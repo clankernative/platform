@@ -259,7 +259,7 @@ fn audit_document(schemas: &mut BTreeMap<String, Value>, paths: &mut BTreeMap<St
             AUDIT_PATH,
             "platform.audit",
             "Platform audit log",
-            "Mandatory host-owned audit of completed commands and queries. Requires current auditor membership. Successful row changes and the completion receipt commit atomically; applications cannot disable capture. Filter by model and record_id for a record's revision timeline. A matching entry includes all changes in its transaction. Field values, request inputs/results and deletion reasons are excluded, so this is not a reconstruction of historical business values. Legacy invocations may predate row-change capture.",
+            "Mandatory host-owned audit of completed commands and queries. Requires current ownership in the enabled app policy's admins. Successful row changes and the completion receipt commit atomically; applications cannot disable capture. Filter by model and record_id for a record's revision timeline. A matching entry includes all changes in its transaction. Field values, request inputs/results and deletion reasons are excluded, so this is not a reconstruction of historical business values. Legacy invocations may predate row-change capture.",
             "AuditPage",
             &["actor", "operation", "status", "model", "record_id"][..],
         ),
@@ -267,13 +267,13 @@ fn audit_document(schemas: &mut BTreeMap<String, Value>, paths: &mut BTreeMap<St
             AUDIT_EVENTS_PATH,
             "platform.audit_events",
             "Platform audit lifecycle events",
-            "Mandatory host-owned admission, reuse, rejection, interruption, completion and HTTP events. Requires current auditor membership. Use identity to follow all attempts for one invocation. HTTP events have their own identities and omit query strings and bodies. Each attempt is retained; a completed invocation still has only one completion receipt. This read does not execute application code.",
+            "Mandatory host-owned admission, reuse, rejection, interruption, completion and HTTP events. Requires current ownership in the enabled app policy's admins. Use identity to follow all attempts for one invocation. HTTP events have their own identities and omit query strings and bodies. Each attempt is retained; a completed invocation still has only one completion receipt. This read does not execute application code.",
             "AuditEventPage",
             &["actor", "operation", "kind", "identity", "outcome"][..],
         ),
     ] {
         let mut parameters = vec![
-            json!({"name":"cursor","in":"query","required":false,"schema":{"type":"string","default":"","pattern":"^(|aud1_[0-9a-f]{64})$"},"example":"","description":"Empty or omitted for the newest page. Copy next_cursor to read older matches; opaque and bound to this app, artifact, actor, view, filters and limit. Expires after 24 hours. Current auditor permission is rechecked on every page."}),
+            json!({"name":"cursor","in":"query","required":false,"schema":{"type":"string","default":"","pattern":"^(|aud1_[0-9a-f]{64})$"},"example":"","description":"Empty or omitted for the newest page. Copy next_cursor to read older matches; opaque and bound to this app, artifact, actor, view, filters and limit. Expires after 24 hours. Current app ownership is rechecked on every page."}),
             json!({"name":"limit","in":"query","required":false,"schema":{"type":"integer","minimum":1,"maximum":50,"default":50},"example":50,"description":"Maximum returned items. Results are in descending append-only sequence; new events do not shift older page boundaries."}),
         ];
         for name in filters {

@@ -18,7 +18,17 @@ Existing `readers`
 and `writers` remain an outer membership gate: writers can be considered for
 commands and queries; readers only for queries. Passing that gate is insufficient.
 The named operation must also explicitly grant the actor in its authority policy.
-`auditors` remains a separate permission for the platform audit viewer.
+The platform audit viewer, audit APIs and audit CLI commands are available only
+to the enabled app policy's `admins` (owners). Membership and operation grants
+cannot extend that access. Apps may expose their own history through a query
+using `Audit.history`, with the query's ordinary operation authority deciding
+its audience; see [SDK-CAPABILITIES.md](SDK-CAPABILITIES.md).
+
+The former `auditors` instance key is retired: empty lists are accepted and
+omitted on serialization; nonempty lists are rejected with migration guidance.
+Existing activated documents and backup manifests containing the key still load,
+ignore its contents, and serialize without it. Former auditors gain no owner
+rights automatically. Local development actors own their disposable app.
 
 An absent policy denies invocations, including for legacy artifacts. The host
 does not derive a broad policy from old membership lists or operation names.
@@ -210,7 +220,7 @@ installed app; it does not select only operations affected by the edited grant.
 
 Policy activation takes the same SQLite writer lock as business mutations. If
 the mutation wins the lock, its commit precedes activation. If activation wins,
-the old invocation cannot commit further business writes. Readers and auditors
+the old invocation cannot commit further business writes. Readers and audit owners
 use an active authorization snapshot in the same read transaction as their
 data. Live subscriptions remain bound to their original stamp and terminate
 on any activation; they cannot silently capture replacement authority.

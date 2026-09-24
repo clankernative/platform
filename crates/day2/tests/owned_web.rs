@@ -31,7 +31,6 @@ impl World {
             "apps": {"owned": {
                 "artifact": artifact,
                 "readers": ["viewer"], "writers": ["alice", "bob", "admin"],
-                "auditors": ["alice", "admin"],
                 "authority": {
                     "version": 1, "admins": ["admin"],
                     "operations": {
@@ -296,7 +295,8 @@ fn native_owner_edit_is_durable_and_retries_once() -> Result<()> {
     assert_eq!(world.changes()?, 2);
     let page = server.page(&client, &path)?;
     assert!(page.contains("&lt;b&gt;Owner edit&lt;/b&gt; &amp; handbook"));
-    let audit = server.page(&client, "/audit?operation=links.edit")?;
+    let owner = Server::start(world.runtime.clone(), "admin")?;
+    let audit = owner.page(&owner.client()?, "/audit?operation=links.edit")?;
     assert!(audit.contains("links.edit") && audit.contains("Values redacted."));
     assert!(!audit.contains("Owner edit"));
     day2::properties::require(

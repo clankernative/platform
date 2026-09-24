@@ -161,7 +161,7 @@ Every struct denies unknown fields.
   "identity": { "scheme": "google_iap", "hosted_domain": "<hosted_domain>" },
   "apps": { "<app_id>": {
     "artifact": "artifacts/<artifact_id>",
-    "readers": [...], "writers": [...], "auditors": [...], "authority": {...},
+    "readers": [...], "writers": [...], "authority": {...},
     "runtime": { "kind": "linux_sqlite_single_v1", "resources": {
       "memory_mib": M, "cpu_millis": C, "process_limit": P,
       "process_limit_enforced_by": "pod", "http_concurrency": H, "shutdown_seconds": S } },
@@ -173,7 +173,7 @@ Several fields are fixed or seeded once:
 
 - `installation`, `environment` and the app key are fixed after the first
   start.
-- Readers, writers, auditors and authority are copied into the app's database
+- Readers, writers and authority are copied into the app's database
   on the first start only. Later changes need explicit activation (`day2
   activate`).
 - The root refuses an authority with no operations.

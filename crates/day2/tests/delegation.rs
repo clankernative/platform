@@ -46,7 +46,6 @@ impl Pair {
             artifact: artifact.to_string_lossy().into(),
             readers: BTreeSet::from(["alice".into()]),
             writers: BTreeSet::from(["alice".into()]),
-            auditors: BTreeSet::from(["alice".into()]),
             edge: None,
         };
         let instance = Instance {

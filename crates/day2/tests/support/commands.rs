@@ -36,7 +36,7 @@ impl World {
             None,
         )?;
         let instance = json!({"installation":"commandsco","environment":"test","resources":resources,"apps":{"reports":{
-            "artifact":artifact,"readers":["viewer"],"writers":["alice","bob","admin"],"auditors":["alice","admin"],"authority":policy,"resource_policies":resource_policies
+            "artifact":artifact,"readers":["viewer"],"writers":["alice","bob","admin"],"authority":policy,"resource_policies":resource_policies
         }}});
         let path = directory.path().join("instance.json");
         fs::write(&path, serde_json::to_vec(&instance)?)?;

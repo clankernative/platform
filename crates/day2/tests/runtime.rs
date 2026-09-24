@@ -60,7 +60,6 @@ impl World {
                     artifact: artifact().to_string_lossy().to_string(),
                     readers: BTreeSet::from(["viewer".into()]),
                     writers: BTreeSet::from(["alice".into()]),
-                    auditors: BTreeSet::from(["alice".into()]),
                     edge: None,
                 },
             )]),

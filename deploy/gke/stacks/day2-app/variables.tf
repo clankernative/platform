@@ -189,12 +189,6 @@ variable "writers" {
   }
 }
 
-variable "auditors" {
-  description = "instance.json auditors. Seeded on first start only."
-  type        = list(string)
-  default     = []
-}
-
 variable "authority" {
   description = "The app's authority policy object (version 1). It must name every operation of the exact artifact being deployed, or every operation fails missing_authority_policy. Seeded on first start only; later changes need day2's explicit activation."
   type        = any

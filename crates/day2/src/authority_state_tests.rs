@@ -31,7 +31,7 @@ fn desired_receipts_survive_expiry_and_artifact_changes_without_reactivating_gra
     }
     let mut instance: Instance = serde_json::from_value(serde_json::json!({
         "installation":"test","environment":"test","resources":catalog,
-        "apps":{"app":{"artifact":"/admitted/one","readers":["viewer"],"writers":["alice"],"auditors":["auditor"],
+        "apps":{"app":{"artifact":"/admitted/one","readers":["viewer"],"writers":["alice"],
             "authority":original_document.policy,"resource_policies":attachments}}
     }))?;
     original_document.resources = instance.resources.as_ref().unwrap().resolve(
@@ -405,10 +405,9 @@ fn document() -> AuthorityDocument {
         enabled: true,
         readers: BTreeSet::from(["viewer".into()]),
         writers: BTreeSet::from(["alice".into()]),
-        auditors: BTreeSet::from(["auditor".into()]),
         policy: Some(Policy {
             version: 1,
-            admins: BTreeSet::new(),
+            admins: BTreeSet::from(["auditor".into()]),
             delegations: Default::default(),
             operations: BTreeMap::from([
                 (
@@ -508,6 +507,31 @@ fn memberships_disable_and_missing_policy_all_deny_independently() -> Result<()>
     doc = document();
     doc.policy = None;
     assert!(doc.authorize(&write, "alice").is_err());
+    assert!(doc.authorize_audit("auditor").is_err());
+    Ok(())
+}
+
+#[test]
+fn legacy_persisted_auditors_are_ignored_and_never_serialized() -> Result<()> {
+    let mut connection = Connection::open_in_memory()?;
+    initialize(&mut connection)?;
+    let mut stored = serde_json::to_value(document())?;
+    stored["auditors"] = serde_json::json!(["former-auditor", "alice"]);
+    connection.execute(
+        "UPDATE day2_authority SET document=?1",
+        [serde_json::to_string(&stored)?],
+    )?;
+    let loaded = current(&connection)?;
+    loaded.document.authorize_audit("auditor")?;
+    assert!(loaded.document.authorize_audit("former-auditor").is_err());
+    assert!(loaded.document.authorize_audit("alice").is_err());
+    assert!(
+        serde_json::to_value(&loaded.document)?
+            .get("auditors")
+            .is_none()
+    );
+    stored["unknown_grant"] = serde_json::json!(["alice"]);
+    assert!(serde_json::from_value::<AuthorityDocument>(stored).is_err());
     Ok(())
 }
 
@@ -596,7 +620,7 @@ fn binding_and_authority_publish_together_and_stale_runtime_cannot_change_them()
     target.artifact_id = "artifact-two".into();
     target.artifact_path = "/admitted/two".into();
     let mut changed = document();
-    changed.auditors.clear();
+    changed.policy.as_mut().unwrap().admins.clear();
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let request = ApplyAuthority {
         request_id: "artifact-upgrade".into(),

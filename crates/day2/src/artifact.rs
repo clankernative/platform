@@ -931,8 +931,14 @@ pub struct EndpointBinding {
     pub disabled: bool,
 }
 
+/// One application's place in an instance.
+///
+/// There is no audit grant here. The platform audit log is readable by the
+/// application's owners — `authority.admins` — and by nobody else; an app that
+/// wants to show its history more widely does so through its own query over
+/// `Audit.history`, granted like any other operation. See docs/AUTHORITY.md.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(from = "StoredBinding")]
 pub struct AppBinding {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub security: Option<crate::security_admission::Requirements>,
@@ -941,8 +947,6 @@ pub struct AppBinding {
     pub artifact: String,
     pub readers: BTreeSet<String>,
     pub writers: BTreeSet<String>,
-    #[serde(default)]
-    pub auditors: BTreeSet<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authority: Option<crate::authority::Policy>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -968,6 +972,91 @@ pub struct AppBinding {
     /// identity provider. Absent means the app is not served at an edge.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edge: Option<Edge>,
+}
+
+/// An app binding as files and snapshots written before owners read the audit
+/// may still spell it: with a retired `auditors` list.
+///
+/// The list is read and dropped; it is never written and never consulted. An
+/// operator-authored instance file is held to more than this — a non-empty list
+/// there is refused by [`Instance::from_bytes`] with the rule that replaced it —
+/// but a backup manifest is historical evidence and must keep loading whatever
+/// it recorded. Every other field is exactly [`AppBinding`]'s.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredBinding {
+    #[serde(default)]
+    security: Option<crate::security_admission::Requirements>,
+    #[serde(default)]
+    runtime: Option<day2_capabilities::runtime::RuntimeProfile>,
+    artifact: String,
+    readers: BTreeSet<String>,
+    writers: BTreeSet<String>,
+    #[serde(default, rename = "auditors")]
+    _retired_auditors: BTreeSet<String>,
+    #[serde(default)]
+    authority: Option<crate::authority::Policy>,
+    #[serde(default)]
+    resource_policies: Vec<day2_capabilities::resources::Attachment>,
+    #[serde(default)]
+    schedules: BTreeMap<String, ScheduleBinding>,
+    #[serde(default)]
+    ingress: BTreeMap<String, EndpointBinding>,
+    #[serde(default)]
+    retention: BTreeMap<String, crate::retention::Rule>,
+    #[serde(default)]
+    journal: Option<crate::journal::Policy>,
+    #[serde(default)]
+    edge: Option<Edge>,
+}
+
+impl From<StoredBinding> for AppBinding {
+    fn from(stored: StoredBinding) -> Self {
+        Self {
+            security: stored.security,
+            runtime: stored.runtime,
+            artifact: stored.artifact,
+            readers: stored.readers,
+            writers: stored.writers,
+            authority: stored.authority,
+            resource_policies: stored.resource_policies,
+            schedules: stored.schedules,
+            ingress: stored.ingress,
+            retention: stored.retention,
+            journal: stored.journal,
+            edge: stored.edge,
+        }
+    }
+}
+
+/// Refuse a non-empty retired `auditors` list in an operator-authored instance.
+///
+/// An empty list is accepted and ignored, so files written before the change —
+/// including every deployment that never used it — keep loading unchanged. A
+/// non-empty one names people who expected audit access, and that expectation
+/// can be met in exactly two ways, both of which are an operator's decision: make
+/// them owners (`authority.admins`), or grant them an app query over
+/// `Audit.history`. Silently dropping the list would revoke their access without
+/// anyone having decided to; silently promoting them to owners would grant far
+/// more than they had.
+fn refuse_retired_auditors(instance: &serde_json::Value) -> Result<()> {
+    let Some(apps) = instance.get("apps").and_then(serde_json::Value::as_object) else {
+        return Ok(());
+    };
+    for (app, binding) in apps {
+        match binding.get("auditors") {
+            None => {}
+            Some(serde_json::Value::Array(actors)) if actors.is_empty() => {}
+            Some(_) => anyhow::bail!(
+                "apps.{app}.auditors is retired: the platform audit log is readable by the \
+                 app's owners (authority.admins) only. Move these actors into \
+                 authority.admins if they should own the app, or grant them an app query \
+                 that reads Audit.history; then remove the auditors key (an empty list is \
+                 accepted and ignored)"
+            ),
+        }
+    }
+    Ok(())
 }
 
 /// How people prove who they are, for the whole installation.
@@ -1082,7 +1171,9 @@ impl Instance {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        let instance: Self = crate::json::decode(bytes)?;
+        let raw: serde_json::Value = crate::json::decode(bytes)?;
+        refuse_retired_auditors(&raw)?;
+        let instance: Self = serde_json::from_value(raw)?;
         crate::schema::identifier(&instance.installation)?;
         crate::schema::identifier(&instance.environment)?;
         ensure!(!instance.apps.is_empty(), "instance has no apps");
@@ -1182,6 +1273,40 @@ impl Instance {
             .as_ref()
             .context("missing_authority_policy")?
             .authorize(&operation.name, actor)?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod retired_audit_grant_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn empty_legacy_instances_load_but_nonempty_grants_require_migration() -> Result<()> {
+        let mut value = json!({"installation":"test","environment":"test","apps":{"app":{
+            "artifact":"/artifact","readers":[],"writers":[],"auditors":[]
+        }}});
+        let instance = Instance::from_bytes(&serde_json::to_vec(&value)?)?;
+        assert!(
+            serde_json::to_value(&instance)?["apps"]["app"]
+                .get("auditors")
+                .is_none()
+        );
+        value["apps"]["app"]["auditors"] = json!(["former-auditor"]);
+        let error = Instance::from_bytes(&serde_json::to_vec(&value)?)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("apps.app.auditors is retired") && error.contains("authority.admins")
+        );
+        // Backup manifests are historical evidence, not a fresh desired grant.
+        let backup: Instance = serde_json::from_value(value)?;
+        assert!(
+            serde_json::to_value(backup)?["apps"]["app"]
+                .get("auditors")
+                .is_none()
+        );
         Ok(())
     }
 }

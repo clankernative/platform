@@ -49,7 +49,6 @@ locals {
         artifact  = "artifacts/${var.artifact_id}"
         readers   = sort(distinct(var.readers))
         writers   = sort(distinct(var.writers))
-        auditors  = sort(distinct(var.auditors))
         authority = var.authority
         runtime = {
           kind = "linux_sqlite_single_v1"

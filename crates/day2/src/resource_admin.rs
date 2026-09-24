@@ -477,7 +477,6 @@ fn proposed_document(
         .context("app_not_installed")?;
     binding.readers = active.readers.clone();
     binding.writers = active.writers.clone();
-    binding.auditors = active.auditors.clone();
     binding.authority = active.policy.clone();
     let desired = AuthorityDocument::resolve(&scoped, runtime.app(), runtime.artifact())?;
     // Resource administration cannot modify app memberships, coarse operation

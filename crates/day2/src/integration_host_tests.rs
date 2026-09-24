@@ -183,7 +183,7 @@ impl Fixture {
         let instance = json!({"installation":"integrationco","environment":"test","resources":catalog,
             "control":{"version":1,"state_directory":directory.path().join("control"),"operators":["it"],
                 "sources":{"repo":{"kind":"local_git","repository":directory.path().join("repo")}},"apps":{"app":{"source":"repo"}}},
-            "apps":{"app":{"artifact":artifact_directory,"readers":[],"writers":["alice","bob"],"auditors":["alice"],"authority":policy,
+            "apps":{"app":{"artifact":artifact_directory,"readers":[],"writers":["alice","bob"],"authority":policy,
                 "resource_policies":[{"policy":{"id":"policy","revision":1},"operation":"run","bindings":{"resource":{"id":"resource","revision":1}}}]}}});
         fs::write(&path, serde_json::to_vec(&instance)?)?;
         let contract = serde_json::from_value(

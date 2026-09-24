@@ -788,7 +788,7 @@ fn receipt(
                 "selection":{"find":"zero-or-one visible row; ambiguous matches rejected","predicates":"typed equality, LIKE, AND and OR; SQL before limits","ordering":"declared fields with stable ID tie-breaker"},
                 "uniqueness":{"schema":"single and compound keys","writes":"atomic SQLite enforcement on insert and update","migration":"additive, transactional and duplicate-rejecting"},
                 "backup":"complete copied-state structural validation independent of the bounded app-property snapshot; reviewed local provider stores retained; cross-store coherence requires quiesced managed work",
-                "audit":"mandatory redacted receipts, mutation changes and lifecycle events; auditor-only filtered cursor APIs in Platform docs; append-only and replacement guards",
+                "audit":"mandatory redacted receipts, mutation changes and lifecycle events; app-owner-only filtered platform APIs; operation-granted app history observation; append-only and replacement guards",
                 "model_retirement":"explicit identity-ledger retirement preserves historical tables and audit, freezes archived rows and applies transactionally",
                 "definition_order_lint":"not implemented; pinned compiler metadata is insufficient"
             },

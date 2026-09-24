@@ -243,7 +243,7 @@ fn mcp_and_http_share_report_contracts_authority_and_durable_command_receipts() 
         &path,
         serde_json::to_vec(
             &json!({"installation":"mcpco","environment":"test","resources":resources,"apps":{"reports":{
-                "artifact":artifact,"readers":["viewer"],"writers":["alice"],"auditors":["alice"],"authority":policy,"resource_policies":resource_policies
+                "artifact":artifact,"readers":["viewer"],"writers":["alice"],"authority":policy,"resource_policies":resource_policies
             }}}),
         )?,
     )?;
@@ -677,7 +677,7 @@ fn real_http_datastar_form_command_scheduler_html_and_audit_survive_restart() ->
         &path,
         serde_json::to_vec(
             &json!({"installation":"httpco","environment":"test","resources":resources,"apps":{"reports":{
-                "artifact":artifact,"readers":[],"writers":["alice"],"auditors":["alice"],
+                "artifact":artifact,"readers":[],"writers":["alice"],
                 "authority":policy,"resource_policies":resource_policies
             }}}),
         )?,

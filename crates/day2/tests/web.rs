@@ -163,8 +163,11 @@ fn platform_audit_pages_bind_filters_actor_scope_and_expiry() -> Result<()> {
         .apps
         .get_mut("links")
         .unwrap()
-        .auditors
-        .insert("bob".into());
+        .authority
+        .as_mut()
+        .unwrap()
+        .admins
+        .extend(["alice".into(), "bob".into()]);
     fs::write(
         world.runtime.instance_path(),
         serde_json::to_vec(&instance)?,
@@ -302,7 +305,10 @@ fn platform_audit_pages_bind_filters_actor_scope_and_expiry() -> Result<()> {
         .apps
         .get_mut("links")
         .unwrap()
-        .auditors
+        .authority
+        .as_mut()
+        .unwrap()
+        .admins
         .remove("alice");
     fs::write(
         world.runtime.instance_path(),
@@ -317,10 +323,28 @@ fn platform_audit_pages_bind_filters_actor_scope_and_expiry() -> Result<()> {
 fn platform_audit_http_docs_enforce_authority_and_strict_inputs() -> Result<()> {
     let world = World::new()?;
     let row = world.seed("audit-http")?;
-    let server = Server::start(world.runtime.clone(), "alice", 0)?;
+    let server = Server::start(world.runtime.clone(), "admin", 0)?;
     let client = server.client()?;
     let viewer_server = Server::start(world.runtime.clone(), "viewer", 0)?;
     let viewer = viewer_server.client()?;
+    let writer_server = Server::start(world.runtime.clone(), "alice", 0)?;
+    let writer = writer_server.client()?;
+    for path in ["/audit", "/api/audit", "/api/audit/events"] {
+        assert_eq!(
+            writer
+                .get(format!("{}{path}", writer_server.origin))
+                .send()?
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            client
+                .get(format!("{}{path}", server.origin))
+                .send()?
+                .status(),
+            StatusCode::OK
+        );
+    }
     for path in ["/api/audit", "/api/audit/events"] {
         assert_eq!(
             Client::new()
@@ -408,29 +432,38 @@ fn platform_audit_http_docs_enforce_authority_and_strict_inputs() -> Result<()> 
         .apps
         .get_mut("links")
         .unwrap()
-        .auditors
-        .insert("audit-only".into());
+        .authority
+        .as_mut()
+        .unwrap()
+        .admins
+        .insert("owner-only".into());
     fs::write(
         world.runtime.instance_path(),
         serde_json::to_vec(&instance)?,
     )?;
     apply_desired_authority(&world.runtime)?;
-    let auditor_server = Server::start(world.runtime.clone(), "audit-only", 0)?;
-    let auditor = auditor_server.client()?;
-    for path in ["/api/audit", "/api/audit/events", "/docs", "/openapi.json"] {
+    let owner_server = Server::start(world.runtime.clone(), "owner-only", 0)?;
+    let owner = owner_server.client()?;
+    for path in [
+        "/audit",
+        "/api/audit",
+        "/api/audit/events",
+        "/docs",
+        "/openapi.json",
+    ] {
         assert_eq!(
-            auditor
-                .get(format!("{}{path}", auditor_server.origin))
+            owner
+                .get(format!("{}{path}", owner_server.origin))
                 .send()?
                 .status(),
             StatusCode::OK
         );
     }
     assert_eq!(
-        auditor
+        owner
             .get(format!(
                 "{}/api/links.list?after=&limit=20",
-                auditor_server.origin
+                owner_server.origin
             ))
             .send()?
             .status(),
@@ -596,13 +629,22 @@ fn api_commands_enforce_csrf_authority_and_stable_idempotency() -> Result<()> {
     );
     let mut instance = Instance::load(world.runtime.instance_path())?;
     instance.apps.get_mut("links").unwrap().writers.clear();
+    instance
+        .apps
+        .get_mut("links")
+        .unwrap()
+        .authority
+        .as_mut()
+        .unwrap()
+        .admins
+        .insert("alice".into());
     fs::write(
         world.runtime.instance_path(),
         serde_json::to_vec(&instance)?,
     )?;
     apply_desired_authority(&world.runtime)?;
-    // Revoking application access preserves Alice's independent auditor grant.
-    // Platform discovery/session endpoints remain available for audit access.
+    // An owner retains platform audit access independently of app membership.
+    // Platform discovery/session endpoints remain available for the owner.
     for path in [
         "/docs",
         "/openapi.json",
@@ -689,7 +731,6 @@ impl World {
                     artifact: artifact.to_string_lossy().into(),
                     readers: BTreeSet::from(["viewer".into()]),
                     writers: BTreeSet::from(["alice".into()]),
-                    auditors: BTreeSet::from(["alice".into()]),
                     edge: None,
                 },
             )]),
@@ -730,7 +771,6 @@ impl World {
                         artifact: artifact.to_string_lossy().into(),
                         readers: BTreeSet::from(["viewer".into()]),
                         writers: BTreeSet::from(["alice".into()]),
-                        auditors: BTreeSet::from(["alice".into()]),
                         edge: None,
                     },
                 ),
@@ -750,7 +790,6 @@ impl World {
                         artifact: artifact.to_string_lossy().into(),
                         readers: BTreeSet::new(),
                         writers: BTreeSet::from(["alice".into()]),
-                        auditors: BTreeSet::from(["alice".into()]),
                         edge: None,
                     },
                 ),
@@ -806,7 +845,7 @@ fn apps_without_pages_get_the_same_api_and_documentation() -> Result<()> {
         &path,
         serde_json::to_vec(
             &json!({"installation":"api_only","environment":"test","apps":{"relational":{
-                "artifact":artifact,"readers":[],"writers":["alice"],"auditors":[],"authority":policy
+                "artifact":artifact,"readers":[],"writers":["alice"],"authority":policy
             }}}),
         )?,
     )?;
@@ -1440,8 +1479,10 @@ fn real_http_mpa_datastar_queries_forms_and_redacted_audit() -> Result<()> {
         1
     );
     assert_eq!(world.count("day2_audit_changes")?, 2);
-    let audit = client
-        .get(format!("{}/audit?operation=links.create", server.origin))
+    let owner = Server::start(world.runtime.clone(), "admin", 0)?;
+    let audit = owner
+        .client()?
+        .get(format!("{}/audit?operation=links.create", owner.origin))
         .send()?
         .text()?;
     assert!(
@@ -2079,7 +2120,7 @@ fn mandatory_admission_events_cover_rejections_duplicates_and_interruptions_with
     );
     assert_eq!(world.count("day2_audit")?, 0);
     assert_eq!(world.count("day2_audit_changes")?, 0);
-    let events = world.runtime.audit_events("alice", 0)?;
+    let events = world.runtime.audit_events("admin", 0)?;
     assert_eq!(events.len(), 7);
     let event = |identity: &str| {
         events
@@ -2123,7 +2164,7 @@ fn mandatory_admission_events_cover_rejections_duplicates_and_interruptions_with
         world.runtime.execute("pending", Fault::None)?.status,
         "success"
     );
-    let complete = world.runtime.audit_events("alice", 0)?;
+    let complete = world.runtime.audit_events("admin", 0)?;
     assert_eq!(complete[0].kind, "invocation");
     assert_eq!(complete[0].outcome, "success");
     assert_eq!(complete[0].identity, "pending");
@@ -2604,7 +2645,7 @@ fn asset_cache_policies_and_conditional_get_and_head() -> Result<()> {
     // A validator never makes a dynamic page or a missing asset cacheable.
     for (path, status) in [
         ("/", StatusCode::OK),
-        ("/audit", StatusCode::OK),
+        ("/audit", StatusCode::FORBIDDEN),
         ("/assets/platform/missing.css", StatusCode::NOT_FOUND),
     ] {
         let response = client

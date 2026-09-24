@@ -655,7 +655,6 @@ impl Session {
         app.artifact = target.directory().to_string_lossy().into_owned();
         app.readers = [self.options.actor.clone()].into();
         app.writers = [self.options.actor.clone()].into();
-        app.auditors = [self.options.actor.clone()].into();
         app.authority = Some(day2::development::local_policy_for(
             &target,
             &self.options.actor,

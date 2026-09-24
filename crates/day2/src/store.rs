@@ -2036,16 +2036,16 @@ fn selection_predicate(
 
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SelectionCursor {
-    binding: String,
-    values: Vec<Value>,
+pub(crate) struct SelectionCursor {
+    pub(crate) binding: String,
+    pub(crate) values: Vec<Value>,
 }
 
 const SELECTION_CURSOR_TTL: i64 = 86_400;
 const SELECTION_CURSOR_CAPACITY: i64 = 10_000;
 const SELECTION_CURSOR_PIN_CAPACITY: i64 = 100_000;
 
-fn upgrade_selection_cursors(connection: &Connection) -> Result<()> {
+pub(crate) fn upgrade_selection_cursors(connection: &Connection) -> Result<()> {
     connection.execute_batch(
         "CREATE TABLE IF NOT EXISTS day2_selection_cursors (
             token TEXT PRIMARY KEY CHECK(length(token)=69),
@@ -2064,7 +2064,11 @@ fn upgrade_selection_cursors(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn pin_selection_cursor(connection: &Connection, token: &str, invocation: &str) -> Result<()> {
+pub(crate) fn pin_selection_cursor(
+    connection: &Connection,
+    token: &str,
+    invocation: &str,
+) -> Result<()> {
     if invocation.is_empty() {
         return Ok(());
     }
@@ -2111,7 +2115,7 @@ fn collect_selection_cursors(connection: &Connection, now: i64) -> Result<()> {
     Ok(())
 }
 
-fn encode_selection_cursor(
+pub(crate) fn encode_selection_cursor(
     connection: &Connection,
     cursor: &SelectionCursor,
     now: i64,
@@ -2165,7 +2169,7 @@ fn encode_selection_cursor(
     Ok(token)
 }
 
-fn decode_selection_cursor(
+pub(crate) fn decode_selection_cursor(
     connection: &Connection,
     raw: &str,
     now: i64,

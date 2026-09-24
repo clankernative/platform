@@ -584,13 +584,14 @@ Actor, operation, artifact, row identity and versions are host-derived. Apps
 cannot disable capture or write the audit tables. UPDATE/DELETE/replacement guards enforce
 append-only audit behavior under the host contract, not against a local DB admin.
 
-The reserved `/audit` viewer requires explicit instance `auditors` membership.
+The reserved `/audit` viewer requires ownership: membership in the enabled app
+policy's `admins`. No membership or operation grant extends platform audit access.
 It has actor/operation/status filters and bounded cursor pagination. Values are
 redacted by default. Read-only page queries also get completion entries. Separate
 `day2_web_events` record request admission/status, including rejected requests,
 without bodies, tokens or query strings. The common `audit-events` CLI stream also
 includes invocation admission/rejection, interruptions and command execution attempts;
-it is auditor-only, redacted and cursor-paged.
+it is owner-only, redacted and cursor-paged.
 
 The generated `/docs` **Platform** section exposes two authenticated JSON reads:
 
@@ -608,7 +609,7 @@ Omit `cursor` or pass an empty string for the newest page; copy `next_cursor` fo
 older pages and stop when it is empty. `limit` defaults to 50 and accepts 1–50.
 Filters are exact; omitted or empty filters match all. Continuations are opaque
 256-bit random handles, expire after 24 hours, and are bound to the app, artifact,
-actor, view, filters and limit. Every page rechecks current auditor authority.
+actor, view, filters and limit. Every page rechecks current owner authority.
 Newer writes do not shift older page boundaries. Cursor storage is capped at
 10,000 active handles per app database; it fails closed without evicting active
 continuations when full. Expired handles are reclaimed as new pages are issued.

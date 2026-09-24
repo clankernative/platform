@@ -204,7 +204,6 @@ pub fn take(instance_path: &Path, app: &str, output: &Path) -> Result<Manifest> 
     binding.artifact = artifact_relative;
     binding.readers = active.document.readers;
     binding.writers = active.document.writers;
-    binding.auditors = active.document.auditors;
     binding.authority = active.document.policy;
     binding.resource_policies.clear();
     let manifest = Manifest {
@@ -276,7 +275,6 @@ pub fn verify(backup: &Path) -> Result<Manifest> {
             && active.artifact_id == manifest.artifact
             && active.document.readers == binding.readers
             && active.document.writers == binding.writers
-            && active.document.auditors == binding.auditors
             && active.document.policy == binding.authority
             && active.document.resources == manifest.resources,
         "backup authority snapshot mismatch"
@@ -338,7 +336,6 @@ pub fn restore(backup: &Path, output: &Path) -> Result<PathBuf> {
         .context("restore app")?;
     binding.readers.clear();
     binding.writers.clear();
-    binding.auditors.clear();
     binding.authority = None;
     binding.resource_policies.clear();
     let path = output.join("instance.json");
