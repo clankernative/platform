@@ -195,3 +195,15 @@ run "refuses_profile_above_namespace_maximum" {
 
   expect_failures = [kubernetes_config_map_v1.instance]
 }
+
+run "state_ownership_is_idempotent_with_only_cap_chown" {
+  command = plan
+
+  assert {
+    condition = (
+      jsonencode(kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].init_container[0].command) == jsonencode(["/busybox/chown", "10001:10001", "/srv/day2/.state"]) &&
+      jsonencode(kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].init_container[0].security_context[0].capabilities[0].add) == jsonencode(["CHOWN"])
+    )
+    error_message = "the state-ownership init container only chowns (idempotent under CAP_CHOWN); day2 itself chmods .state to 0700 as its owner"
+  }
+}

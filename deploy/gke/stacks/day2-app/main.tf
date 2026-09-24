@@ -209,10 +209,12 @@ resource "kubernetes_stateful_set_v1" "day2" {
             image             = var.state_ownership_image
             image_pull_policy = "IfNotPresent"
             # The app image is distroless and has no shell, so this runs in a
-            # separate pinned image that carries busybox. chmod before chown:
-            # root owns the fresh directory, so only CAP_CHOWN is needed.
-            # Idempotent on later starts.
-            command = ["/busybox/sh", "-eu", "-c", "/busybox/chmod 0700 ${local.state_dir} && /busybox/chown 10001:10001 ${local.state_dir}"]
+            # separate pinned image that carries busybox. Only chown: CAP_CHOWN
+            # permits it whoever owns the directory, so it is idempotent on
+            # every later start. day2 chmods .state to 0700 itself as its
+            # owner. (A chmod here would need CAP_FOWNER once the directory is
+            # 10001's, and failed every start after the first.)
+            command = ["/busybox/chown", "10001:10001", local.state_dir]
 
             security_context {
               run_as_non_root            = false
