@@ -304,6 +304,30 @@ impl Session {
         })
     }
 
+    /// Give a path copied out of the tooling container to whoever runs this
+    /// qualification. The container copies as root; on a native Linux engine
+    /// the bind-mounted export keeps that ownership (and cp's 0600 modes),
+    /// so the host could not read what it exported. The owner of this run's
+    /// private output directory is the host user, on every engine.
+    fn hand_over(&self, exported: String) -> Result<()> {
+        use std::os::unix::fs::MetadataExt;
+        ensure!(
+            exported.starts_with("/qualification-export/") && !exported.contains(".."),
+            "export ownership is limited to the private export directory"
+        );
+        let owner = fs::metadata(&self.output)?;
+        let status = Command::new("docker")
+            .args(["exec", &self.container, "chown", "-R"])
+            .arg(format!("{}:{}", owner.uid(), owner.gid()))
+            .arg(&exported)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()?;
+        ensure!(status.success(), "could not hand over {exported}");
+        Ok(())
+    }
+
     fn build_image(&mut self, target: &str) -> Result<()> {
         let input = self.output.join("inputs/platform");
         let id = self.output.join(format!("{target}-image.id"));
@@ -453,6 +477,7 @@ impl Session {
                     ]),
                     60,
                 )?;
+                self.hand_over("/qualification-export/current.json".to_owned())?;
                 // Docker's archive endpoint cannot see this tmpfs mount. A
                 // fixed native copy exports only to this run's private bind;
                 // the host still validates the complete addressed artifact.
@@ -471,6 +496,7 @@ impl Session {
                         .arg(format!("/qualification-export/{hash}")),
                     120,
                 )?;
+                self.hand_over(format!("/qualification-export/{hash}"))?;
                 let copied = inspect_artifact(&destination)?;
                 ensure!(
                     copied["artifact"] == artifact,
@@ -508,6 +534,7 @@ impl Session {
                     ]),
                     120,
                 )?;
+                self.hand_over("/qualification-export/app-check-evidence".to_owned())?;
                 self.artifact = Some(destination);
                 self.artifact_evidence = Some(admitted);
                 json!({"artifact":artifact, "seed":42, "cases_per_generator":16})
@@ -540,6 +567,7 @@ impl Session {
                     ]),
                     60,
                 )?;
+                self.hand_over("/qualification-export/probe-current.json".to_owned())?;
                 let pointer = read_json(&self.output.join("artifacts/probe-current.json"))?;
                 let id = pointer["artifact"]
                     .as_str()
@@ -559,6 +587,7 @@ impl Session {
                         .arg(format!("/qualification-export/{hash}")),
                     120,
                 )?;
+                self.hand_over(format!("/qualification-export/{hash}"))?;
                 let exported = inspect_artifact(&destination)?;
                 logged(
                     &self.output,
@@ -617,6 +646,7 @@ impl Session {
                     ]),
                     60,
                 )?;
+                self.hand_over("/qualification-export/owned-current.json".to_owned())?;
                 let pointer = read_json(&self.output.join("artifacts/owned-current.json"))?;
                 let id = pointer["artifact"]
                     .as_str()
@@ -636,6 +666,7 @@ impl Session {
                         .arg(format!("/qualification-export/{hash}")),
                     120,
                 )?;
+                self.hand_over(format!("/qualification-export/{hash}"))?;
                 let exported = inspect_artifact(&destination)?;
                 logged(
                     &self.output,
@@ -873,6 +904,7 @@ impl Session {
             ]),
             60,
         )?;
+        self.hand_over("/qualification-export/failed-operations".to_owned())?;
         logged(
             &self.output,
             "failed-pointer-export",
@@ -885,6 +917,7 @@ impl Session {
             ]),
             60,
         )?;
+        self.hand_over("/qualification-export/failed-current.json".to_owned())?;
         let pointer = read_json(&self.output.join("artifacts/failed-current.json"))?;
         let hash = day2::assets::hash_part(
             pointer["artifact"]
@@ -902,6 +935,7 @@ impl Session {
                     .arg(format!("/qualification-export/{hash}")),
                 60,
             )?;
+            self.hand_over(format!("/qualification-export/{hash}"))?;
         }
         Ok(())
     }
