@@ -28,11 +28,18 @@ impl Fixture {
         let temporary = tempfile::tempdir_in(root.join("artifacts"))?;
         let stage = temporary.path().join("stage");
         fs::create_dir_all(stage.join("app"))?;
-        let authored =
-            day2::app_sources::stage(&root.join("examples/reports"), &stage.join("app"))?
-                .into_keys()
-                .map(|name| stage.join("app").join(format!("{name}.roc")))
-                .collect();
+        let modules = day2::app_sources::stage(&root.join("examples/reports"), &stage.join("app"))?;
+        fs::copy(
+            root.join("examples/reports")
+                .join(day2::identity::REGISTRY_FILE),
+            stage.join("app").join(day2::identity::REGISTRY_FILE),
+        )?;
+        let schema_source =
+            day2::app_inference::staged_schema_source(&stage.join("app"), &modules)?;
+        let authored = modules
+            .into_keys()
+            .map(|name| stage.join("app").join(format!("{name}.roc")))
+            .collect();
         day2::sdk::stage(&root.join("sdk"), &stage.join("sdk"))?;
         let contract = &artifact.contract();
         for (name, source) in
@@ -47,16 +54,7 @@ impl Fixture {
                 "AppIdentity.roc",
                 day2::app_inference::identity_module("reports")?,
             ),
-            (
-                "SchemaSource.roc",
-                day2::app_inference::schema_source(&fs::read_to_string(
-                    stage.join("app/App.roc"),
-                )?)?,
-            ),
-            (
-                "StorageContract.roc",
-                day2::app_contract::storage_module(&contract.schema)?,
-            ),
+            ("SchemaSource.roc", schema_source),
             ("Data.roc", contract.schema.data_module()?),
             (
                 "Domains.roc",
@@ -488,7 +486,19 @@ fn omissions_stale_references_and_forged_factories_fail_compilation() -> Result<
             "Notifications.latest(context, input.report_id.to_str())",
             "Observe.admission_capability(\"notifications.latest.v1\", \"{}\")",
         ),
-        ("App.roc", "storage: Storage.definition,", ""),
+        // Storage is platform-generated: a leftover App.definition.storage no longer fits Product.
+        (
+            "App.roc",
+            "namespace: \"reports\",",
+            "namespace: \"reports\",\n\t\tstorage: {},",
+        ),
+        // A key names the model's own columns, and a one-column key must be a record.
+        ("Models.roc", "ready: row.ready", "ready: row.readied"),
+        (
+            "Models.roc",
+            "{ announced: row.announced, ready: row.ready }",
+            "{ ready }",
+        ),
         ("SubmitReport.roc", "contract,", ""),
         (
             "SubmitReport.roc",
@@ -593,7 +603,7 @@ fn omissions_stale_references_and_forged_factories_fail_compilation() -> Result<
         "SubmitReport.roc",
         "SubmitReportTypes.roc",
         "ReportScenarios.roc",
-        "Storage.roc",
+        "Models.roc",
         "AnalyzeReport.roc",
         "Demo.roc",
     ] {

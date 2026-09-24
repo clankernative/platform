@@ -1,4 +1,3 @@
-import Storage
 import Seed
 import Move
 import ListDeals
@@ -8,7 +7,6 @@ import Demo
 App :: [].{
 	definition = {
 		namespace: "deals",
-		storage: Storage.definition,
 		operations: { seed: Seed.definition, move: Move.definition, list: ListDeals.definition },
 		pages: {},
 		properties: {

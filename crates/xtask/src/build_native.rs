@@ -71,7 +71,7 @@ fn prepare(root: &Path, app: &Path, overrides: Option<&Path>) -> Result<Prepared
     )?;
     fs::write(
         stage.join("app/SchemaSource.roc"),
-        day2::app_inference::schema_source(&fs::read_to_string(stage.join("app/App.roc"))?)?,
+        day2::app_inference::staged_schema_source(&stage.join("app"), &modules)?,
     )?;
     let assets = day2::assets::package(&captured.join("assets"), &stage)?;
     let web_resources = day2::web_resources::package(&captured.join("ui"), &stage)?;
@@ -144,10 +144,6 @@ fn data(_app: &Path, _isolated_job: Option<&Path>, prepared: &mut Prepared) -> R
     fs::write(
         stage.join("app/Domains.roc"),
         day2::domain::module(&schema, false)?,
-    )?;
-    fs::write(
-        stage.join("app/StorageContract.roc"),
-        day2::app_contract::storage_module(&schema)?,
     )?;
     fs::write(stage.join("app/Inputs.roc"), schema.inputs_module()?)?;
     fs::write(

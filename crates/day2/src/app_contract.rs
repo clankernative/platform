@@ -330,7 +330,7 @@ impl Definition {
         }
         ensure!(
             self.identities == crate::identity::REGISTRY_FILE,
-            "App.definition.storage must bind the committed model identity ledger"
+            "the generated storage schema must bind the committed model identity ledger"
         );
         ensure!(
             serde_json::to_vec(self)?.len() <= 1_048_576,
@@ -699,7 +699,7 @@ pub fn modules(
         "    verify : AppContract.Product, Api.VerificationRequest -> Try(Str, Str)\n    verify = |product, request| {\n",
     );
     let mut source = format!(
-        "{imports}import pf.Api\nimport pf.Product\nimport pf.Example\nimport pf.CommandBinding\nimport pf.QueryBinding\nimport AppContract\nimport Commands\nimport Reads\nRegistry :: [].{{\n"
+        "{imports}import pf.Api\nimport pf.Product\nimport pf.Example\nimport pf.CommandBinding\nimport pf.QueryBinding\nimport AppContract\nimport SchemaSource\nimport Commands\nimport Reads\nRegistry :: [].{{\n"
     );
     for (kind, wrapper, definitions, handle) in [
         ("command", "CommandDef", &catalog.commands, "Commands"),
@@ -760,8 +760,8 @@ pub fn modules(
     }
     verification.push_str("        Err(\"unknown verification obligation\")\n    }\n");
     source.push_str(&verification);
-    source.push_str(&format!("    definition : AppContract.Product -> Try(Api.Definition, Str)\n    definition = |product| Ok({{ operations: [{}], presentation: product.presentation, identities: product.storage.identities }})\n", metadata.join(", ")));
-    source.push_str(&format!("    {prefix}step : AppContract.Product, Str -> Str\n    {prefix}step = |product, raw| {{\n        if raw == \"app-contract\" {{\n            result = definition(product)\n            empty : Api.Definition\n            empty = {{ operations: [], presentation: product.presentation, identities: product.storage.identities }}\n            return match result {{\n                Ok(value) => Json.to_str({{ definition: value, error: \"\" }})\n                Err(error) => Json.to_str({{ definition: empty, error }})\n            }}\n        }}\n        if raw == \"examples\" {{ return Example.encode(product.examples) }}\n        Product.{prefix}step({{ namespace: product.namespace, commands: [{}], queries: [{}], pages: product.pages, properties: product.properties }}, raw)\n    }}\n}}\n", bindings["command"], bindings["query"]));
+    source.push_str(&format!("    definition : AppContract.Product -> Try(Api.Definition, Str)\n    definition = |product| Ok({{ operations: [{}], presentation: product.presentation, identities: SchemaSource.identities }})\n", metadata.join(", ")));
+    source.push_str(&format!("    {prefix}step : AppContract.Product, Str -> Str\n    {prefix}step = |product, raw| {{\n        if raw == \"app-contract\" {{\n            result = definition(product)\n            empty : Api.Definition\n            empty = {{ operations: [], presentation: product.presentation, identities: SchemaSource.identities }}\n            return match result {{\n                Ok(value) => Json.to_str({{ definition: value, error: \"\" }})\n                Err(error) => Json.to_str({{ definition: empty, error }})\n            }}\n        }}\n        if raw == \"examples\" {{ return Example.encode(product.examples) }}\n        Product.{prefix}step({{ namespace: product.namespace, commands: [{}], queries: [{}], pages: product.pages, properties: product.properties }}, raw)\n    }}\n}}\n", bindings["command"], bindings["query"]));
     source = source.replacen("        if raw == \"app-contract\"", "        if raw.starts_with(\"verify:\") {\n            parsed : Try(Api.VerificationRequest, _)\n            parsed = Json.parse(raw.drop_prefix(\"verify:\"))\n            result = parsed.map_err(|_| \"invalid verification request\").and_then(|request| verify(product, request))\n            return match result {\n                Ok(value) => Json.to_str({ value, error: \"\" })\n                Err(error) => Json.to_str({ value: \"\", error })\n            }\n        }\n        if raw == \"app-contract\"", 1);
     let pages = catalog
         .pages
@@ -840,8 +840,8 @@ pub fn modules(
         .collect::<Vec<_>>()
         .join(", ");
     source = source.replace(
-        "identities: product.storage.identities",
-        &format!("identities: product.storage.identities, invariants: [{invariants}]"),
+        "identities: SchemaSource.identities",
+        &format!("identities: SchemaSource.identities, invariants: [{invariants}]"),
     );
     let page_type = format!(
         "{{ {} }}",
@@ -882,18 +882,6 @@ pub fn modules(
             .collect::<Vec<_>>()
             .join(", ")
     );
-    let tables = format!(
-        "{{ {} }}",
-        schema
-            .models
-            .iter()
-            .map(|(name, record)| format!(
-                "{name} : List({})",
-                record.roc_type.as_deref().expect("checked model")
-            ))
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
     let schedule_import = if catalog.schedules.is_empty() {
         ""
     } else {
@@ -915,7 +903,7 @@ pub fn modules(
         ", ingress : List(IngressBinding)".to_owned()
     };
     let contract = format!(
-        "{imports}import pf.Api\nimport pf.PageBinding\nimport pf.Property\nimport pf.Example\n{schedule_import}{ingress_import}AppContract :: [].{{\n    Product : {{ namespace : Str, storage : {{ schema : ({tables} -> {tables}), identities : Str }}, operations : {{ {} }}, pages : List(PageBinding), properties : List(Property), examples : List(Example), presentation : Api.Presentation{schedule_field}{ingress_field} }}\n}}\n",
+        "{imports}import pf.Api\nimport pf.PageBinding\nimport pf.Property\nimport pf.Example\n{schedule_import}{ingress_import}AppContract :: [].{{\n    Product : {{ namespace : Str, operations : {{ {} }}, pages : List(PageBinding), properties : List(Property), examples : List(Example), presentation : Api.Presentation{schedule_field}{ingress_field} }}\n}}\n",
         operation_types.join(", ")
     );
     for (name, operation) in catalog.commands.iter().chain(catalog.queries.iter()) {
@@ -938,13 +926,13 @@ pub fn modules(
         .domains
         .iter()
         .map(|(name, tag)| {
-            format!("{{ name: \"{tag}\", rules: product.storage.domains.{name}.metadata() }}")
+            format!("{{ name: \"{tag}\", rules: SchemaSource.domains.{name}.metadata() }}")
         })
         .collect::<Vec<_>>()
         .join(", ");
     source = source.replace(
-        "identities: product.storage.identities",
-        &format!("domains: [{domains}], identities: product.storage.identities"),
+        "identities: SchemaSource.identities",
+        &format!("domains: [{domains}], identities: SchemaSource.identities"),
     );
     let errors = catalog
         .errors
@@ -953,8 +941,8 @@ pub fn modules(
         .collect::<Vec<_>>()
         .join(", ");
     source = source.replace(
-        "identities: product.storage.identities",
-        &format!("errors: [{errors}], identities: product.storage.identities"),
+        "identities: SchemaSource.identities",
+        &format!("errors: [{errors}], identities: SchemaSource.identities"),
     );
     // A rejected metadata callback must still be encoded as an error response;
     // do not evaluate its fallible examples again in the empty response value.
@@ -967,21 +955,7 @@ pub fn modules(
             .find(&error_fields)
             .context("empty contract errors generator")?;
     source.replace_range(error_at..error_at + error_fields.len(), "errors: []");
-    let domain_type = format!(
-        "{{ {} }}",
-        schema
-            .domains
-            .iter()
-            .map(|(name, tag)| format!("{name} : TextSpec({tag})"))
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
     let mut contract = contract
-        .replace("import pf.Api\n", "import pf.Api\nimport pf.TextSpec\n")
-        .replace(
-            "identities : Str }",
-            &format!("identities : Str, domains : {domain_type} }}"),
-        )
         .replace("pages : List(PageBinding)", &format!("pages : {page_type}"))
         .replace(
             "schedules : List(ScheduleBinding)",
@@ -995,39 +969,6 @@ pub fn modules(
             "properties : List(Property)",
             &format!("properties : {property_type}"),
         );
-    if !schema.indexes.is_empty() {
-        contract = contract.replace("import pf.Api\n", "import pf.Api\nimport pf.Index\n");
-        let mut models = BTreeMap::<&str, Vec<String>>::new();
-        for index in &schema.indexes {
-            let fields = index
-                .fields
-                .iter()
-                .map(|field| format!("{field} : Index.Field"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            models.entry(&index.model).or_default().push(format!(
-                "{} : [{}(List({{ {fields} }}))]",
-                index.name,
-                if index.unique { "Unique" } else { "NonUnique" }
-            ));
-        }
-        let indexes = models
-            .into_iter()
-            .map(|(model, keys)| format!("{model} : {{ {} }}", keys.join(", ")))
-            .collect::<Vec<_>>()
-            .join(", ");
-        contract = contract.replace(
-            "identities : Str, domains :",
-            &format!("identities : Str, indexes : {{ {indexes} }}, domains :"),
-        );
-    }
-    for tag in schema.domains.values() {
-        for module in output_schema::annotation_imports(tag)? {
-            if !contract.contains(&format!("import {module}\n")) {
-                contract = format!("import {module}\n{contract}");
-            }
-        }
-    }
     let error_type = format!(
         "{{ {} }}",
         catalog
@@ -1271,27 +1212,6 @@ fn selectors(
     }
     source.push_str("}\n");
     Ok(source)
-}
-
-pub fn storage_module(schema: &Schema) -> Result<String> {
-    let mut imports = BTreeSet::new();
-    let mut fields = Vec::new();
-    for (name, model) in &schema.models {
-        let roc_type = model
-            .roc_type
-            .as_deref()
-            .context("nominal storage model required")?;
-        imports.extend(output_schema::annotation_imports(roc_type)?);
-        fields.push(format!("{name} : List({roc_type})"));
-    }
-    Ok(format!(
-        "{}\nStorageContract :: [].{{\n    Tables : {{ {} }}\n}}\n",
-        imports
-            .into_iter()
-            .map(|module| format!("import {module}\n"))
-            .collect::<String>(),
-        fields.join(", ")
-    ))
 }
 
 #[cfg(test)]

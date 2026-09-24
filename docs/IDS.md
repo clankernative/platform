@@ -12,8 +12,8 @@ Within one model the length is fixed. API clients should treat IDs as strings.
 Declare ordinary nominal models and `Ref(Models.Customer)` relationships.
 The platform assigns IDs on create; app authors need no UUID factory or counters.
 Register each model explicitly with `xtask register-model APP TABLE Models.Type`.
-This creates or extends `model-identities.json`; bind it through the required
-storage definition and commit it. Every build reads it without creating identities.
+This creates or extends `model-identities.json`; commit it. Every build derives
+its tables from this ledger and `Models.roc` without creating identities.
 It records a stable random model key, its prefix, the table and
 Roc type, and retirement status. It is included in the build source digest and
 retained as checked artifact evidence. Isolated builds cannot invent assignments.

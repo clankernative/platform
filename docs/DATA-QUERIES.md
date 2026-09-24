@@ -3,9 +3,9 @@
 Commands and queries use the same typed selection plans. `Query.find` and
 `Tx.find` return `Some(row)` or `None`; more than one visible match fails with
 `ambiguous_selection`. They do not silently choose the first row and do not
-establish uniqueness. Declare uniqueness in
-[Storage.definition.indexes](STORAGE-INDEXES.md); storage enforces it for every
-insert and update, including writes that did not first perform a lookup.
+establish uniqueness. Declare uniqueness on the model with
+[`Table.unique`](STORAGE-INDEXES.md); storage enforces it for every insert and
+update, including writes that did not first perform a lookup.
 
 Generated `Data` functions retain each model and field's type. For a `links`
 model with indexed `name : Str` and `is_deleted : Bool` fields:
@@ -105,16 +105,17 @@ their existing cursor behavior.
 ## Enforcement
 
 Generated handles retain field types, but business fields must also belong to a
-declared index or a generated reference index before the host allows their use.
+key declared on the model or a generated reference index before the host allows
+their use.
 Metadata fields `id`, `version` and `created_at` are always admitted.
 Generated predicate/order constructors are sealed by both compiler-admission
 profiles. The host independently checks model identity, field types, declared
-indexes, operator shapes, predicate budgets, ordering and cursor bindings.
+keys, operator shapes, predicate budgets, ordering and cursor bindings.
 Selection plans are limited to 64 KiB, 512 predicate nodes, nesting depth 16,
 and eight explicit ordering fields. Exceeding a limit fails explicitly.
 Predicates do not grant row authority. `find` counts only rows visible under the
 current policy; a uniqueness conflict does not return an inaccessible row.
 
-Index declarations admit fields for selection; they do not promise that every
+Key declarations admit fields for selection; they do not promise that every
 combination of LIKE, OR and ordering can use an index efficiently. Filtering a
 returned page in Roc is not a replacement for complete database selection.

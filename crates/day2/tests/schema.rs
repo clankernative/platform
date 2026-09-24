@@ -133,16 +133,17 @@ fn relational_storage_reflection_rejects_forged_text_codec_shapes() -> Result<()
         .canonicalize()?;
     let temporary = tempfile::tempdir_in(root.join("artifacts"))?;
     let stage = temporary.path();
-    day2::app_sources::stage(
-        &root.join("fixtures/relational-conformance"),
-        &stage.join("app"),
+    let fixture = root.join("fixtures/relational-conformance");
+    let modules = day2::app_sources::stage(&fixture, &stage.join("app"))?;
+    fs::copy(
+        fixture.join(day2::identity::REGISTRY_FILE),
+        stage.join("app").join(day2::identity::REGISTRY_FILE),
     )?;
     day2::sdk::stage(&root.join("sdk"), &stage.join("sdk"))?;
     fs::write(stage.join("sdk/types.roc"), day2::sdk::reflection_package())?;
-    let source = fs::read_to_string(stage.join("app/App.roc"))?;
     fs::write(
         stage.join("app/SchemaSource.roc"),
-        day2::app_inference::schema_source(&source)?,
+        day2::app_inference::staged_schema_source(&stage.join("app"), &modules)?,
     )?;
     fs::copy(
         root.join("tools/schema-platform.roc"),
@@ -350,7 +351,7 @@ fn checked_storage_index_declarations_reject_forged_model_fields_and_markers() -
     let artifact = artifact()?;
     let original: Value =
         serde_json::from_slice(&fs::read(artifact.directory().join("checked-types.json"))?)?;
-    for mutation in ["model", "field", "marker", "witness", "empty"] {
+    for mutation in ["model", "field", "marker", "witness", "empty", "row"] {
         let mut document = original.clone();
         let table = &mut document[0];
         let entry = table["entries"]
@@ -362,26 +363,38 @@ fn checked_storage_index_declarations_reject_forged_model_fields_and_markers() -
             .as_u64()
             .unwrap() as usize;
         let root = table["types"][entry]["ret"].as_u64().unwrap() as usize;
-        let declarations = table["types"][root]["fields"]
+        let tables = table["types"][root]["fields"]
             .as_array()
             .unwrap()
             .iter()
-            .find(|field| field["name"] == "indexes")
+            .find(|field| field["name"] == "tables")
             .unwrap()["type_id"]
             .as_u64()
             .unwrap() as usize;
-        let model = table["types"][declarations]["fields"][0]["type_id"]
+        let witness = |table: &Value, node: usize, name: &str| {
+            let list = table["types"][node]["fields"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|field| field["name"] == name)
+                .unwrap()["type_id"]
+                .as_u64()
+                .unwrap() as usize;
+            table["types"][list]["item"].as_u64().unwrap() as usize
+        };
+        let declared = table["types"][tables]["fields"][0]["type_id"]
             .as_u64()
             .unwrap() as usize;
-        let key = table["types"][model]["fields"][0]["type_id"]
+        let keys = witness(table, declared, "key_witness");
+        let key = table["types"][keys]["fields"][0]["type_id"]
             .as_u64()
             .unwrap() as usize;
-        let witness = table["types"][key]["tags"][0]["payload"][0]
+        let payload = table["types"][key]["tags"][0]["payload"][0]
             .as_u64()
             .unwrap() as usize;
-        let fields = table["types"][witness]["item"].as_u64().unwrap() as usize;
+        let fields = table["types"][payload]["item"].as_u64().unwrap() as usize;
         match mutation {
-            "model" => table["types"][declarations]["fields"][0]["name"] = json!("missing"),
+            "model" => table["types"][tables]["fields"][0]["name"] = json!("missing"),
             "field" => table["types"][fields]["fields"][0]["name"] = json!("missing"),
             "marker" => table["types"][key]["tags"][0]["name"] = json!("Unchecked"),
             "witness" => {
@@ -394,6 +407,22 @@ fn checked_storage_index_declarations_reject_forged_model_fields_and_markers() -
                 table["types"][fields]["fields"][0]["type_id"] = json!(text);
             }
             "empty" => table["types"][fields]["fields"] = json!([]),
+            "row" => {
+                // Keys declared over another model's row do not belong to this table.
+                let other = table["types"][tables]["fields"][1]["type_id"]
+                    .as_u64()
+                    .unwrap() as usize;
+                let foreign = witness(table, other, "row_witness");
+                let own = table["types"][declared]["fields"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|field| field["name"] == "row_witness")
+                    .unwrap()["type_id"]
+                    .as_u64()
+                    .unwrap() as usize;
+                table["types"][own]["item"] = json!(foreign);
+            }
             _ => unreachable!(),
         }
         assert!(

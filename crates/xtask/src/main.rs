@@ -123,7 +123,6 @@ fn snapshot(
                         "app-platform.roc",
                         "AppIdentity.roc",
                         "SchemaSource.roc",
-                        "StorageContract.roc",
                         "Selectors.roc",
                         "Domains.roc",
                         "Errors.roc",

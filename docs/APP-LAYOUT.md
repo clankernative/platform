@@ -16,8 +16,7 @@ commands/analyze/AnalyzeReportTypes.roc # captured nominal request
 commands/notify/NotifyReady.roc        # preparation, decision, external effects, completion
 domain/Title.roc                     # nominal value and executable constraints
 domain/Document.roc
-storage/Storage.roc                  # tables, domains, identity ledger
-storage/Models.roc                   # nominal persistent records
+storage/Models.roc                   # nominal persistent records; each is a table
 shared/ReportView.roc                # shared result shapes and field meaning
 verification/ReportInvariants.roc    # checks spanning application state
 verification/ReportScenarios.roc     # shared scenario setup, when needed

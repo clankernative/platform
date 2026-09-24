@@ -7,10 +7,10 @@ not activate documentation, verification, stylesheets or scripts.
 
 | Read this file | What it owns |
 | --- | --- |
-| [Reports App](../examples/reports/App.roc) | Namespace; one operations record with public and internal commands; named pages, model checks, error cases, examples, storage and presentation |
+| [Reports App](../examples/reports/App.roc) | Namespace; one operations record with public and internal commands; named pages, model checks, error cases, examples and presentation |
 | [SubmitReport](../examples/reports/commands/submit/SubmitReport.roc), [GetReport](../examples/reports/queries/detail/GetReport.roc) | Complete operation: request, handler, structured contract, typed example and verification |
 | [AnalyzeReport](../examples/reports/commands/analyze/AnalyzeReport.roc), [NotifyReady](../examples/reports/commands/notify/NotifyReady.roc) | Internal commands with preparation and external effects |
-| [Storage](../examples/reports/storage/Storage.roc), [Title](../examples/reports/domain/Title.roc), [Document](../examples/reports/domain/Document.roc) | Explicit persistence, permanent identity ledger and executable text rules |
+| [Models](../examples/reports/storage/Models.roc), [Title](../examples/reports/domain/Title.roc), [Document](../examples/reports/domain/Document.roc) | Tables and their keys, and executable text rules; the committed identity ledger names each table |
 | [Api SDK](../sdk/contracts/Api.roc) | Required command/query constructors, verification, errors and execution requirements |
 | [Registry inference](../crates/day2/src/registry.rs), [application contract](../crates/day2/src/app_contract.rs) | Derive codecs and exact application/description types from checked wrapper witnesses; generate final handles and dispatcher |
 | [Build workflow](../ops/Build.roc), [Check workflow](../ops/Check.roc) | Required compiler, admission, native build and behavioral verification order |

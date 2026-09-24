@@ -1,4 +1,3 @@
-import Storage
 import SubmitReport
 import ReviseReport
 import ListReports
@@ -14,7 +13,6 @@ import Demo
 App :: [].{
 	definition = {
 		namespace: "reports",
-		storage: Storage.definition,
 		operations: {
 			submit: SubmitReport.definition,
 			revise: ReviseReport.definition,

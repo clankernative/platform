@@ -1,4 +1,3 @@
-import Storage
 import CreateLink
 import EditLink
 import ListLinks
@@ -10,7 +9,6 @@ import Demo
 App :: [].{
 	definition = {
 		namespace: "links",
-		storage: Storage.definition,
 		operations: {
 			create: CreateLink.definition,
 			edit: EditLink.definition,

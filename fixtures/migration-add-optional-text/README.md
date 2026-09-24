@@ -1,7 +1,8 @@
 # Add An Optional Text Field
 
 This two-module overlay tests an additive database migration.
-`storage/Models.roc` adds `Deal.note : [None, Some(Str)]`; `commands/seed/Seed.roc` supplies
+`storage/Models.roc` adds `Deal.note : [None, Some(Str)]` and repeats the base models'
+table keys, which live with the models; `commands/seed/Seed.roc` supplies
 `None` when creating new rows under the changed schema. Other modules come from
 a staged copy of `fixtures/relational-conformance`, preserving its model identities.
 

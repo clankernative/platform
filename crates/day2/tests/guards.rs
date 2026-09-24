@@ -32,10 +32,14 @@ fn compiler_fixture(root: &Path, stage: &Path, artifact: &LoadedArtifact) -> Res
         );
     }
     day2::sdk::stage(&root.join("sdk"), &sdk)?;
+    fs::copy(
+        source.join(day2::identity::REGISTRY_FILE),
+        app.join(day2::identity::REGISTRY_FILE),
+    )?;
     for (module, source) in [
         (
             "SchemaSource.roc",
-            day2::app_inference::schema_source(&fs::read_to_string(app.join("App.roc"))?)?,
+            day2::app_inference::staged_schema_source(&app, &modules)?,
         ),
         ("Data.roc", artifact.contract().schema.data_module()?),
         (
