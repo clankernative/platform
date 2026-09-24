@@ -92,7 +92,9 @@ fn snapshot(
             .file_name()
             .into_string()
             .map_err(|_| anyhow::anyhow!("invalid filename"))?;
-        if name == ".git" {
+        // Version-control metadata is never app input: an app that lives in its
+        // own repository carries it beside its sources.
+        if [".git", ".gitignore", ".gitattributes"].contains(&name.as_str()) {
             continue;
         }
         let kind = entry.file_type()?;
@@ -975,6 +977,36 @@ mod tests {
             snapshot(
                 &source,
                 &directory.path().join("linked"),
+                &mut BTreeMap::new(),
+                "app"
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn version_control_metadata_is_not_app_input() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let source = directory.path().join("source");
+        fs::create_dir_all(source.join(".git/objects"))?;
+        fs::write(source.join(".git/HEAD"), "ref: refs/heads/main\n")?;
+        fs::write(source.join(".gitignore"), "artifacts/\n")?;
+        fs::write(source.join(".gitattributes"), "* text=auto\n")?;
+        fs::write(source.join("App.roc"), "App :: [].{}\n")?;
+        let target = directory.path().join("stage");
+        let mut hashes = BTreeMap::new();
+        snapshot(&source, &target, &mut hashes, "app")?;
+        assert_eq!(hashes.keys().collect::<Vec<_>>(), ["app/App.roc"]);
+        for name in [".git", ".gitignore", ".gitattributes"] {
+            assert!(!target.join(name).exists(), "{name} was captured");
+        }
+        // Any other dotfile is still refused.
+        fs::write(source.join(".env"), "SECRET=1\n")?;
+        assert!(
+            snapshot(
+                &source,
+                &directory.path().join("dotfile"),
                 &mut BTreeMap::new(),
                 "app"
             )
