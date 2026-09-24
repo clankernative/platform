@@ -142,12 +142,50 @@ fn probe(profile: &str) -> Result<()> {
     let sandbox = day2::worker::qualify_sandbox();
     match &sandbox {
         Ok(()) => println!("RESULT sandbox: QUALIFIED"),
-        Err(error) => println!("RESULT sandbox: NOT QUALIFIED ({error:#})"),
+        Err(error) => {
+            println!("RESULT sandbox: NOT QUALIFIED ({error:#})");
+            launcher_diagnosis()?;
+        }
     }
     ensure!(
         preflight.is_ok() && sandbox.is_ok(),
         "this node cannot serve a day2 app"
     );
+    Ok(())
+}
+
+/// Why the launcher refused. The supervisor discards the launcher's stderr,
+/// because after the exec it is the app worker's; here the worker is the
+/// host-only probe, so the launcher's own refusal is safe to print. This runs
+/// the same launcher on the same probe, as this process's child.
+fn launcher_diagnosis() -> Result<()> {
+    let directory = std::env::current_exe()?
+        .canonicalize()?
+        .parent()
+        .context("inspector installation directory")?
+        .to_owned();
+    let mut child = std::process::Command::new(directory.join("day2-sandbox"))
+        .arg(directory.join("day2-sandbox-probe"))
+        .arg(std::process::id().to_string())
+        .env_clear()
+        .env("LANG", "C")
+        .env("LC_ALL", "C")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .context("spawn the sandbox launcher")?;
+    {
+        use std::io::Write;
+        let mut stdin = child.stdin.take().context("launcher stdin")?;
+        let _ = stdin.write_all(b"qualify\n");
+    }
+    let output = child.wait_with_output()?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    println!("launcher exit: {}", output.status);
+    for line in stderr.lines().take(20) {
+        println!("launcher: {line}");
+    }
     Ok(())
 }
 

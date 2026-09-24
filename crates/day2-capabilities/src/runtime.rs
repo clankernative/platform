@@ -38,8 +38,9 @@ impl RuntimeProfile {
 /// pod's processes in a cgroup above the container's, which a container in its
 /// own cgroup namespace cannot see. `Pod` is the operator declaring that the
 /// orchestrator holds this profile's `process_limit` for the whole pod. The
-/// container then accepts an unbounded view of its own cgroup, and a bound it
-/// can see is still held to the profile. It is a declaration, not an
+/// container then does not hold its own cgroup's process bound to the profile:
+/// it may be unbounded, or a looser value the container runtime wrote itself
+/// (containerd 2 on GKE writes a node-derived one). It is a declaration, not an
 /// observation, and qualification records it as one.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
