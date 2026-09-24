@@ -458,11 +458,14 @@ async fn queued_permit(host: &Host, wait: Duration) -> Option<tokio::sync::Owned
         .ok()
 }
 
+/// Health answers `200 OK` with an empty body, not `204`: a Google Cloud load
+/// balancer's HTTP health check counts only `200` as healthy, and every other
+/// orchestrator probe accepts it too.
 fn health_response(method: &Method, ready: bool) -> Response {
     let status = if !matches!(*method, Method::GET | Method::HEAD) {
         StatusCode::METHOD_NOT_ALLOWED
     } else if ready {
-        StatusCode::NO_CONTENT
+        StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE
     };
@@ -1730,8 +1733,8 @@ mod deployment_health_tests {
     #[tokio::test]
     async fn health_has_no_sensitive_body_or_mutating_method() -> Result<()> {
         for (method, ready, expected) in [
-            (Method::GET, true, StatusCode::NO_CONTENT),
-            (Method::HEAD, true, StatusCode::NO_CONTENT),
+            (Method::GET, true, StatusCode::OK),
+            (Method::HEAD, true, StatusCode::OK),
             (Method::GET, false, StatusCode::SERVICE_UNAVAILABLE),
             (Method::POST, true, StatusCode::METHOD_NOT_ALLOWED),
         ] {

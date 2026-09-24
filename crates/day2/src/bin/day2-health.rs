@@ -23,7 +23,7 @@ fn check() -> Result<()> {
     let mut line = String::new();
     BufReader::new(socket).take(1024).read_line(&mut line)?;
     ensure!(
-        line.starts_with("HTTP/1.1 204 ") && line.ends_with("\r\n"),
+        line.starts_with("HTTP/1.1 200 ") && line.ends_with("\r\n"),
         "not ready"
     );
     Ok(())

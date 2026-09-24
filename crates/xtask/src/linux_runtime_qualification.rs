@@ -546,7 +546,7 @@ impl RuntimeSession {
         loop {
             if self
                 .request(index, "GET", "/health/ready", &[], "")
-                .is_ok_and(|response| response.status == 204 && response.body.is_empty())
+                .is_ok_and(|response| response.status == 200 && response.body.is_empty())
             {
                 break;
             }
@@ -613,7 +613,7 @@ impl RuntimeSession {
         );
         let live = self.request(index, "GET", "/health/live", &[], "")?;
         ensure!(
-            live.status == 204 && live.body.is_empty(),
+            live.status == 200 && live.body.is_empty(),
             "runtime liveness response"
         );
         let native = self.output.join("native");
@@ -642,7 +642,7 @@ impl RuntimeSession {
         }
         Ok(
             json!({"container":id,"kernel":kernel.trim(),"kernel_files":files,
-            "mounts":mounts,"host_config":inspect["HostConfig"],"health":{"live":204,"ready":204},
+            "mounts":mounts,"host_config":inspect["HostConfig"],"health":{"live":200,"ready":200},
             "runtime_supervisor":binaries["runtime_supervisor"],"runtime_sandbox":binaries["runtime_sandbox"],
             "startup_sandbox_probe":"mandatory before HTTP admission"}),
         )
