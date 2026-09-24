@@ -1,7 +1,7 @@
 //! Read-only observation journal. The decision transaction never spans a provider call.
 use crate::{protocol::*, store, store::Runtime};
 use anyhow::{Context as _, Result, bail, ensure};
-use rusqlite::{Connection, TransactionBehavior, params};
+use rusqlite::{Connection, params};
 
 const MAX_OBSERVATIONS: usize = 32;
 const MAX_OBSERVATION_BYTES: usize = 65_536;
@@ -52,7 +52,7 @@ pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
         return Ok(Vec::new());
     }
     let mut connection = store::open(runtime.db())?;
-    let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let tx = crate::write_queue::immediate(&mut connection)?;
     runtime.check_binding(&tx)?;
     upgrade(&tx)?;
     let (operation, input, actor, artifact, status): (String, String, String, String, String) = tx
@@ -99,7 +99,7 @@ pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
     loop {
         // Keep the authority snapshot valid while pure code consumes recorded
         // inputs. Activation can only commit before or after this replay step.
-        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = crate::write_queue::immediate(&mut connection)?;
         crate::authority_state::require_invocation_in(
             &tx,
             runtime,
@@ -152,7 +152,7 @@ pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
         // pins. Reserve the local writer before reading rows, avoiding a deferred
         // snapshot-to-writer race with another preparation. This transaction still
         // ends before any provider call, and permits no application mutation.
-        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = crate::write_queue::immediate(&mut connection)?;
         runtime.check_binding(&tx)?;
         let active = crate::authority_state::require_invocation_in(
             &tx,
@@ -280,7 +280,7 @@ pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
         if let Some((ordinal, attempt, reservation, _, identity, correlation)) = admitted_attempt {
             // Retain provider knowledge even if policy changed during the call.
             // A separate reauthorization below gates use by application code.
-            let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let tx = crate::write_queue::immediate(&mut connection)?;
             crate::execution::check_settlement_binding(&tx, runtime, id, &active.stamp)?;
             crate::resources::record_correlation_in(&tx, &identity, &correlation)?;
             tx.execute(
@@ -294,7 +294,7 @@ pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
             )?;
             tx.commit()?;
         }
-        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = crate::write_queue::immediate(&mut connection)?;
         runtime.check_binding(&tx)?;
         crate::authority_state::require_invocation_in(
             &tx,

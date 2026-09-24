@@ -549,7 +549,7 @@ impl Session {
                 .to_string_lossy()
                 .as_ref()],
         )?;
-        let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let tx = day2::write_queue::immediate(&mut db)?;
         tx.execute_batch("PRAGMA defer_foreign_keys=ON")?;
         for model in runtime.artifact().contract().schema.models.keys() {
             day2::schema::identifier(model)?;
@@ -675,7 +675,7 @@ impl Session {
             rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
         )?;
         let operator = day2::authority_state::LocalOperator::assert_local("local-development")?;
-        let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let tx = day2::write_queue::immediate(&mut db)?;
         let expected = day2::authority_state::current(&tx)?.stamp;
         // This checkpoint is a deliberate disposable local cutover. Retain all
         // usage and unknown holds while recovering its fenced accounting. Empty

@@ -5,7 +5,7 @@ use crate::{
     store::{Runtime, open},
 };
 use anyhow::{Result, ensure};
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -205,7 +205,7 @@ fn apply_plan(
     if supplied.convert_ids {
         connection.pragma_update(None, "foreign_keys", false)?;
     }
-    let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let tx = crate::write_queue::immediate(&mut connection)?;
     let scope: String = tx.query_row("SELECT value FROM day2_meta WHERE key='scope'", [], |r| {
         r.get(0)
     })?;
@@ -323,7 +323,7 @@ pub fn activate_checked(
         Some(target),
     )?;
     let mut connection = open(runtime.db())?;
-    let connection = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let connection = crate::write_queue::immediate(&mut connection)?;
     crate::authority_state::upgrade(&connection)?;
     let scope: String =
         connection.query_row("SELECT value FROM day2_meta WHERE key='scope'", [], |r| {
@@ -517,6 +517,7 @@ fn convert_ids(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::TransactionBehavior;
 
     #[test]
     fn explicit_retirement_preserves_rows_audit_and_indexes_and_freezes_archived_models()

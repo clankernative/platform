@@ -969,7 +969,7 @@ impl Runtime {
     pub fn audit_page(&self, actor: &str, request: &PageRequest) -> Result<Page<Entry>> {
         request.validate(false)?;
         let mut db = open(self.db())?;
-        let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let tx = crate::write_queue::immediate(&mut db)?;
         self.authorize_audit_in(&tx, actor)?;
         let now = self.host().now_ms()?.div_euclid(1000);
         let binding = request.binding(self, actor, false)?;
@@ -1010,7 +1010,7 @@ impl Runtime {
     pub fn audit_event_page(&self, actor: &str, request: &PageRequest) -> Result<Page<Event>> {
         request.validate(true)?;
         let mut db = open(self.db())?;
-        let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let tx = crate::write_queue::immediate(&mut db)?;
         self.authorize_audit_in(&tx, actor)?;
         validate_event_stream(&tx)?;
         let now = self.host().now_ms()?.div_euclid(1000);
@@ -1069,8 +1069,7 @@ impl Runtime {
             self.host().now_ms()?
         };
         let mut connection = open(self.db())?;
-        let transaction =
-            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let transaction = crate::write_queue::immediate(&mut connection)?;
         self.check_binding(&transaction)?;
         upgrade(&transaction)?;
         record_attempt(
@@ -1094,8 +1093,7 @@ impl Runtime {
 
     pub(crate) fn audit_execution_interruption(&self, identity: &str) -> Result<()> {
         let mut connection = open(self.db())?;
-        let transaction =
-            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let transaction = crate::write_queue::immediate(&mut connection)?;
         self.check_binding(&transaction)?;
         upgrade(&transaction)?;
         let metadata: Option<(String, String, String)> = transaction
@@ -1203,7 +1201,7 @@ impl Runtime {
             "invalid_web_audit_metadata"
         );
         let mut db = open(self.db())?;
-        let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let tx = crate::write_queue::immediate(&mut db)?;
         self.check_binding(&tx)?;
         upgrade(&tx)?;
         tx.execute(

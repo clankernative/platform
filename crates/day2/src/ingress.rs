@@ -33,6 +33,9 @@ pub enum Refused {
     /// The delivery carries no identifier and the endpoint supplies no derivation,
     /// so the delivery cannot be made exactly-once.
     Unidentified,
+    /// The delivery verified but could not be recorded within [`ACCEPT_WAIT`];
+    /// nothing was recorded, and the provider may redeliver it.
+    Busy,
 }
 
 impl Refused {
@@ -45,6 +48,7 @@ impl Refused {
             Self::Stale => "ingress_stale",
             Self::Untrusted => "ingress_untrusted",
             Self::Unidentified => "ingress_unidentified",
+            Self::Busy => "ingress_busy",
         }
     }
 }
@@ -53,6 +57,11 @@ impl Refused {
 /// anything else is refused at admission: the provider owns the signature scheme,
 /// the envelope shape and the rule that identifies one delivery, so an unregistered
 /// name has nobody to answer those.
+/// Longest a verified delivery waits, for an execution permit and again for its
+/// write turn, before the host answers busy. Twice this stays inside GitHub's
+/// ten-second delivery timeout.
+pub const ACCEPT_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
 pub const PROVIDERS: &[&str] = &[
     "slack.events.v1",
     "slack.interactivity.v1",
@@ -416,8 +425,11 @@ pub fn admit(
     let identity = endpoint.identity(&identifier);
     // A repeated delivery resolves to the identity that already ran, so accepting
     // it again is a reuse rather than a second invocation.
-    runtime
-        .accept_route(
+    // Providers abandon a delivery after a short deadline (GitHub: ten seconds) and
+    // do not retry on their own, so recording it may not wait out the full write
+    // queue: a busy host answers 503 while the provider is still listening.
+    crate::write_queue::bounded(ACCEPT_WAIT, || {
+        runtime.accept_route(
             &endpoint.operation,
             binding.actor,
             &identity,
@@ -425,7 +437,14 @@ pub fn admit(
             now_seconds,
             crate::audit::Trigger::Ingress,
         )
-        .map_err(|_| Refused::Untrusted)?;
+    })
+    .map_err(|error| {
+        if crate::error::classify(&error) == crate::error::Failure::StorageBusy {
+            Refused::Busy
+        } else {
+            Refused::Untrusted
+        }
+    })?;
     Ok(identity)
 }
 

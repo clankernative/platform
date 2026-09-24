@@ -1,4 +1,5 @@
 use super::*;
+use rusqlite::TransactionBehavior;
 
 fn database() -> Result<Connection> {
     let mut connection = Connection::open_in_memory()?;

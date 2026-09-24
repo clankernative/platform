@@ -61,6 +61,8 @@ struct Host {
     secret: Vec<u8>,
     sign_in: SignIn,
     capacity: Arc<Semaphore>,
+    /// Requests waiting for a permit; bounded by [`MAX_QUEUED`].
+    queued: std::sync::atomic::AtomicUsize,
     live_capacity: Arc<Semaphore>,
     admitting: Arc<AtomicBool>,
     health_endpoints: bool,
@@ -314,6 +316,7 @@ impl LocalServer {
             origin: origin.clone(),
             sign_in,
             capacity: Arc::new(Semaphore::new(concurrency)),
+            queued: std::sync::atomic::AtomicUsize::new(0),
             live_capacity: Arc::new(Semaphore::new(64)),
             admitting: Arc::new(AtomicBool::new(true)),
             health_endpoints,
@@ -428,6 +431,33 @@ impl LocalServer {
     }
 }
 
+/// Longest a request waits for an execution permit before it is refused as busy.
+const QUEUE_WAIT: Duration = Duration::from_secs(10);
+
+/// Requests that may wait for a permit at once; beyond this, refuse immediately.
+const MAX_QUEUED: usize = 256;
+
+/// Wait in arrival order for an execution permit. Tokio's semaphore serves waiters
+/// first come, first served, so a burst queues instead of being refused; only a
+/// wait longer than `wait` or a line longer than [`MAX_QUEUED`] is busy.
+async fn queued_permit(host: &Host, wait: Duration) -> Option<tokio::sync::OwnedSemaphorePermit> {
+    struct Waiting<'a>(&'a std::sync::atomic::AtomicUsize);
+    impl Drop for Waiting<'_> {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+    if host.queued.fetch_add(1, Ordering::AcqRel) >= MAX_QUEUED {
+        host.queued.fetch_sub(1, Ordering::AcqRel);
+        return None;
+    }
+    let _waiting = Waiting(&host.queued);
+    tokio::time::timeout(wait, host.capacity.clone().acquire_owned())
+        .await
+        .ok()?
+        .ok()
+}
+
 fn health_response(method: &Method, ready: bool) -> Response {
     let status = if !matches!(*method, Method::GET | Method::HEAD) {
         StatusCode::METHOD_NOT_ALLOWED
@@ -455,18 +485,36 @@ async fn handle(State(host): State<Arc<Host>>, request: Request) -> Response {
             .headers()
             .get("datastar-request")
             .is_some_and(|value| value == "true");
+    // Webhook providers abandon a delivery after a short deadline, so a delivery
+    // queues for a permit only as long as it can still be answered in time.
+    let wait = if request.method() == Method::POST
+        && request
+            .uri()
+            .path()
+            .starts_with(crate::ingress::ROUTE_PREFIX)
+    {
+        crate::ingress::ACCEPT_WAIT
+    } else {
+        QUEUE_WAIT
+    };
     let permit = match host.capacity.clone().try_acquire_owned() {
         Ok(permit) => permit,
-        Err(_) => {
-            if live_request {
-                return secure(live::retry_response());
+        Err(_) if live_request => return secure(live::retry_response()),
+        Err(_) => match queued_permit(&host, wait).await {
+            Some(permit) => permit,
+            None => {
+                let mut response = transport_error(
+                    json,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Server is busy. Retry this request.",
+                );
+                response.headers_mut().insert(
+                    header::RETRY_AFTER,
+                    axum::http::HeaderValue::from_static("1"),
+                );
+                return secure(response);
             }
-            return secure(transport_error(
-                json,
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Server is busy. Retry this request.",
-            ));
-        }
+        },
     };
     let (parts, body) = request.into_parts();
     let body = match tokio::time::timeout(Duration::from_secs(3), to_bytes(body, 65_536)).await {
@@ -997,6 +1045,18 @@ impl Host {
         );
         match admitted {
             Ok(_) => Ok(transport_error(true, StatusCode::OK, "")),
+            Err(crate::ingress::Refused::Busy) => {
+                let mut response = transport_error(
+                    true,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Server is busy. Retry this request.",
+                );
+                response.headers_mut().insert(
+                    header::RETRY_AFTER,
+                    axum::http::HeaderValue::from_static("1"),
+                );
+                Ok(response)
+            }
             Err(_) => refused(),
         }
     }

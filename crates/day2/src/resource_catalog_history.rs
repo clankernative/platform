@@ -5,7 +5,7 @@
 
 use anyhow::{Result, ensure};
 use day2_capabilities::resources::{BudgetDefinition, Catalog};
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use std::{collections::BTreeMap, fs, path::Path};
 
@@ -44,7 +44,7 @@ pub(crate) fn validate_and_record(
         );
     }
     let mut db = crate::store::open(&path)?;
-    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let tx = crate::write_queue::immediate(&mut db)?;
     upgrade(&tx)?;
     let identity = serde_json::to_string(&(installation, environment))?;
     let previous: Option<String> = tx

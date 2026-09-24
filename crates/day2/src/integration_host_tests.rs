@@ -7,6 +7,7 @@ use day2_capabilities::{
     integrations::{LiveConnection, OpenAiText, SlackChannel},
     resources::{Action, ResourceTarget, VersionRef},
 };
+use rusqlite::TransactionBehavior;
 use std::{
     collections::VecDeque,
     os::unix::fs::PermissionsExt,

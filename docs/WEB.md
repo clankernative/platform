@@ -142,7 +142,19 @@ background work may still be running after the command succeeds.
 
 Failures use `{"error":{"code":"…","message":"…"}}`. The spec documents
 authentication/authorization errors, conflicts, application rejection and
-transport failures. Requests retain the host's 64 KiB body, 8192-byte URI and
+transport failures.
+
+Requests beyond the host's execution permits wait in arrival order rather than
+being refused; only a request that waits more than ten seconds, or arrives when
+256 are already waiting, receives `503` with `Retry-After: 1`. Signed webhook
+deliveries wait at most three seconds for a permit and three more to be recorded,
+so a busy host answers `503` inside a provider's delivery timeout (GitHub's is ten
+seconds) instead of recording a delivery the provider has already abandoned. Writes to an app
+database are likewise served in arrival order within the host, so a burst of
+commands queues behind SQLite's single writer instead of racing for it. A write
+that still cannot get the database fails as `503 storage_busy`, never
+`internal_error`; nothing committed, so retry the same request with the same
+idempotency key. Requests retain the host's 64 KiB body, 8192-byte URI and
 three-second body-read limits. Responses remain `Cache-Control: no-store`.
 The docs console sends commands only when explicitly submitted, preserves the
 key for retries, and forwards JSON text without rounding 64-bit integers.

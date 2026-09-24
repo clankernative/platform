@@ -11,7 +11,7 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 pub use day2_capabilities::resources::ResolvedResources;
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, path::Path};
 
@@ -652,7 +652,7 @@ pub fn apply(
     change: &ApplyAuthority,
 ) -> Result<AuthorityReceipt> {
     let mut connection = open(runtime.db())?;
-    let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let tx = crate::write_queue::immediate(&mut connection)?;
     upgrade(&tx)?;
     scope_matches(&tx, runtime)?;
     if let Some(receipt) = cached_policy_receipt_in(&tx, operator, change)? {
@@ -717,7 +717,7 @@ pub fn apply_desired(
     );
     let source = desired_fingerprint(&instance, runtime.app(), operator, &expected, None)?;
     let mut connection = open(runtime.db())?;
-    let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let tx = crate::write_queue::immediate(&mut connection)?;
     upgrade(&tx)?;
     scope_matches(&tx, runtime)?;
     if let Some(receipt) = cached_desired_receipt_in(&tx, request_id, &source)? {

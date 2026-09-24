@@ -5,7 +5,7 @@ use crate::integrations::{
 };
 use anyhow::{Context, Result, ensure};
 use day2_capabilities::integrations::LiveConnection;
-use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -320,7 +320,7 @@ pub fn mount(instance: &Path, operator: &str, request: &Mount) -> Result<serde_j
         );
     }
     let mut connection = crate::store::open(&path)?;
-    let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let tx = crate::write_queue::immediate(&mut connection)?;
     tx.execute_batch("CREATE TABLE IF NOT EXISTS mounts(id TEXT NOT NULL,revision INTEGER NOT NULL,profile TEXT NOT NULL,path TEXT NOT NULL,fingerprint TEXT NOT NULL,operator TEXT NOT NULL,PRIMARY KEY(id,revision)) STRICT;
         CREATE TRIGGER IF NOT EXISTS mounts_no_update BEFORE UPDATE ON mounts BEGIN SELECT RAISE(ABORT,'immutable_credential_version'); END;
         CREATE TRIGGER IF NOT EXISTS mounts_no_delete BEFORE DELETE ON mounts BEGIN SELECT RAISE(ABORT,'immutable_credential_version'); END;")?;

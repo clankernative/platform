@@ -6,6 +6,7 @@ use crate::{
     authority_state::{self, ActiveAuthority, ApplyAuthority, AuthorityDocument, LocalOperator},
     error::{Failure, classify},
 };
+use rusqlite::TransactionBehavior;
 use std::collections::BTreeMap;
 
 struct Fixture {

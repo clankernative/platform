@@ -69,6 +69,7 @@ pub mod web_resources;
 mod web_security;
 pub mod web_templates;
 pub mod worker;
+pub mod write_queue;
 
 use sha2::{Digest, Sha256};
 

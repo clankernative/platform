@@ -5,7 +5,7 @@
 //! employee mapping, publication and financial calculations remain application code.
 use crate::{protocol::Instruction, store::Runtime};
 use anyhow::{Context, Result, ensure};
-use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::path::Path;
@@ -305,7 +305,7 @@ fn seed_with_mode(
         issuer_id: capture.issuer_id.clone(),
     };
     let mut connection = crate::store::open(path)?;
-    let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let tx = crate::write_queue::immediate(&mut connection)?;
     upgrade(&tx)?;
     if only_unconfigured {
         let existing = tx.query_row(
@@ -484,7 +484,7 @@ fn read_at(path: &Path, read: Read) -> Result<String> {
             issuer_id,
         } => {
             let cursor = i64::try_from(cursor)?;
-            let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let tx = crate::write_queue::immediate(&mut connection)?;
             let count: Option<i64> = tx
                 .query_row(
                     "SELECT record_count FROM carta_snapshots WHERE scope=?1 AND id=?2 AND issuer_id=?3",

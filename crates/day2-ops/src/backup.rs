@@ -313,7 +313,7 @@ pub fn restore(backup: &Path, output: &Path) -> Result<PathBuf> {
         .join(".state")
         .join(format!("{}.sqlite", manifest.app));
     let mut db = Connection::open_with_flags(&database, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
-    let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let tx = day2::write_queue::immediate(&mut db)?;
     authority_state::invalidate_restored(&tx, &output.join(&artifact_relative))?;
     // A backup is not a current login grant. Rotate browser authentication and
     // ticket signing as part of the same restore fence; preserve execution evidence.

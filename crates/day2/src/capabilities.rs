@@ -7,7 +7,7 @@ use crate::{
     store::{self, Runtime},
 };
 use anyhow::{Context, Result, ensure};
-use rusqlite::{Connection, TransactionBehavior, params};
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -490,7 +490,7 @@ pub(crate) fn with_world(
 ) -> Result<String> {
     let path = runtime.db().with_file_name("notifications.sqlite");
     let mut connection = store::open(&path)?;
-    let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let tx = crate::write_queue::immediate(&mut connection)?;
     tx.execute_batch("CREATE TABLE IF NOT EXISTS notification_world (id INTEGER PRIMARY KEY CHECK(id=1), state TEXT NOT NULL) STRICT; INSERT OR IGNORE INTO notification_world VALUES(1,'{\"messages\":{}}');")?;
     let encoded: String = tx.query_row(
         "SELECT state FROM notification_world WHERE id=1",
