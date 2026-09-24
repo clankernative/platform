@@ -15,7 +15,7 @@ struct Prepared {
     web_resources: day2::web_resources::Catalog,
     templates: day2::web_templates::Catalog,
     namespace: String,
-    schedules: bool,
+    projection: day2::registry::Projection,
     shape: Option<day2::registry::AppShape>,
     platform_hashes: BTreeMap<String, String>,
     inference_sources: BTreeMap<String, String>,
@@ -63,8 +63,8 @@ fn prepare(root: &Path, app: &Path, overrides: Option<&Path>) -> Result<Prepared
     )?;
     let namespace =
         day2::app_inference::namespace(&fs::read_to_string(stage.join("app/App.roc"))?)?;
-    let schedules =
-        day2::app_inference::declares_schedules(&fs::read_to_string(stage.join("app/App.roc"))?)?;
+    let projection =
+        day2::registry::Projection::declared(&fs::read_to_string(stage.join("app/App.roc"))?)?;
     fs::write(
         stage.join("app/AppIdentity.roc"),
         day2::app_inference::identity_module(&namespace)?,
@@ -113,7 +113,7 @@ fn prepare(root: &Path, app: &Path, overrides: Option<&Path>) -> Result<Prepared
         web_resources,
         templates,
         namespace,
-        schedules,
+        projection,
         shape: None,
         platform_hashes,
         inference_sources,
@@ -167,7 +167,7 @@ fn data(_app: &Path, _isolated_job: Option<&Path>, prepared: &mut Prepared) -> R
     }
     fs::write(
         stage.join("app/app-platform.roc"),
-        day2::registry::app_platform_for(None, prepared.schedules),
+        day2::registry::app_platform_for(None, prepared.projection),
     )?;
     Ok(Bound {
         checked_types,
@@ -318,6 +318,7 @@ fn publish(root: &Path, prepared: &mut Prepared, bound: &Bound) -> Result<PathBu
         "pages": manifest.pages,
         "schedules": manifest.schedules,
         "ingress": manifest.ingress,
+        "redirects": manifest.redirects,
         "assets": assets,
         "web_resources": web_resources,
         "outputs": outputs,
@@ -531,7 +532,7 @@ pub fn execute(
                     );
                     fs::write(
                         stage.join("app/app-platform.roc"),
-                        day2::registry::app_platform_for(Some(&shape), prepared.schedules),
+                        day2::registry::app_platform_for(Some(&shape), prepared.projection),
                     )?;
                     prepared.shape = Some(shape);
                 }

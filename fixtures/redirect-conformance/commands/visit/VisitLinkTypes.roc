@@ -1,0 +1,3 @@
+VisitLinkTypes :: [].{
+	Input := { path : Str }
+}

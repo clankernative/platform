@@ -240,6 +240,16 @@ const MODULES: &[Module] = &[
         app_export: true,
     },
     Module {
+        file: "Redirect.roc",
+        source: "web/Redirect.roc",
+        app_export: true,
+    },
+    Module {
+        file: "RedirectBinding.roc",
+        source: "web/RedirectBinding.roc",
+        app_export: true,
+    },
+    Module {
         file: "PageSize.roc",
         source: "data/pagination/PageSize.roc",
         app_export: true,

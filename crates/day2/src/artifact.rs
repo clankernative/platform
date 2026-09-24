@@ -164,6 +164,24 @@ impl Endpoint {
     }
 }
 
+/// A declared redirect route: a GET path that runs one public command and
+/// answers `302 Found` with a field of its result. See `crate::redirects`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Redirect {
+    pub name: String,
+    pub path: String,
+    pub operation: String,
+    pub input_type: String,
+    pub output_type: String,
+    /// The command result field that becomes `Location`.
+    pub location: String,
+    /// `web` or `any`; see `crate::redirects::Schemes`.
+    pub schemes: String,
+    /// Application failure codes answered 404.
+    pub not_found: Vec<String>,
+}
+
 impl Page {
     pub fn validate_live(&self) -> Result<()> {
         ensure!(
@@ -208,6 +226,8 @@ pub struct Artifact {
     pub schedules: Vec<Schedule>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ingress: Vec<Endpoint>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub redirects: Vec<Redirect>,
     #[serde(default)]
     pub assets: crate::assets::Catalog,
     #[serde(default)]
@@ -618,6 +638,11 @@ impl LoadedArtifact {
             ensure!(endpoints.insert(&endpoint.name), "duplicate endpoint name");
             endpoint.validate(&contract)?;
         }
+        ensure!(
+            contract.format >= 12 || contract.redirects.is_empty(),
+            "legacy artifact has redirect routes"
+        );
+        crate::redirects::Catalog::from_artifact(&contract)?;
         ensure!(contract.pages.len() <= 32, "page count budget");
         let mut pages = BTreeSet::new();
         for page in &contract.pages {
@@ -742,6 +767,14 @@ impl LoadedArtifact {
                 ensure!(
                     loaded.contract.ingress.is_empty(),
                     "compiled manifest omits declared endpoints"
+                );
+            }
+            if manifest.get("redirects").is_some() {
+                expected["redirects"] = serde_json::to_value(&loaded.contract.redirects)?;
+            } else {
+                ensure!(
+                    loaded.contract.redirects.is_empty(),
+                    "compiled manifest omits declared redirect routes"
                 );
             }
             ensure!(

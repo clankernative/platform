@@ -298,6 +298,41 @@ impl Catalog {
     }
 }
 
+impl Catalog {
+    /// Whether some page route has this path's shape, even if the path's
+    /// encoding or values are invalid for it. A page route claims such a path
+    /// (and answers 400), so nothing after it — a redirect route — may.
+    pub fn claims(&self, path: &str) -> bool {
+        let Some(raw) = path.strip_prefix('/') else {
+            return false;
+        };
+        let segments = if raw.is_empty() {
+            Vec::new()
+        } else {
+            raw.split('/').collect()
+        };
+        self.routes.values().any(|route| {
+            route.segments.len() == segments.len()
+                && route
+                    .segments
+                    .iter()
+                    .zip(&segments)
+                    .all(|(pattern, raw)| match pattern {
+                        Segment::Literal(literal) => {
+                            decode_segment(raw).is_ok_and(|value| &value == literal)
+                        }
+                        Segment::Parameter(_) => true,
+                    })
+        })
+    }
+}
+
+/// A first path segment the platform owns. Nothing an application declares may
+/// answer a path in one of these namespaces.
+pub(crate) fn reserved_namespace(segment: &str) -> bool {
+    RESERVED.contains(&segment) || crate::openapi::RESERVED.contains(&segment)
+}
+
 fn pattern(path: &str) -> Result<Vec<Segment>> {
     ensure!(
         path.starts_with('/') && path.len() <= MAX_PATH_BYTES,
@@ -360,7 +395,7 @@ fn validate_segment(value: &str) -> Result<()> {
     Ok(())
 }
 
-fn decode_segment(raw: &str) -> Result<String> {
+pub(crate) fn decode_segment(raw: &str) -> Result<String> {
     strict_percent(raw)?;
     let value = percent_decode_str(raw)
         .decode_utf8()

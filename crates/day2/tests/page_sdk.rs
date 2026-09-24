@@ -223,7 +223,7 @@ expect empty.with_defaults({{ after: Cursor.start, limit: PageSize.default }}).l
 poisoned = QueryBinding.define(read, |_context, bounds| Query.page(Selection.all(model, bounds.after, bounds.limit)).map(|_| "poisoned"))
 poisoned_page = Page.define(config, Read.define("links.list", input, output)).with_defaults({{ after: Cursor.start, limit: PageSize.default }}).register()
 product : Product.Contract
-product = {{ namespace: "links", commands: [], queries: [query], properties: [], pages: [poisoned_page], schedules: [], ingress: [] }}
+product = {{ namespace: "links", commands: [], queries: [query], properties: [], pages: [poisoned_page], schedules: [], ingress: [], redirects: [] }}
 request : Wire.Request
 request = {{
     operation: "$page.links",

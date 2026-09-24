@@ -728,3 +728,30 @@ fn seeded_route_roundtrips_preserve_unicode_scalars_and_large_reference_ids() ->
     )?;
     Ok(())
 }
+
+/// A page route claims every path of its shape, including one it refuses, so a
+/// redirect route declared after it can never answer a path the page rejected.
+#[test]
+fn page_routes_claim_their_shape_even_when_they_refuse_the_value() -> Result<()> {
+    let routes = catalog(vec![spec(
+        "link",
+        "/links/{link_id}",
+        vec![("link_id", Kind::Integer)],
+        json!({}),
+    )])?;
+    assert!(routes.resolve("/links/abc", "").is_err());
+    for claimed in ["/", "/links/7", "/links/abc", "/links/%zz", "/%6Cinks/7"] {
+        assert!(routes.claims(claimed), "{claimed}");
+    }
+    for unclaimed in [
+        "/hello",
+        "/links",
+        "/links/7/more",
+        "/docs/intro",
+        "",
+        "links/7",
+    ] {
+        assert!(!routes.claims(unclaimed), "{unclaimed}");
+    }
+    Ok(())
+}

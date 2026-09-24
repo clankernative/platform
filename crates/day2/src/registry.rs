@@ -18,6 +18,8 @@ pub struct Catalog {
     pub schedules: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ingress: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub redirects: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -558,6 +560,7 @@ pub struct AppShape {
     pub errors: Vec<String>,
     pub schedules: Vec<String>,
     pub ingress: Vec<String>,
+    pub redirects: Vec<String>,
 }
 
 fn app_table(tables: &[Table]) -> Result<&Table> {
@@ -605,7 +608,7 @@ impl AppShape {
         // `schedules` is optional: an application that declares none omits the
         // field entirely, so existing applications keep their exact shape.
         let optional = if unified {
-            BTreeSet::from(["schedules", "ingress"])
+            BTreeSet::from(["schedules", "ingress", "redirects"])
         } else {
             BTreeSet::new()
         };
@@ -707,6 +710,11 @@ impl AppShape {
             } else {
                 Vec::new()
             },
+            redirects: if unified && declared.contains("redirects") {
+                category("redirects")?
+            } else {
+                Vec::new()
+            },
         };
         ensure!(
             !shape.commands.is_empty() || !shape.queries.is_empty(),
@@ -755,19 +763,43 @@ impl AppShape {
 }
 
 pub fn app_platform(shape: Option<&AppShape>) -> String {
-    app_platform_for(shape, false)
+    app_platform_for(shape, Projection::default())
 }
 
-/// `schedules` is projected only for an application that declares it, so an
+/// The optional App.definition categories whose names the app-shape reflection
+/// must see. Each is projected only for an application that declares it, so an
 /// application with none keeps exactly the shape it has today.
-pub fn app_platform_for(shape: Option<&AppShape>, schedules: bool) -> String {
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Projection {
+    pub schedules: bool,
+    pub redirects: bool,
+}
+
+impl Projection {
+    /// Read from App.roc, because no type table exists yet to ask.
+    pub fn declared(app_source: &str) -> Result<Self> {
+        Ok(Self {
+            schedules: crate::app_inference::declares_schedules(app_source)?,
+            redirects: crate::app_inference::declares_redirects(app_source)?,
+        })
+    }
+}
+
+pub fn app_platform_for(shape: Option<&AppShape>, projection: Projection) -> String {
     let mut source = include_str!("../../../tools/app-platform.roc").to_string();
-    if schedules {
-        source = source.replacen(
-            "\t\tpages: App.definition.pages,",
-            "\t\tpages: App.definition.pages,\n\t\tschedules: App.definition.schedules,",
-            1,
-        );
+    for (declared, category) in [
+        (projection.schedules, "schedules"),
+        (projection.redirects, "redirects"),
+    ] {
+        if declared {
+            source = source.replacen(
+                "\t\tpages: App.definition.pages,",
+                &format!(
+                    "\t\tpages: App.definition.pages,\n\t\t{category}: App.definition.{category},"
+                ),
+                1,
+            );
+        }
     }
     if let Some(shape) = shape {
         let mut provides = "\"day2_app\": app_shape".to_string();
@@ -826,6 +858,7 @@ fn inferred_catalog(table: &Table) -> Result<Catalog> {
         pages: shape.pages.clone(),
         schedules: shape.schedules.clone(),
         ingress: shape.ingress.clone(),
+        redirects: shape.redirects.clone(),
         errors: shape.errors.clone(),
         ..Catalog::default()
     };
@@ -950,7 +983,7 @@ impl Catalog {
             .map(|key| format!("QueryBinding.{prefix}define(Reads.{key}, product.queries.{key})"))
             .collect::<Vec<_>>()
             .join(", ");
-        registry.push_str(&format!("\t{prefix}step : AppContract.Product, Str -> Str\n\t{prefix}step = |product, raw| Product.{prefix}step({{ namespace: product.namespace, commands: [{commands}], queries: [{queries}], pages: product.pages, properties: product.properties, schedules: [], ingress: [] }}, raw)\n}}\n"));
+        registry.push_str(&format!("\t{prefix}step : AppContract.Product, Str -> Str\n\t{prefix}step = |product, raw| Product.{prefix}step({{ namespace: product.namespace, commands: [{commands}], queries: [{queries}], pages: product.pages, properties: product.properties, schedules: [], ingress: [], redirects: [] }}, raw)\n}}\n"));
         modules.insert("Registry.roc".into(), registry);
         Ok(modules)
     }

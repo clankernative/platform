@@ -53,6 +53,7 @@ struct Notice<'a> {
 struct Host {
     runtime: Runtime,
     routes: Option<crate::routing::Catalog>,
+    redirects: crate::redirects::Catalog,
     api: crate::openapi::Catalog,
     appearance: Appearance,
     authority: String,
@@ -311,6 +312,7 @@ impl LocalServer {
             routes: (runtime.artifact().contract().format >= 7)
                 .then(|| crate::routing::Catalog::from_artifact(runtime.artifact().contract()))
                 .transpose()?,
+            redirects: crate::redirects::Catalog::from_artifact(runtime.artifact().contract())?,
             appearance: Appearance::load(&runtime)?,
             secret: security::secret(&runtime)?,
             cookie_name: format!(
@@ -993,16 +995,36 @@ impl Host {
                     .as_ref()
                     .context("route catalog missing")?
                     .resolve(path, uri.query().unwrap_or(""));
+                let invalid = || {
+                    error_page(
+                        StatusCode::BAD_REQUEST,
+                        "The route contains invalid or unexpected fields.",
+                    )
+                };
+                // Page routes take precedence. A redirect route answers only a
+                // path no page route claims, even one a page route would refuse.
                 match route {
                     Ok(Some((name, input))) => {
                         let content = self.page(&name, &input, session, at, None, None)?;
                         self.app_response(StatusCode::OK, &name, &input, session, content)
                     }
-                    Ok(None) => Ok(error_page(StatusCode::NOT_FOUND, "Page not found.")),
-                    Err(_) => Ok(error_page(
-                        StatusCode::BAD_REQUEST,
-                        "The route contains invalid or unexpected fields.",
-                    )),
+                    Ok(None) => self.redirect_route(
+                        path,
+                        headers,
+                        session,
+                        at,
+                        error_page(StatusCode::NOT_FOUND, "Page not found."),
+                    ),
+                    Err(_)
+                        if !self
+                            .routes
+                            .as_ref()
+                            .context("route catalog missing")?
+                            .claims(path) =>
+                    {
+                        self.redirect_route(path, headers, session, at, invalid())
+                    }
+                    Err(_) => Ok(invalid()),
                 }
             }
             _ => Ok(error_page(StatusCode::NOT_FOUND, "Page not found.")),
@@ -1103,6 +1125,101 @@ impl Host {
             }
             Err(_) => refused(),
         }
+    }
+
+    /// Run a declared redirect route's command and answer with its destination.
+    ///
+    /// The person was admitted as for any page; the command runs through the
+    /// ordinary invocation path, so its authority, input validation and mandatory
+    /// audit are the command's own. Each followed link is a new invocation, as
+    /// each followed link is a new visit. `unmatched` is the answer when no
+    /// redirect route claims the path either.
+    fn redirect_route(
+        &self,
+        path: &str,
+        headers: &HeaderMap,
+        session: &Session,
+        at: i64,
+        unmatched: Response,
+    ) -> Result<Response> {
+        use crate::redirects::{Match, Refusal};
+        let (route, input) = match self.redirects.resolve(path) {
+            Match::None => return Ok(unmatched),
+            Match::Invalid => {
+                return Ok(error_page(
+                    StatusCode::BAD_REQUEST,
+                    "This address is not a valid link.",
+                ));
+            }
+            Match::Route(route, input) => (route, input),
+        };
+        match crate::redirects::refusal(headers) {
+            // Declining a prefetch lets the browser fetch again when, and only
+            // when, the person follows the link.
+            Some(Refusal::Prefetch) => {
+                return Ok(error_page(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Links are resolved only when they are followed.",
+                ));
+            }
+            Some(Refusal::NotNavigation) => {
+                return Ok(error_page(
+                    StatusCode::FORBIDDEN,
+                    "Links open only as a page you navigate to.",
+                ));
+            }
+            None => {}
+        }
+        let id = format!("redirect-{}", security::random()?);
+        let outcome = self.runtime.invoke(
+            &route.operation,
+            &session.actor,
+            &id,
+            &input,
+            at,
+            Fault::None,
+        )?;
+        let mut response = if outcome.status == "success" {
+            match route.location(&outcome.result) {
+                Ok(location) => {
+                    let mut response = StatusCode::FOUND.into_response();
+                    response
+                        .headers_mut()
+                        .insert(header::LOCATION, location.parse()?);
+                    response
+                }
+                Err(error) => {
+                    // The command committed; only the destination was refused.
+                    eprintln!(
+                        "redirect_location_refused {} {}",
+                        route.name,
+                        crate::error::diagnostic(&error)
+                    );
+                    error_page(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "This link's destination is not an address that can be opened.",
+                    )
+                }
+            }
+        } else if outcome.status == "pending" {
+            error_page(
+                StatusCode::ACCEPTED,
+                "This link is still being resolved. Follow it again shortly.",
+            )
+        } else {
+            let (status, _, message) =
+                crate::web_api::outcome_failure(&self.runtime, &outcome.error);
+            let status = if route.not_found(&outcome.error) {
+                StatusCode::NOT_FOUND
+            } else {
+                status
+            };
+            error_page(status, &message)
+        };
+        response
+            .headers_mut()
+            .insert("x-day2-invocation", id.parse()?);
+        Ok(response)
     }
 
     fn login(&self, method: &Method, uri: &Uri, body: &[u8], at: i64) -> Result<Response> {

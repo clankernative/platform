@@ -325,6 +325,15 @@ impl Definition {
                 == artifact.declarations.pages.iter().collect(),
             "named page manifest mismatch"
         );
+        ensure!(
+            artifact
+                .redirects
+                .iter()
+                .map(|redirect| &redirect.name)
+                .collect::<BTreeSet<_>>()
+                == artifact.declarations.redirects.iter().collect(),
+            "named redirect manifest mismatch"
+        );
         for description in self.invariants.values() {
             text(description, 1024)?;
         }
@@ -781,6 +790,12 @@ pub fn modules(
         .map(|name| format!("IngressBinding.named(\"{name}\", product.ingress.{name})"))
         .collect::<Vec<_>>()
         .join(", ");
+    let redirects = catalog
+        .redirects
+        .iter()
+        .map(|name| format!("RedirectBinding.named(\"{name}\", product.redirects.{name})"))
+        .collect::<Vec<_>>()
+        .join(", ");
     let properties = schema
         .models
         .keys()
@@ -815,7 +830,7 @@ pub fn modules(
     source = source.replacen(
         contract_fields,
         &format!(
-            "pages: [{pages}], properties: [{properties}], schedules: [{schedules}], ingress: [{ingress}]"
+            "pages: [{pages}], properties: [{properties}], schedules: [{schedules}], ingress: [{ingress}], redirects: [{redirects}]"
         ),
         1,
     );
@@ -829,6 +844,12 @@ pub fn modules(
         source = source.replace(
             "import pf.PageBinding\n",
             "import pf.PageBinding\nimport pf.IngressBinding\n",
+        );
+    }
+    if !catalog.redirects.is_empty() {
+        source = source.replace(
+            "import pf.PageBinding\n",
+            "import pf.PageBinding\nimport pf.RedirectBinding\n",
         );
     }
     let invariants = schema
@@ -858,6 +879,15 @@ pub fn modules(
             .ingress
             .iter()
             .map(|name| format!("{name} : IngressBinding"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let redirect_type = format!(
+        "{{ {} }}",
+        catalog
+            .redirects
+            .iter()
+            .map(|name| format!("{name} : RedirectBinding"))
             .collect::<Vec<_>>()
             .join(", ")
     );
@@ -892,6 +922,16 @@ pub fn modules(
     } else {
         "import pf.IngressBinding\n"
     };
+    let redirect_import = if catalog.redirects.is_empty() {
+        ""
+    } else {
+        "import pf.RedirectBinding\n"
+    };
+    let redirect_field = if catalog.redirects.is_empty() {
+        String::new()
+    } else {
+        ", redirects : List(RedirectBinding)".to_owned()
+    };
     let schedule_field = if catalog.schedules.is_empty() {
         String::new()
     } else {
@@ -903,7 +943,7 @@ pub fn modules(
         ", ingress : List(IngressBinding)".to_owned()
     };
     let contract = format!(
-        "{imports}import pf.Api\nimport pf.PageBinding\nimport pf.Property\nimport pf.Example\n{schedule_import}{ingress_import}AppContract :: [].{{\n    Product : {{ namespace : Str, operations : {{ {} }}, pages : List(PageBinding), properties : List(Property), examples : List(Example), presentation : Api.Presentation{schedule_field}{ingress_field} }}\n}}\n",
+        "{imports}import pf.Api\nimport pf.PageBinding\nimport pf.Property\nimport pf.Example\n{schedule_import}{ingress_import}{redirect_import}AppContract :: [].{{\n    Product : {{ namespace : Str, operations : {{ {} }}, pages : List(PageBinding), properties : List(Property), examples : List(Example), presentation : Api.Presentation{schedule_field}{ingress_field}{redirect_field} }}\n}}\n",
         operation_types.join(", ")
     );
     for (name, operation) in catalog.commands.iter().chain(catalog.queries.iter()) {
@@ -964,6 +1004,10 @@ pub fn modules(
         .replace(
             "ingress : List(IngressBinding)",
             &format!("ingress : {ingress_type}"),
+        )
+        .replace(
+            "redirects : List(RedirectBinding)",
+            &format!("redirects : {redirect_type}"),
         )
         .replace(
             "properties : List(Property)",
@@ -1861,6 +1905,42 @@ mod selector_tests {
             inspected >= 3,
             "only {inspected} contract literals were inspected"
         );
+        Ok(())
+    }
+
+    /// A declared redirect route reaches the generated product type and the
+    /// manifest literal by its registered name; an app without one keeps its shape.
+    #[test]
+    fn declared_redirect_routes_reach_the_generated_contract_by_name() -> Result<()> {
+        let (mut catalog, schema, outputs) = fixture();
+        for admission in [false, true] {
+            let plain = modules(&catalog, &schema, &outputs, "", admission)?;
+            assert!(
+                plain
+                    .values()
+                    .all(|source| !source.contains("RedirectBinding")),
+                "an app without redirect routes names none"
+            );
+        }
+        catalog.redirects = vec!["bare".into(), "prefixed".into()];
+        for admission in [false, true] {
+            let generated = modules(&catalog, &schema, &outputs, "", admission)?;
+            let contract = &generated["AppContract.roc"];
+            assert!(contract.contains("import pf.RedirectBinding\n"));
+            assert!(
+                contract
+                    .contains("redirects : { bare : RedirectBinding, prefixed : RedirectBinding }"),
+                "{contract}"
+            );
+            let registry = &generated["Registry.roc"];
+            assert!(registry.contains("import pf.RedirectBinding\n"));
+            assert!(
+                registry.contains(
+                    "redirects: [RedirectBinding.named(\"bare\", product.redirects.bare), RedirectBinding.named(\"prefixed\", product.redirects.prefixed)]"
+                ),
+                "{registry}"
+            );
+        }
         Ok(())
     }
 }

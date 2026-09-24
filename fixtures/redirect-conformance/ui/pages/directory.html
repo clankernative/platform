@@ -1,0 +1,10 @@
+<div id="go-links" class="workspace">
+  <header><h1>Go links</h1><a href="{{ routes.about() }}">About</a></header>
+  <ul id="links-list">
+    {% for link in links.items %}
+      <li class="link-row">{{ link.name }} {{ link.visits }}</li>
+    {% else %}
+      <li>No links yet.</li>
+    {% endfor %}
+  </ul>
+</div>
