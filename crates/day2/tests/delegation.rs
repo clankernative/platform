@@ -38,6 +38,7 @@ impl Pair {
             security: None,
             runtime: None,
             retention: Default::default(),
+            journal: None,
             resource_policies: Vec::new(),
             schedules: Default::default(),
             ingress: Default::default(),

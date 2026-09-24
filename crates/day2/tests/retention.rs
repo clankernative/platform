@@ -51,6 +51,7 @@ impl World {
                     ingress: Default::default(),
                     runtime: None,
                     retention,
+                    journal: None,
                     authority: Some(serde_json::from_str(include_str!(
                         "../../../fixtures/authority-policies/owned-links.json"
                     ))?),

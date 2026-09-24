@@ -158,6 +158,52 @@ Object retention is not built. The bytes an operator would reclaim are the ones
 no live row points at, and finding them needs a list capability the object
 store provider does not have yet.
 
+## The invocation journal
+
+Every invocation keeps its accepted input and a full trace: each storage
+observation, the authority policy it ran under and its outcome. A pending
+command needs all of it to resume by replay. A completed one needs almost
+none of it, and at roughly seventeen kilobytes per command the traces soon
+outweigh the business data by two orders of magnitude.
+
+So the host compacts them. Once a completed invocation is older than the
+window, a background pass that runs about once a minute replaces its input
+and trace with a receipt: a digest of the input and a digest of the policy it
+ran under. The outcome column is kept as it was. An effectful command's
+completion copy of the trace goes too. Invocations that are still pending,
+including blocked ones, are never touched.
+
+What keeps working:
+
+- **A retry under the same key** is recognised by comparing the input's
+  digest, gets the original outcome back, and still conflicts if its input
+  differs.
+- **Reusing a receipt** still requires the authority it ran under to be the
+  active one, by policy digest and stamp, and still fails with
+  `receipt_policy_changed` once that authority changes.
+- **Invocation status** is still answered.
+
+What goes is the trace itself. `day2 trace` on a compacted invocation fails
+with `invocation_trace_compacted`, so replay and debugging use the window.
+
+```json
+"apps": {
+  "support": {
+    "journal": { "trace_hours": 168 }
+  }
+}
+```
+
+Unlike removal, compaction has a default: 72 hours, long enough to debug
+yesterday's failure. Nothing an app wrote is affected, only the platform's own
+record of how it was written, so a default here deletes nothing an operator
+chose to keep. `trace_hours` must be between 1 and 8784 (a year).
+
+Rows are never deleted. Every completed invocation has an append-only audit
+row that references it, and the audit record is kept by design. Space freed by
+compaction is reused by SQLite for new rows. The database file does not
+shrink.
+
 ## Objects
 
 The same rule, one layer down. An application cannot destroy bytes in an object

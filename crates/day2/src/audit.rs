@@ -27,7 +27,7 @@ pub(crate) fn upgrade(db: &Connection) -> Result<()> {
     );
     if let Some(version) = &version {
         ensure!(
-            ["1", "2", "3", "4", "5", "6", "7", "8", "9"].contains(&version.as_str()),
+            ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"].contains(&version.as_str()),
             "unknown_host_schema"
         );
     }
@@ -242,6 +242,28 @@ pub(crate) fn upgrade(db: &Connection) -> Result<()> {
     if at < 9 {
         db.execute_batch(PRINCIPALS_DDL)?;
         db.execute("UPDATE day2_meta SET value='9' WHERE key='host_schema'", [])?;
+    }
+    // Schema 10 lets a completed invocation keep a receipt in place of its input
+    // and trace. See `crate::journal`.
+    if at < 10 {
+        let columns: i64 = db.query_row(
+            "SELECT count(*) FROM pragma_table_info('day2_invocations') WHERE name='receipt'",
+            [],
+            |row| row.get(0),
+        )?;
+        if columns == 0 {
+            db.execute_batch("ALTER TABLE day2_invocations ADD COLUMN receipt TEXT")?;
+        }
+        // Compaction looks for the oldest completed invocations that still carry a
+        // trace; once compacted a row leaves this index, so it stays small.
+        db.execute_batch(
+            "CREATE INDEX IF NOT EXISTS day2_invocations_uncompacted ON day2_invocations(now)
+             WHERE trace IS NOT NULL AND status IN ('success','failure')",
+        )?;
+        db.execute(
+            "UPDATE day2_meta SET value='10' WHERE key='host_schema'",
+            [],
+        )?;
     }
     for (name, sql) in APPEND_TRIGGERS
         .iter()

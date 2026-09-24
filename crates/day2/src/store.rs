@@ -827,7 +827,8 @@ impl Runtime {
                 .query_row(
                     "SELECT operation,actor,input,artifact,status,
                      COALESCE(NULLIF(authenticated,''),actor)=?2
-                        AND delegation_rule=?3 AND trigger=?4 AND caller=?5
+                        AND delegation_rule=?3 AND trigger=?4 AND caller=?5,
+                     receipt
                      FROM day2_invocations WHERE id=?1",
                     params![id, initiator, rule, trigger.as_str(), caller],
                     |row| {
@@ -838,17 +839,20 @@ impl Runtime {
                             row.get::<_, String>(3)?,
                             row.get::<_, String>(4)?,
                             row.get::<_, bool>(5)?,
+                            row.get::<_, Option<String>>(6)?,
                         ))
                     },
                 )
                 .optional()?;
             let reused = existing.is_some();
-            if let Some((op, user, data, artifact, status, same_cause)) = existing {
+            if let Some((op, user, data, artifact, status, same_cause, receipt)) = existing {
                 reason = AttemptReason::IdempotencyConflict;
+                // A compacted invocation compares the input's digest instead.
+                let same_input = crate::journal::same_input(&data, receipt.as_deref(), &canonical)?;
                 ensure!(
                     op == operation
                         && user == actor
-                        && data == canonical
+                        && same_input
                         && artifact == self.artifact.id()
                         && same_cause,
                     crate::error::Failure::IdempotencyKeyConflict
@@ -990,6 +994,8 @@ impl Runtime {
             return completed_outcome(&tx, id, completed.as_deref(), &policy);
         }
         crate::authority_state::require_invocation_in(&tx, self, id, &operation, &actor)?;
+        // Still pending, so any saved trace is intact: compaction only touches
+        // completed invocations.
         let continuation = crate::execution::load(&tx, id)?;
         if continuation
             .as_ref()
@@ -1349,12 +1355,15 @@ impl Runtime {
     pub fn trace(&self, id: &str) -> Result<Trace> {
         let connection = open(&self.db)?;
         self.check_binding(&connection)?;
-        let raw: String = connection.query_row(
+        let raw: Option<String> = connection.query_row(
             "SELECT trace FROM day2_invocations WHERE id=?1",
             [id],
             |r| r.get(0),
         )?;
-        Ok(serde_json::from_str(&raw)?)
+        // Completed invocations keep only a receipt once the journal window passes.
+        Ok(serde_json::from_str(
+            &raw.context("invocation_trace_compacted")?,
+        )?)
     }
     pub fn render_page(
         &self,
@@ -1497,11 +1506,16 @@ pub(crate) fn completed_outcome(
     outcome: Option<&str>,
     policy: &crate::authority::Policy,
 ) -> Result<Outcome> {
-    let raw: Option<String> = connection.query_row(
-        "SELECT trace FROM day2_invocations WHERE id=?1",
+    let (raw, receipt): (Option<String>, Option<String>) = connection.query_row(
+        "SELECT trace,receipt FROM day2_invocations WHERE id=?1",
         [id],
-        |row| row.get(0),
+        |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
+    if raw.is_none()
+        && let Some(receipt) = receipt
+    {
+        return compacted_outcome(connection, id, outcome, policy, &receipt);
+    }
     let trace: Trace =
         serde_json::from_str(&raw.context(crate::error::Failure::ReceiptAuthorityUnavailable)?)?;
     ensure!(
@@ -1522,6 +1536,31 @@ pub(crate) fn completed_outcome(
     let outcome: Outcome = serde_json::from_str(outcome.context("missing durable outcome")?)?;
     outcome.decode()?;
     ensure!(trace.outcome == outcome, "receipt_outcome_mismatch");
+    Ok(outcome)
+}
+
+/// The same reuse checks as [`completed_outcome`], for an invocation whose trace
+/// was compacted: its policy is compared by digest and its outcome is the stored
+/// outcome column, which compaction never changes. See `crate::journal`.
+fn compacted_outcome(
+    connection: &Connection,
+    id: &str,
+    outcome: Option<&str>,
+    policy: &crate::authority::Policy,
+    receipt: &str,
+) -> Result<Outcome> {
+    let receipt = crate::journal::Receipt::parse(receipt)?;
+    let recorded = receipt
+        .policy
+        .context(crate::error::Failure::ReceiptAuthorityUnavailable)?;
+    let active = crate::authority_state::current(connection)?;
+    let stamp = crate::authority_state::invocation_stamp(connection, id)?;
+    ensure!(
+        recorded == crate::journal::policy_digest(policy)? && active.stamp == stamp,
+        crate::error::Failure::ReceiptPolicyChanged
+    );
+    let outcome: Outcome = serde_json::from_str(outcome.context("missing durable outcome")?)?;
+    outcome.decode()?;
     Ok(outcome)
 }
 

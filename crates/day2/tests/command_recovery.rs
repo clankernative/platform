@@ -274,3 +274,91 @@ fn scheduler_executes_durably_accepted_public_commands_without_background_bindin
     );
     Ok(())
 }
+
+#[test]
+fn compacted_journal_keeps_receipts_and_never_touches_unfinished_work() -> Result<()> {
+    let world = World::new()?;
+    let saved = world.submit("submit", Fault::None)?;
+    let (_, notify) = notification(&world)?;
+    // Long after the window, so everything completed is due.
+    let later = 100 + 365 * 24 * 3_600;
+    let compact = || -> Result<usize> {
+        let mut total = 0;
+        loop {
+            let batch = day2::journal::compact(&world.runtime, later, 2)?;
+            total += batch;
+            if batch < 2 {
+                return Ok(total);
+            }
+        }
+    };
+    let db = rusqlite::Connection::open(world.runtime.db())?;
+    let row = |id: &str| -> Result<(String, bool, bool)> {
+        Ok(db.query_row(
+            "SELECT status,input!='' AND trace IS NOT NULL,receipt IS NOT NULL FROM day2_invocations WHERE id=?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?)
+    };
+    assert_eq!(compact()?, 2, "submit and analysis are complete");
+    assert_eq!(row(&notify)?.0, "pending");
+    assert!(
+        !row(&notify)?.2,
+        "unfinished work keeps its input and trace"
+    );
+    assert_eq!(row("submit")?, ("success".into(), false, true));
+
+    let receipt = world.finish(&notify)?;
+    assert_eq!(receipt.status, "success");
+    assert_eq!(compact()?, 1);
+    assert_eq!(compact()?, 0, "compaction is idempotent");
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM day2_execution WHERE phase='complete' AND trace!=''",
+            [],
+            |r| r.get::<_, i64>(0)
+        )?,
+        0,
+        "the completion copy of an effectful trace is compacted too"
+    );
+
+    // Retries are still answered from the receipt, by both paths.
+    assert_eq!(world.submit("submit", Fault::None)?, saved);
+    assert_eq!(world.finish(&notify)?, receipt);
+    let conflict = world
+        .runtime
+        .invoke(
+            "reports.submit",
+            "alice",
+            "submit",
+            &json!({"title":"Another report","text":"different"}),
+            100,
+            Fault::None,
+        )
+        .unwrap_err();
+    assert!(
+        conflict.to_string().contains("idempotency_key_conflict"),
+        "{conflict:#}"
+    );
+    let trace = world.runtime.trace(&notify).unwrap_err();
+    assert!(
+        trace.to_string().contains("invocation_trace_compacted"),
+        "{trace:#}"
+    );
+
+    // A compacted receipt is still bound to the authority it ran under.
+    world.change_policy(|policy| {
+        policy
+            .operations
+            .get_mut("reports.notify")
+            .unwrap()
+            .observations
+            .clear();
+    })?;
+    let stale = world.finish(&notify).unwrap_err();
+    assert!(
+        stale.to_string().contains("receipt_policy_changed"),
+        "{stale:#}"
+    );
+    Ok(())
+}
