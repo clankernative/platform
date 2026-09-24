@@ -25,7 +25,34 @@ fn image_digest(value: &str) -> Result<()> {
     Ok(())
 }
 
-fn linux_arm64_worker(path: &Path) -> Result<()> {
+/// The Linux platform a deployment packaged here runs on: this build's own
+/// architecture. Packaging, like qualification, is native, so the worker and
+/// image it packages are the ones this host built and qualified.
+pub(crate) struct DeploymentPlatform {
+    /// `docker --platform` / Compose `platform` value.
+    pub docker: &'static str,
+    /// ELF `e_machine` of a worker built for it.
+    elf_machine: u16,
+    label: &'static str,
+}
+
+pub(crate) fn deployment_platform() -> Result<DeploymentPlatform> {
+    Ok(match std::env::consts::ARCH {
+        "aarch64" => DeploymentPlatform {
+            docker: "linux/arm64",
+            elf_machine: 183,
+            label: "ARM64",
+        },
+        "x86_64" => DeploymentPlatform {
+            docker: "linux/amd64",
+            elf_machine: 62,
+            label: "x86_64",
+        },
+        other => anyhow::bail!("no Linux deployment platform for {other}"),
+    })
+}
+
+fn linux_worker(path: &Path, platform: &DeploymentPlatform) -> Result<()> {
     ensure!(
         fs::symlink_metadata(path)?.is_file(),
         "regular worker required"
@@ -39,8 +66,9 @@ fn linux_arm64_worker(path: &Path) -> Result<()> {
             && header[6] == 1
             && matches!(header[7], 0 | 3)
             && matches!(u16::from_le_bytes([header[16], header[17]]), 2 | 3)
-            && u16::from_le_bytes([header[18], header[19]]) == 183,
-        "deployment requires a Linux ARM64 ELF worker"
+            && u16::from_le_bytes([header[18], header[19]]) == platform.elf_machine,
+        "deployment requires a Linux {} ELF worker",
+        platform.label
     );
     Ok(())
 }
@@ -138,7 +166,7 @@ fn compose(
     Ok(json!({
         "name":project,
         "services":{"app":{
-            "image":image,"platform":"linux/arm64","pull_policy":"never","user":"10001:10001",
+            "image":image,"platform":deployment_platform()?.docker,"pull_policy":"never","user":"10001:10001",
             "entrypoint":["/usr/local/bin/day2-serve"],
             "command":["/srv/day2/instance.json",app,"--development-auth",actor,"--published-port",port.to_string()],
             "init":true,"restart":"unless-stopped","read_only":true,"cap_drop":["ALL"],
@@ -228,7 +256,10 @@ pub fn export_with_provisioning(
         requirements.validate(&artifact)?;
         requirements.require_image(image)?;
     }
-    linux_arm64_worker(&artifact.directory().join("worker"))?;
+    linux_worker(
+        &artifact.directory().join("worker"),
+        &deployment_platform()?,
+    )?;
     let policy = binding
         .authority
         .as_ref()
@@ -454,19 +485,43 @@ mod tests {
 
     #[test]
     fn worker_platform_gate_rejects_macos_and_wrong_architecture() -> Result<()> {
+        let arm = DeploymentPlatform {
+            docker: "linux/arm64",
+            elf_machine: 183,
+            label: "ARM64",
+        };
+        let x86 = DeploymentPlatform {
+            docker: "linux/amd64",
+            elf_machine: 62,
+            label: "x86_64",
+        };
         let temporary = tempfile::tempdir()?;
         let path = temporary.path().join("worker");
         let mut bytes = [0u8; 64];
         fs::write(&path, bytes)?;
-        assert!(linux_arm64_worker(&path).is_err());
+        assert!(linux_worker(&path, &arm).is_err());
+        assert!(linux_worker(&path, &x86).is_err());
         bytes[..7].copy_from_slice(b"\x7fELF\x02\x01\x01");
         bytes[16] = 3;
         bytes[18] = 183;
         fs::write(&path, bytes)?;
-        linux_arm64_worker(&path)?;
+        linux_worker(&path, &arm)?;
+        assert!(linux_worker(&path, &x86).is_err());
         bytes[18] = 62;
         fs::write(&path, bytes)?;
-        assert!(linux_arm64_worker(&path).is_err());
+        linux_worker(&path, &x86)?;
+        assert!(linux_worker(&path, &arm).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn the_deployment_platform_is_this_build_s_own() -> Result<()> {
+        let expected = match std::env::consts::ARCH {
+            "aarch64" => "linux/arm64",
+            "x86_64" => "linux/amd64",
+            _ => return Ok(()),
+        };
+        assert_eq!(deployment_platform()?.docker, expected);
         Ok(())
     }
 }

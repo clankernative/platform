@@ -246,7 +246,7 @@ fn prepare_connections(
         json!({"type":"volume","source":"state","target":format!("{ROOT}/.state")}),
     ]);
     let service = json!({
-        "image":request.tooling_image,"platform":"linux/arm64","pull_policy":"never","profiles":["operator"],
+        "image":request.tooling_image,"platform":crate::packaging::deployment_platform()?.docker,"pull_policy":"never","profiles":["operator"],
         "entrypoint":["/workspace/platform/cli/day2"],
         "command":["platform","provision-credentials",format!("{ROOT}/operator-instance.json"),app,request.operator.replace('$', "$$"),format!("{ROOT}/provisioning.json")],
         "working_dir":"/workspace/platform","user":"10001:10001","network_mode":"none","read_only":true,
