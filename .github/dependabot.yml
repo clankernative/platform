@@ -8,19 +8,19 @@ updates:
     directory: /
     schedule:
       interval: weekly
-  - package-ecosystem: terraform
+  - package-ecosystem: opentofu
     directory: /deploy/gke/stacks/cluster
     schedule:
       interval: weekly
-  - package-ecosystem: terraform
+  - package-ecosystem: opentofu
     directory: /deploy/gke/stacks/app-edge
     schedule:
       interval: weekly
-  - package-ecosystem: terraform
+  - package-ecosystem: opentofu
     directory: /deploy/gke/stacks/day2-app
     schedule:
       interval: weekly
-  - package-ecosystem: terraform
+  - package-ecosystem: opentofu
     directory: /deploy/gke/stacks/qualification-runner
     schedule:
       interval: weekly
