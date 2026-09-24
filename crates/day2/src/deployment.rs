@@ -41,16 +41,26 @@ fn validate_cgroups(resources: &Resources, memory: &str, cpu: &str, pids: &str) 
         positive(memory.trim())? <= u64::from(resources.memory_mib()) * 1024 * 1024,
         "container memory exceeds admitted profile"
     );
-    // A bound the container can see is always held to the profile. An
-    // unbounded view is accepted only when the operator has declared that the
-    // pod's orchestrator holds the bound, which the container cannot observe.
-    let unbounded_pod = pids.trim() == "max"
-        && resources.process_limit_enforced_by()
-            == day2_capabilities::runtime::ProcessLimitEnforcement::Pod;
-    ensure!(
-        unbounded_pod || positive(pids.trim())? <= u64::from(resources.process_limit()),
-        "container process limit exceeds admitted profile"
-    );
+    // By default the container's own bound is the one held to the profile.
+    // When the operator has declared that the pod's orchestrator holds the
+    // bound, the container's view is not the enforcing limit: the kubelet
+    // bounds the pod cgroup above the container's cgroup namespace, and the
+    // container runtime may still write its own looser value (containerd 2
+    // on GKE writes a node-derived one). It must still read as a limit.
+    let pids = pids.trim();
+    if resources.process_limit_enforced_by()
+        == day2_capabilities::runtime::ProcessLimitEnforcement::Pod
+    {
+        ensure!(
+            pids == "max" || positive(pids).is_ok(),
+            "invalid cgroup process limit"
+        );
+    } else {
+        ensure!(
+            positive(pids)? <= u64::from(resources.process_limit()),
+            "container process limit exceeds admitted profile"
+        );
+    }
     let cpu: Vec<_> = cpu.split_whitespace().collect();
     ensure!(cpu.len() == 2, "invalid cgroup CPU limit");
     ensure!(
@@ -439,7 +449,8 @@ mod tests {
     }
 
     #[test]
-    fn a_pod_enforced_process_limit_accepts_only_an_unbounded_container_view() -> Result<()> {
+    fn a_pod_enforced_process_limit_does_not_hold_the_container_view_to_the_profile() -> Result<()>
+    {
         let pod: RuntimeProfile = serde_json::from_value(
             json!({"kind":"linux_sqlite_single_v1","resources":{
                 "memory_mib":512,"cpu_millis":1000,"process_limit":64,"process_limit_enforced_by":"pod",
@@ -449,15 +460,18 @@ mod tests {
         let (memory, cpu) = ("536870912", "100000 100000");
         // Kubernetes bounds the pod above the container's cgroup namespace.
         validate_cgroups(pod.resources(), memory, cpu, "max\n")?;
-        // A bound the container can see is still held to the profile.
+        // The container runtime's own value is not the enforcing bound.
         validate_cgroups(pod.resources(), memory, cpu, "64")?;
-        assert!(validate_cgroups(pod.resources(), memory, cpu, "65").is_err());
+        validate_cgroups(pod.resources(), memory, cpu, "629145\n")?;
         assert!(validate_cgroups(pod.resources(), memory, cpu, "0").is_err());
+        assert!(validate_cgroups(pod.resources(), memory, cpu, "").is_err());
+        assert!(validate_cgroups(pod.resources(), memory, cpu, "-1").is_err());
         // The declaration covers processes only: memory and CPU stay observed.
         assert!(validate_cgroups(pod.resources(), "max", cpu, "max").is_err());
         assert!(validate_cgroups(pod.resources(), memory, "max 100000", "max").is_err());
-        // Without the declaration, an unbounded view is refused as before.
+        // Without the declaration, the container's bound is held to the profile.
         assert!(validate_cgroups(profile().resources(), memory, cpu, "max").is_err());
+        assert!(validate_cgroups(profile().resources(), memory, cpu, "629145").is_err());
         Ok(())
     }
 

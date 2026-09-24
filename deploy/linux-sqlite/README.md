@@ -71,8 +71,9 @@ cgroup namespace cannot see. There the operator declares it instead:
 "process_limit_enforced_by": "pod"
 ```
 
-With `pod`, an unbounded `pids.max` inside the container is accepted, and a
-bound the container can see is still held to the profile. Memory and CPU are
+With `pod`, the container's own `pids.max` is not held to the profile: it may be
+`max`, or a looser value the container runtime writes itself (containerd 2 on
+GKE writes a node-derived one, such as `629145`). Memory and CPU are
 always observed. The declaration is the operator's promise that the orchestrator
 bounds the whole pod at no more than `process_limit` — on GKE, a node pool
 `pod_pids_limit` (1024 at least) no greater than it. See
