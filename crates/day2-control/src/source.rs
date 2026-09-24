@@ -115,6 +115,12 @@ impl SecretValue {
         Ok(Self(value))
     }
 }
+impl SecretValue {
+    /// For provider adapters that must put the value on the wire. Never log it.
+    pub(crate) fn expose(&self) -> &str {
+        &self.0
+    }
+}
 impl fmt::Debug for SecretValue {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("SecretValue([REDACTED])")

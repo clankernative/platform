@@ -4,6 +4,7 @@ use crate::{
     engine::ExecutionHost,
     journal::Journal,
     local_source::{LocalGit, SourceChange, SourceControl, SourceReceipt, private_directory},
+    remote_source::{Credential, RemoteGit},
 };
 use anyhow::{Context, Result, ensure};
 use day2_capabilities::{
@@ -78,8 +79,18 @@ pub struct Service {
     scope: ControlScope,
     configuration: InstallationControl,
     journal: PathBuf,
+    tokens: Option<std::sync::Arc<dyn crate::secrets::AccessTokenProvider>>,
 }
 impl Service {
+    /// Lets sources resolve their declared credentials. Without it a remote source
+    /// can still read commits it has already fetched.
+    pub fn with_access_tokens(
+        mut self,
+        tokens: std::sync::Arc<dyn crate::secrets::AccessTokenProvider>,
+    ) -> Self {
+        self.tokens = Some(tokens);
+        self
+    }
     pub fn secret_resolver(
         &self,
         app: &AppHandle,
@@ -95,10 +106,18 @@ impl Service {
         endpoint: &str,
     ) -> Result<ScopedSecrets> {
         self.check(app)?;
+        self.scoped_secrets(&app.app, tokens, endpoint)
+    }
+    fn scoped_secrets(
+        &self,
+        app: &Name,
+        tokens: std::sync::Arc<dyn crate::secrets::AccessTokenProvider>,
+        endpoint: &str,
+    ) -> Result<ScopedSecrets> {
         let app = self
             .configuration
             .apps
-            .get(&app.app)
+            .get(app)
             .context("unknown control app")?;
         let mut bindings = std::collections::BTreeMap::new();
         for (logical, binding) in &app.provider_secrets {
@@ -145,6 +164,7 @@ impl Service {
             scope,
             configuration,
             journal: root.join("source-journal.sqlite"),
+            tokens: None,
         };
         let mut connection = result.connection()?;
         connection.execute_batch("CREATE TABLE IF NOT EXISTS installation (singleton INTEGER PRIMARY KEY CHECK(singleton=1), scope TEXT NOT NULL); CREATE TABLE IF NOT EXISTS source_intents (id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, intent TEXT NOT NULL, state TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, lease_until INTEGER NOT NULL DEFAULT 0); CREATE TABLE IF NOT EXISTS source_events (seq INTEGER PRIMARY KEY, execution TEXT NOT NULL, kind TEXT NOT NULL, actor TEXT NOT NULL);")?;
@@ -230,6 +250,33 @@ impl Service {
                 std::path::Path::new(repository),
                 &owner,
             )?)),
+            provider @ SourceProvider::RemoteGit { credential, .. } => {
+                let credential = match (credential, &self.tokens) {
+                    (None, _) => Credential::None,
+                    (Some(_), None) => Credential::Unavailable,
+                    (Some(reference), Some(tokens)) => Credential::Secret {
+                        resolver: Box::new(self.scoped_secrets(
+                            app,
+                            tokens.clone(),
+                            "https://secretmanager.googleapis.com/",
+                        )?),
+                        reference: crate::source::SecretRef::try_from(
+                            reference.as_str().to_owned(),
+                        )?,
+                    },
+                };
+                // The cache is named for its owner, which pins the provider
+                // declaration: a changed URL or credential starts a fresh cache.
+                let cache = PathBuf::from(&self.configuration.state_directory)
+                    .join("remote-sources")
+                    .join(format!("{}.git", &owner.as_str()[7..]));
+                Ok(Box::new(RemoteGit::open(
+                    &cache,
+                    &owner,
+                    provider.remote_url().context("remote source url")?,
+                    credential,
+                )?))
+            }
         }
     }
     pub fn submit(
@@ -239,6 +286,17 @@ impl Service {
         change: SourceChange,
     ) -> Result<SourceStatus> {
         self.check(app)?;
+        // Remote repositories are written by people pushing to them, never here.
+        ensure!(
+            matches!(
+                self.configuration
+                    .sources
+                    .get(&self.binding(&app.app)?.id)
+                    .context("unknown source provider")?,
+                SourceProvider::LocalGit { .. }
+            ),
+            "source_provider_read_only"
+        );
         let intent = Intent {
             scope: self.scope.clone(),
             app: app.app.clone(),

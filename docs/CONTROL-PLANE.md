@@ -32,6 +32,42 @@ build submission/status, and provider-only secret resolution require that handle
 Operators select provider configuration; app authors never supply provider URLs,
 repositories, tokens, build recipes, queues or revision digests.
 
+### Where an app's source lives
+
+`control.sources` names each app's repository. A `local_git` source is a bare
+repository the control plane creates and owns at an absolute path; exports and
+proposals are written there. A `remote_git` source is a company repository on a
+Git host, named by host, owning organisation or group path, and repository:
+
+```json
+"sources": {
+  "golinks-source": {
+    "kind": "remote_git",
+    "host": "git.wonderly.info",
+    "namespace": "internal-tools",
+    "repository": "golinks",
+    "credential": "source-read"
+  }
+}
+```
+
+That is `https://git.wonderly.info/internal-tools/golinks.git`. `namespace` may
+be a nested group path such as `platform/internal-tools`. `credential` is
+optional and, when present, must be a logical name in the owning app's
+`provider_secrets`; its Secret Manager value is a read token, sent as the
+password of an HTTP Basic credential, which Gitea, GitLab and GitHub all accept.
+
+A remote source is read-only. People push to it as usual; `export` and
+`propose` are refused with `source_provider_read_only`. `build-submit REQUEST
+COMMIT` fetches exactly that commit, shallowly, into a bare cache under
+`state_directory/remote-sources`, and every later read of the commit, including
+the build worker's, is served from the cache. A credential is therefore needed
+only when a commit is first seen: pass `--gcp-token-file PATH` (an operator
+token file, mode 0600) to the control CLI. The fetch uses the same fixed Git
+runner as local sources, with only HTTPS to that URL enabled, no credential
+helpers, no redirects and no ambient configuration. Changing any field of the
+source starts a new cache and invalidates build pins, as any binding change does.
+
 ## Execution
 
 ```text
@@ -69,7 +105,7 @@ no atomic idempotency key. Cancellation cannot erase an uncertain outcome.
 
 | Area | Implemented now | Still required |
 | --- | --- | --- |
-| Source | Real local company-owned Git exports/proposal branches with atomic base checks, CLI recovery and app-scoped authority; existing GitHub exact-commit fetch/check adapter | GitHub export/PR provider, merge approval, Gitea/GitLab adapters, live enterprise qualification |
+| Source | Real local company-owned Git exports/proposal branches with atomic base checks, CLI recovery and app-scoped authority; read-only `remote_git` exact-commit fetch over HTTPS from any Git host (Gitea, GitLab, GitHub) into a control-owned cache; existing GitHub exact-commit fetch/check adapter | Export/PR to remote hosts, merge approval, live enterprise qualification |
 | CI | Instance-selected local build service; generated exact pins; offline acceptance; Temporal execution; isolated Roc build/admission; immutable checked artifact/evidence receipts | Hosted/BYOC Linux execution, production attestation/signing, resource quotas, full per-app state-machine certification, external CI integrations |
 | Secrets | Instance-selected GCP numeric versions; app-scoped provider-only logical references; CRC32C verification; injected host access-token provider | Workload-identity bootstrap/refresh implementation, provisioning/rotation workflows, live GCP qualification, other managers |
 | Identity | Existing local development authentication remains unchanged | IAP, Entra, Okta and directory-fact/entitlement adapters |

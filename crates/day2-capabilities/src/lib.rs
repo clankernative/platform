@@ -153,7 +153,36 @@ impl ControlScope {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SourceProvider {
+    /// A bare repository the control plane creates and owns at this path. Exports
+    /// and proposals are written here.
     LocalGit { repository: String },
+    /// A company repository on a Git host, read over HTTPS at exact commits:
+    /// `https://{host}/{namespace}/{repository}.git`. `namespace` is the owning
+    /// organisation or group path, such as `internal-tools` or `platform/tools`.
+    /// The control plane never writes to it; people push there as usual.
+    RemoteGit {
+        host: String,
+        namespace: String,
+        repository: String,
+        /// A logical name in the owning app's `provider_secrets` whose value is a
+        /// read token. Absent for a repository that needs no credential.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        credential: Option<Name>,
+    },
+}
+impl SourceProvider {
+    /// The fetch URL of a remote repository; `None` for a local one.
+    pub fn remote_url(&self) -> Option<String> {
+        match self {
+            Self::LocalGit { .. } => None,
+            Self::RemoteGit {
+                host,
+                namespace,
+                repository,
+                ..
+            } => Some(format!("https://{host}/{namespace}/{repository}.git")),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -303,12 +332,46 @@ impl InstallationControl {
                 SourceProvider::LocalGit { repository } => {
                     absolute_directory(repository)?;
                     ensure!(
-                        repositories.insert(repository),
+                        repositories.insert(repository.clone()),
                         "duplicate repository authority"
                     );
                     ensure!(
                         repository != &self.state_directory,
                         "repository and control state must be distinct"
+                    );
+                }
+                SourceProvider::RemoteGit {
+                    host,
+                    namespace,
+                    repository,
+                    credential,
+                } => {
+                    host_name(host)?;
+                    let segments: Vec<_> = namespace.split('/').collect();
+                    ensure!(
+                        segments.len() <= 8 && segments.iter().all(|segment| path_segment(segment)),
+                        "invalid remote source namespace"
+                    );
+                    ensure!(
+                        path_segment(repository) && !repository.ends_with(".git"),
+                        "invalid remote source repository"
+                    );
+                    ensure!(
+                        credential
+                            .as_ref()
+                            .is_none_or(|name| app.provider_secrets.contains_key(name)),
+                        "remote source credential is not an app provider secret"
+                    );
+                    // Git hosts resolve owners and repositories without regard to
+                    // case, so two spellings would be one repository.
+                    ensure!(
+                        repositories.insert(
+                            provider
+                                .remote_url()
+                                .unwrap_or_default()
+                                .to_ascii_lowercase()
+                        ),
+                        "duplicate repository authority"
                     );
                 }
             }
@@ -344,6 +407,36 @@ impl InstallationControl {
         );
         Ok(())
     }
+}
+
+/// A lowercase DNS name with at least two labels and no port.
+fn host_name(value: &str) -> Result<()> {
+    let labels: Vec<_> = value.split('.').collect();
+    ensure!(
+        value.len() <= 253
+            && labels.len() >= 2
+            && labels.iter().all(|label| {
+                !label.is_empty()
+                    && label.len() <= 63
+                    && !label.starts_with('-')
+                    && !label.ends_with('-')
+                    && label
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+            }),
+        "invalid remote source host"
+    );
+    Ok(())
+}
+
+/// One owner, group or repository name as Git hosts spell them.
+fn path_segment(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 100
+        && value.as_bytes()[0].is_ascii_alphanumeric()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
 }
 
 fn absolute_directory(value: &str) -> Result<()> {
