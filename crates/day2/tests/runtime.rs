@@ -48,6 +48,7 @@ impl World {
                 "relational".into(),
                 AppBinding {
                     retention: Default::default(),
+                    journal: None,
                     security: None,
                     resource_policies: Vec::new(),
                     schedules: Default::default(),

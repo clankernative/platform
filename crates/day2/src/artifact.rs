@@ -959,6 +959,11 @@ pub struct AppBinding {
     /// swept and cannot tell that it will be. See `crate::retention`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub retention: BTreeMap<String, crate::retention::Rule>,
+    /// How long completed invocations keep their full traces before compaction to
+    /// a receipt. Absent means [`crate::journal::DEFAULT_TRACE_HOURS`]. Compaction
+    /// changes no business data: retries and status reads keep working.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub journal: Option<crate::journal::Policy>,
     /// Where this application is reached, when the installation declares an
     /// identity provider. Absent means the app is not served at an edge.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1101,6 +1106,9 @@ impl Instance {
         for binding in instance.apps.values() {
             for (model, rule) in &binding.retention {
                 rule.validate(model)?;
+            }
+            if let Some(journal) = &binding.journal {
+                journal.validate()?;
             }
         }
         instance.validate_edges()?;

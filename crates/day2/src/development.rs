@@ -1063,6 +1063,8 @@ pub fn create_for(
                 // A retention policy is an operator's decision about real
                 // records, and a default here would teach the opposite.
                 retention: BTreeMap::new(),
+                // Journal compaction follows the platform default.
+                journal: None,
                 edge: None,
                 // A disposable development instance binds every declared schedule
                 // to the development actor, so schedules are exercised here rather

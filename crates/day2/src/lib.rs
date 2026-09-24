@@ -32,6 +32,7 @@ pub mod input_shape;
 pub mod integration_host;
 pub mod integrations;
 pub mod invocations;
+pub mod journal;
 pub mod json;
 mod live;
 pub mod mcp;

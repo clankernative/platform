@@ -100,6 +100,13 @@ fn now_ms() -> Result<i64> {
 /// lateness small and rare enough to cost two indexed lookups per schedule.
 const SCHEDULE_TICK: Duration = Duration::from_secs(10);
 
+/// How often the journal is compacted, and how much one pass may do. Each batch is
+/// its own short write transaction, so requests queue behind at most one batch; a
+/// backlog larger than one pass drains over the following minutes.
+const JOURNAL_TICK: Duration = Duration::from_secs(60);
+const JOURNAL_BATCH: usize = 500;
+const JOURNAL_BATCHES_PER_TICK: usize = 20;
+
 /// A loopback documentation preview with no sessions or business API dispatcher.
 pub async fn serve_docs_preview(
     artifact: crate::artifact::LoadedArtifact,
@@ -413,6 +420,39 @@ impl LocalServer {
                 }
             })
         });
+        let journal = {
+            let runtime = self.host.runtime.clone();
+            let mut stopped = stop.subscribe();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(JOURNAL_TICK);
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    tokio::select! {
+                        _ = stopped.changed() => break,
+                        _ = interval.tick() => {
+                            let runtime = runtime.clone();
+                            let compacted = tokio::task::spawn_blocking(move || -> Result<()> {
+                                for _ in 0..JOURNAL_BATCHES_PER_TICK {
+                                    if crate::journal::compact(&runtime, now()?, JOURNAL_BATCH)? < JOURNAL_BATCH {
+                                        break;
+                                    }
+                                }
+                                Ok(())
+                            })
+                            .await;
+                            match compacted {
+                                Ok(Ok(())) => {}
+                                Ok(Err(error)) => eprintln!(
+                                    "journal_compaction_failed {}",
+                                    crate::error::diagnostic(&error)
+                                ),
+                                Err(_) => eprintln!("journal_compaction_task_failed"),
+                            }
+                        }
+                    }
+                }
+            })
+        };
         let admitting = self.host.admitting.clone();
         let router = Router::new().fallback(handle).with_state(self.host);
         let result = axum::serve(self.listener, router)
@@ -423,6 +463,7 @@ impl LocalServer {
             .await;
         let _ = stop.send(true);
         commands.await?;
+        journal.await?;
         if let Some(scheduled) = scheduled {
             scheduled.await?;
         }

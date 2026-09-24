@@ -33,6 +33,20 @@ pub(crate) fn upgrade(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// The phase alone. A complete execution's trace may have been compacted by
+/// `crate::journal`, so callers that only branch on the phase must not parse it.
+pub(crate) fn phase(connection: &Connection, id: &str) -> Result<Option<Phase>> {
+    connection
+        .query_row(
+            "SELECT phase FROM day2_execution WHERE invocation=?1",
+            [id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .map(|phase| Phase::persisted(&phase))
+        .transpose()
+}
+
 pub(crate) fn load(connection: &Connection, id: &str) -> Result<Option<(Phase, Trace)>> {
     let value: Option<(String, String)> = connection
         .query_row(
@@ -137,7 +151,7 @@ pub(crate) fn advance(runtime: &Runtime, id: &str, fault: Fault) -> Result<bool>
         return Ok(false);
     }
     let connection = store::open(runtime.db())?;
-    let Some((phase, _)) = load(&connection, id)? else {
+    let Some(phase) = phase(&connection, id)? else {
         return Ok(false);
     };
     if phase == Phase::Complete {
@@ -238,7 +252,7 @@ fn require_authority(
 
 pub(crate) fn claim(runtime: &Runtime, id: &str) -> Result<Option<Work>> {
     let connection = store::open(runtime.db())?;
-    let Some((phase, _)) = load(&connection, id)? else {
+    let Some(phase) = phase(&connection, id)? else {
         return Ok(None);
     };
     if phase == Phase::Complete {
@@ -256,10 +270,10 @@ fn claim_with_worker(
 ) -> Result<Option<Work>> {
     let mut connection = store::open(runtime.db())?;
     let tx = crate::write_queue::immediate(&mut connection)?;
-    let (phase, current) = load(&tx, id)?.context("execution_journal_missing")?;
-    if phase == Phase::Complete {
+    if phase(&tx, id)?.context("execution_journal_missing")? == Phase::Complete {
         return Ok(None);
     }
+    let (_, current) = load(&tx, id)?.context("execution_journal_missing")?;
     let mut trace = current;
     ensure!(
         trace.artifact == runtime.artifact().id() && trace.scope == runtime.scope(),

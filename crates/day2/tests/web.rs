@@ -677,6 +677,7 @@ impl World {
                 "things".into(),
                 AppBinding {
                     retention: Default::default(),
+                    journal: None,
                     security: None,
                     resource_policies: Vec::new(),
                     schedules: Default::default(),
@@ -717,6 +718,7 @@ impl World {
                     "links".into(),
                     AppBinding {
                         retention: Default::default(),
+                        journal: None,
                         security: None,
                         resource_policies: Vec::new(),
                         schedules: Default::default(),
@@ -736,6 +738,7 @@ impl World {
                     "other".into(),
                     AppBinding {
                         retention: Default::default(),
+                        journal: None,
                         security: None,
                         resource_policies: Vec::new(),
                         schedules: Default::default(),
@@ -2195,8 +2198,9 @@ fn host_v1_upgrade_is_repeatable_and_does_not_invent_old_event_metadata() -> Res
         // table its deletion column; 6 added the record of removals; 7 recorded
         // which applications a call passed through; 8 separated who
         // authenticated from whom the work is for; 9 bound each address to
-        // the account behind it.
-        "9"
+        // the account behind it; 10 let a completed invocation keep a receipt
+        // in place of its trace.
+        "10"
     );
     world.seed("new-receipt")?;
     assert_eq!(world.count("day2_audit_events")?, before + 2);
