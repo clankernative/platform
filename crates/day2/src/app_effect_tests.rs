@@ -25,6 +25,7 @@ fn fixture(db: &Connection) -> Result<Schema> {
             .into(),
         inputs: BTreeMap::new(),
         foreign_keys: vec![],
+        rollups: Vec::new(),
         indexes: vec![],
         domains: BTreeMap::new(),
     };

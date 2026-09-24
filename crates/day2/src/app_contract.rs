@@ -1623,6 +1623,7 @@ mod selector_tests {
                 },
             )]),
             foreign_keys: vec![],
+            rollups: Vec::new(),
             indexes: vec![],
             domains: BTreeMap::new(),
         };

@@ -282,6 +282,50 @@ impl Schema {
                 }
             }
         }
+        // Rollups read like models but have no writes, no metadata handles beyond
+        // the implied id order, and no place in the property snapshot.
+        for rollup in &self.rollups {
+            let name = rollup.table();
+            let record = rollup.record(&self.models[&rollup.model]);
+            let ty = self.value_type(&record)?;
+            let body = format!(
+                "Model.{prefix}define(\"{name}\", \"{}\", {}, {})",
+                rollup.prefix(),
+                self.decoder(&record, false),
+                Self::encoder(&record, false)
+            );
+            result.push_str(&format!("    {name} : Model({ty})\n    {name} = {body}\n"));
+            result.push_str(&format!(
+                "    all_{name} : Cursor, PageSize -> Selection({ty})\n    all_{name} = |after, limit| Selection.{prefix}all({name}, after, limit)\n"
+            ));
+            for (field, kind) in &record.fields {
+                let (field_type, encoded) = match kind {
+                    Kind::TextDomain { roc_type } => {
+                        (roc_type.clone(), format!("{roc_type}.to_str(value)"))
+                    }
+                    Kind::StandardText { domain } => {
+                        (format!("Text({domain})"), "Text.to_str(value)".into())
+                    }
+                    _ => (kind.wire_type(false).into(), "value".into()),
+                };
+                result.push_str(&format!(
+                    "    {name}_{field}_equal : {field_type} -> Predicate({ty})\n    {name}_{field}_equal = |value| Predicate.{prefix}define({name}, \"{field}\", \"equal\", Json.to_str({encoded}))\n"
+                ));
+                if matches!(
+                    kind,
+                    Kind::Text | Kind::TextDomain { .. } | Kind::StandardText { .. }
+                ) {
+                    result.push_str(&format!(
+                        "    {name}_{field}_like : Str -> Predicate({ty})\n    {name}_{field}_like = |value| Predicate.{prefix}define({name}, \"{field}\", \"like\", Json.to_str(value))\n"
+                    ));
+                }
+                for (suffix, descending) in [("asc", "Bool.False"), ("desc", "Bool.True")] {
+                    result.push_str(&format!(
+                        "    {name}_{field}_{suffix} : Order({ty})\n    {name}_{field}_{suffix} = Order.{prefix}define({name}, \"{field}\", {descending})\n"
+                    ));
+                }
+            }
+        }
         let snapshot_fields = self
             .models
             .iter()

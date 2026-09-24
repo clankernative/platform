@@ -34,6 +34,7 @@ fn opaque_pagination_wire_inputs_are_canonical_and_never_persistent_columns() ->
         models: BTreeMap::from([("rows".into(), input.clone())]),
         inputs: BTreeMap::from([("request".into(), input)]),
         foreign_keys: vec![],
+        rollups: Vec::new(),
         indexes: vec![],
     };
     assert!(schema.validate().is_err());
@@ -106,6 +107,7 @@ step_for_host = |raw| step(raw)
             },
         )]),
         foreign_keys: vec![],
+        rollups: Vec::new(),
         indexes: vec![],
     };
     fs::write(stage.join("app/Data.roc"), schema.data_module()?)?;

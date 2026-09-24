@@ -384,6 +384,41 @@ fn table_declaration(model: &str, block: &[Token<'_>]) -> Result<bool> {
         ) => None,
         _ => anyhow::bail!("{model}.table must be `Table.keyed(|row| {{ ... }})`"),
     };
+    if parameter.is_some() {
+        ensure!(
+            block.get(start + 6) == Some(&Token::Punct(b'|'))
+                && block.get(start + 7) == Some(&Token::Punct(b'{')),
+            "{model}.table requires a literal declaration record"
+        );
+        let end = closing(block, start + 7)?;
+        let mut cursor = start + 8;
+        while cursor < end {
+            if block[cursor] == Token::Punct(b',') {
+                cursor += 1;
+                continue;
+            }
+            ensure!(
+                matches!(
+                    block.get(cursor..cursor + 7),
+                    Some([
+                        Token::Word(_),
+                        Token::Punct(b':'),
+                        Token::Word("Table"),
+                        Token::Punct(b'.'),
+                        Token::Word("unique" | "non_unique" | "rollup"),
+                        Token::Punct(b'('),
+                        Token::Punct(b'{')
+                    ])
+                ),
+                "{model}.table entries require Table.unique, Table.non_unique or Table.rollup"
+            );
+            cursor = closing(block, cursor + 5)? + 1;
+            ensure!(
+                cursor == end || block.get(cursor) == Some(&Token::Punct(b',')),
+                "{model}.table declarations cannot compute or transform witnesses"
+            );
+        }
+    }
     let mut at = start;
     while at < block.len() {
         if let (
@@ -400,13 +435,25 @@ fn table_declaration(model: &str, block: &[Token<'_>]) -> Result<bool> {
             block.get(at + 4),
         ) {
             ensure!(
-                matches!(*kind, "unique" | "non_unique"),
+                matches!(*kind, "unique" | "non_unique" | "rollup"),
                 "{model}.table: unknown key kind Table.{kind}"
             );
             let open = at + 4;
             let end = closing(block, open)?;
-            key_columns(model, parameter, &block[open + 1..end])?;
-            at = end;
+            if *kind == "rollup" {
+                rollup_columns(model, parameter, &block[open + 1..end], false)?;
+                ensure!(
+                    block.get(end + 1) == Some(&Token::Punct(b','))
+                        && block.get(end + 2) == Some(&Token::Punct(b'{')),
+                    "{model}.table: write a rollup as `Table.rollup({{ group }}, {{ measures }})`"
+                );
+                let measures = closing(block, end + 2)?;
+                rollup_columns(model, parameter, &block[end + 3..measures], true)?;
+                at = measures;
+            } else {
+                key_columns(model, parameter, &block[open + 1..end])?;
+                at = end;
+            }
         }
         at += 1;
     }
@@ -439,6 +486,70 @@ fn key_columns(model: &str, parameter: Option<&str>, columns: &[Token<'_>]) -> R
                 "{model}.table: key column `{label}` reads `{column}`; a key label must name the column it reads"
             ),
             _ => anyhow::bail!("{model}.table: write each key column as `column: row.column`"),
+        }
+    }
+    Ok(())
+}
+
+/// A rollup group is `column: row.column` or `column: Table.day(row.column)`; its
+/// measures are `name: Table.count` or `column: Table.sum(row.column)`. Wherever
+/// a column is read, the label must name it, as with keys.
+fn rollup_columns(
+    model: &str,
+    parameter: Option<&str>,
+    columns: &[Token<'_>],
+    measures: bool,
+) -> Result<()> {
+    ensure!(
+        !columns.is_empty(),
+        "{model}.table: a rollup needs at least one group column and one measure"
+    );
+    let reads = |label: &str, read: &str, column: &str| -> Result<()> {
+        ensure!(
+            Some(read) == parameter && label == column,
+            "{model}.table: rollup column `{label}` reads `{read}.{column}`; a rollup label must name the column it reads"
+        );
+        Ok(())
+    };
+    for entry in columns.split(|token| *token == Token::Punct(b',')) {
+        match entry {
+            [] => (),
+            [
+                Token::Word(label),
+                Token::Punct(b':'),
+                Token::Word(read),
+                Token::Punct(b'.'),
+                Token::Word(column),
+            ] if !measures => reads(label, read, column)?,
+            [
+                Token::Word(label),
+                Token::Punct(b':'),
+                Token::Word("Table"),
+                Token::Punct(b'.'),
+                Token::Word(function),
+                Token::Punct(b'('),
+                Token::Word(read),
+                Token::Punct(b'.'),
+                Token::Word(column),
+                Token::Punct(b')'),
+            ] if (!measures && matches!(*function, "hour" | "day" | "week"))
+                || (measures && *function == "sum") =>
+            {
+                reads(label, read, column)?
+            }
+            [
+                Token::Word(_),
+                Token::Punct(b':'),
+                Token::Word("Table"),
+                Token::Punct(b'.'),
+                Token::Word("count"),
+            ] if measures => (),
+            _ if measures => anyhow::bail!(
+                "{model}.table: write each rollup measure as `name: Table.count` or `column: Table.sum(row.column)`"
+            ),
+            _ => anyhow::bail!(
+                "{model}.table: write each rollup group column as `column: row.column` or `column: Table.day(row.column)`"
+            ),
         }
     }
     Ok(())
@@ -822,6 +933,23 @@ mod tests {
         assert!(
             failure(LEDGER, &computed).contains("write each key column as `column: row.column`")
         );
+    }
+
+    #[test]
+    fn rollup_labels_cannot_hide_computation_or_a_different_column() -> Result<()> {
+        let valid = MODELS.replace(
+            "by_date: Table.unique({ campaign: row.campaign, date: row.date })",
+            "daily: Table.rollup({ date: row.date }, { count: Table.count })",
+        );
+        schema_source(LEDGER, &sources(&valid))?;
+        for invalid in [
+            valid.replace("date: row.date", "date: row.campaign"),
+            valid.replace("date: row.date", "date: Str.concat(row.date, \"x\")"),
+            valid.replace("count: Table.count", "count: 1"),
+        ] {
+            assert!(schema_source(LEDGER, &sources(&invalid)).is_err());
+        }
+        Ok(())
     }
 
     #[test]
