@@ -8,7 +8,7 @@ use crate::{
     release::{self, ActivationReceipt, ImmutableSecretRef, ReleaseApproval, ReleaseTarget},
 };
 use anyhow::{Context, Result, ensure};
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
 
@@ -342,9 +342,7 @@ struct StoredQuiescenceAuthority {
 
 impl Journal {
     pub(crate) fn initialize_runtime_secret_schema(&mut self) -> Result<()> {
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = day2::write_queue::immediate(&mut self.connection)?;
         tx.execute_batch(
             "CREATE TABLE IF NOT EXISTS runtime_secret_meta(
             singleton INTEGER PRIMARY KEY CHECK(singleton=1),version INTEGER NOT NULL);
@@ -470,9 +468,7 @@ impl Journal {
         resource: &ProviderResource,
         actor: &OperatorActor,
     ) -> Result<RegisteredRuntimeSecret> {
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = day2::write_queue::immediate(&mut self.connection)?;
         let scope = ResourceScope::from(target);
         let resource_id = resource.id()?;
         if let Some(registered) = read_resource_optional(&tx, resource)? {
@@ -569,9 +565,7 @@ impl Journal {
         policy: &Digest,
         actor: &OperatorActor,
     ) -> Result<ResourceAuthority> {
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = day2::write_queue::immediate(&mut self.connection)?;
         require(
             read_resource(&tx, resource)?.scope == *scope,
             RuntimeSecretRejection::WrongOwner,
@@ -827,9 +821,7 @@ impl Journal {
         incarnation: &DeploymentIncarnation,
         actor: &OperatorActor,
     ) -> Result<()> {
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = day2::write_queue::immediate(&mut self.connection)?;
         require(
             crate::release_execution::runtime_deployment_fact(&tx, &deployment.release)?.as_ref()
                 == Some(deployment),
@@ -865,9 +857,7 @@ impl Journal {
         decision: &QuiescenceAuthorityDecision,
         actor: &OperatorActor,
     ) -> Result<QuiescenceAuthorityRef> {
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = day2::write_queue::immediate(&mut self.connection)?;
         require(
             crate::release_execution::runtime_deployment_fact(&tx, &deployment.release)?.as_ref()
                 == Some(deployment),
@@ -1170,9 +1160,7 @@ impl Journal {
         observation: &ConsumerDrainObservation,
         actor: &OperatorActor,
     ) -> Result<ConsumerView> {
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = day2::write_queue::immediate(&mut self.connection)?;
         let mut consumer = read_consumer(&tx, &observation.release)?;
         require(
             consumer.key == observation.key
@@ -1228,9 +1216,7 @@ impl Journal {
         successor: &Digest,
         actor: &OperatorActor,
     ) -> Result<ConsumerView> {
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = day2::write_queue::immediate(&mut self.connection)?;
         let mut consumer = read_consumer(&tx, release)?;
         require_superseded(&tx, &consumer, successor)?;
         require_no_unsettled_effects(&tx, release)?;
@@ -1274,9 +1260,7 @@ impl Journal {
         release: &Digest,
         actor: &OperatorActor,
     ) -> Result<ConsumerView> {
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = day2::write_queue::immediate(&mut self.connection)?;
         let mut consumer = read_consumer(&tx, release)?;
         let current = release::read_state(&tx, &consumer.target)?;
         require(

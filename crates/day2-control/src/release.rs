@@ -10,7 +10,7 @@ use crate::provider_evidence::{RevisionRelation, StateEvidence};
 use crate::{BindingRef, BuildPlan, Digest, GitOid, Name, journal::OperatorActor};
 use crate::{journal::Journal, kernel::State};
 use anyhow::{Result, ensure};
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
 
@@ -170,9 +170,7 @@ pub(crate) struct StoredReady {
 
 impl Journal {
     pub(crate) fn initialize_release_schema(&mut self) -> Result<()> {
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = day2::write_queue::immediate(&mut self.connection)?;
         tx.execute_batch(
             "CREATE TABLE IF NOT EXISTS release_meta (
                 singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL);
@@ -275,9 +273,7 @@ impl Journal {
         expected_revision: u64,
         authority: &ReleaseAuthority,
     ) -> Result<u64> {
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = day2::write_queue::immediate(&mut self.connection)?;
         let receipt = observe(
             &tx,
             target,
@@ -305,9 +301,7 @@ impl Journal {
             &Digest::of(&observation.reference)?,
             None,
         )?;
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = day2::write_queue::immediate(&mut self.connection)?;
         let key = secret_key(&observation.reference)?;
         let id = observation_id(target, "secret", &key, request)?;
         let duplicate =
@@ -361,9 +355,7 @@ impl Journal {
     pub fn approve_release(&mut self, approval: &ReleaseApproval) -> Result<ApprovedRelease> {
         let id = Digest::of(&("day2-release-v1", &approval.target, &approval.request))?;
         let fingerprint = Digest::of(approval)?;
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = day2::write_queue::immediate(&mut self.connection)?;
         if let Some(prior) = tx
             .query_row(
                 "SELECT fingerprint FROM release_approvals WHERE id=?1",
@@ -420,9 +412,7 @@ impl Journal {
     }
 
     pub fn prepare_release(&mut self, approved: &ApprovedRelease) -> Result<ReadyRelease> {
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = day2::write_queue::immediate(&mut self.connection)?;
         let ready = Self::prepare_release_in(&tx, approved)?;
         tx.commit()?;
         Ok(ready)
@@ -468,9 +458,7 @@ impl Journal {
     /// A future deployment adapter must supply separately qualified readback and
     /// transition guards before this bounded secret-readiness proof is sufficient.
     pub fn activate_release(&mut self, ready: &ReadyRelease) -> Result<ActivationReceipt> {
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = day2::write_queue::immediate(&mut self.connection)?;
         let enrolled: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM release_workflows
             WHERE json_extract(body,'$.snapshot.plan.release')=?1)",
@@ -582,9 +570,7 @@ impl Journal {
         actor: &OperatorActor,
         status: &str,
     ) -> Result<()> {
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = day2::write_queue::immediate(&mut self.connection)?;
         let stored = read_approval(&tx, &release.id)?;
         let current: String = tx.query_row(
             "SELECT status FROM release_status WHERE id=?1",

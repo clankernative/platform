@@ -10,7 +10,7 @@ use crate::release::{ActivationReceipt, ReleaseApproval, ReleaseTarget, SecretOb
 use crate::{BindingRef, Digest, Name};
 use anyhow::{Result, ensure};
 use durable_temporal::{AdvanceBackend, BackendError, StepOutcome, TemporalAdapter};
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc};
 
@@ -310,9 +310,7 @@ impl ReleaseExecutionHost {
         self.capabilities
             .validate(&lease.execution.plan, &lease.approval)?;
         let mut journal = Journal::open(&self.journal)?;
-        let tx = journal
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = day2::write_queue::immediate(&mut journal.connection)?;
         let stored = read_execution(&tx, &lease.execution.id)?;
         let row = step_row(&tx, &lease.execution.id, lease.step.ordinal)?
             .ok_or(ReleaseRejection::FencedLease)?;
@@ -406,9 +404,7 @@ impl ReleaseExecutionHost {
             let snapshot = self.inspect(&id)?;
             let receipt = adapter.ensure_started(snapshot.id.as_str()).await?;
             let mut journal = Journal::open(&self.journal)?;
-            let tx = journal
-                .connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let tx = day2::write_queue::immediate(&mut journal.connection)?;
             let (prior, run): (Option<String>, Option<String>) = tx.query_row(
                 "SELECT workflow_id,run_id FROM release_workflow_outbox WHERE execution=?1",
                 [snapshot.id.as_str()],
@@ -538,9 +534,7 @@ impl Journal {
     }
 
     pub(crate) fn initialize_release_execution_schema(&mut self) -> Result<()> {
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = day2::write_queue::immediate(&mut self.connection)?;
         tx.execute_batch(
             "CREATE TABLE IF NOT EXISTS release_execution_meta(
             singleton INTEGER PRIMARY KEY CHECK(singleton=1),version INTEGER NOT NULL);
@@ -595,9 +589,7 @@ impl Journal {
     ) -> Result<ReleaseSnapshot> {
         let id = plan.execution_id()?;
         let fingerprint = plan.fingerprint()?;
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = day2::write_queue::immediate(&mut self.connection)?;
         if let Some(prior) = tx
             .query_row(
                 "SELECT fingerprint FROM release_workflows WHERE id=?1",
@@ -740,9 +732,7 @@ impl Journal {
             .checked_add(LEASE_MILLIS)
             .ok_or_else(|| anyhow::anyhow!("release lease overflow"))?;
         i64::try_from(until)?;
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = day2::write_queue::immediate(&mut self.connection)?;
         let mut stored = read_execution(&tx, id)?;
         if stored.snapshot.terminal.is_some() {
             return Ok(ReleaseClaim::Terminal(Box::new(stored.snapshot)));
@@ -856,9 +846,7 @@ impl Journal {
         result: &ReleaseEffectResult,
         now: u64,
     ) -> Result<ReleaseSnapshot> {
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = day2::write_queue::immediate(&mut self.connection)?;
         let mut stored = read_execution(&tx, &lease.execution.id)?;
         let row = step_row(&tx, &lease.execution.id, lease.step.ordinal)?
             .ok_or(ReleaseRejection::FencedLease)?;
