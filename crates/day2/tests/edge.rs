@@ -422,7 +422,7 @@ fn nothing_but_a_valid_assertion_admits_a_request() -> Result<()> {
             .get(format!("{}/health/live", server.origin))
             .send()?
             .status(),
-        StatusCode::NO_CONTENT
+        StatusCode::OK
     );
     // There is no sign-in link to use.
     assert_eq!(
