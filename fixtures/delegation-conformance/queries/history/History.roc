@@ -75,7 +75,7 @@ History :: [].{
 					actor: "Whom the invocation acted for.",
 					initiator: "Who authenticated the invocation.",
 					outcome: "success or failure.",
-					at: "Completion time in Unix seconds.",
+					at: "Accepted invocation time in Unix seconds.",
 					records: "Identifiers of the rows the invocation wrote, separated by spaces.",
 					change_count: "How many rows the invocation wrote.",
 				},

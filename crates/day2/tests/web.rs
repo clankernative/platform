@@ -168,6 +168,15 @@ fn platform_audit_pages_bind_filters_actor_scope_and_expiry() -> Result<()> {
         .unwrap()
         .admins
         .extend(["alice".into(), "bob".into()]);
+    instance
+        .apps
+        .get_mut("other")
+        .unwrap()
+        .authority
+        .as_mut()
+        .unwrap()
+        .admins
+        .insert("alice".into());
     fs::write(
         world.runtime.instance_path(),
         serde_json::to_vec(&instance)?,
@@ -224,6 +233,7 @@ fn platform_audit_pages_bind_filters_actor_scope_and_expiry() -> Result<()> {
     }
     let other = Runtime::load(world.runtime.instance_path(), "other")?;
     other.initialize()?;
+    assert!(other.audit_page("alice", &request)?.items.is_empty());
     assert!(other.audit_page("alice", &next).is_err());
 
     // New writes are newer than the saved boundary and cannot shift older pages.

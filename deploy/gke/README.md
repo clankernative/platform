@@ -176,6 +176,8 @@ Several fields are fixed or seeded once:
 - Readers, writers and authority are copied into the app's database
   on the first start only. Later changes need explicit activation (`day2
   activate`).
+- Platform audit pages and APIs are available only to the enabled authority
+  policy's `admins` (app owners). There is no separate audit-access variable.
 - The root refuses an authority with no operations.
 
 ## How the pod satisfies day2-serve

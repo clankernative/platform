@@ -1391,7 +1391,8 @@ fn history_page(
             "SELECT a.rowid,a.invocation,a.operation,a.actor,
                 COALESCE(NULLIF(i.authenticated,''),a.actor),i.trigger,a.status,a.at
             FROM day2_audit a JOIN day2_invocations i ON a.invocation=i.id
-            WHERE (?1=0 OR a.rowid<?1)
+            WHERE i.status IN ('success','failure') AND a.status=i.status
+            AND (?1=0 OR a.rowid<?1)
             AND (?2='[]' OR a.operation IN (SELECT value FROM json_each(?2)))
             ORDER BY a.rowid DESC LIMIT ?3",
         )?
@@ -1492,7 +1493,7 @@ mod history_tests {
 
     fn database() -> Result<Connection> {
         let db = Connection::open_in_memory()?;
-        db.execute_batch("CREATE TABLE day2_invocations(id TEXT PRIMARY KEY, authenticated TEXT, trigger TEXT);
+        db.execute_batch("CREATE TABLE day2_invocations(id TEXT PRIMARY KEY, authenticated TEXT, trigger TEXT, status TEXT);
             CREATE TABLE day2_audit(invocation TEXT PRIMARY KEY, operation TEXT, actor TEXT, status TEXT, at INTEGER);
             CREATE TABLE day2_audit_changes(invocation TEXT, ordinal INTEGER, model TEXT, record_id TEXT,
                 before_version INTEGER, after_version INTEGER, fields TEXT);")?;
@@ -1507,7 +1508,7 @@ mod history_tests {
         field: &str,
     ) -> Result<()> {
         db.execute(
-            "INSERT INTO day2_invocations VALUES(?1,'support','request')",
+            "INSERT INTO day2_invocations VALUES(?1,'support','request','success')",
             [id],
         )?;
         db.execute(
@@ -1601,6 +1602,14 @@ mod history_tests {
         receipt(&db, "old", "retired.write", 0, "")?;
         receipt(&db, "query", "app.read", 0, "")?;
         receipt(&db, "new", "retired.write", 0, "")?;
+        db.execute(
+            "INSERT INTO day2_invocations VALUES('pending','support','request','pending')",
+            [],
+        )?;
+        db.execute(
+            "INSERT INTO day2_invocations VALUES('aborted','support','request','failure')",
+            [],
+        )?;
         let first = page(&db, &["retired.write"], "", 1, "bound-filter")?;
         let cursor = first["next_after"].as_str().unwrap();
         assert!(page(&db, &[], cursor, 1, "different-filter").is_err());

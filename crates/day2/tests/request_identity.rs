@@ -63,11 +63,16 @@ impl World {
         let mut instance = json!({"installation":"identityco","environment":"test",
             "control":{"version":1,"state_directory":directory.path().join("control"),"operators":["it"],"sources":{},"apps":{}},
             "apps":{"caller":binding,"callee":binding}});
-        // Permit gateway a session only, so the wrong-path rule can be tested.
+        // Permit gateway an identity read so it can sign in, then test that its
+        // ingress-only delegation still cannot select a target on requests.
         instance["apps"]["caller"]["readers"]
             .as_array_mut()
             .unwrap()
             .extend([json!("support"), json!("gateway")]);
+        instance["apps"]["caller"]["authority"]["operations"]["delegation.who"]["actors"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!("gateway"));
         fs::write(&path, serde_json::to_vec(&instance)?)?;
         let callee = Runtime::load(&path, "callee")?;
         callee.initialize()?;
