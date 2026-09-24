@@ -1486,6 +1486,31 @@ fn escaped_len(entry: &HistoryEntry) -> Result<usize> {
     Ok(serde_json::to_string(&serde_json::to_string(entry)?)?.len() + 1)
 }
 
+fn read_changes(db: &Connection, invocation: &str) -> Result<Vec<Change>> {
+    let mut statement = db.prepare("SELECT model,record_id,before_version,after_version,fields FROM day2_audit_changes WHERE invocation=?1 ORDER BY ordinal")?;
+    let changes = statement.query_map([invocation], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, Option<i64>>(2)?,
+            row.get::<_, i64>(3)?,
+            row.get::<_, String>(4)?,
+        ))
+    })?;
+    changes
+        .map(|change| {
+            let (model, record_id, before_version, after_version, fields) = change?;
+            Ok(Change {
+                model,
+                record_id,
+                before_version,
+                after_version,
+                fields: serde_json::from_str(&fields)?,
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod history_tests {
     use super::*;
@@ -1636,29 +1661,4 @@ mod history_tests {
         assert!(page(&db, &["retired.write"], cursor, 1, "bound-filter").is_err());
         Ok(())
     }
-}
-
-fn read_changes(db: &Connection, invocation: &str) -> Result<Vec<Change>> {
-    let mut statement = db.prepare("SELECT model,record_id,before_version,after_version,fields FROM day2_audit_changes WHERE invocation=?1 ORDER BY ordinal")?;
-    let changes = statement.query_map([invocation], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, Option<i64>>(2)?,
-            row.get::<_, i64>(3)?,
-            row.get::<_, String>(4)?,
-        ))
-    })?;
-    changes
-        .map(|change| {
-            let (model, record_id, before_version, after_version, fields) = change?;
-            Ok(Change {
-                model,
-                record_id,
-                before_version,
-                after_version,
-                fields: serde_json::from_str(&fields)?,
-            })
-        })
-        .collect()
 }
