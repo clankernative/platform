@@ -44,6 +44,24 @@ fn lines() -> &'static Mutex<HashMap<PathBuf, Arc<Line>>> {
 
 thread_local! {
     static HELD: RefCell<HashSet<PathBuf>> = RefCell::new(HashSet::new());
+    static CAP: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
+}
+
+/// Run `work` with every write turn on this thread waiting at most `wait`.
+///
+/// For callers answering someone with a deadline of their own, such as a webhook
+/// provider that abandons a delivery after ten seconds: failing fast and visibly
+/// beats recording a delivery the provider has already given up on.
+pub fn bounded<T>(wait: Duration, work: impl FnOnce() -> T) -> T {
+    let previous = CAP.with(|cap| cap.replace(Some(wait)));
+    struct Restore(Option<Duration>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            CAP.with(|cap| cap.set(self.0));
+        }
+    }
+    let _restore = Restore(previous);
+    work()
 }
 
 fn busy(message: &str) -> rusqlite::Error {
@@ -168,7 +186,8 @@ impl DerefMut for WriteTransaction<'_> {
 /// Begin an immediate transaction after this process's earlier writers to the same
 /// database, in arrival order.
 pub fn immediate(connection: &mut Connection) -> rusqlite::Result<WriteTransaction<'_>> {
-    immediate_within(connection, WAIT)
+    let wait = CAP.with(|cap| cap.get()).map_or(WAIT, |cap| cap.min(WAIT));
+    immediate_within(connection, wait)
 }
 
 fn immediate_within(
@@ -261,6 +280,31 @@ mod tests {
             .unwrap()
             .commit()
             .unwrap();
+    }
+
+    #[test]
+    fn a_bounded_caller_fails_fast_and_restores_the_default_wait() {
+        let (_directory, path) = database();
+        let mut first = Connection::open(&path).unwrap();
+        let holding = immediate(&mut first).unwrap();
+        let waited = {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                let mut connection = Connection::open(&path).unwrap();
+                let started = Instant::now();
+                let error = bounded(Duration::from_millis(50), || {
+                    immediate(&mut connection).map(|_| ())
+                })
+                .unwrap_err();
+                let restored = CAP.with(|cap| cap.get()).is_none();
+                (error.sqlite_error_code(), started.elapsed(), restored)
+            })
+        };
+        let (code, elapsed, restored) = waited.join().unwrap();
+        assert_eq!(code, Some(rusqlite::ErrorCode::DatabaseBusy));
+        assert!(elapsed < Duration::from_secs(5));
+        assert!(restored);
+        holding.commit().unwrap();
     }
 
     #[test]

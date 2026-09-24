@@ -146,7 +146,10 @@ transport failures.
 
 Requests beyond the host's execution permits wait in arrival order rather than
 being refused; only a request that waits more than ten seconds, or arrives when
-256 are already waiting, receives `503` with `Retry-After: 1`. Writes to an app
+256 are already waiting, receives `503` with `Retry-After: 1`. Signed webhook
+deliveries wait at most three seconds for a permit and three more to be recorded,
+so a busy host answers `503` inside a provider's delivery timeout (GitHub's is ten
+seconds) instead of recording a delivery the provider has already abandoned. Writes to an app
 database are likewise served in arrival order within the host, so a burst of
 commands queues behind SQLite's single writer instead of racing for it. A write
 that still cannot get the database fails as `503 storage_busy`, never
