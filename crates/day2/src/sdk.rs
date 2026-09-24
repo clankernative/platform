@@ -315,8 +315,8 @@ const MODULES: &[Module] = &[
         app_export: true,
     },
     Module {
-        file: "Index.roc",
-        source: "data/Index.roc",
+        file: "Table.roc",
+        source: "data/Table.roc",
         app_export: true,
     },
     Module {

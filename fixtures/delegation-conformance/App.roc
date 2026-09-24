@@ -1,4 +1,3 @@
-import Storage
 import Who
 import Forward
 import RecordEntry
@@ -7,7 +6,6 @@ import IdentityInvariants
 App :: [].{
 	definition = {
 		namespace: "delegation",
-		storage: Storage.definition,
 		operations: { who: Who.definition, forward: Forward.definition, record: RecordEntry.definition },
 		pages: {},
 		properties: { entries: IdentityInvariants.entries },

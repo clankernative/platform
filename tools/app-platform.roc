@@ -24,15 +24,15 @@ platform "day2-app-shape"
 	}
 
 import App
-import StorageContract
+import SchemaSource
 import pf.Context
 import pf.Model
 import pf.Tx
 import pf.Query
 import pf.Api
 
-schema_shape : StorageContract.Tables -> StorageContract.Tables
-schema_shape = |value| (App.definition.storage.schema)(value)
+schema_shape : SchemaSource.Tables -> SchemaSource.Tables
+schema_shape = |value| SchemaSource.schema(value)
 
 # The checked wrappers carry native type witnesses for callback inputs/results.
 # Include named properties and errors so glue commits their complete layouts.
@@ -50,11 +50,11 @@ shape =
 
 app_shape = |_| shape
 
-domains = App.definition.storage.domains
+domains = SchemaSource.domains
 
 domain_shape = |_| domains
 
-storage = App.definition.storage
+storage = SchemaSource.storage
 
 storage_shape = |_| storage
 

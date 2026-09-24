@@ -129,7 +129,14 @@ pub fn identifier(name: &str) -> Result<()> {
 }
 
 impl Table {
-    fn indexes(&self) -> Result<Vec<Index>> {
+    /// Keys come from each model's attached `table`, reflected through the
+    /// platform-generated storage witness. Every key column must be a column of
+    /// its own model with the same kind; the SDK has no other way to name one.
+    fn indexes(
+        &self,
+        models: &BTreeMap<String, Record>,
+        model_types: &BTreeMap<String, String>,
+    ) -> Result<Vec<Index>> {
         let entries = self
             .entries
             .iter()
@@ -149,67 +156,90 @@ impl Table {
             storage.kind == "record",
             "storage definition must be a record"
         );
-        let Some(declaration) = storage.fields.iter().find(|field| field.name == "indexes") else {
-            return Ok(Vec::new());
-        };
-        let models = self.node(declaration.type_id)?;
+        let declaration = storage
+            .fields
+            .iter()
+            .find(|field| field.name == "tables")
+            .context("storage witness requires generated tables")?;
+        let tables = self.node(declaration.type_id)?;
         ensure!(
-            models.kind == "record" && !models.fields.is_empty(),
-            "omit indexes when no indexes are declared"
+            tables.kind == "record" && tables.fields.len() == models.len(),
+            "storage tables must match registered models"
         );
+        let witness = |node: &Node, name: &str| -> Result<usize> {
+            let field = node
+                .fields
+                .iter()
+                .find(|field| field.name == name)
+                .with_context(|| format!("table witness requires {name}"))?;
+            let list = self.node(field.type_id)?;
+            ensure!(list.kind == "list", "invalid table witness {name}");
+            Ok(list.item)
+        };
         let mut indexes = Vec::new();
-        for model in &models.fields {
-            let definitions = self.node(model.type_id)?;
+        for declared in &tables.fields {
+            let model = models
+                .get(&declared.name)
+                .with_context(|| format!("unregistered storage table {}", declared.name))?;
+            let table = self.node(declared.type_id)?;
             ensure!(
-                definitions.kind == "record" && !definitions.fields.is_empty(),
-                "index declarations require a nonempty record"
+                table.kind == "record" && table.name == "Table" && table.fields.len() == 2,
+                "storage tables require Table witnesses"
             );
-            for definition in &definitions.fields {
+            let row = self.node(witness(table, "row_witness")?)?;
+            ensure!(
+                row.kind == "record" && Some(&row.name) == model.roc_type.as_ref(),
+                "table {} must declare keys over its own model",
+                declared.name
+            );
+            let keys = self.node(witness(table, "key_witness")?)?;
+            if keys.kind == "unit" || (keys.kind == "record" && keys.fields.is_empty()) {
+                continue;
+            }
+            ensure!(keys.kind == "record", "table keys must be a record");
+            for definition in &keys.fields {
                 let key = self.node(definition.type_id)?;
                 ensure!(
                     key.kind == "union" && key.tags.len() == 1,
-                    "index requires Unique or NonUnique"
+                    "a key requires Table.unique or Table.non_unique"
                 );
                 let tag = &key.tags[0];
                 ensure!(
                     matches!(tag.name.as_str(), "Unique" | "NonUnique") && tag.payload.len() == 1,
-                    "index requires Unique or NonUnique field witnesses"
+                    "a key requires Table.unique or Table.non_unique"
                 );
-                let witness = self.node(tag.payload[0])?;
+                let list = self.node(tag.payload[0])?;
+                ensure!(list.kind == "list", "invalid key witness");
+                let columns = self.node(list.item)?;
                 ensure!(
-                    witness.kind == "list",
-                    "index requires a list field witness"
+                    columns.kind == "record"
+                        && columns.name.starts_with("__")
+                        && !columns.fields.is_empty(),
+                    "key {}.{} must select a record of columns, such as {{ date: row.date }}",
+                    declared.name,
+                    definition.name
                 );
-                let fields = self.node(witness.item)?;
-                ensure!(
-                    fields.kind == "record" && !fields.fields.is_empty(),
-                    "index fields must be a nonempty record"
-                );
-                for field in &fields.fields {
-                    let witness = self.node(field.type_id)?;
+                let mut fields = Vec::new();
+                for column in &columns.fields {
+                    let expected = model.fields.get(&column.name).with_context(|| {
+                        format!(
+                            "key {}.{} names {}, which is not a column of {}",
+                            declared.name, definition.name, column.name, row.name
+                        )
+                    })?;
                     ensure!(
-                        witness.kind == "record"
-                            && witness.name == "Index.Field"
-                            && witness.fields.len() == 1
-                            && witness.fields[0].name == "witness",
-                        "index fields require Index.field witnesses"
+                        &self.kind(column.type_id, model_types)? == expected,
+                        "key {}.{} column {} does not read the model's {} column",
+                        declared.name,
+                        definition.name,
+                        column.name,
+                        column.name
                     );
-                    let list = self.node(witness.fields[0].type_id)?;
-                    ensure!(list.kind == "list", "invalid Index.field witness");
-                    let unit = self.node(list.item)?;
-                    ensure!(
-                        unit.kind == "unit" || (unit.kind == "record" && unit.fields.is_empty()),
-                        "invalid Index.field witness item"
-                    );
+                    fields.push(column.name.clone());
                 }
-                let mut fields = fields
-                    .fields
-                    .iter()
-                    .map(|field| field.name.clone())
-                    .collect::<Vec<_>>();
                 fields.sort();
                 indexes.push(Index {
-                    model: model.name.clone(),
+                    model: declared.name.clone(),
                     name: definition.name.clone(),
                     fields,
                     unique: tag.name == "Unique",
@@ -781,11 +811,12 @@ impl Schema {
                     })
             })
             .collect();
+        let indexes = table.indexes(&models, &model_types)?;
         let schema = Self {
             models,
             inputs,
             foreign_keys,
-            indexes: table.indexes()?,
+            indexes,
             domains: table.domains()?,
         };
         schema.validate_typed()?;

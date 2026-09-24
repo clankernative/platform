@@ -1,6 +1,7 @@
 import Title
 import Document
 import pf.Text
+import pf.Table
 
 # Persistent values are nominal. Model.Entity adds host-owned ID and revision fields.
 Models :: [].{
@@ -15,5 +16,12 @@ Models :: [].{
 		announced : Bool,
 		bytes : U64,
 		lines : U64,
+	}.{
+		table : Table(Report, _)
+		table = Table.keyed(
+			|row| {
+				by_announcement: Table.non_unique({ announced: row.announced, ready: row.ready }),
+			},
+		)
 	}
 }
