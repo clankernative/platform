@@ -355,7 +355,7 @@ impl Rollup {
                 columns.join(", ")
             ),
             format!(
-                "CREATE UNIQUE INDEX IF NOT EXISTS \"day2_rollup_{table}\" ON \"{table}\"({})",
+                "CREATE UNIQUE INDEX IF NOT EXISTS \"day2_rollup_group_{table}\" ON \"{table}\"({})",
                 Self::quoted(self.index_columns().into_iter().map(|g| g.field.as_str()))
             ),
             format!(
@@ -381,8 +381,10 @@ impl Rollup {
                 self.remove("OLD.")
             ),
         ];
-        for field in self.record(source).fields.keys() {
-            statements.push(format!("CREATE INDEX IF NOT EXISTS \"day2_rollup_{table}_{field}\" ON \"{table}\"(\"{field}\",id)"));
+        // Separate object categories and use a numeric field suffix so table
+        // and field names containing underscores cannot alias another index.
+        for (ordinal, field) in self.record(source).fields.keys().enumerate() {
+            statements.push(format!("CREATE INDEX IF NOT EXISTS \"day2_rollup_column_{table}_{ordinal}\" ON \"{table}\"(\"{field}\",id)"));
         }
         Ok(statements)
     }
@@ -480,6 +482,43 @@ pub(crate) mod tests {
             connection.execute_batch(&sql)?;
         }
         Ok((connection, schema))
+    }
+
+    #[test]
+    fn overlapping_names_keep_all_indexes_and_sequences_distinct() -> Result<()> {
+        let (_, mut schema) = fixture()?;
+        schema.models.insert(
+            "sequence_events".to_owned(),
+            schema.models["events"].clone(),
+        );
+        let mut count_suffix = schema.rollups[0].clone();
+        count_suffix.name = "daily_count".to_owned();
+        let mut sequence_prefix = schema.rollups[0].clone();
+        sequence_prefix.model = "sequence_events".to_owned();
+        schema.rollups.extend([count_suffix, sequence_prefix]);
+        schema.validate()?;
+        let db = Connection::open_in_memory()?;
+        for sql in schema.ddl()? {
+            db.execute_batch(&sql)?;
+        }
+        for model in ["events", "sequence_events"] {
+            db.execute_batch(&format!(
+                "INSERT INTO {model}(id,version,created_at,owner,time,amount) VALUES(1,1,0,'alice',1,7),(2,1,0,'alice',2,3)"
+            ))?;
+        }
+        for rollup in &schema.rollups {
+            assert_eq!(rollup.mismatches(&db)?, 0);
+            let indexes: i64 = db.query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE type='index' AND tbl_name=?1 AND name LIKE 'day2_rollup_%'",
+                [rollup.table()],
+                |row| row.get(0),
+            )?;
+            assert_eq!(
+                indexes,
+                1 + rollup.record(&schema.models[&rollup.model]).fields.len() as i64
+            );
+        }
+        Ok(())
     }
 
     #[test]
