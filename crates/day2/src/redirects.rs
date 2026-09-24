@@ -22,7 +22,7 @@
 use crate::{
     artifact::{self, Artifact},
     output_schema::Type,
-    schema::Kind,
+    schema::{Kind, Record},
 };
 use anyhow::{Context, Result, bail, ensure};
 use axum::http::HeaderMap;
@@ -38,9 +38,15 @@ const MAX_LOCATION_BYTES: usize = 8_192;
 const MAX_NOT_FOUND: usize = 16;
 
 /// Schemes no redirect may send a browser to, whatever the declaration allows.
-/// Each makes the destination itself executable or inline content rather than an
-/// address, so there is no link for which following one is the intent.
-pub const REFUSED_SCHEMES: &[&str] = &["javascript", "vbscript", "data", "blob", "filesystem"];
+/// These destinations contain executable/inline content or address local files.
+pub const REFUSED_SCHEMES: &[&str] = &[
+    "javascript",
+    "vbscript",
+    "data",
+    "blob",
+    "file",
+    "filesystem",
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Schemes {
@@ -57,6 +63,7 @@ pub struct Route {
     pub operation: String,
     prefix: Vec<String>,
     field: String,
+    pub(crate) input: Record,
     location: String,
     schemes: Schemes,
     not_found: BTreeSet<String>,
@@ -89,6 +96,13 @@ pub struct Catalog {
 }
 
 impl Catalog {
+    pub(crate) fn route(&self, name: &str) -> Result<&Route> {
+        self.routes
+            .iter()
+            .find(|route| route.name == name)
+            .context("unknown redirect route name")
+    }
+
     pub fn from_artifact(artifact: &Artifact) -> Result<Self> {
         ensure!(
             artifact.redirects.len() <= MAXIMUM_ROUTES,
@@ -254,10 +268,30 @@ impl Route {
             operation: command.name.clone(),
             prefix,
             field,
+            input: input.clone(),
             location: declared.location.clone(),
             schemes,
             not_found,
         })
+    }
+
+    /// Build the declared path from logical text, encoding each segment once.
+    /// Matching still uses the ordinary platform/page/redirect precedence.
+    pub(crate) fn build_url(&self, supplied: &Value) -> Result<String> {
+        self.input.validate_input(supplied)?;
+        let path = supplied[&self.field]
+            .as_str()
+            .context("redirect route path requires text")?;
+        let mut segments = self.prefix.clone();
+        for segment in path.split('/') {
+            crate::routing::validate_segment(segment)?;
+            segments.push(segment.to_owned());
+        }
+        ensure!(
+            segments.len() <= MAX_SEGMENTS,
+            "redirect route segment budget"
+        );
+        Ok(crate::routing::path_url(&segments)?.path().to_owned())
     }
 
     /// Whether an application failure means nothing is at this address.
@@ -304,6 +338,10 @@ fn pattern(path: &str) -> Result<(Vec<String>, String)> {
             "redirect route prefix segments must be plain literals"
         );
         crate::routing::decode_segment(literal)?;
+        ensure!(
+            crate::routing::path_url(&[(*literal).to_owned()])?.path() == format!("/{literal}"),
+            "redirect route prefix segments must use canonical URL spelling"
+        );
         prefix.push((*literal).to_owned());
     }
     if let Some(first) = prefix.first() {
@@ -411,6 +449,11 @@ mod tests {
             operation: "go.visit".into(),
             prefix: prefix.iter().map(|segment| (*segment).to_owned()).collect(),
             field: "path".into(),
+            input: Record {
+                fields: std::collections::BTreeMap::from([("path".into(), Kind::Text)]),
+                roc_type: None,
+                identity: None,
+            },
             location: "url".into(),
             schemes: Schemes::Any,
             not_found: BTreeSet::from(["app:go.missing".to_owned()]),
@@ -455,6 +498,8 @@ mod tests {
             "/docs/{path..}",
             "/_live/{path..}",
             "/health/{path..}",
+            "/go here/{path..}",
+            "/caf\u{e9}/{path..}",
         ] {
             assert!(pattern(invalid).is_err(), "{invalid}");
         }
@@ -485,6 +530,47 @@ mod tests {
             matched(&catalog, "/docs/%7Euser"),
             Some(("bare".into(), json!({"path":"docs/~user"})))
         );
+    }
+
+    #[test]
+    fn navigation_encodes_logical_segments_once_and_rejects_invalid_inputs() -> Result<()> {
+        let catalog = catalog();
+        let route = catalog.route("prefixed")?;
+        for (path, expected) in [
+            ("hello", "/go/hello"),
+            ("docs/Read Me", "/go/docs/Read%20Me"),
+            ("docs/%2F", "/go/docs/%252F"),
+            ("docs/a?b#c", "/go/docs/a%3Fb%23c"),
+            ("docs/caf\u{e9}", "/go/docs/caf%C3%A9"),
+        ] {
+            let input = json!({"path":path});
+            let url = route.build_url(&input)?;
+            assert_eq!(url, expected);
+            assert_eq!(matched(&catalog, &url), Some(("prefixed".into(), input)));
+        }
+        for path in [
+            "", "/hello", "hello/", "a//b", "a/../b", "a/./b", "a\\b", "a\nb",
+        ] {
+            assert!(route.build_url(&json!({"path":path})).is_err(), "{path:?}");
+        }
+        for input in [
+            json!({}),
+            json!({"path":1}),
+            json!({"path":"hello", "extra":"x"}),
+        ] {
+            assert!(route.build_url(&input).is_err(), "{input}");
+        }
+        assert!(
+            route
+                .build_url(&json!({"path":(["a"; MAX_SEGMENTS].join("/"))}))
+                .is_err()
+        );
+        assert!(
+            route
+                .build_url(&json!({"path":"a".repeat(MAX_PATH_BYTES)}))
+                .is_err()
+        );
+        Ok(())
     }
 
     #[test]
@@ -580,6 +666,8 @@ mod tests {
             "vbscript:msgbox",
             "data:text/html,<script>alert(1)</script>",
             "blob:https://example.com/uuid",
+            "file:///etc/passwd",
+            "FILE://localhost/Users/example/document.html",
             "filesystem:https://example.com/temporary/x",
             "https://",
         ] {

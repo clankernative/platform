@@ -26,6 +26,7 @@ use ring::{
 };
 use serde_json::{Value, json};
 use std::{
+    collections::BTreeMap,
     fs,
     path::PathBuf,
     sync::mpsc,
@@ -365,7 +366,12 @@ fn a_followed_link_runs_its_command_and_redirects_to_the_result() -> Result<()> 
         server.follow("/go/docs/a+b", VISITOR)?,
         "https://example.com/search?q=a%2Bb",
     )?;
-    assert_eq!(server.visits("docs/%s")?, 2);
+    // The host decodes once: the logical capture is literal `%2F`, not a slash.
+    redirected(
+        server.follow("/docs/%252F", VISITOR)?,
+        "https://example.com/search?q=%252F",
+    )?;
+    assert_eq!(server.visits("docs/%s")?, 3);
     // A platform endpoint reserves only itself, so `audit/%s` resolves.
     redirected(
         server.follow("/audit/q3", VISITOR)?,
@@ -572,6 +578,9 @@ fn declarations_are_admitted_only_against_the_bound_command_contract() -> Result
     let admitted = loaded.contract().clone();
     // The positive control: the fixture as built is admitted.
     day2::redirects::Catalog::from_artifact(&admitted)?;
+    let mut collision = admitted.clone();
+    collision.redirects[0].name = collision.pages[0].name.clone();
+    assert!(day2::routing::Catalog::from_artifact(&collision).is_err());
     let bare = admitted
         .redirects
         .iter()
@@ -649,6 +658,79 @@ fn declarations_are_admitted_only_against_the_bound_command_contract() -> Result
             day2::redirects::Catalog::from_artifact(&contract).is_err(),
             "admitted a route naming {case}"
         );
+    }
+    Ok(())
+}
+
+#[test]
+fn template_redirect_helpers_check_arguments_and_encode_each_path_segment() -> Result<()> {
+    use day2::{output_schema::Type, web_templates};
+    let artifact = std::env::var_os("DAY2_TEST_REDIRECT_ARTIFACT")
+        .map(PathBuf::from)
+        .context("run xtask verify or set DAY2_TEST_REDIRECT_ARTIFACT")?;
+    let loaded = day2::artifact::LoadedArtifact::load(&artifact)?;
+    let routes = day2::routing::Catalog::from_artifact(loaded.contract())?;
+    let shape = Type::Record(BTreeMap::from([
+        ("path".into(), Type::String),
+        ("number".into(), Type::Integer),
+    ]));
+    let directory = tempfile::tempdir()?;
+    let source = directory.path().join("ui");
+    let packaged = directory.path().join("artifact");
+    fs::create_dir_all(source.join("pages"))?;
+    let package = |markup: &str| -> Result<web_templates::Catalog> {
+        fs::write(source.join("pages/test.html"), markup)?;
+        web_templates::package(&source, &packaged)
+    };
+    let admit = |catalog: &web_templates::Catalog| {
+        web_templates::validate_routed_page(
+            &packaged,
+            catalog,
+            "pages/test.html",
+            &shape,
+            &day2::assets::Catalog::new(),
+            &routes,
+        )
+    };
+    for markup in [
+        "<a href=\"{{ routes.bare() }}\">Missing</a>",
+        "<a href=\"{{ routes.bare(path=number) }}\">Wrong type</a>",
+        "<a href=\"{{ routes.bare(path=path, extra=path) }}\">Unknown</a>",
+        "<a href=\"{{ routes.bare(path) }}\">Positional</a>",
+        "<a href=\"/prefix{{ routes.bare(path=path) }}\">Concatenation</a>",
+    ] {
+        assert!(admit(&package(markup)?).is_err(), "{markup}");
+    }
+    let catalog = package(
+        "<a href=\"{{ routes.bare(path=path) }}\">Bare</a><a href=\"{{ routes.prefixed(path=path) }}\">Prefixed</a>",
+    )?;
+    admit(&catalog)?;
+    let render = |path: &str| {
+        web_templates::render_routed(
+            &packaged,
+            &catalog,
+            "pages/test.html",
+            json!({"path":path,"number":1}),
+            BTreeMap::new(),
+            &routes,
+            ORIGIN,
+        )
+    };
+    for (path, encoded) in [
+        ("docs/Read Me", "docs/Read%20Me"),
+        ("docs/%2F", "docs/%252F"),
+        ("docs/a?b#c", "docs/a%3Fb%23c"),
+    ] {
+        let html = render(path)?;
+        let document = scraper::Html::parse_fragment(&html);
+        let hrefs = document
+            .select(&scraper::Selector::parse("a").unwrap())
+            .map(|link| link.value().attr("href").unwrap().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(hrefs, [format!("/{encoded}"), format!("/go/{encoded}")]);
+    }
+    for path in ["a/../b", "a//b", "/a", "a\\b"] {
+        assert!(render(path).is_err(), "{path}");
     }
     Ok(())
 }

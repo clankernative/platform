@@ -14,7 +14,7 @@ RedirectBinding :: { metadata : Metadata }.{
 		# be a top-level text field of the command's output.
 		location : Str,
 		# "web" (http and https only) or "any" (any absolute URI scheme except the
-		# script- and content-bearing ones the platform always refuses).
+		# script-, content- and local-file-bearing ones the platform always refuses).
 		schemes : Str,
 		# Application failures that mean "nothing is at this address", answered
 		# 404. Every one must be declared by the bound command.

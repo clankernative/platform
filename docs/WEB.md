@@ -466,6 +466,15 @@ field, because the host must read it from the typed result and a Roc selector
 cannot cross the worker boundary. Admission, not a runtime lookup, rejects a
 misspelled or non-text field.
 
+Templates link to redirect routes with the same typed navigation helpers as
+pages: `<a href="{{ routes.bare(path=link.name) }}">Visit</a>` or
+`{{ routes.prefixed(path=link.name) }}`. Page and redirect names must be distinct.
+Admission checks the required text argument; rendering splits its logical value
+at `/`, validates every segment and percent-encodes each exactly once. A literal
+`%2F` becomes `%252F` and reaches the command as `%2F`, so commands must not
+percent-decode their input again. Helpers preserve the usual route precedence;
+use the prefixed helper for names such as `docs` that a platform endpoint owns.
+
 ### Matching and precedence
 
 Platform paths are dispatched first, page routes next; a redirect route answers
@@ -518,8 +527,8 @@ reflected into it. The value must contain no whitespace or control characters
 (URL parsers silently drop some of them, so `java\nscript:` is refused rather than
 parsed), must parse as an absolute URL without a base (relative, `//host` and
 bare-host values are refused), must use a scheme the declaration allows, and is
-never `javascript`, `vbscript`, `data`, `blob` or `filesystem`, which make the
-destination executable or inline content rather than an address. The WHATWG
+never `javascript`, `vbscript`, `data`, `blob`, `file` or `filesystem`, which carry
+executable/inline content or address local files. The WHATWG
 serialization of the parsed URL is sent, so the browser follows exactly what was
 checked. At most 8 KiB.
 

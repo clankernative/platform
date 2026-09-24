@@ -15,6 +15,8 @@ import RedirectBinding
 # Page routes and the platform's own paths always take precedence; a redirect
 # route answers only the paths nothing else claims. Between redirect routes, the
 # longest literal prefix wins.
+# Templates link with `routes.go(path=value)` using logical decoded text; the
+# helper encodes each slash-separated segment once, as page route helpers do.
 #
 #     go : Redirect(VisitTypes.Input)
 #     go = Redirect.route(
@@ -23,7 +25,7 @@ import RedirectBinding
 #     )
 Redirect(a) :: { binding : RedirectBinding }.{
 	# Which destinations the host will send a browser to. The platform always
-	# refuses javascript:, vbscript:, data:, blob: and filesystem: destinations,
+	# refuses javascript:, vbscript:, data:, blob:, file: and filesystem: destinations,
 	# whichever is chosen here.
 	Schemes : [
 		# http and https only.

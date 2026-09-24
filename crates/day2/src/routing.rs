@@ -34,6 +34,12 @@ pub struct Route {
 #[derive(Clone, Debug, Default)]
 pub struct Catalog {
     routes: BTreeMap<String, Route>,
+    redirects: crate::redirects::Catalog,
+}
+
+pub(crate) struct NavigationInput<'a> {
+    pub input: &'a Record,
+    pub required: BTreeSet<&'a str>,
 }
 
 impl Catalog {
@@ -42,7 +48,16 @@ impl Catalog {
             artifact.format >= 7,
             "explicit routes require artifact format 7"
         );
-        Self::compile(&artifact.pages, &artifact.operations, &artifact.schema)
+        let mut catalog = Self::compile(&artifact.pages, &artifact.operations, &artifact.schema)?;
+        for redirect in &artifact.redirects {
+            ensure!(
+                !catalog.routes.contains_key(&redirect.name),
+                "page and redirect share a route name: {}",
+                redirect.name
+            );
+        }
+        catalog.redirects = crate::redirects::Catalog::from_artifact(artifact)?;
+        Ok(catalog)
     }
 
     pub fn compile(pages: &[Page], operations: &[Operation], schema: &Schema) -> Result<Self> {
@@ -153,7 +168,10 @@ impl Catalog {
                 "duplicate route name"
             );
         }
-        let catalog = Self { routes };
+        let catalog = Self {
+            routes,
+            redirects: Default::default(),
+        };
         if !catalog.routes.is_empty() {
             let root = catalog
                 .routes
@@ -175,8 +193,32 @@ impl Catalog {
         self.routes.get(name).context("unknown route name")
     }
 
+    pub(crate) fn navigation_input(&self, name: &str) -> Result<NavigationInput<'_>> {
+        if let Some(route) = self.routes.get(name) {
+            return Ok(NavigationInput {
+                input: &route.input,
+                required: route
+                    .input
+                    .fields
+                    .keys()
+                    .filter(|name| {
+                        route.path_fields.contains(*name) || !route.defaults.contains_key(*name)
+                    })
+                    .map(String::as_str)
+                    .collect(),
+            });
+        }
+        let route = self.redirects.route(name)?;
+        Ok(NavigationInput {
+            input: &route.input,
+            required: route.input.fields.keys().map(String::as_str).collect(),
+        })
+    }
+
     pub fn build_url(&self, name: &str, supplied: &Value) -> Result<String> {
-        let route = self.route(name)?;
+        let Some(route) = self.routes.get(name) else {
+            return self.redirects.route(name)?.build_url(supplied);
+        };
         let supplied = supplied
             .as_object()
             .context("route input must be an object")?;
@@ -384,7 +426,7 @@ fn strict_percent(raw: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_segment(value: &str) -> Result<()> {
+pub(crate) fn validate_segment(value: &str) -> Result<()> {
     ensure!(
         !value.is_empty()
             && ![".", ".."].contains(&value)
@@ -405,7 +447,7 @@ pub(crate) fn decode_segment(raw: &str) -> Result<String> {
     Ok(value)
 }
 
-fn path_url(segments: &[String]) -> Result<url::Url> {
+pub(crate) fn path_url(segments: &[String]) -> Result<url::Url> {
     let mut url = url::Url::parse("https://day2.invalid/")?;
     {
         let mut path = url

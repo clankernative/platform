@@ -296,7 +296,7 @@ impl Analysis<'_> {
             return Ok(true);
         }
         let route = catalog
-            .route(method.name)
+            .navigation_input(method.name)
             .with_context(|| format!("template_unknown_route: {}", method.name))?;
         let mut supplied = BTreeSet::new();
         for argument in &call.args {
@@ -316,10 +316,9 @@ impl Analysis<'_> {
                 method.name
             );
         }
-        for name in route.input.fields.keys() {
+        for name in route.required {
             ensure!(
-                supplied.contains(name.as_str())
-                    || (!route.path_fields.contains(name) && route.defaults.contains_key(name)),
+                supplied.contains(name),
                 "template_missing_route_argument: {}.{name}",
                 method.name
             );
