@@ -9,6 +9,8 @@ pub(crate) enum Category {
     Method,
     ContentType,
     Timeout,
+    /// Temporarily unable to serve; the same request can be retried unchanged.
+    Unavailable,
     Internal,
 }
 
@@ -102,6 +104,7 @@ failures! {
     TransactionDeadline => ("transaction_budget_exceeded", Timeout),
     PreparationDeadline => ("preparation_deadline", Timeout),
     ExternalAmbiguous => ("external_outcome_ambiguous", Internal),
+    StorageBusy => ("storage_busy", Unavailable),
     Internal => ("internal_error", Internal),
 }
 
@@ -114,10 +117,26 @@ impl std::fmt::Display for Failure {
 impl std::error::Error for Failure {}
 
 pub(crate) fn classify(error: &anyhow::Error) -> Failure {
-    error
-        .downcast_ref::<Failure>()
-        .copied()
-        .unwrap_or(Failure::Internal)
+    if let Some(failure) = error.downcast_ref::<Failure>() {
+        return *failure;
+    }
+    // A write that could not get the database, from SQLite or from the in-process
+    // write queue, changed nothing and can be retried with the same request.
+    let busy = error.chain().any(|cause| {
+        cause
+            .downcast_ref::<rusqlite::Error>()
+            .is_some_and(|error| {
+                matches!(
+                    error.sqlite_error_code(),
+                    Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+                )
+            })
+    });
+    if busy {
+        Failure::StorageBusy
+    } else {
+        Failure::Internal
+    }
 }
 
 /// Operator diagnostics contain only closed error types and numeric OS/SQLite
@@ -190,7 +209,14 @@ mod tests {
         for error in [&sqlite, &io, &parse, &worker, &opaque] {
             assert!(!diagnostic(error).to_string().contains(private));
         }
-        assert_eq!(classify(&sqlite), Failure::Internal);
+        // A busy database is retryable by its typed engine code, never by message.
+        assert_eq!(classify(&sqlite), Failure::StorageBusy);
+        let constraint = anyhow::Error::new(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),
+            Some("database is locked".into()),
+        ))
+        .context("database is busy");
+        assert_eq!(classify(&constraint), Failure::Internal);
         assert!(
             diagnostic(&opaque)
                 .as_object()

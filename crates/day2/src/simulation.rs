@@ -239,7 +239,7 @@ impl Simulation {
             data["invocation"] = json!(invocation);
         }
         let mut connection = crate::store::open(self.runtime.db())?;
-        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let tx = crate::write_queue::immediate(&mut connection)?;
         let (operation, input) = tx.query_row(
             "SELECT operation,input FROM day2_invocations WHERE id=?1",
             [invocation],

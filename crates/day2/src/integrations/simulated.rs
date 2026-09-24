@@ -21,7 +21,7 @@ use super::{
 };
 use anyhow::{Context, Result, bail, ensure};
 use day2_capabilities::{integrations::LiveConnection, resources::Provider};
-use rusqlite::{OptionalExtension, TransactionBehavior, params};
+use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -495,7 +495,7 @@ pub fn delegated_read(
 
 fn seed_world<W: Serialize>(database: &Path, scope: &str, world: &str, value: &W) -> Result<()> {
     let mut connection = crate::store::open(&database.with_file_name(world))?;
-    let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let tx = crate::write_queue::immediate(&mut connection)?;
     upgrade(&tx)?;
     let exists: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM simulated_provider WHERE scope=?1)",
@@ -616,7 +616,7 @@ where
 {
     ensure!(path.is_file(), "simulated_provider_unconfigured");
     let mut connection = crate::store::open(path)?;
-    let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let tx = crate::write_queue::immediate(&mut connection)?;
     upgrade(&tx)?;
     let mut state: World<W> = read_world(&tx, scope)?;
     let result = act(&mut state)?;

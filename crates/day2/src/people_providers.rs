@@ -4,7 +4,7 @@
 use crate::{protocol::Instruction, store::Runtime};
 use anyhow::{Context, Result, ensure};
 use day2_capabilities::resources::{Provider, ResourceTarget, email_in_domain, path_is_within};
-use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::{
@@ -662,7 +662,7 @@ fn with_state<W: DeserializeOwned + Serialize, T>(
     act: impl FnOnce(&mut ProviderState<W>) -> Result<T>,
 ) -> Result<T> {
     let mut connection = open_existing(path)?;
-    let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let tx = crate::write_queue::immediate(&mut connection)?;
     let mut state = read_state(&tx, scope, target)?;
     let result = act(&mut state)?;
     write_state(&tx, scope, target, &state)?;
@@ -678,7 +678,7 @@ fn seed<W: Serialize>(
 ) -> Result<()> {
     bounded(target, 256)?;
     let mut connection = crate::store::open(&runtime.db().with_file_name(provider.database()))?;
-    let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let tx = crate::write_queue::immediate(&mut connection)?;
     upgrade(&tx)?;
     let exists: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM people_provider WHERE scope=?1 AND target=?2)",

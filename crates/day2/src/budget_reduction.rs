@@ -554,9 +554,7 @@ impl Allocator {
         request: &PoolReductionRequest,
         operator: &crate::authority_state::LocalOperator,
     ) -> Result<PoolReduction> {
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = crate::write_queue::immediate(&mut self.connection)?;
         let fingerprint = crate::digest(&serde_json::to_vec(request)?);
         let old: Option<(String, String)> = tx
             .query_row(
@@ -743,9 +741,7 @@ impl Allocator {
             .optional()?
             .context("budget_pool_local_return_missing")?;
         let receipt: CapacityReturnReceipt = crate::json::decode(raw.as_bytes())?;
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = crate::write_queue::immediate(&mut self.connection)?;
         let proposal = proposal_in(&tx, reduction_id)?;
         validate_return_receipt(&proposal, ledger_id, &receipt)?;
         let existing: Option<String> = tx
@@ -779,9 +775,7 @@ impl Allocator {
         complete: bool,
         operator: &crate::authority_state::LocalOperator,
     ) -> Result<PoolReductionDecision> {
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = crate::write_queue::immediate(&mut self.connection)?;
         if let Some(receipt) = decision_in(&tx, id)? {
             ensure!(
                 receipt.completed == complete,

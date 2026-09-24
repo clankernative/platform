@@ -8,8 +8,7 @@ use crate::{
 };
 use anyhow::{Context as _, Result, bail, ensure};
 use rusqlite::{
-    Connection, OptionalExtension, Transaction, TransactionBehavior, params, params_from_iter,
-    types::Value as SqlValue,
+    Connection, OptionalExtension, Transaction, params, params_from_iter, types::Value as SqlValue,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -493,7 +492,7 @@ impl Runtime {
     pub fn initialize(&self) -> Result<()> {
         let mut connection = open(&self.db)?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
-        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = crate::write_queue::immediate(&mut connection)?;
         let exists: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='day2_meta')",
             [],
@@ -767,7 +766,7 @@ impl Runtime {
             }
             reason = AttemptReason::StorageRejected;
             let mut connection = open(&self.db)?;
-            let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let tx = crate::write_queue::immediate(&mut connection)?;
             self.check_binding(&tx)?;
             reason = AttemptReason::AuthorizationRejected;
             let active = crate::authority_state::authorize_in(&tx, self, operation, actor)?;
@@ -942,7 +941,7 @@ impl Runtime {
             )
         {
             let mut connection = open(&self.db)?;
-            let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let tx = crate::write_queue::immediate(&mut connection)?;
             let pending: bool = tx.query_row(
                 "SELECT status='pending' FROM day2_invocations WHERE id=?1",
                 [id],
@@ -975,7 +974,7 @@ impl Runtime {
             return Err(fault.interruption("simulated_process_loss"));
         }
         let mut connection = open(&self.db)?;
-        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = crate::write_queue::immediate(&mut connection)?;
         self.check_binding(&tx)?;
         crate::audit::upgrade(&tx)?;
         let (operation, actor, input, artifact, status, completed): (String,String,String,String,String,Option<String>) =
@@ -1119,7 +1118,7 @@ impl Runtime {
             // A refusal needs a durable receipt but must retain no app effects.
             // Roll back first, then recheck authority and any competing completion.
             tx.rollback()?;
-            let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let tx = crate::write_queue::immediate(&mut connection)?;
             self.check_binding(&tx)?;
             self.check_authority(&tx, &trace.request, &policy)?;
             let existing: Option<String> = tx.query_row(
@@ -2306,6 +2305,7 @@ fn mutation_error(error: rusqlite::Error) -> anyhow::Error {
 #[cfg(test)]
 mod selection_tests {
     use super::*;
+    use rusqlite::TransactionBehavior;
     use std::collections::BTreeMap;
 
     fn fixture() -> Result<(Connection, Schema)> {

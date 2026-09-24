@@ -43,13 +43,22 @@ pub(crate) fn error(status: StatusCode, code: &str, message: &str) -> Response {
 pub(crate) fn failure(cause: &anyhow::Error) -> Response {
     record_failure(cause);
     let (status, code, message) = failure_details(cause);
-    error(status, &code, message)
+    let mut response = error(status, &code, message);
+    if status == StatusCode::SERVICE_UNAVAILABLE {
+        response.headers_mut().insert(
+            axum::http::header::RETRY_AFTER,
+            axum::http::HeaderValue::from_static("1"),
+        );
+    }
+    response
 }
 
 pub(crate) fn record_failure(cause: &anyhow::Error) {
     if matches!(
         crate::error::classify(cause).category(),
-        crate::error::Category::Internal | crate::error::Category::Timeout
+        crate::error::Category::Internal
+            | crate::error::Category::Timeout
+            | crate::error::Category::Unavailable
     ) {
         eprintln!("http_execution_failed {}", crate::error::diagnostic(cause));
     }
@@ -93,6 +102,10 @@ fn typed_failure_details(failure: crate::error::Failure) -> (StatusCode, String,
         Category::Timeout => (
             StatusCode::GATEWAY_TIMEOUT,
             "Execution was interrupted. Check the invocation before retrying with the same idempotency key.",
+        ),
+        Category::Unavailable => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "The server is busy. Retry the same request; commands keep their idempotency key.",
         ),
         Category::Internal => {
             return (

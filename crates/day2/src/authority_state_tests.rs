@@ -1,5 +1,6 @@
 use super::*;
 use crate::authority::{Mode, OperationPolicy};
+use rusqlite::TransactionBehavior;
 use std::{collections::BTreeMap, sync::mpsc, thread, time::Duration};
 
 #[test]

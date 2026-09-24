@@ -5,7 +5,7 @@ use crate::{
     store::{self, Fault, Runtime},
 };
 use anyhow::{Context as _, Result, bail, ensure};
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 pub(crate) fn upgrade(connection: &Connection) -> Result<()> {
     connection.execute_batch(
@@ -108,7 +108,7 @@ fn save(
 ) -> Result<()> {
     let phase = phase.persistence_code()?;
     let mut connection = store::open(runtime.db())?;
-    let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let tx = crate::write_queue::immediate(&mut connection)?;
     if settlement {
         let authority = previous
             .guard
@@ -255,7 +255,7 @@ fn claim_with_worker(
     worker: &mut crate::host::Session,
 ) -> Result<Option<Work>> {
     let mut connection = store::open(runtime.db())?;
-    let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let tx = crate::write_queue::immediate(&mut connection)?;
     let (phase, current) = load(&tx, id)?.context("execution_journal_missing")?;
     if phase == Phase::Complete {
         return Ok(None);
@@ -337,7 +337,7 @@ fn claim_with_worker(
     );
     let encoded = serde_json::to_string(&instruction)?;
     let mut connection = store::open(runtime.db())?;
-    let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let tx = crate::write_queue::immediate(&mut connection)?;
     runtime.check_binding(&tx)?;
     let active = require_authority(&tx, runtime, &trace)?;
     crate::capabilities::authorized(
@@ -412,7 +412,7 @@ pub(crate) fn check_settlement_binding(
 pub(crate) fn admit_dispatch(runtime: &Runtime, work: &Work) -> Result<DispatchPermit> {
     check_work(runtime, work)?;
     let mut connection = store::open(runtime.db())?;
-    let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let tx = crate::write_queue::immediate(&mut connection)?;
     runtime.check_binding(&tx)?;
     let active = require_authority(&tx, runtime, &work.trace)?;
     let capability = crate::capabilities::authorized(
@@ -560,7 +560,7 @@ pub(crate) fn settle(runtime: &Runtime, work: &Work, result: Performed) -> Resul
     ensure!(encoded.len() <= 65_536, "external_result_budget");
     let id = &work.trace.request.context.invocation_id;
     let mut connection = store::open(runtime.db())?;
-    let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let tx = crate::write_queue::immediate(&mut connection)?;
     let authority = work
         .trace
         .guard

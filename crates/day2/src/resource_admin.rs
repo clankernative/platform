@@ -7,7 +7,7 @@ use crate::{
     store::{Runtime, open},
 };
 use anyhow::{Context, Result, ensure};
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, fs, io::Write, path::Path};
@@ -531,7 +531,7 @@ pub fn propose(path: &Path, app: &str, operator: &str, proposal: &Proposal) -> R
     );
     let runtime = Runtime::load(path, app)?;
     let mut db = open(runtime.db())?;
-    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let tx = crate::write_queue::immediate(&mut db)?;
     upgrade(&tx)?;
     let active = authority_state::current(&tx)?;
     let document = proposed_document(&instance, &runtime, &active.document)?;
@@ -599,7 +599,7 @@ pub fn decide(path: &Path, app: &str, operator: &str, decision: &Decision) -> Re
     bounded_note(&decision.reason)?;
     let runtime = Runtime::load(path, app)?;
     let mut db = open(runtime.db())?;
-    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let tx = crate::write_queue::immediate(&mut db)?;
     upgrade(&tx)?;
     let previous: Option<(String,String,String,Option<String>)> = tx.query_row("SELECT operator,decision,reason,receipt FROM day2_resource_review_decisions WHERE review=?1", [&decision.review], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
     if let Some((actor, action, reason, receipt)) = previous {
@@ -807,7 +807,7 @@ pub fn allocate(path: &Path, app: &str, operator: &str, request: &Allocate) -> R
     let runtime = Runtime::load(path, app)?;
     let operator = LocalOperator::assert_local(operator)?;
     let mut db = open(runtime.db())?;
-    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let tx = crate::write_queue::immediate(&mut db)?;
     let active = authority_state::current(&tx)?;
     let ledger = crate::budget::inspect_in(&tx)?;
     let mut allocator = company_allocator(path, &operator)?;
@@ -865,7 +865,7 @@ pub fn recover_budget(path: &Path, app: &str, operator: &str, request: &Recover)
     let runtime = Runtime::load(path, app)?;
     let operator = LocalOperator::assert_local(operator)?;
     let mut db = open(runtime.db())?;
-    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let tx = crate::write_queue::immediate(&mut db)?;
     let ledger = crate::budget::prepare_restore_recovery_in(&tx, &operator)?;
     tx.commit()?;
     let mut allocator = if request.allocations.is_empty() {
@@ -917,7 +917,7 @@ pub fn recover_budget(path: &Path, app: &str, operator: &str, request: &Recover)
                 )?,
         );
     }
-    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let tx = crate::write_queue::immediate(&mut db)?;
     let ledger = crate::budget::recover_restored_in(&tx, allocator.as_ref(), &receipts, &operator)?;
     let usage = crate::budget::inspect_in(&tx)?;
     tx.commit()?;
@@ -934,7 +934,7 @@ pub fn resolve_overruns(
     administrator(&Instance::load(path)?, operator)?;
     let runtime = Runtime::load(path, app)?;
     let mut db = open(runtime.db())?;
-    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let tx = crate::write_queue::immediate(&mut db)?;
     let receipt =
         crate::budget::resolve_overruns_in(&tx, &LocalOperator::assert_local(operator)?, request)?;
     let usage = crate::budget::inspect_in(&tx)?;
@@ -952,7 +952,7 @@ pub fn reconcile_usage(
     administrator(&Instance::load(path)?, operator)?;
     let runtime = Runtime::load(path, app)?;
     let mut db = open(runtime.db())?;
-    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let tx = crate::write_queue::immediate(&mut db)?;
     authority_state::current(&tx)?;
     crate::budget::upgrade(&tx)?;
     let receipt =
@@ -1033,7 +1033,7 @@ pub fn return_company_capacity(
     let runtime = Runtime::load(path, app)?;
     let mut db = open(runtime.db())?;
     let mut allocator = company_allocator(path, &operator)?;
-    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let tx = crate::write_queue::immediate(&mut db)?;
     authority_state::current(&tx)?;
     crate::budget::upgrade(&tx)?;
     let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM day2_budget_capacity_returns WHERE reduction_id=?1 AND ledger_id=?2)", params![request.reduction, request.ledger_id], |row| row.get(0))?;
@@ -1091,7 +1091,7 @@ pub fn import_pool_reduction(
     let runtime = Runtime::load(path, app)?;
     let mut db = open(runtime.db())?;
     let allocator = company_allocator(path, &operator)?;
-    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let tx = crate::write_queue::immediate(&mut db)?;
     let receipt =
         crate::budget::install_pool_reduction_in(&tx, &allocator, &request.reduction, &operator)?;
     tx.commit()?;

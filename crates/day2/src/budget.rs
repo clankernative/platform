@@ -10,7 +10,7 @@
 use crate::error::Failure;
 use anyhow::{Context, Result, ensure};
 use day2_capabilities::resources::{BudgetDefinition, BudgetLimits, BudgetScope};
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -1214,7 +1214,7 @@ impl Allocator {
             .open(path)
             .context("budget_allocator_already_exists")?;
         let mut connection = crate::store::open(path)?;
-        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = crate::write_queue::immediate(&mut connection)?;
         tx.execute_batch("CREATE TABLE IF NOT EXISTS day2_company_budget_meta(singleton INTEGER PRIMARY KEY CHECK(singleton=1),id TEXT NOT NULL) STRICT;
             CREATE TABLE IF NOT EXISTS day2_company_budget_accounts(id TEXT NOT NULL,window_start INTEGER NOT NULL,unit TEXT NOT NULL,period_seconds INTEGER NOT NULL,revision INTEGER NOT NULL,limit_amount INTEGER NOT NULL,allocated INTEGER NOT NULL CHECK(allocated>=0),PRIMARY KEY(id,window_start,unit)) STRICT;
             CREATE TABLE IF NOT EXISTS day2_company_budget_definitions(id TEXT PRIMARY KEY,definition TEXT NOT NULL) STRICT;
@@ -1283,9 +1283,7 @@ impl Allocator {
         request: &AllocationRequest,
         _operator: &crate::authority_state::LocalOperator,
     ) -> Result<AllocationReceipt> {
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = crate::write_queue::immediate(&mut self.connection)?;
         request.definition.validate()?;
         ensure!(
             matches!(request.definition.scope, BudgetScope::Installation),

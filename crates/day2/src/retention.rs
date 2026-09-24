@@ -22,7 +22,7 @@
 //! the next one, which is the harmless direction for the mistake to fall.
 use crate::{artifact::Instance, store::open};
 use anyhow::{Context, Result, ensure};
-use rusqlite::{Connection, TransactionBehavior, params};
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -152,7 +152,7 @@ pub fn sweep(
     let rules = declared(instance, app, operator)?;
     let runtime = crate::store::Runtime::load(instance, app)?;
     let mut connection = open(runtime.db())?;
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let transaction = crate::write_queue::immediate(&mut connection)?;
     runtime.check_binding(&transaction)?;
     crate::audit::upgrade(&transaction)?;
 
