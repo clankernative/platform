@@ -211,7 +211,10 @@ impl LocalGit {
         let bytes = self.git_bytes(args, input)?;
         Ok(String::from_utf8(bytes)?)
     }
-    fn git_bytes(&self, args: &[&str], input: Option<&[u8]>) -> Result<Vec<u8>> {
+    pub(crate) fn repository(&self) -> &Path {
+        &self.repository
+    }
+    pub(crate) fn git_bytes(&self, args: &[&str], input: Option<&[u8]>) -> Result<Vec<u8>> {
         let mut command = fixed_git();
         command
             .arg("--git-dir")
@@ -381,7 +384,7 @@ impl SourceControl for LocalGit {
     }
 }
 
-fn fixed_git() -> Command {
+pub(crate) fn fixed_git() -> Command {
     let mut command = Command::new("/usr/bin/git");
     command
         .env_clear()

@@ -137,6 +137,8 @@ The command returns a durable execution identity. Run it, or resume after a proc
 restart, with `run ID`; inspect it with `status ID`. Use `propose REQUEST BASE_COMMIT
 SOURCE_DIRECTORY` to create a proposal branch against an exact exported revision.
 The service selects the repository. A request cannot substitute another app's repo.
+An app whose source is a `remote_git` repository skips export and propose: push to
+the repository, then build the exact commit.
 The local provider verifies the base revision and creates the proposal ref atomically;
 it does not automatically merge changes.
 
@@ -215,7 +217,8 @@ This completes a local end-to-end surface, not fleet or production parity:
 - SQLite is durable but not highly available. The Temporal adapter is currently
   restricted to local loopback. Terminal workflow failure/timeouts require explicit
   operational recovery; they are never reported as a successful execution.
-- Source writes use real local Git, not GitHub/GitLab PR APIs. The existing GitHub
+- Source writes use real local Git, not GitHub/GitLab PR APIs. Remote Git
+  sources are read-only exact-commit fetches. The existing GitHub
   fetch/check and GCP adapters have HTTP conformance coverage, not live-cloud qualification.
 - Replay traces and source snapshots can contain sensitive app data. Local state
   is protected, but production encryption, retention and access control remain gates.

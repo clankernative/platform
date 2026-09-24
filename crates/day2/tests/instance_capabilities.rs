@@ -94,3 +94,77 @@ fn control_endpoints_and_names_use_the_connected_runtime_contract() -> Result<()
     assert!(load(&root, &value).is_err());
     Ok(())
 }
+
+#[test]
+fn remote_sources_name_a_host_namespace_and_repository() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let root = directory.path().canonicalize()?;
+    let mut value = fixture(&root)?;
+    // A remote source replaces the local one, so the build pin is dropped with it.
+    value["control"]["apps"]["reports"]
+        .as_object_mut()
+        .unwrap()
+        .remove("build");
+    value["control"]["secrets"] = json!({"gitea-read":{"kind":"gcp_version",
+        "project_number":1,"secret":"gitea-read","version":1}});
+    value["control"]["apps"]["reports"]["provider_secrets"] = json!({"source-read":"gitea-read"});
+    let remote = |namespace: &str, repository: &str| {
+        let mut value = value.clone();
+        value["control"]["sources"]["reports-source"] = json!({"kind":"remote_git",
+            "host":"git.example.com","namespace":namespace,"repository":repository,
+            "credential":"source-read"});
+        value
+    };
+    let instance = load(&root, &remote("internal-tools", "reports"))?;
+    assert_eq!(
+        instance.control.unwrap().sources[&Name::try_from("reports-source".to_owned())?]
+            .remote_url()
+            .as_deref(),
+        Some("https://git.example.com/internal-tools/reports.git")
+    );
+    load(&root, &remote("platform/internal-tools", "reports.v2"))?;
+    for (namespace, repository) in [
+        ("", "reports"),
+        ("internal-tools/", "reports"),
+        ("internal-tools/../other", "reports"),
+        (".hidden", "reports"),
+        ("internal-tools", "reports.git"),
+        ("internal-tools", "reports?ref=main"),
+        ("a/b/c/d/e/f/g/h/i", "reports"),
+    ] {
+        assert!(
+            load(&root, &remote(namespace, repository)).is_err(),
+            "{namespace}/{repository}"
+        );
+    }
+    for host in [
+        "git.example.com:443",
+        "Git.Example.com",
+        "localhost",
+        "-git.example.com",
+        "git.example.com/path",
+    ] {
+        let mut value = remote("internal-tools", "reports");
+        value["control"]["sources"]["reports-source"]["host"] = json!(host);
+        assert!(load(&root, &value).is_err(), "{host}");
+    }
+    let mut unbound = remote("internal-tools", "reports");
+    unbound["control"]["sources"]["reports-source"]["credential"] = json!("other-read");
+    assert!(
+        load(&root, &unbound).is_err(),
+        "credential outside provider_secrets"
+    );
+    let mut anonymous = remote("internal-tools", "reports");
+    anonymous["control"]["sources"]["reports-source"]
+        .as_object_mut()
+        .unwrap()
+        .remove("credential");
+    load(&root, &anonymous)?;
+    // Hosts ignore case, so two spellings are one repository and one authority.
+    let mut twice = remote("internal-tools", "reports");
+    twice["control"]["sources"]["links-source"] = json!({"kind":"remote_git",
+        "host":"git.example.com","namespace":"Internal-Tools","repository":"Reports"});
+    twice["control"]["apps"]["links"] = json!({"source":"links-source"});
+    assert!(load(&root, &twice).is_err());
+    Ok(())
+}

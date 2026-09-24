@@ -15,13 +15,24 @@ async fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     ensure!(
         args.len() >= 5 && args[0] == "--local",
-        "usage: control --local INSTANCE ACTOR APP OPERATION [ARGS]; local actor assertion only, no production authentication"
+        "usage: control --local INSTANCE ACTOR APP OPERATION [ARGS] [--gcp-token-file PATH]; local actor assertion only, no production authentication"
     );
     let path = Path::new(&args[1]);
     let actor = &args[2];
     let app = Name::try_from(args[3].clone())?;
     let operation = args[4].as_str();
-    let rest = &args[5..];
+    let mut rest = &args[5..];
+    // An explicit operator-supplied GCP access token lets sources resolve their
+    // declared credentials from Secret Manager. Nothing ambient is consulted.
+    let mut tokens = None;
+    if let [head @ .., flag, path] = rest
+        && flag == "--gcp-token-file"
+    {
+        tokens = Some(std::sync::Arc::new(
+            day2_control::provider_conformance::FileToken::load(Path::new(path))?,
+        ));
+        rest = head;
+    }
     let original_instance = fs::read(path)?;
     let mut instance = Instance::load(path)?;
     ensure!(
@@ -40,6 +51,10 @@ async fn main() -> Result<()> {
         configuration,
         instance.apps.keys().map(String::as_str),
     )?;
+    let service = match tokens {
+        Some(tokens) => service.with_access_tokens(tokens),
+        None => service,
+    };
     let handle = service.authorize(actor, &app)?;
     match (operation, rest) {
         ("export", [request, directory]) => {

@@ -15,6 +15,7 @@ pub mod provider_evidence;
 pub mod release;
 pub mod release_execution;
 pub mod release_recipe;
+pub mod remote_source;
 pub mod runtime_secret;
 pub mod secret_retirement;
 pub mod secret_retirement_recipe;
