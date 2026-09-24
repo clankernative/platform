@@ -34,7 +34,7 @@ roxmltree = "0.21"
 cssparser = "=0.35.0"
 oxc_allocator = "=0.148.0"
 oxc_ast = "=0.148.0"
-oxc_ast_visit = "=0.148.0"
+oxc_ast_visit = "=0.150.0"
 oxc_parser = "=0.148.0"
 oxc_span = "=0.148.0"
 minijinja = { version = "=2.12.0", default-features = false, features = ["debug", "multi_template", "serde", "fuel", "unstable_machinery"] }
