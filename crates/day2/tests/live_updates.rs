@@ -83,8 +83,10 @@ fn live_queries_ignore_rolled_back_duplicate_and_query_only_writes() -> Result<(
 
     let saved = world.submit("deduplicated", Fault::None)?;
     assert_eq!(saved.status, "success");
-    stream.until("Complete")?;
-    // Let the concurrent completion settle before measuring new query work.
+    // Analysis marks the report complete at revision 2; its announcement commits
+    // revision 3 afterwards. Observe that final write before asserting silence.
+    let settled = stream.until("Revision 3")?;
+    assert!(settled.contains("Complete"));
     stream.quiet(Duration::from_millis(600))?;
     assert_eq!(
         world.submit("deduplicated", Fault::None)?.result,
