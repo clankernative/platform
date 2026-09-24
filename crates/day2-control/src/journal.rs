@@ -3,7 +3,7 @@ use crate::{
     kernel::{self, EffectKind, Observation, State},
 };
 use anyhow::{Context, Result, ensure};
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::{path::Path, time::Duration};
 
@@ -194,9 +194,7 @@ impl Journal {
         plan.validate()?;
         let id = plan.execution_id()?;
         let fingerprint = plan.fingerprint()?;
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = day2::write_queue::immediate(&mut self.connection)?;
         let prior: Option<String> = tx
             .query_row(
                 "SELECT fingerprint FROM executions WHERE id=?1",
@@ -297,9 +295,7 @@ impl Journal {
             !workflow.is_empty() && workflow.len() <= 256 && !run.is_empty() && run.len() <= 128,
             "invalid Temporal receipt"
         );
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = day2::write_queue::immediate(&mut self.connection)?;
         let prior: (Option<String>, Option<String>) = tx.query_row(
             "SELECT workflow_id,run_id FROM outbox WHERE execution=?1",
             [id.as_str()],
@@ -319,9 +315,7 @@ impl Journal {
     }
 
     pub fn request_cancel(&mut self, id: &Digest) -> Result<()> {
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = day2::write_queue::immediate(&mut self.connection)?;
         let execution = read_execution(&tx, id)?;
         if execution.state.next_effect().is_some() && !execution.cancel_requested {
             tx.execute(
@@ -341,9 +335,7 @@ impl Journal {
         );
         let until = now.checked_add(duration).context("lease overflow")?;
         ensure!(until <= i64::MAX as u64, "lease timestamp overflow");
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = day2::write_queue::immediate(&mut self.connection)?;
         let mut execution = read_execution(&tx, id)?;
         let Some(kind) = execution.state.next_effect() else {
             return Ok(Claim::Terminal(execution.state));
@@ -415,9 +407,7 @@ impl Journal {
         observation: &Observation,
         now: u64,
     ) -> Result<State> {
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = day2::write_queue::immediate(&mut self.connection)?;
         let id = &lease.execution.id;
         let execution = read_execution(&tx, id)?;
         let previous: Option<String> = tx
@@ -467,9 +457,7 @@ impl Journal {
     }
 
     pub fn defer(&mut self, lease: &Lease, disposition: RetryDisposition, now: u64) -> Result<()> {
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = day2::write_queue::immediate(&mut self.connection)?;
         validate_lease(&tx, lease, now)?;
         // Only an adapter's definitive non-application observation may authorize another mutation.
         if lease.recovery == RecoveryMode::Reconcile
@@ -507,9 +495,7 @@ impl Journal {
     /// At most one diagnostic per fixed fault code and execution. This records
     /// operator-visible context without raw provider errors or unbounded retry spam.
     pub fn record_fault(&mut self, id: &Digest, code: HostFault) -> Result<()> {
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = day2::write_queue::immediate(&mut self.connection)?;
         read_execution(&tx, id)?;
         let prior: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM events WHERE execution=?1 AND kind='host_fault' AND body=?2)",

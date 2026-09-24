@@ -10,7 +10,7 @@ use crate::{
 };
 use anyhow::{Result, ensure};
 use durable_temporal::{AdvanceBackend, BackendError, StepOutcome, TemporalAdapter};
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc};
 
@@ -319,9 +319,7 @@ impl RetirementExecutionHost {
         self.validate(&lease.execution.plan)?;
         self.capabilities.validate(&lease.execution.plan)?;
         let mut journal = Journal::open(&self.journal)?;
-        let tx = journal
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = day2::write_queue::immediate(&mut journal.connection)?;
         let stored = read(&tx, &lease.execution.id)?;
         let row = step_row(&tx, &lease.execution.id, lease.step.ordinal)?
             .ok_or(RetirementRejection::FencedLease)?;
@@ -419,9 +417,7 @@ impl RetirementExecutionHost {
             let snapshot = self.inspect(&id)?;
             let receipt = adapter.ensure_started(snapshot.id.as_str()).await?;
             let mut journal = Journal::open(&self.journal)?;
-            let tx = journal
-                .connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let tx = day2::write_queue::immediate(&mut journal.connection)?;
             let (workflow, run): (Option<String>, Option<String>) = tx.query_row(
                 "SELECT workflow_id,run_id FROM secret_retirement_outbox WHERE execution=?1",
                 [id.as_str()],
@@ -492,9 +488,7 @@ fn progress(snapshot: &RetirementSnapshot) -> StepOutcome {
 
 impl Journal {
     pub(crate) fn initialize_secret_retirement_schema(&mut self) -> Result<()> {
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = day2::write_queue::immediate(&mut self.connection)?;
         tx.execute_batch("CREATE TABLE IF NOT EXISTS secret_retirement_meta(singleton INTEGER PRIMARY KEY CHECK(singleton=1),version INTEGER NOT NULL);
             INSERT OR IGNORE INTO secret_retirement_meta VALUES(1,2);")?;
         let version: i64 = tx.query_row(
@@ -551,9 +545,7 @@ impl Journal {
         i64::try_from(plan.authority_revision)?;
         let id = plan.execution_id()?;
         let fingerprint = plan.fingerprint()?;
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = day2::write_queue::immediate(&mut self.connection)?;
         if let Some(prior) = tx
             .query_row(
                 "SELECT fingerprint FROM secret_retirements WHERE id=?1",
@@ -686,9 +678,7 @@ impl Journal {
             .checked_add(LEASE_MILLIS)
             .ok_or_else(|| anyhow::anyhow!("retirement lease overflow"))?;
         i64::try_from(until)?;
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = day2::write_queue::immediate(&mut self.connection)?;
         let mut stored = read(&tx, id)?;
         if stored.snapshot.terminal.is_some() {
             return Ok(RetirementClaim::Terminal(Box::new(stored.snapshot)));
@@ -795,9 +785,7 @@ impl Journal {
         result: &RetirementEffectResult,
         now: u64,
     ) -> Result<RetirementSnapshot> {
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = day2::write_queue::immediate(&mut self.connection)?;
         let mut stored = read(&tx, &lease.execution.id)?;
         let row = step_row(&tx, &lease.execution.id, lease.step.ordinal)?
             .ok_or(RetirementRejection::FencedLease)?;

@@ -9,7 +9,7 @@ use anyhow::{Context, Result, ensure};
 use day2_capabilities::{
     BindingRef, ControlScope, InstallationControl, SecretProvider, SourceProvider,
 };
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::{
     path::PathBuf,
@@ -148,7 +148,7 @@ impl Service {
         };
         let mut connection = result.connection()?;
         connection.execute_batch("CREATE TABLE IF NOT EXISTS installation (singleton INTEGER PRIMARY KEY CHECK(singleton=1), scope TEXT NOT NULL); CREATE TABLE IF NOT EXISTS source_intents (id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, intent TEXT NOT NULL, state TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, lease_until INTEGER NOT NULL DEFAULT 0); CREATE TABLE IF NOT EXISTS source_events (seq INTEGER PRIMARY KEY, execution TEXT NOT NULL, kind TEXT NOT NULL, actor TEXT NOT NULL);")?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let transaction = day2::write_queue::immediate(&mut connection)?;
         let scope = Digest::of(&result.scope)?;
         transaction.execute(
             "INSERT OR IGNORE INTO installation(singleton,scope) VALUES(1,?1)",
@@ -250,7 +250,7 @@ impl Service {
         let id = intent.id()?;
         let fingerprint = Digest::of(&intent)?;
         let mut connection = self.connection()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let transaction = day2::write_queue::immediate(&mut connection)?;
         let existing: Option<String> = transaction
             .query_row(
                 "SELECT fingerprint FROM source_intents WHERE id=?1",
@@ -319,7 +319,7 @@ impl Service {
     pub fn advance_at(&self, app: &AppHandle, id: &Digest, now: u64) -> Result<SourceStatus> {
         self.check(app)?;
         let mut connection = self.connection()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let transaction = day2::write_queue::immediate(&mut connection)?;
         let (intent, state, attempts, lease_until) = read_intent(&transaction, id)?;
         ensure!(
             intent.scope == self.scope && intent.app == app.app,
@@ -362,7 +362,7 @@ impl Service {
                 anyhow::bail!("source_provider_unavailable");
             }
         };
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let transaction = day2::write_queue::immediate(&mut connection)?;
         let changed = transaction.execute(
             "UPDATE source_intents SET state=?1,lease_until=0 WHERE id=?2 AND attempts=?3",
             params![serde_json::to_string(&state)?, id.as_str(), attempt],
