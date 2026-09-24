@@ -1,0 +1,17 @@
+[package]
+name = "day2-sandbox"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = "1.0"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "=0.4.7"
+seccompiler = "=0.5.0"
+nix = { version = "=0.31.3", features = ["process", "resource", "signal", "fs"] }
+
+[dev-dependencies]
+tempfile = "3.27"
+

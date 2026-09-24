@@ -1,0 +1,14 @@
+# Expected diagnostic: type mismatch
+import Cli
+import Source
+main! : List(OsStr.OsStr) => Try({}, [Exit(I32)])
+main! = |_| {
+	parsed = Cli.parse(["app", "describe", "links", "--demo"]).map_err(|_| Exit(2))?
+	match parsed {
+		Cli.Request.Describe(request) => {
+			loaded = Source.load!(request.parts()).map_err(|_| Exit(5))?
+			Stdout.line!(loaded.request().parts().app_name.to_str()).map_err(|_| Exit(1))
+		}
+		_ => Err(Exit(2))
+	}
+}

@@ -1,0 +1,9 @@
+# Expected diagnostic: cannot use opaque nominal type
+import Catalog
+import Cli
+main! : List(OsStr.OsStr) => Try({}, [Exit(I32)])
+main! = |_| {
+	catalog = Catalog.{ operations: [] }
+	view = catalog.select(Cli.Filter.All).map_err(|_| Exit(5))?
+	Stdout.line!(view.names().len().to_str()).map_err(|_| Exit(1))
+}

@@ -1,0 +1,67 @@
+diff --git a/src/fmt/fmt.zig b/src/fmt/fmt.zig
+index 4e6b2ee..36f73e6 100644
+--- a/src/fmt/fmt.zig
++++ b/src/fmt/fmt.zig
+@@ -4054,9 +4054,62 @@ const Formatter = struct {
+         }
+ 
+         const text = fmt.ast.env.source[start..region.end.offset];
++        if (tag == .Int) {
++            try fmt.pushGroupedInt(text);
++            return;
++        }
+         try fmt.pushVerbatim(text);
+     }
+ 
++    // Long decimal integers are written with underscore groups so magnitude is
++    // readable at a glance. Five digits is the threshold: four-digit values are
++    // usually years, ports or small counts that read better ungrouped.
++    //
++    // Only plain decimal literals are regrouped. A literal that already contains
++    // an underscore is the author's chosen grouping and is left exactly as
++    // written; a based literal (0x, 0b, 0o) groups by different conventions and
++    // is left alone rather than grouped wrongly.
++    const int_group_threshold: usize = 5;
++
++    fn pushGroupedInt(fmt: *Formatter, text: []const u8) error{WriteFailed}!void {
++        var digits = text;
++        var sign: []const u8 = "";
++        if (digits.len > 0 and (digits[0] == '-' or digits[0] == '+')) {
++            sign = digits[0..1];
++            digits = digits[1..];
++        }
++        if (!isPlainDecimal(digits) or digits.len < int_group_threshold) {
++            try fmt.pushVerbatim(text);
++            return;
++        }
++        try fmt.pushVerbatim(sign);
++        // Emit a separator before every whole group of three remaining digits.
++        var index: usize = 0;
++        while (index < digits.len) : (index += 1) {
++            const remaining = digits.len - index;
++            if (index != 0 and remaining % 3 == 0) {
++                try fmt.push('_');
++            }
++            try fmt.push(digits[index]);
++        }
++    }
++
++    fn isPlainDecimal(digits: []const u8) bool {
++        if (digits.len == 0) return false;
++        // A based literal keeps its own grouping conventions.
++        if (digits.len > 1 and digits[0] == '0') {
++            const marker = digits[1];
++            if (marker == 'x' or marker == 'X' or marker == 'b' or marker == 'B' or marker == 'o' or marker == 'O') {
++                return false;
++            }
++        }
++        for (digits) |byte| {
++            // An existing underscore means the author already chose a grouping.
++            if (byte < '0' or byte > '9') return false;
++        }
++        return true;
++    }
++
+     // Pipe-target grouping is not stored as a tuple node. Restore parentheses
+     // when attaching a postfix to an expression whose grammar would otherwise
+     // absorb that postfix into its operand or body. Numeric receivers also need

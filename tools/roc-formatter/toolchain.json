@@ -1,0 +1,22 @@
+{
+  "roc_version": "nightly-2026-09-12-220fd47",
+  "roc_binary_sha256": "beb452f23cdd099c416e2c05e5e8a20fa9d07a25a86cd33620f7f4765f510c23",
+  "roc_source_archive": "https://github.com/roc-lang/nightlies/releases/download/nightly-2026-09-12-220fd47/roc_nightly-source-2026-09-12-220fd47.tar.gz",
+  "roc_source_archive_sha256": "d25cbd3f9cf012a08d734daf1c6d917b9d997e3943376103943109be01570b4d",
+  "roc_source_commit": "220fd4709ea8c96e88ad83cdf4447048418f9045",
+  "patch_sha256": "bdc1a7a89284bd5fc2ec3bc88cd33b03dc76c0c92d6800ab71a6f2c3e39e2c4c",
+  "digit_grouping_patch_sha256": "78be77ab3f9d908946cf14498907d51422b893d60ca925195247c58fd89c7a09",
+  "zig_version": "0.16.0",
+  "zig_archive": "https://ziglang.org/download/0.16.0/zig-aarch64-macos-0.16.0.tar.xz",
+  "zig_archive_sha256": "b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489",
+  "target": "aarch64-macos",
+  "build_args": [
+    "build",
+    "roc",
+    "-Doptimize=ReleaseFast",
+    "-Dstrip=true",
+    "-Dcpu=apple_m1",
+    "-Dcompiler-version=nightly-2026-09-12-220fd47",
+    "-j4"
+  ]
+}

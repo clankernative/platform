@@ -1,0 +1,32 @@
+{
+  "format": 1,
+  "models": [
+    {
+      "identity": {
+        "key": "dc8079d120c94e769bdf9ddc9efeef51",
+        "prefix": "dea"
+      },
+      "table": "deals",
+      "roc_type": "Models.Deal",
+      "retired": false
+    },
+    {
+      "identity": {
+        "key": "d0b520b62d36460496fb08b452fcd4bb",
+        "prefix": "his"
+      },
+      "table": "history",
+      "roc_type": "Models.History",
+      "retired": false
+    },
+    {
+      "identity": {
+        "key": "fad09ee38d314ffbb1cba77b059686b7",
+        "prefix": "sta"
+      },
+      "table": "stages",
+      "roc_type": "Models.Stage",
+      "retired": false
+    }
+  ]
+}

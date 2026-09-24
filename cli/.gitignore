@@ -1,0 +1,15 @@
+.cache/
+day2
+day2-host
+day2-workflows
+day2-workflows.json
+xtask
+distribution.json
+target/
+verify
+day2-sandbox
+day2-sandbox-probe
+day2-compiler-sandbox
+LICENSE
+THIRD-PARTY-NOTICES.txt
+dependency-inventory.json

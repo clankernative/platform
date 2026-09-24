@@ -1,0 +1,9 @@
+# Expected diagnostic: parser_for
+import Names
+main! : List(OsStr.OsStr) => Try({}, [Exit(I32)])
+main! = |_| {
+	decoded : Try(Names.App, [InvalidJson(Str)])
+	decoded = Json.parse("\"INVALID\"")
+	app_name = decoded.map_err(|_| Exit(2))?
+	Stdout.line!(app_name.to_str()).map_err(|_| Exit(1))
+}

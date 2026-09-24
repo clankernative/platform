@@ -1,0 +1,25 @@
+{
+  "required_status_checks": {
+    "strict": true,
+    "contexts": [
+      "secrets",
+      "dependencies",
+      "verify",
+      "infrastructure (cluster)",
+      "infrastructure (app-edge)",
+      "infrastructure (day2-app)",
+      "infrastructure (qualification-runner)"
+    ]
+  },
+  "enforce_admins": true,
+  "required_pull_request_reviews": {
+    "dismiss_stale_reviews": true,
+    "required_approving_review_count": 1,
+    "require_last_push_approval": true
+  },
+  "restrictions": null,
+  "required_linear_history": true,
+  "required_conversation_resolution": true,
+  "allow_force_pushes": false,
+  "allow_deletions": false
+}

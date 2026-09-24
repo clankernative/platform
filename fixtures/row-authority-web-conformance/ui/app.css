@@ -1,0 +1,16 @@
+:root { color: #17211e; background: #f4f6f5; font-family: system-ui, sans-serif; letter-spacing: 0; }
+body { margin: 0; }
+.workspace { max-width: 880px; padding: 32px 24px; margin: auto; }
+header { display: flex; align-items: center; justify-content: space-between; gap: 24px; }
+h1 { font-size: 28px; }
+h2 { font-size: 20px; }
+section { border-top: 1px solid #d6ded9; padding-block: 20px; }
+a { color: #175d45; overflow-wrap: anywhere; }
+form { display: grid; gap: 10px; max-width: 480px; }
+input, button { box-sizing: border-box; font: inherit; border: 1px solid #9eaaa4; border-radius: 4px; padding: 10px 12px; min-width: 0; }
+button { background: #175d45; color: white; cursor: pointer; }
+ul { list-style: none; padding: 0; }
+.link-row { display: flex; justify-content: space-between; gap: 20px; padding-block: 14px; border-bottom: 1px solid #d6ded9; }
+.owner, dt { color: #526159; }
+dd { margin: 4px 0 16px; overflow-wrap: anywhere; }
+@media (max-width: 600px) { header, .link-row { align-items: start; flex-direction: column; gap: 8px; } .workspace { padding: 20px 16px; } }

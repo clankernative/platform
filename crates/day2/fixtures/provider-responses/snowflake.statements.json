@@ -1,0 +1,22 @@
+{
+  "resultSetMetaData": {
+    "numRows": 4,
+    "format": "jsonv2",
+    "rowType": [
+      { "name": "COLUMN1", "database": "", "schema": "", "table": "", "scale": null,
+        "precision": null, "length": 4, "type": "text", "nullable": false,
+        "byteLength": 16, "collation": null },
+      { "name": "COLUMN2", "database": "", "schema": "", "table": "\"VALUES\"", "scale": 0,
+        "precision": 1, "length": null, "type": "fixed", "nullable": false,
+        "byteLength": null, "collation": null }
+    ],
+    "partitionInfo": [{ "rowCount": 4, "uncompressedSize": 1438 }]
+  },
+  "data": [["test", "2"], ["test", "3"], ["test", "4"], ["test", "5"]],
+  "code": "090001",
+  "statementStatusUrl": "/api/v2/statements/{handle}?requestId={id3}&partition=0",
+  "sqlState": "00000",
+  "statementHandle": "{handle}",
+  "message": "Statement executed successfully.",
+  "createdOn": 1620151584132
+}

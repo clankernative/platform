@@ -1,0 +1,8 @@
+# Expected diagnostic: type mismatch
+import Cli
+import Source
+main! : List(OsStr.OsStr) => Try({}, [Exit(I32)])
+main! = |_| {
+	loaded = Source.load!(Cli.Request.Help(Cli.Format.Json)).map_err(|_| Exit(5))?
+	Stdout.line!(loaded.request().parts().app_name.to_str()).map_err(|_| Exit(1))
+}

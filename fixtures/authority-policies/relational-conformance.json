@@ -1,0 +1,93 @@
+{
+  "version": 1,
+  "admins": [],
+  "operations": {
+    "deals.seed": {
+      "actors": [
+        "alice",
+        "developer"
+      ],
+      "mode": {
+        "kind": "current_state"
+      },
+      "models": {
+        "stages": {
+          "read": true,
+          "create": true,
+          "rows": {
+            "kind": "all"
+          }
+        },
+        "deals": {
+          "read": true,
+          "create": true,
+          "rows": {
+            "kind": "all"
+          }
+        }
+      }
+    },
+    "deals.move": {
+      "actors": [
+        "alice",
+        "developer"
+      ],
+      "mode": {
+        "kind": "current_state"
+      },
+      "models": {
+        "stages": {
+          "read": true,
+          "update_fields": [
+            "deal_count"
+          ],
+          "rows": {
+            "kind": "all"
+          }
+        },
+        "deals": {
+          "read": true,
+          "update_fields": [
+            "stage_id"
+          ],
+          "rows": {
+            "kind": "all"
+          }
+        },
+        "history": {
+          "read": true,
+          "create": true,
+          "rows": {
+            "kind": "all"
+          }
+        }
+      }
+    },
+    "deals.list": {
+      "actors": [
+        "alice",
+        "developer",
+        "viewer"
+      ],
+      "mode": {
+        "kind": "read"
+      },
+      "models": {
+        "deals": {
+          "read": true,
+          "rows": {
+            "kind": "all"
+          }
+        }
+      }
+    }
+  },
+  "constraints": {
+    "deals": {
+      "title": {
+        "nonempty": true,
+        "max_bytes": 200
+      }
+    }
+  }
+}

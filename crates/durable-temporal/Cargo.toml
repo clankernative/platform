@@ -1,0 +1,22 @@
+[package]
+name = "durable-temporal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = "1.0"
+futures = "0.3"
+serde = { version = "1.0", features = ["derive"] }
+temporalio-sdk = { version = "=1.0.0", default-features = false }
+temporalio-client = { version = "=1.0.0", default-features = false, features = ["vendored-protox"] }
+temporalio-common = { version = "=1.0.0", default-features = false }
+temporalio-macros = "=1.0.0"
+temporalio-workflow = "=1.0.0"
+tokio = { version = "1", features = ["rt-multi-thread", "time", "macros", "sync"] }
+url = "2.5"
+
+[dev-dependencies]
+rusqlite = { version = "=0.40.2", features = ["bundled"] }
+serde_json = "1.0"
+tempfile = "3.27"

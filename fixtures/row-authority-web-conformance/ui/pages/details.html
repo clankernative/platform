@@ -1,0 +1,16 @@
+<div id="owned-link-details" class="workspace" data-link-id="{{ link.id }}" data-version="{{ link.version }}">
+  <nav aria-label="Breadcrumb"><a href="{{ routes.links() }}">Owned links</a></nav>
+  <header><h1>{{ link.title }}</h1></header>
+  <dl>
+    <dt>Owner</dt><dd id="link-owner">{{ link.owner }}</dd>
+    <dt>Version</dt><dd id="link-version">{{ link.version }}</dd>
+    <dt>Destination</dt><dd><a href="{{ link.destination }}" rel="noopener noreferrer">{{ link.destination }}</a></dd>
+  </dl>
+  <form data-command="links.edit" id="edit-link-form">
+    <input type="hidden" name="link_id" value="{{ link.id }}">
+    <input type="hidden" name="expected_version" value="{{ link.version }}">
+    <label for="edit-title">Title</label>
+    <input id="edit-title" type="text" name="title" value="{{ link.title }}" required maxlength="200">
+    <button type="submit">Save title</button>
+  </form>
+</div>

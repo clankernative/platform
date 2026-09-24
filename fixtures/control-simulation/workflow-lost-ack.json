@@ -1,0 +1,13 @@
+{
+  "format": 1,
+  "seed": 12,
+  "actions": [
+    {"action":"claim","build":0,"slot":0}, {"action":"perform","slot":0,"fault":"none"}, {"action":"settle","slot":0},
+    {"action":"claim","build":0,"slot":0}, {"action":"perform","slot":0,"fault":"none"}, {"action":"settle","slot":0},
+    {"action":"claim","build":0,"slot":0}, {"action":"perform","slot":0,"fault":"none"}, {"action":"settle","slot":0},
+    {"action":"approve","build":0,"wrong_commit":false,"wrong_tenant":false}, {"action":"release_start","build":0},
+    {"action":"release_secret","build":0,"enabled":true,"access":true,"ready":true,"delay":0},
+    {"action":"release_claim","build":0,"slot":0}, {"action":"release_perform","slot":0,"fault":"lost_ack"},
+    {"action":"restart"}
+  ]
+}

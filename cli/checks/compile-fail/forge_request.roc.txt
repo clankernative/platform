@@ -1,0 +1,9 @@
+# Expected diagnostic: cannot use opaque nominal type
+import Cli
+import Names
+main! : List(OsStr.OsStr) => Try({}, [Exit(I32)])
+main! = |_| {
+	app_name = Names.App.from_str("links").map_err(|_| Exit(2))?
+	request = Cli.Describe.{ app_name, source: Cli.Source.Demo, filter: Cli.Filter.All, format: Cli.Format.Json }
+	Stdout.line!(Json.to_str(Cli.arguments(Cli.Request.Describe(request)))).map_err(|_| Exit(1))
+}

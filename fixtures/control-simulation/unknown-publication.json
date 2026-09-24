@@ -1,0 +1,15 @@
+{
+  "format": 1,
+  "seed": 2,
+  "actions": [
+    {"action":"claim","build":0,"slot":0},
+    {"action":"perform","slot":0,"fault":"none"},
+    {"action":"settle","slot":0},
+    {"action":"claim","build":0,"slot":0},
+    {"action":"perform","slot":0,"fault":"none"},
+    {"action":"settle","slot":0},
+    {"action":"claim","build":0,"slot":0},
+    {"action":"restart"},
+    {"action":"cancel","build":0}
+  ]
+}

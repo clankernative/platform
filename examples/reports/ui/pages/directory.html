@@ -1,0 +1,16 @@
+<div id="reports-app">
+  <header class="app-header"><a class="brand" href="{{ routes.reports() }}"><img src="{{ asset('report') }}" width="24" height="24" alt="">Reports</a><span>{{ company.name }}</span><a href="{{ platform.audit() }}">Audit log</a></header>
+  <main class="workspace">
+    <div id="reports-heading" data-live class="page-heading"><h1>Document reports</h1><span>{{ reports.items | length }} on this page</span></div>
+    <div class="workspace-grid">
+      <section id="reports-list" data-live aria-label="Reports">
+        <div class="table-heading"><span>DOCUMENT</span><span>STATUS</span></div>
+        {% for report in reports.items %}
+        <a class="report-row" href="{{ routes.report(report_id=report.id) }}"><div><strong>{{ report.title }}</strong><p>Revision {{ report.version }}</p></div>{% if report.ready %}<span class="status complete">Complete</span>{% else %}<span class="status pending">Awaiting result</span>{% endif %}</a>
+        {% else %}<p class="empty">No reports yet.</p>{% endfor %}
+        {% if reports.has_more %}<a class="next" href="{{ routes.reports(after=reports.next_after, limit=20) }}">Next page</a>{% endif %}
+      </section>
+      <aside class="new-report"><h2>New report</h2><form id="create-report" data-command="reports.submit" class="command"><label for="title">Title</label><input id="title" type="text" name="title"><label for="text">Document</label><textarea id="text" name="text" rows="9"></textarea><button type="submit"><img src="{{ asset('report') }}" width="18" height="18" alt="">Create report</button></form></aside>
+    </div>
+  </main>
+</div>

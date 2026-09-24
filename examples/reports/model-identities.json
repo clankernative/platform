@@ -1,0 +1,14 @@
+{
+  "format": 1,
+  "models": [
+    {
+      "identity": {
+        "key": "342f890e3d24160272d016b75febb97d",
+        "prefix": "rep"
+      },
+      "table": "reports",
+      "roc_type": "Models.Report",
+      "retired": false
+    }
+  ]
+}

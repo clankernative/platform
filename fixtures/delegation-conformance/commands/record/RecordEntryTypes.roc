@@ -1,0 +1,3 @@
+RecordEntryTypes :: [].{
+	Input := { note : Str }
+}

@@ -1,0 +1,14 @@
+{
+  "format": 1,
+  "models": [
+    {
+      "identity": {
+        "key": "a38d6eba4d17b9ff48986e409e1ae553",
+        "prefix": "lin"
+      },
+      "table": "links",
+      "roc_type": "Models.Link",
+      "retired": false
+    }
+  ]
+}

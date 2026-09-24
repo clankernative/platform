@@ -1,0 +1,205 @@
+{
+  "version": 1,
+  "admins": [
+    "admin"
+  ],
+  "operations": {
+    "reports.submit": {
+      "actors": [
+        "developer",
+        "alice",
+        "bob",
+        "admin"
+      ],
+      "mode": {
+        "kind": "current_state"
+      },
+      "models": {
+        "reports": {
+          "read": true,
+          "create": true,
+          "rows": {
+            "kind": "owner_or_admin",
+            "field": "owner"
+          }
+        }
+      },
+      "commands": [
+        "reports.analyze"
+      ]
+    },
+    "reports.revise": {
+      "actors": [
+        "developer",
+        "alice",
+        "bob",
+        "admin"
+      ],
+      "mode": {
+        "kind": "edit",
+        "model": "reports",
+        "id_field": "report_id",
+        "version_field": "expected_version"
+      },
+      "models": {
+        "reports": {
+          "read": true,
+          "update_fields": [
+            "text",
+            "ready",
+            "bytes",
+            "lines",
+            "announced"
+          ],
+          "rows": {
+            "kind": "owner_or_admin",
+            "field": "owner"
+          }
+        }
+      },
+      "commands": [
+        "reports.analyze"
+      ]
+    },
+    "reports.list": {
+      "actors": [
+        "developer",
+        "alice",
+        "bob",
+        "admin",
+        "viewer"
+      ],
+      "mode": {
+        "kind": "read"
+      },
+      "models": {
+        "reports": {
+          "read": true,
+          "rows": {
+            "kind": "owner_or_admin",
+            "field": "owner"
+          }
+        }
+      }
+    },
+    "reports.detail": {
+      "actors": [
+        "developer",
+        "alice",
+        "bob",
+        "admin",
+        "viewer"
+      ],
+      "mode": {
+        "kind": "read"
+      },
+      "models": {
+        "reports": {
+          "read": true,
+          "rows": {
+            "kind": "owner_or_admin",
+            "field": "owner"
+          }
+        }
+      },
+      "observations": [
+        "notifications.latest.v1"
+      ]
+    },
+    "reports.analyze": {
+      "actors": [
+        "developer",
+        "alice",
+        "bob",
+        "admin"
+      ],
+      "mode": {
+        "kind": "edit",
+        "model": "reports",
+        "id_field": "report_id",
+        "version_field": "expected_version"
+      },
+      "models": {
+        "reports": {
+          "read": true,
+          "update_fields": [
+            "ready",
+            "bytes",
+            "lines"
+          ],
+          "rows": {
+            "kind": "owner_or_admin",
+            "field": "owner"
+          }
+        }
+      },
+      "commands": [
+        "reports.notify"
+      ]
+    },
+    "reports.notify": {
+      "actors": [
+        "developer",
+        "alice",
+        "bob",
+        "admin"
+      ],
+      "mode": {
+        "kind": "current_state"
+      },
+      "observations": [
+        "notifications.recipient.v1"
+      ],
+      "effects": [
+        "notifications.send.v1"
+      ],
+      "models": {
+        "reports": {
+          "read": true,
+          "rows": {
+            "kind": "owner_or_admin",
+            "field": "owner"
+          },
+          "update_fields": [
+            "announced"
+          ]
+        }
+      }
+    },
+    "reports.sweep": {
+      "actors": [
+        "developer",
+        "alice",
+        "bob",
+        "admin"
+      ],
+      "mode": {
+        "kind": "current_state"
+      },
+      "models": {
+        "reports": {
+          "read": true,
+          "rows": {
+            "kind": "owner_or_admin",
+            "field": "owner"
+          }
+        }
+      },
+      "commands": [
+        "reports.notify"
+      ]
+    }
+  },
+  "constraints": {
+    "reports": {
+      "title": {
+        "nonempty": true,
+        "max_bytes": 200
+      },
+      "text": {
+        "nonempty": true,
+        "max_bytes": 8000
+      }
+    }
+  }
+}

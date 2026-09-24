@@ -1,0 +1,784 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day2 Roc Style Rules</title>
+<style>
+  :root {
+    --bg: #fbfaf8;
+    --panel: #ffffff;
+    --ink: #1c1b19;
+    --ink-soft: #57544e;
+    --ink-faint: #85807a;
+    --line: #e4e0da;
+    --line-soft: #efece7;
+    --accent: #8a4b1f;
+    --accent-soft: #f3e7dc;
+    --before: #9a5b2c;
+    --before-bg: #fdf4ec;
+    --after: #2f6a45;
+    --after-bg: #eef6f0;
+    --code-bg: #f7f5f1;
+    --shadow: 0 1px 2px rgba(28,27,25,.05), 0 8px 24px -16px rgba(28,27,25,.25);
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --sans: ui-sans-serif, -apple-system, "Segoe UI", Inter, Helvetica, Arial, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #17161a;
+      --panel: #1e1d22;
+      --ink: #eeeae4;
+      --ink-soft: #b3aca3;
+      --ink-faint: #8a837b;
+      --line: #323037;
+      --line-soft: #27262c;
+      --accent: #e2a072;
+      --accent-soft: #33281f;
+      --before: #d9a06d;
+      --before-bg: #2a231c;
+      --after: #7fc79b;
+      --after-bg: #1c2722;
+      --code-bg: #242329;
+      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 8px 24px -16px rgba(0,0,0,.8);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 15px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 0 20px; }
+
+  /* ---------- header ---------- */
+  header { border-bottom: 1px solid var(--line); background: var(--panel); }
+  .masthead { padding-block: 40px 28px; }
+  .eyebrow {
+    font-size: 11px; letter-spacing: .14em; text-transform: uppercase;
+    color: var(--accent); font-weight: 600; margin: 0 0 10px;
+  }
+  h1 { font-size: 34px; line-height: 1.15; margin: 0 0 12px; letter-spacing: -.02em; }
+  .lede { font-size: 16px; color: var(--ink-soft); margin: 0; max-width: 68ch; }
+  .facts {
+    list-style: none; display: flex; flex-wrap: wrap; gap: 8px;
+    margin: 22px 0 0; padding: 0;
+  }
+  .facts li {
+    font-family: var(--mono); font-size: 11.5px; color: var(--ink-soft);
+    border: 1px solid var(--line); border-radius: 999px; padding: 4px 11px;
+    background: var(--bg);
+  }
+  .facts b { color: var(--ink); font-weight: 600; }
+
+  /* ---------- tabs ---------- */
+  .tabbar { display: flex; gap: 4px; border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 5; }
+  .tabbar .wrap { display: flex; gap: 4px; }
+  .tab {
+    appearance: none; background: none; border: 0; border-bottom: 2px solid transparent;
+    font: inherit; font-weight: 550; color: var(--ink-faint); cursor: pointer;
+    padding: 13px 14px; margin-bottom: -1px;
+  }
+  .tab:hover { color: var(--ink); }
+  .tab[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent); }
+  .tab .count {
+    font-family: var(--mono); font-size: 11px; color: var(--ink-faint);
+    background: var(--line-soft); border-radius: 5px; padding: 1px 6px; margin-left: 7px;
+  }
+
+  main { padding-block: 34px 72px; }
+  .intro { color: var(--ink-soft); max-width: 72ch; margin: 0 0 30px; }
+  .intro a { color: var(--accent); }
+
+  /* ---------- rule cards ---------- */
+  .rule {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+    padding: 24px; margin-bottom: 22px; box-shadow: var(--shadow);
+  }
+  .rule-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 4px; }
+  .rule-id {
+    font-family: var(--mono); font-size: 12px; color: var(--accent);
+    background: var(--accent-soft); border-radius: 6px; padding: 2px 8px; font-weight: 600;
+  }
+  .rule h2 { font-size: 20px; margin: 0; letter-spacing: -.01em; }
+  .status {
+    font-size: 11px; letter-spacing: .08em; text-transform: uppercase; font-weight: 700;
+    border-radius: 999px; padding: 3px 10px; border: 1px solid;
+  }
+  .status.live { color: var(--after); border-color: color-mix(in srgb, var(--after) 40%, transparent); background: var(--after-bg); }
+  .status.pending { color: var(--before); border-color: color-mix(in srgb, var(--before) 40%, transparent); background: var(--before-bg); }
+  .status.proposed { color: var(--ink-faint); border-color: var(--line); background: var(--line-soft); }
+  .rule > p { color: var(--ink-soft); max-width: 74ch; }
+  .rule > p:first-of-type { margin-top: 12px; }
+
+  .why {
+    border-left: 2px solid var(--accent); background: var(--accent-soft);
+    padding: 12px 16px; border-radius: 0 8px 8px 0; margin: 18px 0 0;
+  }
+  .why h3 {
+    font-size: 11px; letter-spacing: .12em; text-transform: uppercase;
+    margin: 0 0 6px; color: var(--accent);
+  }
+  .why p { margin: 0; color: var(--ink); font-size: 14.5px; }
+
+  /* ---------- code ---------- */
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 18px; }
+  .pair.stack { grid-template-columns: 1fr; }
+  .pane { border: 1px solid var(--line); border-radius: 9px; overflow: hidden; background: var(--code-bg); min-width: 0; }
+  .pane-label {
+    font-size: 11px; letter-spacing: .1em; text-transform: uppercase; font-weight: 700;
+    padding: 8px 12px; border-bottom: 1px solid var(--line);
+  }
+  .pane.before .pane-label { color: var(--before); background: var(--before-bg); }
+  .pane.after .pane-label { color: var(--after); background: var(--after-bg); }
+  .pane.neutral .pane-label { color: var(--ink-faint); background: var(--line-soft); }
+  .pane-label .note { float: right; text-transform: none; letter-spacing: 0; font-weight: 500; opacity: .8; }
+  pre {
+    margin: 0; padding: 12px; overflow-x: auto; tab-size: 4; -moz-tab-size: 4;
+    font-family: var(--mono); font-size: 12.5px; line-height: 1.55; color: var(--ink);
+  }
+  .caption { font-size: 13px; color: var(--ink-faint); margin: 10px 0 0; }
+
+  /* ---------- chips ---------- */
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 18px; }
+  .chip {
+    appearance: none; font: inherit; font-size: 12.5px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--bg); color: var(--ink-soft);
+    border-radius: 7px; padding: 5px 10px;
+  }
+  .chip:hover { border-color: var(--accent); color: var(--ink); }
+  .chip[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 550; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) .chip[aria-pressed="true"] { color: #1b1712; }
+  }
+
+  /* ---------- misc ---------- */
+  h3.section { font-size: 13px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-faint); margin: 38px 0 14px; }
+  .invariants { list-style: none; padding: 0; margin: 0; display: grid; gap: 10px; }
+  .invariants li {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 9px;
+    padding: 13px 16px; color: var(--ink-soft); font-size: 14.5px;
+  }
+  .invariants b { color: var(--ink); }
+  code.inline {
+    font-family: var(--mono); font-size: .88em; background: var(--code-bg);
+    border: 1px solid var(--line-soft); border-radius: 5px; padding: 1px 5px;
+  }
+  .callout {
+    border: 1px dashed var(--line); border-radius: 10px; padding: 16px 18px;
+    color: var(--ink-soft); font-size: 14.5px; background: var(--panel);
+  }
+  .callout b { color: var(--ink); }
+  footer { border-top: 1px solid var(--line); color: var(--ink-faint); font-size: 13px; padding-block: 22px 40px; }
+  footer code { font-family: var(--mono); }
+  [hidden] { display: none !important; }
+
+  @media (max-width: 760px) {
+    h1 { font-size: 27px; }
+    .pair { grid-template-columns: 1fr; }
+    .rule { padding: 18px; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap masthead">
+    <p class="eyebrow">Day2 Roc spike · platform tooling</p>
+    <h1>Roc style rules</h1>
+    <p class="lede">
+      Roc's formatter is deliberately not configurable and the pinned compiler has no lint-plugin API,
+      so our house style lives in a small reviewed patch against the native Zig formatter — not a second
+      parser, a regex pass, or an SDK capability. These are the rules that patch adds, what they change,
+      and why we took each one on.
+    </p>
+    <ul class="facts">
+      <li>Base <b>nightly-2026-09-12-220fd47</b></li>
+      <li>Changed file <b>src/fmt/fmt.zig</b></li>
+      <li>Width <b>120 cols</b></li>
+      <li>Native tests <b>113</b></li>
+      <li>Binary <b>96990ffb…c73e2a9a0</b></li>
+    </ul>
+  </div>
+</header>
+
+<nav class="tabbar">
+  <div class="wrap">
+    <button class="tab" id="tab-fmt" role="tab" aria-selected="true" aria-controls="panel-fmt">Formatting <span class="count">4 live</span></button>
+    <button class="tab" id="tab-lint" role="tab" aria-selected="false" aria-controls="panel-lint">Linting <span class="count">0 live</span></button>
+  </div>
+</nav>
+
+<main class="wrap">
+
+<!-- ======================= FORMATTING ======================= -->
+<section id="panel-fmt" role="tabpanel" aria-labelledby="tab-fmt">
+
+  <p class="intro">
+    Delivered by <code class="inline">.toolchains/roc-fmt-day2</code>, a separately installed formatting
+    binary. It is never substituted for the application compiler. Every <em>after</em> pane below is the
+    literal output of the installed binary; every <em>upstream</em> pane is the literal output of the
+    unpatched <code class="inline">roc fmt</code> at the same commit.
+  </p>
+
+  <!-- RULE 1 -->
+  <article class="rule">
+    <div class="rule-head">
+      <span class="rule-id">FMT-1</span>
+      <h2>Wrap at 120 columns</h2>
+      <span class="status live">Implemented</span>
+    </div>
+    <p>
+      No line exceeds 120 columns, indentation included. Tabs advance to four-column tab stops and a UTF-8
+      code point counts as one column. The formatter renders into a buffer, measures the actual columns it
+      produced, and expands one explicit AST syntax group at a time until the output fits. It never reparses
+      rewritten text or guesses from source-line lengths, and each retry expands a previously compact group,
+      so the process terminates.
+    </p>
+    <p>
+      Upstream's formatter has no width policy at all: it preserves whatever the author wrote on one line.
+      Pick a category to see the same input through both.
+    </p>
+
+    <div class="chips" id="width-chips"></div>
+    <div id="width-example"></div>
+
+    <div class="why">
+      <h3>Why we did it</h3>
+      <p>
+        The first example is the case the width rule was built around: the platform's
+        <code class="inline">CommandDef</code> record, which upstream leaves as a single 250-column line. Review happens in side-by-side diffs and terminal
+        panes, and a rule that only some editors soft-wrap produces diffs nobody can read and merge conflicts
+        that span an entire declaration. Fixing the width in the formatter rather than in a style guide means
+        nobody negotiates it per file, and <code class="inline">fmt --check</code> makes it a build fact rather
+        than review commentary.
+      </p>
+    </div>
+  </article>
+
+  <!-- RULE 2 -->
+  <article class="rule">
+    <div class="rule-head">
+      <span class="rule-id">FMT-2</span>
+      <h2>Blank line between associated definition groups</h2>
+      <span class="status live">Implemented</span>
+    </div>
+    <p>
+      Inside an associated block — <code class="inline">Type :: … .{ … }</code> — each definition group is
+      separated by one blank line. A matching signature and its implementation are one group and stay
+      welded together. Constants, unannotated methods and nested types are groups too. The patch reuses the
+      native formatter's own <code class="inline">DefInfo</code> and
+      <code class="inline">isPairedAnnoDecl</code> grouping, which upstream already applies to top-level
+      definitions, and extends it to the associated-statement loop; it is parser-driven, not line matching.
+    </p>
+
+    <div class="pair">
+      <div class="pane before"><div class="pane-label">Before</div><pre>Methods :: [].{
+first : I64 -> I64
+first = |value| value
+second : I64 -> I64
+second = |value| value
+}</pre></div>
+      <div class="pane after"><div class="pane-label">After <span class="note">roc-fmt-day2</span></div><pre>Methods :: [].{
+	first : I64 -> I64
+	first = |value| value
+
+	second : I64 -> I64
+	second = |value| value
+}</pre></div>
+    </div>
+    <p class="caption">Upstream indents the block but leaves all four lines flush, so the two methods read as one wall of text.</p>
+
+    <div class="pair">
+      <div class="pane neutral"><div class="pane-label">Upstream <span class="note">roc fmt</span></div><pre>Methods :: [].{
+	constant = 42
+	first = |value| value
+	second = |value| value
+}</pre></div>
+      <div class="pane after"><div class="pane-label">After <span class="note">roc-fmt-day2</span></div><pre>Methods :: [].{
+	constant = 42
+
+	first = |value| value
+
+	second = |value| value
+}</pre></div>
+    </div>
+    <p class="caption">Unannotated methods and constants are separate groups; the rule does not depend on a signature being present.</p>
+
+    <div class="pair">
+      <div class="pane neutral"><div class="pane-label">Upstream <span class="note">roc fmt</span></div><pre>Methods :: [].{
+	Nested :: [].{
+		first = 1
+		second = 2
+	}
+	Empty :: [].{}
+	last = 3
+}</pre></div>
+      <div class="pane after"><div class="pane-label">After <span class="note">roc-fmt-day2</span></div><pre>Methods :: [].{
+	Nested :: [].{
+		first = 1
+
+		second = 2
+	}
+
+	Empty :: [].{}
+
+	last = 3
+}</pre></div>
+    </div>
+    <p class="caption">Nesting recurses. An empty associated block stays on one line and is still a group of its own.</p>
+
+    <div class="why">
+      <h3>Why we did it</h3>
+      <p>
+        Roc's associated blocks are where the platform's command and capability surfaces are defined, and they
+        get long. Upstream already spaces top-level definitions this way, so compact associated blocks were an
+        inconsistency in the same file rather than a deliberate style. Making the pair the unit — never
+        splitting an annotation from its body — is what makes the blank line mean "new definition" instead of
+        "new line of text". We deliberately did not add a maximum-spacing rule: an existing blank line inside a
+        signature/body pair keeps upstream's behavior, so the patch stays small enough to propose upstream.
+      </p>
+    </div>
+  </article>
+
+  <!-- RULE 3 -->
+  <article class="rule">
+    <div class="rule-head">
+      <span class="rule-id">FMT-3</span>
+      <h2>Comments keep their owner — including in empty blocks</h2>
+      <span class="status live">Implemented</span>
+    </div>
+    <p>
+      A leading comment belongs to the definition below it and moves with it across the inserted blank line.
+      A trailing inline comment stays attached to the expression it follows, and a block's closing comment
+      stays at the end. Separately, a comment-only associated block retains its comments — upstream silently
+      deletes them.
+    </p>
+
+    <div class="pair">
+      <div class="pane before"><div class="pane-label">Before</div><pre>Empty :: [].{}
+
+Comments :: [].{
+# No definitions
+}</pre></div>
+      <div class="pane neutral"><div class="pane-label">Upstream <span class="note">comment lost</span></div><pre>Empty :: [].{}
+
+Comments :: [].{}</pre></div>
+    </div>
+    <div class="pair stack">
+      <div class="pane after"><div class="pane-label">After <span class="note">roc-fmt-day2</span></div><pre>Empty :: [].{}
+
+Comments :: [].{
+	# No definitions
+}</pre></div>
+    </div>
+    <p class="caption">The upstream pane is real output, not a hypothetical: formatting that file with the stock compiler destroys the comment.</p>
+
+    <div class="pair">
+      <div class="pane before"><div class="pane-label">Before</div><pre># First method
+first : I64 -> I64
+first = |value| value # First implementation
+# Second method
+second : I64 -> I64
+second = |value| value
+# End of methods</pre></div>
+      <div class="pane after"><div class="pane-label">After <span class="note">roc-fmt-day2</span></div><pre>	# First method
+	first : I64 -> I64
+	first = |value| value # First implementation
+
+	# Second method
+	second : I64 -> I64
+	second = |value| value
+	# End of methods</pre></div>
+    </div>
+    <p class="caption">The blank line opens <em>above</em> <code class="inline"># Second method</code>, not between it and its method. The trailing <code class="inline"># End of methods</code> is not orphaned onto a new group.</p>
+
+    <div class="why">
+      <h3>Why we did it</h3>
+      <p>
+        A whitespace rule that silently relocates or deletes comments is worse than no rule — it makes people
+        distrust the formatter and turn it off. The dropped comment-only block is upstream behavior, and losing a
+        comment is a worse outcome than any spacing gain. The comment-aware separator
+        (<code class="inline">flushCommentsBeforeMin</code>) was already in the native formatter, so keeping
+        ownership correct cost us almost nothing.
+      </p>
+    </div>
+  </article>
+
+  <!-- RULE 4 -->
+  <article class="rule">
+    <div class="rule-head">
+      <span class="rule-id">FMT-4</span>
+      <h2>Never break unbreakable content</h2>
+      <span class="status live">Implemented</span>
+    </div>
+    <p>
+      Strings, URLs, comments and identifiers that cannot be split without changing what they mean are left
+      intact and may exceed 120 columns. The formatter only expands at legal parser boundaries; it is not a
+      literal rewriter and not a comment reflow tool. There is no configurable width and no escape directive
+      such as <code class="inline">fmt: off</code>.
+    </p>
+
+    <div class="pair stack">
+      <div class="pane after"><div class="pane-label">After <span class="note">124 columns, left alone</span></div><pre># https://example.com/segment/segment/segment/segment/segment/segment/segment/segment/segment/segment/segment/segment/
+value =
+	"https://example.com/segment/segment/segment/segment/segment/segment/segment/segment/segment/segment/segment/segment/"</pre></div>
+    </div>
+    <p class="caption">The binding is still expanded onto its own line — everything that <em>can</em> legally break does — but the literal itself is untouched.</p>
+
+    <div class="pair stack">
+      <div class="pane neutral"><div class="pane-label">Exactly 120 columns <span class="note">unchanged</span></div><pre>escalation = { primary_oncall: "platform", secondary_oncall: "control-plane", policy: "page-then-escalate", retries: 3 }</pre></div>
+      <div class="pane after"><div class="pane-label">121 columns <span class="note">one character longer</span></div><pre>escalation =
+	{ primary_oncall: "platform", secondary_oncall: "control-plane", policy: "page-then-escalate-", retries: 3 }</pre></div>
+    </div>
+    <p class="caption">The boundary is exact and regression-tested at 120 versus 121 columns, with tab stops and Unicode counting covered separately. Note how little moves: only the outermost group is expanded, and the record body stays inline because that alone is enough to fit.</p>
+
+    <div class="why">
+      <h3>Why we did it</h3>
+      <p>
+        A width rule that is allowed to edit literal content can change program behavior or break a URL in a
+        doc comment, which is precisely the failure that makes teams distrust an auto-formatter. Refusing the
+        break — and leaving one long line in the file — is the honest outcome. Refusing an escape directive is
+        the same choice Roc made upstream: a per-file opt-out turns one rule into a negotiation on every review.
+      </p>
+    </div>
+  </article>
+
+  <!-- RULE 5 -->
+  <article class="rule">
+    <div class="rule-head">
+      <span class="rule-id">FMT-5</span>
+      <h2>Digit grouping for long integer literals</h2>
+      <span class="status pending">Authored · not in installed binary</span>
+    </div>
+    <p>
+      A plain decimal literal of five digits or more is rewritten with underscore separators every three
+      digits. Four digits are left alone — those are usually years, ports or small counts that read better
+      ungrouped. A literal that already contains an underscore is the author's chosen grouping and is kept
+      exactly as written, and a based literal (<code class="inline">0x</code>, <code class="inline">0b</code>,
+      <code class="inline">0o</code>) is left alone rather than grouped by the wrong convention.
+    </p>
+
+    <div class="pair">
+      <div class="pane before"><div class="pane-label">Before</div><pre>a = 1234
+b = 12345
+c = 1234567
+d = 0xDEADBEEF
+e = 12_345</pre></div>
+      <div class="pane after"><div class="pane-label">Intended <span class="note">per the patch</span></div><pre>a = 1234
+b = 12_345
+c = 1_234_567
+d = 0xDEADBEEF
+e = 12_345</pre></div>
+    </div>
+
+    <div class="callout" style="margin-top:16px">
+      <b>Status check.</b> <code class="inline">integer-digit-grouping.patch</code> is committed and its digest
+      is pinned in <code class="inline">toolchain.json</code> as a build input, and
+      <code class="inline">build-formatter</code> applies it after the spacing patch. The currently installed
+      binary predates it — running it on the input above changes nothing — and
+      <code class="inline">roc_binary_sha256</code> still points at the spacing-only build, so a rebuild with
+      both patches will not match the pin. This rule needs a rebuild, review and a new binary pin before it is
+      real. The "intended" pane above is read from the patch, not from a run.
+    </div>
+
+    <div class="why">
+      <h3>Why we did it</h3>
+      <p>
+        Magnitude errors in literals are the kind of bug that survives review because
+        <code class="inline">10000000</code> and <code class="inline">100000000</code> look identical at a
+        glance — and the platform's limits, budgets and timeouts are written as bare integers. Grouping makes
+        an order-of-magnitude slip visible without anyone counting digits. Leaving authored underscores and
+        based literals alone keeps the rule from fighting deliberate choices such as byte masks.
+      </p>
+    </div>
+  </article>
+
+  <h3 class="section">Invariants every rule is held to</h3>
+  <ul class="invariants">
+    <li><b>The parse tree does not change.</b> Regression tests serialize the AST before and after formatting, ignoring source positions, and require them to be identical. Formatting is whitespace policy, never a semantic edit.</li>
+    <li><b>Formatting is idempotent.</b> Formatting an already formatted file produces byte-identical output; the width pass re-runs the check after every expansion.</li>
+    <li><b>Check mode never writes.</b> <code class="inline">fmt --check</code> rejects compact definitions and overlong code without touching bytes, so it is safe in CI and in pre-commit paths.</li>
+    <li><b>Input that does not parse is rejected.</b> Malformed source fails in both check and write mode and keeps its original bytes.</li>
+    <li><b>The toolchain is pinned end to end.</b> Source commit, archive digest, Zig distribution, patch digests and the resulting binary hash are recorded in <code class="inline">toolchain.json</code>; <code class="inline">xtask fmt</code> verifies them before invoking anything, and a source build is never silently treated as a reviewed release.</li>
+    <li><b>The formatter is not the compiler.</b> <code class="inline">.toolchains/roc</code> stays the unmodified application compiler for admission and glue; <code class="inline">.toolchains/roc-fmt-day2</code> only formats.</li>
+  </ul>
+
+  <h3 class="section">Running it</h3>
+  <div class="pane neutral" style="border-radius:9px">
+    <div class="pane-label">From <span class="note">platform/</span></div>
+    <pre>cargo run --locked -p xtask -- bootstrap-formatter   # verify pins, install reviewed binary
+cargo run --locked -p xtask -- fmt-reports          # format platform sources + Reports
+cargo run --locked -p xtask -- fmt-check-reports    # non-zero exit if anything is unformatted
+cargo test --locked -p xtask formatter_native -- --ignored
+
+# editor: external format command, document on stdin
+.toolchains/roc-fmt-day2 fmt --stdin</pre>
+  </div>
+  <p class="caption">
+    Platform verification enforces formatting. Per-app isolated CI and build admission do not invoke this
+    formatter yet — that gate is still planned, not delivered.
+  </p>
+
+</section>
+
+<!-- ======================= LINTING ======================= -->
+<section id="panel-lint" role="tabpanel" aria-labelledby="tab-lint" hidden>
+
+  <p class="intro">
+    Short answer: <b>we have no custom Roc lint rules today.</b> One diagnostic is specified in detail and
+    deliberately not implemented, and the <code class="inline">verify-lint</code> step you see in the pipeline
+    is Rust linting, not Roc. This tab records both so the gap stays visible rather than being mistaken for
+    coverage.
+  </p>
+
+  <article class="rule">
+    <div class="rule-head">
+      <span class="rule-id">LINT-1</span>
+      <h2><code class="inline" style="font-size:.85em">day2.definition-before-reference</code></h2>
+      <span class="status proposed">Proposed · not implemented</span>
+    </div>
+    <p>
+      References to named, function-valued definitions in the same module must appear after the implementation.
+      That includes references passed as callbacks, not just calls: a signature above a use does not make an
+      implementation below that use count as already defined. The rule would apply to module helpers and
+      associated methods alike.
+    </p>
+    <p>
+      Direct self-recursion inside the current definition is allowed. Forward sibling references are rejected,
+      which also rejects mutually recursive groups. Imports are exempt from the line-order comparison — two
+      different files have no meaningful textual order — and Roc's existing local use-before-definition
+      diagnostics stay as they are.
+    </p>
+
+    <div class="pair stack">
+      <div class="pane before"><div class="pane-label">Would be rejected</div><pre># Rejected even though complete is passed as a value, not called here.
+analyze = register_command(complete)
+
+complete : Input -> Output
+complete = |input| transform(input)</pre></div>
+      <div class="pane after"><div class="pane-label">Fix</div><pre>complete : Input -> Output
+complete = |input| transform(input)
+
+analyze = register_command(complete)</pre></div>
+    </div>
+    <p class="caption">Schematic — <code class="inline">register_command</code> is not a new SDK capability. The fix moves the whole signature-and-implementation group above its use; the rule would not reorder anything automatically.</p>
+
+    <div class="why">
+      <h3>Why we wanted it</h3>
+      <p>
+        Reading a Roc module top to bottom should not require jumping forward to find out what a name means.
+        Our command and capability modules are long and heavily callback-driven, where a forward reference is
+        easy to introduce and hard to see in review. Rejecting mutual recursion as a side effect is intentional rather
+        than incidental: direct self-recursion stays allowed, and a mutually recursive helper pair is treated as a
+        sign that a module wants splitting.
+      </p>
+    </div>
+
+    <div class="why" style="border-left-color: var(--before); background: var(--before-bg)">
+      <h3 style="color: var(--before)">Why it is not implemented</h3>
+      <p>
+        It cannot be done honestly at the level we have access to. Getting it right needs the compiler's own
+        binding analysis: declaration identities retained through canonicalization, the actual binder behind
+        every reference including callbacks and unused branches, and resolved dispatch targets for receiver
+        calls like <code class="inline">value.transform()</code> — otherwise a local parameter that shares a
+        name with a module function, or a same-named method on an unrelated type, reads as a violation.
+        <code class="inline">checked-types.json</code> exports type shapes, not resolved source-reference
+        identities, and the LSP symbol list is not a substitute. The verification receipt records this
+        explicitly as <code class="inline">"not implemented; pinned compiler metadata is insufficient"</code>
+        rather than shipping a regex approximation that would be wrong on exactly the cases that matter.
+      </p>
+    </div>
+  </article>
+
+  <article class="rule">
+    <div class="rule-head">
+      <span class="rule-id">NOTE</span>
+      <h2>What <code class="inline" style="font-size:.8em">verify-lint</code> actually runs</h2>
+      <span class="status live">Implemented</span>
+    </div>
+    <p>
+      The <code class="inline">verify-lint</code> step invoked by <code class="inline">ops/Verify.roc</code> is
+      <code class="inline">cargo clippy --locked --workspace --all-targets -- -D warnings</code>. It lints the
+      Rust platform crates and accepts no overrides. It says nothing about Roc source.
+    </p>
+    <p>
+      Roc source is covered today by formatting checks and by the platform's verification fixtures — not by any
+      Roc-level semantic lint.
+    </p>
+  </article>
+
+  <h3 class="section">Why there is no plugin instead</h3>
+  <div class="callout">
+    Roc's formatter is intentionally not configurable, and the pinned compiler exposes no lint-plugin API. A
+    Roc platform's runtime capability surface cannot install compiler diagnostics or formatting rules either,
+    so an app-side hook is not available in principle. That leaves three options, and we chose the first:
+    <b>maintain a small reviewed patch set against the pinned compiler</b>; write a second Roc parser and infer
+    bindings from source text, which would disagree with the real compiler exactly where it matters; or build an
+    external tool against the compiler's internals, which depends on unstable structures and still needs
+    integration work to keep editor and build results equal. A formatter-only binary also cannot enforce a
+    semantic rule — that has to reach compilation and admission, which is why LINT-1 is a bigger commitment
+    than any of the formatting rules.
+  </div>
+
+  <h3 class="section">What delivering LINT-1 would require</h3>
+  <ul class="invariants">
+    <li><b>Pin the rule, not just the compiler.</b> Source commit, patch-set digest, build inputs and binary hash are pinned; app developers cannot supply plugins, compiler flags or rule toggles.</li>
+    <li><b>Check the authored snapshot.</b> Run the diagnostic against the exact source accepted by a build, including authored SDK and fixture code. Exempt only host-proven generated or vendored inputs — not any directory that happens to be named <code class="inline">generated</code>.</li>
+    <li><b>Put the rule version in cache identity.</b> A clean result from an older rule set must not admit a build under a newer one; invalidate or recheck the admitted bytes.</li>
+    <li><b>One tool everywhere.</b> The same pinned binary in <code class="inline">xtask fmt</code>, <code class="inline">fmt-check</code>, build admission and the editor. Editor diagnostics are convenience; platform-owned build failure is enforcement.</li>
+    <li><b>Acceptance tests before policy.</b> Earlier and later module functions and associated methods, qualified and receiver syntax, callbacks, aliases, shadowed parameters, nested scopes, earlier signatures with later bodies, self- and mutual recursion, unused branches, imports and generic dispatch — asserting the rule ID and both source locations, not merely that something failed to compile.</li>
+  </ul>
+
+</section>
+
+</main>
+
+<footer class="wrap">
+  Sources: <code>platform/docs/ROC-STYLE-RULES.md</code>,
+  <code>platform/tools/roc-formatter/</code> (README, SOURCE-PROVENANCE, both patches, toolchain.json),
+  <code>platform/crates/xtask/src/formatting.rs</code> and <code>formatter_bootstrap.rs</code>.
+  Before/after panes were produced by running <code>.toolchains/roc-fmt-day2</code> and the stock
+  <code>.toolchains/roc</code> against the same inputs.
+</footer>
+
+<script>
+(function () {
+  // ---- main tabs ----
+  var tabs = [
+    { tab: document.getElementById('tab-fmt'), panel: document.getElementById('panel-fmt') },
+    { tab: document.getElementById('tab-lint'), panel: document.getElementById('panel-lint') }
+  ];
+  tabs.forEach(function (entry) {
+    entry.tab.addEventListener('click', function () {
+      tabs.forEach(function (other) {
+        var on = other === entry;
+        other.tab.setAttribute('aria-selected', on ? 'true' : 'false');
+        other.panel.hidden = !on;
+      });
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      try { localStorage.setItem('day2-style-tab', entry.tab.id); } catch (e) {}
+    });
+  });
+  try {
+    var saved = localStorage.getItem('day2-style-tab');
+    if (saved) {
+      var match = tabs.filter(function (e) { return e.tab.id === saved; })[0];
+      if (match) match.tab.click();
+    }
+  } catch (e) {}
+
+  // ---- width-rule examples ----
+  // Every `after` string below is literal output of .toolchains/roc-fmt-day2;
+  // every `upstream` string is literal output of the unpatched roc fmt.
+  var widthCases = [
+    {
+      name: 'Record type',
+      before: 'CommandDef(input, output, input_fields, output_fields) :: { input_witness : (input -> input), output_witness : (output -> output), handler : (Context, input -> Tx(output)), contract : Contract(input, output, input_fields, output_fields), execution : Execution(input), verification : Verification(input, output) }.{}',
+      after: 'CommandDef(input, output, input_fields, output_fields) :: {\n\tinput_witness : (input -> input),\n\toutput_witness : (output -> output),\n\thandler : (Context, input -> Tx(output)),\n\tcontract : Contract(input, output, input_fields, output_fields),\n\texecution : Execution(input),\n\tverification : Verification(input, output),\n}.{}'
+    },
+    {
+      name: 'Call',
+      before: 'result = transform(first_argument_with_a_descriptive_name, second_argument_with_a_descriptive_name, third_argument_with_a_descriptive_name)',
+      after: 'result =\n\ttransform(\n\t\tfirst_argument_with_a_descriptive_name,\n\t\tsecond_argument_with_a_descriptive_name,\n\t\tthird_argument_with_a_descriptive_name,\n\t)'
+    },
+    {
+      name: 'Signature',
+      before: 'transform : FirstArgumentWithADescriptiveName, SecondArgumentWithADescriptiveName, ThirdArgumentWithADescriptiveName -> ResultWithADescriptiveName',
+      after: 'transform :\n\tFirstArgumentWithADescriptiveName,\n\tSecondArgumentWithADescriptiveName,\n\tThirdArgumentWithADescriptiveName ->\n\t\tResultWithADescriptiveName'
+    },
+    {
+      name: 'Variant type',
+      before: 'Variant : [FirstVariantWithADescriptiveName(Str), SecondVariantWithADescriptiveName(Str), ThirdVariantWithADescriptiveName(Str)]',
+      after: 'Variant : [\n\tFirstVariantWithADescriptiveName(Str),\n\tSecondVariantWithADescriptiveName(Str),\n\tThirdVariantWithADescriptiveName(Str),\n]'
+    },
+    {
+      name: 'Record literal',
+      before: 'result = { first_field_with_a_descriptive_name: 100, second_field_with_a_descriptive_name: 200, third_field_with_a_descriptive_name: 300 }',
+      after: 'result =\n\t{\n\t\tfirst_field_with_a_descriptive_name: 100,\n\t\tsecond_field_with_a_descriptive_name: 200,\n\t\tthird_field_with_a_descriptive_name: 300,\n\t}'
+    },
+    {
+      name: 'Lambda',
+      before: 'result = |first_argument_with_a_descriptive_name, second_argument_with_a_descriptive_name, third_argument_with_a_descriptive_name| first_argument_with_a_descriptive_name',
+      after: 'result =\n\t|\n\t\tfirst_argument_with_a_descriptive_name,\n\t\tsecond_argument_with_a_descriptive_name,\n\t\tthird_argument_with_a_descriptive_name,\n\t| first_argument_with_a_descriptive_name'
+    },
+    {
+      name: 'Operators',
+      before: 'result = first_value_with_a_descriptive_name + second_value_with_a_descriptive_name + third_value_with_a_descriptive_name + fourth_value_with_a_descriptive_name',
+      after: 'result =\n\tfirst_value_with_a_descriptive_name\n\t\t+ second_value_with_a_descriptive_name\n\t\t+ third_value_with_a_descriptive_name\n\t\t+ fourth_value_with_a_descriptive_name'
+    },
+    {
+      name: 'Access chain',
+      before: 'result = initial_value_with_a_descriptive_name.first_transform_with_a_descriptive_name().second_transform_with_a_descriptive_name()',
+      after: 'result =\n\tinitial_value_with_a_descriptive_name\n\t\t.first_transform_with_a_descriptive_name()\n\t\t.second_transform_with_a_descriptive_name()'
+    },
+    {
+      name: 'Pipeline',
+      before: 'result = initial_value_with_a_descriptive_name |> first_transform_with_a_descriptive_name |> second_transform_with_a_descriptive_name',
+      after: 'result =\n\tinitial_value_with_a_descriptive_name\n\t\t|> first_transform_with_a_descriptive_name\n\t\t|> second_transform_with_a_descriptive_name'
+    },
+    {
+      name: 'Match alternatives',
+      before: 'result = match input { FirstVariantWithADescriptiveName(_) | SecondVariantWithADescriptiveName(_) | ThirdVariantWithADescriptiveName(_) => 1 }',
+      upstream: 'result = match input {\n\tFirstVariantWithADescriptiveName(_) | SecondVariantWithADescriptiveName(_) | ThirdVariantWithADescriptiveName(_) => 1\n}',
+      after: 'result = match input {\n\tFirstVariantWithADescriptiveName(_)\n\t| SecondVariantWithADescriptiveName(_)\n\t| ThirdVariantWithADescriptiveName(_) => 1\n}',
+      note: 'Upstream already opens the match block, but leaves the alternatives on one 121-column line.'
+    },
+    {
+      name: 'Exposing list',
+      before: 'import SomeModule exposing [first_export_with_a_descriptive_name, second_export_with_a_descriptive_name, third_export_with_a_descriptive_name]',
+      after: 'import SomeModule exposing [\n\tfirst_export_with_a_descriptive_name,\n\tsecond_export_with_a_descriptive_name,\n\tthird_export_with_a_descriptive_name,\n]'
+    },
+    {
+      name: 'Interpolation',
+      before: 'result = "Prefix ${call(first_argument_with_a_descriptive_name, second_argument_with_a_descriptive_name, third_argument_with_a_descriptive_name)} suffix"',
+      after: 'result =\n\t"Prefix ${\n\t\tcall(\n\t\t\tfirst_argument_with_a_descriptive_name,\n\t\t\tsecond_argument_with_a_descriptive_name,\n\t\t\tthird_argument_with_a_descriptive_name,\n\t\t)\n\t} suffix"',
+      note: 'The interpolated expression expands; the literal text around it is untouched.'
+    }
+  ];
+
+  var chipRow = document.getElementById('width-chips');
+  var target = document.getElementById('width-example');
+
+  function escapeHtml(text) {
+    return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  function render(index) {
+    var item = widthCases[index];
+    var upstream = item.upstream || item.before;
+    var html =
+      '<div class="pair">' +
+        '<div class="pane neutral"><div class="pane-label">Upstream <span class="note">roc fmt</span></div><pre>' +
+          escapeHtml(upstream) +
+        '</pre></div>' +
+        '<div class="pane after"><div class="pane-label">After <span class="note">roc-fmt-day2</span></div><pre>' +
+          escapeHtml(item.after) +
+        '</pre></div>' +
+      '</div>';
+    if (item.note) html += '<p class="caption">' + item.note + '</p>';
+    target.innerHTML = html;
+    Array.prototype.forEach.call(chipRow.children, function (chip, i) {
+      chip.setAttribute('aria-pressed', i === index ? 'true' : 'false');
+    });
+  }
+
+  widthCases.forEach(function (item, index) {
+    var chip = document.createElement('button');
+    chip.className = 'chip';
+    chip.type = 'button';
+    chip.textContent = item.name;
+    chip.setAttribute('aria-pressed', 'false');
+    chip.addEventListener('click', function () { render(index); });
+    chipRow.appendChild(chip);
+  });
+  render(0);
+})();
+</script>
+
+</body>
+</html>

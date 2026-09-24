@@ -1,0 +1,10 @@
+{
+  "roc_version": "nightly-2026-09-12-220fd47",
+  "roc_binary_sha256": "b4f197fde4836ab8ae19f8d427d38d721ade9bd43323ca793c7411a9f11d1cc6",
+  "libsystem_sha256": "4f96f1402e1950b1764ac6accd0d2b9c1ca197b7783caae5e838fd0a4b474028",
+  "roc_archive": "https://github.com/roc-lang/nightlies/releases/download/nightly-2026-09-12-220fd47/roc_nightly-macos_apple_silicon-2026-09-12-220fd47.tar.gz",
+  "roc_archive_sha256": "fd302798ddb15356744384761a2c23b318880e96c052aad6966cfb34e226af8f",
+  "roc_source_archive_sha256": "d25cbd3f9cf012a08d734daf1c6d917b9d997e3943376103943109be01570b4d",
+  "rust_version": "1.98.1",
+  "host_target": "aarch64-apple-darwin"
+}

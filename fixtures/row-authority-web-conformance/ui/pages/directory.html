@@ -1,0 +1,32 @@
+<div id="owned-links-app" class="workspace">
+  <header>
+    <h1>Owned links</h1>
+    <nav aria-label="Account"><a href="{{ platform.audit() }}">Audit log</a></nav>
+  </header>
+  <section aria-labelledby="directory-heading">
+    <h2 id="directory-heading">Directory</h2>
+    <ul id="links-list">
+      {% for link in links.items %}
+        <li class="link-row" data-link-id="{{ link.id }}">
+          <a class="details-link" href="{{ routes.link(link_id=link.id) }}">{{ link.title }}</a>
+          <span class="owner">{{ link.owner }}</span>
+        </li>
+      {% else %}
+        <li>No links yet.</li>
+      {% endfor %}
+    </ul>
+    {% if links.has_more %}
+      <a href="{{ routes.links(after=links.next_after, limit=20) }}">Next page</a>
+    {% endif %}
+  </section>
+  <section aria-labelledby="create-heading">
+    <h2 id="create-heading">New link</h2>
+    <form data-command="links.create" id="create-link-form">
+      <label for="create-title">Title</label>
+      <input id="create-title" type="text" name="title" required maxlength="200">
+      <label for="create-destination">Destination</label>
+      <input id="create-destination" type="url" name="destination" required maxlength="2048">
+      <button type="submit">Create link</button>
+    </form>
+  </section>
+</div>

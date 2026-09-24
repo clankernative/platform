@@ -1,0 +1,26 @@
+{
+  "format": 1,
+  "seed": 1,
+  "actions": [
+    {"action":"claim","build":0,"slot":0},
+    {"action":"perform","slot":0,"fault":"none"},
+    {"action":"settle","slot":0},
+    {"action":"claim","build":1,"slot":1},
+    {"action":"perform","slot":1,"fault":"delayed"},
+    {"action":"settle","slot":1},
+    {"action":"claim","build":0,"slot":0},
+    {"action":"perform","slot":0,"fault":"none"},
+    {"action":"settle","slot":0},
+    {"action":"claim","build":0,"slot":0},
+    {"action":"perform","slot":0,"fault":"lost_ack"},
+    {"action":"restart"},
+    {"action":"claim","build":2,"slot":2},
+    {"action":"perform","slot":2,"fault":"none"},
+    {"action":"settle","slot":2},
+    {"action":"tick","millis":1200001},
+    {"action":"claim","build":0,"slot":3},
+    {"action":"perform","slot":3,"fault":"none"},
+    {"action":"settle","slot":3},
+    {"action":"settle","slot":3}
+  ]
+}

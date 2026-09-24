@@ -1,0 +1,22 @@
+namespace = "reports"
+app_id = "reports"
+installation = "exampleco"
+environment = "production"
+hosted_domain = "example.com"
+edge_origin = "https://reports.tools.example.com"
+kubeconfig_path = "~/.kube/config"
+kube_context = "gke_example-company-tools_us-central1-a_day2"
+image = "us-central1-docker.pkg.dev/example-company-tools/day2/reports@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+artifact_id = "0000000000000000000000000000000000000000000000000000000000000000"
+pod_pids_limit = 1024
+runtime_resources = {
+  memory_mib = 512
+  cpu_millis = 1000
+  process_limit = 1024
+  http_concurrency = 4
+  shutdown_seconds = 30
+}
+readers = ["operator@example.com"]
+writers = ["operator@example.com"]
+# Intentionally refuses deployment until the exact artifact's complete policy is supplied.
+authority = { version = 1, admins = [], operations = {} }

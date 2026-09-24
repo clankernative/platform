@@ -1,0 +1,466 @@
+[
+  {
+    "name": "match_token",
+    "version": "0.35.0",
+    "repository": "https://github.com/servo/html5ever",
+    "revision": "6db7bbf1c4dfaecd28731950d427e40c8b911bef",
+    "notices": [
+      {
+        "path": "COPYRIGHT",
+        "sha256": "c6b91503fc0a9852e688b56eef715dba9a1ab4b074e86875af2471ce0163b2e5"
+      },
+      {
+        "path": "LICENSE-APACHE",
+        "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+      },
+      {
+        "path": "LICENSE-MIT",
+        "sha256": "86dd7f026f916daf7511e39951ad8ea8cf55a8db67ae64060dacf829761c18f3"
+      }
+    ],
+    "file": "match_token-0.35.0.txt",
+    "sha256": "2f286360349d2a4abb6f97493a53e380dc96834e6baf068a8efe86d17f3d414d"
+  },
+  {
+    "name": "maud",
+    "version": "0.27.0",
+    "repository": "https://github.com/lambda-fairy/maud",
+    "revision": "fb193d31462eea63eabfa705c93ccc56f5bb1eac",
+    "notices": [
+      {
+        "path": "LICENSE-APACHE",
+        "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+      },
+      {
+        "path": "LICENSE-MIT",
+        "sha256": "8764a597675778ddfd4e25f81b08a05dbcf089ac05662df7613fe67f150e3aa2"
+      }
+    ],
+    "file": "maud-0.27.0.txt",
+    "sha256": "29fe8d27259723ca920440475d239e5986cb08abbf1f01e0b179a88735736b36"
+  },
+  {
+    "name": "maud_macros",
+    "version": "0.27.0",
+    "repository": "https://github.com/lambda-fairy/maud",
+    "revision": "fb193d31462eea63eabfa705c93ccc56f5bb1eac",
+    "notices": [
+      {
+        "path": "LICENSE-APACHE",
+        "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+      },
+      {
+        "path": "LICENSE-MIT",
+        "sha256": "8764a597675778ddfd4e25f81b08a05dbcf089ac05662df7613fe67f150e3aa2"
+      }
+    ],
+    "file": "maud_macros-0.27.0.txt",
+    "sha256": "4e1120a4dd8c6c70eae916f8ad35e4cd1be1c881b51c3162c533113543bb1e68"
+  },
+  {
+    "name": "objc2-core-foundation",
+    "version": "0.3.2",
+    "repository": "https://github.com/madsmtm/objc2",
+    "revision": "7b1abfd750a2cacaea71d6a56ecfb83cb7de560b",
+    "notices": [
+      {
+        "path": "LICENSE.md",
+        "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54"
+      }
+    ],
+    "file": "objc2-core-foundation-0.3.2.txt",
+    "sha256": "423c2f22045d44b3e8bb8acbaf9a76b67781fcdbc63db2a5eecdafc3c18e0fd7"
+  },
+  {
+    "name": "objc2-io-kit",
+    "version": "0.3.2",
+    "repository": "https://github.com/madsmtm/objc2",
+    "revision": "7b1abfd750a2cacaea71d6a56ecfb83cb7de560b",
+    "notices": [
+      {
+        "path": "LICENSE.md",
+        "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54"
+      }
+    ],
+    "file": "objc2-io-kit-0.3.2.txt",
+    "sha256": "a5989aaff93d80be73314e2fa2633a7f56c00fa76f2c5914c076fd6e23cdeac5"
+  },
+  {
+    "name": "oxc_allocator",
+    "version": "0.148.0",
+    "repository": "https://github.com/oxc-project/oxc",
+    "revision": "894c8f9cd89508391b01eb26a4b5ac2b846ab39b",
+    "notices": [
+      {
+        "path": "LICENSE",
+        "sha256": "95ced5ecf1133fbf41d409b5555c86c344f83f3b019926057ddbc07cfdcc27b3"
+      }
+    ],
+    "file": "oxc_allocator-0.148.0.txt",
+    "sha256": "4a6856916998c419e5762243ae7d68c90f947c4bd68244cfcd6d05cf66628a8c"
+  },
+  {
+    "name": "oxc_ast",
+    "version": "0.148.0",
+    "repository": "https://github.com/oxc-project/oxc",
+    "revision": "894c8f9cd89508391b01eb26a4b5ac2b846ab39b",
+    "notices": [
+      {
+        "path": "LICENSE",
+        "sha256": "95ced5ecf1133fbf41d409b5555c86c344f83f3b019926057ddbc07cfdcc27b3"
+      }
+    ],
+    "file": "oxc_ast-0.148.0.txt",
+    "sha256": "8f9336940ae46871f163eafe13aab08f1fab0f0e80b8e9306d01d2c3a4444134"
+  },
+  {
+    "name": "oxc_ast_macros",
+    "version": "0.148.0",
+    "repository": "https://github.com/oxc-project/oxc",
+    "revision": "894c8f9cd89508391b01eb26a4b5ac2b846ab39b",
+    "notices": [
+      {
+        "path": "LICENSE",
+        "sha256": "95ced5ecf1133fbf41d409b5555c86c344f83f3b019926057ddbc07cfdcc27b3"
+      }
+    ],
+    "file": "oxc_ast_macros-0.148.0.txt",
+    "sha256": "0f5ac21edf3920757e7a394cbdaf9399f4587dcb578b8d7323ce92b5a8d51b38"
+  },
+  {
+    "name": "oxc_ast_visit",
+    "version": "0.148.0",
+    "repository": "https://github.com/oxc-project/oxc",
+    "revision": "894c8f9cd89508391b01eb26a4b5ac2b846ab39b",
+    "notices": [
+      {
+        "path": "LICENSE",
+        "sha256": "95ced5ecf1133fbf41d409b5555c86c344f83f3b019926057ddbc07cfdcc27b3"
+      }
+    ],
+    "file": "oxc_ast_visit-0.148.0.txt",
+    "sha256": "55565cb48e6b6e122c09fb7d44c9f5ed293cedc0b89fa6a9e94aa95f4180e4ad"
+  },
+  {
+    "name": "oxc_data_structures",
+    "version": "0.148.0",
+    "repository": "https://github.com/oxc-project/oxc",
+    "revision": "894c8f9cd89508391b01eb26a4b5ac2b846ab39b",
+    "notices": [
+      {
+        "path": "LICENSE",
+        "sha256": "95ced5ecf1133fbf41d409b5555c86c344f83f3b019926057ddbc07cfdcc27b3"
+      }
+    ],
+    "file": "oxc_data_structures-0.148.0.txt",
+    "sha256": "b4ab1167cd659cb008126a978b7816a442f681f2cfcfdd2297a2c984d6c35f8a"
+  },
+  {
+    "name": "oxc_diagnostics",
+    "version": "0.148.0",
+    "repository": "https://github.com/oxc-project/oxc",
+    "revision": "894c8f9cd89508391b01eb26a4b5ac2b846ab39b",
+    "notices": [
+      {
+        "path": "LICENSE",
+        "sha256": "95ced5ecf1133fbf41d409b5555c86c344f83f3b019926057ddbc07cfdcc27b3"
+      }
+    ],
+    "file": "oxc_diagnostics-0.148.0.txt",
+    "sha256": "a65fa3914993530b44146ff16139554f46d4fd282db9d38778560cf07d63dd44"
+  },
+  {
+    "name": "oxc_ecmascript",
+    "version": "0.148.0",
+    "repository": "https://github.com/oxc-project/oxc",
+    "revision": "894c8f9cd89508391b01eb26a4b5ac2b846ab39b",
+    "notices": [
+      {
+        "path": "LICENSE",
+        "sha256": "95ced5ecf1133fbf41d409b5555c86c344f83f3b019926057ddbc07cfdcc27b3"
+      }
+    ],
+    "file": "oxc_ecmascript-0.148.0.txt",
+    "sha256": "656ef038db9e5b956eaeb0813e5b84230dd896d9fb08e5665cc72577e845a139"
+  },
+  {
+    "name": "oxc_estree",
+    "version": "0.148.0",
+    "repository": "https://github.com/oxc-project/oxc",
+    "revision": "894c8f9cd89508391b01eb26a4b5ac2b846ab39b",
+    "notices": [
+      {
+        "path": "LICENSE",
+        "sha256": "95ced5ecf1133fbf41d409b5555c86c344f83f3b019926057ddbc07cfdcc27b3"
+      }
+    ],
+    "file": "oxc_estree-0.148.0.txt",
+    "sha256": "419d7b98621d0be5e58eef778477a374567c7a2f1879a75dae065989bdf7228a"
+  },
+  {
+    "name": "oxc_index",
+    "version": "5.0.0",
+    "repository": "https://github.com/oxc-project/oxc-index-vec",
+    "revision": "8e09fe324eb6df02f56e4eacdfac958930300380",
+    "notices": [
+      {
+        "path": "LICENSE",
+        "sha256": "95ced5ecf1133fbf41d409b5555c86c344f83f3b019926057ddbc07cfdcc27b3"
+      }
+    ],
+    "file": "oxc_index-5.0.0.txt",
+    "sha256": "51d91bfc71fa20dccf3677965d077f8c6aef2268ce754e8d79f32e4ed6b0e924"
+  },
+  {
+    "name": "oxc_parser",
+    "version": "0.148.0",
+    "repository": "https://github.com/oxc-project/oxc",
+    "revision": "894c8f9cd89508391b01eb26a4b5ac2b846ab39b",
+    "notices": [
+      {
+        "path": "LICENSE",
+        "sha256": "95ced5ecf1133fbf41d409b5555c86c344f83f3b019926057ddbc07cfdcc27b3"
+      }
+    ],
+    "file": "oxc_parser-0.148.0.txt",
+    "sha256": "79d38991f06fe431e497544c73cb62503ee4569321cdd5d4e5c9e70ab407832c"
+  },
+  {
+    "name": "oxc_regular_expression",
+    "version": "0.148.0",
+    "repository": "https://github.com/oxc-project/oxc",
+    "revision": "894c8f9cd89508391b01eb26a4b5ac2b846ab39b",
+    "notices": [
+      {
+        "path": "LICENSE",
+        "sha256": "95ced5ecf1133fbf41d409b5555c86c344f83f3b019926057ddbc07cfdcc27b3"
+      }
+    ],
+    "file": "oxc_regular_expression-0.148.0.txt",
+    "sha256": "4e6e86f89aae44f62082aee0b29c976c9f730a0cf5c392b6f73e996afddc9eff"
+  },
+  {
+    "name": "oxc_span",
+    "version": "0.148.0",
+    "repository": "https://github.com/oxc-project/oxc",
+    "revision": "894c8f9cd89508391b01eb26a4b5ac2b846ab39b",
+    "notices": [
+      {
+        "path": "LICENSE",
+        "sha256": "95ced5ecf1133fbf41d409b5555c86c344f83f3b019926057ddbc07cfdcc27b3"
+      }
+    ],
+    "file": "oxc_span-0.148.0.txt",
+    "sha256": "94151fa42525075566505ca753683e83cf98c082317280a9efca7429f9557bc6"
+  },
+  {
+    "name": "oxc_str",
+    "version": "0.148.0",
+    "repository": "https://github.com/oxc-project/oxc",
+    "revision": "894c8f9cd89508391b01eb26a4b5ac2b846ab39b",
+    "notices": [
+      {
+        "path": "LICENSE",
+        "sha256": "95ced5ecf1133fbf41d409b5555c86c344f83f3b019926057ddbc07cfdcc27b3"
+      }
+    ],
+    "file": "oxc_str-0.148.0.txt",
+    "sha256": "3075cce6573cbbae0467e940745155143d0281a390ab9d28fbe133688bada555"
+  },
+  {
+    "name": "oxc_syntax",
+    "version": "0.148.0",
+    "repository": "https://github.com/oxc-project/oxc",
+    "revision": "894c8f9cd89508391b01eb26a4b5ac2b846ab39b",
+    "notices": [
+      {
+        "path": "LICENSE",
+        "sha256": "95ced5ecf1133fbf41d409b5555c86c344f83f3b019926057ddbc07cfdcc27b3"
+      }
+    ],
+    "file": "oxc_syntax-0.148.0.txt",
+    "sha256": "7453d0bd4c38a7b67d4d2869714baba40b7b9d2fc8a574fbebfd40933eaba164"
+  },
+  {
+    "name": "pbjson",
+    "version": "0.9.0",
+    "repository": "https://github.com/influxdata/pbjson",
+    "revision": "48ee5989564e0ace82ad71b87736d3d1b2e0e1cd",
+    "notices": [
+      {
+        "path": "LICENSE",
+        "sha256": "791a00933f2ea7e512856361e026998362241c3918d7be948c24d29441033b55"
+      }
+    ],
+    "file": "pbjson-0.9.0.txt",
+    "sha256": "a4294cfaf5dfbe8964f284f0d4461d662748950e54c2577e654f3d97caa228bd"
+  },
+  {
+    "name": "pbjson-build",
+    "version": "0.9.0",
+    "repository": "https://github.com/influxdata/pbjson",
+    "revision": "48ee5989564e0ace82ad71b87736d3d1b2e0e1cd",
+    "notices": [
+      {
+        "path": "LICENSE",
+        "sha256": "791a00933f2ea7e512856361e026998362241c3918d7be948c24d29441033b55"
+      }
+    ],
+    "file": "pbjson-build-0.9.0.txt",
+    "sha256": "12598698729d56251ffdab570f38eec4fde1efc83e2d6be24498e6682e27bd49"
+  },
+  {
+    "name": "prost-wkt",
+    "version": "0.7.2",
+    "repository": "https://github.com/fdeantoni/prost-wkt",
+    "revision": "2f30fc63e8d2a238ee518344d02ea8e006525fba",
+    "notices": [
+      {
+        "path": "LICENSE",
+        "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+      }
+    ],
+    "file": "prost-wkt-0.7.2.txt",
+    "sha256": "e1027ce6519d84a7c10e15e40b4d7c0e47d8d05eaa32651eb8ec2537bebae7e3"
+  },
+  {
+    "name": "prost-wkt-build",
+    "version": "0.7.2",
+    "repository": "https://github.com/fdeantoni/prost-wkt",
+    "revision": "2f30fc63e8d2a238ee518344d02ea8e006525fba",
+    "notices": [
+      {
+        "path": "LICENSE",
+        "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+      }
+    ],
+    "file": "prost-wkt-build-0.7.2.txt",
+    "sha256": "2dcd356cd62974ce49b4852514900ac16a8e7d36b5b4774cef64d5e35b0931e3"
+  },
+  {
+    "name": "prost-wkt-types",
+    "version": "0.7.2",
+    "repository": "https://github.com/fdeantoni/prost-wkt",
+    "revision": "2f30fc63e8d2a238ee518344d02ea8e006525fba",
+    "notices": [
+      {
+        "path": "LICENSE",
+        "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+      }
+    ],
+    "file": "prost-wkt-types-0.7.2.txt",
+    "sha256": "5caaca6561f2d24de8a114d861f20fe3cd79caebec1174b418b0e0c65443e7b3"
+  },
+  {
+    "name": "rsqlite-vfs",
+    "version": "0.1.1",
+    "repository": "https://github.com/Spxg/sqlite-wasm-rs",
+    "revision": "1bb309784f25c401ddf95131dcde4c4cdad7aee7",
+    "notices": [
+      {
+        "path": "LICENSE",
+        "sha256": "e1c1975c3474cce31722836f101a40ffaf1cc784e4d2f38ce3e77b9712934e78"
+      }
+    ],
+    "file": "rsqlite-vfs-0.1.1.txt",
+    "sha256": "b845cf58f395b789af9cd15d32b4216c8f9789dd11dcabd11d7c42c407a800e8"
+  },
+  {
+    "name": "tonic-prost",
+    "version": "0.14.6",
+    "repository": "https://github.com/hyperium/tonic",
+    "revision": "6cb6056b5a748bc5a29bd48f4602dbc4e552bb7d",
+    "notices": [
+      {
+        "path": "LICENSE",
+        "sha256": "e24a56698aa6feaf3a02272b3624f9dc255d982970c5ed97ac4525a95056a5b3"
+      }
+    ],
+    "file": "tonic-prost-0.14.6.txt",
+    "sha256": "af34a3a677abb61625300d256e3411396bd4ba205ada0e2f1bab1b8303019b44"
+  },
+  {
+    "name": "tonic-prost-build",
+    "version": "0.14.6",
+    "repository": "https://github.com/hyperium/tonic",
+    "revision": "6cb6056b5a748bc5a29bd48f4602dbc4e552bb7d",
+    "notices": [
+      {
+        "path": "LICENSE",
+        "sha256": "e24a56698aa6feaf3a02272b3624f9dc255d982970c5ed97ac4525a95056a5b3"
+      }
+    ],
+    "file": "tonic-prost-build-0.14.6.txt",
+    "sha256": "6a786e5378f8d63a1610ac270e678e0124f751d67fb07eda9fa06971c988ab61"
+  },
+  {
+    "name": "valuable",
+    "version": "0.1.1",
+    "repository": "https://github.com/tokio-rs/valuable",
+    "revision": "9efc29b6e58cef28f6566a47aa7e142a55fead77",
+    "notices": [
+      {
+        "path": "LICENSE",
+        "sha256": "ed60d479b8fd1f64e9cbc3de449a16a53ac1b3d1b6aeb9bf9d190a8e93061b44"
+      }
+    ],
+    "file": "valuable-0.1.1.txt",
+    "sha256": "467525109f7a386f77778c3e69761425c7df117b44dc2c80c47ea2f503bc67e3"
+  },
+  {
+    "name": "crc32c",
+    "version": "0.6.8",
+    "repository": "https://github.com/zowens/crc32c",
+    "source": "Locked crates.io package license declaration and headers; Apache-2.0 text from winapi 0.3.9; MPL-2.0 text from cssparser 0.35.0; winapi target licenses from winapi-rs 0.3.9",
+    "sha256": "af2bc25ce3afcb363366cce289bfff54f43934fe538a1f430ede87d86847e6e7"
+  },
+  {
+    "name": "fxhash",
+    "version": "0.2.1",
+    "repository": "https://github.com/cbreeden/fxhash",
+    "source": "Locked crates.io package license declaration and headers; Apache-2.0 text from winapi 0.3.9; MPL-2.0 text from cssparser 0.35.0; winapi target licenses from winapi-rs 0.3.9",
+    "sha256": "807fd225af02b5cb2f25f983a046c25c671ae9781d9ff764714a4dabc5eee076"
+  },
+  {
+    "name": "mac",
+    "version": "0.1.1",
+    "repository": "https://github.com/reem/rust-mac.git",
+    "source": "Locked crates.io package license declaration and headers; Apache-2.0 text from winapi 0.3.9; MPL-2.0 text from cssparser 0.35.0; winapi target licenses from winapi-rs 0.3.9",
+    "sha256": "3e78283b7bba84e4bda5678525ee2ffa245b66b8058950ca92d7a18e04d3834c"
+  },
+  {
+    "name": "r-efi",
+    "version": "5.3.0",
+    "repository": "https://github.com/r-efi/r-efi",
+    "source": "Locked crates.io package license declaration and headers; Apache-2.0 text from winapi 0.3.9; MPL-2.0 text from cssparser 0.35.0; winapi target licenses from winapi-rs 0.3.9",
+    "sha256": "25636f85938c3c62cc490633167c8f1066d250d13fdf087ff4b34fbe3d171193"
+  },
+  {
+    "name": "r-efi",
+    "version": "6.0.0",
+    "repository": "https://github.com/r-efi/r-efi",
+    "source": "Locked crates.io package license declaration and headers; Apache-2.0 text from winapi 0.3.9; MPL-2.0 text from cssparser 0.35.0; winapi target licenses from winapi-rs 0.3.9",
+    "sha256": "2669d4bb976497325322288486a6d65b011a8244d87c59e937c6e9e25dc27811"
+  },
+  {
+    "name": "selectors",
+    "version": "0.31.0",
+    "repository": "https://github.com/servo/stylo",
+    "source": "Locked crates.io package license declaration and headers; Apache-2.0 text from winapi 0.3.9; MPL-2.0 text from cssparser 0.35.0; winapi target licenses from winapi-rs 0.3.9",
+    "sha256": "2d8c753d1df2edc6ae3ff6fcf305bed5c7a313efece2fce7230c4a7bcfbb85ea"
+  },
+  {
+    "name": "winapi-i686-pc-windows-gnu",
+    "version": "0.4.0",
+    "repository": "https://github.com/retep998/winapi-rs",
+    "source": "Locked crates.io package license declaration and headers; Apache-2.0 text from winapi 0.3.9; MPL-2.0 text from cssparser 0.35.0; winapi target licenses from winapi-rs 0.3.9",
+    "sha256": "2cc33c64ceab66fc746df13d4637f5263fefa1995443514093ec556b2353f776"
+  },
+  {
+    "name": "winapi-x86_64-pc-windows-gnu",
+    "version": "0.4.0",
+    "repository": "https://github.com/retep998/winapi-rs",
+    "source": "Locked crates.io package license declaration and headers; Apache-2.0 text from winapi 0.3.9; MPL-2.0 text from cssparser 0.35.0; winapi target licenses from winapi-rs 0.3.9",
+    "sha256": "e0d0dd1da7f8745704e09afae7b319fafab6ac93b14cf951572e5759e9170781"
+  }
+]

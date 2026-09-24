@@ -1,0 +1,6 @@
+project_id = "example-company-tools"
+region = "us-central1"
+zone = "us-central1-a"
+name = "day2"
+admin_cidrs = ["203.0.113.4/32"]
+pod_pids_limit = 1024

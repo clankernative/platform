@@ -1,0 +1,36 @@
+{
+  "roc_version": "nightly-2026-09-05-b195f5b-day2-glue11254",
+  "roc_binary_sha256": "0a20cbf41dce113dd1d22fd3a361ba46dc040d48623b8f8309c0e2aa3b2a254a",
+  "roc_upstream_binary_sha256": "47dba6e951a246c08aa51926c52566922276db2401b6ffb015150905598da01b",
+  "roc_source_archive_sha256": "45de9ca1b48741ecf610aac1c6849a6d873a4cbc2a93cb0efdd0425d216c2cb6",
+  "patch_sha256": "9d33559435a7d4acae54adda099cc91b644c0255bdfeab1621542196e775de72",
+  "built_on": "2026-09-10",
+  "host_target": "aarch64-apple-darwin",
+  "base_commit": "b195f5b23eaecc572659d30acfc4ddea6c9d4ba4",
+  "source_archive": "https://github.com/roc-lang/nightlies/releases/download/nightly-2026-09-05-b195f5b/roc_nightly-source-2026-09-05-b195f5b.tar.gz",
+  "upstream_pr": "https://github.com/roc-lang/roc/pull/11254",
+  "upstream_commits": [
+    "3a209be98ed669592b15a476b7e30219042e77a2",
+    "334a3b4c7ae78ba15d16799838b5c2fe31a4614b",
+    "1527c7d5ade59b233f0527a88a08198d5aa28e34"
+  ],
+  "adaptations": [
+    "Omit the inapplicable GlueProtocolLock.has_payload test-schema hunk: neither exists in the September 5 base.",
+    "Apply the Zig glue callable-release arm against September 5 formatting."
+  ],
+  "zig_version": "0.16.0",
+  "zig_archive_sha256": "b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489",
+  "build_arguments": [
+    "build", "roc", "-Doptimize=ReleaseFast", "-Dstrip=true", "-Dcpu=apple_m1",
+    "-Dcompiler-version=nightly-2026-09-05-b195f5b-day2-glue11254", "-j4"
+  ],
+  "build_cache": "Existing Zig compilation cache reused; dependency cache copied from the reviewed September 5 build. Neither is distributed as compiler source.",
+  "source_check": "Portable patch applies cleanly to the freshly downloaded, SHA-256-verified base source archive. Comparison with the built tree found only generated build outputs and caches outside the applied source changes.",
+  "pre_promotion_checks": [
+    "Exact reported compiler version and SHA-256 verified.",
+    "Unchanged generic ForwardedFactory positive control: roc check --no-cache, exit 0, 32 ms.",
+    "Fully bound Reports SchemaGlue reflection: clean environment, new cache, --no-cache, exit 0 and checked-types.json emitted.",
+    "Fully bound GoLinks SchemaGlue reflection: separate new cache, --no-cache, exit 0 and checked-types.json emitted."
+  ],
+  "qualification_scope": "These checks qualify pin promotion for full native verification. Final worker, admission, application and canary results are recorded separately in apps/VALIDATION.md. Linux is not qualified by this macOS build."
+}

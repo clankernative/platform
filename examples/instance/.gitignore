@@ -1,0 +1,11 @@
+.state/
+backups/
+.terraform/
+*.tfstate*
+*.tfplan
+plan.bin
+.env*
+*.pem
+*.key
+secrets.json
+credentials.json

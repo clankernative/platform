@@ -1,0 +1,9 @@
+# Admission and toolchain pins are byte-exact; never rewrite checkout line endings.
+* -text
+# Preserve upstream license and patch bytes, including original whitespace.
+THIRD-PARTY-NOTICES.txt -whitespace
+vendor/licenses/*.txt -whitespace
+assets/*-LICENSE -whitespace
+vendor/ROC-LICENSE -whitespace
+tools/roc-compiler/*.patch -whitespace
+tools/roc-formatter/*.patch -whitespace

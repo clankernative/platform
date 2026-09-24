@@ -1,0 +1,22 @@
+{
+  "format": 1,
+  "seed": 11,
+  "actions": [
+    {"action":"release_secret","build":0,"enabled":true,"access":true,"ready":true,"delay":0},
+    {"action":"claim","build":0,"slot":0}, {"action":"perform","slot":0,"fault":"none"}, {"action":"settle","slot":0},
+    {"action":"claim","build":0,"slot":0}, {"action":"perform","slot":0,"fault":"none"}, {"action":"settle","slot":0},
+    {"action":"claim","build":0,"slot":0}, {"action":"perform","slot":0,"fault":"none"}, {"action":"settle","slot":0},
+    {"action":"approve","build":0,"wrong_commit":false,"wrong_tenant":false}, {"action":"release_start","build":0},
+    {"action":"claim","build":1,"slot":1}, {"action":"perform","slot":1,"fault":"none"}, {"action":"settle","slot":1},
+    {"action":"claim","build":1,"slot":1}, {"action":"perform","slot":1,"fault":"none"}, {"action":"settle","slot":1},
+    {"action":"claim","build":1,"slot":1}, {"action":"perform","slot":1,"fault":"none"}, {"action":"settle","slot":1},
+    {"action":"approve","build":1,"wrong_commit":false,"wrong_tenant":false}, {"action":"release_start","build":1},
+    {"action":"release_secret","build":1,"enabled":true,"access":true,"ready":true,"delay":4000000},
+    {"action":"claim","build":2,"slot":2}, {"action":"perform","slot":2,"fault":"none"}, {"action":"settle","slot":2},
+    {"action":"claim","build":2,"slot":2}, {"action":"perform","slot":2,"fault":"none"}, {"action":"settle","slot":2},
+    {"action":"claim","build":2,"slot":2}, {"action":"perform","slot":2,"fault":"none"}, {"action":"settle","slot":2},
+    {"action":"approve","build":2,"wrong_commit":false,"wrong_tenant":false}, {"action":"release_start","build":2},
+    {"action":"release_secret","build":2,"enabled":true,"access":true,"ready":true,"delay":0},
+    {"action":"restart"}
+  ]
+}

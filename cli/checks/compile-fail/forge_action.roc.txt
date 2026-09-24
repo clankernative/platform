@@ -1,0 +1,7 @@
+# Expected diagnostic: cannot use opaque nominal type
+import Cli
+main! : List(OsStr.OsStr) => Try({}, [Exit(I32)])
+main! = |_| {
+	action = Cli.Action.{ description: "unchecked", request: Cli.Request.Help(Cli.Format.Json) }
+	Stdout.line!(action.dto().command).map_err(|_| Exit(1))
+}

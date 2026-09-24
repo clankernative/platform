@@ -1,0 +1,18 @@
+title = "Platform public source secret scanning"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Public schema identity keys, not authentication credentials"
+condition = "AND"
+paths = ['''(^|/)(fixtures/[^/]+|examples/reports)/model-identities\.json$''']
+regexTarget = "line"
+regexes = ['''^\s*"key": "[a-f0-9]{32}",?$''']
+
+[[allowlists]]
+description = "Documentation generator references an environment variable, never a credential"
+condition = "AND"
+paths = ['''(^|/)crates/day2/src/api_examples\.rs$''']
+regexTarget = "line"
+regexes = ['''\("Idempotency-Key", "DAY2_IDEMPOTENCY_KEY", true\),''']

@@ -1,0 +1,38 @@
+<div id="things-app">
+  <h1>Repeated field conformance</h1>
+
+  <section id="things-list" aria-label="Things">
+    {% for thing in things.items %}
+    <article class="thing">
+      <strong>{{ thing.name }}</strong>
+      <span class="count">{{ thing.tag_count }}</span>
+      <span class="tags">{{ thing.tags_joined }}</span>
+    </article>
+    {% else %}
+    <p class="empty">No things yet.</p>
+    {% endfor %}
+  </section>
+
+  <form id="tag-thing-form" data-command="things.tag" class="command">
+    <label for="name">Name</label>
+    <input id="name" type="text" name="name" required maxlength="200">
+
+    <!-- A list repeats its field name; document order is the list order. -->
+    <label for="tag-one">Tags</label>
+    <input id="tag-one" type="text" name="tags">
+    <input id="tag-two" type="text" name="tags">
+
+    <!-- A map carries its key in the control name, so one control is one entry. -->
+    <label for="attr-role">Role</label>
+    <input id="attr-role" type="text" name="attributes.role">
+    <label for="attr-team">Team</label>
+    <input id="attr-team" type="text" name="attributes.team">
+
+    <!-- A set repeats its field name and decodes to canonical order. -->
+    <label for="group-one">Groups</label>
+    <input id="group-one" type="text" name="groups">
+    <input id="group-two" type="text" name="groups">
+
+    <button type="submit">Save</button>
+  </form>
+</div>

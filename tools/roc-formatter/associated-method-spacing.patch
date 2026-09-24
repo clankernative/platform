@@ -1,0 +1,916 @@
+--- a/src/fmt/fmt.zig
++++ b/src/fmt/fmt.zig
+@@ -392,11 +392,28 @@
+     const trace = tracy.trace(@src());
+     defer trace.end();
+ 
+-    var fmt = try Formatter.init(ast, writer, options);
+-    defer fmt.deinit();
+-
+-    try formatter(&fmt);
+-    try fmt.flush();
++    // Render into a buffer before publishing any bytes. Width decisions are
++    // made from actual formatted columns at explicit AST layout groups. Each
++    // retry expands at least one previously compact group, so this terminates
++    // after at most the finite number of groups in the parsed source.
++    const expanded = try ast.gpa.alloc(u16, ast.tokens.tokens.len + 1);
++    defer ast.gpa.free(expanded);
++    @memset(expanded, 0);
++    while (true) {
++        var output: std.Io.Writer.Allocating = .init(ast.gpa);
++        defer output.deinit();
++        var fmt = try Formatter.init(ast, &output.writer, options);
++        defer fmt.deinit();
++        fmt.width_expanded = expanded;
++        try formatter(&fmt);
++        try fmt.flush();
++        fmt.finishWidthLine();
++        if (!fmt.width_changed) {
++            try writer.writeAll(output.written());
++            try writer.flush();
++            return;
++        }
++    }
+ }
+ 
+ /// Formats and writes out well-formed source of a Roc parse IR (AST) when the root node is a file.
+@@ -469,7 +486,77 @@
+     has_newline: bool = true,
+     has_multiline_string: bool = false,
+     pending_spaces: usize = 0,
++
++    width_expanded: []u16 = &.{},
++    width_changed: bool = false,
++    width_column: usize = 0,
++    width_group: ?WidthGroup = null,
++    width_group_closed: bool = false,
+ 
++    const max_columns = 120;
++    const tab_columns = 4;
++    const WidthKind = enum(u4) { collection, record, tags, function, declaration, annotation, lambda_args, lambda_body, binary, conditional, arrow, access, alternatives };
++    const WidthGroup = struct { token: Token.Idx, kind: WidthKind };
++
++    fn widthMask(kind: WidthKind) u16 {
++        return @as(u16, 1) << @intFromEnum(kind);
++    }
++
++    fn widthIsExpanded(fmt: *Formatter, token: Token.Idx, kind: WidthKind) bool {
++        return fmt.width_expanded[token] & widthMask(kind) != 0;
++    }
++
++    /// Register only syntax with an explicit legal expanded layout. The first
++    /// compact group on a line is expanded before its children, avoiding a
++    /// cascade of unnecessarily expanded nested calls.
++    fn widthGroup(fmt: *Formatter, token: Token.Idx, kind: WidthKind, already_multiline: bool) bool {
++        const expanded = fmt.widthIsExpanded(token, kind);
++        if (!expanded and !already_multiline and (fmt.width_group == null or fmt.width_group_closed)) {
++            fmt.width_group = .{ .token = token, .kind = kind };
++            fmt.width_group_closed = false;
++        }
++        return expanded;
++    }
++
++    /// A completed collection remains available for overflowing punctuation,
++    /// but the next sibling group owns its own width. For example a short type
++    /// parameter list should not expand merely because its record body is long.
++    fn closeWidthGroup(fmt: *Formatter, token: Token.Idx, kind: WidthKind) void {
++        if (fmt.width_group) |group| {
++            if (group.token == token and group.kind == kind) fmt.width_group_closed = true;
++        }
++    }
++
++    fn finishWidthLine(fmt: *Formatter) void {
++        if (fmt.width_column > max_columns) {
++            if (fmt.width_group) |group| {
++                const mask = widthMask(group.kind);
++                if (fmt.width_expanded[group.token] & mask == 0) {
++                    fmt.width_expanded[group.token] |= mask;
++                    fmt.width_changed = true;
++                }
++            }
++        }
++        fmt.width_column = 0;
++        fmt.width_group = null;
++        fmt.width_group_closed = false;
++    }
++
++    fn measureWidth(fmt: *Formatter, bytes: []const u8) void {
++        for (bytes) |byte| {
++            switch (byte) {
++                '\n' => fmt.finishWidthLine(),
++                '\r' => {},
++                '\t' => fmt.width_column += tab_columns - fmt.width_column % tab_columns,
++                // Count UTF-8 scalars, not their encoding bytes. Literal and
++                // comment contents remain verbatim, including long URLs.
++                else => if (byte & 0xc0 != 0x80) {
++                    fmt.width_column += 1;
++                },
++            }
++        }
++    }
++
+     /// Creates a new Formatter for the given parse IR.
+     fn init(ast: AST, writer: *std.Io.Writer, options: Options) Allocator.Error!Formatter {
+         const type_layouts = try ast.gpa.alloc(TypeLayout, ast.store.nodeCount());
+@@ -588,6 +675,7 @@
+         }
+         switch (statement) {
+             .decl => |d| {
++                const wrap = fmt.widthGroup(statement.to_tokenized_region().start, .declaration, false);
+                 const pattern_region = fmt.nodeRegion(@intFromEnum(d.pattern));
+                 try fmt.formatPatternDiscard(d.pattern);
+                 if (multiline and try fmt.flushCommentsBefore(pattern_region.end)) {
+@@ -601,6 +689,10 @@
+                 if (multiline and try fmt.flushCommentsBefore(body_region.start)) {
+                     fmt.curr_indent += 1;
+                     try fmt.pushIndent();
++                } else if (wrap) {
++                    fmt.curr_indent += 1;
++                    try fmt.ensureNewline();
++                    try fmt.pushIndent();
+                 }
+                 try fmt.formatExprDiscard(d.body);
+             },
+@@ -703,7 +795,8 @@
+                         try fmt.push(braces.end());
+                     } else {
+                         // Imports store their exposing-list layout on the statement node.
+-                        const items_multiline = fmt.ast.store.getCollectionLayout(si) == .expanded or
++                        const wrap = fmt.widthGroup(i.region.start, .collection, fmt.ast.store.getCollectionLayout(si) == .expanded);
++                        const items_multiline = wrap or fmt.ast.store.getCollectionLayout(si) == .expanded or
+                             fmt.nodesWillBeMultiline(AST.ExposedItem.Idx, items) or fmt.regionHasInteriorComment(i.region);
+                         if (items_multiline) {
+                             fmt.curr_indent += 1;
+@@ -799,15 +892,22 @@
+                 if (d.associated) |assoc| {
+                     try fmt.pushAll(".");
+                     try fmt.push('{');
+-                    if (assoc.statements.span.len > 0) {
++                    if (assoc.statements.span.len > 0 or fmt.regionHasInteriorComment(assoc.region)) {
+                         fmt.curr_indent += 1;
+                         const statements = fmt.ast.store.statementSlice(assoc.statements);
++                        var prev_def_info: ?DefInfo = null;
+                         for (statements) |stmt_idx| {
+                             const stmt_region = fmt.nodeRegion(@intFromEnum(stmt_idx));
+-                            try fmt.flushCommentsBeforeDiscard(stmt_region.start);
++                            const curr_def_info = fmt.defInfo(stmt_idx);
++                            const min_newlines: u8 = if (prev_def_info != null and curr_def_info != null and !isPairedAnnoDecl(prev_def_info.?, curr_def_info.?))
++                                2
++                            else
++                                0;
++                            _ = try fmt.flushCommentsBeforeMin(stmt_region.start, min_newlines);
+                             try fmt.ensureNewline();
+                             try fmt.pushIndent();
+                             try fmt.formatStatement(stmt_idx);
++                            prev_def_info = curr_def_info;
+                         }
+                         // Flush any trailing comments before the closing brace
+                         try fmt.flushCommentsBeforeDiscard(assoc.region.end - 1);
+@@ -819,6 +919,7 @@
+                 }
+             },
+             .type_anno => |t| {
++                const wrap = fmt.widthGroup(t.name, .annotation, false);
+                 if (t.is_var) {
+                     try fmt.pushAll("var ");
+                 }
+@@ -834,6 +935,10 @@
+                 if (multiline and try fmt.flushCommentsBefore(anno_region.start)) {
+                     fmt.curr_indent += 1;
+                     try fmt.pushIndent();
++                } else if (wrap) {
++                    fmt.curr_indent += 1;
++                    try fmt.ensureNewline();
++                    try fmt.pushIndent();
+                 } else {
+                     try fmt.push(' ');
+                 }
+@@ -958,7 +1063,9 @@
+         defer fmt.curr_indent = start_indent;
+         const clause_coll = fmt.ast.store.getCollection(w);
+         const clause_slice = fmt.ast.store.whereClauseSlice(.{ .span = clause_coll.span });
+-        const clauses_are_multiline = fmt.collectionWillBeMultiline(AST.WhereClause.Idx, w);
++        const source_multiline = fmt.collectionWillBeMultiline(AST.WhereClause.Idx, w);
++        const wrap = fmt.widthGroup(clause_coll.region.start, .collection, source_multiline);
++        const clauses_are_multiline = wrap or source_multiline;
+ 
+         if (!multiline) {
+             try fmt.push(' ');
+@@ -1080,7 +1187,10 @@
+ 
+     fn formatCollection(fmt: *Formatter, region: AST.TokenizedRegion, layout: AST.CollectionLayout, braces: Braces, comptime T: type, items: []T, formatter: fn (*Formatter, T) FormatAstError!AST.TokenizedRegion) FormatAstError!void {
+         const has_comment = fmt.regionHasInteriorComment(region);
+-        const multiline = layout == .expanded or fmt.nodesWillBeMultiline(T, items) or has_comment;
++        const source_multiline = layout == .expanded or fmt.nodesWillBeMultiline(T, items) or has_comment;
++        const wrap = if (items.len > 0) fmt.widthGroup(region.start, .collection, source_multiline) else false;
++        defer fmt.closeWidthGroup(region.start, .collection);
++        const multiline = source_multiline or wrap;
+         const curr_indent = fmt.curr_indent;
+         defer {
+             fmt.curr_indent = curr_indent;
+@@ -1180,7 +1290,8 @@
+     /// Format a record type annotation with an extension (e.g., { name: Str, ..ext } or { name: Str, .. })
+     fn formatRecordWithExtension(fmt: *Formatter, fields_span: AST.AnnoRecordField.Span, ext: AST.TypeAnno.RecordExt, record_region: AST.TokenizedRegion, layout: AST.CollectionLayout) FormatAstError!void {
+         const fields = fmt.ast.store.annoRecordFieldSlice(fields_span);
+-        const record_multiline = layout == .expanded or fmt.nodesWillBeMultiline(AST.AnnoRecordField.Idx, fields) or
++        const wrap = fmt.widthGroup(record_region.start, .record, layout == .expanded);
++        const record_multiline = wrap or layout == .expanded or fmt.nodesWillBeMultiline(AST.AnnoRecordField.Idx, fields) or
+             fmt.regionHasInteriorComment(record_region);
+         const record_indent = fmt.curr_indent;
+         defer {
+@@ -1500,7 +1611,8 @@
+         const expr = fmt.ast.store.getExpr(ei);
+         const region = fmt.nodeRegion(@intFromEnum(ei));
+         var formatted = FormattedExpr{ .region = region };
+-        const multiline = fmt.nodeWillBeMultiline(AST.Expr.Idx, ei);
++        const wrap_pipe = if (expr == .arrow_call) fmt.widthGroup(region.start, .arrow, false) else false;
++        const multiline = wrap_pipe or fmt.nodeWillBeMultiline(AST.Expr.Idx, ei);
+         const format_behavior = format_context.behavior;
+         const indent_modifier: u32 = @intFromBool(format_behavior != .normal and fmt.curr_indent > 0);
+         const curr_indent: u32 = fmt.curr_indent - indent_modifier;
+@@ -1626,6 +1738,7 @@
+                 if (needs_parens) try fmt.push(')');
+             },
+             .field_access => |fa| {
++                const wrap_access = fmt.widthGroup(region.start, .access, false);
+                 const receiver_expr = fmt.ast.store.getExpr(fa.receiver);
+                 const flatten_pipe_receiver = receiver_expr == .arrow_call and multiline;
+                 const parenthesize_receiver = (receiver_expr == .arrow_call and !flatten_pipe_receiver) or fmt.postfixReceiverNeedsParens(fa.receiver);
+@@ -1646,7 +1759,7 @@
+                     fmt.curr_indent = access_indent;
+ 
+                     const follows_string_line = i == 0 and !parenthesize_receiver and receiver.ends_with_multiline_string_line;
+-                    const layout: PostfixLayout = if ((i == 0 and flatten_pipe_receiver) or follows_string_line)
++                    const layout: PostfixLayout = if ((i == 0 and flatten_pipe_receiver) or follows_string_line or wrap_access)
+                         .continuation
+                     else if (multiline and (!parenthesize_receiver or i > 0))
+                         .source
+@@ -1658,7 +1771,7 @@
+                         .normal
+                     else
+                         format_behavior;
+-                    if (multiline) try fmt.formatPostfixBoundary(segment.field_token, layout, access_behavior);
++                    if (multiline or wrap_access) try fmt.formatPostfixBoundary(segment.field_token, layout, access_behavior);
+ 
+                     switch (segment.mode) {
+                         .required => try fmt.push('.'),
+@@ -1668,6 +1781,7 @@
+                 }
+             },
+             .method_call => |mc| {
++                const wrap_access = fmt.widthGroup(region.start, .access, false);
+                 const left_expr = fmt.ast.store.getExpr(mc.receiver);
+                 const flatten_pipe_receiver = left_expr == .arrow_call and multiline;
+                 const parenthesize_receiver = (left_expr == .arrow_call and !flatten_pipe_receiver) or fmt.postfixReceiverNeedsParens(mc.receiver);
+@@ -1678,13 +1792,13 @@
+                 else
+                     try fmt.formatExprInner(mc.receiver, .{ .starts_pipe_target = format_context.starts_pipe_target });
+                 const follows_string_line = !parenthesize_receiver and receiver.ends_with_multiline_string_line;
+-                const layout: PostfixLayout = if (flatten_pipe_receiver or follows_string_line)
++                const layout: PostfixLayout = if (flatten_pipe_receiver or follows_string_line or wrap_access)
+                     .continuation
+                 else if (multiline and !parenthesize_receiver)
+                     .source
+                 else
+                     .compact;
+-                if (multiline) try fmt.formatPostfixBoundary(mc.method_token, layout, if (follows_string_line) .normal else format_behavior);
++                if (multiline or wrap_access) try fmt.formatPostfixBoundary(mc.method_token, layout, if (follows_string_line) .normal else format_behavior);
+                 try fmt.push('.');
+                 try fmt.pushTokenText(mc.method_token);
+                 // Only the argument list (from the method token onwards) should
+@@ -1866,7 +1980,8 @@
+ 
+                 const fields = fmt.ast.store.recordFieldSlice(r.fields);
+                 var has_extension = false;
+-                const record_multiline = fmt.ast.store.getCollectionLayout(ei) == .expanded or
++                const wrap = fmt.widthGroup(r.region.start, .record, fmt.ast.store.getCollectionLayout(ei) == .expanded);
++                const record_multiline = wrap or fmt.ast.store.getCollectionLayout(ei) == .expanded or
+                     fmt.nodesWillBeMultiline(AST.RecordField.Idx, fields) or fmt.regionHasInteriorComment(r.region);
+                 const empty_has_comment = r.ext == null and fields.len == 0 and fmt.regionHasInteriorComment(r.region);
+ 
+@@ -1938,8 +2053,9 @@
+             .lambda => |l| {
+                 const args = fmt.ast.store.patternSlice(l.args);
+                 const body_region = fmt.nodeRegion(@intFromEnum(l.body));
++                const wrap_args = fmt.widthGroup(l.region.start, .lambda_args, fmt.ast.store.getCollectionLayout(ei) == .expanded);
+                 const args_are_multiline = args.len > 0 and
+-                    (fmt.ast.store.getCollectionLayout(ei) == .expanded or
++                    (wrap_args or fmt.ast.store.getCollectionLayout(ei) == .expanded or
+                         fmt.nodesWillBeMultiline(AST.Pattern.Idx, args) or
+                         fmt.regionHasInteriorComment(.{ .start = l.region.start, .end = body_region.start }));
+                 try fmt.push('|');
+@@ -1964,8 +2080,13 @@
+                     }
+                 }
+                 try fmt.push('|');
++                const wrap_body = fmt.widthGroup(body_region.start, .lambda_body, false);
+                 if (try fmt.flushCommentsBefore(body_region.start)) {
++                    fmt.curr_indent += 1;
++                    try fmt.pushIndent();
++                } else if (wrap_body) {
+                     fmt.curr_indent += 1;
++                    try fmt.ensureNewline();
+                     try fmt.pushIndent();
+                 } else {
+                     try fmt.push(' ');
+@@ -1979,6 +2100,7 @@
+             .bin_op => |op| {
+                 const op_tag = fmt.ast.tokens.tokens.items(.tag)[op.operator];
+                 const is_range_op = op_tag == .OpDoubleDotLessThan or op_tag == .OpDoubleDotEquals;
++                const wrap = if (!is_range_op) fmt.widthGroup(region.start, .binary, false) else false;
+                 if (fmt.flags == .debug_binop) {
+                     try fmt.push('(');
+                     if (multiline) {
+@@ -1995,6 +2117,11 @@
+                     fmt.curr_indent += 1;
+                     try fmt.pushIndent();
+                     pushed = true;
++                } else if (wrap) {
++                    fmt.curr_indent += 1;
++                    try fmt.ensureNewline();
++                    try fmt.pushIndent();
++                    pushed = true;
+                 } else if (!is_range_op) {
+                     try fmt.push(' ');
+                 }
+@@ -2045,6 +2172,7 @@
+                 try fmt.pushTokenText(t.token);
+             },
+             .if_then_else => |i| {
++                const wrap = fmt.widthGroup(region.start, .conditional, false);
+                 // Check if then/else are blocks - blocks use original behavior,
+                 // non-blocks use base_indent to keep else at the same level as if
+                 const then_is_block = fmt.ast.store.getExpr(i.then) == .block;
+@@ -2054,7 +2182,7 @@
+                 try fmt.pushAll("if");
+                 const base_indent = fmt.curr_indent;
+                 const cond_region = fmt.nodeRegion(@intFromEnum(i.condition));
+-                var flushed = try fmt.flushCommentsBefore(cond_region.start);
++                var flushed = try fmt.flushWidthBefore(cond_region.start, wrap);
+                 if (flushed) {
+                     fmt.curr_indent += 1;
+                     try fmt.pushIndent();
+@@ -2064,7 +2192,7 @@
+                 try fmt.formatExprDiscard(i.condition);
+                 if (!has_blocks) fmt.curr_indent = base_indent;
+                 const then_region = fmt.nodeRegion(@intFromEnum(i.then));
+-                flushed = try fmt.flushCommentsBefore(then_region.start);
++                flushed = try fmt.flushWidthBefore(then_region.start, wrap);
+                 if (flushed) {
+                     fmt.curr_indent += 1;
+                     try fmt.pushIndent();
+@@ -2073,7 +2201,7 @@
+                 }
+                 try fmt.formatExprDiscard(i.then);
+                 if (!has_blocks) fmt.curr_indent = base_indent;
+-                flushed = try fmt.flushCommentsBefore(then_region.end);
++                flushed = try fmt.flushWidthBefore(then_region.end, wrap);
+                 if (flushed) {
+                     if (has_blocks) fmt.curr_indent += 1;
+                     try fmt.pushIndent();
+@@ -2083,7 +2211,7 @@
+                 try fmt.pushAll("else");
+                 if (!has_blocks) fmt.curr_indent = base_indent;
+                 const else_region = fmt.nodeRegion(@intFromEnum(i.@"else"));
+-                flushed = try fmt.flushCommentsBefore(else_region.start);
++                flushed = try fmt.flushWidthBefore(else_region.start, wrap);
+                 if (flushed) {
+                     fmt.curr_indent += 1;
+                     try fmt.pushIndent();
+@@ -2093,6 +2221,7 @@
+                 try fmt.formatExprDiscard(i.@"else");
+             },
+             .if_without_else => |i| {
++                const wrap = fmt.widthGroup(region.start, .conditional, false);
+                 // Check if then is a block - blocks use original behavior,
+                 // non-blocks use base_indent logic
+                 const then_is_block = fmt.ast.store.getExpr(i.then) == .block;
+@@ -2100,7 +2229,7 @@
+                 try fmt.pushAll("if");
+                 const base_indent = fmt.curr_indent;
+                 const cond_region = fmt.nodeRegion(@intFromEnum(i.condition));
+-                var flushed = try fmt.flushCommentsBefore(cond_region.start);
++                var flushed = try fmt.flushWidthBefore(cond_region.start, wrap);
+                 if (flushed) {
+                     fmt.curr_indent += 1;
+                     try fmt.pushIndent();
+@@ -2110,7 +2239,7 @@
+                 try fmt.formatExprDiscard(i.condition);
+                 if (!then_is_block) fmt.curr_indent = base_indent;
+                 const then_region = fmt.nodeRegion(@intFromEnum(i.then));
+-                flushed = try fmt.flushCommentsBefore(then_region.start);
++                flushed = try fmt.flushWidthBefore(then_region.start, wrap);
+                 if (flushed) {
+                     fmt.curr_indent += 1;
+                     try fmt.pushIndent();
+@@ -2226,7 +2355,8 @@
+             .record_builder => |rb| {
+                 // Format record builder: { field: value, ... }.TypeName
+                 const fields = fmt.ast.store.recordFieldSlice(rb.fields);
+-                const record_multiline = fmt.ast.store.getCollectionLayout(ei) == .expanded or
++                const wrap = fmt.widthGroup(rb.region.start, .record, fmt.ast.store.getCollectionLayout(ei) == .expanded);
++                const record_multiline = wrap or fmt.ast.store.getCollectionLayout(ei) == .expanded or
+                     fmt.nodesWillBeMultiline(AST.RecordField.Idx, fields) or fmt.regionHasInteriorComment(rb.region);
+ 
+                 try fmt.push('{');
+@@ -2421,7 +2551,8 @@
+     fn formatPattern(fmt: *Formatter, pi: AST.Pattern.Idx) FormatAstError!AST.TokenizedRegion {
+         const pattern = fmt.ast.store.getPattern(pi);
+         var region = AST.TokenizedRegion{ .start = 0, .end = 0 };
+-        const multiline = fmt.nodeWillBeMultiline(AST.Pattern.Idx, pi);
++        const wrap_alternatives = if (pattern == .alternatives) fmt.widthGroup(pattern.alternatives.region.start, .alternatives, false) else false;
++        const multiline = wrap_alternatives or fmt.nodeWillBeMultiline(AST.Pattern.Idx, pi);
+         switch (pattern) {
+             .ident => |i| {
+                 region = i.region;
+@@ -2660,7 +2791,8 @@
+     fn formatSymbolMapSection(fmt: *Formatter, span: AST.SymbolMapEntry.Span, base_indent: u32) (Allocator.Error || error{WriteFailed})!void {
+         const entries = fmt.ast.store.symbolMapEntrySlice(span);
+         const has_comments = fmt.regionHasInteriorComment(span.region);
+-        const multiline = span.layout == .expanded or has_comments;
++        const wrap = fmt.widthGroup(span.region.start, .collection, span.layout == .expanded or has_comments);
++        const multiline = wrap or span.layout == .expanded or has_comments;
+         if (entries.len == 0) {
+             if (has_comments) {
+                 try fmt.push('{');
+@@ -2738,8 +2870,9 @@
+         const config = fmt.ast.store.getTargetConfig(config_idx);
+         const entries = fmt.ast.store.targetConfigEntrySlice(config.entries);
+         const base_indent = fmt.curr_indent;
++        const wrap = fmt.widthGroup(config.region.start, .record, entries.len != 1);
+ 
+-        if (entries.len == 1) {
++        if (entries.len == 1 and !wrap) {
+             const entry = fmt.ast.store.getTargetConfigEntry(entries[0]);
+             try fmt.pushAll("{ ");
+             try fmt.formatTargetConfigEntry(entry);
+@@ -2791,29 +2924,25 @@
+                 try fmt.push('"');
+             },
+             .list => |span| {
+-                const values = fmt.ast.store.targetConfigValueSlice(span);
+-                try fmt.push('[');
+-                for (values, 0..) |child_idx, i| {
+-                    try fmt.formatTargetConfigValue(child_idx);
+-                    if (i < values.len - 1) {
+-                        try fmt.pushAll(", ");
+-                    }
+-                }
+-                try fmt.push(']');
++                const region = fmt.nodeRegion(@intFromEnum(value_idx));
++                try fmt.formatCollection(region, if (fmt.ast.regionIsMultiline(region)) .expanded else .compact, .square, AST.TargetConfigValue.Idx, fmt.ast.store.targetConfigValueSlice(span), Formatter.formatTargetConfigValueItem);
+             },
+             .files => |span| {
+-                const files = fmt.ast.store.targetFileSlice(span);
+-                try fmt.push('[');
+-                for (files, 0..) |file_idx, i| {
+-                    try fmt.formatTargetFile(file_idx);
+-                    if (i < files.len - 1) {
+-                        try fmt.pushAll(", ");
+-                    }
+-                }
+-                try fmt.push(']');
++                const region = fmt.nodeRegion(@intFromEnum(value_idx));
++                try fmt.formatCollection(region, if (fmt.ast.regionIsMultiline(region)) .expanded else .compact, .square, AST.TargetFile.Idx, fmt.ast.store.targetFileSlice(span), Formatter.formatTargetFileItem);
+             },
+             .malformed => {},
+         }
++    }
++
++    fn formatTargetConfigValueItem(fmt: *Formatter, idx: AST.TargetConfigValue.Idx) FormatAstError!AST.TokenizedRegion {
++        try fmt.formatTargetConfigValue(idx);
++        return fmt.nodeRegion(@intFromEnum(idx));
++    }
++
++    fn formatTargetFileItem(fmt: *Formatter, idx: AST.TargetFile.Idx) FormatAstError!AST.TokenizedRegion {
++        try fmt.formatTargetFile(idx);
++        return fmt.nodeRegion(@intFromEnum(idx));
+     }
+ 
+     /// Format a single target file entry
+@@ -2946,7 +3075,9 @@
+                     try fmt.push(' ');
+                 }
+                 const packages = fmt.ast.store.getCollection(a.packages);
+-                const packages_multiline = fmt.collectionWillBeMultiline(AST.RecordField.Idx, a.packages);
++                const source_multiline = fmt.collectionWillBeMultiline(AST.RecordField.Idx, a.packages);
++                const wrap_packages = fmt.widthGroup(packages.region.start, .collection, source_multiline);
++                const packages_multiline = wrap_packages or source_multiline;
+                 // An app that names no platform and no packages writes `{}`,
+                 // with nothing to separate from the braces.
+                 const packages_empty = packages.span.len == 0;
+@@ -3350,7 +3481,8 @@
+         const start_indent = fmt.curr_indent;
+         defer fmt.curr_indent = start_indent;
+ 
+-        const multiline = fmt.nodeWillBeMultiline(AST.WhereClause.Idx, idx);
++        const wrap = fmt.widthGroup(clause.to_tokenized_region().start, .function, false);
++        const multiline = wrap or fmt.nodeWillBeMultiline(AST.WhereClause.Idx, idx);
+         switch (clause) {
+             .mod_method => |c| {
+                 // Format as: a.method : Type
+@@ -3364,7 +3496,7 @@
+                 try fmt.pushAll(" :");
+                 const anno_region = fmt.nodeRegion(@intFromEnum(c.anno));
+                 fmt.curr_indent = start_indent;
+-                if (multiline and try fmt.flushCommentsBefore(anno_region.start)) {
++                if (multiline and try fmt.flushWidthBefore(anno_region.start, wrap)) {
+                     fmt.curr_indent += 1;
+                     try fmt.pushIndent();
+                 } else {
+@@ -3391,7 +3523,10 @@
+     fn formatTypeAnno(fmt: *Formatter, anno: AST.TypeAnno.Idx) FormatAstError!AST.TokenizedRegion {
+         const a = fmt.ast.store.getTypeAnno(anno);
+         const region = fmt.nodeRegion(@intFromEnum(anno));
+-        const multiline = fmt.nodeWillBeMultiline(AST.TypeAnno.Idx, anno);
++        const saved_indent = fmt.curr_indent;
++        defer fmt.curr_indent = saved_indent;
++        const wrap_function = if (a == .@"fn") fmt.widthGroup(region.start, .function, false) else false;
++        const multiline = wrap_function or fmt.nodeWillBeMultiline(AST.TypeAnno.Idx, anno);
+         switch (a) {
+             .apply => |app| {
+                 const slice = fmt.ast.store.typeAnnoSlice(app.args);
+@@ -3435,7 +3570,8 @@
+             .tag_union => |t| {
+                 const tags = fmt.ast.store.typeAnnoSlice(t.tags);
+                 const is_open = t.ext != .closed;
+-                const tag_multiline = fmt.ast.store.getCollectionLayout(anno) == .expanded or
++                const wrap = fmt.widthGroup(region.start, .tags, fmt.ast.store.getCollectionLayout(anno) == .expanded);
++                const tag_multiline = wrap or fmt.ast.store.getCollectionLayout(anno) == .expanded or
+                     fmt.nodesWillBeMultiline(AST.TypeAnno.Idx, tags) or fmt.regionHasInteriorComment(region);
+                 const tag_indent = fmt.curr_indent;
+                 defer {
+@@ -3528,6 +3664,10 @@
+                 if (multiline and try fmt.flushCommentsBefore(ret_region.start)) {
+                     fmt.curr_indent += 1;
+                     try fmt.pushIndent();
++                } else if (wrap_function) {
++                    fmt.curr_indent += 1;
++                    try fmt.ensureNewline();
++                    try fmt.pushIndent();
+                 } else {
+                     try fmt.push(' ');
+                 }
+@@ -3568,6 +3708,12 @@
+         try fmt.push('\n');
+     }
+ 
++    fn flushWidthBefore(fmt: *Formatter, token: Token.Idx, wrap: bool) error{WriteFailed}!bool {
++        const flushed = try fmt.flushCommentsBefore(token);
++        if (wrap and !flushed) try fmt.ensureNewline();
++        return flushed or wrap;
++    }
++
+     fn flushCommentsBefore(fmt: *Formatter, tokenIdx: Token.Idx) error{WriteFailed}!bool {
+         return fmt.flushCommentsBeforeMin(tokenIdx, 0);
+     }
+@@ -3790,15 +3936,18 @@
+             '\n' => {
+                 fmt.pending_spaces = 0;
+                 fmt.has_newline = true;
++                fmt.measureWidth(&.{c});
+                 try fmt.writer.writeByte(c);
+             },
+             '\t' => {
+                 try fmt.flushPendingSpaces();
++                fmt.measureWidth(&.{c});
+                 try fmt.writer.writeByte(c);
+             },
+             else => {
+                 try fmt.flushPendingSpaces();
+                 fmt.has_newline = false;
++                fmt.measureWidth(&.{c});
+                 try fmt.writer.writeByte(c);
+             },
+         }
+@@ -3832,6 +3981,7 @@
+ 
+                     fmt.pending_spaces = 0;
+                     fmt.has_newline = true;
++                    fmt.measureWidth("\n");
+                     try fmt.writer.writeByte('\n');
+                     i += 1;
+                     run_start = i;
+@@ -3855,12 +4005,14 @@
+             fmt.has_newline = false;
+         }
+ 
++        fmt.measureWidth(str);
+         try fmt.writer.writeAll(str);
+     }
+ 
+     fn flushPendingSpaces(fmt: *Formatter) error{WriteFailed}!void {
+         if (fmt.pending_spaces == 0) return;
+ 
++        fmt.width_column += fmt.pending_spaces;
+         try fmt.writer.splatByteAll(' ', fmt.pending_spaces);
+         fmt.pending_spaces = 0;
+     }
+@@ -3878,6 +4030,7 @@
+         }
+ 
+         fmt.has_multiline_string = false;
++        fmt.measureWidth(str);
+         try fmt.writer.writeAll(str);
+     }
+ 
+@@ -4098,6 +4251,22 @@
+     fn nodeWillBeMultiline(fmt: *Formatter, comptime T: type, item: T) bool {
+         if (T == AST.Expr.Idx) {
+             const expr = fmt.ast.store.getExpr(item);
++            const start = expr.to_tokenized_region().start;
++            const width_multiline = switch (expr) {
++                .list, .tuple, .nominal_apply => fmt.widthIsExpanded(start, .collection),
++                .record, .record_builder => fmt.widthIsExpanded(start, .record),
++                .apply => |a| fmt.widthIsExpanded(fmt.nodeRegion(@intFromEnum(a.@"fn")).end, .collection),
++                .method_call => |m| fmt.widthIsExpanded(start, .access) or fmt.widthIsExpanded(m.method_token + 1, .collection),
++                .field_access => fmt.widthIsExpanded(start, .access),
++                .arrow_call => fmt.widthIsExpanded(start, .arrow),
++                .bin_op => fmt.widthIsExpanded(start, .binary),
++                .if_then_else, .if_without_else => fmt.widthIsExpanded(start, .conditional),
++                .lambda => |l| fmt.widthIsExpanded(start, .lambda_args) or fmt.widthIsExpanded(fmt.nodeRegion(@intFromEnum(l.body)).start, .lambda_body),
++                .string => |s| fmt.nodesWillBeMultiline(AST.Expr.Idx, fmt.ast.store.exprSlice(s.parts)),
++                .typed_string => |s| fmt.nodesWillBeMultiline(AST.Expr.Idx, fmt.ast.store.exprSlice(s.parts)),
++                else => false,
++            };
++            if (width_multiline) return true;
+             if (expr == .method_call) {
+                 const method = expr.method_call;
+                 const receiver_region = fmt.nodeRegion(@intFromEnum(method.receiver));
+@@ -4257,6 +4426,14 @@
+         }
+         if (T == AST.Pattern.Idx) {
+             const pattern = fmt.ast.store.getPattern(item);
++            const start = pattern.to_tokenized_region().start;
++            switch (pattern) {
++                .tag, .record, .list, .tuple => if (fmt.widthIsExpanded(start, .collection)) return true,
++                .alternatives => |a| {
++                    if (fmt.widthIsExpanded(start, .alternatives) or fmt.nodesWillBeMultiline(AST.Pattern.Idx, fmt.ast.store.patternSlice(a.patterns))) return true;
++                },
++                else => {},
++            }
+             const pattern_has_comment = fmt.regionHasInteriorComment(pattern.to_tokenized_region());
+             return switch (pattern) {
+                 .tag => |t| t.has_args and (pattern_has_comment or fmt.ast.store.getCollectionLayout(item) == .expanded or
+@@ -4372,6 +4549,18 @@
+         }
+ 
+         const type_anno = fmt.ast.store.getTypeAnno(item);
++        const start = type_anno.to_tokenized_region().start;
++        const width_multiline = switch (type_anno) {
++            .apply, .tuple => fmt.widthIsExpanded(start, .collection),
++            .record => fmt.widthIsExpanded(start, .collection) or fmt.widthIsExpanded(start, .record),
++            .tag_union => fmt.widthIsExpanded(start, .tags),
++            .@"fn" => fmt.widthIsExpanded(start, .function),
++            else => false,
++        };
++        if (width_multiline) {
++            cache_entry.* = .expanded;
++            return true;
++        }
+         const has_comment = fmt.regionHasInteriorComment(type_anno.to_tokenized_region());
+         const multiline = switch (type_anno) {
+             .apply => |apply| has_comment or fmt.ast.store.getCollectionLayout(item) == .expanded or
+@@ -4382,7 +4571,7 @@
+                 fmt.nodesWillBeMultiline(AST.AnnoRecordField.Idx, fmt.ast.store.annoRecordFieldSlice(record.fields)),
+             .tag_union => |tag_union| has_comment or fmt.ast.store.getCollectionLayout(item) == .expanded or
+                 fmt.nodesWillBeMultiline(AST.TypeAnno.Idx, fmt.ast.store.typeAnnoSlice(tag_union.tags)),
+-            .@"fn" => |function| has_comment or
++            .@"fn" => |function| has_comment or fmt.functionHasLineBreaks(function) or
+                 fmt.nodesWillBeMultiline(AST.TypeAnno.Idx, fmt.ast.store.typeAnnoSlice(function.args)) or
+                 fmt.typeAnnoWillBeMultiline(function.ret),
+             .parens => |parens| has_comment or fmt.ast.regionIsMultiline(type_anno.to_tokenized_region()) or
+@@ -4392,6 +4581,16 @@
+ 
+         cache_entry.* = if (multiline) .expanded else .compact;
+         return multiline;
++    }
++
++    fn functionHasLineBreaks(fmt: *Formatter, function: anytype) bool {
++        const args = fmt.ast.store.typeAnnoSlice(function.args);
++        for (args, 0..) |arg, i| {
++            const left = fmt.nodeRegion(@intFromEnum(arg));
++            const right = fmt.nodeRegion(@intFromEnum(if (i + 1 < args.len) args[i + 1] else function.ret));
++            if (fmt.ast.regionIsMultiline(.{ .start = left.end - 1, .end = right.start + 1 })) return true;
++        }
++        return false;
+     }
+ 
+     fn annoRecordFieldWillBeMultiline(fmt: *Formatter, item: AST.AnnoRecordField.Idx) bool {
+@@ -4424,7 +4623,7 @@
+ 
+     fn collectionWillBeMultiline(fmt: *Formatter, comptime T: type, idx: AST.Collection.Idx) bool {
+         const collection = fmt.ast.store.getCollection(idx);
+-        if (collection.layout == .expanded or fmt.regionHasInteriorComment(collection.region)) {
++        if (fmt.widthIsExpanded(collection.region.start, .collection) or collection.layout == .expanded or fmt.regionHasInteriorComment(collection.region)) {
+             return true;
+         }
+ 
+@@ -4868,8 +5067,14 @@
+     const result = try moduleFmtsStable(gpa, source.items, false);
+     defer gpa.free(result);
+ 
+-    try source.append(gpa, '\n');
+-    try std.testing.expectEqualStrings(source.items, result);
++    var expected = std.ArrayList(u8).empty;
++    defer expected.deinit(gpa);
++    try expected.appendSlice(gpa, "value =\n\trecord");
++    for (0..depth) |i| {
++        try expected.appendSlice(gpa, if (i % 2 == 0) "\n\t\t.required" else "\n\t\t.?optional");
++    }
++    try expected.append(gpa, '\n');
++    try std.testing.expectEqualStrings(expected.items, result);
+ }
+ 
+ test "optional field access composes with defaulting without token ambiguity" {
+@@ -6082,6 +6287,190 @@
+     try std.testing.expectEqualStrings(expected, result);
+ }
+ 
++test "120 columns expands syntax without changing the parse tree" {
++    const cases = [_][]const u8{
++        "CommandDef(input, output, input_fields, output_fields) :: { input_witness : (input -> input), output_witness : (output -> output), handler : (Context, input -> Tx(output)), contract : Contract(input, output, input_fields, output_fields), execution : Execution(input), verification : Verification(input, output) }.{\nfirst = 1\nsecond = 2\n}\n",
++        "result = transform(first_argument_with_a_descriptive_name, second_argument_with_a_descriptive_name, third_argument_with_a_descriptive_name)\n",
++        "result = { first_field_with_a_descriptive_name: 100, second_field_with_a_descriptive_name: 200, third_field_with_a_descriptive_name: 300 }\n",
++        "result = |first_argument_with_a_descriptive_name, second_argument_with_a_descriptive_name, third_argument_with_a_descriptive_name| first_argument_with_a_descriptive_name\n",
++        "result = first_value_with_a_descriptive_name + second_value_with_a_descriptive_name + third_value_with_a_descriptive_name + fourth_value_with_a_descriptive_name\n",
++        "transform : FirstArgumentWithADescriptiveName, SecondArgumentWithADescriptiveName, ThirdArgumentWithADescriptiveName -> ResultWithADescriptiveName\n",
++        "Variant : [FirstVariantWithADescriptiveName(Str), SecondVariantWithADescriptiveName(Str), ThirdVariantWithADescriptiveName(Str)]\n",
++        "Record : { first_field_with_a_descriptive_name : Str, second_field_with_a_descriptive_name : Str, third_field_with_a_descriptive_name : Str, ..others }\n",
++        "Tuple : (FirstArgumentWithADescriptiveName, SecondArgumentWithADescriptiveName, ThirdArgumentWithADescriptiveName, FourthArgumentWithADescriptiveName)\n",
++        "result = outer(inner(first_argument_with_a_descriptive_name, second_argument_with_a_descriptive_name), third_argument_with_a_descriptive_name)\n",
++        "result = call({ first_field_with_a_descriptive_name: first_value_with_a_descriptive_name, second_field_with_a_descriptive_name: second_value_with_a_descriptive_name })\n",
++        "result = \"Prefix ${call(first_argument_with_a_descriptive_name, second_argument_with_a_descriptive_name, third_argument_with_a_descriptive_name)} suffix\"\n",
++        "result = match input { FirstVariantWithADescriptiveName(_) | SecondVariantWithADescriptiveName(_) | ThirdVariantWithADescriptiveName(_) => 1 }\n",
++        "import SomeModule exposing [first_export_with_a_descriptive_name, second_export_with_a_descriptive_name, third_export_with_a_descriptive_name]\n",
++        "result = if condition_with_a_descriptive_name first_result_with_a_descriptive_name else second_result_with_a_descriptive_name\n",
++        "result = initial_value_with_a_descriptive_name |> first_transform_with_a_descriptive_name |> second_transform_with_a_descriptive_name\n",
++        "result = initial_value_with_a_descriptive_name.first_transform_with_a_descriptive_name().second_transform_with_a_descriptive_name()\n",
++        "result = initial_value_with_a_descriptive_name.first_field_with_a_descriptive_name.second_field_with_a_descriptive_name.third_field_with_a_descriptive_name\n",
++        "result = (initial_value_with_a_descriptive_name |> transform_with_a_descriptive_name).first_field_with_a_descriptive_name.second_field_with_a_descriptive_name\n",
++        "result = initial_value_with_a_descriptive_name.first_transform_with_a_descriptive_name() # keep boundary\n.second_transform_with_a_descriptive_name().third_transform_with_a_descriptive_name()\n",
++        "helper : a -> Str where [a.method_with_a_descriptive_name : FirstArgumentWithADescriptiveName, SecondArgumentWithADescriptiveName -> ResultWithADescriptiveName]\n",
++        "helper : a -> Str where [a.method_with_a_descriptive_name : (FirstArgumentWithADescriptiveName, SecondArgumentWithADescriptiveName => ResultWithADescriptiveName)]\n",
++        "module [first_export_with_a_descriptive_name, second_export_with_a_descriptive_name, third_export_with_a_descriptive_name, fourth_export_with_a_descriptive_name]\n",
++        "Methods :: [].{\n\tnested = { first_field_with_a_descriptive_name: first_value_with_a_descriptive_name, second_field_with_a_descriptive_name: second_value_with_a_descriptive_name } # Keep this note.\n}\n",
++    };
++    for (cases) |input| {
++        const output = try moduleFmtsStable(std.testing.allocator, input, false);
++        defer std.testing.allocator.free(output);
++        if (std.mem.indexOf(u8, input, "# keep boundary") != null) {
++            try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, output, "# keep boundary"));
++        }
++        var lines = std.mem.splitScalar(u8, output, '\n');
++        while (lines.next()) |line| {
++            var columns: usize = 0;
++            for (line) |byte| {
++                columns += if (byte == '\t') 4 - columns % 4 else @intFromBool(byte & 0xc0 != 0x80);
++            }
++            if (columns > 120) std.debug.print("Overlong formatted line ({d}): {s}\n", .{ columns, line });
++            try std.testing.expect(columns <= 120);
++        }
++        const original_shape = try widthTestParserShape(std.testing.allocator, input);
++        defer std.testing.allocator.free(original_shape);
++        const output_shape = try widthTestParserShape(std.testing.allocator, output);
++        defer std.testing.allocator.free(output_shape);
++        try std.testing.expectEqualStrings(original_shape, output_shape);
++    }
++}
++
++test "120 column boundary counts tabs and Unicode and retains unbreakable content" {
++    const gpa = std.testing.allocator;
++    for ([_]usize{ 120, 121 }) |columns| {
++        // value = [<identifier>, 0] occupies identifier length + 13 columns.
++        const name = try gpa.alloc(u8, columns - 13);
++        defer gpa.free(name);
++        @memset(name, 'a');
++        const input = try std.fmt.allocPrint(gpa, "value = [{s}, 0]\n", .{name});
++        defer gpa.free(input);
++        const output = try moduleFmtsStable(gpa, input, false);
++        defer gpa.free(output);
++        if (columns == 120) {
++            try std.testing.expectEqualStrings(input, output);
++        } else {
++            try std.testing.expect(!std.mem.eql(u8, input, output));
++        }
++    }
++    const unicode = "é" ** 108;
++    const unicode_input = "value = \"" ++ unicode ++ "\"\n";
++    const unicode_output = try moduleFmtsStable(gpa, unicode_input, false);
++    defer gpa.free(unicode_output);
++    try std.testing.expectEqualStrings(unicode_input, unicode_output);
++
++    for ([_]usize{ 120, 121 }) |columns| {
++        const name = try gpa.alloc(u8, columns - 17);
++        defer gpa.free(name);
++        @memset(name, 'a');
++        const nested = try std.fmt.allocPrint(gpa, "Methods :: [].{{\n\tvalue = [{s}, 0]\n}}\n", .{name});
++        defer gpa.free(nested);
++        const formatted = try moduleFmtsStable(gpa, nested, false);
++        defer gpa.free(formatted);
++        try std.testing.expectEqual(columns == 120, std.mem.eql(u8, nested, formatted));
++    }
++
++    const literal = "https://example.com/" ++ "segment/" ** 30;
++    const input = "# " ++ literal ++ "\nvalue = \"" ++ literal ++ "\"\n";
++    const output = try moduleFmtsStable(gpa, input, false);
++    defer gpa.free(output);
++    try std.testing.expect(std.mem.indexOf(u8, output, "# " ++ literal ++ "\n") != null);
++    try std.testing.expect(std.mem.indexOf(u8, output, "\"" ++ literal ++ "\"") != null);
++    const original_shape = try widthTestParserShape(gpa, input);
++    defer gpa.free(original_shape);
++    const output_shape = try widthTestParserShape(gpa, output);
++    defer gpa.free(output_shape);
++    try std.testing.expectEqualStrings(original_shape, output_shape);
++}
++
++fn widthTestParserShape(gpa: std.mem.Allocator, source: []const u8) ![]const u8 {
++    var env = try ModuleEnv.init(gpa, source);
++    defer env.deinit();
++    const ast = try parse.file(gpa, &env.common);
++    defer ast.deinit();
++    try std.testing.expectEqual(@as(usize, 0), ast.parse_diagnostics.items.len);
++    var tree = base.SExprTree.init(gpa);
++    defer tree.deinit();
++    try ast.store.getFile().pushToSExprTree(gpa, &env.common, ast, &tree);
++    var result: std.Io.Writer.Allocating = .init(gpa);
++    defer result.deinit();
++    try tree.toStringPretty(&result.writer, .skip_linecol);
++    return result.toOwnedSlice();
++}
++
++test "associated definition spacing preserves groups and comments" {
++    const ParserShape = struct {
++        fn serialize(gpa: std.mem.Allocator, source: []const u8) ![]const u8 {
++            var env = try ModuleEnv.init(gpa, source);
++            defer env.deinit();
++            const ast = try parse.file(gpa, &env.common);
++            defer ast.deinit();
++            try std.testing.expectEqual(@as(usize, 0), ast.parse_diagnostics.items.len);
++            var tree = base.SExprTree.init(gpa);
++            defer tree.deinit();
++            const file = ast.store.getFile();
++            try file.pushToSExprTree(gpa, &env.common, ast, &tree);
++            var result: std.Io.Writer.Allocating = .init(gpa);
++            defer result.deinit();
++            try tree.toStringPretty(&result.writer, .skip_linecol);
++            return result.toOwnedSlice();
++        }
++    };
++    const cases = [_]struct { input: []const u8, expected: []const u8 }{
++        .{
++            .input = "Methods :: [].{\nfirst : I64 -> I64\nfirst = |value| value\nsecond : I64 -> I64\nsecond = |value| value\n}",
++            .expected = "Methods :: [].{\n\tfirst : I64 -> I64\n\tfirst = |value| value\n\n\tsecond : I64 -> I64\n\tsecond = |value| value\n}\n",
++        },
++        .{
++            .input = "Methods :: [].{\n\tfirst = |value| value\n\n\n\tsecond = |value| value\n}\n",
++            .expected = "Methods :: [].{\n\tfirst = |value| value\n\n\tsecond = |value| value\n}\n",
++        },
++        .{
++            .input = "Methods :: [].{\nconstant = 42\nfirst = |value| value\nsecond = |value| value\n}",
++            .expected = "Methods :: [].{\n\tconstant = 42\n\n\tfirst = |value| value\n\n\tsecond = |value| value\n}\n",
++        },
++        .{
++            .input = "Methods :: [].{\nfirst : I64 -> I64\nsecond : I64 -> I64\nthird = |value| value\n}",
++            .expected = "Methods :: [].{\n\tfirst : I64 -> I64\n\n\tsecond : I64 -> I64\n\n\tthird = |value| value\n}\n",
++        },
++        .{
++            .input = "Methods :: [].{\nNested :: [].{\nfirst = 1\nsecond = 2\n}\nEmpty :: [].{}\nlast = 3\n}",
++            .expected = "Methods :: [].{\n\tNested :: [].{\n\t\tfirst = 1\n\n\t\tsecond = 2\n\t}\n\n\tEmpty :: [].{}\n\n\tlast = 3\n}\n",
++        },
++        .{
++            .input = "Methods :: [].{\n# First method\nfirst : I64 -> I64\nfirst = |value| value # First implementation\n# Second method\nsecond : I64 -> I64\nsecond = |value| value\n# End of methods\n}",
++            .expected = "Methods :: [].{\n\t# First method\n\tfirst : I64 -> I64\n\tfirst = |value| value # First implementation\n\n\t# Second method\n\tsecond : I64 -> I64\n\tsecond = |value| value\n\t# End of methods\n}\n",
++        },
++        .{
++            .input = "Methods :: [].{\nfirst = 1 # First\n## Second method\n## More documentation\nsecond : I64\n# Implementation note\nsecond = 2 # Second\n}",
++            .expected = "Methods :: [].{\n\tfirst = 1 # First\n\n\t## Second method\n\t## More documentation\n\tsecond : I64\n\t# Implementation note\n\tsecond = 2 # Second\n}\n",
++        },
++        .{
++            .input = "Methods :: [].{\r\nfirst : I64 -> I64\r\nfirst = |value| value\nsecond = 2\r\n}\r\n",
++            .expected = "Methods :: [].{\n\tfirst : I64 -> I64\n\tfirst = |value| value\n\n\tsecond = 2\n}\n",
++        },
++        .{
++            .input = "Methods :: [].{\nfirst = |value| {\nlocal = value\nother = local\nother\n}\nsecond = 2\n}",
++            .expected = "Methods :: [].{\n\tfirst = |value| {\n\t\tlocal = value\n\t\tother = local\n\t\tother\n\t}\n\n\tsecond = 2\n}\n",
++        },
++        .{
++            .input = "Empty :: [].{}\n\nComments :: [].{\n# No definitions\n}\n",
++            .expected = "Empty :: [].{}\n\nComments :: [].{\n\t# No definitions\n}\n",
++        },
++    };
++    for (cases) |case| {
++        const result = try moduleFmtsStable(std.testing.allocator, case.input, false);
++        defer std.testing.allocator.free(result);
++        try std.testing.expectEqualStrings(case.expected, result);
++        const original_shape = try ParserShape.serialize(std.testing.allocator, case.input);
++        defer std.testing.allocator.free(original_shape);
++        const formatted_shape = try ParserShape.serialize(std.testing.allocator, result);
++        defer std.testing.allocator.free(formatted_shape);
++        try std.testing.expectEqualStrings(original_shape, formatted_shape);
++    }
++}
++
+ test "blank line inserted between consecutive value defs" {
+     const input =
+         \\to_f64 = |x| x

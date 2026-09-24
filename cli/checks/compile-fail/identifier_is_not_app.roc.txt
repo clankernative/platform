@@ -1,0 +1,7 @@
+# Expected diagnostic: type mismatch
+import Names
+main! : List(OsStr.OsStr) => Try({}, [Exit(I32)])
+main! = |_| {
+	identifier = Names.Identifier.from_str("links").map_err(|_| Exit(2))?
+	Stdout.line!(Names.App.to_str(identifier)).map_err(|_| Exit(1))
+}

@@ -1,0 +1,8 @@
+# Expected diagnostic: cannot use opaque nominal type
+import Output
+import Cli
+main! : List(OsStr.OsStr) => Try({}, [Exit(I32)])
+main! = |_| {
+	response = Output.{ outcome: Output.Outcome.Help(Cli.Format.Json) }
+	Stdout.line!(response.body()).map_err(|_| Exit(1))
+}

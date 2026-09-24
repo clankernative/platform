@@ -1,0 +1,99 @@
+name: Platform CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: platform-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  secrets:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - run: gh release download v8.30.1 --repo gitleaks/gitleaks --pattern gitleaks_8.30.1_linux_x64.tar.gz --dir /tmp/scanners
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - run: sha256sum --check $GITHUB_WORKSPACE/.github/gitleaks.sha256
+        working-directory: /tmp/scanners
+      - run: tar -xzf /tmp/scanners/gitleaks_8.30.1_linux_x64.tar.gz -C /tmp/scanners
+      - run: /tmp/scanners/gitleaks dir . --redact=100 --config .gitleaks.toml
+      - run: /tmp/scanners/gitleaks git . --redact=100 --config .gitleaks.toml
+
+  dependencies:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - run: gh release download cargo-audit/v0.22.2 --repo RustSec/rustsec --pattern cargo-audit-x86_64-unknown-linux-gnu-v0.22.2.tgz --dir /tmp/scanners
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - run: sha256sum --check $GITHUB_WORKSPACE/.github/cargo-audit.sha256
+        working-directory: /tmp/scanners
+      - run: tar -xzf /tmp/scanners/cargo-audit-x86_64-unknown-linux-gnu-v0.22.2.tgz -C /tmp/scanners
+      - run: /tmp/scanners/cargo-audit-x86_64-unknown-linux-gnu-v0.22.2/cargo-audit audit --deny warnings
+
+  verify:
+    runs-on: macos-15
+    timeout-minutes: 360
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_BUILD_JOBS: '2'
+      DAY2_TEMPORAL_CLI: /tmp/day2-tools/temporal
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: opentofu/setup-opentofu@9d84900f3238fab8cd84ce47d658d25dd008be2f # v1
+        with:
+          tofu_version: 1.11.5
+          tofu_wrapper: false
+      - run: gh release download v1.6.1 --repo temporalio/cli --pattern temporal_cli_1.6.1_darwin_arm64.tar.gz --dir /tmp/day2-tools
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - run: shasum -a 256 --check $GITHUB_WORKSPACE/.github/temporal.sha256
+        working-directory: /tmp/day2-tools
+      - run: tar -xzf /tmp/day2-tools/temporal_cli_1.6.1_darwin_arm64.tar.gz -C /tmp/day2-tools
+      - run: cargo run --locked -p xtask -- source-check
+      - run: cargo fetch --locked
+      - run: cargo run --locked -p xtask -- notices
+      - run: git diff --exit-code -- THIRD-PARTY-NOTICES.txt dependency-inventory.json
+      - run: cargo run --locked -p xtask -- bootstrap
+      - run: gh release download roc-formatter-2026-09-12 --repo clankernative/platform --pattern roc-fmt-day2-aarch64-apple-darwin --dir /tmp/day2-tools
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - run: cargo run --locked -p xtask -- bootstrap-formatter /tmp/day2-tools/roc-fmt-day2-aarch64-apple-darwin
+      - run: cargo run --locked -p xtask -- configure-tofu
+      - run: cargo run --locked -p xtask -- verify
+
+  infrastructure:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      matrix:
+        stack: [cluster, app-edge, day2-app, qualification-runner]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: opentofu/setup-opentofu@9d84900f3238fab8cd84ce47d658d25dd008be2f # v1
+        with:
+          tofu_version: 1.11.5
+          tofu_wrapper: false
+      - run: tofu fmt -check -recursive deploy/gke/stacks
+      - run: tofu -chdir=deploy/gke/stacks/${{ matrix.stack }} init -backend=false -lockfile=readonly
+      - run: tofu -chdir=deploy/gke/stacks/${{ matrix.stack }} validate
+      - run: tofu -chdir=deploy/gke/stacks/${{ matrix.stack }} test

@@ -1,0 +1,112 @@
+# GKE Landlock/seccomp probe for the day2 runtime image.
+#
+# Runs day2's own sandbox launcher on its own acceptance probe, exactly as
+# day2-serve does at start (worker::qualify_sandbox):
+#   /usr/local/bin/day2-sandbox /usr/local/bin/day2-sandbox-probe <parent pid>
+#   stdin "qualify"  ->  stdout "day2-linux-sandbox-v1:qualified"
+# The launcher hard-requires Landlock ABI 3 fully enforced plus its own seccomp
+# filter, under this pod's RuntimeDefault seccomp profile. The pod and container
+# securityContext, resources, node selector and /tmp volume are the ones
+# ../stacks/day2-app renders for the production StatefulSet; only the command
+# differs.
+#
+# It also runs day2-serve's own cgroup preflight for the profile, so one run
+# answers both "is Landlock enforced on this node OS" and "will day2-serve's
+# cgroup preflight pass". Both come from day2-inspect in the distroless runtime
+# image, which has no shell.
+#
+# This is a template. The instance supplies every ${DAY2_PROBE_*} value; render
+# it with only those variables substituted, for example:
+#   envsubst "$(env | sed -n 's/^\(DAY2_PROBE_[A-Z_]*\)=.*/${\1}/p' | tr '\n' ' ')" \
+#     < landlock-probe-job.yaml | kubectl apply -f -
+#
+# DAY2_PROBE_NAMESPACE            namespace to run in (the app's namespace)
+# DAY2_PROBE_SERVICE_ACCOUNT      service account the namespace admits for Jobs
+# DAY2_PROBE_POD_LABEL_KEY/VALUE  a pod label the namespace admits for Jobs that
+#                                 keeps the pod out of the app Service
+# DAY2_PROBE_IMAGE                the day2 runtime image, pinned by digest
+# DAY2_PROBE_MEMORY_MIB, DAY2_PROBE_CPU_MILLIS, DAY2_PROBE_PROCESS_LIMIT,
+# DAY2_PROBE_PROCESS_LIMIT_ENFORCED_BY (container|pod)
+#                                 the app's runtime profile
+# DAY2_PROBE_NODE_ARCH            amd64 or arm64
+#
+# Then:
+#   kubectl -n $DAY2_PROBE_NAMESPACE wait --for=condition=complete --timeout=300s job/day2-sandbox-probe \
+#     || kubectl -n $DAY2_PROBE_NAMESPACE wait --for=condition=failed --timeout=10s job/day2-sandbox-probe
+#   kubectl -n $DAY2_PROBE_NAMESPACE logs job/day2-sandbox-probe
+#   kubectl -n $DAY2_PROBE_NAMESPACE delete job day2-sandbox-probe
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: day2-sandbox-probe
+  namespace: ${DAY2_PROBE_NAMESPACE}
+  labels:
+    app.kubernetes.io/name: day2-sandbox-probe
+    app.kubernetes.io/part-of: day2
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 300
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        ${DAY2_PROBE_POD_LABEL_KEY}: ${DAY2_PROBE_POD_LABEL_VALUE}
+        app.kubernetes.io/name: day2-sandbox-probe
+        app.kubernetes.io/part-of: day2
+    spec:
+      restartPolicy: Never
+      serviceAccountName: ${DAY2_PROBE_SERVICE_ACCOUNT}
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      nodeSelector:
+        kubernetes.io/arch: ${DAY2_PROBE_NODE_ARCH}
+        kubernetes.io/os: linux
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: probe
+          # The day2 linux-sqlite runtime image (../../linux-sqlite, target
+          # "runtime"), built natively for the node architecture. An app image
+          # built FROM it (../images/app) works too.
+          image: ${DAY2_PROBE_IMAGE}
+          imagePullPolicy: IfNotPresent
+          # The runtime image is distroless (no shell). day2-inspect probe
+          # prints the node's kernel and cgroup facts, then runs day2-serve's
+          # own cgroup preflight for this profile and the sandbox
+          # qualification: the same functions, not a restatement of them.
+          command: ["/usr/local/bin/day2-inspect"]
+          args:
+            - probe
+            - '{"kind":"linux_sqlite_single_v1","resources":{"memory_mib":${DAY2_PROBE_MEMORY_MIB},"cpu_millis":${DAY2_PROBE_CPU_MILLIS},"process_limit":${DAY2_PROBE_PROCESS_LIMIT},"process_limit_enforced_by":"${DAY2_PROBE_PROCESS_LIMIT_ENFORCED_BY}","http_concurrency":1,"shutdown_seconds":30}}'
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            privileged: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            requests:
+              cpu: ${DAY2_PROBE_CPU_MILLIS}m
+              memory: ${DAY2_PROBE_MEMORY_MIB}Mi
+              ephemeral-storage: 256Mi
+            limits:
+              cpu: ${DAY2_PROBE_CPU_MILLIS}m
+              memory: ${DAY2_PROBE_MEMORY_MIB}Mi
+              ephemeral-storage: 256Mi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi

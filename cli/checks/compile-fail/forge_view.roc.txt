@@ -1,0 +1,9 @@
+# Expected diagnostic: cannot use opaque nominal type
+import Catalog
+import "fixtures/links-artifact.json" as fixture : Str
+main! : List(OsStr.OsStr) => Try({}, [Exit(I32)])
+main! = |_| {
+	catalog = Catalog.from_json(fixture).map_err(|_| Exit(5))?
+	view = Catalog.View.{ catalog, selected: [] }
+	Stdout.line!(view.names().len().to_str()).map_err(|_| Exit(1))
+}

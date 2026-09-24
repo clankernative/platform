@@ -1,0 +1,63 @@
+DAY2  /  your platform, from the terminal
+
+Discover what an app can do, what each operation expects, and what it returns.
+Detailed text is the default. Use --agent for a single JSON response.
+
+USAGE
+  day2 app describe <app> [options]
+  day2 platform --help
+
+PLATFORM OPERATIONS
+  platform build SOURCE                   Build and admit an app artifact.
+  platform check SOURCE [SEED CASES]        Build and run reproducible checks.
+  platform test SOURCE [SEED CASES]         Alias for check.
+  platform local-dev [SOURCE] [options]    Build, watch and serve a local app.
+  platform backup INSTANCE APP NEW_DIR      Take an online SQLite backup.
+  platform restore BACKUP NEW_DIR           Restore into a new directory.
+  platform infra plan CONFIG NEW_DIR        Run the pinned OpenTofu planner.
+
+  Platform operations return JSON receipts; errors use stderr and a nonzero
+  exit code. Local development runs in the foreground until Ctrl-C.
+
+COMMAND
+  app describe    Inspect an app's operation catalog and typed input contracts.
+                  Reads metadata only. Does not invoke operations or sign in.
+
+OPTIONS
+  --demo              Use the bundled Links example; no setup or network needed.
+  --instance <path>   Read a local instance.json and its bound artifact metadata.
+                      Overrides DAY2_INSTANCE. Cannot be combined with --demo.
+  --operation <name>  Focus on one exact operation, such as links.list.
+  --agent, --json     One versioned JSON object on stdout, including errors.
+  -h, --help          Explain this command, its inputs, and its output contract.
+  --version          Print the prototype version.
+
+VALIDATION
+  App names are lowercase identifiers of 1 to 48 bytes. Operation names use
+  dot-separated identifiers, up to 80 bytes. day2_ and sqlite_ are reserved.
+  Conflicting or duplicate source/filter options fail before metadata is read.
+  --help cannot accompany describe options; --version cannot accompany a command.
+  All model, input, and operation contracts are checked before filtering.
+  Malformed, ambiguous, oversized, or unsupported metadata fails as one error.
+
+EXAMPLES
+  day2 app describe links --demo
+  day2 app describe links --demo --operation links.list
+  day2 app describe links --demo --agent
+  day2 app describe reports --instance /path/to/instance.json
+  day2 platform local-dev ../reports-app
+
+FOR AGENTS
+  Never prompts, starts a pager, emits color, or switches format when piped.
+  JSON success and failure share schema_version, ok, command, exit_code,
+  result, error, and next_actions. Prefer next_actions[].argv over shell parsing.
+  Read operation inputs from result.operations[].input_fields; example_input_json
+  is a JSON string containing illustrative input, not an executable command.
+  Help/version JSON lists implemented_commands and explicit capability flags.
+  Exit codes: 0 success/help; 2 usage; 3 context/read failure; 4 not found;
+              5 invalid or unsupported metadata; 1 output failure.
+
+PROTOTYPE SCOPE
+  Local source distribution. Current artifact discovery uses shared runtime
+  admission; legacy metadata remains readable. Remote authentication, hosted
+  CI deployment and cloud infrastructure resources need provider integration.

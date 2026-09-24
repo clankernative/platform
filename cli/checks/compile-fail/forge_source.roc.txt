@@ -1,0 +1,18 @@
+# Expected diagnostic: cannot use opaque nominal type
+import Cli
+import Catalog
+import Source
+import "fixtures/links-artifact.json" as fixture : Str
+main! : List(OsStr.OsStr) => Try({}, [Exit(I32)])
+main! = |_| {
+	parsed = Cli.parse(["app", "describe", "links", "--demo"]).map_err(|_| Exit(2))?
+	match parsed {
+		Cli.Request.Describe(request) => {
+			catalog = Catalog.from_json(fixture).map_err(|_| Exit(5))?
+			view = catalog.select(Cli.Filter.All).map_err(|_| Exit(5))?
+			loaded = Source.{ request, view, context: Demo }
+			Stdout.line!(loaded.request().parts().app_name.to_str()).map_err(|_| Exit(1))
+		}
+		_ => Err(Exit(2))
+	}
+}

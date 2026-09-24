@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "admins": ["admin"],
+  "operations": {
+    "things.tag": {
+      "actors": ["alice", "admin"],
+      "mode": {"kind": "current_state"},
+      "models": {
+        "things": {
+          "read": true,
+          "create": true,
+          "rows": {"kind": "owner_or_admin", "field": "owner"}
+        }
+      }
+    },
+    "things.list": {
+      "actors": ["alice", "admin", "viewer"],
+      "mode": {"kind": "read"},
+      "models": {
+        "things": {"read": true, "rows": {"kind": "all"}}
+      }
+    }
+  },
+  "constraints": {
+    "things": {
+      "name": {"nonempty": true, "max_bytes": 200}
+    }
+  }
+}

@@ -1,0 +1,10 @@
+[package]
+name = "day2-roc-worker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "day2_roc_worker"
+crate-type = ["staticlib"]
+

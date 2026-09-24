@@ -1,0 +1,23 @@
+[package]
+name = "day2-ops"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "day2-host"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+day2 = { path = "../day2" }
+day2-capabilities = { path = "../day2-capabilities" }
+tempfile = "3.27"
+rusqlite = { version = "=0.40.2", features = ["bundled", "backup"] }
+rustix = { version = "1.1.4", features = ["process"] }
+tokio = { version = "1", features = ["rt-multi-thread", "signal"] }
+
+[dev-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "cookies"] }

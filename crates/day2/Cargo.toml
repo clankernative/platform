@@ -1,0 +1,52 @@
+[package]
+name = "day2"
+default-run = "day2"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+day2-capabilities = { path = "../day2-capabilities" }
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+rusqlite = { version = "=0.40.2", features = ["bundled", "hooks", "limits"] }
+tempfile = "3.27"
+rustix = { version = "=1.1.4", features = ["fs"] }
+axum = "0.8.9"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "signal", "sync", "time", "macros"] }
+tokio-stream = "0.1.19"
+maud = "0.27"
+url = "2.5"
+percent-encoding = "2.3"
+base64 = "0.22"
+hmac = "0.12"
+# Already in the lock through rustls. Named directly to verify identity
+# assertions at the edge, rather than adding a second signature library.
+ring = "=0.17.14"
+getrandom = "0.3"
+cookie = "0.18"
+time = { version = "0.3", features = ["formatting"] }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp"] }
+resvg = { version = "0.48.1", default-features = false }
+roxmltree = "0.21"
+cssparser = "=0.35.0"
+oxc_allocator = "=0.148.0"
+oxc_ast = "=0.148.0"
+oxc_ast_visit = "=0.148.0"
+oxc_parser = "=0.148.0"
+oxc_span = "=0.148.0"
+minijinja = { version = "=2.12.0", default-features = false, features = ["debug", "multi_template", "serde", "fuel", "unstable_machinery"] }
+html5gum = "=0.8.4"
+scraper = "0.24"
+html5ever = "=0.35.0"
+ego-tree = "=0.10.0"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+day2-sandbox = { path = "../day2-sandbox" }
+
+[dev-dependencies]
+proptest = "=1.11.0"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "cookies"] }

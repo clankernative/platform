@@ -1,0 +1,5 @@
+[advisories]
+# Informational: scraper 0.24 -> selectors 0.31 -> fxhash 0.2.1.
+# No known vulnerability is exempted. Replace when the selectors dependency
+# permits rustc-hash; review this exception no later than 2026-12-23.
+ignore = ["RUSTSEC-2025-0057"]

@@ -1,0 +1,358 @@
+{
+  "admission": "local-spike-only",
+  "assets": {
+    "directory_logo": {
+      "bytes": 259,
+      "digest": "sha256:0525190f81ba6b163b6196aa58205088adcb805f5852dc52545a322fe6147ed8",
+      "height": 24,
+      "media_type": "image/png",
+      "source_digest": "sha256:892ba1bd1ee2e5bba320eea1c30c83ed83055ded5a0a0c0e7e4ee5fb06c307a5",
+      "width": 24
+    },
+    "icons_archive": {
+      "bytes": 246,
+      "digest": "sha256:aa5af4c708ec0f66eda2f84c859fa065eebcbaecb8e7e60ad29f392dbc94fe4f",
+      "height": 24,
+      "media_type": "image/png",
+      "source_digest": "sha256:78c732e34e232db63af06a2330b4448045cfdf49b48b59f2d31922df54c7bb17",
+      "width": 24
+    },
+    "icons_arrow_up_right": {
+      "bytes": 194,
+      "digest": "sha256:7a6e55e0ae4aade0f5886bbbe97546496c188cad0c2764fada0896a8a97222a2",
+      "height": 24,
+      "media_type": "image/png",
+      "source_digest": "sha256:c79ab54b8daad37324be73724ab0ccc73609fe6d1d33355140c1d814e1b42f35",
+      "width": 24
+    },
+    "icons_copy": {
+      "bytes": 263,
+      "digest": "sha256:0cece5294ff01e1eae48f2f25ed2f00fa0dd89ef0234f88e574bfadb629f9e68",
+      "height": 24,
+      "media_type": "image/png",
+      "source_digest": "sha256:5146bb8eabe23d341108bba880c30a19a7a85188fce8bb5ef9ca693303405f01",
+      "width": 24
+    },
+    "icons_history": {
+      "bytes": 463,
+      "digest": "sha256:eea163874bd8b9061ba3ffec2f832c7cc04822ffa27685f80c502daaf6849b40",
+      "height": 24,
+      "media_type": "image/png",
+      "source_digest": "sha256:19d9f9a86352bb15e05f5b2b3b4b3e7257e4b6ba9d75f42117467fe1340aec7d",
+      "width": 24
+    },
+    "icons_log_out": {
+      "bytes": 270,
+      "digest": "sha256:6929aff22f37265b7e183982442f913a6f19cd21a9445264f55c34bca29b5e23",
+      "height": 24,
+      "media_type": "image/png",
+      "source_digest": "sha256:2a2501ac234651bf945bcff05c49845c6ff3733f8c3ea7a8f42da10da0cd7bd5",
+      "width": 24
+    },
+    "icons_plus": {
+      "bytes": 156,
+      "digest": "sha256:56758b33863c2629d55a425e69de81b2e48a278dd5fb9a5afbb9267c699d5a7c",
+      "height": 24,
+      "media_type": "image/png",
+      "source_digest": "sha256:d5a479b9933d38487cba3502ac12197a533b40e9c2ca48c59849b0657d533419",
+      "width": 24
+    },
+    "icons_search": {
+      "bytes": 417,
+      "digest": "sha256:1119c070cabb6d67e8b9b6c24435b26e9bd3414ed9b42d3d37390eb807019b67",
+      "height": 24,
+      "media_type": "image/png",
+      "source_digest": "sha256:195ac4d1c9d38bd5692faf4088ce6a415a54b6f0d622ee897b77d094fadefc12",
+      "width": 24
+    }
+  },
+  "format": 8,
+  "operations": [
+    {
+      "input_type": "create",
+      "kind": "command",
+      "name": "links.create",
+      "output_type": ""
+    },
+    {
+      "input_type": "archive",
+      "kind": "command",
+      "name": "links.archive",
+      "output_type": ""
+    },
+    {
+      "input_type": "list_links",
+      "kind": "query",
+      "name": "links.list",
+      "output_type": "links"
+    },
+    {
+      "input_type": "get_link",
+      "kind": "query",
+      "name": "links.detail",
+      "output_type": "link"
+    }
+  ],
+  "outputs": {
+    "link": {
+      "roc_type": "{ archived : Bool, destination : Str, id : Str, title : Str, version : I64 }",
+      "shape": {
+        "record": {
+          "archived": "boolean",
+          "destination": "string",
+          "id": "string",
+          "title": "string",
+          "version": "integer"
+        }
+      }
+    },
+    "links": {
+      "roc_type": "{ has_more : Bool, items : List({ archived : Bool, destination : Str, id : Str, title : Str, version : I64 }), next_after : I64 }",
+      "shape": {
+        "record": {
+          "has_more": "boolean",
+          "items": {
+            "list": {
+              "record": {
+                "archived": "boolean",
+                "destination": "string",
+                "id": "string",
+                "title": "string",
+                "version": "integer"
+              }
+            }
+          },
+          "next_after": "integer"
+        }
+      }
+    }
+  },
+  "pages": [
+    {
+      "defaults": "{\"after\":0,\"limit\":20}",
+      "input_type": "list_links",
+      "name": "links",
+      "operation": "links.list",
+      "output_type": "links",
+      "path": "/",
+      "template": "pages/directory.html",
+      "title": "Links"
+    },
+    {
+      "defaults": "{}",
+      "input_type": "get_link",
+      "name": "link",
+      "operation": "links.detail",
+      "output_type": "link",
+      "path": "/links/{link_id}",
+      "template": "pages/details.html",
+      "title": "Link details"
+    }
+  ],
+  "properties": [
+    "archive_is_single_transition"
+  ],
+  "roc_version": "nightly-2026-09-05-b195f5b",
+  "schema": {
+    "foreign_keys": [],
+    "inputs": {
+      "archive": {
+        "fields": {
+          "expected_version": "integer",
+          "link_id": {
+            "reference": {
+              "target": "links"
+            }
+          }
+        },
+        "roc_type": "Contracts.Archive"
+      },
+      "create": {
+        "fields": {
+          "destination": "web_url",
+          "title": {
+            "text_domain": {
+              "roc_type": "Title"
+            }
+          }
+        },
+        "roc_type": "Contracts.Create"
+      },
+      "get_link": {
+        "fields": {
+          "link_id": {
+            "reference": {
+              "target": "links"
+            }
+          }
+        },
+        "roc_type": "Contracts.GetLink"
+      },
+      "list_links": {
+        "fields": {
+          "after": "integer",
+          "limit": "integer"
+        },
+        "roc_type": "Contracts.ListLinks"
+      }
+    },
+    "models": {
+      "links": {
+        "fields": {
+          "archived": "boolean",
+          "destination": "web_url",
+          "title": {
+            "text_domain": {
+              "roc_type": "Title"
+            }
+          }
+        },
+        "roc_type": "Models.Link"
+      }
+    }
+  },
+  "schema_digest": "sha256:ecff1ff381d4fc3af0740e7bc046a1cac488e3fb6980f8b382fd5b4ad9d1e7a5",
+  "sources": {
+    "Cargo.lock": "sha256:c8e90268359b82a084d14d19af926a1cd0d3b865dc22697d609f4ca49ac06dbe",
+    "Cargo.toml": "sha256:f093d3c0b8d58851a44006d7b632dc7407be9917080c715476f5d49d2697b8cc",
+    "app/Actions.roc": "sha256:30d92ebbbf03861c1745f59e49ff020b5a025338c32ea2da9d2ac78f6185c15d",
+    "app/App.roc": "sha256:aa8b9fe0280b05d4cea0531fd334388784814916d9cd35c498e5c8a468a07a94",
+    "app/Contracts.roc": "sha256:229908f1adb54636b00b5327c1b5aa147d55b3f571c9cd2f1443993a15446438",
+    "app/Models.roc": "sha256:2020cfc192392c779ee9d34aefb49617956b94bb4d50fbfb4a40a76ea8611262",
+    "app/Pages.roc": "sha256:8c83abdf7f2cb139e8ddcff697ba0262fd96fc8fc661eadaf6104180137da71b",
+    "app/Properties.roc": "sha256:038e0f1b70930351c4a911eb0698e6132a2645932d92ce5b8b76acdc62e3d4df",
+    "app/Queries.roc": "sha256:78f0e2dd3effde62be596527b4b9297d1f84d7c5bf994fe1ff4014b0a672df20",
+    "app/Title.roc": "sha256:dfb935cbe9bf07d0e5e9da49023f65cf950720ce9469b1ab91e25d1393874442",
+    "assets/README.md": "sha256:7ab51d9b9ee82537cac285cc31e129b1ab2e26c0c262a00ba44dcbced9a5d48c",
+    "assets/datastar-1.0.1.js": "sha256:54768cf34985be0229c7229f1df9469fbd32e2a0c09b4a3f1e81ad8c4d6840da",
+    "assets/datastar-LICENSE": "sha256:17da0e216d3c6a819526f5b72a6a44d84d34bcd9beb4191ac6af89c1508ef08f",
+    "assets/icons/archive.svg": "sha256:78c732e34e232db63af06a2330b4448045cfdf49b48b59f2d31922df54c7bb17",
+    "assets/icons/arrow-up-right.svg": "sha256:50b2503b9d11881142255466b7e3461d022b919735841c321d72003ac9959fe1",
+    "assets/icons/history.svg": "sha256:a98ff758157910b9fc9d42d5d5dc80c2f4e037afa5f8ea4dee5f5649f03d438d",
+    "assets/icons/link.svg": "sha256:4f3237183dcaabfac92f4e94c776a9a9e45c3c5e77a921061a6b34b61eb5413f",
+    "assets/icons/list-filter.svg": "sha256:502573071e3b8118356eb408df781872f0608071b4b09cd99954ba1d8e2b8b37",
+    "assets/icons/log-out.svg": "sha256:ef5acaea068568b087096ca3da84f41982e7518860de199305dc28f0928ff75a",
+    "assets/icons/plus.svg": "sha256:7f6af73bf1ff6c4bca3f18351c8d1bdec6749c0c2530c4de5da85d520c21df17",
+    "assets/icons/shield-check.svg": "sha256:8d4fcdbde5bba4abb1a2f6fe53e37ceb6343a1d5449a9d88f6f97c1971d26c4e",
+    "assets/lucide-LICENSE": "sha256:1e7290b35280a048667bbf0ebabac1c7fd52a75300e8b2946ac165715997f2bc",
+    "assets/web.css": "sha256:c1f4d7078b8fffabc283cc2aa7ccf7bbb2358006acb9f503c5609e14deb4c3c4",
+    "crates/day2/Cargo.toml": "sha256:ea474295c7a8ebe9d91995f8ed22bd156ed9ae866c10dc73a4a47189fe17902d",
+    "crates/day2/src/admission.rs": "sha256:abf7248c3df3859f3a787de77b713e635c616d69b9100191d289217143ae98c2",
+    "crates/day2/src/artifact.rs": "sha256:13cf385320b892cba4190c6536e65054c23ee6b4d441a5b13624717b54c7be9f",
+    "crates/day2/src/assets.rs": "sha256:5ac61514288bb0376e964ac6e5576cde1444124ef56c043fe91cf8d0b5d050fa",
+    "crates/day2/src/audit.rs": "sha256:8bd899d6e1f406af2be7b05bb4c6d339104dd6d03f775a74698d85402aad4a0b",
+    "crates/day2/src/authority.rs": "sha256:985e9e83c8f39fc5ca9114d52360d7fce3692f88c9ae91f3ad670d4e9b8a5f6a",
+    "crates/day2/src/bin/sandbox_probe.rs": "sha256:210ea187d8443d115e7bad7f34178ca3dde5ec05adf378878264ba6549b55856",
+    "crates/day2/src/branding.rs": "sha256:2f7239feb2c322355e354238b2ae9155b86153a90f9e4cdf0784845972173dbb",
+    "crates/day2/src/codegen.rs": "sha256:039e0c1f5f27ffb42b15ca4bba4a598a2dcd7de6de298c48258b8ad8d2380677",
+    "crates/day2/src/lib.rs": "sha256:ca7c80c0c3385755e328b21b98913ff8011fcdf428fc998ef41e37c7fd2b000b",
+    "crates/day2/src/main.rs": "sha256:496586e929cb1869722419b92ab491e47550d9eeaf7df12eccc5c0a78b87bfe3",
+    "crates/day2/src/migration.rs": "sha256:569a6de2150fd82e5a053b9c7b62a33b504e52510b001680216fb179882cc53f",
+    "crates/day2/src/output_schema.rs": "sha256:2331a438034c14405c2713f210638d1e0b5fad807c7406812f9464087898354d",
+    "crates/day2/src/properties.rs": "sha256:3c4919dcf2c8ce34eb01af3bc2623ff4c2fdaed06dc5a9bc832b88f812be9c21",
+    "crates/day2/src/protocol.rs": "sha256:caac039edf41213a848c162dedbc719a4cf1964e88fbfda7e9af66efb520f50f",
+    "crates/day2/src/routing.rs": "sha256:ae72799eabaa109aa4faf395e0117120c7bd5799d58ee5f519e5a8769c332a18",
+    "crates/day2/src/sandbox.rs": "sha256:f5cc4dfdb66210fd904bf2f72ca644ec628d99a87a606241050a78bc8c2dd930",
+    "crates/day2/src/schema.rs": "sha256:3ff1a5f9d8a604d5c2ab5eaaed53d31d9e4048d5fefdea3ea3b2441c2bc84dac",
+    "crates/day2/src/store.rs": "sha256:975655b142fc181401f105b1c3ef624a30fa34047a263aa066ece8ed4cf106bf",
+    "crates/day2/src/web.rs": "sha256:83ed3785df48276284e9f83cdf6d046fd945c1bd1887019e23f804266df88400",
+    "crates/day2/src/web_assets.rs": "sha256:41fc8995771cf5f9e09a4dd3ecfef8f5d6bf26566169b56612c63d47b07a8f87",
+    "crates/day2/src/web_forms.rs": "sha256:2ff28c7df2d7303949c59e1794ed7071bee6e18b0ea5242d2b8dbe01da38809a",
+    "crates/day2/src/web_html.rs": "sha256:d25edcebd8493d2f1901d498dc29d1f47dd69bcad1f286d81efcff037b1a3aae",
+    "crates/day2/src/web_resources.rs": "sha256:23e121bc9470eb561221075fee8367a3160414174eb61a388b379f2dafaf600a",
+    "crates/day2/src/web_security.rs": "sha256:b796ccd28143ac17ed6716ded3f03dcdeaf0919fb72fcaf2e18ef1e87cd4b68c",
+    "crates/day2/src/web_templates.rs": "sha256:e112cd1e38b64f747730f99ba6a3e6e7357efb42b4a468cc28fe9804b09f9331",
+    "crates/day2/src/worker.rs": "sha256:67c1113ab1884b83a2910b96b0380bec5b885431a44ae3ff321a8b5e386dfe27",
+    "crates/day2/tests/admission.rs": "sha256:4d904bc6b3ad706c043eea79249e4787597aa275df27315162bf2502365a413f",
+    "crates/day2/tests/assets.rs": "sha256:ee763fe8ebe67063e2c669ea9bcbe8fabcc766168bbdcf32c648da510d8a595b",
+    "crates/day2/tests/authority.rs": "sha256:e6e07410c7636f9a1b3212aafd1347015820a521dfacf299776612993920d332",
+    "crates/day2/tests/guards.rs": "sha256:e23f598e9a911676fa004926b74d5676304e2c1ab262bda4676a88c9607a6f13",
+    "crates/day2/tests/output_schema.rs": "sha256:fe69a616b02fe1b372edb7af594e59b5c459652e8ffee051137a2d84fd2c64f8",
+    "crates/day2/tests/owned_runtime.rs": "sha256:f05ec63f5cc7fc57f0a59339e1ffbb7d43a07af6cbe9f61b4ba142551af5dcef",
+    "crates/day2/tests/owned_web.rs": "sha256:9f4321cbfe399544731b2c2498418f04e42db8f1dc8673eb26f9365247a4c01c",
+    "crates/day2/tests/page_sdk.rs": "sha256:d183a56265fece53079819c88a236416b0892dc0be56b36ee12f648e9f2e45d2",
+    "crates/day2/tests/routing.rs": "sha256:7d85bc65dc0ffb95a5fed9beb716cbf5e70a85e29b48fb455475c9b9f810fb42",
+    "crates/day2/tests/runtime.rs": "sha256:c76e3b61d9d8078a995aee123de22a499a52de118fbdc447b93b82fb01eaa8bc",
+    "crates/day2/tests/schema.rs": "sha256:8ccdf481f252d27278482dafb90c44ab7c2161897cfe9d08d2a1577e00d9868e",
+    "crates/day2/tests/template_routes.rs": "sha256:756849b7092cc3400ff62265a259ae1452d2972119579cf58b9ac454a0145533",
+    "crates/day2/tests/templates.rs": "sha256:0edfb5652815292ffb281d5b1659d2b184673566b730b7aac6b1b82d8aee55a7",
+    "crates/day2/tests/web.rs": "sha256:001ba4c3deb2a9eb546b5ac7fbbe75614e9ed8a2106f737429a2118e09e2a930",
+    "crates/day2/tests/web_resources.rs": "sha256:ae4b842fc5839085139632e9ee981f2b8c22687b5a45fb94c8765c789458f3be",
+    "crates/worker/Cargo.toml": "sha256:b8e2f551cc92785726ac6133da2ef8afdd397b7c1a05ec4acf47f070f812ee67",
+    "crates/worker/generated/roc_platform_abi.rs": "sha256:dbd8fcd2b31282134694b0ff7b775b9df13d2570c02be83278e8ec25988c4e47",
+    "crates/worker/src/lib.rs": "sha256:7ee920021317c6d32bd99e3318bf1075bd40c817cf98b980fcacfa8ab50d402c",
+    "crates/xtask/Cargo.toml": "sha256:5b915b8c58e2dd0741f436d16c178483ac3d204df3a3ea3d131f9fa09858ee05",
+    "crates/xtask/src/main.rs": "sha256:98b5c3d19025d5a50c8bd3960ca7cb73d6ee457cf100fb3d758fc2087b03a7ab",
+    "rust-toolchain.toml": "sha256:8f60080a0aa2e78a9e7fde169981a1fc74de26be32c994e0a94398065e377577",
+    "sdk/Asset.roc": "sha256:15cdce1218866a4a3c7446a767f6bfc83bcad869625e404e801af85cf99bbf52",
+    "sdk/Attribute.roc": "sha256:703c1261e635284ca6ebb35098f9f07f208980f2da5e381340230eb1af2767d4",
+    "sdk/Button.roc": "sha256:e055fbad842ab5c8f2efe16b44c57b5337160b7289803bf4f2efb61723e085e9",
+    "sdk/Control.roc": "sha256:3505f31114a9d9bf54ff82164d855e10ca018903e1177a7aad89c1e8696a8bc4",
+    "sdk/Field.roc": "sha256:4800e317d8334237087ad010ec484cbd097c4c4f023f5d1762268d313b1da1dc",
+    "sdk/Form.roc": "sha256:37a49b637a8507b829cc021643424006b354f78f8920a9b6173a88d321193308",
+    "sdk/Html.roc": "sha256:59880adf3df190c1d6e419769df62354b4716ec3caace02dd76934437ecc21db",
+    "sdk/Input.roc": "sha256:e40c73941f3e79a39b61d3a7cf85afe7934e3219600d2b9c2c771af64a6c7b7c",
+    "sdk/Model.roc": "sha256:3f035b4088e811c8c825b2aee7503404481872b87125550f932163ae592cb4e6",
+    "sdk/Operation.roc": "sha256:e5ca3ccd4d2f5f66b2538f30125c051be47317290fa93f2abc6051f1d1192733",
+    "sdk/Output.roc": "sha256:48e6f123f0a022ad0c44f300e07235da5dda04de4501dd9cd47f9ba7f516f09f",
+    "sdk/Page.roc": "sha256:e3c851076d60755f705095ebf42af0f069b5e7b170c4713214a05dc637ccce98",
+    "sdk/PageBinding.roc": "sha256:adf476b10a2f4c88c1a2e6d7890873bd14c52a0b9ccf77a20cf5a7e17e3b9dba",
+    "sdk/Product.roc": "sha256:40fdf71092702f62e0451dab92856d2fbaffc3f062eecc7eaff573b9381ebdd5",
+    "sdk/Property.roc": "sha256:81bb4fcb5dfbb5d8d6a47cd0bef76b7c94c6367b92f2bc53356c39fdd44c1f52",
+    "sdk/Query.roc": "sha256:2d8fd4e97e76ebc2cc3f1dd2f561e1afd229a4812e0df88eecda34432d4aad80",
+    "sdk/Read.roc": "sha256:b2151e6bae5b747cdf6dd885e335dd9b96a5fe0be5027f890efdaa2bc9e8fdaa",
+    "sdk/Ref.roc": "sha256:c676fe1c1d3b09f2bc7bfeaacbd6528337d01a21eb1fcfb25bd5c423eaad2e3a",
+    "sdk/Selection.roc": "sha256:6ae379b95c687c610a629dbd0ea1d07c517ac5a4395609a16eff642e760c4db0",
+    "sdk/Template.roc": "sha256:5a2ab1c46ecafe421ffd2e773b5d306a5809e63d3f69d53e9502fb12d188637a",
+    "sdk/Tx.roc": "sha256:702fa84c95d8d035bd8c0ddfa488cc4bd4fde5da960e7580d5aff56704a69e4d",
+    "sdk/WebUrl.roc": "sha256:4f0e50d8c49758254ba0fa53f537c177ce476c084d34fe2bec550a55fca0bb2e",
+    "sdk/Wire.roc": "sha256:4c0b694d971a3a3ae8dc29a804af9907d1e2a13b7ec680d76a305f310976f7dd",
+    "sdk/Write.roc": "sha256:2a4c5bb7d3cc67ed61c5a2f0c2286a79a58218bcc7d9be6bb413997e3e8473a7",
+    "sdk/main.roc": "sha256:f50fd8409728bd8b8ba5f74bef4fe031804aae0e8d1193356a453b4b7d5676c5",
+    "sdk/types.roc": "sha256:ecea6d8014325961345b35231c4f4e872e38a1e3758928961ae0743d7de7d5ee",
+    "toolchain.json": "sha256:e69d8dc8812807f5db2c97ab08ce8e85d7020e2406a57548a4072aa8c0eaa6b1",
+    "tools/SchemaGlue.roc": "sha256:9d92efee50560fbe928db36cf702ce0c19befddfda96e3d13ec8214f88bb25bc",
+    "tools/schema-platform.roc": "sha256:8e328f5adbe6c9598f1e716bd161f55718d613eb9f5d5cfd9d8435f36cf8a654",
+    "vendor/RustGlue.roc": "sha256:011ba5d125eb54c6883f216d22c2c740d5f3fecef668cecd2f7f0be6a6e65593"
+  },
+  "templates": {
+    "components/create-form.html": {
+      "bytes": 630,
+      "digest": "sha256:9b334ee5e4c052f97c96ee77c1dd155aa7d18e25326524ffeb9aebba8ef50938"
+    },
+    "components/header.html": {
+      "bytes": 745,
+      "digest": "sha256:f66652649ea0f0df2555bd324aed565c86c46f9a7d70a62e3d2ba37188147edd"
+    },
+    "components/link-row.html": {
+      "bytes": 1635,
+      "digest": "sha256:c29c6d37e81cff71e18482171c60a0cf28011421fdf9543b22186b4bd249a0dc"
+    },
+    "pages/details.html": {
+      "bytes": 1895,
+      "digest": "sha256:e70469ad12e39a0ae626004b0f9f83a53743c246a65cf2dcaded1a9974bf3210"
+    },
+    "pages/directory.html": {
+      "bytes": 2082,
+      "digest": "sha256:eb6b8a50342c7e7d5dd534a21eaeb23554f080993d4bb5df3b3a180893c5e70e"
+    }
+  },
+  "web_resources": {
+    "app.css": {
+      "bytes": 9244,
+      "digest": "sha256:182152169d6772b43028201ef3430973c6e8602861558aa8ff03be306b627331",
+      "media_type": "text/css; charset=utf-8"
+    },
+    "app.js": {
+      "bytes": 3901,
+      "digest": "sha256:611f50b03aa540612b563328f158399a013acf693f0b78c04d5ec1e87a24aecb",
+      "media_type": "text/javascript; charset=utf-8"
+    },
+    "filter.js": {
+      "bytes": 393,
+      "digest": "sha256:65ada6a2e9a8db74c322dc1dca7e5cc1e6c9d0e87706c55b0e9fb0b874ac0456",
+      "media_type": "text/javascript; charset=utf-8"
+    }
+  },
+  "worker_digest": "sha256:2be6c1c5cfb6ab864533012247f69a34dd5815728e65851e2821780207e0b5a3"
+}

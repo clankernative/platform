@@ -1,0 +1,7 @@
+project_id = "example-company-tools"
+namespace = "reports"
+domain = "reports.tools.example.com"
+dns_managed_zone = "tools"
+kube_context = "gke_example-company-tools_us-central1-a_day2"
+iap_members = ["group:tools-users@example.com"]
+backend_service_name = "" # Fill from the Ingress after the first apply.

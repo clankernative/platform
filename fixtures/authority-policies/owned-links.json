@@ -1,0 +1,52 @@
+{
+  "version": 1,
+  "admins": ["admin"],
+  "operations": {
+    "links.create": {
+      "actors": ["alice", "bob", "admin"],
+      "mode": {"kind": "current_state"},
+      "models": {
+        "links": {
+          "read": true,
+          "create": true,
+          "rows": {"kind": "owner_or_admin", "field": "owner"}
+        }
+      }
+    },
+    "links.edit": {
+      "actors": ["alice", "bob", "admin"],
+      "mode": {
+        "kind": "edit",
+        "model": "links",
+        "id_field": "link_id",
+        "version_field": "expected_version"
+      },
+      "models": {
+        "links": {
+          "read": true,
+          "update_fields": ["title"],
+          "rows": {"kind": "owner_or_admin", "field": "owner"}
+        }
+      }
+    },
+    "links.list": {
+      "actors": ["alice", "bob", "admin", "viewer"],
+      "mode": {"kind": "read"},
+      "models": {
+        "links": {"read": true, "rows": {"kind": "all"}}
+      }
+    },
+    "links.detail": {
+      "actors": ["alice", "bob", "admin", "viewer"],
+      "mode": {"kind": "read"},
+      "models": {
+        "links": {"read": true, "rows": {"kind": "all"}}
+      }
+    }
+  },
+  "constraints": {
+    "links": {
+      "title": {"nonempty": true, "max_bytes": 200}
+    }
+  }
+}

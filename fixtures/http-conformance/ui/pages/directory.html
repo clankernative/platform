@@ -1,0 +1,42 @@
+<div id="owned-links-app" class="workspace">
+  <header>
+    <img class="app-icon" src="{{ asset('directory_logo') }}" alt="" width="24" height="24">
+    <h1>Owned links</h1><span>{{ company.name }}</span>
+    <nav aria-label="Account"><a href="{{ platform.audit() }}">Audit log</a></nav>
+    <form data-platform="sign-out"><button type="submit">Sign out</button></form>
+  </header>
+  <section aria-labelledby="directory-heading">
+    <h2 id="directory-heading">Directory</h2>
+    <label for="link-search">Filter links</label><input id="link-search" type="search">
+    <ul id="links-list">
+      {% for link in links.items %}
+        <li class="link-row" data-link-id="{{ link.id }}" data-title="{{ link.title }}" data-version="{{ link.version }}">
+          <a class="details-link" href="{{ routes.link(link_id=link.id) }}">{{ link.title }}</a>
+          <a class="external" href="{{ link.destination }}" rel="noopener noreferrer">{{ link.title }}</a>
+          <span class="owner">{{ link.owner }}</span>
+          <form data-command="links.edit" class="edit-form command">
+            <input type="hidden" name="link_id" value="{{ link.id }}">
+            <input type="hidden" name="expected_version" value="{{ link.version }}">
+            <label>Title<input type="text" name="title" value="{{ link.title }}" required maxlength="200"></label>
+            <button type="submit">Save title</button>
+          </form>
+        </li>
+      {% else %}
+        <li>No links yet.</li>
+      {% endfor %}
+    </ul>
+    {% if links.has_more %}
+      <a href="{{ routes.links(after=links.next_after, limit=20) }}">Next page</a>
+    {% endif %}
+  </section>
+  <section aria-labelledby="create-heading">
+    <h2 id="create-heading">New link</h2>
+    <form data-command="links.create" id="create-link-form" class="command">
+      <label for="create-title">Title</label>
+      <input id="create-title" type="text" name="title" required maxlength="200">
+      <label for="create-destination">Destination</label>
+      <input id="create-destination" type="url" name="destination" required maxlength="2048">
+      <button class="primary" type="submit"><img src="{{ asset('icons_plus') }}" alt="" width="16" height="16">Create link</button>
+    </form>
+  </section>
+</div>

@@ -1,0 +1,7 @@
+# Expected diagnostic: cannot use opaque nominal type
+import Names
+main! : List(OsStr.OsStr) => Try({}, [Exit(I32)])
+main! = |_| {
+	app_name = Names.App.("INVALID")
+	Stdout.line!(app_name.to_str()).map_err(|_| Exit(1))
+}

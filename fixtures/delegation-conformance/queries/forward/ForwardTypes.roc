@@ -1,0 +1,3 @@
+ForwardTypes :: [].{
+	Input : {}
+}

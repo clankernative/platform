@@ -1,0 +1,643 @@
+//! The host owns long-lived transport; each query evaluation remains bounded.
+use super::*;
+use crate::{authority_state::AuthorityStamp, error::Failure, web_templates};
+use std::time::Instant;
+use std::{
+    pin::Pin,
+    task::{Context as TaskContext, Poll},
+};
+use tokio::sync::{OwnedSemaphorePermit, mpsc, oneshot};
+
+const CHECK_INTERVAL: Duration = Duration::from_millis(250);
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
+
+// An abandoned/lagging stream must fail its body so Datastar retries it. Only
+// explicit authority termination is a clean EOF (and must not retry forever).
+struct LiveBody {
+    receiver: mpsc::Receiver<String>,
+    terminal: Option<oneshot::Receiver<String>>,
+    ended: bool,
+}
+
+impl tokio_stream::Stream for LiveBody {
+    type Item = std::result::Result<String, std::io::Error>;
+
+    fn poll_next(self: Pin<&mut Self>, context: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
+        let stream = self.get_mut();
+        if stream.ended {
+            return Poll::Ready(None);
+        }
+        // Revocation bypasses the bounded data queue. Discard any unsent app
+        // patches before releasing the final clear-regions event, even when a
+        // slow consumer has kept the queue full throughout revocation.
+        if let Some(terminal) = &mut stream.terminal {
+            match Pin::new(terminal).poll(context) {
+                Poll::Ready(Ok(value)) => {
+                    stream.ended = true;
+                    stream.receiver.close();
+                    while stream.receiver.try_recv().is_ok() {}
+                    return Poll::Ready(Some(Ok(value)));
+                }
+                Poll::Ready(Err(_)) => stream.terminal = None,
+                Poll::Pending => {}
+            }
+        }
+        match stream.receiver.poll_recv(context) {
+            Poll::Ready(Some(value)) => Poll::Ready(Some(Ok(value))),
+            Poll::Ready(None) => {
+                stream.ended = true;
+                Poll::Ready(Some(Err(std::io::Error::other("live stream interrupted"))))
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+fn stream_response(body: LiveBody) -> Response {
+    (
+        [
+            (header::CONTENT_TYPE.as_str(), "text/event-stream"),
+            ("x-accel-buffering", "no"),
+        ],
+        Body::from_stream(body),
+    )
+        .into_response()
+}
+
+/// Datastar's default retry mode retries interrupted streams but stops on HTTP
+/// error responses. A transient overload therefore uses the same interrupted
+/// SSE transport as a dropped connection; auth failures retain their 4xx status.
+pub(super) fn retry_response() -> Response {
+    let (sender, receiver) = mpsc::channel(1);
+    sender
+        .try_send(": live updates temporarily unavailable; reconnecting\n\n".into())
+        .expect("new live retry channel");
+    drop(sender);
+    stream_response(LiveBody {
+        receiver,
+        terminal: None,
+        ended: false,
+    })
+}
+
+struct Subscription {
+    page: String,
+    input: Value,
+    headers: HeaderMap,
+    actor: String,
+    session: String,
+    revision: i64,
+    authority: AuthorityStamp,
+    regions: BTreeMap<String, String>,
+    refreshed: Instant,
+    refresh: Option<Duration>,
+}
+
+impl Host {
+    pub(super) fn live_initializer(&self, name: &str, input: &Value) -> Result<Markup> {
+        if !self.runtime.artifact().page(name)?.live {
+            return Ok(html! {});
+        }
+        let page_url = view::page_url(&self.runtime, name, input)?;
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("path", &page_url)
+            .finish();
+        let url = format!("/_live?{query}");
+        ensure!(url.len() <= 8192, Failure::UriBudget);
+        // The URL is encoded as a JS string and then as an HTML attribute. Do not
+        // interpolate user input directly into an executable Datastar expression.
+        let expression = format!(
+            "@get({}, {{filterSignals: {{include: /^$/}}, requestCancellation: 'cleanup'}})",
+            serde_json::to_string(&url)?
+        );
+        Ok(html! {
+            div id="day2-live" data-live-url=(url) data-init=(expression) {
+                div id="day2-live-status" role="status" aria-live="polite" {}
+            }
+        })
+    }
+
+    pub(super) fn live_response(
+        self: &Arc<Self>,
+        uri: &Uri,
+        headers: &HeaderMap,
+        session: &Session,
+        at: i64,
+    ) -> Result<Response> {
+        ensure!(
+            headers
+                .get("datastar-request")
+                .is_some_and(|value| value == "true"),
+            Failure::InvalidInput
+        );
+        ensure!(
+            headers
+                .get("sec-fetch-site")
+                .is_none_or(|value| value == "same-origin"),
+            Failure::InvalidOrigin
+        );
+        ensure!(
+            headers
+                .get(header::ORIGIN)
+                .is_none_or(|value| value == self.origin.as_str()),
+            Failure::InvalidOrigin
+        );
+        let mut fields = security::fields(uri.query().unwrap_or("").as_bytes())?;
+        let path = fields.remove("path").context(Failure::InvalidInput)?;
+        if let Some(signals) = fields.remove("datastar") {
+            ensure!(
+                serde_json::from_str::<Value>(&signals).ok() == Some(serde_json::json!({})),
+                Failure::InvalidInput
+            );
+        }
+        ensure!(fields.is_empty(), Failure::UnknownFields);
+        ensure!(
+            path.starts_with('/') && !path.starts_with("//") && !path.contains('#'),
+            Failure::InvalidInput
+        );
+        let target: Uri = path.parse().map_err(|_| Failure::InvalidInput)?;
+        ensure!(
+            target.scheme().is_none() && target.authority().is_none(),
+            Failure::InvalidInput
+        );
+        let (page, input) = self
+            .routes
+            .as_ref()
+            .context(Failure::UnknownPage)?
+            .resolve(target.path(), target.query().unwrap_or(""))
+            .map_err(|_| Failure::InvalidPageInput)?
+            .context(Failure::UnknownPage)?;
+        let definition = self.runtime.artifact().page(&page)?;
+        ensure!(definition.live, Failure::UnknownPage);
+        let permit = match self.live_capacity.clone().try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => return Ok(retry_response()),
+        };
+        let authority = self
+            .runtime
+            .authority_snapshot(&definition.operation, &session.actor)?
+            .stamp;
+        // Sample BEFORE querying. A commit while we render forces another pass;
+        // using a revision sampled afterwards would lose that change forever.
+        let revision = crate::live::revision(&open(self.runtime.db())?)?;
+        let content = self.page(&page, &input, session, at, None, None)?;
+        let regions = web_templates::live_regions(&content.into_string())?;
+        let subscription = Subscription {
+            page,
+            input,
+            headers: headers.clone(),
+            actor: session.actor.clone(),
+            session: session.hash.clone(),
+            revision,
+            authority,
+            regions,
+            refreshed: Instant::now(),
+            refresh: (definition.live_refresh_ms > 0)
+                .then(|| Duration::from_millis(definition.live_refresh_ms)),
+        };
+        // Recheck after rendering before any app data is released.
+        let (_, current) = subscription.authorize(self)?;
+        ensure!(
+            current == subscription.authority,
+            Failure::AuthorityPolicyChanged
+        );
+        let (sender, receiver) = mpsc::channel(1);
+        let (terminal_sender, terminal) = oneshot::channel();
+        let initial = format!(
+            "{}{}",
+            subscription.regions.values().cloned().collect::<String>(),
+            html! { div id="day2-live-status" role="status" aria-live="polite" {} }.into_string()
+        );
+        sender
+            .try_send(elements(&initial, "outer"))
+            .map_err(|_| anyhow::anyhow!("live_initial_frame"))?;
+        let host = self.clone();
+        tokio::spawn(async move {
+            subscription
+                .run(host, sender, terminal_sender, permit)
+                .await;
+        });
+        Ok(stream_response(LiveBody {
+            receiver,
+            terminal: Some(terminal),
+            ended: false,
+        }))
+    }
+}
+
+impl Subscription {
+    fn authorize(&self, host: &Host) -> Result<(Session, AuthorityStamp)> {
+        ensure!(
+            host.admitting.load(Ordering::Acquire),
+            Failure::ArtifactBindingChanged
+        );
+        host.appearance.check_binding(&host.runtime)?;
+        let session = security::session(&host.runtime, &self.headers, &host.cookie_name, now()?)?;
+        ensure!(
+            session.hash == self.session && session.actor == self.actor,
+            Failure::SignInRequired
+        );
+        let operation = &host.runtime.artifact().page(&self.page)?.operation;
+        let authority = host
+            .runtime
+            .authority_snapshot(operation, &self.actor)?
+            .stamp;
+        // A subscription stays bound to its admission revision. It must never
+        // silently acquire a newer grant, including an identical A -> B -> A policy.
+        ensure!(authority == self.authority, Failure::AuthorityPolicyChanged);
+        Ok((session, authority))
+    }
+
+    fn refresh(&mut self, host: &Host) -> Result<Option<String>> {
+        let (session, authority) = self.authorize(host)?;
+        let revision = crate::live::revision(&open(host.runtime.db())?)?;
+        if revision == self.revision
+            && self
+                .refresh
+                .is_none_or(|interval| self.refreshed.elapsed() < interval)
+        {
+            return Ok(None);
+        }
+        let markup = host.page(&self.page, &self.input, &session, now()?, None, None)?;
+        let regions = web_templates::live_regions(&markup.into_string())?;
+        ensure!(
+            regions.keys().eq(self.regions.keys()),
+            "live_region_set_changed"
+        );
+        let (_, current) = self.authorize(host)?;
+        ensure!(current == authority, Failure::AuthorityPolicyChanged);
+        let changed = regions
+            .iter()
+            .filter(|(id, markup)| self.regions.get(*id) != Some(*markup))
+            .map(|(_, markup)| markup.as_str())
+            .collect::<String>();
+        self.regions = regions;
+        self.revision = revision;
+        self.refreshed = Instant::now();
+        Ok((!changed.is_empty()).then(|| elements(&changed, "outer")))
+    }
+
+    async fn run(
+        mut self,
+        host: Arc<Host>,
+        sender: mpsc::Sender<String>,
+        terminal: oneshot::Sender<String>,
+        _permit: OwnedSemaphorePermit,
+    ) {
+        let mut interval = tokio::time::interval(CHECK_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut heartbeat = Instant::now();
+        loop {
+            tokio::select! {
+                _ = sender.closed() => break,
+                _ = interval.tick() => {}
+            }
+            if !host.admitting.load(Ordering::Acquire) {
+                break;
+            }
+            // Idle streams hold only their stream budget, never a worker, DB
+            // transaction, or normal request permit. Query work shares capacity.
+            let Ok(work) = host.capacity.clone().try_acquire_owned() else {
+                continue;
+            };
+            let evaluator = host.clone();
+            let refreshed = tokio::task::spawn_blocking(move || {
+                let _work = work;
+                let result = self.refresh(&evaluator);
+                (self, result)
+            })
+            .await;
+            let (subscription, result) = match refreshed {
+                Ok(result) => result,
+                Err(_) => break,
+            };
+            self = subscription;
+            match result {
+                Ok(Some(event)) => {
+                    if sender.try_send(event).is_err() {
+                        break;
+                    }
+                    heartbeat = Instant::now();
+                }
+                Ok(None) if heartbeat.elapsed() >= HEARTBEAT_INTERVAL => {
+                    if sender.try_send(": keep-alive\n\n".into()).is_err() {
+                        break;
+                    }
+                    heartbeat = Instant::now();
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    let classified = crate::error::classify(&error);
+                    if matches!(
+                        classified.category(),
+                        crate::error::Category::Authentication
+                            | crate::error::Category::Forbidden
+                            | crate::error::Category::Conflict
+                            | crate::error::Category::NotFound
+                    ) {
+                        let mut cleared = String::new();
+                        for id in self.regions.keys() {
+                            cleared.push_str(&html! { div id=(id) {} }.into_string());
+                        }
+                        cleared.push_str(&html! { div id="day2-live-status" role="status" { "Live updates stopped. " a href="/" { "Reload to continue." } } }.into_string());
+                        let _ = terminal.send(elements(&cleared, "outer"));
+                    }
+                    break;
+                }
+            }
+        }
+    }
+}
+
+impl Runtime {
+    pub(crate) fn authority_snapshot(
+        &self,
+        operation: &str,
+        actor: &str,
+    ) -> Result<crate::authority_state::ActiveAuthority> {
+        let mut db = open(self.db())?;
+        let tx = db.transaction()?;
+        crate::authority_state::authorize_in(&tx, self, operation, actor)
+    }
+}
+
+fn elements(markup: &str, mode: &str) -> String {
+    let mut event = format!("event: datastar-patch-elements\ndata: mode {mode}\n");
+    for line in markup.replace('\r', "&#13;").split('\n') {
+        event.push_str("data: elements ");
+        event.push_str(line);
+        event.push('\n');
+    }
+    event.push('\n');
+    event
+}
+
+/// The subscription exclusively owns data regions. A command can replace only
+/// its signed, stable form target and acknowledgement, avoiding response races.
+pub(super) fn command_patch(
+    markup: Markup,
+    ticket: &Ticket,
+    status: StatusCode,
+    invocation: &str,
+) -> Result<Response> {
+    let document = scraper::Html::parse_fragment(&markup.into_string());
+    let id = ticket.form_id.as_deref().context(Failure::InvalidTicket)?;
+    let form = document
+        .select(&scraper::Selector::parse("form[id]").expect("static selector"))
+        .find(|form| form.value().attr("id") == Some(id));
+    let notice = document
+        .select(&scraper::Selector::parse("#day2-command-status").expect("static selector"))
+        .next()
+        .context("command notice")?;
+    let content = html! { div id="day2-command-status"
+        data-day2-invocation=(invocation) data-day2-operation=(&ticket.operation)
+        data-day2-status=(match status {
+            StatusCode::OK => "success",
+            StatusCode::ACCEPTED => "pending",
+            _ => "failure",
+        }) {
+        (maud::PreEscaped(notice.inner_html()))
+    } }
+    .into_string();
+    let mut events = elements(&content, "outer");
+    // A rejected submission keeps the existing draft and its original ticket.
+    // A deliberate reload is required after a stale edit; never silently rebase.
+    // ACCEPTED is durable acceptance, so its form is reset with a fresh ticket
+    // exactly like a success; only a genuine rejection retains the draft.
+    if matches!(status, StatusCode::OK | StatusCode::ACCEPTED)
+        && let Some(form) = form
+    {
+        // Morphing preserves dirty controls when their default values did
+        // not change. Replace this submitted form so a successful create
+        // resets its values together with its new idempotency ticket.
+        events.push_str(&elements(&form.html(), "replace"));
+    }
+    Ok(([(header::CONTENT_TYPE, "text/event-stream")], events).into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio_stream::StreamExt;
+
+    #[tokio::test]
+    async fn terminal_revocation_discards_a_saturated_data_queue() -> Result<()> {
+        let (sender, receiver) = mpsc::channel(1);
+        let (terminal_sender, terminal) = oneshot::channel();
+        sender.try_send("stale private app data".into())?;
+        let mut body = LiveBody {
+            receiver,
+            terminal: Some(terminal),
+            ended: false,
+        };
+        let clear = elements("<div id=\"private-region\"></div>", "outer");
+        terminal_sender.send(clear.clone()).expect("live receiver");
+        assert_eq!(body.next().await.transpose()?, Some(clear));
+        assert!(sender.is_closed());
+        assert!(body.next().await.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn interrupted_producer_is_an_error_instead_of_clean_eof() -> Result<()> {
+        let (sender, receiver) = mpsc::channel(1);
+        let (terminal_sender, terminal) = oneshot::channel();
+        sender.try_send(": keep-alive\n\n".into())?;
+        let mut body = LiveBody {
+            receiver,
+            terminal: Some(terminal),
+            ended: false,
+        };
+        drop(sender);
+        drop(terminal_sender);
+        assert_eq!(
+            body.next().await.transpose()?,
+            Some(": keep-alive\n\n".into())
+        );
+        assert!(body.next().await.context("interruption error")?.is_err());
+        assert!(body.next().await.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn disconnected_body_wakes_the_waiting_producer() -> Result<()> {
+        let (sender, receiver) = mpsc::channel(1);
+        let (terminal_sender, terminal) = oneshot::channel();
+        let body = LiveBody {
+            receiver,
+            terminal: Some(terminal),
+            ended: false,
+        };
+        drop(body);
+        tokio::time::timeout(Duration::from_secs(1), sender.closed()).await?;
+        assert!(terminal_sender.is_closed());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn transient_overload_uses_the_native_datastar_stream_retry_path() -> Result<()> {
+        let response = retry_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "text/event-stream"
+        );
+        assert_eq!(response.headers()["x-accel-buffering"], "no");
+        let mut body = response.into_body().into_data_stream();
+        let first = body.next().await.context("retry comment")??;
+        assert!(first.starts_with(b": "));
+        assert!(first.ends_with(b"\n\n"));
+        assert!(body.next().await.context("retry interruption")?.is_err());
+        assert!(body.next().await.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn html_line_breaks_cannot_inject_sse_fields_or_events() {
+        assert_eq!(
+            elements(
+                "<p id=\"result\">A\r\n\nevent: forged\nid: forged</p>",
+                "outer"
+            ),
+            "event: datastar-patch-elements\ndata: mode outer\ndata: elements <p id=\"result\">A&#13;\ndata: elements \ndata: elements event: forged\ndata: elements id: forged</p>\n\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_command_replaces_its_form_and_failure_preserves_the_draft() -> Result<()> {
+        let ticket: Ticket = serde_json::from_value(serde_json::json!({
+            "scope":"test", "artifact":"test", "session":"test", "actor":"alice",
+            "page":"reports", "page_input":{}, "operation":"reports.submit", "form_id":"create-report",
+            "bound":{}, "editable":["title"], "nonce":"test", "issued":0, "expires":1800
+        }))?;
+        let markup = html! {
+            div id="day2-command-status" { "Saved." }
+            div id="reports-list" data-live { "Current reports" }
+            form id="create-report" {
+                input name="title" value="";
+                input type="hidden" name="_ticket" value="new-ticket";
+            }
+        };
+        let response = command_patch(markup.clone(), &ticket, StatusCode::OK, "saved")?;
+        let payload = String::from_utf8(to_bytes(response.into_body(), 16_384).await?.to_vec())?;
+        let frames: Vec<_> = payload.trim_end().split("\n\n").collect();
+        assert_eq!(frames.len(), 2);
+        assert!(frames[0].contains("data: mode outer\n"));
+        assert!(!frames[0].contains("<form"));
+        assert!(frames[1].contains("data: mode replace\n"));
+        assert!(frames[1].contains("<form id=\"create-report\""));
+        assert!(frames[1].contains("new-ticket"));
+        assert!(!payload.contains("reports-list"));
+        let response = command_patch(markup, &ticket, StatusCode::CONFLICT, "rejected")?;
+        let payload = String::from_utf8(to_bytes(response.into_body(), 16_384).await?.to_vec())?;
+        assert_eq!(payload.matches("event: datastar-patch-elements").count(), 1);
+        assert!(payload.contains("data-day2-status=\"failure\""));
+        assert!(!payload.contains("<form"));
+        assert!(!payload.contains("new-ticket"));
+        Ok(())
+    }
+
+    #[test]
+    fn fresh_page_query_retries_conflicts_with_new_receipts() -> Result<()> {
+        let mut receipts = BTreeMap::<String, crate::protocol::Outcome>::new();
+        let outcome = super::super::fresh_page_query(|id| {
+            // An invocation ID identifies a durable receipt. Reusing a failed
+            // ID must return that same failure, even after the underlying row
+            // stops changing; recovery requires a fresh query invocation.
+            if let Some(receipt) = receipts.get(id) {
+                return Ok(receipt.clone());
+            }
+            let receipt = if receipts.len() < 2 {
+                crate::protocol::Outcome {
+                    status: "failure".into(),
+                    result: Value::Null,
+                    error: "preparation_conflict".into(),
+                }
+            } else {
+                crate::protocol::Outcome {
+                    status: "success".into(),
+                    result: serde_json::json!({"version":4,"text":"Current document"}),
+                    error: String::new(),
+                }
+            };
+            receipts.insert(id.into(), receipt.clone());
+            Ok(receipt)
+        })?;
+        assert_eq!(outcome.status, "success");
+        assert_eq!(outcome.result["version"], 4);
+        assert_eq!(outcome.result["text"], "Current document");
+        assert_eq!(receipts.len(), 3);
+        assert!(receipts.keys().all(|id| id.starts_with("page-")));
+        assert_eq!(
+            receipts
+                .values()
+                .filter(|receipt| receipt.status == "failure")
+                .count(),
+            2
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn fresh_page_query_bounds_continuous_conflicts_to_three_attempts() -> Result<()> {
+        let conflict = crate::protocol::Outcome {
+            status: "failure".into(),
+            result: Value::Null,
+            error: "preparation_conflict".into(),
+        };
+        let mut ids = Vec::new();
+        let outcome = super::super::fresh_page_query(|id| {
+            ids.push(id.to_string());
+            Ok(conflict.clone())
+        })?;
+        assert_eq!(outcome, conflict);
+        assert_eq!(ids.len(), 3);
+        assert_eq!(
+            ids.iter().collect::<std::collections::BTreeSet<_>>().len(),
+            3
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn fresh_page_query_does_not_retry_other_outcomes() -> Result<()> {
+        for (status, error) in [
+            ("success", ""),
+            ("pending", ""),
+            ("failure", "forbidden"),
+            ("failure", "not_found"),
+            ("failure", "conflict"),
+            ("failure", "preparation_deadline"),
+        ] {
+            let expected = crate::protocol::Outcome {
+                status: status.into(),
+                result: if status == "failure" {
+                    Value::Null
+                } else {
+                    serde_json::json!({})
+                },
+                error: error.into(),
+            };
+            let mut attempts = 0;
+            let outcome = super::super::fresh_page_query(|_| {
+                attempts += 1;
+                Ok(expected.clone())
+            })?;
+            assert_eq!(outcome, expected);
+            assert_eq!(attempts, 1, "{status}: {error}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn fresh_page_query_preserves_infrastructure_errors_without_retrying() {
+        let mut attempts = 0;
+        let error = super::super::fresh_page_query(|_| {
+            attempts += 1;
+            anyhow::bail!("provider unavailable")
+        })
+        .unwrap_err();
+        assert_eq!(error.to_string(), "provider unavailable");
+        assert_eq!(attempts, 1);
+    }
+}
