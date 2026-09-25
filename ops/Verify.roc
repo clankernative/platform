@@ -28,7 +28,14 @@ Verify :: [].{
 	reports! = |host!| {
 		_ = Capability.call!("verify-format", Json.to_str({ scope: "reports" }), host!)?
 		_ = Capability.call!("verify-cli", "{}", host!)?
-		for fixture in ["reports", "reports-probe", "owned", "owned-probe", "repeated-field"] {
+		for fixture in [
+			"reports",
+			"reports-probe",
+			"reports-deferrals",
+			"owned",
+			"owned-probe",
+			"repeated-field",
+		] {
 			_ = Capability.call!("verify-build", Json.to_str({ fixture: fixture }), host!)?
 		}
 		_ = Capability.call!("verify-lint", "{}", host!)?
@@ -55,6 +62,7 @@ Verify :: [].{
 			"repeated-field",
 			"reports",
 			"reports-probe",
+			"reports-deferrals",
 		] {
 			_ = Capability.call!("verify-build", Json.to_str({ fixture: fixture }), host!)?
 		}

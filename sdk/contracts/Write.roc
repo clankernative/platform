@@ -23,6 +23,25 @@ Write(a, b) :: { key : Str, input : Input(a), output : Output(b), input_witness 
 	metadata =
 		|write| { name: write.key, kind: "command", input_type: write.input.name(), output_type: write.output.name() }
 
+	defer_until : Write(a, b), Model(model), Model.Entity(model), a, I64 -> Tx({})
+	defer_until =
+		|
+			command,
+			model,
+			target,
+			payload,
+			due,
+		|
+			Tx.invoke_deferral(
+				command.key,
+				command.input.name(),
+				command.output.name(),
+				model,
+				target,
+				command.input.encode(payload),
+				due,
+			)
+
 	request : Write(a, b), Model(model), Model.Entity(model), a -> Tx({})
 	request =
 		|

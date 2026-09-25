@@ -247,6 +247,11 @@ fn build_fixture(root: &Path, fixture: &str) -> Result<PathBuf> {
             &root.join("examples/reports"),
             Some(&root.join("fixtures/command-target-adversaries")),
         ),
+        "reports-deferrals" => build_with_overrides(
+            root,
+            &root.join("examples/reports"),
+            Some(&root.join("fixtures/deferrals-conformance")),
+        ),
         "http" => build_with_overrides(
             root,
             &root.join("fixtures/row-authority-web-conformance"),
@@ -529,6 +534,8 @@ fn tests(
             "reports_http",
             "--test",
             "live_updates",
+            "--test",
+            "deferrals",
         ],
         "all-runtime" => &[
             "-p",
@@ -660,6 +667,7 @@ fn tests(
         ("reports", "DAY2_TEST_REPORTS_ARTIFACT"),
         ("reports", "DAY2_TEST_REPORTS_API_ARTIFACT"),
         ("reports-probe", "DAY2_TEST_REPORTS_PROBE_ARTIFACT"),
+        ("reports-deferrals", "DAY2_TEST_REPORTS_DEFERRALS_ARTIFACT"),
         ("relational", "DAY2_TEST_RELATIONAL_ARTIFACT"),
         ("collection", "DAY2_TEST_COLLECTION_ARTIFACT"),
         ("delegation", "DAY2_TEST_DELEGATION_ARTIFACT"),

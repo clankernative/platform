@@ -498,7 +498,7 @@ impl Execution {
                 );
                 continue;
             }
-            if effect.kind == "request" {
+            if matches!(effect.kind.as_str(), "request" | "defer") {
                 ensure!(
                     effect.model.is_empty()
                         && effect.fields.is_empty()
@@ -507,7 +507,7 @@ impl Execution {
                             .iter()
                             .any(|operation| operation.kind == "command"
                                 && operation.name == effect.command),
-                    "invalid command request effect"
+                    "invalid child command effect"
                 );
                 continue;
             }

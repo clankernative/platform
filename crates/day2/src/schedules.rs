@@ -163,9 +163,9 @@ impl Schedule {
 /// that binding is also not built. Passing it here keeps the decision visible
 /// rather than letting a default identity appear by accident.
 ///
-/// A command with deferred effects returns `pending` rather than completing here.
-/// That is not an error and needs no handling of its own: the existing command
-/// scheduler already drains pending invocations durably, which is the reason a
+/// A command whose effects are still outstanding returns `pending` rather than
+/// completing here. That is not an error and needs no handling of its own: the
+/// existing command scheduler already drains pending invocations durably, which is the reason a
 /// schedule can be a trigger for an ordinary command rather than a new execution
 /// kind.
 pub fn offer(

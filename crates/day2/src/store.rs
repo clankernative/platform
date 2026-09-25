@@ -529,10 +529,12 @@ impl Runtime {
         }
         crate::audit::upgrade(&tx)?;
         crate::invocations::upgrade(&tx)?;
+        crate::deferrals::upgrade(&tx)?;
         crate::resources::upgrade(&tx)?;
         crate::budget::upgrade(&tx)?;
         crate::preparation::upgrade(&tx)?;
         crate::execution::upgrade(&tx)?;
+        crate::recovery::upgrade(&tx)?;
         upgrade_selection_cursors(&tx)?;
         crate::authority_state::upgrade(&tx)?;
         tx.commit()?;
@@ -1190,7 +1192,7 @@ impl Runtime {
                     if request
                         .observations
                         .iter()
-                        .any(|entry| entry.instruction.kind == "request")
+                        .any(|entry| matches!(entry.instruction.kind.as_str(), "request" | "defer"))
                     {
                         ensure!(
                             request
@@ -1293,6 +1295,16 @@ impl Runtime {
                         } else if matches!(step, Step::Request { .. }) {
                             ensure!(kind == "command", "command_request_forbidden");
                             crate::invocations::request(
+                                self,
+                                connection,
+                                request,
+                                &instruction,
+                                policy,
+                                operation,
+                            )
+                        } else if matches!(step, Step::Defer { .. }) {
+                            ensure!(kind == "command", "deferral_not_permitted");
+                            crate::deferrals::defer(
                                 self,
                                 connection,
                                 request,
@@ -1832,14 +1844,27 @@ fn check_app_effect(
             "application_edit_target_forbidden"
         );
     }
-    if instruction.kind == "request" {
-        let target: crate::invocations::CommandRequest = serde_json::from_str(&instruction.data)?;
+    if matches!(instruction.kind.as_str(), "request" | "defer") {
+        let target: serde_json::Value = serde_json::from_str(&instruction.data)?;
+        let command = target
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .context("invalid_child_command")?;
+        let kind = if instruction.kind == "request" {
+            "request"
+        } else {
+            "defer"
+        };
         ensure!(
             execution
                 .effects
                 .iter()
-                .any(|effect| effect.kind == "request" && effect.command == target.command),
-            "undeclared_command_request"
+                .any(|effect| effect.kind == kind && effect.command == command),
+            if kind == "request" {
+                "undeclared_command_request"
+            } else {
+                "undeclared_deferral"
+            }
         );
         return Ok(());
     }

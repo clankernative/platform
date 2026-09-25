@@ -563,12 +563,16 @@ pub enum Trigger {
     Schedule,
     /// Another command requested it inside its own transaction.
     CommandRequest,
+    /// A deferred command became due and was admitted afresh.
+    Deferral,
     /// A verified inbound delivery from a provider: a webhook. No actor asked;
     /// the instance bound one, and the signature established the sender.
     Ingress,
     /// Another application in this instance asked, on behalf of the same actor.
     /// The caller chain on the invocation says which, and through what.
     Delegated,
+    /// A blocked invocation was admitted afresh by a local operator.
+    Recovery,
 }
 
 impl Trigger {
@@ -577,8 +581,10 @@ impl Trigger {
             Self::Request => "request",
             Self::Schedule => "schedule",
             Self::CommandRequest => "command_request",
+            Self::Deferral => "deferral",
             Self::Ingress => "ingress",
             Self::Delegated => "delegated",
+            Self::Recovery => "recovery",
         }
     }
 }
@@ -588,6 +594,7 @@ impl Trigger {
 pub enum AttemptKind {
     Admission,
     ExecutionAttempt,
+    Recovery,
 }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -596,10 +603,13 @@ pub enum AttemptOutcome {
     Reused,
     Rejected,
     Interrupted,
+    Abandoned,
+    Reissued,
 }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AttemptReason {
+    OperatorRecovery,
     ArtifactRejected,
     UnknownOperation,
     InvalidIdentity,
@@ -642,6 +652,46 @@ pub(crate) struct Attempt<'a> {
     pub outcome: AttemptOutcome,
     pub reason: Option<AttemptReason>,
     pub at_ms: i64,
+}
+
+pub(crate) fn record_recovery(
+    db: &Connection,
+    runtime: &Runtime,
+    operator: &str,
+    invocation: &str,
+    resolution: &str,
+    _reason: &str,
+    at_ms: i64,
+) -> Result<()> {
+    ensure!(!db.is_autocommit(), "recovery audit requires transaction");
+    let operation: String = db.query_row(
+        "SELECT operation FROM day2_invocations WHERE id=?1",
+        [invocation],
+        |row| row.get(0),
+    )?;
+    let outcome = match resolution {
+        "abandoned" => AttemptOutcome::Abandoned,
+        "reissued" => AttemptOutcome::Reissued,
+        _ => anyhow::bail!("invalid_recovery_resolution"),
+    };
+    record_attempt(
+        db,
+        runtime,
+        Attempt {
+            kind: AttemptKind::Recovery,
+            trigger: Trigger::Recovery,
+            identity: invocation,
+            actor: operator,
+            initiator: operator,
+            operation: &operation,
+            outcome,
+            reason: Some(AttemptReason::OperatorRecovery),
+            at_ms,
+        },
+    )?;
+    // The append-only recovery row holds the bounded operator reason and evidence;
+    // the event stream exposes resolution and redacted metadata.
+    Ok(())
 }
 
 pub(crate) fn record_attempt(
@@ -1137,8 +1187,10 @@ impl Runtime {
         let trigger = match cause.as_str() {
             "schedule" => Trigger::Schedule,
             "command_request" => Trigger::CommandRequest,
+            "deferral" => Trigger::Deferral,
             "ingress" => Trigger::Ingress,
             "delegated" => Trigger::Delegated,
+            "recovery" => Trigger::Recovery,
             _ => Trigger::Request,
         };
         record_attempt(

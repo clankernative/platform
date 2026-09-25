@@ -1105,6 +1105,7 @@ fn fence_restored_in(
     relocated: &Path,
 ) -> Result<()> {
     require_transaction(connection)?;
+    crate::deferrals::fence_restored(connection, &active.artifact_id)?;
     crate::budget::invalidate_restored(connection)?;
     let mut entropy = [0_u8; 32];
     getrandom::fill(&mut entropy)

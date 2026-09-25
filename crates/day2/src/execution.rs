@@ -5,7 +5,7 @@ use crate::{
     store::{self, Fault, Runtime},
 };
 use anyhow::{Context as _, Result, bail, ensure};
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 pub(crate) fn upgrade(connection: &Connection) -> Result<()> {
     connection.execute_batch(
@@ -86,6 +86,8 @@ pub(crate) fn begin(runtime: &Runtime, connection: &Transaction<'_>, trace: &Tra
     let cause = match cause.as_str() {
         "schedule" => crate::audit::Trigger::Schedule,
         "command_request" => crate::audit::Trigger::CommandRequest,
+        "deferral" => crate::audit::Trigger::Deferral,
+        "recovery" => crate::audit::Trigger::Recovery,
         _ => crate::audit::Trigger::Request,
     };
     crate::audit::record_attempt(
@@ -512,6 +514,18 @@ pub(crate) fn perform(runtime: &Runtime, permit: DispatchPermit) -> Result<Perfo
             && permit.scope == runtime.scope(),
         "execution_binding_changed"
     );
+    // The operator fence serializes on this writer lock. A permit already in
+    // this section may be in flight when recovery commits; unstarted permits
+    // observed after the recovery transaction are refused.
+    let mut database = store::open(runtime.db())?;
+    let tx = database.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    runtime.check_binding(&tx)?;
+    let resolved: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM day2_recoveries WHERE invocation=(SELECT invocation FROM day2_external_effects WHERE identity=?1))",
+        [&permit.effect], |row| row.get(0),
+    )?;
+    ensure!(!resolved, "resolved_invocation_perform_fenced");
+    tx.commit()?;
     if let Some(observation) = permit.recorded {
         return Ok(Performed {
             observation,

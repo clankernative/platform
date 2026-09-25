@@ -361,8 +361,25 @@ impl LocalServer {
                 }
             }
         });
-        // Only applications that declare a schedule get an occurrence source.
-        let declared = !self.host.runtime.artifact().contract().schedules.is_empty();
+        // Schedule occurrences and due deferrals share the platform tick cadence.
+        let declares_deferrals = self
+            .host
+            .runtime
+            .artifact()
+            .contract()
+            .app_contract
+            .as_ref()
+            .is_some_and(|contract| {
+                contract.operations.values().any(|operation| {
+                    operation
+                        .execution
+                        .effects
+                        .iter()
+                        .any(|effect| effect.kind == "defer")
+                })
+            });
+        let declared =
+            !self.host.runtime.artifact().contract().schedules.is_empty() || declares_deferrals;
         let scheduled = declared.then(|| {
             let runtime = self.host.runtime.clone();
             let mut stopped = stop.subscribe();
@@ -382,11 +399,19 @@ impl LocalServer {
                         _ = interval.tick() => {
                             let runtime = runtime.clone();
                             let ticked = tokio::task::spawn_blocking(move || {
-                                crate::schedules::tick(&runtime, now_ms()?)
+                                let now_ms = now_ms()?;
+                                let schedules = crate::schedules::tick(&runtime, now_ms)?;
+                                let deferrals = crate::deferrals::tick(&runtime, now_ms)?;
+                                Ok::<_, anyhow::Error>((schedules, deferrals))
                             })
                             .await;
                             match ticked {
-                                Ok(Ok(ticks)) => {
+                                Ok(Ok((ticks, deferrals))) => {
+                                    for result in deferrals {
+                                        if result.outcome == "blocked" {
+                                            eprintln!("deferral_blocked {} {}", result.id, result.reason);
+                                        }
+                                    }
                                     for tick in ticks {
                                         // A refusal is reported once, where it happens.
                                         // A schedule that silently does nothing cannot be

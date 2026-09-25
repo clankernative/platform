@@ -357,6 +357,10 @@ Api :: [].{
 	request : Write(a, b) -> Effect
 	request = |handle| { kind: "request", model: "", fields: [], command: handle.name() }
 
+	# A deferral is admitted afresh when its due time arrives.
+	defer : Write(a, b) -> Effect
+	defer = |handle| { kind: "defer", model: "", fields: [], command: handle.name() }
+
 	# Internal commands have the same contract but no HTTP, form or MCP entrypoint.
 	internal : Execution(input) -> Execution(input)
 	internal = |execution| { ..execution, internal: Bool.True }

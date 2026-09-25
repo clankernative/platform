@@ -121,7 +121,7 @@ const SEALED: &[(&str, &str, &str)] = &[
     (
         "Api.roc",
         "",
-        "d1d52af6bebeef4a7065a65b496c6a9220924aab9a3139b3cb6fac16cb0b74de",
+        "3bd589133c5d797020d16af16c84ef51d660d3717abaee242eae9fbcfb65f29a",
     ),
     (
         "Effects.roc",
@@ -161,7 +161,7 @@ const SEALED: &[(&str, &str, &str)] = &[
     (
         "Write.roc",
         "define",
-        "bd082ba2d59c1e3dab2fb36434b55a166c85440371a18d6d09c1777daf3b6d4b",
+        "62d39272912ad8c2a78a0abfd88d3552a937ae01c2ec1359ba1beb2f032fd08e",
     ),
     (
         "Read.roc",
@@ -181,7 +181,7 @@ const SEALED: &[(&str, &str, &str)] = &[
     (
         "Context.roc",
         "from_wire",
-        "3cfa16ca524528cedbdafcdcc4b7feaeb66db920b3806b0023831b6b2d0d4fa5",
+        "17c8d6199e0c9f9319e3fd7c15cf7fe91ffc2c22d489f814b0d4f98f7c65c16f",
     ),
     (
         "Product.roc",
@@ -191,7 +191,7 @@ const SEALED: &[(&str, &str, &str)] = &[
     (
         "Tx.roc",
         "evaluate",
-        "f0b63e65441932e9d60d4efacc1c36e492bb47e240bb69dfecd2bfe4f0c28813",
+        "af63c16bc2bcd0a49630c84ab4a6d0beda49b5f5b48fa1288c075688bb6ef1a2",
     ),
     (
         "Operation.roc",
@@ -213,6 +213,7 @@ const RESTRICTED_CALLS: &[(&str, &str)] = &[
     ("Tx", "from_host"),
     ("Tx", "begin_decision"),
     ("Tx", "invoke_command"),
+    ("Tx", "invoke_deferral"),
     ("Tx", "begin_effects"),
     ("Tx", "begin_completion"),
     ("Tx", "capability"),
@@ -258,6 +259,7 @@ fn restrict_sealed(module: &str, source: &str) -> Result<String> {
             "from_host",
             "begin_decision",
             "invoke_command",
+            "invoke_deferral",
             "begin_effects",
             "begin_completion",
             "capability",

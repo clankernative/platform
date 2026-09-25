@@ -214,11 +214,38 @@ Expected host failures carry typed categories and stable codes. HTML, HTTP API
 and MCP share one mapping; diagnostic context cannot change the status or public
 code. Serialized application failures remain part of the admitted app contract.
 
+## Recovery
+
+A local operator can resolve a **blocked** invocation through the native
+`recovery-abandon` or `recovery-reissue` command. Recovery is not an app
+capability. An abandon records one `abandoned` resolution, fences the old
+invocation from new dispatch and completion, and stores native effect evidence
+as **never admitted**, **known result**, or **unknown outcome**. Status receipts
+expose only the resolution, successor identity, and redacted evidence counts.
+Unknown outcomes keep their existing budget reservations. A permit checked before
+the fence commits may already be in flight; recovery cannot cancel that provider
+call, but its late result is still settled and does not run app completion.
+Committed child command requests and deferrals remain committed business and are
+reported in the recovery receipt; recovery does not recursively abandon them.
+
+Reissue is narrower: it requires a blocked invocation with no committed decision,
+children, or external effects/attempts. It admits the same operation, actor, and
+input afresh against current authority, with a deterministic successor identity
+and `recovery` authentication. If fresh admission fails, the recovery transaction
+rolls back. Continuation under the pinned artifact and automatic retry/backoff
+remain unimplemented. Local operator assertions are not production authentication.
+
+## Deferrals
+
+A deferral records that a command should be invoked with an input at a due time. It commits atomically with the command that creates it, but it is not a command request: while waiting it has no invocation row, authority pin, or target-version fence. This lets it survive policy changes, deploys, and target edits.
+
+The identity is derived from the instance scope, parent invocation, and shared child ordinal. When due, the deferral is offered once and freshly admitted against the active artifact and current policy. An admitted invocation is pinned to the current authority stamp; an incompatible command/input is blocked as `deferral_incompatible`, and a currently unauthorized actor is blocked as `deferral_forbidden`. Blocked invocations are retained and excluded from draining. Artifact activation checks every unoffered deferral for command contract and input compatibility. Due times are Unix seconds, cannot be in the past or more than 30 days away, and the instance holds at most 1,000 unoffered deferrals. Restore never resurrects pending work held by a backup: each unoffered deferral is marked offered and recorded as a blocked invocation with reason `deferral_restored` in the restore transaction.
+
 ## Current scope
 
 This is a local spike with bounded execution: 32 preparation observations, 32
 external effects, 64 total interpreter steps, 64 KiB observation results and eight
-child requests per invocation. Native computation retains the worker timeout.
+combined child command requests and deferrals per invocation. Native computation retains the worker timeout.
 There is no HA scheduler, automatic worker classification, arbitrary hour-long
 backfill, public cancellation API for the new engine, timers, external signals,
 human approval waits or generic compensation engine yet. The SDK leaves room to

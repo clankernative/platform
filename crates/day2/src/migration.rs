@@ -369,6 +369,7 @@ pub fn activate_checked(
         scope == runtime.scope() && schema == target.contract().schema_digest && pending == 0,
         "activation_precondition_failed"
     );
+    crate::deferrals::check_compatible(&connection, target)?;
     if let Some(contract) = &target.contract().app_contract {
         crate::domain::validate_storage(&connection, &target.contract().schema, &contract.domains)?;
     }
