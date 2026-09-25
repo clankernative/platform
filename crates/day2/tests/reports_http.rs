@@ -944,8 +944,19 @@ fn real_http_datastar_form_command_scheduler_html_and_audit_survive_restart() ->
             .get(reqwest::Url::parse(&server.origin)?.join(audit)?)
             .send()?
             .status(),
-        StatusCode::OK
+        StatusCode::FORBIDDEN
     );
+    {
+        let owner_server = Server::start_actor(&path, directory.path(), "admin")?;
+        let owner = owner_server.client()?;
+        assert_eq!(
+            owner
+                .get(reqwest::Url::parse(&owner_server.origin)?.join(audit)?)
+                .send()?
+                .status(),
+            StatusCode::OK
+        );
+    }
     let connection = rusqlite::Connection::open(runtime.db())?;
     let changes: i64 =
         connection.query_row("SELECT count(*) FROM day2_audit_changes", [], |row| {
