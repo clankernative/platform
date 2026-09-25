@@ -4,8 +4,8 @@ output "workload_identity_provider" {
 }
 
 output "oidc_audience" {
-  description = "Audience the workflows must request from the OIDC issuer."
-  value       = var.oidc_audience
+  description = "Audience the provider accepts (its canonical URL, the auth action's default)."
+  value       = local.oidc_audience
 }
 
 output "plan_service_account_email" {

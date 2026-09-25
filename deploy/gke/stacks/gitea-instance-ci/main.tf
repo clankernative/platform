@@ -20,6 +20,9 @@
 locals {
   iap_tcp_range = "35.235.240.0/20"
   pool_name     = "projects/${var.project_number}/locations/global/workloadIdentityPools/${var.workload_identity_pool_id}"
+  # The provider's canonical audience: what google-github-actions/auth asks
+  # for by default, and the form git-oidc issues tokens for.
+  oidc_audience = "https://iam.googleapis.com/${local.pool_name}/providers/${var.workload_identity_provider_id}"
 
   # Each workflow ref is "<owner>/<repo>/<path>@<ref>".
   apply_workflow_ref  = "${var.repository}/${var.apply_workflow_path}@refs/heads/main"
@@ -241,7 +244,7 @@ resource "google_iam_workload_identity_pool_provider" "gitea" {
 
   oidc {
     issuer_uri        = var.oidc_issuer_uri
-    allowed_audiences = [var.oidc_audience]
+    allowed_audiences = [local.oidc_audience]
   }
 }
 

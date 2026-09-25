@@ -122,12 +122,6 @@ variable "oidc_issuer_uri" {
   default     = "https://git-oidc.wonderly.info"
 }
 
-variable "oidc_audience" {
-  description = "Audience the workflows request and the provider accepts. Distinct from every other provider's audience."
-  type        = string
-  default     = "wonderly-internal-tools-instance-ci"
-}
-
 variable "workload_identity_pool_id" {
   description = "Existing workload identity pool (created at bootstrap) that holds the Gitea provider."
   type        = string

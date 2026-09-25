@@ -33,8 +33,8 @@ run "identities_are_bound_to_the_repository_ids_and_one_workflow_each" {
   }
 
   assert {
-    condition     = google_iam_workload_identity_pool_provider.gitea.oidc[0].allowed_audiences == tolist(["wonderly-internal-tools-instance-ci"])
-    error_message = "the provider accepts exactly one dedicated audience"
+    condition     = google_iam_workload_identity_pool_provider.gitea.oidc[0].allowed_audiences == tolist(["https://iam.googleapis.com/projects/123456789012/locations/global/workloadIdentityPools/instance-ci/providers/gitea"])
+    error_message = "the provider accepts exactly its own canonical audience"
   }
 
   assert {
