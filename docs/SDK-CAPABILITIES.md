@@ -70,7 +70,7 @@ bounded reason code. It excludes request bodies, results, tokens and raw errors.
 cargo run --locked -p day2 -- audit-events ../my-private-instance/instance.json reports developer 0
 ```
 
-This auditor-only view returns at most 50 events with `has_more` and `next_before`.
+This owner-only view returns at most 50 events with `has_more` and `next_before`.
 Use `0` for the first page. The existing HTML audit page remains the completed
 invocation/change view; it does not yet display every lifecycle event.
 
@@ -87,7 +87,7 @@ Both JSON APIs return `{items,next_cursor}`, newest sequence first, with a defau
 50-row limit and an allowed range of 1–50. Empty `next_cursor` means no older
 matches. Cursors are opaque 256-bit handles bound to the database/app, artifact,
 actor, view, filter set and limit, and expire after 24 hours. Each page rechecks
-current auditor permission; a revoked auditor cannot continue. The host keeps at
+current app owner permission; a revoked owner cannot continue. The host keeps at
 most 10,000 live handles per app database, reuses a handle for the same boundary,
 and never evicts a live handle to make room. Exact descending sequence boundaries
 prevent new events from shifting later pages. The legacy HTML/CLI integer
@@ -108,6 +108,40 @@ associated state commit. HTTP-response logging occurs later: its failure returns
 Migrations do not invent historical events or actors. Admission events use the
 attempted request time; receipts preserve accepted invocation time. Interruption events use observed host time. A missing actor
 means no authenticated actor or host-originated work, not an inferred user.
+
+## Application History
+
+`pf.Audit.history` reads only the current app's completed commands and queries,
+with redacted row changes. It excludes platform admission/rejection, interruption,
+HTTP and retention events. It exposes no invocation input, output, raw error,
+token, request body or business field value. The platform audit remains accessible
+only to the enabled policy's `admins`; granting an app history query grants no
+platform audit access.
+
+Use `Handler.prepared(prepare, handle)` and return
+`Audit.history({ operations: ["links.edit"], after: input.after, limit: input.limit })`
+from `prepare`. The handle phase receives `CollectionPage(Audit.Entry)` and can
+project it into the app's own output or join current rows through ordinary model
+grants. The operation needs `"observations": ["audit.history.v1"]` in its policy.
+The host rechecks this grant before reading and before using a cached observation.
+No provider, resource binding or platform owner role is needed.
+
+`Entry` contains `sequence`, `operation`, `actor`, `initiator`, `trigger`, `outcome`,
+`at` (Unix seconds), `changes` and `change_count`. A change contains `model`,
+`record_id`, `before_version` (zero for creation), `after_version`, and changed
+`fields`. No row values are copied into append-only history. Read current rows
+under the operation's model grants when values are needed.
+
+Results are newest first. `operations` is an exact-name filter of at most 64 names;
+empty includes all completed operations, including reads. Retired names remain
+readable. `limit` must be 1–50, even though `PageSize` itself permits up to 100.
+Each entry includes at most 20 row changes, while `change_count` states the total.
+A page stops early when its escaped JSON approaches 40 KB. An unusually large
+change list may be omitted with its total still reported. Follow `has_more` and
+pass `next_after` unchanged. Cursors bind app, actor, calling operation and filter,
+expire after 24 hours, and retain exact sequence boundaries across new writes.
+The read is journaled for deterministic replay. See the
+`fixtures/delegation-conformance/queries/history` example.
 `initiator` is the original requesting actor, not a work identifier.
 
 These are platform invariants, not WORM storage. A SQLite file owner can alter the

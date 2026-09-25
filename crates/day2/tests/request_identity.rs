@@ -50,9 +50,10 @@ impl World {
         let read = json!({"actors":actors,"mode":{"kind":"read"},"models":{}});
         let mut forward = read.clone();
         forward["observations"] = json!(["app.query.v1"]);
-        let binding = json!({"artifact":artifact,"readers":actors,"writers":actors,"auditors":["support"],
+        let binding = json!({"artifact":artifact,"readers":actors,"writers":actors,
         "authority":{"version":1,"admins":["boss"],"operations":{
             "delegation.who":read,"delegation.forward":forward,
+            "delegation.history":{"actors":actors,"mode":{"kind":"read"},"models":{},"observations":["audit.history.v1"]},
             "delegation.record":{"actors":actors,"mode":{"kind":"current_state"},
                 "models":{"entries":{"read":true,"create":true,"rows":{"kind":"owner_or_admin","field":"actor"}}}}
         },"delegations":{
@@ -62,8 +63,16 @@ impl World {
         let mut instance = json!({"installation":"identityco","environment":"test",
             "control":{"version":1,"state_directory":directory.path().join("control"),"operators":["it"],"sources":{},"apps":{}},
             "apps":{"caller":binding,"callee":binding}});
-        // Permit gateway a session only, so the wrong-path rule can be tested.
-        instance["apps"]["caller"]["auditors"] = json!(["support", "gateway"]);
+        // Permit gateway an identity read so it can sign in, then test that its
+        // ingress-only delegation still cannot select a target on requests.
+        instance["apps"]["caller"]["readers"]
+            .as_array_mut()
+            .unwrap()
+            .extend([json!("support"), json!("gateway")]);
+        instance["apps"]["caller"]["authority"]["operations"]["delegation.who"]["actors"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!("gateway"));
         fs::write(&path, serde_json::to_vec(&instance)?)?;
         let callee = Runtime::load(&path, "callee")?;
         callee.initialize()?;
@@ -403,6 +412,138 @@ fn commands_and_async_receipts_bind_requester_target_and_idempotency() -> Result
         StatusCode::FORBIDDEN
     );
     assert_eq!(world.rows()?, 2);
+    Ok(())
+}
+
+#[test]
+fn app_history_is_granted_independently_redacted_scoped_and_cursor_paged() -> Result<()> {
+    let world = World::new()?;
+    let server = Server::start(world.caller.clone(), "support")?;
+    let mut records = Vec::new();
+    for key in ["history-one", "history-two", "history-three"] {
+        let result = value(
+            server
+                .record("customer", key)
+                .body(r#"{"note":"SECRET-ROW-VALUE"}"#)
+                .send()?,
+            StatusCode::OK,
+        )?;
+        records.push(result["id"].clone());
+    }
+    // Reads and web/admission/rejection events exist but are outside this
+    // app query's record-command filter. A nonowner can use the app query.
+    value(
+        server.get("/api/delegation.who", "customer").send()?,
+        StatusCode::OK,
+    )?;
+    assert_eq!(
+        server.record("boss", "rejected").send()?.status(),
+        StatusCode::FORBIDDEN
+    );
+    assert!(
+        world
+            .caller
+            .audit_entries("customer", &Default::default())
+            .is_err()
+    );
+    let response = server
+        .get("/api/delegation.history?after=&limit=2", "customer")
+        .send()?;
+    let invocation = response.headers()["x-day2-invocation"].to_str()?.to_owned();
+    let first = value(response, StatusCode::OK)?;
+    assert_eq!(first["items"].as_array().unwrap().len(), 2);
+    assert_eq!(first["items"][0]["records"], records[2]);
+    assert_eq!(first["items"][1]["records"], records[1]);
+    assert_eq!(first["items"][0]["actor"], "customer");
+    assert_eq!(first["items"][0]["initiator"], "support");
+    assert_eq!(first["items"][0]["change_count"], 1);
+    assert_eq!(first["has_more"], true);
+    let cursor = first["next_after"].as_str().context("history cursor")?;
+    assert!(cursor.starts_with("sel1_"));
+    let saved = world.caller.trace(&invocation)?;
+    replay(world.caller.artifact(), &saved)?;
+    let observation = &saved.request.observations[0].result;
+    let raw: Value = serde_json::from_str(observation)?;
+    assert_eq!(raw["items"][0]["changes"][0]["model"], "entries");
+    assert_eq!(raw["items"][0]["changes"][0]["before_version"], 0);
+    assert_eq!(
+        raw["items"][0]["changes"][0]["fields"],
+        json!(["actor", "note"])
+    );
+    for forbidden in [
+        "SECRET-ROW-VALUE",
+        "input",
+        "result",
+        "token",
+        "body",
+        "admission",
+        "rejected",
+    ] {
+        assert!(
+            !observation.contains(forbidden),
+            "history leaked {forbidden}"
+        );
+    }
+    let next = format!("/api/delegation.history?after={cursor}&limit=2");
+    assert_eq!(
+        server.get(&next, "another").send()?.status(),
+        StatusCode::BAD_REQUEST
+    );
+    let callee = Server::start(world.callee.clone(), "customer")?;
+    let empty = value(
+        callee
+            .client
+            .get(format!(
+                "{}/api/delegation.history?after=&limit=2",
+                callee.origin
+            ))
+            .send()?,
+        StatusCode::OK,
+    )?;
+    assert_eq!(empty["items"], json!([]));
+    assert_eq!(
+        callee
+            .client
+            .get(format!("{}{next}", callee.origin))
+            .send()?
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    // Writes newer than the boundary do not duplicate or displace old entries.
+    value(
+        server.record("customer", "history-four").send()?,
+        StatusCode::OK,
+    )?;
+    let older = value(server.get(&next, "customer").send()?, StatusCode::OK)?;
+    assert_eq!(older["items"].as_array().unwrap().len(), 1);
+    assert_eq!(older["items"][0]["records"], records[0]);
+    assert_eq!(older["has_more"], false);
+    assert_eq!(older["next_after"], "");
+    assert_eq!(
+        server
+            .get("/api/delegation.history?after=&limit=51", "customer")
+            .send()?
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    rusqlite::Connection::open(world.caller.db())?.execute(
+        "UPDATE day2_selection_cursors SET expires_at=0 WHERE token=?1",
+        [cursor],
+    )?;
+    assert_eq!(
+        server.get(&next, "customer").send()?.status(),
+        StatusCode::BAD_REQUEST
+    );
+    world.change("caller", |binding| {
+        binding["authority"]["operations"]["delegation.history"]["observations"] = json!([]);
+    })?;
+    assert_eq!(
+        server
+            .get("/api/delegation.history?after=&limit=2", "customer")
+            .send()?
+            .status(),
+        StatusCode::FORBIDDEN
+    );
     Ok(())
 }
 

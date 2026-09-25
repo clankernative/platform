@@ -58,6 +58,7 @@ fn desired(
     mut catalog: Value,
     mut attachments: Value,
 ) -> Result<Value> {
+    policy.admins.insert(ACTOR.into());
     // Reports never invokes this slot. Its explicit grant exists only to test
     // packaging and mount selection without provider traffic.
     policy
@@ -83,7 +84,7 @@ fn desired(
     Ok(
         json!({"installation":installation,"environment":"disposable","resources":catalog,
         "control":{"version":1,"state_directory":root.join("operator-control"),"operators":[OPERATOR],"sources":{},"apps":{}},
-        "apps":{APP:{"artifact":artifact,"readers":[ACTOR],"writers":[ACTOR],"auditors":[ACTOR],
+        "apps":{APP:{"artifact":artifact,"readers":[ACTOR],"writers":[ACTOR],
             "authority":policy,"resource_policies":attachments,
             "runtime":{"kind":"linux_sqlite_single_v1","resources":{"memory_mib":512,"cpu_millis":1000,"process_limit":64,"http_concurrency":4,"shutdown_seconds":30}}}}}),
     )

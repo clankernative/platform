@@ -191,7 +191,7 @@ impl Policy {
                 policy
                     .observations
                     .iter()
-                    .all(|name| crate::capabilities::READS.contains(&name.as_str())),
+                    .all(|name| crate::capabilities::observation(name)),
                 "unknown observation grant"
             );
             ensure!(

@@ -5,7 +5,8 @@ binding. `instance.json` is desired configuration. Editing it prepares a change;
 it never modifies live grants, and runtime startup does not overwrite active
 authority from that file. Apps retain their existing Roc handlers and SDK.
 
-The active document includes enabled state, readers, writers, auditors and policy.
+The active document includes enabled state, readers, writers and policy. Only
+the enabled policy's admins (app owners) can read platform audit records.
 Its stamp has an opaque `epoch` and an increasing `revision`, separate from the
 policy's format `version`. All invocation phases retain the stamp accepted with
 their original input. Every activation advances the revision even for identical

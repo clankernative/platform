@@ -22,15 +22,20 @@ pub struct AuthorityStamp {
     pub revision: u64,
 }
 
+/// The activated authority an app runs under.
+///
+/// There is no separate audit grant. The platform audit log belongs to the
+/// application's owners — its policy `admins` — and nobody else; see
+/// [`AuthorityDocument::authorize_audit`]. An app that wants a wider audience for
+/// its history exposes its own query over `Audit.history` and grants that.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
+#[serde(from = "StoredDocument")]
 pub struct AuthorityDocument {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub security: Option<crate::security_admission::Requirements>,
     pub enabled: bool,
     pub readers: BTreeSet<String>,
     pub writers: BTreeSet<String>,
-    pub auditors: BTreeSet<String>,
     /// Absence is an explicit denial, never an implicit unrestricted policy.
     pub policy: Option<Policy>,
     /// Fully resolved immutable resource authority. Empty means deny all
@@ -42,6 +47,40 @@ pub struct AuthorityDocument {
     pub resources: day2_capabilities::resources::ResolvedResources,
 }
 
+/// An activated document as it may already sit in an application database.
+///
+/// Documents activated before owners read the audit carry an `auditors` list.
+/// It is read and discarded, never written back and never consulted: an old
+/// database keeps loading, and the list it holds grants nothing. Every other
+/// field is exactly [`AuthorityDocument`]'s, so this admits no other shape.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredDocument {
+    #[serde(default)]
+    security: Option<crate::security_admission::Requirements>,
+    enabled: bool,
+    readers: BTreeSet<String>,
+    writers: BTreeSet<String>,
+    #[serde(default, rename = "auditors")]
+    _retired_auditors: BTreeSet<String>,
+    policy: Option<Policy>,
+    #[serde(default)]
+    resources: day2_capabilities::resources::ResolvedResources,
+}
+
+impl From<StoredDocument> for AuthorityDocument {
+    fn from(stored: StoredDocument) -> Self {
+        Self {
+            security: stored.security,
+            enabled: stored.enabled,
+            readers: stored.readers,
+            writers: stored.writers,
+            policy: stored.policy,
+            resources: stored.resources,
+        }
+    }
+}
+
 impl AuthorityDocument {
     pub fn from_binding(binding: &AppBinding) -> Self {
         Self {
@@ -49,7 +88,6 @@ impl AuthorityDocument {
             enabled: true,
             readers: binding.readers.clone(),
             writers: binding.writers.clone(),
-            auditors: binding.auditors.clone(),
             policy: binding.authority.clone(),
             resources: Default::default(),
         }
@@ -138,12 +176,7 @@ impl AuthorityDocument {
         if let Some(requirements) = &self.security {
             requirements.validate(artifact)?;
         }
-        for actor in self
-            .readers
-            .iter()
-            .chain(&self.writers)
-            .chain(&self.auditors)
-        {
+        for actor in self.readers.iter().chain(&self.writers) {
             crate::authority::valid_actor(actor)?;
         }
         if let Some(policy) = &self.policy {
@@ -199,9 +232,21 @@ impl AuthorityDocument {
             .authorize(&operation.name, actor)
     }
 
+    /// Whether `actor` may read this application's platform audit log.
+    ///
+    /// Hard-coded to the application's owners: the `admins` of its activated
+    /// policy, while it is enabled. There is deliberately no grant, list or
+    /// policy field that extends this to anyone else. A missing policy has no
+    /// owners and so admits nobody. Membership (`readers`/`writers`) is neither
+    /// required nor sufficient; the audit is about the application, not a use
+    /// of it.
     pub fn authorize_audit(&self, actor: &str) -> Result<()> {
         ensure!(
-            self.enabled && self.auditors.contains(actor),
+            self.enabled
+                && self
+                    .policy
+                    .as_ref()
+                    .is_some_and(|policy| policy.admins.contains(actor)),
             Failure::Forbidden
         );
         Ok(())

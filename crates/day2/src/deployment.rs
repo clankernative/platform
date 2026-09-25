@@ -591,8 +591,7 @@ mod tests {
             "INSERT INTO day2_authority VALUES(1,?1,1,?2,?3,?4)",
             rusqlite::params![
                 crate::digest(b"layout-test"),
-                json!({"enabled":false,"readers":[],"writers":[],"auditors":[],"policy":null})
-                    .to_string(),
+                json!({"enabled":false,"readers":[],"writers":[],"policy":null}).to_string(),
                 format!("sha256:{hash}"),
                 active.to_string_lossy()
             ],

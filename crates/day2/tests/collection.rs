@@ -43,7 +43,7 @@ impl World {
         }});
         let instance = json!({"installation":"collectiontest","environment":"test","apps":{"collections":{
             "artifact":artifact,"readers":["alice","bob","admin","viewer"],
-            "writers":["alice","bob","admin"],"auditors":["admin"],"authority":policy
+            "writers":["alice","bob","admin"],"authority":policy
         }}});
         let path = directory.join("instance.json");
         fs::write(&path, serde_json::to_vec_pretty(&instance)?)?;

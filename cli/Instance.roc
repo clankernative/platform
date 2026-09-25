@@ -61,17 +61,11 @@ check_apps = |apps, done| match apps {
 	[] => Ok(done)
 	[(name, binding), .. as rest] => {
 		app_name = Names.App.from_str(name).map_err(|_| BadJson("invalid bound app name"))?
-		binding.keys(["artifact", "readers", "writers", "auditors", "authority"])?
+		binding.keys(["artifact", "readers", "writers", "authority"])?
 		path =
 			Names.LocalPath.from_str(binding.get("artifact")?.string()?).map_err(|_| BadJson("invalid artifact path"))?
 		check_actors(binding.get("readers")?)?
 		check_actors(binding.get("writers")?)?
-		match binding.optional("auditors")? {
-			Absent => {}
-			Present(actors) => {
-				check_actors(actors)?
-			}
-		}
 		match binding.optional("authority")? {
 			Absent => {}
 			Present(policy) => {

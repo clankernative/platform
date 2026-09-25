@@ -15,6 +15,16 @@ use std::collections::BTreeMap;
 // Generated from the one provider table; see `day2_capabilities::registry`.
 pub use day2_capabilities::registry::{LOCAL_PROVIDER_DATABASES, READS, WRITES};
 
+/// Whether `name` is an observation an operation policy may grant.
+///
+/// Every provider read, plus the host's own [`crate::audit::HISTORY`]: an
+/// application reading its own history is granted exactly like any other read,
+/// but it reaches no provider, holds no resource and spends no budget, so it
+/// has no place in the provider table.
+pub fn observation(name: &str) -> bool {
+    READS.contains(&name) || name == crate::audit::HISTORY
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct NotificationWorld {
     pub messages: BTreeMap<String, Message>,

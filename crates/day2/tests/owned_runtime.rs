@@ -64,7 +64,7 @@ impl World {
         let instance: Instance = serde_json::from_value(json!({
             "installation":"owned_runtimeco", "environment":"test", "apps":{"owned":{
                 "artifact":artifact,"readers":["viewer"],"writers":["alice","bob","admin"],
-                "auditors":["alice","admin"],"authority":policy(mode, private_reads)
+                "authority":policy(mode, private_reads)
             }}
         }))?;
         let path = directory.path().join("instance.json");

@@ -766,6 +766,19 @@ pub(crate) fn validate_cached(
     if !observation.error.is_empty() {
         return Ok(());
     }
+    if observation.instruction.model == crate::audit::HISTORY {
+        // A recorded history page carries no resource. What must still hold is
+        // the grant: revoking `audit.history` stops the invocation using what it
+        // already read, as revoking any other read does.
+        let active = authority_state::require_invocation_in(
+            connection,
+            runtime,
+            &request.context.invocation_id,
+            &request.operation,
+            &request.context.actor,
+        )?;
+        return crate::audit::require_history(active.policy()?, runtime, &request.operation);
+    }
     if [BIND, ATTENUATE].contains(&observation.instruction.model.as_str()) {
         let result: serde_json::Value = crate::json::decode(observation.result.as_bytes())?;
         let token = result

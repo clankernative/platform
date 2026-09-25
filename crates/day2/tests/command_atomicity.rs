@@ -356,7 +356,7 @@ fn submit_analyze_notify_are_independently_replayable_and_receipts_are_idempoten
             .get::<_, i64>(0))?,
         3
     );
-    let events = world.runtime.audit_events("alice", 0)?;
+    let events = world.runtime.audit_events("admin", 0)?;
     assert!(!serde_json::to_string(&events)?.contains("first line"));
     assert!(
         events

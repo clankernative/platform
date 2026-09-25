@@ -133,7 +133,6 @@ fn online_backup_restores_wal_data_into_a_new_instance_and_rejects_tampering() -
     let mut desired = day2::artifact::Instance::load(runtime.instance_path())?;
     let pending = desired.apps.get_mut("app").context("app binding")?;
     pending.writers.clear();
-    pending.auditors.clear();
     pending.authority = None;
     pending.artifact = "not-activated-artifact".into();
     fs::write(runtime.instance_path(), serde_json::to_vec(&desired)?)?;

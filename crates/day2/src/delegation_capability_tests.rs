@@ -64,7 +64,7 @@ impl Granted {
         let instance = json!({"installation":"delegationco","environment":"test",
             "resources":catalog,
             "apps":{"caller":{"artifact":artifact_directory,"readers":[],"writers":["alice"],
-                "auditors":["alice"],"authority":policy,
+                "authority":policy,
                 "resource_policies":[{"policy":{"id":"reading","revision":1},
                     "operation":"ask","bindings":{"directory":{"id":"callee_list","revision":1}}}]}}});
         fs::write(&path, serde_json::to_vec(&instance)?)?;
@@ -284,7 +284,7 @@ impl Impersonating {
                 "operators":["it"],"sources":{},"apps":{}},
             "apps":{"support":{"artifact":artifact_directory,"readers":[],
                 "writers":["alice","bob","customer","customer:other","boss","it","app:worker","svc:worker","no-access"],
-                "auditors":["alice"],"authority":policy}}});
+                "authority":policy}}});
         fs::write(&path, serde_json::to_vec(&instance)?)?;
         let contract = serde_json::from_value(json!({
             "format":crate::artifact::CURRENT_FORMAT,"roc_version":"support-test",

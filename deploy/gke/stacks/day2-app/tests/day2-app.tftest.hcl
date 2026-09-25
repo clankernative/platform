@@ -63,7 +63,6 @@ run "renders_instance_from_platform_contract" {
           artifact  = "artifacts/9ef287e05cb53f593b35c140140e83306e8c487cca417ff9f23f58568340b6bb"
           readers   = ["qa@example.com"]
           writers   = ["qa@example.com"]
-          auditors  = []
           authority = { version = 1, admins = [], operations = { "example.list" = { actors = ["qa@example.com"], mode = { kind = "read" }, models = {} } } }
           runtime = {
             kind = "linux_sqlite_single_v1"

@@ -80,6 +80,11 @@ const MODULES: &[Module] = &[
         app_export: true,
     },
     Module {
+        file: "Audit.roc",
+        source: "contracts/Audit.roc",
+        app_export: true,
+    },
+    Module {
         file: "ObjectStore.roc",
         source: "contracts/ObjectStore.roc",
         app_export: true,

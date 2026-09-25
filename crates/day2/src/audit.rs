@@ -986,7 +986,7 @@ fn next_page_cursor(db: &Connection, binding: &str, before: i64, now: i64) -> Re
 
 impl Runtime {
     /// Read completed invocations and their redacted row changes under current
-    /// auditor authority. Record filters match changes in the same transaction;
+    /// app owner authority. Record filters match changes in the same transaction;
     /// the returned entry retains every change in that invocation.
     pub fn audit_page(&self, actor: &str, request: &PageRequest) -> Result<Page<Entry>> {
         request.validate(false)?;
@@ -1235,6 +1235,257 @@ impl Runtime {
     }
 }
 
+/// The observation an application uses to read its own history.
+///
+/// Granted per operation in the authority policy's `observations`, like any
+/// other read, and refused to every operation that is not granted it.
+pub const HISTORY: &str = "audit.history.v1";
+
+/// Most entries one history page may return. The same bound as the platform
+/// audit pages, so neither view can be made to read more than the other.
+const HISTORY_PAGE: i64 = 50;
+/// Most operation names one history read may filter by.
+const HISTORY_OPERATIONS: usize = 64;
+/// Most row changes listed on one entry. `change_count` always states the total,
+/// so an abbreviated list is visible as one rather than passing for complete.
+const HISTORY_CHANGES: usize = 20;
+/// Encoded bytes a page may occupy. An observation is journaled as an escaped
+/// string inside a 64-KiB record, so the page stops early, lawfully, with a
+/// continuation, rather than growing past what the journal will hold.
+const HISTORY_BYTES: usize = 40_000;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HistoryRequest {
+    operations: Vec<String>,
+    after: String,
+    limit: i64,
+}
+
+/// One completed invocation of this application, as the application sees it.
+#[derive(Serialize)]
+struct HistoryEntry {
+    sequence: i64,
+    operation: String,
+    actor: String,
+    initiator: String,
+    trigger: String,
+    outcome: String,
+    at: i64,
+    changes: Vec<HistoryChange>,
+    change_count: u64,
+}
+
+#[derive(Serialize)]
+struct HistoryChange {
+    model: String,
+    record_id: String,
+    /// Zero when the change created the row.
+    before_version: i64,
+    after_version: i64,
+    fields: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct HistoryPage {
+    items: Vec<HistoryEntry>,
+    has_more: bool,
+    next_after: String,
+}
+
+/// Refuse `audit.history` to an operation its current policy does not grant it.
+pub(crate) fn require_history(
+    policy: &crate::authority::Policy,
+    runtime: &Runtime,
+    operation: &str,
+) -> Result<()> {
+    let operation = &runtime.artifact().route(operation)?.name;
+    ensure!(
+        policy
+            .operations
+            .get(operation)
+            .is_some_and(|grant| grant.observations.contains(HISTORY)),
+        crate::error::Failure::CapabilityForbidden
+    );
+    Ok(())
+}
+
+/// Read one page of this application's own completed history.
+///
+/// Scoped by construction rather than by filter: each application has its own
+/// database, and this reads only its receipts and row changes — never another
+/// application's, never the admission, rejection, interruption, web or
+/// retention events of the platform log, and never inputs, results, tokens or
+/// bodies, none of which the receipt holds. Row changes name the record and the
+/// fields that changed but carry no values, because the platform records none:
+/// an append-only copy of business values would outlive the deletion and
+/// retention of the rows they came from. An application that wants a value
+/// reads the row through its own granted query.
+///
+/// Newest first. The continuation is an ordinary selection cursor, bound to
+/// this actor, this operation and this filter, and expiring like any other.
+/// The caller holds the write lock; the only write is that cursor.
+pub(crate) fn history(
+    db: &Connection,
+    runtime: &Runtime,
+    request: &Request,
+    instruction: &crate::protocol::Instruction,
+) -> Result<String> {
+    use crate::error::Failure::InvalidInput;
+    let read: HistoryRequest =
+        crate::json::decode(instruction.data.as_bytes()).context(InvalidInput)?;
+    ensure!((1..=HISTORY_PAGE).contains(&read.limit), InvalidInput);
+    ensure!(read.operations.len() <= HISTORY_OPERATIONS, InvalidInput);
+    for operation in &read.operations {
+        ensure!(
+            !operation.is_empty()
+                && operation.len() <= 160
+                && !operation.chars().any(char::is_control),
+            InvalidInput
+        );
+    }
+    let operations: std::collections::BTreeSet<&str> =
+        read.operations.iter().map(String::as_str).collect();
+    let registered = &runtime.artifact().route(&request.operation)?.name;
+    let binding = crate::digest(&serde_json::to_vec(&(
+        "day2.audit_history.v1",
+        runtime.scope(),
+        &request.context.actor,
+        registered,
+        &operations,
+    ))?);
+    history_page(
+        db,
+        &read,
+        &binding,
+        &request.context.invocation_id,
+        request.context.now,
+    )
+}
+
+fn history_page(
+    db: &Connection,
+    read: &HistoryRequest,
+    binding: &str,
+    invocation_id: &str,
+    now: i64,
+) -> Result<String> {
+    use crate::error::Failure::InvalidCursor;
+    crate::store::upgrade_selection_cursors(db)?;
+    let before = if read.after.is_empty() {
+        0
+    } else {
+        let cursor = crate::store::decode_selection_cursor(db, &read.after, now)?;
+        ensure!(
+            cursor.binding == binding && cursor.values.len() == 1,
+            InvalidCursor
+        );
+        crate::store::pin_selection_cursor(db, &read.after, invocation_id)?;
+        cursor.values[0]
+            .as_i64()
+            .filter(|sequence| *sequence > 0)
+            .context(InvalidCursor)?
+    };
+    let rows = db
+        .prepare(
+            "SELECT a.rowid,a.invocation,a.operation,a.actor,
+                COALESCE(NULLIF(i.authenticated,''),a.actor),i.trigger,a.status,a.at
+            FROM day2_audit a JOIN day2_invocations i ON a.invocation=i.id
+            WHERE i.status IN ('success','failure') AND a.status=i.status
+            AND (?1=0 OR a.rowid<?1)
+            AND (?2='[]' OR a.operation IN (SELECT value FROM json_each(?2)))
+            ORDER BY a.rowid DESC LIMIT ?3",
+        )?
+        .query_map(
+            params![
+                before,
+                serde_json::to_string(&read.operations)?,
+                read.limit + 1
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(1)?,
+                    HistoryEntry {
+                        sequence: row.get(0)?,
+                        operation: row.get(2)?,
+                        actor: row.get(3)?,
+                        initiator: row.get(4)?,
+                        trigger: row.get(5)?,
+                        outcome: row.get(6)?,
+                        at: row.get(7)?,
+                        changes: Vec::new(),
+                        change_count: 0,
+                    },
+                ))
+            },
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut has_more = rows.len() > read.limit as usize;
+    let mut items = Vec::new();
+    let mut spent = 64;
+    for (invocation, mut entry) in rows.into_iter().take(read.limit as usize) {
+        entry.change_count = u64::try_from(db.query_row(
+            "SELECT count(*) FROM day2_audit_changes WHERE invocation=?1",
+            [&invocation],
+            |row| row.get::<_, i64>(0),
+        )?)?;
+        entry.changes = db.prepare(
+            "SELECT model,record_id,before_version,after_version,fields FROM day2_audit_changes WHERE invocation=?1 ORDER BY ordinal LIMIT ?2",
+        )?.query_map(params![invocation, HISTORY_CHANGES as i64], |row| {
+            let fields: String = row.get(4)?;
+            Ok((HistoryChange {
+                model: row.get(0)?, record_id: row.get(1)?, before_version: row.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                after_version: row.get(3)?, fields: Vec::new(),
+            }, fields))
+        })?.collect::<rusqlite::Result<Vec<_>>>()?.into_iter().map(|(mut change, fields)| {
+            change.fields = serde_json::from_str(&fields)?;
+            Ok(change)
+        }).collect::<Result<Vec<_>>>()?;
+        let mut cost = escaped_len(&entry)?;
+        if cost > HISTORY_BYTES / 2 {
+            // Only a pathological entry reaches this: its change list is dropped,
+            // and `change_count` still says how many there were.
+            entry.changes.clear();
+            cost = escaped_len(&entry)?;
+        }
+        if !items.is_empty() && spent + cost > HISTORY_BYTES {
+            has_more = true;
+            break;
+        }
+        spent += cost;
+        items.push(entry);
+    }
+    let next_after = match items.last() {
+        Some(last) if has_more => {
+            let token = crate::store::encode_selection_cursor(
+                db,
+                &crate::store::SelectionCursor {
+                    binding: binding.into(),
+                    values: vec![serde_json::json!(last.sequence)],
+                },
+                now,
+            )?;
+            crate::store::pin_selection_cursor(db, &token, invocation_id)?;
+            token
+        }
+        _ => {
+            has_more = false;
+            String::new()
+        }
+    };
+    Ok(serde_json::to_string(&HistoryPage {
+        items,
+        has_more,
+        next_after,
+    })?)
+}
+
+/// What an entry costs inside the journaled observation, where the page is an
+/// escaped JSON string.
+fn escaped_len(entry: &HistoryEntry) -> Result<usize> {
+    Ok(serde_json::to_string(&serde_json::to_string(entry)?)?.len() + 1)
+}
+
 fn read_changes(db: &Connection, invocation: &str) -> Result<Vec<Change>> {
     let mut statement = db.prepare("SELECT model,record_id,before_version,after_version,fields FROM day2_audit_changes WHERE invocation=?1 ORDER BY ordinal")?;
     let changes = statement.query_map([invocation], |row| {
@@ -1258,4 +1509,156 @@ fn read_changes(db: &Connection, invocation: &str) -> Result<Vec<Change>> {
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    fn database() -> Result<Connection> {
+        let db = Connection::open_in_memory()?;
+        db.execute_batch("CREATE TABLE day2_invocations(id TEXT PRIMARY KEY, authenticated TEXT, trigger TEXT, status TEXT);
+            CREATE TABLE day2_audit(invocation TEXT PRIMARY KEY, operation TEXT, actor TEXT, status TEXT, at INTEGER);
+            CREATE TABLE day2_audit_changes(invocation TEXT, ordinal INTEGER, model TEXT, record_id TEXT,
+                before_version INTEGER, after_version INTEGER, fields TEXT);")?;
+        Ok(db)
+    }
+
+    fn receipt(
+        db: &Connection,
+        id: &str,
+        operation: &str,
+        changes: usize,
+        field: &str,
+    ) -> Result<()> {
+        db.execute(
+            "INSERT INTO day2_invocations VALUES(?1,'support','request','success')",
+            [id],
+        )?;
+        db.execute(
+            "INSERT INTO day2_audit VALUES(?1,?2,'customer','success',100)",
+            params![id, operation],
+        )?;
+        for ordinal in 0..changes {
+            db.execute(
+                "INSERT INTO day2_audit_changes VALUES(?1,?2,'entries',?3,NULL,1,?4)",
+                params![
+                    id,
+                    ordinal as i64,
+                    format!("record-{ordinal}"),
+                    json!([field]).to_string()
+                ],
+            )?;
+        }
+        Ok(())
+    }
+
+    fn page(
+        db: &Connection,
+        operations: &[&str],
+        after: &str,
+        limit: i64,
+        binding: &str,
+    ) -> Result<Value> {
+        Ok(serde_json::from_str(&history_page(
+            db,
+            &HistoryRequest {
+                operations: operations.iter().map(|name| (*name).into()).collect(),
+                after: after.into(),
+                limit,
+            },
+            binding,
+            "",
+            100,
+        )?)?)
+    }
+
+    #[test]
+    fn bounded_changes_report_the_total_and_large_entries_preserve_continuations() -> Result<()> {
+        let db = database()?;
+        receipt(&db, "old", "retired.write", 25, "note")?;
+        let first = page(&db, &[], "", 50, "scope")?;
+        assert_eq!(first["items"][0]["change_count"], 25);
+        assert_eq!(
+            first["items"][0]["changes"].as_array().unwrap().len(),
+            HISTORY_CHANGES
+        );
+        assert_eq!(first["items"][0]["changes"][0]["before_version"], 0);
+        // Each row is within the entry budget but the collection needs more
+        // than one page. Quotes exercise escaped observation/journal size.
+        for index in 0..12 {
+            receipt(
+                &db,
+                &format!("wide-{index}"),
+                "retired.write",
+                1,
+                &"\"".repeat(1_500),
+            )?;
+        }
+        let mut cursor = String::new();
+        let mut sequences = std::collections::BTreeSet::new();
+        let mut pages = 0;
+        loop {
+            let result = page(&db, &[], &cursor, 50, "scope")?;
+            assert!(serde_json::to_string(&result.to_string())?.len() < HISTORY_BYTES + 256);
+            pages += 1;
+            for entry in result["items"].as_array().unwrap() {
+                assert!(sequences.insert(entry["sequence"].as_i64().unwrap()));
+            }
+            if result["has_more"] == false {
+                break;
+            }
+            cursor = result["next_after"].as_str().unwrap().into();
+        }
+        assert!(pages > 1);
+        assert_eq!(sequences.len(), 13);
+        receipt(&db, "huge", "retired.write", 1, &"\"".repeat(HISTORY_BYTES))?;
+        let huge = page(&db, &[], "", 1, "scope")?;
+        assert_eq!(huge["items"][0]["changes"], json!([]));
+        assert_eq!(huge["items"][0]["change_count"], 1);
+        assert_eq!(huge["has_more"], true);
+        Ok(())
+    }
+
+    #[test]
+    fn exact_operation_filters_and_cursor_binding_cannot_widen_history() -> Result<()> {
+        let db = database()?;
+        receipt(&db, "old", "retired.write", 0, "")?;
+        receipt(&db, "query", "app.read", 0, "")?;
+        receipt(&db, "new", "retired.write", 0, "")?;
+        db.execute(
+            "INSERT INTO day2_invocations VALUES('pending','support','request','pending')",
+            [],
+        )?;
+        db.execute(
+            "INSERT INTO day2_invocations VALUES('aborted','support','request','failure')",
+            [],
+        )?;
+        let first = page(&db, &["retired.write"], "", 1, "bound-filter")?;
+        let cursor = first["next_after"].as_str().unwrap();
+        assert!(page(&db, &[], cursor, 1, "different-filter").is_err());
+        assert!(page(&db, &["retired.write"], "sel1_forged", 1, "bound-filter").is_err());
+        receipt(&db, "newer", "retired.write", 0, "")?;
+        let older = page(&db, &["retired.write"], cursor, 1, "bound-filter")?;
+        assert_eq!(older["items"][0]["sequence"], 1);
+        assert_eq!(older["has_more"], false);
+        assert_eq!(
+            page(&db, &["retired"], "", 50, "other")?["items"],
+            json!([])
+        );
+        assert_eq!(
+            page(&db, &[], "", 50, "all")?["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            4
+        );
+        db.execute(
+            "UPDATE day2_selection_cursors SET expires_at=100 WHERE token=?1",
+            [cursor],
+        )?;
+        assert!(page(&db, &["retired.write"], cursor, 1, "bound-filter").is_err());
+        Ok(())
+    }
 }

@@ -248,7 +248,9 @@ pub fn local_policy_for(artifact: &LoadedArtifact, actor: &str) -> Result<Policy
             OperationPolicy {
                 observations: crate::capabilities::READS
                     .iter()
-                    .map(|name| (*name).into())
+                    .copied()
+                    .chain([crate::audit::HISTORY])
+                    .map(Into::into)
                     .collect(),
                 effects: if operation.kind == "command" {
                     crate::capabilities::WRITES
@@ -281,7 +283,10 @@ pub fn local_policy_for(artifact: &LoadedArtifact, actor: &str) -> Result<Policy
     }
     let policy = Policy {
         version: 1,
-        admins: BTreeSet::new(),
+        // The development actor owns a disposable instance, which is what lets
+        // it read that instance's platform audit log. Rows are granted to every
+        // operation below regardless, so owning them bypasses nothing further.
+        admins: BTreeSet::from([actor.into()]),
         // A disposable development instance grants nobody the right to act as
         // anybody: impersonation is an operator's decision about real people.
         delegations: BTreeMap::new(),
@@ -1056,7 +1061,6 @@ pub fn create_for(
                     .into(),
                 readers: BTreeSet::from([actor.into()]),
                 writers: BTreeSet::from([actor.into()]),
-                auditors: BTreeSet::from([actor.into()]),
                 authority: Some(policy.unwrap_or(local_policy_for(&artifact, actor)?)),
                 resource_policies: Vec::new(),
                 // Nothing is ever removed from a development instance either.

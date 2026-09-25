@@ -30,7 +30,7 @@ pub fn instance(path: &Path) -> Result<Value> {
             !binding.artifact.trim().is_empty() && binding.artifact.len() <= 4096,
             "artifact path budget"
         );
-        for actors in [&binding.readers, &binding.writers, &binding.auditors] {
+        for actors in [&binding.readers, &binding.writers] {
             ensure!(actors.len() <= 512, "actor count budget");
             for actor in actors {
                 ensure!(
@@ -41,7 +41,7 @@ pub fn instance(path: &Path) -> Result<Value> {
                 );
             }
         }
-        apps.insert(name.clone(), json!({"artifact": binding.artifact, "readers":binding.readers, "writers":binding.writers, "auditors":binding.auditors}));
+        apps.insert(name.clone(), json!({"artifact": binding.artifact, "readers":binding.readers, "writers":binding.writers}));
     }
     Ok(json!({"installation":instance.installation,"environment":instance.environment,"apps":apps}))
 }

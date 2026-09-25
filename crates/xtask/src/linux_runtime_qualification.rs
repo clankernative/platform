@@ -2369,15 +2369,16 @@ pub fn native_package(
     let artifact = LoadedArtifact::load(artifact)?;
     artifact.require_current_api()?;
     day2::schema::identifier(installation)?;
-    let policy: day2::authority::Policy = serde_json::from_str(include_str!(
+    let mut policy: day2::authority::Policy = serde_json::from_str(include_str!(
         "../../../fixtures/authority-policies/reports.json"
     ))?;
+    policy.admins.insert(ACTOR.into());
     let (resources, resource_policies) =
         day2::development::resource_fixture_for_artifact(APP, &artifact, &policy)?;
     let mut desired = json!({
         "installation":installation,"environment":"disposable","resources":resources,
         "apps":{APP:{
-            "artifact":artifact.directory(),"readers":[ACTOR],"writers":[ACTOR],"auditors":[ACTOR],
+            "artifact":artifact.directory(),"readers":[ACTOR],"writers":[ACTOR],
             "authority":policy,"resource_policies":resource_policies,
             "runtime":{"kind":"linux_sqlite_single_v1","resources":{
                 "memory_mib":512,"cpu_millis":1000,"process_limit":64,

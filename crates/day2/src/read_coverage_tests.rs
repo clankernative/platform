@@ -63,7 +63,7 @@ impl Fixture {
             serde_json::to_vec(&json!({
                 "installation":"coverage","environment":"test",
                 "apps":{"app":{"artifact":artifact_directory,"readers":["alice","bob","admin"],
-                    "writers":["alice","bob","admin"],"auditors":["admin"],"authority":policy}}
+                    "writers":["alice","bob","admin"],"authority":policy}}
             }))?,
         )?;
         let model = json!({"fields":{"owner":"text","status":"text"}});

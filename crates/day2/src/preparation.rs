@@ -183,6 +183,16 @@ pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
                 .context("resource_host_operation")?;
             tx.commit()?;
             Ok(result)
+        } else if matches!(step, Step::Observe { .. }) && instruction.model == crate::audit::HISTORY
+        {
+            // The application's own history: host data under the same write
+            // lock, reaching no provider, so there is nothing to reserve, budget
+            // or settle. The grant is checked against current authority first,
+            // exactly as a provider read's is.
+            crate::audit::require_history(active.policy()?, runtime, &operation)?;
+            let result = crate::audit::history(&tx, runtime, &request, &instruction);
+            tx.commit()?;
+            result
         } else if matches!(step, Step::Observe { .. }) {
             // The observation's position in this invocation, which is what makes
             // a name derived here survive a retry: the same read, retried, is
