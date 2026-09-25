@@ -1791,6 +1791,9 @@ pub fn strict(root: &Path, qualified: &Path, output: &Path) -> Result<()> {
             && receipt["scope"] == "linux_sqlite_single_v1",
         "actual completed Linux qualification required"
     );
+    day2::security_admission::require_linux_checks(&serde_json::from_value(
+        receipt["checks"].clone(),
+    )?)?;
     let field = |name: &str| {
         receipt[name]
             .as_str()

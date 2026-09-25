@@ -128,6 +128,7 @@ pub(super) fn preflight(runner: &Path) -> Result<()> {
                 seen == required_steps(),
                 "incomplete Linux recipe preflight"
             );
+            day2::security_admission::require_linux_checks(&seen)?;
             completed = true;
             Ok(json!({"recipe_preflight":true}))
         } else {
@@ -781,6 +782,7 @@ impl Session {
             self.checks == required_steps() && !self.tooling_started,
             "incomplete Linux qualification"
         );
+        day2::security_admission::require_linux_checks(&self.checks)?;
         let inputs = self.inputs.as_ref().context("captured platform")?;
         let source = self.source.as_ref().context("captured application")?;
         ensure!(
@@ -988,7 +990,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn actual_linux_recipe_has_closed_payloads_for_every_required_step() -> Result<()> {
+    fn actual_linux_recipe_satisfies_receipt_and_security_admission() -> Result<()> {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let runner = workflows::build(&root)?;
         preflight(&runner)?;
@@ -998,6 +1000,31 @@ mod tests {
         assert!(request_key("linux-test-suite", &json!("sandbox")).is_err());
         assert!(request_key("linux-test-suite", &json!({"suite":"other"})).is_err());
         assert!(request_key("linux-runtime-start", &json!({"image":"override"})).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn receipt_checks_reject_every_omission_and_obsolete_or_extra_names() -> Result<()> {
+        // This is the producer's receipt vocabulary, independently checked by
+        // the admission guard and by the actual compiled recipe test above.
+        let checks: BTreeSet<String> =
+            serde_json::from_value(serde_json::to_value(required_steps())?)?;
+        day2::security_admission::require_linux_checks(&checks)?;
+        for missing in &checks {
+            let mut incomplete = checks.clone();
+            incomplete.remove(missing);
+            assert!(
+                day2::security_admission::require_linux_checks(&incomplete).is_err(),
+                "missing check admitted: {missing}"
+            );
+        }
+        let mut obsolete = checks.clone();
+        assert!(obsolete.remove("linux-build-owned"));
+        obsolete.insert("linux-build-golinks".into());
+        assert!(day2::security_admission::require_linux_checks(&obsolete).is_err());
+        let mut extra = checks;
+        extra.insert("unreviewed-check".into());
+        assert!(day2::security_admission::require_linux_checks(&extra).is_err());
         Ok(())
     }
 
