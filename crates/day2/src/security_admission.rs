@@ -18,7 +18,7 @@ const LINUX_CHECKS: &[&str] = &[
     "linux-start-tooling",
     "linux-build-check",
     "linux-build-probe",
-    "linux-build-golinks",
+    "linux-build-owned",
     "test-sandbox",
     "test-worker",
     "test-http",
@@ -34,6 +34,20 @@ const LINUX_CHECKS: &[&str] = &[
     "linux-runtime-stop",
     "linux-stop-tooling",
 ];
+
+/// Require the complete reviewed Linux campaign before issuing or consuming
+/// evidence. Recipe preflight uses the same guard before native effects begin.
+pub fn require_linux_checks(checks: &BTreeSet<String>) -> Result<()> {
+    ensure!(
+        *checks
+            == LINUX_CHECKS
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect(),
+        "security_qualification_incomplete"
+    );
+    Ok(())
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -148,14 +162,7 @@ impl Requirements {
                     evidence.platform_inventory == self.platform_inventory,
                     "security_qualification_platform_mismatch"
                 );
-                ensure!(
-                    evidence.checks
-                        == LINUX_CHECKS
-                            .iter()
-                            .map(|value| (*value).to_owned())
-                            .collect(),
-                    "security_qualification_incomplete"
-                );
+                require_linux_checks(&evidence.checks)?;
                 // Each pin names its own host target, so the digest the
                 // qualification recorded identifies the architecture it ran on.
                 ensure!(
