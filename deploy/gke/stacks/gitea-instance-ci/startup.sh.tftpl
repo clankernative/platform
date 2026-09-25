@@ -25,8 +25,12 @@ if [[ ! -f "$state_dir/provisioned-v1" ]]; then
 fi
 systemctl start docker
 
-# Job containers get no Docker socket ("-"), no privileges and no host
-# volumes, so a job cannot touch the host or a later job. One job at a time.
+# The controller image is act_runner's Docker-in-Docker build, as in the fleet
+# runner profile (privilegedRunnerController): it runs its own Docker daemon
+# in a privileged container, and jobs run inside that daemon. The host's
+# Docker socket is never mounted. Job containers get no Docker socket ("-"),
+# no privileges and no host volumes, so a job cannot touch the host, the
+# controller or a later job. One job at a time.
 cat >"$state_dir/config.yaml" <<'YAML'
 log:
   level: info
@@ -66,9 +70,10 @@ fi
 docker rm -f act_runner >/dev/null 2>&1 || true
 env_file_args=()
 [[ -f "$state_dir/registration.env" ]] && env_file_args=(--env-file "$state_dir/registration.env")
-docker run -d --name act_runner --restart=always \
+install -d -m 0700 /var/lib/gitea-instance-ci-docker
+docker run -d --name act_runner --restart=always --privileged \
   -v "$state_dir:/data" \
-  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v /var/lib/gitea-instance-ci-docker:/var/lib/docker \
   -e CONFIG_FILE=/data/config.yaml \
   -e GITEA_INSTANCE_URL='${gitea_url}' \
   -e GITEA_RUNNER_NAME='${runner_name}' \

@@ -97,9 +97,10 @@ run "runner_is_private_and_jobs_are_isolated" {
       strcontains(google_compute_instance.runner.metadata["startup-script"], "docker_host: \"-\"") &&
       strcontains(google_compute_instance.runner.metadata["startup-script"], "privileged: false") &&
       strcontains(google_compute_instance.runner.metadata["startup-script"], "valid_volumes: []") &&
-      strcontains(google_compute_instance.runner.metadata["startup-script"], "instance-ci:docker://docker.io/gitea/runner-images@sha256:")
+      strcontains(google_compute_instance.runner.metadata["startup-script"], "instance-ci:docker://docker.io/gitea/runner-images@sha256:") &&
+      !strcontains(google_compute_instance.runner.metadata["startup-script"], "/var/run/docker.sock")
     )
-    error_message = "jobs run in the pinned job image without the Docker socket, privileges or host volumes"
+    error_message = "jobs run in the pinned job image without the Docker socket, privileges or host volumes, and the host socket is never mounted"
   }
 
   assert {

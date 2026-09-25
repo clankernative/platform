@@ -5,9 +5,11 @@
 # workflow OIDC tokens through workload identity federation, bound to the
 # repository's native Gitea ids and to one workflow file each. No key exists.
 #
-# The runner is a dedicated VM registered only to that repository. Jobs run
-# in fresh containers without the Docker socket, so a pull-request job cannot
-# leave anything on the host for a later main-branch job. The VM's own
+# The runner is a dedicated VM registered only to that repository. Its
+# controller runs its own Docker daemon (the fleet's privileged
+# Docker-in-Docker controller); jobs run in fresh, unprivileged containers of
+# that daemon without its socket, so a pull-request job cannot leave anything
+# for a later main-branch job. The VM's own
 # service account can read the runner registration secret and write logs,
 # nothing else: a job reaching the metadata server gains no authority.
 #
