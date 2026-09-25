@@ -73,6 +73,7 @@ fn exact(specs: Vec<Spec>) -> Result<Catalog> {
             models: BTreeMap::new(),
             inputs,
             foreign_keys: Vec::new(),
+            rollups: Vec::new(),
             indexes: vec![],
         },
     )
@@ -202,6 +203,7 @@ fn route_input_handle_must_match_even_when_nominal_contracts_have_the_same_wire_
             ("right".into(), input("Right")),
         ]),
         foreign_keys: vec![],
+        rollups: Vec::new(),
         indexes: vec![],
     };
     let operations = vec![Operation {

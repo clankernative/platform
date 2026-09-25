@@ -176,6 +176,7 @@ mod unsigned_storage_tests {
             models: BTreeMap::from([("counts".into(), record.clone())]),
             inputs: BTreeMap::from([("counts".into(), record.clone())]),
             foreign_keys: vec![],
+            rollups: Vec::new(),
             indexes: vec![],
         };
         let values = [
@@ -1423,6 +1424,13 @@ impl Runtime {
             ensure!(rows.len() <= limit, "inspection_limit");
             models.insert(name.clone(), serde_json::to_value(rows)?);
         }
+        for rollup in &self.artifact.contract().schema.rollups {
+            ensure!(
+                rollup.mismatches(&snapshot)? == 0,
+                "rollup_recount_mismatch: {}",
+                rollup.table()
+            );
+        }
         snapshot.commit()?;
         Ok(Value::Object(models))
     }
@@ -1486,6 +1494,13 @@ pub fn validate_storage_snapshot(
         ensure!(
             statement.query([])?.next()?.is_none(),
             "invalid stored foreign key"
+        );
+    }
+    for rollup in &artifact.contract().schema.rollups {
+        ensure!(
+            rollup.mismatches(&snapshot)? == 0,
+            "rollup_recount_mismatch: {}",
+            rollup.table()
         );
     }
     snapshot.commit()?;
@@ -1933,19 +1948,22 @@ fn sql_value(kind: &Kind, value: &Value) -> Result<SqlValue> {
     })
 }
 
-fn selection_field<'a>(schema: &'a Schema, model: &str, field: &str) -> Result<Option<&'a Kind>> {
+fn selection_field(schema: &Schema, model: &str, field: &str) -> Result<Option<Kind>> {
     if matches!(field, "id" | "version" | "created_at") {
         return Ok(None);
     }
-    let kind = schema.models[model]
+    let record = schema.readable(model).context("unregistered_model")?;
+    let kind = record
         .fields
         .get(field)
-        .context("unknown_selection_field")?;
+        .context("unknown_selection_field")?
+        .clone();
     ensure!(
-        schema
-            .foreign_keys
-            .iter()
-            .any(|key| key.model == model && key.field == field)
+        schema.rollup(model).is_some()
+            || schema
+                .foreign_keys
+                .iter()
+                .any(|key| key.model == model && key.field == field)
             || schema
                 .indexes
                 .iter()
@@ -1964,7 +1982,13 @@ fn selection_value(schema: &Schema, model: &str, field: &str, value: &Value) -> 
                 serde_json::from_value::<Id>(value.clone())?
             };
             ensure!(id.valid(), "invalid_selection_value");
-            id.sql(schema.models[model].identity.as_ref())
+            id.sql(
+                schema
+                    .readable(model)
+                    .context("unregistered_model")?
+                    .identity
+                    .as_ref(),
+            )
         }
         None => {
             let number = value.as_i64().context("invalid_selection_value")?;
@@ -1980,7 +2004,7 @@ fn selection_value(schema: &Schema, model: &str, field: &str, value: &Value) -> 
         }
         Some(kind) => {
             ensure!(kind.valid(value), "invalid_selection_value");
-            sql_value(kind, value)
+            sql_value(&kind, value)
         }
     }
 }
@@ -2205,7 +2229,8 @@ fn select_rows(
     row_filter: RowFilter,
     context: SelectionContext<'_>,
 ) -> Result<String> {
-    let record = &schema.models[model];
+    let record = schema.readable(model).context("unregistered_model")?;
+    let record = record.as_ref();
     let plan = SelectionPlan::parse(data, find)?;
     let mut orders = plan.orders;
     let mut ordered = std::collections::BTreeSet::new();
@@ -2228,6 +2253,7 @@ fn select_rows(
         "{:x}",
         Sha256::digest(serde_json::to_vec(&(
             "day2.selection.v1",
+            schema.hash()?,
             model,
             &plan.predicate,
             &orders,
@@ -2375,6 +2401,7 @@ mod selection_tests {
             inputs: BTreeMap::new(),
             foreign_keys: vec![],
             domains: BTreeMap::new(),
+            rollups: Vec::new(),
             indexes: vec![crate::schema::Index {
                 model: "links".into(),
                 name: "selection".into(),
@@ -3080,14 +3107,36 @@ pub(crate) fn effect(
         bail!("unsupported_database_effect");
     };
     let model = instruction.model();
-    let record = schema.models.get(model).context("unregistered_model")?;
-    let row_filter = policy.read_scope(operation, model, &request.context.actor)?;
+    let record = schema.readable(model).context("unregistered_model")?;
+    let record = record.as_ref();
+    let source = schema
+        .rollup(model)
+        .map_or(model, |rollup| rollup.model.as_str());
+    let row_filter = policy.read_scope(operation, source, &request.context.actor)?;
+    if let Some(rollup) = schema.rollup(model) {
+        ensure!(
+            matches!(
+                instruction,
+                Database::Get { .. } | Database::Select { .. } | Database::Page { .. }
+            ),
+            "rollup_is_read_only"
+        );
+        if let RowFilter::Owner { field, .. } = &row_filter {
+            ensure!(
+                rollup
+                    .group
+                    .iter()
+                    .any(|group| group.field == *field && group.bucket.is_none()),
+                "rollup_requires_owner_group"
+            );
+        }
+    }
     match instruction {
         Database::Get { id, .. } => {
             let row = get(connection, model, record, id)?;
             policy.check_read(
                 operation,
-                model,
+                source,
                 &request.context.actor,
                 &serde_json::from_str(&row.data)?,
             )?;
@@ -3446,4 +3495,95 @@ pub fn replay(artifact: &LoadedArtifact, trace: &Trace) -> Result<()> {
         _ => bail!("replay_outcome_mismatch"),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod rollup_read_tests {
+    use super::*;
+
+    #[test]
+    fn rollups_filter_before_paging_and_inherit_source_authority() -> Result<()> {
+        let (db, mut schema) = crate::rollup::tests::fixture()?;
+        db.execute_batch(PLATFORM_DDL)?;
+        upgrade_selection_cursors(&db)?;
+        db.execute_batch("INSERT INTO events(id,version,created_at,owner,time,amount) VALUES(1,1,0,'alice',1,7),(2,1,0,'alice',90000,8),(3,1,0,'bob',1,900)")?;
+        let request: Request = serde_json::from_value(
+            json!({"operation":"lookup","input":"{}","observations":[],"context":{"invocation_id":"","actor":"alice","now":100,"authentication":"test","caller":[],"authenticated":"alice","delegation_rule":""}}),
+        )?;
+        let policy: Policy = serde_json::from_value(
+            json!({"version":1,"operations":{"lookup":{"actors":["alice"],"mode":{"kind":"read"},"models":{"events":{"read":true,"rows":{"kind":"owner_or_admin","field":"owner"}}}}}}),
+        )?;
+        let mut instruction = Instruction { kind:"select_page".into(), model:"events_daily".into(), data:json!({"predicate":json!({"kind":"all","model":"","field":"","value":"","children":[]}).to_string(),"orders":[{"model":"events_daily","field":"time","descending":false}],"after":"","limit":1}).to_string(), ..Instruction::default() };
+        let first: Value = serde_json::from_str(&effect(
+            &db,
+            &schema,
+            "test",
+            &request,
+            &instruction,
+            &policy,
+            "lookup",
+        )?)?;
+        assert_eq!(first["items"].as_array().unwrap().len(), 1);
+        let data: Value = serde_json::from_str(first["items"][0]["data"].as_str().unwrap())?;
+        assert_eq!(data["amount"], 7);
+        assert_eq!(data["owner"], "alice");
+        assert_eq!(first["has_more"], true);
+        let mut plan: Value = serde_json::from_str(&instruction.data)?;
+        plan["after"] = first["next_after"].clone();
+        instruction.data = plan.to_string();
+        let second: Value = serde_json::from_str(&effect(
+            &db,
+            &schema,
+            "test",
+            &request,
+            &instruction,
+            &policy,
+            "lookup",
+        )?)?;
+        let data: Value = serde_json::from_str(second["items"][0]["data"].as_str().unwrap())?;
+        assert_eq!(data["amount"], 8);
+        assert_eq!(second["has_more"], false);
+        let write = Instruction {
+            kind: "create".into(),
+            model: "events_daily".into(),
+            data: "{}".into(),
+            ..Instruction::default()
+        };
+        assert!(
+            effect(&db, &schema, "test", &request, &write, &policy, "lookup")
+                .unwrap_err()
+                .to_string()
+                .contains("rollup_is_read_only")
+        );
+        let mut denied = policy.clone();
+        denied.operations.get_mut("lookup").unwrap().models.clear();
+        assert!(
+            effect(
+                &db,
+                &schema,
+                "test",
+                &request,
+                &instruction,
+                &denied,
+                "lookup"
+            )
+            .is_err()
+        );
+        schema.rollups[0].group.remove(0);
+        assert!(
+            effect(
+                &db,
+                &schema,
+                "test",
+                &request,
+                &instruction,
+                &policy,
+                "lookup"
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("rollup_requires_owner_group")
+        );
+        Ok(())
+    }
 }

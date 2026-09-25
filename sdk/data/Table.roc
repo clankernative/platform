@@ -38,4 +38,35 @@ Table(row, keys) :: { row_witness : List(row), key_witness : List(keys) }.{
 	# nothing about the data.
 	non_unique : { ..fields } -> [NonUnique(List({ ..fields }))]
 	non_unique = |_selected| NonUnique([])
+
+	# Totals the platform keeps from this table's rows, grouped by some of its
+	# columns and read like a table of their own:
+	#
+	#     daily: Table.rollup(
+	#         { created_time: Table.day(row.created_time), repo: row.repo },
+	#         { runs: Table.count, duration: Table.sum(row.duration) },
+	#     )
+	#
+	# Every write to the table adjusts them in the same transaction, a deleted row
+	# is outside them, and a group with no rows left disappears. A group column is
+	# `column: row.column`, or an integer time bucketed with `Table.hour`,
+	# `Table.day` or `Table.week` (UTC; weeks start on Monday). A measure counts
+	# rows or sums an integer column, which it is named after.
+	rollup : { ..group }, { ..measures } -> [Rollup(List({ ..group }), List({ ..measures }))]
+	rollup = |_group, _measures| Rollup([], [])
+
+	hour : I64 -> [Hour(I64)]
+	hour = |time| Hour(time)
+
+	day : I64 -> [Day(I64)]
+	day = |time| Day(time)
+
+	week : I64 -> [Week(I64)]
+	week = |time| Week(time)
+
+	count : [Count]
+	count = Count
+
+	sum : I64 -> [Sum(I64)]
+	sum = |value| Sum(value)
 }
