@@ -46,6 +46,7 @@ Verify :: [].{
 		for fixture in [
 			"http",
 			"delegation",
+			"redirect",
 			"relational",
 			"relational-next",
 			"collection",

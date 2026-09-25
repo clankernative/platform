@@ -7,6 +7,7 @@ import CommandBinding
 import QueryBinding
 import ScheduleBinding
 import IngressBinding
+import RedirectBinding
 
 Product :: [].{
 	Contract : {
@@ -17,6 +18,7 @@ Product :: [].{
 		pages : List(PageBinding),
 		schedules : List(ScheduleBinding),
 		ingress : List(IngressBinding),
+		redirects : List(RedirectBinding),
 	}
 
 	step : Contract, Str -> Str
@@ -31,6 +33,7 @@ Product :: [].{
 				pages: contract.pages.map(PageBinding.metadata),
 				schedules: contract.schedules.map(ScheduleBinding.metadata),
 				ingress: contract.ingress.map(IngressBinding.metadata),
+				redirects: contract.redirects.map(RedirectBinding.metadata),
 			})
 		}
 

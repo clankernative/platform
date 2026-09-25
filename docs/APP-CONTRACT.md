@@ -196,7 +196,9 @@ Storage must bind `model-identities.json`. Ordinary builds are read-only.
 and `retire-model APP TABLE` are explicit authoring actions. Commit the ledger;
 history cannot be reconstructed from today's model names. Presentation explicitly
 names its stylesheet/script (empty strings mean absent); named pages bind their
-templates. Resources and source overlays are captured before packaging, and
+templates. An optional `redirects` record registers `Redirect.route(...)` declarations,
+each binding one public command and one text field of its result; admission
+checks them against that command's contract (see [redirect routes](WEB.md#redirect-routes)). Resources and source overlays are captured before packaging, and
 platform inputs are checked for changes before publication and selection.
 
 Format 12 requires a complete contract. The loader rederives types/registrations,

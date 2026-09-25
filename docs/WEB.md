@@ -103,7 +103,7 @@ Domain constructor validation still runs in Roc; the spec describes the wire
 shape and identifies constraints that require application validation.
 
 The first path segments `api`, `docs`, `openapi.json`, and `mcp` are reserved. Admission
-rejects app pages that use those namespaces, including descendants, encoded
+rejects app pages and redirect route prefixes that use those namespaces, including descendants, encoded
 aliases and dynamic path segments that could overlap them. There is no app
 configuration to rename, disable or replace these endpoints. Platform dispatch
 also handles them before app routes. Datastar `/actions`, HTML pages, assets,
@@ -412,6 +412,150 @@ Formats 1 through 11 remain loadable for inspection, replay, and explicit operat
 recovery of accepted work. Upgrade requires draining accepted invocations and
 pending invocations, then explicit migration and activation. Company authority is
 still required for execution; loading a legacy artifact grants no permission.
+
+## Redirect Routes
+
+A redirect route is a GET path that runs one of the app's commands and answers
+`302 Found` with a URL that command returned. It is the shape of a go-link
+service: `go/<name>` counts a visit and sends the browser to the link's
+destination. A page renders a query's result; a redirect route answers with one
+field of a command's result. GETs never run commands otherwise.
+
+An app opts one command into one route explicitly, in its source, and registers
+it under `App.definition.redirects`:
+
+```roc
+# pages/Redirects.roc
+Redirects :: [].{
+    prefixed : Redirect(VisitLinkTypes.Input)
+    prefixed = Redirect.route(
+        { path: "/go/{path..}", location: "url", schemes: AnyScheme, not_found: [Errors.missing_link] },
+        Commands.visit,
+    )
+
+    bare : Redirect(VisitLinkTypes.Input)
+    bare = Redirect.route(
+        { path: "/{path..}", location: "url", schemes: AnyScheme, not_found: [Errors.missing_link] },
+        Commands.visit,
+    )
+}
+
+# App.roc
+redirects: { prefixed: Redirects.prefixed.register(), bare: Redirects.bare.register() },
+```
+
+A redirect is its own declaration rather than a kind of page because it binds a
+command, has no template and no live region, and answers only the paths nothing
+else claims; page routes keep their query-only, non-overlapping catalog. The
+declaration mirrors a schedule or webhook: a platform-owned trigger for an
+existing command, adding no handler of its own.
+
+Admission checks each declaration against the bound command's compiled contract:
+
+| Field | Rule |
+| --- | --- |
+| `path` | Literal segments, then exactly one rest parameter `{field..}`. The first literal may not be a reserved platform name. Two routes may not share a literal prefix. At most eight routes. |
+| rest parameter | Names the command's only input field, which must be text. It receives the remaining segments, percent-decoded and joined by `/`. |
+| command | A registered public command. Internal commands, queries and mismatched input/output handles are refused. |
+| `location` | A top-level text field of the command's typed result. It is the only source of `Location`. |
+| `schemes` | `Web` (http and https only) or `AnyScheme` (any absolute URI, for app deep links such as `slack://` or `zoommtg:`). |
+| `not_found` | Application failures the command declares that mean "nothing is at this address"; they answer 404. |
+
+The location field is named as text, like a page path placeholder names an input
+field, because the host must read it from the typed result and a Roc selector
+cannot cross the worker boundary. Admission, not a runtime lookup, rejects a
+misspelled or non-text field.
+
+Templates link to redirect routes with the same typed navigation helpers as
+pages: `<a href="{{ routes.bare(path=link.name) }}">Visit</a>` or
+`{{ routes.prefixed(path=link.name) }}`. Page and redirect names must be distinct.
+Admission checks the required text argument; rendering splits its logical value
+at `/`, validates every segment and percent-encodes each exactly once. A literal
+`%2F` becomes `%252F` and reaches the command as `%2F`, so commands must not
+percent-decode their input again. Helpers preserve the usual route precedence;
+use the prefixed helper for names such as `docs` that a platform endpoint owns.
+
+### Matching and precedence
+
+Platform paths are dispatched first, page routes next; a redirect route answers
+only what remains. A path any page route has the shape of stays the page's,
+including one the page refuses with 400. Between redirect routes the longest
+literal prefix wins, so with the routes above `/go/docs` visits `docs` and a bare
+`/go` visits a link named `go`.
+
+A redirect never matches a platform path. Beneath `api`, `assets`, `health`,
+`ingress` and `_live` nothing is a link. The single platform endpoints `/docs`,
+`/audit`, `/login`, `/logout`, `/actions`, `/mcp`, `/openapi.json`, `/pages` and
+`/api` are never links either, so a link with one of those names is reachable only
+through a prefixed route such as `/go/docs`. A longer path beginning with the same
+word is not the platform's: `/docs/intro` reaches a `docs/%s` link. Encoded
+spellings of platform names are treated as the names.
+
+Each remaining segment is strictly percent-decoded as UTF-8. Empty segments
+(including a trailing slash), `.`, `..`, control characters and an encoded slash
+(`%2F`, which would make a segment boundary ambiguous) answer 400 without running
+the command, as do paths over 4096 bytes or 128 segments. Noncanonical but
+unambiguous encodings such as `%7E` are decoded. The query string is ignored: it
+never reaches the command or the response.
+
+### Admission, authority and audit
+
+The request is admitted exactly as a page is: at the edge its IAP assertion must
+verify and the person must be admitted to the app; in development it needs the
+session. The command then runs through the ordinary invocation path, so the
+person must hold the command's own grant in the instance authority policy, its
+input is validated, and the mandatory audit records the admission and outcome.
+There is no separate redirect permission. Each followed link is a new
+invocation with a fresh `redirect-<random>` id, returned in `X-Day2-Invocation`:
+following a link twice counts two visits, and a GET has no idempotency key to
+replay.
+
+| Outcome | Response |
+| --- | --- |
+| Success with an allowed destination | `302 Found`, `Location` from the result, empty body, `Cache-Control: no-store` |
+| A declared `not_found` failure | 404 platform error page with the failure's declared description |
+| Any other application failure | 422 platform error page with its description and recovery |
+| Authority, conflict and host failures | The platform's usual status and error page, such as 403 |
+| Accepted but still running | 202 page; nothing is redirected |
+| Success with a refused destination | 500 page; the command's writes are committed |
+| No route, or an invalid path | 404 or 400 page; no command runs |
+
+### Destination safety
+
+`Location` comes only from the named result field; nothing from the request is
+reflected into it. The value must contain no whitespace or control characters
+(URL parsers silently drop some of them, so `java\nscript:` is refused rather than
+parsed), must parse as an absolute URL without a base (relative, `//host` and
+bare-host values are refused), must use a scheme the declaration allows, and is
+never `javascript`, `vbscript`, `data`, `blob`, `file` or `filesystem`, which carry
+executable/inline content or address local files. The WHATWG
+serialization of the parsed URL is sent, so the browser follows exactly what was
+checked. At most 8 KiB.
+
+GoLinks v1 accepted any absolute URI with any scheme, including app deep links;
+`AnyScheme` preserves that except for the refused schemes, which the application
+may still store but the host will not redirect to. A destination refused after
+the command committed still counts that visit.
+
+### Cross-site requests, prefetch and methods
+
+A redirect runs a command on a GET, so the host admits only a request a person
+made as a navigation. When a browser sends fetch metadata, `Sec-Fetch-Dest` must
+be `document` and `Sec-Fetch-Mode` `navigate`; an `<img>`, frame or `fetch()`
+from another site answers 403 without running the command. A cross-site top-level
+navigation, such as a link clicked in chat or a document, is admitted and counts
+a visit, as it did in GoLinks v1; that is the purpose of a go link, and the route
+can do nothing but run its declared command. Speculative requests (`Sec-Purpose`
+or `Purpose: prefetch`, `X-Purpose: preview`, `X-Moz: prefetch`) answer 503 so
+the browser fetches again only when the person follows the link. Clients that
+send no fetch metadata, such as `curl`, are treated as navigations. Only GET runs
+a redirect; HEAD, POST and other methods are refused. The development session
+cookie is `SameSite=Strict`, so cross-site navigations reach a redirect only at
+the edge, where each request carries its own assertion.
+
+The executable [redirect conformance fixture](../fixtures/redirect-conformance/README.md)
+declares the GoLinks shape and is exercised end to end at the edge by
+`crates/day2/tests/redirect_routes.rs`.
 
 ## Native UI Resources
 

@@ -77,7 +77,7 @@ impl Fixture {
                 // App.roc, because no type table exists yet to ask.
                 registry::app_platform_for(
                     None,
-                    day2::app_inference::declares_schedules(&fs::read_to_string(
+                    registry::Projection::declared(&fs::read_to_string(
                         stage.join("app/App.roc"),
                     )?)?,
                 ),
@@ -194,7 +194,7 @@ impl Fixture {
             self.stage.join("app/app-platform.roc"),
             registry::app_platform_for(
                 Some(&shape),
-                day2::app_inference::declares_schedules(&fs::read_to_string(
+                registry::Projection::declared(&fs::read_to_string(
                     self.stage.join("app/App.roc"),
                 )?)?,
             ),

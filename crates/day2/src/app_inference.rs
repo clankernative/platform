@@ -219,6 +219,12 @@ pub fn declares_ingress(source: &str) -> Result<bool> {
     declares_category(source, "ingress")
 }
 
+/// Whether App.definition declares a `redirects` field. Like `schedules`, its names
+/// must be projected into the app-shape witness before any type table exists.
+pub fn declares_redirects(source: &str) -> Result<bool> {
+    declares_category(source, "redirects")
+}
+
 pub fn identity_module(namespace: &str) -> Result<String> {
     crate::schema::identifier(namespace)?;
     Ok(format!(

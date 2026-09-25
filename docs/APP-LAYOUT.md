@@ -22,6 +22,7 @@ verification/ReportInvariants.roc    # checks spanning application state
 verification/ReportScenarios.roc     # shared scenario setup, when needed
 examples/Demo.roc                    # optional sample command inputs
 pages/Routes.roc                     # typed routes and template bindings
+pages/Redirects.roc                  # optional redirect routes bound to commands
 ui/pages/                           # HTML templates
 ui/app.css                          # presentation resources
 assets/                             # admitted images

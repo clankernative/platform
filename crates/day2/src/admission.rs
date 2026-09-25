@@ -181,7 +181,7 @@ const SEALED: &[(&str, &str, &str)] = &[
     (
         "Product.roc",
         "step",
-        "9bc06e82e9f68192b0f7af0e18aa5a57ddf5d14e27f8a81cf87f5b9fb657169d",
+        "70ea8aa49599a5ed455e651a3dc9dbf81770ad647d5e5a045bfdc6ac0d7b48ef",
     ),
     (
         "Tx.roc",

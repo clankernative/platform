@@ -32,6 +32,8 @@ struct Manifest {
     schedules: Vec<day2::artifact::Schedule>,
     #[serde(default)]
     ingress: Vec<day2::artifact::Endpoint>,
+    #[serde(default)]
+    redirects: Vec<day2::artifact::Redirect>,
 }
 
 const DEFAULT_CAMPAIGN_BUDGET_SECONDS: u64 = 600;

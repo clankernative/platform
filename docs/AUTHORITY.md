@@ -83,6 +83,13 @@ compiled operations also need explicit entries. See the conformance policies in
 and their use in `crates/day2/tests/owned_web.rs`,
 `crates/day2/tests/owned_runtime.rs`, and `crates/day2/tests/runtime.rs`.
 
+A [redirect route](WEB.md#redirect-routes) grants nothing of its own. Following
+one invokes its bound command as the admitted person, so that person needs the
+command's ordinary entry, and its model grants bound what the visit may write:
+the redirect conformance test grants `go.visit` only `"update_fields": ["visits"]`.
+A person admitted to the app but not granted the command receives 403, and the
+refused attempt is audited like any other.
+
 ## Request Identity And Delegation
 
 Identity is settled by the host before operation authorization. The authenticated

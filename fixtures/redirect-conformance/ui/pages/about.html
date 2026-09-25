@@ -1,0 +1,8 @@
+<div id="go-about" class="workspace">
+  <header><h1>About go links</h1><a href="{{ routes.links() }}">Directory</a></header>
+  <ul id="about-links">
+    {% for link in about.items %}
+      <li>{{ link.name }}</li>
+    {% endfor %}
+  </ul>
+</div>

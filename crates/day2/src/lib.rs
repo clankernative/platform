@@ -47,6 +47,7 @@ pub mod people_providers;
 mod preparation;
 pub mod properties;
 pub mod protocol;
+pub mod redirects;
 pub mod registry;
 pub mod resource_admin;
 mod resource_catalog_history;
