@@ -1,0 +1,86 @@
+#!/bin/bash
+# Runs as root on every boot (GCE startup-script). Installs Docker once, then
+# runs the pinned act_runner controller, registered to exactly one repository.
+# Rendered by OpenTofu: $${...} is a literal shell expansion.
+set -euo pipefail
+
+state_dir=/var/lib/gitea-instance-ci
+install -d -m 0700 "$state_dir"
+
+if [[ ! -f "$state_dir/provisioned-v1" ]]; then
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update
+  apt-get install -y --no-install-recommends ca-certificates curl gnupg jq
+  install -m 0755 -d /etc/apt/keyrings
+  curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
+  chmod a+r /etc/apt/keyrings/docker.asc
+  # shellcheck disable=SC1091
+  . /etc/os-release
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $${VERSION_CODENAME} stable" \
+    >/etc/apt/sources.list.d/docker.list
+  apt-get update
+  apt-get install -y docker-ce docker-ce-cli containerd.io
+  systemctl enable --now docker
+  touch "$state_dir/provisioned-v1"
+fi
+systemctl start docker
+
+# Job containers get no Docker socket ("-"), no privileges and no host
+# volumes, so a job cannot touch the host or a later job. One job at a time.
+cat >"$state_dir/config.yaml" <<'YAML'
+log:
+  level: info
+runner:
+  file: .runner
+  capacity: 1
+  timeout: 3h
+  insecure: false
+  fetch_timeout: 5s
+  fetch_interval: 2s
+cache:
+  enabled: false
+container:
+  network: ""
+  privileged: false
+  options: ""
+  workdir_parent: ""
+  valid_volumes: []
+  docker_host: "-"
+  force_pull: false
+YAML
+
+# First boot only: register with the repository-scoped token from Secret
+# Manager. The token is never logged; afterwards the runner's own credential
+# in .runner is what it uses, and the token is no longer needed.
+if [[ ! -s "$state_dir/.runner" ]]; then
+  access_token="$(curl -fsS -H 'Metadata-Flavor: Google' \
+    'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token' | jq -r .access_token)"
+  registration_token="$(curl -fsS -H "Authorization: Bearer $${access_token}" \
+    'https://secretmanager.googleapis.com/v1/${registration_secret}:access' | jq -r .payload.data | base64 -d)"
+  [[ -n "$registration_token" ]] || { echo "empty runner registration token" >&2; exit 1; }
+  umask 077
+  printf 'GITEA_RUNNER_REGISTRATION_TOKEN=%s\n' "$registration_token" >"$state_dir/registration.env"
+  unset registration_token access_token
+fi
+
+docker rm -f act_runner >/dev/null 2>&1 || true
+env_file_args=()
+[[ -f "$state_dir/registration.env" ]] && env_file_args=(--env-file "$state_dir/registration.env")
+docker run -d --name act_runner --restart=always \
+  -v "$state_dir:/data" \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e CONFIG_FILE=/data/config.yaml \
+  -e GITEA_INSTANCE_URL='${gitea_url}' \
+  -e GITEA_RUNNER_NAME='${runner_name}' \
+  -e GITEA_RUNNER_LABELS='${runner_label}:docker://${job_image}' \
+  "$${env_file_args[@]}" \
+  '${controller_image}'
+
+# Once registered, drop the one-time token from disk.
+for _ in $(seq 1 60); do
+  if [[ -s "$state_dir/.runner" ]]; then
+    rm -f "$state_dir/registration.env"
+    break
+  fi
+  sleep 5
+done
