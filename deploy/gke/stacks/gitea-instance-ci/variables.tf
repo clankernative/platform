@@ -213,9 +213,9 @@ variable "runner_controller_image" {
 }
 
 variable "job_image" {
-  description = "Image every job runs in, pinned by digest (the fleet runner profile's job image)."
+  description = "Image every job runs in, pinned by digest. The slim runner image (Node for JavaScript actions, about 200 MB): the fleet's full image is tens of gigabytes of language toolchains OpenTofu jobs never use. Jobs install their few tools themselves."
   type        = string
-  default     = "docker.io/gitea/runner-images@sha256:2aff9acf250ff6886c70200ae3bbc2a87be956bc15654ced3a7cf25fdd925e27"
+  default     = "docker.io/gitea/runner-images@sha256:7c285821aab503cffc21024bbb216822a86326c1b22ea53e341492e2aa6df245"
 
   validation {
     condition     = can(regex("@sha256:[0-9a-f]{64}$", var.job_image))

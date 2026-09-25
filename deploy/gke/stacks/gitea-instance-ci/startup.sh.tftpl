@@ -36,6 +36,9 @@ log:
   level: info
 runner:
   file: .runner
+  # Declared on every start, so a changed job image needs no re-registration.
+  labels:
+    - "${runner_label}:docker://${job_image}"
   capacity: 1
   timeout: 3h
   insecure: false
