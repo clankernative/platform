@@ -76,7 +76,8 @@ run "publishes_the_contract_day2_app_reads" {
       kubernetes_manifest.backend_config.manifest.spec.healthCheck.requestPath == "/health/ready" &&
       kubernetes_manifest.frontend_config.manifest.spec.redirectToHttps.enabled &&
       kubernetes_manifest.managed_certificate.manifest.spec.domains == ["example.apps.example.com"] &&
-      kubernetes_ingress_v1.app.metadata[0].annotations["networking.gke.io/managed-certificates"] == "managed-cert" &&
+      kubernetes_ingress_v1.app.metadata[0].annotations["networking.gke.io/managed-certificates"] == "managed-cert-example-apps-example-com" &&
+      kubernetes_manifest.managed_certificate.manifest.metadata.name == "managed-cert-example-apps-example-com" &&
       kubernetes_ingress_v1.app.metadata[0].annotations["kubernetes.io/ingress.global-static-ip-name"] == "example-ip" &&
       kubernetes_ingress_v1.app.spec[0].rule[0].host == "example.apps.example.com"
     )

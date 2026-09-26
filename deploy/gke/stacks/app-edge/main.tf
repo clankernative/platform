@@ -23,12 +23,17 @@ locals {
   ingress_name            = "app"
   backend_config_name     = "backend"
   frontend_config_name    = "frontend"
-  managed_cert_name       = "managed-cert"
-  contract_name           = "platform-contract"
-  global_ip_name          = "${var.app_id}-ip"
-  artifact_repo_id        = var.app_id
-  state_bucket_name       = "${var.project_id}-${var.app_id}-state"
-  backup_plan_name        = "${var.app_id}-backup"
+  # Named after its domain: GKE cannot change the domains of a ManagedCertificate
+  # attached to a load balancer (the controller must delete the in-use
+  # SslCertificate first and is refused). A new domain is a new certificate:
+  # created first (create_before_destroy), the Ingress repointed, then the old
+  # one removed.
+  managed_cert_name = "managed-cert-${replace(var.domain, ".", "-")}"
+  contract_name     = "platform-contract"
+  global_ip_name    = "${var.app_id}-ip"
+  artifact_repo_id  = var.app_id
+  state_bucket_name = "${var.project_id}-${var.app_id}-state"
+  backup_plan_name  = "${var.app_id}-backup"
   # Off-cluster day2 backups (day2-app's CronJob uploads them).
   backup_bucket_name              = "${var.project_id}-${var.app_id}-backups"
   backup_kubernetes_account       = "backup"
