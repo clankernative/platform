@@ -16,7 +16,8 @@ active authorization document lives in the app SQLite database and changes only
 through explicit operator activation. Editing the file does not change live grants.
 Existing `readers`
 and `writers` remain an outer membership gate: writers can be considered for
-commands and queries; readers only for queries. Passing that gate is insufficient.
+commands and queries; readers only for queries. Either may admit everyone at the
+installation's verified domain ([below](#everyone-at-the-verified-domain)). Passing that gate is insufficient.
 The named operation must also explicitly grant the actor in its authority policy.
 The platform audit viewer, audit APIs and audit CLI commands are available only
 to the enabled app policy's `admins` (owners). Membership and operation grants
@@ -99,6 +100,57 @@ command's ordinary entry, and its model grants bound what the visit may write:
 the redirect conformance test grants `go.visit` only `"update_fields": ["visits"]`.
 A person admitted to the app but not granted the command receives 403, and the
 refused attempt is audited like any other.
+
+### Everyone at the verified domain
+
+An app's `readers` and `writers`, and an operation's `actors`, may contain an
+entry of the exact form `domain:<hosted_domain>`, for example
+`domain:example.com`. It admits every person at that domain without naming
+them, so a new hire can use an app the day their account exists:
+
+```json
+{
+  "identity": {"scheme": "google_iap", "hosted_domain": "example.com"},
+  "apps": {"go": {"readers": ["domain:example.com"], "writers": ["domain:example.com"],
+    "authority": {"version": 1, "admins": ["owner@example.com"], "operations": {
+      "go.visit": {"actors": ["domain:example.com"], "mode": {"kind": "current_state"}, "models": {}}}}}}
+}
+```
+
+A `domain:D` entry admits an actor only when all of these hold:
+
+- **The installation's edge verifies `D`.** The instance declares
+  `identity: {scheme: google_iap, hosted_domain: D}`, so every edge request has
+  had its `hd` claim and its address checked against `D` (see
+  [EDGE-IDENTITY.md](EDGE-IDENTITY.md)). A domain entry for any other domain, or
+  for any domain in an instance without an identity provider, is refused when
+  the instance loads and when authority is resolved or activated. Local
+  development (`day2 serve-local`, the development sign-in) declares no
+  identity provider and so cannot use one.
+- **The actor is a plain address at exactly `D`:** one `@`, a non-empty local
+  part, then `D` byte for byte, in lowercase ASCII without whitespace.
+  `x@evil-D`, `x@D.evil.com`, `x@sub.D`, `X@D` and `x@y@D` are not members.
+- **The actor is a person.** `app:` and `svc:` principals and Google service
+  accounts (`*.gserviceaccount.com`) are never members of a domain.
+
+Entries are otherwise unchanged: named people keep working beside a domain
+entry, and a domain entry in `readers` still admits queries only. Membership and
+the operation grant remain two independent gates, so an app that lists the
+domain as a reader but names a few people as an operation's actors admits only
+those people to that operation.
+
+A domain is never an identity. `domain:` is refused in `admins`, in delegation
+rules (`authenticated` and `may_act_as` actors) and as an `X-Day2-Act-As` target,
+and an actor spelled as one is never admitted, even by that same entry. Row ownership, the audit and every invocation record hold
+the real address the edge verified, and `owner_or_admin` rows are compared with
+that address as before. Resource grants also name people: a person admitted
+through a domain entry may be named in one, but the entry itself may not.
+
+The activated document records the hosted domain it was resolved under
+(`hosted_domain`), and every authorization checks it against the running
+installation. If the identity provider is removed or its domain changes, the
+app's requests are refused with `installation_changed` until authority is
+activated again; domain entries never outlive the verification they rely on.
 
 ## Request Identity And Delegation
 

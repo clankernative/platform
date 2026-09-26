@@ -328,6 +328,9 @@ pub struct Runtime {
     app: String,
     db: PathBuf,
     scope: String,
+    /// The installation's verified edge domain, as declared when this runtime
+    /// loaded. Activated `domain:` entries admit only while it still matches.
+    hosted_domain: Option<String>,
     artifact: Arc<LoadedArtifact>,
     host: Arc<dyn crate::host::Host>,
 }
@@ -361,6 +364,11 @@ impl Runtime {
         self.integrations = Arc::new(host);
         self
     }
+    /// The hosted domain the installation declared when this runtime loaded.
+    pub(crate) fn hosted_domain(&self) -> Option<&str> {
+        self.hosted_domain.as_deref()
+    }
+
     pub fn instance_path(&self) -> &Path {
         &self.instance_path
     }
@@ -481,6 +489,7 @@ impl Runtime {
         let runtime = Self {
             integrations: Arc::new(crate::integration_host::Host::local(&instance_path)?),
             scope: instance.scope(app)?,
+            hosted_domain: instance.hosted_domain().map(str::to_owned),
             instance_path,
             app: app.to_string(),
             db,

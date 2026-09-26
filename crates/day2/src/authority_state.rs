@@ -5,7 +5,7 @@
 
 use crate::{
     artifact::{AppBinding, Instance, LoadedArtifact, Operation},
-    authority::Policy,
+    authority::{Policy, admits},
     error::Failure,
     store::{Runtime, open},
 };
@@ -34,6 +34,14 @@ pub struct AuthorityDocument {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub security: Option<crate::security_admission::Requirements>,
     pub enabled: bool,
+    /// The hosted domain the installation's `google_iap` edge verified every
+    /// request against when this document was resolved: the only domain a
+    /// `domain:` entry below may name. Absent without an identity provider, and
+    /// then no entry may name any. Authorization re-checks it against the
+    /// running installation, so dropping or changing the identity provider
+    /// cannot leave domain entries admitting requests nothing verified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hosted_domain: Option<String>,
     pub readers: BTreeSet<String>,
     pub writers: BTreeSet<String>,
     /// Absence is an explicit denial, never an implicit unrestricted policy.
@@ -59,6 +67,8 @@ struct StoredDocument {
     #[serde(default)]
     security: Option<crate::security_admission::Requirements>,
     enabled: bool,
+    #[serde(default)]
+    hosted_domain: Option<String>,
     readers: BTreeSet<String>,
     writers: BTreeSet<String>,
     #[serde(default, rename = "auditors")]
@@ -73,6 +83,7 @@ impl From<StoredDocument> for AuthorityDocument {
         Self {
             security: stored.security,
             enabled: stored.enabled,
+            hosted_domain: stored.hosted_domain,
             readers: stored.readers,
             writers: stored.writers,
             policy: stored.policy,
@@ -82,10 +93,11 @@ impl From<StoredDocument> for AuthorityDocument {
 }
 
 impl AuthorityDocument {
-    pub fn from_binding(binding: &AppBinding) -> Self {
+    pub fn from_binding(binding: &AppBinding, hosted_domain: Option<&str>) -> Self {
         Self {
             security: binding.security.clone(),
             enabled: true,
+            hosted_domain: hosted_domain.map(str::to_owned),
             readers: binding.readers.clone(),
             writers: binding.writers.clone(),
             policy: binding.authority.clone(),
@@ -109,7 +121,7 @@ impl AuthorityDocument {
         now_ms: i64,
     ) -> Result<Self> {
         let binding = instance.apps.get(app).context("app_not_installed")?;
-        let mut document = Self::from_binding(binding);
+        let mut document = Self::from_binding(binding, instance.hosted_domain());
         document.resources = match &instance.resources {
             Some(catalog) => catalog.resolve(app, &binding.resource_policies, now_ms)?,
             None => {
@@ -143,9 +155,8 @@ impl AuthorityDocument {
             };
             bindings.retain(|_, grant| {
                 grant.actors.retain(|actor| {
-                    approved.actors.contains(actor)
-                        && (self.writers.contains(actor)
-                            || (operation.kind == "query" && self.readers.contains(actor)))
+                    admits(&approved.actors, actor)
+                        && member(&self.readers, &self.writers, operation, actor)
                 });
                 grant.actions.retain(|action| {
                     if action.is_write() {
@@ -176,11 +187,16 @@ impl AuthorityDocument {
         if let Some(requirements) = &self.security {
             requirements.validate(artifact)?;
         }
-        for actor in self.readers.iter().chain(&self.writers) {
-            crate::authority::valid_actor(actor)?;
+        let hosted_domain = self.hosted_domain.as_deref();
+        if let Some(domain) = hosted_domain {
+            ensure!(crate::artifact::dns_name(domain), "invalid_hosted_domain");
+        }
+        for entry in self.readers.iter().chain(&self.writers) {
+            crate::authority::valid_entry(entry, hosted_domain)?;
         }
         if let Some(policy) = &self.policy {
             policy.validate(&artifact.contract().operations, &artifact.contract().schema)?;
+            policy.validate_domains(hosted_domain)?;
         }
         self.resources.validate()?;
         for (name, bindings) in &self.resources.operations {
@@ -195,12 +211,17 @@ impl AuthorityDocument {
                 .context("resource_operation_not_approved")?;
             for grant in bindings.values() {
                 ensure!(
-                    grant.actors.is_subset(&approved.actors),
+                    grant
+                        .actors
+                        .iter()
+                        .all(|actor| admits(&approved.actors, actor)),
                     "resource_actors_exceed_operation_authority"
                 );
                 ensure!(
-                    grant.actors.iter().all(|actor| self.writers.contains(actor)
-                        || (operation.kind == "query" && self.readers.contains(actor))),
+                    grant
+                        .actors
+                        .iter()
+                        .all(|actor| self.admits(operation, actor)),
                     "resource_actors_exceed_membership"
                 );
                 for action in &grant.actions {
@@ -219,13 +240,14 @@ impl AuthorityDocument {
         Ok(())
     }
 
+    /// The outer membership gate, before any operation grant is consulted.
+    fn admits(&self, operation: &Operation, actor: &str) -> bool {
+        member(&self.readers, &self.writers, operation, actor)
+    }
+
     pub fn authorize(&self, operation: &Operation, actor: &str) -> Result<()> {
         ensure!(self.enabled, Failure::Forbidden);
-        ensure!(
-            self.writers.contains(actor)
-                || (operation.kind == "query" && self.readers.contains(actor)),
-            Failure::Forbidden
-        );
+        ensure!(self.admits(operation, actor), Failure::Forbidden);
         self.policy
             .as_ref()
             .context("missing_authority_policy")?
@@ -251,6 +273,17 @@ impl AuthorityDocument {
         );
         Ok(())
     }
+}
+
+/// Writers may be considered for any operation and readers for queries only,
+/// by name or by a `domain:` entry; see [`admits`].
+fn member(
+    readers: &BTreeSet<String>,
+    writers: &BTreeSet<String>,
+    operation: &Operation,
+    actor: &str,
+) -> bool {
+    admits(writers, actor) || (operation.kind == "query" && admits(readers, actor))
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -566,6 +599,15 @@ pub(crate) fn authorize_in(
             && Path::new(&active.artifact_path) == runtime.artifact().directory(),
         Failure::ArtifactBindingChanged
     );
+    // Domain entries were validated against the hosted domain the document
+    // was resolved under. They admit only while this installation still
+    // verifies that domain at its edge; an identity provider dropped or changed
+    // since activation refuses the document until it is activated again.
+    ensure!(
+        active.document.hosted_domain.is_none()
+            || active.document.hosted_domain.as_deref() == runtime.hosted_domain(),
+        Failure::InstallationChanged
+    );
     active.document.validate(runtime.artifact())?;
     if let Some(requirements) = &active.document.security {
         requirements.require_runtime()?;
@@ -847,7 +889,7 @@ pub(crate) fn desired_fingerprint(
         instance.scope(app)?,
         &operator.name,
         expected,
-        AuthorityDocument::from_binding(binding),
+        AuthorityDocument::from_binding(binding, instance.hosted_domain()),
         &binding.resource_policies,
         selected,
         target.map(|target| (target.id(), target.directory())),
@@ -935,6 +977,12 @@ pub(crate) fn apply_binding_in(
     );
     target.require_current_api()?;
     change.document.validate(target)?;
+    if let Some(domain) = &change.document.hosted_domain {
+        ensure!(
+            runtime.hosted_domain() == Some(domain.as_str()),
+            "authority hosted_domain {domain} is not the installation's google_iap hosted_domain"
+        );
+    }
     if let Some(receipt) = activation_receipt_in(connection, target, operator, change)? {
         return Ok(receipt);
     }

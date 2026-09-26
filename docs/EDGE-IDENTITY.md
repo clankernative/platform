@@ -77,8 +77,8 @@ In order, before any route is chosen:
 6. **The hosted domain**, as described above.
 7. **The subject binding** (see below).
 8. **The app's own policy.** The person must be allowed at least one thing by
-   this app. Otherwise the request is refused as `forbidden` and no session is
-   created.
+   this app, by name or through a `domain:<hosted_domain>` entry (see below).
+   Otherwise the request is refused as `forbidden` and no session is created.
 
 When every check passes, the request is from that person. It reaches Roc as
 `context.actor()`, acting directly, with authentication `Request`. The audit
@@ -101,6 +101,20 @@ balancer's health checks do not carry one. Inbound provider deliveries under
 `/_ingress/` need no assertion either. They come from a provider, not a person,
 and their own signature establishes them (see [INGRESS-PLAN.md](INGRESS-PLAN.md)).
 `/login` does not exist at the edge.
+
+## Admitting the whole domain
+
+Because every edge request has had its `hd` claim and its address checked
+against `hosted_domain`, an app may admit everyone there without naming them:
+`"readers": ["domain:example.com"]`, and the same entry in an operation's
+`actors`. The entry must name exactly this installation's `hosted_domain`; an
+instance without an identity provider cannot use one at all. It matches only a
+lowercase address with a single `@` followed by exactly that domain, never a
+subdomain, a lookalike, an `app:`/`svc:` principal or a service account (which
+step 5 has already refused). The person is still themselves: the session, the
+invocation, row ownership and the audit all carry their verified address, never
+the entry. `admins` and delegation rules still name people. See
+[AUTHORITY.md](AUTHORITY.md#everyone-at-the-verified-domain).
 
 ## Sessions are not sign-in
 

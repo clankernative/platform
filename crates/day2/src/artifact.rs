@@ -1161,7 +1161,7 @@ fn digits(value: &str) -> bool {
 
 /// A lowercase DNS name of at least two labels. Lowercase only, because the
 /// origin is compared byte for byte and a browser always sends it lowercased.
-fn dns_name(value: &str) -> bool {
+pub(crate) fn dns_name(value: &str) -> bool {
     value.len() <= 253
         && value.split('.').count() >= 2
         && value.split('.').all(|label| {
@@ -1236,6 +1236,7 @@ impl Instance {
             }
         }
         instance.validate_edges()?;
+        instance.validate_domain_entries()?;
         let mut queues = BTreeSet::new();
         for binding in instance.apps.values() {
             if let Some(runtime) = &binding.runtime {
@@ -1285,6 +1286,40 @@ impl Instance {
         }
         Ok(())
     }
+    /// The domain whose people the installation's edge verifies on every
+    /// request, and so the only domain a `domain:` entry may name. Absent
+    /// without an identity provider, when no entry may name any domain.
+    pub fn hosted_domain(&self) -> Option<&str> {
+        self.identity
+            .as_ref()
+            .map(|identity| match identity.scheme {
+                IdentityScheme::GoogleIap => identity.hosted_domain.as_str(),
+            })
+    }
+
+    /// Refuse a `domain:` entry the installation's identity provider does not
+    /// verify, at load, where the operator sees which app named it. The
+    /// activated document is held to the same rule on every authorization.
+    fn validate_domain_entries(&self) -> Result<()> {
+        for (app, binding) in &self.apps {
+            let entries = binding
+                .readers
+                .iter()
+                .chain(&binding.writers)
+                .filter(|entry| entry.starts_with(crate::authority::DOMAIN_PREFIX));
+            for entry in entries {
+                crate::authority::valid_entry(entry, self.hosted_domain())
+                    .with_context(|| format!("apps.{app} membership"))?;
+            }
+            if let Some(policy) = &binding.authority {
+                policy
+                    .validate_domains(self.hosted_domain())
+                    .with_context(|| format!("apps.{app}.authority"))?;
+            }
+        }
+        Ok(())
+    }
+
     /// The edge an application is served at, with the installation's identity.
     pub fn edge(&self, app: &str) -> Result<(&IdentityProvider, &Edge)> {
         let binding = self.apps.get(app).context("app_not_installed")?;
@@ -1298,8 +1333,8 @@ impl Instance {
     }
     pub fn authorize(&self, app: &str, operation: &Operation, actor: &str) -> Result<()> {
         let binding = self.apps.get(app).context("app_not_installed")?;
-        let permitted = binding.writers.contains(actor)
-            || (operation.kind == "query" && binding.readers.contains(actor));
+        let permitted = crate::authority::admits(&binding.writers, actor)
+            || (operation.kind == "query" && crate::authority::admits(&binding.readers, actor));
         ensure!(permitted, crate::error::Failure::Forbidden);
         binding
             .authority

@@ -126,6 +126,10 @@ struct Server {
 
 impl Server {
     fn start() -> Result<Self> {
+        Self::start_with(instance)
+    }
+
+    fn start_with(instance: fn(&str) -> Value) -> Result<Self> {
         let artifact = std::env::var_os("DAY2_TEST_DELEGATION_ARTIFACT")
             .map(PathBuf::from)
             .context("run xtask verify or set DAY2_TEST_DELEGATION_ARTIFACT")?;
@@ -608,5 +612,161 @@ fn which_sign_in_a_container_serves_is_the_instance_s_decision() -> Result<()> {
         serve(&with_identity, development()).contains("development_auth_refused_with_identity")
     );
     assert!(serve(&without, day2::deployment::Access::Edge).contains("identity_not_declared"));
+    Ok(())
+}
+
+/// The same app, admitting everyone at the verified domain instead of naming
+/// people: `domain:` in the membership lists and in every operation's actors.
+fn domain_instance(artifact: &str) -> Value {
+    let mut document = instance(artifact);
+    let everyone = json!(["domain:exampleco.test"]);
+    let app = &mut document["apps"]["go"];
+    app["readers"] = everyone.clone();
+    app["writers"] = everyone.clone();
+    for operation in app["authority"]["operations"]
+        .as_object_mut()
+        .unwrap()
+        .values_mut()
+    {
+        operation["actors"] = everyone.clone();
+    }
+    document
+}
+
+#[test]
+fn a_domain_entry_admits_verified_colleagues_as_themselves() -> Result<()> {
+    const NEW_HIRE: &str = "newhire@exampleco.test";
+    let server = Server::start_with(domain_instance)?;
+
+    // Named nowhere, admitted by the domain, and a session for that person.
+    let response = server
+        .as_person(server.get("/api/session"), NEW_HIRE)
+        .send()?;
+    let (cookie, _) = issued(&response).context("a session is issued")?;
+    let session = value(response, StatusCode::OK)?;
+    assert_eq!(session["actor"], NEW_HIRE);
+    let csrf = session["csrf_token"].as_str().context("csrf")?.to_owned();
+    let who = value(
+        server
+            .as_person(server.get("/api/delegation.who"), NEW_HIRE)
+            .header(COOKIE, &cookie)
+            .send()?,
+        StatusCode::OK,
+    )?;
+    assert_eq!(who["actor"], NEW_HIRE);
+    assert_eq!(who["authenticated"], NEW_HIRE);
+
+    // What they do is recorded against their own address, never the entry.
+    let response = server
+        .as_person(
+            server
+                .client
+                .post(format!("{}/api/delegation.record", server.origin))
+                .header(HOST, AUTHORITY),
+            NEW_HIRE,
+        )
+        .header(COOKIE, &cookie)
+        .header("Origin", ORIGIN)
+        .header("X-CSRF-Token", &csrf)
+        .header("Idempotency-Key", "domain-one")
+        .header("Content-Type", "application/json")
+        .body(r#"{"note":"hello"}"#)
+        .send()?;
+    let id = response.headers()["x-day2-invocation"].to_str()?.to_owned();
+    value(response, StatusCode::OK)?;
+    let db = rusqlite::Connection::open(server.runtime.db())?;
+    let (actor, initiator): (String, String) = db.query_row(
+        "SELECT actor,initiator FROM day2_audit_events WHERE kind='invocation' AND identity=?1",
+        [&id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    assert_eq!((actor.as_str(), initiator.as_str()), (NEW_HIRE, NEW_HIRE));
+    let recorded: i64 = db.query_row(
+        "SELECT count(*) FROM day2_audit_events WHERE actor LIKE 'domain:%' OR initiator LIKE 'domain:%'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(recorded, 0, "no audit event names the domain entry");
+
+    let before = server.sessions()?;
+    let with = |claims: Value| {
+        server
+            .get("/api/session")
+            .header("x-goog-iap-jwt-assertion", server.signer.assertion(claims))
+            .send()
+    };
+    // A lookalike domain, correctly signed for its own hosted domain, is not
+    // this installation's: the verifier refuses it before membership is asked.
+    for lookalike in ["eve@evil-exampleco.test", "eve@sub.exampleco.test"] {
+        let mut claims = claims(lookalike, &format!("accounts.google.com:{lookalike}"));
+        claims["hd"] = json!(lookalike.split_once('@').unwrap().1);
+        refused(
+            with(claims)?,
+            StatusCode::UNAUTHORIZED,
+            "invalid_identity_assertion",
+        )?;
+    }
+    // An address that does end in the domain, and carries the right `hd`, but
+    // whose part after its first `@` is not the domain: the entry refuses it.
+    refused(
+        with(claims(
+            "eve@evil.test@exampleco.test",
+            "accounts.google.com:eve",
+        ))?,
+        StatusCode::FORBIDDEN,
+        "forbidden",
+    )?;
+    // A service account has no person behind it, whatever the entry says.
+    refused(
+        with(claims(
+            "control-plane@tools.iam.gserviceaccount.com",
+            "accounts.google.com:svc",
+        ))?,
+        StatusCode::FORBIDDEN,
+        "machine_caller_requires_delegation",
+    )?;
+    assert_eq!(server.sessions()?, before, "no refusal issued a session");
+    Ok(())
+}
+
+#[test]
+fn a_domain_entry_needs_the_installation_to_verify_that_domain() -> Result<()> {
+    let base = domain_instance("artifacts/unused");
+    let load = |change: &Change| {
+        let mut document = base.clone();
+        change(&mut document);
+        Instance::from_bytes(&serde_json::to_vec(&document).unwrap())
+            .map(|_| ())
+            .map_err(|error| format!("{error:#}"))
+    };
+    assert_eq!(load(&|_| {}), Ok(()));
+    let refusals: [(&str, &Change); 5] = [
+        ("no identity provider", &|d| {
+            d.as_object_mut().unwrap().remove("identity");
+            d["apps"]["go"].as_object_mut().unwrap().remove("edge");
+        }),
+        ("another hosted domain", &|d| {
+            d["identity"]["hosted_domain"] = json!("other.test");
+        }),
+        ("a subdomain of the hosted domain", &|d| {
+            d["apps"]["go"]["readers"] = json!(["domain:sub.exampleco.test"]);
+        }),
+        ("an operation naming another domain", &|d| {
+            d["apps"]["go"]["authority"]["operations"]["delegation.who"]["actors"] =
+                json!(["domain:other.test"]);
+        }),
+        ("an uppercase domain", &|d| {
+            d["apps"]["go"]["writers"] = json!(["domain:ExampleCo.test"]);
+        }),
+    ];
+    for (name, change) in refusals {
+        assert!(load(change).is_err(), "{name}");
+    }
+    let error = load(&|d| {
+        d.as_object_mut().unwrap().remove("identity");
+        d["apps"]["go"].as_object_mut().unwrap().remove("edge");
+    })
+    .unwrap_err();
+    assert!(error.contains("google_iap"), "{error}");
     Ok(())
 }
