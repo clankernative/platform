@@ -9,7 +9,7 @@ Who :: [].{
 	definition =
 		Api.query(
 			{ handler: Handler.local(handle), contract, verification: { input: verify_input, check: verify_result } },
-		)
+		).cross_app({ version: 1 })
 
 	handle : Context, WhoTypes.Input -> Query(IdentityView.Value)
 	handle = |context, _input| Query.from_try(Ok(IdentityView.from_context(context)))

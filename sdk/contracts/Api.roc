@@ -57,6 +57,7 @@ Api :: [].{
 		request_example : Str,
 		response_example : Str,
 		deprecated : Bool,
+		export_version : U64,
 		execution : ExecutionMetadata,
 		errors : List(Str),
 		required_all_rows : List(Str),
@@ -194,7 +195,17 @@ Api :: [].{
 		execution : Execution(input),
 		verification : Verification(input, output),
 		required_all_rows : List(Str),
+		export_version : U64,
 	}.{
+		cross_app :
+			CommandDef(input, output, input_fields, output_fields),
+			{ version : U64 } ->
+				CommandDef(input, output, input_fields, output_fields)
+		cross_app = |definition, options| { ..definition, export_version: options.version }
+
+		export_version : CommandDef(input, output, input_fields, output_fields) -> U64
+		export_version = |definition| definition.export_version
+
 		command_program : CommandDef(input, output, input_fields, output_fields) -> (Context, input -> Tx(output))
 		command_program = |definition| definition.handler
 
@@ -229,7 +240,17 @@ Api :: [].{
 		contract : Contract(input, output, input_fields, output_fields),
 		verification : Verification(input, output),
 		required_all_rows : List(Str),
+		export_version : U64,
 	}.{
+		cross_app :
+			QueryDef(input, output, input_fields, output_fields),
+			{ version : U64 } ->
+				QueryDef(input, output, input_fields, output_fields)
+		cross_app = |definition, options| { ..definition, export_version: options.version }
+
+		export_version : QueryDef(input, output, input_fields, output_fields) -> U64
+		export_version = |definition| definition.export_version
+
 		query_program : QueryDef(input, output, input_fields, output_fields) -> (Context, input -> Tx(output))
 		query_program = |definition| definition.handler
 
@@ -271,6 +292,7 @@ Api :: [].{
 			execution: definition.execution,
 			verification: definition.verification,
 			required_all_rows: [],
+			export_version: 0,
 		}
 	}
 
@@ -290,6 +312,7 @@ Api :: [].{
 			contract: definition.contract,
 			verification: definition.verification,
 			required_all_rows: [],
+			export_version: 0,
 		}
 	}
 
