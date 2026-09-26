@@ -205,6 +205,8 @@ pub struct Artifact {
     pub format: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app_contract: Option<crate::app_contract::Definition>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub export_manifest: Option<crate::operation_contract::Manifest>,
     #[serde(default)]
     pub namespace: String,
     #[serde(default)]
@@ -585,10 +587,23 @@ impl LoadedArtifact {
                 .as_ref()
                 .context("complete application contract required")?
                 .validate(&contract)?;
+            let expected = crate::operation_contract::Manifest::from_checked_artifact(&contract)?;
+            if let Some(actual) = &contract.export_manifest {
+                ensure!(
+                    actual == &expected,
+                    "export manifest differs from checked definitions"
+                );
+            } else {
+                ensure!(expected.exports.is_empty(), "export manifest missing");
+            }
         } else {
             ensure!(
                 contract.app_contract.is_none(),
                 "legacy artifact has current application contract"
+            );
+            ensure!(
+                contract.export_manifest.is_none(),
+                "legacy artifact has export manifest"
             );
         }
         ensure!(

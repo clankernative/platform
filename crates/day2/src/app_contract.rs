@@ -37,6 +37,8 @@ pub struct Operation {
     pub request_example: String,
     pub response_example: String,
     pub deprecated: bool,
+    #[serde(default)]
+    pub export_version: u32,
     pub execution: Execution,
     pub errors: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -399,6 +401,14 @@ impl Definition {
                 &serde_json::from_str(&definition.response_example)?,
             )?;
             definition.execution.validate(artifact, operation, input)?;
+            ensure!(
+                definition.export_version <= 1,
+                "unsupported cross-app export version: {name}"
+            );
+            ensure!(
+                definition.export_version == 0 || !definition.execution.internal,
+                "internal command cannot be a cross-app export: {name}"
+            );
             definition.validate_required_all_rows(&artifact.schema)?;
         }
         for (path, media) in [
@@ -760,7 +770,7 @@ pub fn modules(
                 &crate::operation_catalog::output_schema(&output.shape),
                 "contract.outputs",
             );
-            source.push_str(&format!("    contract_{name} : AppContract.Product -> Try(Api.Metadata, Str)\n    contract_{name} = |product| {{\n        contract = product.operations.{name}.contract()\n        example = (contract.example)({{}})?\n        request_example = Inputs.{}.encode(example.input)\n        _ = Inputs.{}.decode(request_example)?\n        {execution}\n        Ok({{ intent: {{ target: Api.{}({handle}.{name}), title: contract.title, usage: contract.usage, inputs: {inputs}, outputs: {out}, input_sources: contract.input_sources, follow_ups: contract.follow_ups }}, request_example, response_example: Outputs.{}.encode(example.output), deprecated: contract.deprecated, execution: execution_metadata, required_all_rows: product.operations.{name}.required_all_rows() }})\n    }}\n", operation.input, operation.input, if kind == "command" { "write" } else { "read" }, operation.output));
+            source.push_str(&format!("    contract_{name} : AppContract.Product -> Try(Api.Metadata, Str)\n    contract_{name} = |product| {{\n        contract = product.operations.{name}.contract()\n        example = (contract.example)({{}})?\n        request_example = Inputs.{}.encode(example.input)\n        _ = Inputs.{}.decode(request_example)?\n        {execution}\n        Ok({{ intent: {{ target: Api.{}({handle}.{name}), title: contract.title, usage: contract.usage, inputs: {inputs}, outputs: {out}, input_sources: contract.input_sources, follow_ups: contract.follow_ups }}, request_example, response_example: Outputs.{}.encode(example.output), deprecated: contract.deprecated, execution: execution_metadata, required_all_rows: product.operations.{name}.required_all_rows(), export_version: product.operations.{name}.export_version() }})\n    }}\n", operation.input, operation.input, if kind == "command" { "write" } else { "read" }, operation.output));
         }
         bindings.insert(kind, bound.join(", "));
     }

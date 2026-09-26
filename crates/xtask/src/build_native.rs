@@ -309,7 +309,7 @@ fn publish(root: &Path, prepared: &mut Prepared, bound: &Bound) -> Result<PathBu
         "platform inputs changed during build; rebuild from one stable snapshot"
     );
     hashes.extend(platform_hashes);
-    let artifact = serde_json::json!({
+    let mut artifact = serde_json::json!({
         "format": day2::artifact::CURRENT_FORMAT, "identities": identities, "namespace": manifest.namespace, "declarations": declarations,
         "checked_types_digest": digest(checked_types),
         "roc_version": pin["roc_version"], "worker_digest": worker_digest,
@@ -326,6 +326,10 @@ fn publish(root: &Path, prepared: &mut Prepared, bound: &Bound) -> Result<PathBu
         "app_contract": app_contract,
         "sources": &*hashes, "admission": "local-spike-only",
     });
+    let checked: day2::artifact::Artifact = serde_json::from_value(artifact.clone())?;
+    artifact["export_manifest"] = serde_json::to_value(
+        day2::operation_contract::Manifest::from_checked_artifact(&checked)?,
+    )?;
     publish_contract(
         root,
         stage,

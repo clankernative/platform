@@ -40,6 +40,7 @@ pub mod migration;
 pub mod numeric;
 pub mod openapi;
 pub mod operation_catalog;
+pub mod operation_contract;
 pub mod operation_metadata;
 pub mod output_schema;
 pub mod packaging;
