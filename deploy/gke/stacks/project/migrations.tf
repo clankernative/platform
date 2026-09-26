@@ -80,6 +80,26 @@ removed {
   }
 }
 
+# The shared app-secrets bootstrap secret and its marker version, which only
+# the first-generation app stack granted and mounted. Nothing reads it any
+# more. Forget it here, without a destroy plan (instance CI refuses those);
+# the operator deletes the secret itself afterwards.
+removed {
+  from = google_secret_manager_secret.app_secrets_bootstrap
+
+  lifecycle {
+    destroy = false
+  }
+}
+
+removed {
+  from = google_secret_manager_secret_version.app_secrets_bootstrap
+
+  lifecycle {
+    destroy = false
+  }
+}
+
 # Deliberately absent, so a plan against the old state destroys them:
 # - google_project_iam_custom_role.internal_tools_fcm_message_sender: a
 #   Firebase Cloud Messaging sender role nothing in day2 grants.

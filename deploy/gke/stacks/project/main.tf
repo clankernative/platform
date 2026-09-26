@@ -175,36 +175,3 @@ resource "google_secret_manager_secret" "cloudflare_api_token" {
 
   depends_on = [google_project_service.api["secretmanager.googleapis.com"]]
 }
-
-# Shared bootstrap secret. The app stack grants each app's runtime identity
-# secretAccessor on it (live today for app "go") and mounts it into the app's
-# secret volume, refusing to render without an enabled version. It stays
-# until nothing grants or mounts it.
-resource "google_secret_manager_secret" "app_secrets_bootstrap" {
-  project   = var.project_id
-  secret_id = "app-secrets-bootstrap"
-
-  replication {
-    auto {}
-  }
-
-  labels = {
-    managed_by = "opentofu"
-    stack      = "foundation"
-    purpose    = "shared-bootstrap"
-  }
-
-  lifecycle {
-    prevent_destroy = true
-  }
-
-  depends_on = [google_project_service.api["secretmanager.googleapis.com"]]
-}
-
-# The enabled version the app stack checks for. The payload is a fixed,
-# non-secret marker; the secret exists so the mount is never empty. Changing
-# the text adds a new version and destroys this one.
-resource "google_secret_manager_secret_version" "app_secrets_bootstrap" {
-  secret      = google_secret_manager_secret.app_secrets_bootstrap.id
-  secret_data = "internal-tools app-secrets bootstrap"
-}
