@@ -16,7 +16,6 @@ output "enabled_apis" {
 output "shared_secret_ids" {
   description = "Secret Manager secret ids created here, by purpose."
   value = {
-    cloudflare_api_token  = google_secret_manager_secret.cloudflare_api_token.secret_id
-    app_secrets_bootstrap = google_secret_manager_secret.app_secrets_bootstrap.secret_id
+    cloudflare_api_token = google_secret_manager_secret.cloudflare_api_token.secret_id
   }
 }

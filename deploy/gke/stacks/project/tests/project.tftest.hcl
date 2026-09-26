@@ -136,11 +136,8 @@ run "shared_secrets_are_containers" {
   command = plan
 
   assert {
-    condition = (
-      google_secret_manager_secret.cloudflare_api_token.secret_id == "cloudflare-api-token" &&
-      google_secret_manager_secret.app_secrets_bootstrap.secret_id == "app-secrets-bootstrap"
-    )
-    error_message = "shared secret ids other stacks and bootstrap look up"
+    condition     = google_secret_manager_secret.cloudflare_api_token.secret_id == "cloudflare-api-token"
+    error_message = "the shared secret id other stacks and bootstrap look up"
   }
 }
 
@@ -156,7 +153,6 @@ run "declares_only_project_layer_types" {
       "google_project_iam_audit_config",
       "google_project_service",
       "google_secret_manager_secret",
-      "google_secret_manager_secret_version",
       "google_storage_bucket",
       "google_storage_bucket_iam_binding",
     ])
