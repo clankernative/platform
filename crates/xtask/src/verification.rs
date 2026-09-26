@@ -454,13 +454,9 @@ fn tests(
             "--test",
             "command_recovery",
         ],
-        "linux-backup" => &[
-            "-p",
-            "day2-ops",
-            "--test",
-            "reports",
-            "online_backup_restores_wal_data_into_a_new_instance_and_rejects_tampering",
-        ],
+        // Matches the online backup/restore test and the runtime image's
+        // day2-backup CLI test; a renamed test drops out of this filter.
+        "linux-backup" => &["-p", "day2-ops", "--test", "reports", "online_backup_"],
         "xtask" => &["-p", "xtask", "--bin", "xtask"],
         "operations" => &[
             "-p",

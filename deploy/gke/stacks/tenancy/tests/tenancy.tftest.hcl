@@ -71,6 +71,46 @@ run "app_workloads_need_the_runtime_service_account_and_service_label" {
   }
 }
 
+run "backup_jobs_are_the_one_day2_service_account_exception" {
+  command = plan
+
+  assert {
+    condition = strcontains(
+      kubernetes_manifest.require_runtime_service_account.manifest.spec.validations[0].expression,
+      join(" && ", [
+        "object.kind == 'Job'",
+        "has(object.spec.template.spec.serviceAccountName)",
+        "object.spec.template.spec.serviceAccountName == 'backup'",
+        "has(object.spec.template.spec.automountServiceAccountToken)",
+        "object.spec.template.spec.automountServiceAccountToken == false",
+        "has(object.spec.template.metadata.labels)",
+        "'internal-tools.wonderly.io/service' in object.spec.template.metadata.labels",
+        "object.spec.template.metadata.labels['internal-tools.wonderly.io/service'] == 'backup'",
+      ])
+    )
+    error_message = "The backup service account must be admitted only for Jobs labelled service=backup with token automount disabled."
+  }
+
+  # The expression before the exception, verbatim: the backup clause is the
+  # only addition, appended as the last alternative.
+  assert {
+    condition = kubernetes_manifest.require_runtime_service_account.manifest.spec.validations[0].expression == join("", [
+      "!has(request.namespace) || !request.namespace.startsWith('app-') || has(object.spec.template.spec.serviceAccountName) && object.spec.template.spec.serviceAccountName == 'runtime' && (object.kind != 'Job' || !has(object.spec.template.metadata.labels) || !('internal-tools.wonderly.io/deploy-smoke' in object.spec.template.metadata.labels) || object.spec.template.metadata.labels['internal-tools.wonderly.io/deploy-smoke'] != 'true') || object.kind == 'Deployment' && has(object.spec.template.spec.serviceAccountName) && object.spec.template.spec.serviceAccountName == 'runtime-worker' && has(object.spec.template.metadata.labels) && 'internal-tools.wonderly.io/runtime-role' in object.spec.template.metadata.labels && object.spec.template.metadata.labels['internal-tools.wonderly.io/runtime-role'] == 'notification-worker' || object.kind == 'Deployment' && has(object.spec.template.spec.serviceAccountName) && object.spec.template.spec.serviceAccountName == 'runtime-worker' && has(object.spec.template.metadata.labels) && 'internal-tools.wonderly.io/runtime-role' in object.spec.template.metadata.labels && object.spec.template.metadata.labels['internal-tools.wonderly.io/runtime-role'] == 'worker' && 'internal-tools.wonderly.io/workload-controller' in object.spec.template.metadata.labels && object.spec.template.metadata.labels['internal-tools.wonderly.io/workload-controller'] == 'sqlite-rwo-worker' || object.kind == 'Job' && has(object.spec.template.spec.serviceAccountName) && object.spec.template.spec.serviceAccountName == 'smoke' && has(object.spec.template.spec.automountServiceAccountToken) && object.spec.template.spec.automountServiceAccountToken == false && has(object.spec.template.metadata.labels) && 'internal-tools.wonderly.io/deploy-smoke' in object.spec.template.metadata.labels && object.spec.template.metadata.labels['internal-tools.wonderly.io/deploy-smoke'] == 'true'",
+      " || object.kind == 'Job' && has(object.spec.template.spec.serviceAccountName) && object.spec.template.spec.serviceAccountName == 'backup' && has(object.spec.template.spec.automountServiceAccountToken) && object.spec.template.spec.automountServiceAccountToken == false && has(object.spec.template.metadata.labels) && 'internal-tools.wonderly.io/service' in object.spec.template.metadata.labels && object.spec.template.metadata.labels['internal-tools.wonderly.io/service'] == 'backup'",
+    ])
+    error_message = "Apart from the backup Job exception, the runtime, runtime-worker and smoke rules must be unchanged."
+  }
+
+  assert {
+    condition = (
+      strcontains(kubernetes_manifest.require_app_service_label.manifest.spec.validations[0].expression, "request.resource.resource == 'jobs' ? ['app', 'backup', 'background'].exists(") &&
+      kubernetes_manifest.require_runtime_service_account.manifest.spec.matchConstraints.resourceRules[1].resources == ["jobs"] &&
+      contains(kubernetes_manifest.forbid_platform_resource_mutation_in_app_namespaces.manifest.spec.matchConstraints.resourceRules[5].resources, "cronjobs")
+    )
+    error_message = "Backup Jobs must pass the service-label policy; their CronJob stays platform-automation-owned."
+  }
+}
+
 run "platform_automation_may_change_platform_objects" {
   command = plan
 

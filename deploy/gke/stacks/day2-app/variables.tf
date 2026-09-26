@@ -231,3 +231,64 @@ variable "state_ownership_image" {
     error_message = "state_ownership_image must be pinned by digest."
   }
 }
+
+variable "backup_bucket" {
+  description = "The app's off-cluster backup bucket: the app-edge stack's backup_bucket output (<project_id>-<app>-backups). The backup service account may only create objects in it."
+  type        = string
+
+  validation {
+    condition     = can(regex("^[a-z0-9][a-z0-9_-]{1,61}[a-z0-9]$", var.backup_bucket)) && !startswith(var.backup_bucket, "goog")
+    error_message = "backup_bucket must be a GCS bucket name without dots (3-63 lowercase letters, digits, hyphens and underscores)."
+  }
+}
+
+variable "backup_schedule" {
+  description = "Cron schedule of the off-cluster backup, in UTC. Default: hourly at minute 17."
+  type        = string
+  default     = "17 * * * *"
+
+  validation {
+    condition     = can(regex("^[0-9*/,-]+ [0-9*/,-]+ [0-9*/,-]+ [0-9*/,-]+ [0-9*/,-]+$", var.backup_schedule))
+    error_message = "backup_schedule must be a five-field numeric cron expression (no @-macros or names)."
+  }
+}
+
+variable "backup_service_account_name" {
+  description = "Kubernetes service account of the backup Job: app-edge's \"backup\", bound through Workload Identity to the object-create-only uploader. The tenancy policy admits it only for Jobs labelled service=backup."
+  type        = string
+  default     = "backup"
+}
+
+variable "backup_starting_deadline_seconds" {
+  description = "A run that could not start within this many seconds of its schedule is skipped (counted as missed)."
+  type        = number
+  default     = 600
+
+  validation {
+    condition     = var.backup_starting_deadline_seconds == floor(var.backup_starting_deadline_seconds) && var.backup_starting_deadline_seconds >= 60 && var.backup_starting_deadline_seconds <= 3600
+    error_message = "backup_starting_deadline_seconds must be a whole number from 60 to 3600."
+  }
+}
+
+variable "backup_active_deadline_seconds" {
+  description = "Hard limit of one backup Job, including a pod left Pending because the app pod is not running."
+  type        = number
+  default     = 1800
+
+  validation {
+    condition     = var.backup_active_deadline_seconds == floor(var.backup_active_deadline_seconds) && var.backup_active_deadline_seconds >= 300 && var.backup_active_deadline_seconds <= 3300
+    error_message = "backup_active_deadline_seconds must be a whole number from 300 to 3300 (under an hour, so hourly runs cannot pile up)."
+  }
+}
+
+variable "backup_scratch_size_limit" {
+  description = "Disk emptyDir for the verified bundle before upload (and the container's ephemeral-storage limit). At least the state database, provider stores and artifact together."
+  type        = string
+  default     = "2Gi"
+}
+
+variable "backup_memory" {
+  description = "Memory limit of the day2-backup container. Digesting reads each database (up to 256 MiB) into memory; uploads stream."
+  type        = string
+  default     = "1Gi"
+}

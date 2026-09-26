@@ -1,8 +1,9 @@
 # Per-app edge for one day2 app: namespace, runtime service account, retained
 # data PVC, guardrails, Service, IAP BackendConfig, managed certificate, static
 # IP, Cloudflare DNS, Ingress, IAP grant, network policies, Artifact Registry
-# repository, workload state bucket, deployer RBAC, Backup for GKE plan and the
-# platform contract ConfigMap that stacks/day2-app reads.
+# repository, workload state bucket, deployer RBAC, Backup for GKE plan,
+# off-cluster backup bucket and its write-only identity, and the platform
+# contract ConfigMap that stacks/day2-app reads.
 #
 # Object names and labels match what the first gke-cloudflare app stack
 # created, so existing apps adopt this root without replacing anything.
@@ -28,7 +29,12 @@ locals {
   artifact_repo_id        = var.app_id
   state_bucket_name       = "${var.project_id}-${var.app_id}-state"
   backup_plan_name        = "${var.app_id}-backup"
-  cluster_id              = "projects/${var.project_id}/locations/${var.cluster_location}/clusters/${var.cluster_name}"
+  # Off-cluster day2 backups (day2-app's CronJob uploads them).
+  backup_bucket_name              = "${var.project_id}-${var.app_id}-backups"
+  backup_kubernetes_account       = "backup"
+  backup_google_account_id        = var.offsite_backup_service_account_id != "" ? var.offsite_backup_service_account_id : "${var.app_id}-backup"
+  backup_workload_identity_member = "serviceAccount:${var.project_id}.svc.id.goog[${local.namespace_name}/${local.backup_kubernetes_account}]"
+  cluster_id                      = "projects/${var.project_id}/locations/${var.cluster_location}/clusters/${var.cluster_name}"
 
   # The label the Service (and the load balancer ingress policy) selects;
   # day2-app puts it on the pod from the contract.
@@ -224,6 +230,113 @@ resource "google_gke_backup_backup_plan" "app" {
   }
 
   depends_on = [kubernetes_persistent_volume_claim_v1.data]
+}
+
+# --- Off-cluster backups -------------------------------------------------------
+# day2-app's CronJob runs day2-backup (runtime image) beside the serving pod and
+# uploads the verified bundle here, one object per file under
+# <app_id>/<UTC stamp>/, with a COMPLETE marker last. The uploader can only
+# create objects: it cannot read, list, overwrite or delete them, so a
+# compromised backup pod cannot destroy earlier backups. The retention policy
+# (not locked) additionally refuses deletion or replacement by anyone before
+# retention_days; lifecycle deletes objects one day after that.
+
+resource "google_storage_bucket" "backups" {
+  name                        = local.backup_bucket_name
+  project                     = var.project_id
+  location                    = var.region
+  storage_class               = "STANDARD"
+  uniform_bucket_level_access = true
+  public_access_prevention    = "enforced"
+  force_destroy               = false
+
+  retention_policy {
+    is_locked        = false
+    retention_period = var.offsite_backup_retention_days * 86400
+  }
+
+  lifecycle_rule {
+    condition {
+      age = var.offsite_backup_retention_days + 1
+    }
+
+    action {
+      type = "Delete"
+    }
+  }
+
+  labels = {
+    app        = var.app_id
+    managed_by = "opentofu"
+    purpose    = "day2-backup"
+  }
+
+  lifecycle {
+    prevent_destroy = true
+
+    precondition {
+      condition     = length(local.backup_bucket_name) <= 63
+      error_message = "The backup bucket name ${local.backup_bucket_name} exceeds 63 characters; shorten project_id or app_id."
+    }
+  }
+}
+
+resource "google_service_account" "backup" {
+  project      = var.project_id
+  account_id   = local.backup_google_account_id
+  display_name = "day2 backups for ${var.app_id}"
+  description  = "Uploads ${var.app_id}'s scheduled day2 backups to ${local.backup_bucket_name}; object create only."
+
+  lifecycle {
+    precondition {
+      condition     = can(regex("^[a-z]([-a-z0-9]{4,28}[a-z0-9])$", local.backup_google_account_id))
+      error_message = "The backup service account id ${local.backup_google_account_id} must be 6-30 lowercase letters, digits and hyphens; set offsite_backup_service_account_id for a long app_id."
+    }
+  }
+}
+
+locals {
+  # From the created account's id (not its computed attributes), so the plan
+  # shows the exact principal.
+  backup_google_account_email = "${google_service_account.backup.account_id}@${var.project_id}.iam.gserviceaccount.com"
+}
+
+resource "google_storage_bucket_iam_member" "backup_object_creator" {
+  bucket = google_storage_bucket.backups.name
+  role   = "roles/storage.objectCreator"
+  member = "serviceAccount:${local.backup_google_account_email}"
+}
+
+resource "google_storage_bucket_iam_member" "backup_readers" {
+  for_each = toset(var.offsite_backup_readers)
+
+  bucket = google_storage_bucket.backups.name
+  role   = "roles/storage.objectViewer"
+  member = each.value
+}
+
+# Only the backup Job's Kubernetes service account in this namespace may act as
+# the uploader (GKE Workload Identity through the metadata server; no key and
+# no mounted token).
+resource "google_service_account_iam_member" "backup_workload_identity" {
+  service_account_id = "projects/${var.project_id}/serviceAccounts/${local.backup_google_account_email}"
+  role               = "roles/iam.workloadIdentityUser"
+  member             = local.backup_workload_identity_member
+}
+
+# The tenancy policy admits this account only for Jobs labelled
+# internal-tools.wonderly.io/service=backup with token automount disabled.
+resource "kubernetes_service_account_v1" "backup" {
+  metadata {
+    name      = local.backup_kubernetes_account
+    namespace = kubernetes_namespace_v1.app.metadata[0].name
+    labels    = local.platform_labels
+    annotations = {
+      "iam.gke.io/gcp-service-account" = local.backup_google_account_email
+    }
+  }
+
+  automount_service_account_token = false
 }
 
 # --- Deploy surface: image repository, workload state, deployer RBAC --------

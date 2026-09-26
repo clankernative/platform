@@ -17,3 +17,8 @@ output "workload" {
   description = "The day2 StatefulSet."
   value       = "${var.namespace}/${kubernetes_stateful_set_v1.day2.metadata[0].name}"
 }
+
+output "backup_cron_job" {
+  description = "The off-cluster backup CronJob."
+  value       = "${var.namespace}/${kubernetes_cron_job_v1.backup.metadata[0].name}"
+}
