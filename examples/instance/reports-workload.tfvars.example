@@ -9,6 +9,7 @@ kube_context = "gke_example-company-tools_us-central1-a_day2"
 image = "us-central1-docker.pkg.dev/example-company-tools/day2/reports@sha256:0000000000000000000000000000000000000000000000000000000000000000"
 artifact_id = "0000000000000000000000000000000000000000000000000000000000000000"
 pod_pids_limit = 1024
+backup_bucket = "example-company-tools-reports-backups" # app-edge output backup_bucket
 runtime_resources = {
   memory_mib = 512
   cpu_millis = 1000

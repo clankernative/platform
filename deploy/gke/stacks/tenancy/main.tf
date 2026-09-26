@@ -115,6 +115,13 @@ resource "kubernetes_manifest" "pd_snapshot_class" {
 # runtime-worker and deploy-smoke alternatives are only narrower exceptions for
 # Deployments and Jobs carrying those exact labels; day2 apps use neither. They
 # are kept unchanged so this policy matches the live object.
+#
+# The one day2 exception: Jobs (including those a CronJob creates, whose
+# spec.template is the CronJob's jobTemplate) labelled
+# internal-tools.wonderly.io/service=backup may use the "backup" ServiceAccount,
+# with token automount disabled. app-edge binds that account through Workload
+# Identity to a Google service account that may only create objects in the
+# app's backup bucket; day2-app's backup CronJob uses it.
 resource "kubernetes_manifest" "require_runtime_service_account" {
   field_manager {
     name            = "opentofu"
@@ -179,8 +186,18 @@ resource "kubernetes_manifest" "require_runtime_service_account" {
               "'internal-tools.wonderly.io/deploy-smoke' in object.spec.template.metadata.labels",
               "object.spec.template.metadata.labels['internal-tools.wonderly.io/deploy-smoke'] == 'true'",
             ]),
+            join(" && ", [
+              "object.kind == 'Job'",
+              "has(object.spec.template.spec.serviceAccountName)",
+              "object.spec.template.spec.serviceAccountName == 'backup'",
+              "has(object.spec.template.spec.automountServiceAccountToken)",
+              "object.spec.template.spec.automountServiceAccountToken == false",
+              "has(object.spec.template.metadata.labels)",
+              "'internal-tools.wonderly.io/service' in object.spec.template.metadata.labels",
+              "object.spec.template.metadata.labels['internal-tools.wonderly.io/service'] == 'backup'",
+            ]),
           ])
-          message = "App workloads must use serviceAccountName=runtime; dedicated notification and SQLite worker Deployments may use runtime-worker, and isolated deploy-smoke Jobs must use smoke with token automount disabled."
+          message = "App workloads must use serviceAccountName=runtime; dedicated notification and SQLite worker Deployments may use runtime-worker, isolated deploy-smoke Jobs must use smoke with token automount disabled, and backup Jobs labelled internal-tools.wonderly.io/service=backup may use backup with token automount disabled."
         },
       ]
     }

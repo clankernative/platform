@@ -225,3 +225,36 @@ variable "backup" {
     delete_lock_days   = 1
   }
 }
+
+variable "offsite_backup_retention_days" {
+  description = "Days each off-cluster day2 backup is kept in <project_id>-<app_id>-backups. The bucket's (unlocked) retention policy refuses earlier deletion or replacement; lifecycle deletes objects one day later."
+  type        = number
+  default     = 30
+
+  validation {
+    condition     = var.offsite_backup_retention_days == floor(var.offsite_backup_retention_days) && var.offsite_backup_retention_days >= 1 && var.offsite_backup_retention_days <= 365
+    error_message = "offsite_backup_retention_days must be a whole number of days from 1 to 365."
+  }
+}
+
+variable "offsite_backup_readers" {
+  description = "Principals granted roles/storage.objectViewer on the backup bucket, to download backups for restore. The uploader itself can only create objects."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = alltrue([for member in var.offsite_backup_readers : can(regex("^(user|group|serviceAccount):[^@\\s]+@[^@\\s]+$", member))])
+    error_message = "offsite_backup_readers must be user:, group: or serviceAccount: principals."
+  }
+}
+
+variable "offsite_backup_service_account_id" {
+  description = "Account id of the backup uploader's Google service account. Empty derives <app_id>-backup; set it when that exceeds 30 characters."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.offsite_backup_service_account_id == "" || can(regex("^[a-z]([-a-z0-9]{4,28}[a-z0-9])$", var.offsite_backup_service_account_id))
+    error_message = "offsite_backup_service_account_id must be empty or 6-30 lowercase letters, digits and hyphens, starting with a letter."
+  }
+}

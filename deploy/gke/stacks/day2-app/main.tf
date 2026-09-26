@@ -371,3 +371,324 @@ resource "kubernetes_stateful_set_v1" "day2" {
     update = "15m"
   }
 }
+
+# --- Scheduled off-cluster backup -------------------------------------------
+# Every run takes an online snapshot with the runtime image's day2-backup (the
+# same native backup and verification as `day2 platform backup`), beside the
+# serving pod and without its lock, then uploads the verified bundle as one
+# tar.gz to the app-edge backup bucket. The uploader identity (Workload
+# Identity, no key, no mounted token) may only create objects; ifGenerationMatch=0
+# refuses to replace one. The state PVC is ReadWriteOnce, so the pod must run on
+# the app pod's node: while the app is stopped (maintenance) a run stays Pending
+# and fails at its deadline instead of competing for the volume.
+
+locals {
+  backup_name = "${local.workload_name}-backup"
+  # Outside the Service selector (the required label says backup, not app) and
+  # outside the StatefulSet's app.kubernetes.io/name, which the maintenance
+  # procedure uses to find the app's pods.
+  backup_labels = merge(var.extra_pod_labels, local.contract_pod_labels, {
+    (local.required_label_key)     = "backup"
+    "app.kubernetes.io/name"       = local.backup_name
+    "app.kubernetes.io/component"  = "backup"
+    "app.kubernetes.io/managed-by" = "opentofu"
+    "app.kubernetes.io/part-of"    = "day2"
+  })
+  backup_output   = "/backup"
+  backup_snapshot = "${local.backup_output}/snapshot"
+  # Object names: <app_id>-<UTC yyyymmddThhmmssZ>.tar.gz.
+  backup_object_prefix = "${var.app_id}-"
+
+  backup_security_context = {
+    run_as_non_root            = true
+    run_as_user                = 10001
+    run_as_group               = 10001
+    allow_privilege_escalation = false
+    read_only_root_filesystem  = true
+    privileged                 = false
+  }
+
+  # POSIX sh (busybox in the pinned uploader image). No ${...} or %{...} here:
+  # this is an OpenTofu heredoc.
+  backup_upload_script = <<-SCRIPT
+    set -eu
+    umask 077
+    test -f "$SNAPSHOT/backup.json" || { echo "no verified day2 backup at $SNAPSHOT" >&2; exit 1; }
+    stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    object="$OBJECT_PREFIX$stamp.tar.gz"
+    archive="$OUTPUT/$stamp.tar.gz"
+    tar -czf "$archive" -C "$OUTPUT" snapshot
+    size="$(wc -c < "$archive" | tr -d ' ')"
+    token="$(curl -fsS --max-time 30 --retry 3 -H 'Metadata-Flavor: Google' \
+      "$METADATA_TOKEN_URL" | sed -n 's/.*"access_token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+    test -n "$token" || { echo "no access token from the GKE metadata server" >&2; exit 1; }
+    # The token goes to curl on stdin, never on a command line. Media upload of
+    # a new object only: ifGenerationMatch=0 fails (412) if the name exists.
+    printf 'Authorization: Bearer %s\n' "$token" | curl -fsS --max-time "$UPLOAD_TIMEOUT_SECONDS" \
+      -X POST -H @- -H 'Content-Type: application/gzip' --upload-file "$archive" \
+      -o "$OUTPUT/upload.json" \
+      "$UPLOAD_URL/$BUCKET/o?uploadType=media&ifGenerationMatch=0&name=$object"
+    stored="$(sed -n 's/.*"size"[[:space:]]*:[[:space:]]*"\([0-9]*\)".*/\1/p' "$OUTPUT/upload.json")"
+    test "$stored" = "$size" || { echo "gs://$BUCKET/$object stored $stored bytes, expected $size" >&2; exit 1; }
+    generation="$(sed -n 's/.*"generation"[[:space:]]*:[[:space:]]*"\([0-9]*\)".*/\1/p' "$OUTPUT/upload.json")"
+    echo "{\"uploaded\":\"gs://$BUCKET/$object\",\"bytes\":$size,\"generation\":\"$generation\"}"
+  SCRIPT
+}
+
+resource "kubernetes_cron_job_v1" "backup" {
+  metadata {
+    name      = local.backup_name
+    namespace = var.namespace
+    labels    = local.backup_labels
+  }
+
+  spec {
+    schedule                      = var.backup_schedule
+    timezone                      = "Etc/UTC"
+    concurrency_policy            = "Forbid"
+    starting_deadline_seconds     = var.backup_starting_deadline_seconds
+    successful_jobs_history_limit = 3
+    failed_jobs_history_limit     = 3
+    suspend                       = false
+
+    job_template {
+      metadata {
+        labels = local.backup_labels
+      }
+
+      spec {
+        backoff_limit           = 1
+        active_deadline_seconds = var.backup_active_deadline_seconds
+
+        template {
+          metadata {
+            labels = local.backup_labels
+          }
+
+          spec {
+            # The tenancy policy admits serviceAccountName=backup only for Jobs
+            # labelled service=backup with token automount off. Workload Identity
+            # needs no mounted token: the GKE metadata server exchanges it.
+            service_account_name            = var.backup_service_account_name
+            automount_service_account_token = false
+            enable_service_links            = false
+            restart_policy                  = "Never"
+
+            node_selector = var.node_selector
+
+            security_context {
+              run_as_non_root = true
+              run_as_user     = 10001
+              run_as_group    = 10001
+
+              seccomp_profile {
+                type = "RuntimeDefault"
+              }
+            }
+
+            affinity {
+              pod_affinity {
+                required_during_scheduling_ignored_during_execution {
+                  label_selector {
+                    match_labels = {
+                      "app.kubernetes.io/name" = local.workload_name
+                    }
+                  }
+                  topology_key = "kubernetes.io/hostname"
+                }
+              }
+            }
+
+            # The app's own image (the same digest as the StatefulSet), so the
+            # active artifact the database names is present at the same path.
+            init_container {
+              name              = "snapshot"
+              image             = var.image
+              image_pull_policy = "IfNotPresent"
+              command           = ["/usr/local/bin/day2-backup"]
+              args              = [local.instance_path, var.app_id, local.backup_snapshot]
+
+              security_context {
+                run_as_non_root            = local.backup_security_context.run_as_non_root
+                run_as_user                = local.backup_security_context.run_as_user
+                run_as_group               = local.backup_security_context.run_as_group
+                allow_privilege_escalation = local.backup_security_context.allow_privilege_escalation
+                read_only_root_filesystem  = local.backup_security_context.read_only_root_filesystem
+                privileged                 = local.backup_security_context.privileged
+
+                capabilities {
+                  drop = ["ALL"]
+                }
+
+                seccomp_profile {
+                  type = "RuntimeDefault"
+                }
+              }
+
+              resources {
+                requests = {
+                  cpu               = "100m"
+                  memory            = "256Mi"
+                  ephemeral-storage = "64Mi"
+                }
+                limits = {
+                  cpu               = "1"
+                  memory            = var.backup_snapshot_memory
+                  ephemeral-storage = var.backup_scratch_size_limit
+                }
+              }
+
+              # Mirrors the StatefulSet: instance.json as a regular read-only
+              # file (subPath), the artifact baked into the image under
+              # /srv/day2/artifacts, and the state volume read-write (SQLite
+              # opens the WAL's -shm even for a read-only connection).
+              volume_mount {
+                name       = "instance"
+                mount_path = local.instance_path
+                sub_path   = "instance.json"
+                read_only  = true
+              }
+
+              volume_mount {
+                name       = "state"
+                mount_path = local.state_dir
+              }
+
+              volume_mount {
+                name       = "tmp"
+                mount_path = "/tmp"
+              }
+
+              volume_mount {
+                name       = "backup"
+                mount_path = local.backup_output
+              }
+            }
+
+            container {
+              name              = "upload"
+              image             = var.backup_uploader_image
+              image_pull_policy = "IfNotPresent"
+              command           = ["/bin/sh", "-c", local.backup_upload_script]
+
+              env {
+                name  = "BUCKET"
+                value = var.backup_bucket
+              }
+
+              env {
+                name  = "OBJECT_PREFIX"
+                value = local.backup_object_prefix
+              }
+
+              env {
+                name  = "OUTPUT"
+                value = local.backup_output
+              }
+
+              env {
+                name  = "SNAPSHOT"
+                value = local.backup_snapshot
+              }
+
+              env {
+                name  = "METADATA_TOKEN_URL"
+                value = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token"
+              }
+
+              env {
+                name  = "UPLOAD_URL"
+                value = "https://storage.googleapis.com/upload/storage/v1/b"
+              }
+
+              env {
+                name  = "UPLOAD_TIMEOUT_SECONDS"
+                value = tostring(var.backup_active_deadline_seconds)
+              }
+
+              security_context {
+                run_as_non_root            = local.backup_security_context.run_as_non_root
+                run_as_user                = local.backup_security_context.run_as_user
+                run_as_group               = local.backup_security_context.run_as_group
+                allow_privilege_escalation = local.backup_security_context.allow_privilege_escalation
+                read_only_root_filesystem  = local.backup_security_context.read_only_root_filesystem
+                privileged                 = local.backup_security_context.privileged
+
+                capabilities {
+                  drop = ["ALL"]
+                }
+
+                seccomp_profile {
+                  type = "RuntimeDefault"
+                }
+              }
+
+              resources {
+                requests = {
+                  cpu               = "50m"
+                  memory            = "64Mi"
+                  ephemeral-storage = "64Mi"
+                }
+                limits = {
+                  cpu               = "500m"
+                  memory            = "256Mi"
+                  ephemeral-storage = var.backup_scratch_size_limit
+                }
+              }
+
+              volume_mount {
+                name       = "backup"
+                mount_path = local.backup_output
+              }
+
+              volume_mount {
+                name       = "tmp"
+                mount_path = "/tmp"
+              }
+            }
+
+            volume {
+              name = "instance"
+
+              config_map {
+                name         = kubernetes_config_map_v1.instance.metadata[0].name
+                default_mode = "0444"
+
+                items {
+                  key  = "instance.json"
+                  path = "instance.json"
+                }
+              }
+            }
+
+            volume {
+              name = "state"
+
+              persistent_volume_claim {
+                claim_name = local.pvc_name
+              }
+            }
+
+            volume {
+              name = "tmp"
+
+              empty_dir {
+                medium     = "Memory"
+                size_limit = "16Mi"
+              }
+            }
+
+            # The verified bundle and its tar.gz; gone with the pod.
+            volume {
+              name = "backup"
+
+              empty_dir {
+                size_limit = var.backup_scratch_size_limit
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

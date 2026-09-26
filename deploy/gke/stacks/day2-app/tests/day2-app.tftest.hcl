@@ -35,6 +35,7 @@ variables {
     shutdown_seconds = 30
   }
   pod_pids_limit = 1024
+  backup_bucket  = "example-tools-example-backups"
   readers        = ["qa@example.com"]
   writers        = ["qa@example.com"]
   authority = {
@@ -205,4 +206,152 @@ run "state_ownership_is_idempotent_with_only_cap_chown" {
     )
     error_message = "the state-ownership init container only chowns (idempotent under CAP_CHOWN); day2 itself chmods .state to 0700 as its owner"
   }
+}
+
+run "backs_up_hourly_beside_the_app_pod_to_the_backup_bucket" {
+  command = plan
+
+  assert {
+    condition = (
+      kubernetes_cron_job_v1.backup.metadata[0].name == "day2-example-app-backup" &&
+      kubernetes_cron_job_v1.backup.metadata[0].namespace == "app-example" &&
+      kubernetes_cron_job_v1.backup.spec[0].schedule == "17 * * * *" &&
+      kubernetes_cron_job_v1.backup.spec[0].timezone == "Etc/UTC" &&
+      kubernetes_cron_job_v1.backup.spec[0].concurrency_policy == "Forbid" &&
+      kubernetes_cron_job_v1.backup.spec[0].starting_deadline_seconds == 600 &&
+      kubernetes_cron_job_v1.backup.spec[0].successful_jobs_history_limit == 3 &&
+      kubernetes_cron_job_v1.backup.spec[0].failed_jobs_history_limit == 3 &&
+      kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].backoff_limit == 1 &&
+      kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].active_deadline_seconds == 1800
+    )
+    error_message = "One hourly UTC backup at a time, bounded start and run deadlines, one retry and short history."
+  }
+
+  assert {
+    condition = (
+      kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].service_account_name == "backup" &&
+      kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].automount_service_account_token == false &&
+      kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].restart_policy == "Never" &&
+      kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].node_selector["kubernetes.io/arch"] == "amd64"
+    )
+    error_message = "The backup pod runs as the backup service account (Workload Identity) with no mounted token."
+  }
+
+  assert {
+    condition = (
+      kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].metadata[0].labels["platform.example.com/service"] == "backup" &&
+      kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].metadata[0].labels["telemetry.example.com/service"] == "example-api" &&
+      kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].metadata[0].labels["app.kubernetes.io/name"] == "day2-example-app-backup" &&
+      kubernetes_cron_job_v1.backup.spec[0].job_template[0].metadata[0].labels["platform.example.com/service"] == "backup"
+    )
+    error_message = "Backup pods carry the tenancy service=backup and o11y labels, and neither the Service selector value nor the StatefulSet's name."
+  }
+
+  assert {
+    condition = (
+      length(kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].affinity[0].pod_affinity[0].required_during_scheduling_ignored_during_execution) == 1 &&
+      kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].affinity[0].pod_affinity[0].required_during_scheduling_ignored_during_execution[0].topology_key == "kubernetes.io/hostname" &&
+      kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].affinity[0].pod_affinity[0].required_during_scheduling_ignored_during_execution[0].label_selector[0].match_labels == tomap({ "app.kubernetes.io/name" = "day2-example-app" }) &&
+      kubernetes_stateful_set_v1.day2.spec[0].template[0].metadata[0].labels["app.kubernetes.io/name"] == "day2-example-app"
+    )
+    error_message = "The ReadWriteOnce state volume requires the backup pod on the app pod's node."
+  }
+
+  assert {
+    condition = (
+      kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].init_container[0].image == kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[0].image &&
+      kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].init_container[0].command == tolist(["/usr/local/bin/day2-backup"]) &&
+      kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].init_container[0].args == tolist(["/srv/day2/instance.json", "example_app", "/backup/snapshot"]) &&
+      jsonencode([for mount in kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].init_container[0].volume_mount : [mount.name, mount.mount_path, mount.sub_path == null ? "" : mount.sub_path, mount.read_only == true]]) == jsonencode([
+        ["instance", "/srv/day2/instance.json", "instance.json", true],
+        ["state", "/srv/day2/.state", "", false],
+        ["tmp", "/tmp", "", false],
+        ["backup", "/backup", "", false],
+      ]) &&
+      jsonencode([for mount in kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[0].volume_mount : [mount.name, mount.mount_path, mount.sub_path == null ? "" : mount.sub_path, mount.read_only == true] if mount.name != "tmp"]) == jsonencode([
+        ["instance", "/srv/day2/instance.json", "instance.json", true],
+        ["state", "/srv/day2/.state", "", false],
+      ]) &&
+      kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].volume[0].config_map[0].name == "day2-example-app-instance" &&
+      kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].volume[1].persistent_volume_claim[0].claim_name == "data"
+    )
+    error_message = "day2-backup runs from the StatefulSet's exact app image with the same instance, state and artifact paths."
+  }
+
+  assert {
+    condition = alltrue([
+      for container in concat(
+        kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].init_container,
+        kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].container,
+      ) :
+      container.security_context[0].run_as_user == "10001" &&
+      container.security_context[0].run_as_non_root == true &&
+      container.security_context[0].read_only_root_filesystem == true &&
+      container.security_context[0].allow_privilege_escalation == false &&
+      container.security_context[0].privileged == false &&
+      container.security_context[0].capabilities[0].drop == tolist(["ALL"]) &&
+      length(coalesce(container.security_context[0].capabilities[0].add, [])) == 0 &&
+      container.security_context[0].seccomp_profile[0].type == "RuntimeDefault" &&
+      can(regex("@sha256:[0-9a-f]{64}$", container.image))
+    ])
+    error_message = "Both backup containers are non-root 10001 with a read-only root, no capabilities, RuntimeDefault seccomp and digest-pinned images."
+  }
+
+  assert {
+    condition = (
+      kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].container[0].image == "docker.io/curlimages/curl:8.22.0@sha256:58adaa4e8dca9c988bae2aba4ab3434a0bb2da16bbe3f92dec39ec7785166777" &&
+      kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].container[0].command[0] == "/bin/sh" &&
+      strcontains(kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].container[0].command[2], "ifGenerationMatch=0") &&
+      strcontains(kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].container[0].command[2], "Metadata-Flavor: Google") &&
+      strcontains(kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].container[0].command[2], "set -eu") &&
+      one([for env in kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].container[0].env : env.value if env.name == "BUCKET"]) == "example-tools-example-backups" &&
+      one([for env in kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].container[0].env : env.value if env.name == "UPLOAD_URL"]) == "https://storage.googleapis.com/upload/storage/v1/b" &&
+      one([for env in kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].container[0].env : env.value if env.name == "METADATA_TOKEN_URL"]) == "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token" &&
+      length(kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].container[0].volume_mount) == 2
+    )
+    error_message = "The pinned uploader gets a metadata-server token and creates (never replaces) one object in the app-edge backup bucket; it sees only the backup scratch volume and /tmp."
+  }
+}
+
+run "backup_schedule_is_configurable" {
+  command = plan
+
+  variables {
+    backup_schedule = "5 */6 * * *"
+  }
+
+  assert {
+    condition     = kubernetes_cron_job_v1.backup.spec[0].schedule == "5 */6 * * *"
+    error_message = "backup_schedule sets the CronJob schedule."
+  }
+}
+
+run "refuses_an_unpinned_uploader" {
+  command = plan
+
+  variables {
+    backup_uploader_image = "curlimages/curl:latest"
+  }
+
+  expect_failures = [var.backup_uploader_image]
+}
+
+run "refuses_a_backup_bucket_that_is_not_a_bucket_name" {
+  command = plan
+
+  variables {
+    backup_bucket = "gs://example-tools-example-backups"
+  }
+
+  expect_failures = [var.backup_bucket]
+}
+
+run "refuses_a_backup_deadline_past_the_hour" {
+  command = plan
+
+  variables {
+    backup_active_deadline_seconds = 7200
+  }
+
+  expect_failures = [var.backup_active_deadline_seconds]
 }

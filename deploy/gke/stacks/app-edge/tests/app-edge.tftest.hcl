@@ -160,6 +160,96 @@ run "refuses_public_iap_access" {
   expect_failures = [var.iap_members]
 }
 
+run "offsite_backups_are_write_only_and_retained" {
+  command = plan
+
+  variables {
+    backend_service_name = ""
+  }
+
+  assert {
+    condition = (
+      google_storage_bucket.backups.name == "example-tools-example-backups" &&
+      output.backup_bucket == "example-tools-example-backups" &&
+      google_storage_bucket.backups.uniform_bucket_level_access &&
+      google_storage_bucket.backups.public_access_prevention == "enforced" &&
+      !google_storage_bucket.backups.force_destroy &&
+      google_storage_bucket.backups.retention_policy[0].retention_period == 2592000 &&
+      !google_storage_bucket.backups.retention_policy[0].is_locked &&
+      length(google_storage_bucket.backups.lifecycle_rule) == 1 &&
+      one(google_storage_bucket.backups.lifecycle_rule[0].condition).age == 31 &&
+      one(google_storage_bucket.backups.lifecycle_rule[0].action).type == "Delete"
+    )
+    error_message = "The backup bucket must be private, keep backups 30 days under an unlocked retention policy and delete them at 31 days."
+  }
+
+  assert {
+    condition = (
+      google_service_account.backup.account_id == "example-backup" &&
+      google_storage_bucket_iam_member.backup_object_creator.bucket == "example-tools-example-backups" &&
+      google_storage_bucket_iam_member.backup_object_creator.role == "roles/storage.objectCreator" &&
+      google_storage_bucket_iam_member.backup_object_creator.member == "serviceAccount:example-backup@example-tools.iam.gserviceaccount.com" &&
+      output.backup_service_account == "example-backup@example-tools.iam.gserviceaccount.com" &&
+      length(google_storage_bucket_iam_member.backup_readers) == 0
+    )
+    error_message = "The backup service account may only create objects in the backup bucket; nobody reads backups unless listed."
+  }
+
+  assert {
+    condition = (
+      google_service_account_iam_member.backup_workload_identity.role == "roles/iam.workloadIdentityUser" &&
+      google_service_account_iam_member.backup_workload_identity.member == "serviceAccount:example-tools.svc.id.goog[app-example/backup]" &&
+      kubernetes_service_account_v1.backup.metadata[0].name == "backup" &&
+      kubernetes_service_account_v1.backup.metadata[0].namespace == "app-example" &&
+      google_service_account_iam_member.backup_workload_identity.service_account_id == "projects/example-tools/serviceAccounts/example-backup@example-tools.iam.gserviceaccount.com" &&
+      kubernetes_service_account_v1.backup.metadata[0].annotations["iam.gke.io/gcp-service-account"] == "example-backup@example-tools.iam.gserviceaccount.com" &&
+      kubernetes_service_account_v1.backup.automount_service_account_token == false
+    )
+    error_message = "Only the app namespace's backup Kubernetes service account may act as the uploader, and it mounts no token."
+  }
+}
+
+run "offsite_backup_retention_and_readers_are_configurable" {
+  command = plan
+
+  variables {
+    backend_service_name          = ""
+    offsite_backup_retention_days = 7
+    offsite_backup_readers        = ["group:day2-restore@example.com"]
+  }
+
+  assert {
+    condition = (
+      google_storage_bucket.backups.retention_policy[0].retention_period == 604800 &&
+      one(google_storage_bucket.backups.lifecycle_rule[0].condition).age == 8 &&
+      google_storage_bucket_iam_member.backup_readers["group:day2-restore@example.com"].role == "roles/storage.objectViewer"
+    )
+    error_message = "Retention days drive both the retention policy and the lifecycle deletion; readers get objectViewer only."
+  }
+}
+
+run "refuses_unbounded_backup_retention" {
+  command = plan
+
+  variables {
+    backend_service_name          = ""
+    offsite_backup_retention_days = 0
+  }
+
+  expect_failures = [var.offsite_backup_retention_days]
+}
+
+run "refuses_a_backup_account_id_gcp_cannot_create" {
+  command = plan
+
+  variables {
+    backend_service_name = ""
+    app_id               = "a-very-long-application-name"
+  }
+
+  expect_failures = [google_service_account.backup]
+}
+
 # prevent_destroy cannot be observed in a plan, so these read the source.
 run "retained_objects_keep_prevent_destroy" {
   command = plan
@@ -176,10 +266,11 @@ run "retained_objects_keep_prevent_destroy" {
         "\"google_storage_bucket\" \"state\"",
         "\"google_gke_backup_backup_plan\" \"app\"",
         "\"google_artifact_registry_repository\" \"app\"",
+        "\"google_storage_bucket\" \"backups\"",
       ] :
       strcontains(one([for block in split("\nresource ", file("${path.module}/main.tf")) : block if startswith(block, header)]), "prevent_destroy = true")
     ])
-    error_message = "The namespace, data PVC, state bucket, backup plan and image repository must keep prevent_destroy = true."
+    error_message = "The namespace, data PVC, state bucket, backup plan, image repository and backup bucket must keep prevent_destroy = true."
   }
 }
 

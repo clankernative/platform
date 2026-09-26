@@ -27,3 +27,13 @@ output "state_bucket" {
   description = "Bucket for the app's day2-app OpenTofu state."
   value       = google_storage_bucket.state.name
 }
+
+output "backup_bucket" {
+  description = "Bucket for the app's off-cluster day2 backups: day2-app's backup_bucket."
+  value       = google_storage_bucket.backups.name
+}
+
+output "backup_service_account" {
+  description = "Google service account the backup Job acts as (object create only on backup_bucket)."
+  value       = local.backup_google_account_email
+}

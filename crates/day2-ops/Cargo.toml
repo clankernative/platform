@@ -8,6 +8,11 @@ license.workspace = true
 name = "day2-host"
 path = "src/main.rs"
 
+# Shipped in the distroless runtime image for scheduled off-cluster backups.
+[[bin]]
+name = "day2-backup"
+path = "src/bin/day2-backup.rs"
+
 [dependencies]
 anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }

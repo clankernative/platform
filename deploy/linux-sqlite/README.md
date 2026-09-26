@@ -219,6 +219,38 @@ The restart policy is `unless-stopped`; an unhealthy status alone does not make
 Compose restart a still-running process. Supervisor failures terminate the
 process. Deleting the volume is a destructive operator action, not part of restart.
 
+## Online Backup In The Runtime Image
+
+The runtime image carries `/usr/local/bin/day2-backup`, the one operator
+executable beside `day2-serve`, `day2-health` and `day2-inspect`:
+
+```text
+day2-backup INSTANCE_JSON APP NEW_OUTPUT_DIRECTORY
+```
+
+It runs the same native operations as `day2 platform backup`
+(`ops/Backup.roc`), in the same order and with no logic of its own: an online
+snapshot of the app database and its local provider stores through SQLite's
+backup API over read-only connections (15 s deadline each), a copy of the
+active artifact, then verification of the stored bundle. It does not take the
+`.state/<app>.serve.lock` lease, so it runs beside a serving `day2-serve` on the
+same state volume; the volume must be writable because SQLite maintains the
+WAL's shared-memory file even for readers. The output directory must be new.
+On success it prints one JSON line (`backup`, `app`, `installation`,
+`environment`, `scope`, `artifact`, `database`, `provider_databases`,
+`authority`, `verified: true`); any failure exits non-zero and leaves no
+`backup.json`, so a partial directory is never a backup. Restore stays a
+tooling-image operation (`day2 platform restore`, which verifies again). As
+with every online snapshot, each store is individually consistent;
+cross-store coherence needs quiesced provider work.
+
+Qualification runs it from the runtime image beside the serving runtime
+(`linux-runtime-restore`: read-only root, no network, no capabilities, the
+serving volume) and restores its bundle with the tooling image, requiring the
+same domain and journal contents. The `linux-backup` suite runs the CLI test
+too. The GKE reference schedules it hourly
+([Backups](../gke/README.md#scheduled-off-cluster-backups)).
+
 ## Authentication And Limits
 
 Authentication is **disposable local-operator authentication**, not enterprise
