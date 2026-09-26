@@ -234,7 +234,8 @@ resource "google_gke_backup_backup_plan" "app" {
 
 # --- Off-cluster backups -------------------------------------------------------
 # day2-app's CronJob runs day2-backup (runtime image) beside the serving pod and
-# uploads the verified bundle here as <app>-<UTC>.tar.gz. The uploader can only
+# uploads the verified bundle here, one object per file under
+# <app_id>/<UTC stamp>/, with a COMPLETE marker last. The uploader can only
 # create objects: it cannot read, list, overwrite or delete them, so a
 # compromised backup pod cannot destroy earlier backups. The retention policy
 # (not locked) additionally refuses deletion or replacement by anyone before

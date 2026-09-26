@@ -190,19 +190,25 @@ Jobs kept). Each run:
    `app.kubernetes.io/name=day2-<app>`), because the state disk is
    ReadWriteOnce. While the app is stopped, for example during maintenance, the
    run stays Pending and fails at its deadline instead of taking the volume;
-2. runs `/usr/local/bin/day2-backup /srv/day2/instance.json <app> /backup/snapshot`
-   as an init container from the StatefulSet's exact app image, with the same
+2. runs one container of the StatefulSet's exact app image:
+   `/usr/local/bin/day2-backup /srv/day2/instance.json <app_id> /backup/snapshot
+   --upload-gcs <project>-<app>-backups --object-prefix <app_id>`, with the same
    instance ConfigMap (`subPath`), state volume and baked artifact. It takes an
    online SQLite snapshot beside the serving pod without its lock and verifies
    the bundle ([Linux guide](../linux-sqlite/README.md#online-backup-in-the-runtime-image));
-3. packs the bundle into `<app_id>-<UTC yyyymmddThhmmssZ>.tar.gz` in a pinned
-   `curlimages/curl` container, takes an access token from the GKE metadata
-   server and uploads it to `<project>-<app>-backups` with a JSON API media
-   upload and `ifGenerationMatch=0`, so an existing object is never replaced.
-   The stored size must match. Any failure fails the Job.
+3. in the same process, takes the pod's access token from the GKE metadata
+   server and uploads every file of the verified bundle as its own object
+   `<app_id>/<UTC yyyymmddThhmmssZ>/<relative path>` (the binary appends the
+   timestamp), streaming each file as a JSON API media upload with
+   `ifGenerationMatch=0`, so an existing object is never replaced. Each
+   response must name the object with the file's exact size. Only then is
+   `<app_id>/<stamp>/COMPLETE` written, listing every object, its size and the
+   manifest's sha256. Nothing is retried; any failure fails the Job and leaves
+   a prefix without `COMPLETE`, which is never a backup.
 
-Both containers run as 10001 with a read-only root, no capabilities,
-`RuntimeDefault` seccomp and no mounted token. The pod runs as the Kubernetes
+The container runs as 10001 with a read-only root, no capabilities,
+`RuntimeDefault` seccomp and no mounted token; there is no shell and no second
+image in the pod. The pod runs as the Kubernetes
 service account `backup` (labels `internal-tools.wonderly.io/service=backup`
 plus the app's o11y label), which the tenancy policy admits only for such Jobs
 with token automount off. `app-edge` binds it through Workload Identity to the
@@ -217,9 +223,9 @@ has `prevent_destroy`. Principals in `offsite_backup_readers` get
 `roles/storage.objectViewer` to download backups.
 
 Watch for failed `day2-<app>-backup` Jobs (`kubectl -n app-<app> get jobs`) and
-for the newest object's age in the bucket; a missed schedule creates no Job.
-Each hourly object holds the full database, so storage is about 24 × 30 copies
-of the compressed bundle at the default settings.
+for the age of the newest `COMPLETE` object; a missed schedule creates no Job.
+Each hourly prefix holds the full, uncompressed bundle (databases and
+artifact), so storage is about 24 × 30 bundles at the default settings.
 
 Wire it by applying `app-edge` first and passing its `backup_bucket` output to
 `day2-app`'s required `backup_bucket` variable. Both the CronJob and the
@@ -236,12 +242,26 @@ new directory). Restore never activates historical grants: it disables them,
 rotates browser sessions and signing secrets, and requires a fresh authority
 activation.
 
-Verify a backup anywhere (an x86_64 Docker host, no network):
+Pick a backup whose prefix has `COMPLETE`, download the whole prefix, and
+check it against the marker before trusting it (an x86_64 Docker host; the
+restore itself runs with no network):
 
 ```console
-gcloud storage ls gs://PROJECT-APP-backups/
-gcloud storage cp gs://PROJECT-APP-backups/APP_ID-STAMP.tar.gz .
-mkdir restore && tar -xzf APP_ID-STAMP.tar.gz -C restore
+gcloud storage ls gs://PROJECT-APP-backups/APP_ID/          # one prefix per run
+gcloud storage cat gs://PROJECT-APP-backups/APP_ID/STAMP/COMPLETE
+mkdir restore && gcloud storage cp -r gs://PROJECT-APP-backups/APP_ID/STAMP restore/
+mv restore/STAMP restore/snapshot
+```
+
+`COMPLETE` lists every object name and byte count, and the sha256 of
+`backup.json`. Require that the downloaded tree has exactly those files and
+sizes (plus `COMPLETE` itself) and that `sha256sum restore/snapshot/backup.json`
+matches (the marker's value is `sha256:<hex>`). A prefix without `COMPLETE` is
+an interrupted upload: do not use it. Then verify and restore with the tooling
+image:
+
+```console
+rm restore/snapshot/COMPLETE
 docker run --rm --network none --user "$(id -u):$(id -g)" -v "$PWD/restore:/work" \
   --entrypoint /workspace/platform/cli/day2 TOOLING_IMAGE@sha256:... \
   platform restore /work/snapshot /work/restored
@@ -259,7 +279,7 @@ terminate; backup runs cannot start without it), attach the maintenance pod
 from [k8s/maintenance-pod.yaml](k8s/maintenance-pod.yaml) rendered exactly as
 `day2-maintain.sh` renders it, and in it:
 
-1. `kubectl cp` the extracted `snapshot/` to `/srv/day2/restore-in`, the current
+1. `kubectl cp` the downloaded, checked `snapshot/` to `/srv/day2/restore-in`, the current
    desired `instance.json` (ConfigMap `day2-APP-instance`) to
    `/srv/day2/instance.json`, and the running artifact (as `day2-maintain.sh`
    fetches it) to `/srv/day2/artifacts/ARTIFACT_ID`;

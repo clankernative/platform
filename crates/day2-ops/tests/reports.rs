@@ -291,6 +291,33 @@ fn online_backup_cli_snapshots_a_serving_instance_into_a_verified_bundle() -> Re
         .output()?;
     assert!(!usage.status.success());
     assert!(String::from_utf8_lossy(&usage.stderr).contains("usage: day2-backup"));
+    // Upload options are checked before any snapshot is taken.
+    for options in [
+        &["--upload-gcs", "example-backups"][..],
+        &[
+            "--upload-gcs",
+            "gs://example-backups",
+            "--object-prefix",
+            "app",
+        ],
+        &[
+            "--upload-gcs",
+            "example-backups",
+            "--object-prefix",
+            "../app",
+        ],
+        &["--object-prefix", "app", "--upload-gcs", "example-backups"],
+    ] {
+        let refused = scratch.path().join("refused-upload");
+        let result = std::process::Command::new(binary)
+            .arg(runtime.instance_path())
+            .arg("app")
+            .arg(&refused)
+            .args(options)
+            .output()?;
+        assert!(!result.status.success() && result.stdout.is_empty());
+        assert!(!refused.exists());
+    }
     drop(lock);
     Ok(())
 }

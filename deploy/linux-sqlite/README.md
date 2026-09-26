@@ -225,7 +225,7 @@ The runtime image carries `/usr/local/bin/day2-backup`, the one operator
 executable beside `day2-serve`, `day2-health` and `day2-inspect`:
 
 ```text
-day2-backup INSTANCE_JSON APP NEW_OUTPUT_DIRECTORY
+day2-backup INSTANCE_JSON APP NEW_OUTPUT_DIRECTORY [--upload-gcs BUCKET --object-prefix PREFIX]
 ```
 
 It runs the same native operations as `day2 platform backup`
@@ -239,10 +239,25 @@ WAL's shared-memory file even for readers. The output directory must be new.
 On success it prints one JSON line (`backup`, `app`, `installation`,
 `environment`, `scope`, `artifact`, `database`, `provider_databases`,
 `authority`, `verified: true`); any failure exits non-zero and leaves no
-`backup.json`, so a partial directory is never a backup. Restore stays a
-tooling-image operation (`day2 platform restore`, which verifies again). As
-with every online snapshot, each store is individually consistent;
-cross-store coherence needs quiesced provider work.
+`backup.json`, so a partial directory is never a backup.
+
+With `--upload-gcs`, the same process then copies the verified bundle to
+Cloud Storage (`day2_ops::offsite`): an access token from the GKE metadata
+server (Workload Identity; no key), then one streamed JSON API media upload per
+file to `PREFIX/<UTC yyyymmddThhmmssZ>/<relative path>` with
+`ifGenerationMatch=0` (never replacing an object), each response checked for
+success, name and exact size, and finally `PREFIX/<stamp>/COMPLETE`, listing
+every object and the manifest's sha256. The binary appends the timestamp.
+Nothing is retried; a failure exits non-zero and leaves a prefix without
+`COMPLETE`. The summary gains `upload` (`bucket`, `prefix`, `objects`, `bytes`,
+`complete`). TLS uses reqwest's rustls with its bundled web PKI roots, as the
+IAP key fetch in `day2-serve` does. Options are validated before any snapshot.
+The upload path is tested against an in-process mock of the metadata server
+and GCS; qualification runs `day2-backup` without upload (no network).
+
+Restore stays a tooling-image operation (`day2 platform restore`, which
+verifies again). As with every online snapshot, each store is individually
+consistent; cross-store coherence needs quiesced provider work.
 
 Qualification runs it from the runtime image beside the serving runtime
 (`linux-runtime-restore`: read-only root, no network, no capabilities, the

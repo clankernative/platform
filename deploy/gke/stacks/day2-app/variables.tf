@@ -259,17 +259,6 @@ variable "backup_service_account_name" {
   default     = "backup"
 }
 
-variable "backup_uploader_image" {
-  description = "Image of the upload container, pinned by digest. It needs /bin/sh, tar, gzip, sed, wc, tr, date and curl; the distroless app image has none of them."
-  type        = string
-  default     = "docker.io/curlimages/curl:8.22.0@sha256:58adaa4e8dca9c988bae2aba4ab3434a0bb2da16bbe3f92dec39ec7785166777"
-
-  validation {
-    condition     = can(regex("^[a-z0-9.-]+(:[0-9]+)?/[A-Za-z0-9._/-]+(:[A-Za-z0-9._-]+)?@sha256:[0-9a-f]{64}$", var.backup_uploader_image))
-    error_message = "backup_uploader_image must be pinned by digest: <registry>/<path>[:tag]@sha256:<64 lowercase hex>."
-  }
-}
-
 variable "backup_starting_deadline_seconds" {
   description = "A run that could not start within this many seconds of its schedule is skipped (counted as missed)."
   type        = number
@@ -293,13 +282,13 @@ variable "backup_active_deadline_seconds" {
 }
 
 variable "backup_scratch_size_limit" {
-  description = "Disk emptyDir for the snapshot and its tar.gz (and the containers' ephemeral-storage limit). At least twice the state database, provider stores and artifact."
+  description = "Disk emptyDir for the verified bundle before upload (and the container's ephemeral-storage limit). At least the state database, provider stores and artifact together."
   type        = string
   default     = "2Gi"
 }
 
-variable "backup_snapshot_memory" {
-  description = "Memory limit of the day2-backup container. Digesting reads each database (up to 256 MiB) into memory."
+variable "backup_memory" {
+  description = "Memory limit of the day2-backup container. Digesting reads each database (up to 256 MiB) into memory; uploads stream."
   type        = string
   default     = "1Gi"
 }
