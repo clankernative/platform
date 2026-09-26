@@ -170,22 +170,22 @@ variable "pod_pids_limit" {
 }
 
 variable "readers" {
-  description = "instance.json readers (lowercased IAP e-mail addresses). Seeded into the app database on first start only."
+  description = "instance.json readers: lowercased IAP e-mail addresses, or domain:<hosted_domain> for everyone at the domain IAP verifies. Seeded into the app database on first start only."
   type        = list(string)
 
   validation {
-    condition     = length(var.readers) > 0 && alltrue([for actor in var.readers : can(regex("^[^\\s@]+@[^\\s@]+$", actor)) && lower(actor) == actor])
-    error_message = "readers must be a non-empty list of lowercase e-mail addresses."
+    condition     = length(var.readers) > 0 && alltrue([for actor in var.readers : can(regex("^([^\\s@:]+@[^\\s@]+|domain:[a-z0-9.-]+)$", actor)) && lower(actor) == actor])
+    error_message = "readers must be a non-empty list of lowercase e-mail addresses or domain:<hosted_domain> entries."
   }
 }
 
 variable "writers" {
-  description = "instance.json writers (lowercased IAP e-mail addresses). Seeded on first start only."
+  description = "instance.json writers: lowercased IAP e-mail addresses, or domain:<hosted_domain>. Seeded on first start only."
   type        = list(string)
 
   validation {
-    condition     = alltrue([for actor in var.writers : can(regex("^[^\\s@]+@[^\\s@]+$", actor)) && lower(actor) == actor])
-    error_message = "writers must be lowercase e-mail addresses."
+    condition     = alltrue([for actor in var.writers : can(regex("^([^\\s@:]+@[^\\s@]+|domain:[a-z0-9.-]+)$", actor)) && lower(actor) == actor])
+    error_message = "writers must be lowercase e-mail addresses or domain:<hosted_domain> entries."
   }
 }
 
