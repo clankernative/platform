@@ -859,6 +859,17 @@
     "version": "0.3.7"
   },
   {
+    "license": "MIT/Apache-2.0",
+    "name": "filetime",
+    "notices": [
+      "LICENSE-APACHE",
+      "LICENSE-MIT"
+    ],
+    "repository": "https://github.com/alexcrichton/filetime",
+    "source": "registry+https://github.com/rust-lang/crates.io-index",
+    "version": "0.2.29"
+  },
+  {
     "license": "MIT OR Apache-2.0",
     "name": "find-msvc-tools",
     "notices": [
@@ -3691,6 +3702,17 @@
     "repository": "https://github.com/GuillaumeGomez/sysinfo",
     "source": "registry+https://github.com/rust-lang/crates.io-index",
     "version": "0.38.4"
+  },
+  {
+    "license": "MIT OR Apache-2.0",
+    "name": "tar",
+    "notices": [
+      "LICENSE-APACHE",
+      "LICENSE-MIT"
+    ],
+    "repository": "https://github.com/composefs/tar-rs",
+    "source": "registry+https://github.com/rust-lang/crates.io-index",
+    "version": "0.4.46"
   },
   {
     "license": "MIT OR Apache-2.0",
