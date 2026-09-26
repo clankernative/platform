@@ -319,6 +319,15 @@ run "backs_up_hourly_beside_the_app_pod_to_the_backup_bucket" {
   }
 
   assert {
+    condition = (
+      one([for volume in kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].volume : volume.empty_dir[0] if volume.name == "tmp"]).medium == "Memory" &&
+      one([for volume in kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].volume : volume.empty_dir[0] if volume.name == "tmp"]).size_limit ==
+      one([for volume in kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].volume : volume.empty_dir[0] if volume.name == "tmp"]).size_limit
+    )
+    error_message = "day2-backup copies the worker executable into /tmp as day2-serve does, so the backup Job's memory /tmp is the app pod's size."
+  }
+
+  assert {
     condition = alltrue([
       for container in kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].container :
       container.security_context[0].run_as_user == "10001" &&
