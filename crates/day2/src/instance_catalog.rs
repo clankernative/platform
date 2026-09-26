@@ -42,6 +42,15 @@ pub struct ResolvedImports {
     pub types: BTreeMap<String, TypePin>,
 }
 
+/// Contract checks for the supplied callers only. Release readiness still
+/// requires complete dependency evidence, serving bindings and current policy.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct CheckedConsumers {
+    pub catalog_digest: String,
+    pub dependencies: BTreeMap<String, Vec<String>>,
+    pub imports: BTreeMap<String, ResolvedImports>,
+}
+
 impl CandidateCatalog {
     pub fn derive(
         installation: String,
@@ -201,6 +210,43 @@ impl CandidateCatalog {
         let types = resolve_type_closure(operations.values())?;
         Ok(ResolvedImports { operations, types })
     }
+
+    pub fn check_consumers(
+        &self,
+        locks: &BTreeMap<String, ImportLock>,
+    ) -> Result<CheckedConsumers> {
+        self.verify()?;
+        ensure!(locks.len() <= self.apps.len(), "consumer lock budget");
+        let mut dependencies: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut imports = BTreeMap::new();
+        for (caller, lock) in locks {
+            ensure!(
+                self.apps.contains_key(caller),
+                "consumer app not selected: {caller}"
+            );
+            ensure!(!lock.apps.contains_key(caller), "self app import: {caller}");
+            let resolved = self.resolve(lock)?;
+            dependencies.insert(caller.clone(), lock.apps.keys().cloned().collect());
+            imports.insert(caller.clone(), resolved);
+        }
+        let mut remaining = dependencies.clone();
+        while !remaining.is_empty() {
+            let ready = remaining
+                .iter()
+                .filter(|(_, targets)| targets.iter().all(|target| !remaining.contains_key(target)))
+                .map(|(caller, _)| caller.clone())
+                .collect::<Vec<_>>();
+            ensure!(!ready.is_empty(), "cyclic app contract-build dependency");
+            for caller in ready {
+                remaining.remove(&caller);
+            }
+        }
+        Ok(CheckedConsumers {
+            catalog_digest: self.digest.clone(),
+            dependencies,
+            imports,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -343,5 +389,50 @@ mod tests {
                 .resolve(&lock("directory", &first, "lookup"))
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn candidate_checks_consumed_contracts_and_conservative_app_cycles() {
+        let directory = manifest("directory", &[("lookup", "directory.type.Person", 1)]);
+        let onboarding = manifest("onboarding", &[("start", "onboarding.type.Start", 1)]);
+        let selected_apps = BTreeMap::from([
+            ("directory".into(), selected(directory.clone())),
+            ("onboarding".into(), selected(onboarding.clone())),
+        ]);
+        let candidate = catalog(selected_apps.clone());
+        let callers =
+            BTreeMap::from([("onboarding".into(), lock("directory", &directory, "lookup"))]);
+        let checked = candidate.check_consumers(&callers).unwrap();
+        assert_eq!(checked.dependencies["onboarding"], ["directory"]);
+        assert_eq!(checked.imports["onboarding"].operations.len(), 1);
+
+        let mut unrelated = selected_apps.clone();
+        unrelated.insert(
+            "directory".into(),
+            selected(manifest(
+                "directory",
+                &[
+                    ("lookup", "directory.type.Person", 1),
+                    ("manager", "directory.type.Manager", 2),
+                ],
+            )),
+        );
+        assert!(catalog(unrelated).check_consumers(&callers).is_ok());
+
+        let mut changed = selected_apps;
+        changed.insert(
+            "directory".into(),
+            selected(manifest(
+                "directory",
+                &[("lookup", "directory.type.Person", 2)],
+            )),
+        );
+        assert!(catalog(changed).check_consumers(&callers).is_err());
+
+        let mut cycle = callers;
+        cycle.insert("directory".into(), lock("onboarding", &onboarding, "start"));
+        assert!(candidate.check_consumers(&cycle).is_err());
+        cycle.remove("onboarding");
+        assert!(candidate.check_consumers(&cycle).is_ok());
     }
 }
