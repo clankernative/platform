@@ -1,16 +1,21 @@
 # Company internal tools on GKE
 
-These public OpenTofu roots create a dedicated Standard GKE cluster, then one
-IAP-protected edge and single-replica SQLite workload per app. All company inputs
+These public OpenTofu roots create a dedicated project foundation and Standard
+GKE cluster, then one IAP-protected edge and single-replica SQLite workload per
+app. They are the whole control plane of an instance: nothing is shared with
+another platform's infrastructure code. All company inputs
 come from a separate private instance repository; start with the
 [synthetic template](../../examples/instance/README.md).
 
 | Root | Ownership |
 | --- | --- |
-| [cluster](stacks/cluster/main.tf) | Dedicated VPC, private nodes, NAT, GKE Dataplane V2, node identity, Artifact Registry |
-| [app-edge](stacks/app-edge/main.tf) | Namespace, service account, retained disk, quotas, Service, IAP BackendConfig, certificate, DNS, Ingress, network policy and contract |
+| [project](stacks/project/main.tf) | APIs, the OpenTofu state bucket and its per-prefix IAM, storage audit logs, the DNS provider token's secret |
+| [cluster](stacks/cluster/main.tf) | Dedicated VPC, zonal Standard cluster with Workload Identity and Calico network policy, one Ubuntu node pool with a pod PID limit, node identity |
+| [tenancy](stacks/tenancy/main.tf) | Retained SQLite storage and snapshot classes, admission policies for app namespaces |
+| [app-edge](stacks/app-edge/main.tf) | Per app: namespace, runtime service account, retained disk, quotas, Service, IAP BackendConfig, HTTPS redirect, managed certificate, static IP, Cloudflare DNS, Ingress, network policy, image repository, workload state bucket, GKE backup plan and the platform contract |
 | [day2-app](stacks/day2-app/main.tf) | Instance ConfigMap and one-replica StatefulSet |
 | [qualification-runner](stacks/qualification-runner/main.tf) | Optional x86_64 native Docker VM, off by default, private IP and IAP SSH |
+| [gitea-instance-ci](stacks/gitea-instance-ci/main.tf) | Optional plan-on-PR / apply-on-main CI for an instance repository on Gitea |
 
 The cluster example is zonal and uses fixed non-overlapping private ranges in a
 new dedicated VPC. It is a reference deployment, not a multi-zone HA service.
@@ -34,8 +39,10 @@ required deployment step, not a claim supplied by the source tests.
    bucket-level access, public-access prevention and object versioning. Grant only
    the provisioning identity bucket-scoped object access. State contains private
    configuration. Keep backend configuration and all tfvars in the private repo.
-4. Create a public Cloud DNS managed zone for the app subdomain and delegate it
-   at the parent zone. Put its name and real app domain in private edge tfvars.
+4. The app domain's zone is on Cloudflare. Create an API token scoped to DNS
+   edit on that zone, store it in the project's Secret Manager secret the
+   project stack creates, and put the zone id and app domain in the private
+   edge tfvars. Applies read the token into the process environment only.
 5. Configure Google Auth Platform branding/audience for the organization's IAP
    use. This stack uses the Google-managed OAuth client available with GKE
    1.29.4-gke.1043000 and later. It requires no OAuth client secret in Terraform.
@@ -57,10 +64,11 @@ tofu -chdir=deploy/gke/stacks/cluster apply /private/instance/cluster.tfplan
 gcloud container clusters get-credentials CLUSTER --zone ZONE --project PROJECT
 ```
 
-The Kubernetes API permits only `admin_cidrs`. Use your actual operator egress
-address; the template's TEST-NET address intentionally cannot work. Nodes have
-no public addresses and use NAT for external HTTPS. The node pool uses Ubuntu,
-cgroup v2 and an explicit `pod_pids_limit` (1024 by default). Verify the actual
+Apply `project` first, then `cluster`, then `tenancy`, each with its own
+backend prefix. The cluster's control-plane endpoint is public and its nodes
+have external addresses (no Cloud NAT); making both private is a separate,
+planned change. The node pool uses Ubuntu, cgroup v2 and an explicit
+`pod_pids_limit` (1024 or more; GKE's minimum). Verify the actual
 kernel with the probe before deploying. Do not substitute COS or Autopilot and
 assume containment is equivalent.
 
@@ -81,13 +89,12 @@ plan/apply `app-edge` again. It reads the backend's numeric ID, grants IAP acces
 and publishes the exact `/projects/NUMBER/global/backendServices/ID` audience.
 Wait for the managed certificate to become Active and DNS to resolve. Initial
 provisioning may take tens of minutes; inspect Ingress events for controller errors.
-The reference disables HTTP immediately; if a GKE version requires a staged TLS
-bootstrap, resolve certificate provisioning before deploying an app, and leave
-HTTP disabled in the final plan.
+A FrontendConfig redirects HTTP to HTTPS.
 
-The network policy allows only GFE health/proxy ranges to port 8080, kube-dns, and
-public IPv4 HTTPS egress (including IAP's public signing keys). It excludes private
-and metadata ranges. Kubernetes NetworkPolicy cannot express an FQDN allowlist;
+The network policy denies everything by default and allows only GFE health/proxy
+ranges to port 8080, kube-dns, the GKE metadata server (Workload Identity), and
+public IPv4 egress (including IAP's public signing keys); cluster ranges are
+excluded. Kubernetes NetworkPolicy cannot express an FQDN allowlist;
 companies needing narrower external egress must supply a controlled proxy. No
 pod service account token or cloud IAM role is granted to the runtime.
 
