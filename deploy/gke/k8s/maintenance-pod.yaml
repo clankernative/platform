@@ -1,0 +1,72 @@
+# One-off maintenance pod for a day2 app on GKE: the qualified tooling image
+# with the app's state volume mounted, so an operator can run day2's own
+# operations (inspect, backup, authority apply/activate, migrations, import)
+# against the stopped app. Rendered and run by ../scripts/day2-maintain.sh,
+# which stops the app's StatefulSet first: never run it next to a serving pod.
+#
+# Variables (every ${DAY2_MAINT_*} must be set):
+#   DAY2_MAINT_NAMESPACE      app namespace (app-<id>)
+#   DAY2_MAINT_POD            pod name
+#   DAY2_MAINT_TOOLING_IMAGE  tooling image of the SAME platform build as the
+#                             app's artifact, pinned by digest
+#   DAY2_MAINT_PVC            the app's state PVC (the contract's PVC_NAME)
+#   DAY2_MAINT_SERVICE_LABEL_KEY / DAY2_MAINT_SERVICE_LABEL_VALUE
+#                             the tenancy service label for maintenance
+#                             workloads ("background")
+#   DAY2_MAINT_DEADLINE_SECONDS  hard stop for the pod
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ${DAY2_MAINT_POD}
+  namespace: ${DAY2_MAINT_NAMESPACE}
+  labels:
+    ${DAY2_MAINT_SERVICE_LABEL_KEY}: ${DAY2_MAINT_SERVICE_LABEL_VALUE}
+    app.kubernetes.io/name: day2-maintenance
+    app.kubernetes.io/part-of: day2
+spec:
+  restartPolicy: Never
+  # The tenancy policy admits only the runtime service account; it has no
+  # cloud role and no token is mounted.
+  serviceAccountName: runtime
+  automountServiceAccountToken: false
+  enableServiceLinks: false
+  activeDeadlineSeconds: ${DAY2_MAINT_DEADLINE_SECONDS}
+  nodeSelector:
+    kubernetes.io/arch: amd64
+    kubernetes.io/os: linux
+  containers:
+    - name: maintenance
+      image: ${DAY2_MAINT_TOOLING_IMAGE}
+      imagePullPolicy: IfNotPresent
+      command: ["sleep", "${DAY2_MAINT_DEADLINE_SECONDS}"]
+      workingDir: /srv/day2
+      securityContext:
+        runAsUser: 10001
+        runAsGroup: 10001
+        runAsNonRoot: true
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+        seccompProfile:
+          type: RuntimeDefault
+      resources:
+        requests: { cpu: 100m, memory: 512Mi, ephemeral-storage: 1Gi }
+        limits: { cpu: "2", memory: 2Gi, ephemeral-storage: 4Gi }
+      volumeMounts:
+        # /srv/day2 mirrors the serving pod: instance.json and
+        # artifacts/<id>/ are copied in; .state is the app's volume.
+        - { name: work, mountPath: /srv/day2 }
+        - { name: data, mountPath: /srv/day2/.state }
+        - { name: tmp, mountPath: /tmp }
+  volumes:
+    - name: work
+      emptyDir:
+        sizeLimit: 1Gi
+    - name: data
+      persistentVolumeClaim:
+        claimName: ${DAY2_MAINT_PVC}
+    - name: tmp
+      emptyDir:
+        medium: Memory
+        sizeLimit: 256Mi
