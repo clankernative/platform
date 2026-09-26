@@ -156,6 +156,43 @@ run "refuses_a_pod_bound_gke_cannot_set" {
   expect_failures = [var.pod_pids_limit]
 }
 
+run "admits_everyone_at_the_hosted_domain" {
+  command = plan
+
+  variables {
+    readers = ["domain:example.com", "qa@example.com"]
+    writers = ["domain:example.com"]
+  }
+
+  assert {
+    condition = (
+      jsondecode(kubernetes_config_map_v1.instance.data["instance.json"]).apps.example_app.readers == ["domain:example.com", "qa@example.com"] &&
+      jsondecode(kubernetes_config_map_v1.instance.data["instance.json"]).apps.example_app.writers == ["domain:example.com"]
+    )
+    error_message = "domain:<hosted_domain> is rendered into readers and writers unchanged"
+  }
+}
+
+run "refuses_a_domain_other_than_the_hosted_domain" {
+  command = plan
+
+  variables {
+    readers = ["domain:example.org"]
+  }
+
+  expect_failures = [kubernetes_config_map_v1.instance]
+}
+
+run "refuses_an_uppercase_domain_entry" {
+  command = plan
+
+  variables {
+    writers = ["domain:Example.com"]
+  }
+
+  expect_failures = [var.writers]
+}
+
 run "refuses_placeholder_authority" {
   command = plan
 

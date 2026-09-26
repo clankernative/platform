@@ -323,6 +323,9 @@ Several fields are fixed or seeded once:
 
 - `installation`, `environment` and the app key are fixed after the first
   start.
+- Readers, writers and operation actors are lowercase e-mail addresses, or
+  `domain:<hosted_domain>` for everyone at the domain IAP verifies. The root
+  refuses any other `domain:` entry, as day2 does.
 - Readers, writers and authority are copied into the app's database
   on the first start only. Later changes need explicit activation (`day2
   activate`).

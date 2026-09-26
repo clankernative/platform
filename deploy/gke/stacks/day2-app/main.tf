@@ -125,6 +125,11 @@ resource "kubernetes_config_map_v1" "instance" {
     }
 
     precondition {
+      condition     = alltrue([for actor in concat(var.readers, var.writers) : !startswith(actor, "domain:") || actor == "domain:${var.hosted_domain}"])
+      error_message = "A domain: entry in readers or writers must be exactly domain:${var.hosted_domain}. Day2 admits a domain only when it is the hosted_domain its identity provider verifies, and refuses the instance otherwise."
+    }
+
+    precondition {
       condition     = try(var.authority.version == 1 && length(keys(var.authority.operations)) > 0, false)
       error_message = "authority must be a version 1 day2 authority policy that lists the artifact's operations; the placeholder has not been replaced."
     }
