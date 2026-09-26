@@ -36,10 +36,51 @@ pub struct ImportLock {
     pub apps: BTreeMap<String, Vec<ImportPin>>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ResolvedImports {
     pub operations: BTreeMap<String, Package>,
     pub types: BTreeMap<String, TypePin>,
+}
+
+/// Portable build input: only the consumed operation packages and their exact
+/// type closure. Instance scope, selected artifact IDs and the catalog digest
+/// stay in build/qualification evidence, outside the compiled app artifact.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImportedContracts {
+    pub operations: BTreeMap<String, Package>,
+    pub types: BTreeMap<String, TypePin>,
+}
+
+impl ImportedContracts {
+    pub fn from_resolved(resolved: ResolvedImports) -> Result<Self> {
+        let imports = Self {
+            operations: resolved.operations,
+            types: resolved.types,
+        };
+        imports.verify()?;
+        Ok(imports)
+    }
+
+    pub fn verify(&self) -> Result<()> {
+        ensure!(
+            !self.operations.is_empty() && self.operations.len() <= 1024,
+            "imported operation budget"
+        );
+        for (id, package) in &self.operations {
+            ensure!(
+                id == &package.operation.id,
+                "imported operation key mismatch"
+            );
+            package.verify()?;
+        }
+        ensure!(
+            self.types == resolve_type_closure(self.operations.values())?,
+            "imported type closure mismatch"
+        );
+        Ok(())
+    }
 }
 
 /// Contract checks for the supplied callers only. Release readiness still

@@ -27,6 +27,7 @@ mod host;
 pub mod iap;
 pub mod identity;
 pub mod import;
+pub mod import_codegen;
 pub mod ingress;
 pub mod input_shape;
 pub mod instance_catalog;

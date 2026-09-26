@@ -19,6 +19,7 @@ struct Prepared {
     shape: Option<day2::registry::AppShape>,
     platform_hashes: BTreeMap<String, String>,
     inference_sources: BTreeMap<String, String>,
+    imports: Option<day2::instance_catalog::ImportedContracts>,
 }
 
 struct Bound {
@@ -29,7 +30,12 @@ struct Bound {
     declarations: day2::registry::Catalog,
 }
 
-fn prepare(root: &Path, app: &Path, overrides: Option<&Path>) -> Result<Prepared> {
+fn prepare(
+    root: &Path,
+    app: &Path,
+    overrides: Option<&Path>,
+    import_context: Option<&BuildImportContext>,
+) -> Result<Prepared> {
     let platform_hashes = platform_sources(root)?;
     let native_pin = native_toolchain::load(root)?;
     let roc = native_pin.verified_compiler(root)?;
@@ -65,6 +71,30 @@ fn prepare(root: &Path, app: &Path, overrides: Option<&Path>) -> Result<Prepared
         day2::app_inference::namespace(&fs::read_to_string(stage.join("app/App.roc"))?)?;
     let projection =
         day2::registry::Projection::declared(&fs::read_to_string(stage.join("app/App.roc"))?)?;
+    let imports = if let Some(context) = import_context {
+        let metadata = fs::symlink_metadata(&context.lock)?;
+        ensure!(
+            metadata.file_type().is_file() && metadata.len() <= 1_048_576,
+            "invalid import lock file"
+        );
+        let lock: day2::instance_catalog::ImportLock =
+            day2::json::decode(&fs::read(&context.lock)?)?;
+        ensure!(
+            !lock.apps.contains_key(&namespace),
+            "app cannot import its own exported contract"
+        );
+        let catalog =
+            day2::instance_catalog::CandidateCatalog::from_instance_file(&context.instance)?;
+        let imports =
+            day2::instance_catalog::ImportedContracts::from_resolved(catalog.resolve(&lock)?)?;
+        fs::write(
+            stage.join("app").join(day2::import_codegen::MODULE),
+            day2::import_codegen::module(&imports)?,
+        )?;
+        Some(imports)
+    } else {
+        None
+    };
     fs::write(
         stage.join("app/AppIdentity.roc"),
         day2::app_inference::identity_module(&namespace)?,
@@ -117,6 +147,7 @@ fn prepare(root: &Path, app: &Path, overrides: Option<&Path>) -> Result<Prepared
         shape: None,
         platform_hashes,
         inference_sources,
+        imports,
     })
 }
 
@@ -262,6 +293,7 @@ fn publish(root: &Path, prepared: &mut Prepared, bound: &Bound) -> Result<PathBu
         web_resources,
         templates,
         pin,
+        imports,
         ..
     } = prepared;
     let Bound {
@@ -330,6 +362,9 @@ fn publish(root: &Path, prepared: &mut Prepared, bound: &Bound) -> Result<PathBu
     artifact["export_manifest"] = serde_json::to_value(
         day2::operation_contract::Manifest::from_checked_artifact(&checked)?,
     )?;
+    if let Some(imports) = imports {
+        artifact["imports"] = serde_json::to_value(imports)?;
+    }
     publish_contract(
         root,
         stage,
@@ -460,6 +495,7 @@ pub fn execute(
     app: &Path,
     overrides: Option<&Path>,
     isolated_job: Option<&Path>,
+    import_context: Option<&BuildImportContext>,
     runner: &Path,
 ) -> Result<PathBuf> {
     let mut prepared = None;
@@ -474,7 +510,7 @@ pub fn execute(
         );
         ensure!(!done.contains(&request.action), "duplicate compiler effect");
         if request.action == "build-stage" {
-            prepared = Some(prepare(root, app, overrides)?);
+            prepared = Some(prepare(root, app, overrides, import_context)?);
         } else {
             let prepared = prepared
                 .as_mut()

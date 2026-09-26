@@ -139,6 +139,7 @@ fn snapshot(
                         "Commands.roc",
                         "Reads.roc",
                         "AppContract.roc",
+                        "ImportedContracts.roc",
                         "Registry.roc",
                     ]
                     .contains(&name.as_str()))
@@ -163,7 +164,12 @@ fn build(root: &Path, app: &Path) -> Result<PathBuf> {
 }
 
 fn build_with_overrides(root: &Path, app: &Path, overrides: Option<&Path>) -> Result<PathBuf> {
-    build_recipe(root, app, overrides, None)
+    build_recipe(root, app, overrides, None, None)
+}
+
+struct BuildImportContext {
+    instance: PathBuf,
+    lock: PathBuf,
 }
 
 fn build_recipe(
@@ -171,6 +177,7 @@ fn build_recipe(
     app: &Path,
     overrides: Option<&Path>,
     isolated_job: Option<&Path>,
+    imports: Option<&BuildImportContext>,
 ) -> Result<PathBuf> {
     let runner = if let Some(job) = isolated_job {
         for (name, expected) in day2::automation::SOURCES {
@@ -183,7 +190,7 @@ fn build_recipe(
     } else {
         workflows::build(root)?
     };
-    build_native::execute(root, app, overrides, isolated_job, &runner)
+    build_native::execute(root, app, overrides, isolated_job, imports, &runner)
 }
 
 fn main() -> Result<()> {
@@ -388,16 +395,32 @@ fn main() -> Result<()> {
                 &isolated_app.context("isolated app root")?,
                 None,
                 Some(root.parent().context("isolated workspace parent")?),
+                None,
             )?;
         }
         "build" => {
-            build(
-                &root,
-                &args
-                    .next()
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| root.join("examples/reports")),
-            )?;
+            let app = args
+                .next()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| root.join("examples/reports"));
+            let context = match args.next() {
+                None => None,
+                Some(flag) => {
+                    ensure!(
+                        flag == "--instance",
+                        "usage: xtask build APP [--instance INSTANCE_JSON --imports IMPORT_LOCK_JSON]"
+                    );
+                    let instance = PathBuf::from(args.next().context("missing build instance")?);
+                    ensure!(
+                        args.next().as_deref() == Some("--imports"),
+                        "missing --imports build lock"
+                    );
+                    let lock = PathBuf::from(args.next().context("missing build import lock")?);
+                    ensure!(args.next().is_none(), "unexpected build argument");
+                    Some(BuildImportContext { instance, lock })
+                }
+            };
+            build_recipe(&root, &app, None, None, context.as_ref())?;
         }
         "catalog-candidate" => {
             let instance = PathBuf::from(
