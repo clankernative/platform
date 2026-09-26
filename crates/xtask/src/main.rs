@@ -443,6 +443,25 @@ fn main() -> Result<()> {
                 serde_json::to_string_pretty(&catalog.resolve(&lock)?)?
             );
         }
+        "catalog-check-consumers" => {
+            let instance = PathBuf::from(args.next().context(
+                "usage: xtask catalog-check-consumers INSTANCE_JSON CONSUMER_LOCKS_JSON",
+            )?);
+            let locks = PathBuf::from(args.next().context(
+                "usage: xtask catalog-check-consumers INSTANCE_JSON CONSUMER_LOCKS_JSON",
+            )?);
+            ensure!(
+                args.next().is_none() && fs::metadata(&locks)?.len() <= 1_048_576,
+                "consumer locks byte budget or usage"
+            );
+            let locks: BTreeMap<String, day2::instance_catalog::ImportLock> =
+                day2::json::decode(&fs::read(locks)?)?;
+            let catalog = day2::instance_catalog::CandidateCatalog::from_instance_file(&instance)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&catalog.check_consumers(&locks)?)?
+            );
+        }
         "build-receipt" => {
             let source = PathBuf::from(
                 args.next()

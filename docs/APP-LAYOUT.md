@@ -134,6 +134,9 @@ These commands verify the instance's selected artifacts. A lock names the
 installation, environment, target apps, and consumed operation/version/digests;
 resolution rejects missing or changed contracts and conflicting nominal type
 shapes. Candidate discovery does not mean an operation is serving or permitted.
+`catalog-check-consumers INSTANCE_JSON CONSUMER_LOCKS_JSON` also checks the
+supplied caller locks against one candidate and refuses an app import cycle.
+The supplied locks are not yet a complete release dependency inventory.
 Generated Roc client modules, build staging, active catalog publication, and
 cross-app dispatch are later parts of the delegation implementation.
 
