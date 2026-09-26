@@ -87,6 +87,7 @@ impl Fixture {
             app: "app".into(),
             db: state.join("app.sqlite"),
             scope: "coverage/test/app".into(),
+            hosted_domain: None,
             artifact: Arc::new(LoadedArtifact::from_contract_for_tests(
                 "read-coverage-host-test".into(),
                 artifact_directory,

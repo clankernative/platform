@@ -80,6 +80,7 @@ impl Granted {
             app: "caller".into(),
             db: state.join("caller.sqlite"),
             scope: "delegationco/test/caller".into(),
+            hosted_domain: None,
             artifact: Arc::new(LoadedArtifact::from_contract_for_tests(
                 "delegation-test".into(),
                 artifact_directory,
@@ -299,6 +300,7 @@ impl Impersonating {
             app: "support".into(),
             db: state.join("support.sqlite"),
             scope: "supportco/test/support".into(),
+            hosted_domain: None,
             artifact: Arc::new(LoadedArtifact::from_contract_for_tests(
                 "support-test".into(),
                 artifact_directory,

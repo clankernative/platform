@@ -175,7 +175,8 @@ from `GET /api/session`. The target header must occur exactly once and contain a
 valid nonempty actor. Cross-site fetch metadata is rejected. The host requires an
 active operator delegation rule with `paths: ["request"]`, then independently
 checks the target's membership, operation, model and row permissions. A rule
-for `ingress` is not usable by a session. See [AUTHORITY.md](AUTHORITY.md).
+for `ingress` is not usable by a session. The target is one principal, never a
+`domain:` entry, though its membership may come from one. See [AUTHORITY.md](AUTHORITY.md).
 
 For example, a signed-in support client can send:
 
@@ -729,7 +730,8 @@ cannot disable capture or write the audit tables. UPDATE/DELETE/replacement guar
 append-only audit behavior under the host contract, not against a local DB admin.
 
 The reserved `/audit` viewer requires ownership: membership in the enabled app
-policy's `admins`. No membership or operation grant extends platform audit access.
+policy's `admins`. No membership or operation grant extends platform audit access,
+and `admins` never accepts a `domain:` entry.
 It has actor/operation/status filters and bounded cursor pagination. Values are
 redacted by default. Read-only page queries also get completion entries. Separate
 `day2_web_events` record request admission/status, including rejected requests,

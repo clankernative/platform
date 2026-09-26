@@ -56,6 +56,7 @@ fn runtime(directory: &Path) -> Result<Runtime> {
         app: "app".into(),
         db,
         scope: "supplyco/test/app".into(),
+        hosted_domain: None,
         artifact: Arc::new(LoadedArtifact::from_contract_for_tests(
             "supply-test".into(),
             artifact_directory,

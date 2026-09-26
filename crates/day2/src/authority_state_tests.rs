@@ -401,6 +401,7 @@ fn exhaustion_autocommit_and_tampered_history_guards_fail_closed() -> Result<()>
 fn document() -> AuthorityDocument {
     AuthorityDocument {
         security: None,
+        hosted_domain: None,
         resources: Default::default(),
         enabled: true,
         readers: BTreeSet::from(["viewer".into()]),
@@ -729,5 +730,90 @@ fn sqlite_writer_lock_orders_business_commit_before_revocation() -> Result<()> {
     let tx = business.transaction_with_behavior(TransactionBehavior::Immediate)?;
     assert_ne!(current(&tx)?.stamp, stamp);
     assert!(!current(&tx)?.document.enabled);
+    Ok(())
+}
+
+#[test]
+fn domain_membership_admits_only_under_the_document_s_verified_domain() -> Result<()> {
+    let artifact = LoadedArtifact::from_contract_for_tests(
+        "domain-test".into(),
+        "/admitted/domain".into(),
+        serde_json::from_value(serde_json::json!({
+            "format":crate::artifact::CURRENT_FORMAT,"roc_version":"domain-test",
+            "worker_digest":"domain-test","schema_digest":"domain-test",
+            "schema":{"models":{},"inputs":{"input":{"fields":{}}},"foreign_keys":[]},
+            "operations":[
+                {"name":"items.read","kind":"query","input_type":"input","output_type":""},
+                {"name":"items.write","kind":"command","input_type":"input","output_type":""}],
+            "sources":{},"admission":"local-spike-only"}))?,
+    );
+    let read = artifact.route("items.read")?.clone();
+    let write = artifact.route("items.write")?.clone();
+    let everyone = String::from("domain:wonderly.com");
+    let mut doc = document();
+    doc.hosted_domain = Some("wonderly.com".into());
+    doc.readers.insert(everyone.clone());
+    let policy = doc.policy.as_mut().unwrap();
+    for operation in policy.operations.values_mut() {
+        operation.actors.insert(everyone.clone());
+    }
+    doc.validate(&artifact)?;
+
+    // A reader by domain may query and may not write; named members are unchanged.
+    let hire = "newhire@wonderly.com";
+    doc.authorize(&read, hire)?;
+    assert!(doc.authorize(&write, hire).is_err());
+    doc.authorize(&write, "alice")?;
+    doc.authorize(&read, "viewer")?;
+    for outsider in [
+        "newhire@evil-wonderly.com",
+        "newhire@wonderly.com.evil.com",
+        "newhire@sub.wonderly.com",
+        "NewHire@wonderly.com",
+        "a@b@wonderly.com",
+        "app:links@wonderly.com",
+        "domain:wonderly.com",
+    ] {
+        assert!(doc.authorize(&read, outsider).is_err(), "{outsider}");
+    }
+    // Owners stay named: the audit is never opened by a domain.
+    assert!(doc.authorize_audit(hire).is_err());
+    let mut owners = doc.clone();
+    owners
+        .policy
+        .as_mut()
+        .unwrap()
+        .admins
+        .insert(everyone.clone());
+    assert!(owners.validate(&artifact).is_err());
+
+    // The same entries without the verified domain, or under another, are refused.
+    let mut unverified = doc.clone();
+    unverified.hosted_domain = None;
+    let error = unverified.validate(&artifact).unwrap_err();
+    assert!(format!("{error:#}").contains("google_iap"), "{error:#}");
+    let mut elsewhere = doc.clone();
+    elsewhere.hosted_domain = Some("example.com".into());
+    assert!(elsewhere.validate(&artifact).is_err());
+    let mut operation_only = document();
+    operation_only
+        .policy
+        .as_mut()
+        .unwrap()
+        .operations
+        .get_mut("items.read")
+        .unwrap()
+        .actors
+        .insert(everyone);
+    assert!(operation_only.validate(&artifact).is_err());
+
+    // The document keeps its domain through storage, and omits it when absent.
+    let stored: AuthorityDocument = serde_json::from_str(&serde_json::to_string(&doc)?)?;
+    assert_eq!(stored, doc);
+    assert!(
+        serde_json::to_value(document())?
+            .get("hosted_domain")
+            .is_none()
+    );
     Ok(())
 }

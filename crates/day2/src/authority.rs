@@ -160,13 +160,26 @@ impl Policy {
         for actor in &self.admins {
             valid_actor(actor)?;
         }
+        // Delegation rules name the principals on both sides of an impersonation;
+        // a domain cannot authenticate, and "act as anyone at a domain" is what
+        // `any_human` already says, with its exclusions.
+        for rule in self.delegations.values() {
+            for actor in &rule.authenticated {
+                valid_actor(actor)?;
+            }
+            if let ActAs::Actors { actors } = &rule.may_act_as {
+                for actor in actors {
+                    valid_actor(actor)?;
+                }
+            }
+        }
         for (name, policy) in &self.operations {
             let operation = operations
                 .iter()
                 .find(|operation| operation.name == *name)
                 .with_context(|| format!("authority policy unknown operation: {name}"))?;
             for actor in &policy.actors {
-                valid_actor(actor)?;
+                entry_domain(actor)?;
             }
             ensure!(
                 matches!(
@@ -308,6 +321,23 @@ impl Policy {
         Ok(())
     }
 
+    /// Confine this policy's `domain:` operation actors to the domain the
+    /// installation's edge verifies; see [`valid_entry`]. Separate from
+    /// [`Policy::validate`] because the hosted domain belongs to the
+    /// installation, not to the policy or the artifact.
+    pub fn validate_domains(&self, hosted_domain: Option<&str>) -> Result<()> {
+        for policy in self.operations.values() {
+            for entry in policy
+                .actors
+                .iter()
+                .filter(|actor| actor.starts_with(DOMAIN_PREFIX))
+            {
+                valid_entry(entry, hosted_domain)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Which rule, if any, lets `authenticated` act as `effective` by `path`.
     ///
     /// Returns the rule's name, which is what the invocation records: an
@@ -335,6 +365,7 @@ impl Policy {
                                 && !operators.contains(effective)
                                 && !effective.starts_with("app:")
                                 && !effective.starts_with("svc:")
+                                && !effective.starts_with(DOMAIN_PREFIX)
                         }
                     }
             })
@@ -346,7 +377,7 @@ impl Policy {
         ensure!(
             self.operations
                 .get(operation)
-                .is_some_and(|policy| policy.actors.contains(actor)),
+                .is_some_and(|policy| admits(&policy.actors, actor)),
             crate::error::Failure::Forbidden
         );
         Ok(())
@@ -532,7 +563,28 @@ impl Policy {
     }
 }
 
+/// The prefix of an entry that admits everyone at a domain instead of one person.
+///
+/// `domain:D` may appear in an app's `readers` and `writers` and in an
+/// operation's `actors`, and nowhere else. It admits exactly the addresses
+/// [`in_domain`] accepts, and only when `D` is the hosted domain the
+/// installation's edge verifies on every request (see [`valid_entry`]). It is
+/// never an identity: owners, administrators, delegation rules and the audit
+/// always name the one person the edge verified.
+pub const DOMAIN_PREFIX: &str = "domain:";
+
+/// A principal the platform can record: one person's address, an `app:` or
+/// `svc:` name, or a development name.
+///
+/// A `domain:` entry is refused here because it names a set of people, not one
+/// of them: it cannot own a row, administer an app, take part in a delegation
+/// or appear in the audit as who acted.
 pub(crate) fn valid_actor(actor: &str) -> Result<()> {
+    ensure!(
+        !actor.starts_with(DOMAIN_PREFIX),
+        "a {DOMAIN_PREFIX} entry names a set of people, not one principal, and is accepted only \
+         in readers, writers and operation actors: {actor}"
+    );
     ensure!(
         !actor.is_empty()
             && actor.len() <= 256
@@ -541,4 +593,195 @@ pub(crate) fn valid_actor(actor: &str) -> Result<()> {
         "invalid authority actor"
     );
     Ok(())
+}
+
+/// One entry of a membership list or an operation's `actors`: a principal, or
+/// `domain:D` for the domain the installation's edge verifies.
+///
+/// `hosted_domain` is the installation's `google_iap` hosted domain, and absent
+/// when it declares no identity provider. Only then has the platform checked
+/// every request's `hd` claim and address against `D`, so a domain entry for
+/// any other domain — or any domain at all without an identity provider, as in
+/// local development — is refused rather than left to match nobody.
+pub(crate) fn valid_entry(entry: &str, hosted_domain: Option<&str>) -> Result<()> {
+    let Some(domain) = entry_domain(entry)? else {
+        return Ok(());
+    };
+    match hosted_domain {
+        Some(hosted) => ensure!(
+            hosted == domain,
+            "{entry} does not name the installation's hosted_domain ({hosted}): a domain entry \
+             admits only the domain its identity provider verifies"
+        ),
+        None => anyhow::bail!(
+            "{entry} requires the installation to declare identity \
+             {{\"scheme\":\"google_iap\",\"hosted_domain\":\"{domain}\"}}: without an identity \
+             provider nothing has verified that a request comes from that domain"
+        ),
+    }
+    Ok(())
+}
+
+/// The domain a well-formed entry admits, or `None` for a principal.
+fn entry_domain(entry: &str) -> Result<Option<&str>> {
+    let Some(domain) = entry.strip_prefix(DOMAIN_PREFIX) else {
+        valid_actor(entry)?;
+        return Ok(None);
+    };
+    ensure!(
+        crate::artifact::dns_name(domain),
+        "invalid {DOMAIN_PREFIX} entry: {entry} (expected {DOMAIN_PREFIX}<lowercase domain>)"
+    );
+    Ok(Some(domain))
+}
+
+/// Whether `entries` admit `actor`: by name, or by a `domain:` entry for the
+/// actor's own domain.
+///
+/// A domain entry is matched on its own spelling here; that it names the
+/// domain the installation's edge verifies is established when the entries
+/// are validated ([`valid_entry`]) and re-established on every authorization,
+/// which checks the activated document against the running installation. An
+/// actor spelled as a domain entry is never admitted, even by that same entry.
+pub(crate) fn admits(entries: &BTreeSet<String>, actor: &str) -> bool {
+    !actor.starts_with(DOMAIN_PREFIX)
+        && (entries.contains(actor)
+            || actor.split_once('@').is_some_and(|(_, domain)| {
+                in_domain(actor, domain) && entries.contains(&format!("{DOMAIN_PREFIX}{domain}"))
+            }))
+}
+
+/// Whether `actor` is a person's address at exactly `domain`.
+///
+/// Exactly one `@`, a non-empty local part, and `domain` after it byte for
+/// byte: no subdomain, no suffix, no lookalike. Lowercase ASCII without
+/// whitespace, because the edge records the address it verified lowercased and
+/// trimmed and a differently spelled one is not that person. Service
+/// principals (`app:`, `svc:`) and Google service accounts are never members
+/// of a domain: neither has a person behind it.
+pub(crate) fn in_domain(actor: &str, domain: &str) -> bool {
+    let Some((local, host)) = actor.split_once('@') else {
+        return false;
+    };
+    !local.is_empty()
+        && host == domain
+        && crate::artifact::dns_name(host)
+        && !host.ends_with(".gserviceaccount.com")
+        && !actor.starts_with("app:")
+        && !actor.starts_with("svc:")
+        && !actor.starts_with(DOMAIN_PREFIX)
+        && local
+            .bytes()
+            .all(|b| b.is_ascii_graphic() && !b.is_ascii_uppercase() && b != b'@')
+}
+
+#[cfg(test)]
+mod domain_tests {
+    use super::*;
+
+    const DOMAIN: &str = "wonderly.com";
+
+    fn entries(values: &[&str]) -> BTreeSet<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    #[test]
+    fn only_a_plain_lowercase_address_at_exactly_the_domain_is_a_member() {
+        for member in ["ada@wonderly.com", "a.b+tag@wonderly.com", "x@wonderly.com"] {
+            assert!(in_domain(member, DOMAIN), "{member}");
+        }
+        for outsider in [
+            "ada@evil-wonderly.com",
+            "ada@wonderly.com.evil.com",
+            "ada@sub.wonderly.com",
+            "ada@wonderly.co",
+            "ada@wonderly.comm",
+            "ada@wonderlyxcom",
+            "ada@WONDERLY.COM",
+            "ada@Wonderly.com",
+            "Ada@wonderly.com",
+            "ADA@wonderly.com",
+            "@wonderly.com",
+            "ada@evil.com@wonderly.com",
+            "ada@@wonderly.com",
+            "ada@wonderly.com@evil.com",
+            "wonderly.com",
+            "ada",
+            "",
+            " ada@wonderly.com",
+            "ada@wonderly.com ",
+            "ada @wonderly.com",
+            "ada\t@wonderly.com",
+            "ada\n@wonderly.com",
+            "adá@wonderly.com",
+            "app:links@wonderly.com",
+            "svc:gateway@wonderly.com",
+            "domain:wonderly.com",
+            "domain:x@wonderly.com",
+            "bot@tools.iam.gserviceaccount.com",
+        ] {
+            assert!(!in_domain(outsider, DOMAIN), "{outsider:?}");
+        }
+        // A service account's domain is never a member of itself either.
+        assert!(!in_domain(
+            "bot@tools.iam.gserviceaccount.com",
+            "tools.iam.gserviceaccount.com"
+        ));
+    }
+
+    #[test]
+    fn a_domain_entry_admits_members_and_names_still_admit_themselves() {
+        let listed = entries(&["domain:wonderly.com", "partner@example.com"]);
+        assert!(admits(&listed, "newhire@wonderly.com"));
+        assert!(admits(&listed, "partner@example.com"));
+        for refused in [
+            "other@example.com",
+            "newhire@evil-wonderly.com",
+            "newhire@sub.wonderly.com",
+            "NewHire@wonderly.com",
+            "svc:gateway@wonderly.com",
+            // Spelled as the entry itself, it is still not a principal.
+            "domain:wonderly.com",
+        ] {
+            assert!(!admits(&listed, refused), "{refused}");
+        }
+        // Without a domain entry, membership is exactly the named set.
+        assert!(!admits(
+            &entries(&["partner@example.com"]),
+            "newhire@wonderly.com"
+        ));
+        // An entry for one domain admits nobody from another.
+        assert!(!admits(
+            &entries(&["domain:example.com"]),
+            "newhire@wonderly.com"
+        ));
+    }
+
+    #[test]
+    fn a_domain_entry_must_name_the_verified_hosted_domain() {
+        assert!(valid_entry("domain:wonderly.com", Some(DOMAIN)).is_ok());
+        assert!(valid_entry("ada@wonderly.com", None).is_ok());
+        let without = valid_entry("domain:wonderly.com", None).unwrap_err();
+        assert!(without.to_string().contains("google_iap"), "{without}");
+        for entry in [
+            "domain:example.com",
+            "domain:sub.wonderly.com",
+            "domain:WONDERLY.COM",
+            "domain:wonderly.com ",
+            "domain: wonderly.com",
+            "domain:",
+            "domain:com",
+            "domain:*.wonderly.com",
+            "domain:@wonderly.com",
+        ] {
+            assert!(valid_entry(entry, Some(DOMAIN)).is_err(), "{entry:?}");
+        }
+    }
+
+    #[test]
+    fn a_domain_is_never_a_principal() {
+        let error = valid_actor("domain:wonderly.com").unwrap_err();
+        assert!(error.to_string().contains("readers, writers"), "{error}");
+        assert!(valid_actor("ada@wonderly.com").is_ok());
+    }
 }
