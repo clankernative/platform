@@ -29,6 +29,7 @@ pub mod identity;
 pub mod import;
 pub mod ingress;
 pub mod input_shape;
+pub mod instance_catalog;
 pub mod integration_host;
 pub mod integrations;
 pub mod invocations;

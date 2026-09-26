@@ -399,6 +399,50 @@ fn main() -> Result<()> {
                     .unwrap_or_else(|| root.join("examples/reports")),
             )?;
         }
+        "catalog-candidate" => {
+            let instance = PathBuf::from(
+                args.next()
+                    .context("usage: xtask catalog-candidate INSTANCE_JSON")?,
+            );
+            ensure!(
+                args.next().is_none(),
+                "usage: xtask catalog-candidate INSTANCE_JSON"
+            );
+            let catalog = day2::instance_catalog::CandidateCatalog::from_instance_file(&instance)?;
+            println!("{}", serde_json::to_string_pretty(&catalog)?);
+        }
+        "catalog-pin" => {
+            let instance = PathBuf::from(
+                args.next()
+                    .context("usage: xtask catalog-pin INSTANCE_JSON OPERATION...")?,
+            );
+            let operations = args.collect::<Vec<_>>();
+            let catalog = day2::instance_catalog::CandidateCatalog::from_instance_file(&instance)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&catalog.pin(&operations)?)?
+            );
+        }
+        "catalog-resolve" => {
+            let instance = PathBuf::from(
+                args.next()
+                    .context("usage: xtask catalog-resolve INSTANCE_JSON IMPORT_LOCK_JSON")?,
+            );
+            let lock = PathBuf::from(
+                args.next()
+                    .context("usage: xtask catalog-resolve INSTANCE_JSON IMPORT_LOCK_JSON")?,
+            );
+            ensure!(
+                args.next().is_none() && fs::metadata(&lock)?.len() <= 1_048_576,
+                "import lock byte budget or usage"
+            );
+            let lock: day2::instance_catalog::ImportLock = day2::json::decode(&fs::read(lock)?)?;
+            let catalog = day2::instance_catalog::CandidateCatalog::from_instance_file(&instance)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&catalog.resolve(&lock)?)?
+            );
+        }
         "build-receipt" => {
             let source = PathBuf::from(
                 args.next()

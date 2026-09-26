@@ -113,6 +113,30 @@ Folders never register operations. An unregistered helper remains a helper, and
 deleting a registered dependency fails compilation. There is no second authored
 module manifest or catalog.
 
+## Cross-app contract discovery (in progress)
+
+An operation may opt into a checked export with
+`Api.query(...).cross_app({ version: 1 })` or
+`Api.command(...).cross_app({ version: 1 })`. The normal build derives its export
+manifest from the registered operation and checked types. Unsupported codecs and
+internal operations fail admission. The app does not maintain a second schema.
+
+For a selected instance checkout, platform tooling can inspect candidate exports
+and create an exact import lock without copying contract digests by hand:
+
+```text
+cargo run --locked -p xtask -- catalog-candidate path/to/instance.json
+cargo run --locked -p xtask -- catalog-pin path/to/instance.json directory.lookup
+cargo run --locked -p xtask -- catalog-resolve path/to/instance.json path/to/import-lock.json
+```
+
+These commands verify the instance's selected artifacts. A lock names the
+installation, environment, target apps, and consumed operation/version/digests;
+resolution rejects missing or changed contracts and conflicting nominal type
+shapes. Candidate discovery does not mean an operation is serving or permitted.
+Generated Roc client modules, build staging, active catalog publication, and
+cross-app dispatch are later parts of the delegation implementation.
+
 ## Future app creation
 
 The platform's future app-creation workflow must initialize this layout and a complete
