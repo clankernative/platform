@@ -122,6 +122,28 @@ Initialize, plan and apply `day2-app` with its separate backend. Confirm rollout
 readiness, authenticated access, denial for an unauthorized account, app operation
 authority and rejection of unsigned direct requests. Retain this evidence privately.
 
+## Instance CI on Gitea
+
+`stacks/gitea-instance-ci` gives an instance configuration repository on Gitea
+plan-on-pull-request, apply-on-main CI with no key:
+
+- a dedicated runner VM (no external IP; SSH through IAP), registered to that
+  one repository. Its controller is act_runner's Docker-in-Docker build, run
+  privileged as in the fleet runner profile; jobs run in its inner daemon in a
+  pinned slim image, with no Docker socket, privileges or host volumes;
+- a workload identity provider for workflow tokens from `git-oidc`, which
+  trusts only the repository's native Gitea ids and maps a pull-request run of
+  the plan workflow to a read-only plan identity it creates, and a
+  `push`/`workflow_dispatch` run of the apply workflow on `refs/heads/main` to
+  the instance's apply identity. Anything else maps to no role.
+
+Before the first apply, create the runner registration secret (the root reads
+it once) and enable Actions on the repository. `git-oidc` issues tokens for
+pull-request runs only for an explicitly trusted audience and workflow path, so
+the provider's canonical audience and the plan workflow must also be listed in
+its `trustedPullRequestPolicies`; main-branch runs need no entry. Workflows use
+the auth action's default audience, which is the provider's canonical URL.
+
 ## Updates, rollback and data recovery
 
 Keep platform, app source, artifacts, provider locks and image digests versioned
