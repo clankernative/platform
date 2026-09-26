@@ -201,7 +201,7 @@ variable "state_ownership_init_enabled" {
 }
 
 variable "tmp_size_limit" {
-  description = "Size of the memory-backed /tmp emptyDir. day2-serve copies each worker executable there before sandboxing it. Counts against the memory limit."
+  description = "Size of the memory-backed /tmp emptyDir of the app pod and of the backup Job. day2-serve and day2-backup copy the worker executable there before sandboxing it. Counts against each container's memory limit."
   type        = string
   default     = "64Mi"
 }

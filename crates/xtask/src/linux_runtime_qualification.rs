@@ -1125,8 +1125,11 @@ impl RuntimeSession {
             "--network".into(),
             "none".into(),
             "--read-only".into(),
+            // day2 copies the artifact's worker into /tmp and executes it
+            // there, as it does in day2-serve. Docker makes a tmpfs noexec
+            // unless told otherwise; Kubernetes' memory emptyDir is exec.
             "--tmpfs".into(),
-            "/tmp:rw,nosuid,nodev,mode=1777,size=64m".into(),
+            "/tmp:rw,exec,nosuid,nodev,mode=1777,size=64m".into(),
             "--cap-drop".into(),
             "ALL".into(),
             "--security-opt".into(),

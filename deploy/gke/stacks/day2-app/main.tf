@@ -565,9 +565,11 @@ resource "kubernetes_cron_job_v1" "backup" {
             volume {
               name = "tmp"
 
+              # day2-backup loads the artifact as day2-serve does, copying its
+              # worker executable here first: the same size as the app's /tmp.
               empty_dir {
                 medium     = "Memory"
-                size_limit = "16Mi"
+                size_limit = var.tmp_size_limit
               }
             }
 
