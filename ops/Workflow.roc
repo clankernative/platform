@@ -7,6 +7,7 @@ import Backup
 import Infra
 import Authority
 import Provision
+import Maintain
 
 Workflow :: [].{
 	Request := [
@@ -23,6 +24,7 @@ Workflow :: [].{
 		AuthorityAdmin(Str, Str),
 		Resources(Str, Str, Str, Str, Str),
 		Provision(Str, Str, Str, Str),
+		Maintain(Str, Str),
 	]
 
 	BuildReceipt : { artifact : Str }
@@ -43,6 +45,10 @@ Workflow :: [].{
 			Ok(Check(source, checked_seed, checked_count))
 		}
 		["local-dev", .. as local_args] => Ok(LocalDev(local_args))
+		["maintain", "inspect", request_file] => Ok(Maintain("inspect", request_file))
+		["maintain", "backup", request_file] => Ok(Maintain("backup", request_file))
+		["maintain", "authority-apply", request_file] => Ok(Maintain("authority-apply", request_file))
+		["maintain", "activate", request_file] => Ok(Maintain("activate", request_file))
 		["backup", instance, app_name, output] => Ok(Backup(instance, app_name, output))
 		["restore", backup, output] => Ok(Restore(backup, output))
 		["infra", "plan", configuration, output] => Ok(Infra(configuration, output))
@@ -87,7 +93,7 @@ Workflow :: [].{
 			Ok(AuthorityActivate(instance, app_name, target, operator, expected, request_id))
 		}
 		_ => Err(
-			"usage: day2 platform build SOURCE | check SOURCE [SEED CASES] | local-dev [SOURCE] [OPTIONS] | backup INSTANCE APP NEW_DIRECTORY | restore BACKUP NEW_DIRECTORY | infra plan CONFIG NEW_DIRECTORY",
+			"usage: day2 platform build SOURCE | check SOURCE [SEED CASES] | local-dev [SOURCE] [OPTIONS] | backup INSTANCE APP NEW_DIRECTORY | restore BACKUP NEW_DIRECTORY | infra plan CONFIG NEW_DIRECTORY | maintain inspect|backup|authority-apply|activate REQUEST_JSON_FILE",
 		)
 	}
 
@@ -110,6 +116,7 @@ Workflow :: [].{
 					"resources save|attach|propose|decide|allocate|recover|resolve-overruns INSTANCE APP LOCAL_OPERATOR INPUT_JSON_FILE",
 					"authority apply INSTANCE APP LOCAL_OPERATOR EXPECTED_STAMP_JSON REQUEST_ID",
 					"authority activate INSTANCE APP TARGET LOCAL_OPERATOR EXPECTED_STAMP_JSON REQUEST_ID",
+					"maintain inspect|backup|authority-apply|activate REQUEST_JSON_FILE",
 				],
 			}),
 		)
@@ -136,11 +143,22 @@ Workflow :: [].{
 		AuthorityActivate(instance, app_name, target, operator, expected, request_id) => {
 			Authority.activate!(instance, app_name, target, operator, expected, request_id, host!)
 		}
+		Maintain(operation, request_file) => Maintain.run!(operation, request_file, host!)
 	}
 
 }
 
 expect match Workflow.parse(["check", "reports-app", "42", "0"]) {
 	Err(_) => Bool.True
+	_ => Bool.False
+}
+
+expect match Workflow.parse(["maintain", "restart", "request.json"]) {
+	Err(_) => Bool.True
+	_ => Bool.False
+}
+
+expect match Workflow.parse(["maintain", "activate", "request.json"]) {
+	Ok(Maintain("activate", "request.json")) => Bool.True
 	_ => Bool.False
 }

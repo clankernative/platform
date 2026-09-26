@@ -37,6 +37,10 @@ pub const SOURCES: &[(&str, &[u8])] = &[
     ),
     ("ops/Backup.roc", include_bytes!("../../../ops/Backup.roc")),
     (
+        "ops/Maintain.roc",
+        include_bytes!("../../../ops/Maintain.roc"),
+    ),
+    (
         "ops/Authority.roc",
         include_bytes!("../../../ops/Authority.roc"),
     ),

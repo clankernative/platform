@@ -1,10 +1,12 @@
 # One-off maintenance pod for a day2 app on GKE: the qualified tooling image
 # with the app's state volume mounted, so an operator can run day2's own
 # operations (inspect, backup, authority apply/activate, migrations, import)
-# against the stopped app. Rendered and run by ../scripts/day2-maintain.sh,
-# which stops the app's StatefulSet first: never run it next to a serving pod.
+# against the stopped app. Rendered and run by `day2 platform maintain`
+# (ops/Maintain.roc, crates/day2-ops/src/maintenance.rs), which stops the app's
+# StatefulSet first: never run it next to a serving pod. Until it is retired,
+# ../scripts/day2-maintain.sh renders the same placeholders.
 #
-# Variables (every ${DAY2_MAINT_*} must be set):
+# Placeholders (the renderer refuses an unknown or unfilled one):
 #   DAY2_MAINT_NAMESPACE      app namespace (app-<id>)
 #   DAY2_MAINT_POD            pod name
 #   DAY2_MAINT_TOOLING_IMAGE  tooling image of the SAME platform build as the

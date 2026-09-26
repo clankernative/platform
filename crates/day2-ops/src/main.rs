@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 use anyhow::{Context, Result, ensure};
-use day2_ops::{backup, infra, local_dev, process, projection};
+use day2_ops::{backup, infra, local_dev, maintenance, process, projection};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::{
@@ -39,9 +39,16 @@ struct Operations {
     development: Option<day2::development::Campaign>,
     infrastructure: Option<infra::Session>,
     local: Option<local_dev::Session>,
+    maintenance: Option<maintenance::Session>,
 }
 
 impl Operations {
+    fn maintenance(&mut self) -> Result<&mut maintenance::Session> {
+        self.maintenance
+            .as_mut()
+            .context("maintenance session required")
+    }
+
     fn effect(&mut self, request: Request) -> Result<Value> {
         if request.action == "local-resolve" {
             ensure!(self.local.is_none(), "one local session per workflow");
@@ -528,6 +535,51 @@ impl Operations {
                 let manifest = backup::verify(&input::<Input>(&request)?.directory)?;
                 Ok(json!({"artifact":manifest.artifact,"database":manifest.database}))
             }
+            "maintenance-open" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Input {
+                    operation: String,
+                    request: PathBuf,
+                }
+                ensure!(
+                    self.maintenance.is_none(),
+                    "one maintenance session per workflow"
+                );
+                let parameters: Input = input(&request)?;
+                let tools = maintenance::Tools::native(maintenance::interrupt_flag())?;
+                self.maintenance = Some(maintenance::Session::open(
+                    &parameters.operation,
+                    &parameters.request,
+                    tools,
+                )?);
+                Ok(json!({}))
+            }
+            "maintenance-artifacts" => self.maintenance()?.artifacts(),
+            "maintenance-stop" => self.maintenance()?.stop(),
+            "maintenance-pod" => self.maintenance()?.start_pod(),
+            "maintenance-workflow" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Input {
+                    workflow: String,
+                }
+                let name = input::<Input>(&request)?.workflow;
+                self.maintenance()?.workflow(&name)
+            }
+            "maintenance-copy-backup" => self.maintenance()?.copy_backup(),
+            "maintenance-migration" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Input {
+                    step: String,
+                }
+                let step = input::<Input>(&request)?.step;
+                self.maintenance()?.migration(&step)
+            }
+            "maintenance-confirm" => self.maintenance()?.confirm(),
+            "maintenance-fence" => self.maintenance()?.fence(),
+            "maintenance-finish" => self.maintenance()?.finish(),
             _ => anyhow::bail!("unknown private platform capability"),
         }
     }
@@ -542,6 +594,7 @@ fn run(request: Request) -> Result<Value> {
         development: None,
         infrastructure: None,
         local: None,
+        maintenance: None,
     };
     if !["workflow", "local-session"].contains(&request.action.as_str()) {
         ensure!(
@@ -569,7 +622,9 @@ fn run(request: Request) -> Result<Value> {
         .is_some_and(|arg| arg == "local-dev-session")
         || arguments.get(1).is_some_and(|arg| arg == "local-dev")
         || arguments.get(1).is_some_and(|arg| arg == "authority")
-            && arguments.get(2).is_some_and(|arg| arg == "admin");
+            && arguments.get(2).is_some_and(|arg| arg == "admin")
+        // Maintenance reports progress and waits for the operator's confirmation.
+        || arguments.get(1).is_some_and(|arg| arg == "maintain");
     let args: Vec<_> = arguments.iter().map(String::as_str).collect();
     let runner = day2::automation::checked_runner(
         &std::env::current_exe()?.with_file_name("day2-workflows"),
@@ -612,7 +667,8 @@ fn main() {
             let args = input::<Vec<String>>(&request)?;
             streaming = args.first().is_some_and(|value| value == "local-dev")
                 || args.first().is_some_and(|value| value == "authority")
-                    && args.get(1).is_some_and(|value| value == "admin");
+                    && args.get(1).is_some_and(|value| value == "admin")
+                || args.first().is_some_and(|value| value == "maintain");
         }
         run(request)
     })();

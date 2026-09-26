@@ -172,6 +172,62 @@ operator tools other than the read-only `day2-inspect` and the online
 `day2-backup`. Online backups are scheduled (below); restore is an operator
 procedure.
 
+### Maintenance: `day2 platform maintain`
+
+`day2 platform maintain OPERATION REQUEST_JSON` runs day2's own operations
+against a stopped app. `ops/Maintain.roc` orders the steps; the Rust session
+behind its `maintenance-*` capabilities (`crates/day2-ops/src/maintenance.rs`)
+does every native action with `kubectl` and the registry API. Operations:
+
+| Operation | What it does | App afterwards |
+| --- | --- | --- |
+| `inspect` | Reads the active authority stamp and policy | restored |
+| `backup` | Verified backup, copied to `~/day2-backups/<namespace>/<stamp>/` | restored |
+| `authority-apply` | Backup, then applies the policy in the current ConfigMap, after a typed `apply` | restored |
+| `activate` | Backup, migration plan, typed `activate`, migration, fresh activation of the target artifact | stopped: apply day2-app for the new image next |
+
+The request file names the target exactly:
+
+```json
+{
+  "namespace": "app-go", "statefulset": "day2-go", "configmap": "day2-go-instance",
+  "app": "go", "pvc": "data",
+  "app_image": "REGISTRY/go/golinks@sha256:...", "artifact_id": "64 hex",
+  "tooling_image": "REGISTRY/go/day2-tooling@sha256:...",
+  "operator": "you@example.com",
+  "pod_label": {"key": "internal-tools.wonderly.io/service", "value": "background"},
+  "request_id": "release-2026-09-26",
+  "target": {"instance": "desired-instance.json", "app_image": "REGISTRY/go/golinks@sha256:...", "artifact_id": "64 hex"}
+}
+```
+
+`request_id` is for `authority-apply` and `activate`; `target` (the desired
+instance, e.g. rendered from the day2-app plan) is for `activate` only;
+`backup_dir` and `"yes": true` (skip the typed confirmation, recorded) are
+optional. The tooling image must come from the same platform build as the app's
+artifact.
+
+What the session guarantees, whatever the recipe does:
+
+- The maintenance pod ([k8s/maintenance-pod.yaml](k8s/maintenance-pod.yaml),
+  rendered from a fixed placeholder set) is removed on every exit, including
+  Ctrl-C; its one-hour deadline is the backstop.
+- Before the migration fence, any failure restores the StatefulSet's replicas on
+  its original image. After the fence the old image is never restarted on the
+  migrated volume; the session prints the two ways forward instead.
+- The fence needs a verified local backup, a migration plan and a confirmation
+  from the same session, and `migration apply` refuses to run without it.
+- Artifacts come from the digest-pinned app images: manifest, layer, artifact
+  identity and worker digests are checked, and links or devices are refused.
+- The local backup copy must match a SHA-256 manifest computed in the pod; a
+  mismatching copy is renamed `<stamp>.INCOMPLETE` and refused.
+- One session per namespace; the running image must equal `app_image`.
+- Every step is journalled to `~/day2-backups/<namespace>/<stamp>.session.json`
+  before it runs, for recovery after the operator's machine dies mid-session.
+
+`deploy/gke/scripts/day2-maintain.sh` remains until this command has run a
+production activation; it will then be removed.
+
 To roll back code, plan the prior qualified image and configuration. After a schema
 migration, first prove backward compatibility or restore the matching backup;
 never point an old artifact at incompatible state. Node upgrades require rerunning
@@ -272,8 +328,8 @@ docker run --rm --network none --user "$(id -u):$(id -g)" -v "$PWD/restore:/work
 private environment before relying on it.
 
 Restoring into the app's own volume replaces its current data, so take a fresh
-backup first (`deploy/gke/scripts/day2-maintain.sh ... backup`, which also
-copies it off-cluster). Then, with the app stopped
+backup first (`day2 platform maintain backup REQUEST_JSON`, which also copies
+it off-cluster). Then, with the app stopped
 (`kubectl -n NS scale statefulset day2-APP --replicas=0`, wait for the pod to
 terminate; backup runs cannot start without it), attach the maintenance pod
 from [k8s/maintenance-pod.yaml](k8s/maintenance-pod.yaml) rendered exactly as
