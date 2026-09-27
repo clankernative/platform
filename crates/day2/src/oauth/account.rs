@@ -2,6 +2,7 @@
 //! email and provider list order never participate in account selection.
 
 use super::connect::ConnectIntent;
+use super::profiles::ValidatedTokenResponse;
 use anyhow::{Result, ensure};
 use day2_capabilities::Digest;
 use day2_capabilities::oauth::{
@@ -37,6 +38,28 @@ pub struct VerifiedMappedAccount {
 
 impl VerifiedMappedAccount {
     pub fn verify(
+        intent: &ConnectIntent,
+        requirement: &ConnectionRequirement,
+        permission: &ProviderPermissionContract,
+        mapping: &MappedHumanEvidence,
+        observed: &ProviderAccount,
+        response: &ValidatedTokenResponse,
+    ) -> Result<Self> {
+        ensure!(
+            response.matches_permission(permission),
+            "token response does not match account consent"
+        );
+        Self::verify_scopes(
+            intent,
+            requirement,
+            permission,
+            mapping,
+            observed,
+            response.scopes(),
+        )
+    }
+
+    fn verify_scopes(
         intent: &ConnectIntent,
         requirement: &ConnectionRequirement,
         permission: &ProviderPermissionContract,
@@ -119,6 +142,7 @@ fn stable_part(value: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::oauth::profiles::{BrowserCodeIdentity, ConfidentialPkceProfile};
     use day2_capabilities::oauth::ConnectionOwner;
     use day2_capabilities::{BindingRef, Name};
     use std::collections::BTreeMap;
@@ -196,13 +220,23 @@ mod tests {
     #[test]
     fn first_account_requires_exact_stable_mapping_not_email() {
         let (intent, requirement, permission, mapping, observed, scopes) = fixture();
+        let profile = ConfidentialPkceProfile::NoRefresh(BrowserCodeIdentity {
+            binding: permission.profile.clone(),
+            scope_interpretation: permission.interpretation.clone(),
+        });
+        let response = profile
+            .validate_token_response(
+                br#"{"access_token":"secret_access","token_type":"Bearer","expires_in":3600,"scope":"calendar.read"}"#,
+                &permission,
+            )
+            .unwrap();
         let verified = VerifiedMappedAccount::verify(
             &intent,
             &requirement,
             &permission,
             &mapping,
             &observed,
-            &scopes,
+            &response,
         )
         .unwrap();
         let mut different_registration = intent.clone();
@@ -215,7 +249,7 @@ mod tests {
         colliding_email.subject = "personal-subject".into();
         assert_eq!(colliding_email.display_email, observed.display_email);
         assert!(
-            VerifiedMappedAccount::verify(
+            VerifiedMappedAccount::verify_scopes(
                 &intent,
                 &requirement,
                 &permission,
@@ -227,7 +261,7 @@ mod tests {
         );
         let mut changed_display = observed.clone();
         changed_display.display_email = "renamed@example.com".into();
-        let same = VerifiedMappedAccount::verify(
+        let same = VerifiedMappedAccount::verify_scopes(
             &intent,
             &requirement,
             &permission,
@@ -243,7 +277,7 @@ mod tests {
     fn missing_or_extra_scopes_and_wrong_owner_fail_verification() {
         let (intent, requirement, permission, mapping, observed, scopes) = fixture();
         assert!(
-            VerifiedMappedAccount::verify(
+            VerifiedMappedAccount::verify_scopes(
                 &intent,
                 &requirement,
                 &permission,
@@ -256,7 +290,7 @@ mod tests {
         let mut excess = scopes.clone();
         excess.insert("calendar.write".into());
         assert!(
-            VerifiedMappedAccount::verify(
+            VerifiedMappedAccount::verify_scopes(
                 &intent,
                 &requirement,
                 &permission,
@@ -269,7 +303,7 @@ mod tests {
         let mut wrong_owner = mapping;
         wrong_owner.human = "human_2".into();
         assert!(
-            VerifiedMappedAccount::verify(
+            VerifiedMappedAccount::verify_scopes(
                 &intent,
                 &requirement,
                 &permission,
@@ -284,7 +318,7 @@ mod tests {
     #[test]
     fn mapped_activation_uses_verified_binding() {
         let (intent, requirement, permission, mapping, observed, scopes) = fixture();
-        let verified = VerifiedMappedAccount::verify(
+        let verified = VerifiedMappedAccount::verify_scopes(
             &intent,
             &requirement,
             &permission,
