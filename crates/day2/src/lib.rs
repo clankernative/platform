@@ -40,6 +40,9 @@ mod live;
 pub mod mcp;
 pub mod migration;
 pub mod numeric;
+// Protocol kernels are staged behind host-only verification and custody wiring.
+#[allow(dead_code)]
+mod oauth;
 pub mod openapi;
 pub mod operation_catalog;
 pub mod operation_contract;
