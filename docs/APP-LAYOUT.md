@@ -160,8 +160,8 @@ invocation; app code supplies neither a binding name nor an actor. It checks the
 callee's exported contract digest before dispatch. A missing, ambiguous or stale
 grant fails the observation. Nominal inputs are rejected until the generator can
 preserve their identities. Commands currently have types only; command receipts,
-separate-host transport, active catalog publication, and release dependency
-inventory are subsequent work.
+separate-host transport, serving bindings and policy qualification are
+subsequent work.
 
 During a normal build, mandatory verification supplies each imported query with
 the selected callee's checked contract example and a disposable, operation-pinned
@@ -169,6 +169,20 @@ grant. The simulated reply is available only for that example input; a different
 request fails verification unless it matches the callee's example. These
 build-time grants do not become instance authority. An operator still grants the
 exact app operation when installing the caller.
+
+For a release-managed installation, `xtask catalog-active RELEASE_JOURNAL
+ARTIFACT_STORE COMPANY ENVIRONMENT` derives discovery from activated release
+receipts and verifies the selected artifact bytes. `xtask catalog-release-candidate
+RELEASE_JOURNAL ARTIFACT_STORE RELEASE_ID` replaces only the approved app and
+checks every selected caller's embedded imports against the candidate exports.
+Its `base_selection` digest identifies the active composition the candidate
+was checked against. A `ReleaseExecutionHost` configured with
+`with_catalog_store` enrolls its installation/environment in catalog-managed
+activation. At settlement, the host qualifies the approved artifact and all
+selected callers again; the journal compares the candidate's base selection
+inside the activation transaction. An unqualified or stale candidate leaves
+the active pointer unchanged. This checks contract dependencies; serving
+bindings and access policy still require their separate release guards.
 
 ## Future app creation
 

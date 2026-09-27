@@ -13,6 +13,7 @@ pub mod local_source;
 pub mod provider_conformance;
 pub mod provider_evidence;
 pub mod release;
+pub mod release_catalog;
 pub mod release_execution;
 pub mod release_recipe;
 pub mod remote_source;

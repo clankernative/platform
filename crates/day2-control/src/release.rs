@@ -242,6 +242,8 @@ impl Journal {
                 body TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS release_activations (
                 release TEXT PRIMARY KEY REFERENCES release_approvals(id), body TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS release_catalog_scopes (
+                scope TEXT PRIMARY KEY);
             CREATE TABLE IF NOT EXISTS release_events (
                 sequence INTEGER PRIMARY KEY AUTOINCREMENT, target TEXT NOT NULL,
                 kind TEXT NOT NULL, body TEXT NOT NULL);
@@ -469,14 +471,15 @@ impl Journal {
             !enrolled,
             "enrolled release requires guarded deployment workflow activation"
         );
-        let receipt = Self::activate_release_in(&tx, ready)?;
+        let receipt = Self::activate_release_in_checked(&tx, ready, None)?;
         tx.commit()?;
         Ok(receipt)
     }
 
-    pub(crate) fn activate_release_in(
+    pub(crate) fn activate_release_in_checked(
         tx: &Transaction<'_>,
         ready: &ReadyRelease,
+        catalog: Option<&crate::release_catalog::ReleaseCatalogCandidate>,
     ) -> Result<ActivationReceipt> {
         if let Some(body) = tx
             .query_row(
@@ -504,6 +507,12 @@ impl Journal {
             "readiness receipt integrity mismatch"
         );
         let stored = current_approval(tx, &ready.release)?;
+        crate::release_catalog::check_activation_candidate(
+            tx,
+            &ready.release,
+            &stored.approval,
+            catalog,
+        )?;
         ensure!(
             proof.release == ready.release && proof.generation == stored.generation,
             "readiness belongs to another release generation"
