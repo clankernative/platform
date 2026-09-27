@@ -92,6 +92,48 @@ pub struct CheckedConsumers {
     pub imports: BTreeMap<String, ResolvedImports>,
 }
 
+/// A selected composition whose callers' embedded imports all resolve to the
+/// selected exporters. This is qualification evidence, not invocation authority.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct QualifiedCatalog {
+    pub catalog: CandidateCatalog,
+    pub consumers: CheckedConsumers,
+}
+
+pub fn qualify_artifacts(
+    installation: String,
+    environment: String,
+    paths: &BTreeMap<String, std::path::PathBuf>,
+) -> Result<QualifiedCatalog> {
+    let mut apps = BTreeMap::new();
+    let mut embedded = BTreeMap::new();
+    for (name, path) in paths {
+        let artifact = crate::artifact::LoadedArtifact::load(path)
+            .with_context(|| format!("selected artifact for {name}"))?;
+        ensure!(
+            artifact.contract().namespace == *name,
+            "selected artifact namespace mismatch: {name}"
+        );
+        let manifest = match &artifact.contract().export_manifest {
+            Some(manifest) => manifest.clone(),
+            None => Manifest::derive(name.clone(), [], &BTreeMap::new())?,
+        };
+        if let Some(imports) = &artifact.contract().imports {
+            embedded.insert(name.clone(), imports.clone());
+        }
+        apps.insert(
+            name.clone(),
+            SelectedApp {
+                artifact: artifact.id().to_owned(),
+                manifest,
+            },
+        );
+    }
+    let catalog = CandidateCatalog::derive(installation, environment, apps)?;
+    let consumers = catalog.check_embedded_consumers(&embedded)?;
+    Ok(QualifiedCatalog { catalog, consumers })
+}
+
 impl CandidateCatalog {
     pub fn derive(
         installation: String,
@@ -288,6 +330,46 @@ impl CandidateCatalog {
             imports,
         })
     }
+
+    /// Check every selected caller's portable import closure against the
+    /// selected exporter, without asking an operator to maintain a lock list.
+    pub fn check_embedded_consumers(
+        &self,
+        embedded: &BTreeMap<String, ImportedContracts>,
+    ) -> Result<CheckedConsumers> {
+        let mut locks = BTreeMap::new();
+        for (caller, imports) in embedded {
+            imports.verify()?;
+            let mut apps: BTreeMap<String, Vec<ImportPin>> = BTreeMap::new();
+            for (operation, package) in &imports.operations {
+                let (app, _) = operation
+                    .split_once('.')
+                    .context("import operation needs its app namespace")?;
+                apps.entry(app.to_owned()).or_default().push(ImportPin {
+                    operation: operation.clone(),
+                    version: package.operation.version,
+                    digest: package.digest.clone(),
+                });
+            }
+            locks.insert(
+                caller.clone(),
+                ImportLock {
+                    installation: self.installation.clone(),
+                    environment: self.environment.clone(),
+                    apps,
+                },
+            );
+        }
+        let checked = self.check_consumers(&locks)?;
+        for (caller, imports) in embedded {
+            let resolved = &checked.imports[caller];
+            ensure!(
+                imports.operations == resolved.operations && imports.types == resolved.types,
+                "selected caller import closure changed: {caller}"
+            );
+        }
+        Ok(checked)
+    }
 }
 
 #[cfg(test)]
@@ -350,6 +432,15 @@ mod tests {
                 }],
             )]),
         }
+    }
+
+    fn embedded(manifest: &Manifest, operation: &str) -> ImportedContracts {
+        let package = manifest.exports[operation].clone();
+        ImportedContracts::from_resolved(ResolvedImports {
+            operations: BTreeMap::from([(operation.into(), package.clone())]),
+            types: package.types,
+        })
+        .unwrap()
     }
 
     #[test]
@@ -475,5 +566,58 @@ mod tests {
         assert!(candidate.check_consumers(&cycle).is_err());
         cycle.remove("onboarding");
         assert!(candidate.check_consumers(&cycle).is_ok());
+    }
+
+    #[test]
+    fn selected_callers_pin_exact_exports_without_a_separate_lock_inventory() {
+        let directory = manifest("directory", &[("lookup", "directory.type.Person", 1)]);
+        let caller = manifest("caller", &[("who", "caller.type.Person", 1)]);
+        let imports = BTreeMap::from([("caller".into(), embedded(&directory, "directory.lookup"))]);
+        let selected_apps = BTreeMap::from([
+            ("directory".into(), selected(directory.clone())),
+            ("caller".into(), selected(caller.clone())),
+        ]);
+        let qualified = catalog(selected_apps.clone())
+            .check_embedded_consumers(&imports)
+            .unwrap();
+        assert_eq!(qualified.dependencies["caller"], ["directory"]);
+
+        let mut unrelated = selected_apps.clone();
+        unrelated.insert(
+            "directory".into(),
+            selected(manifest(
+                "directory",
+                &[
+                    ("lookup", "directory.type.Person", 1),
+                    ("manager", "directory.type.Manager", 2),
+                ],
+            )),
+        );
+        assert!(
+            catalog(unrelated)
+                .check_embedded_consumers(&imports)
+                .is_ok()
+        );
+
+        let mut changed = selected_apps;
+        changed.insert(
+            "directory".into(),
+            selected(manifest(
+                "directory",
+                &[("lookup", "directory.type.Person", 2)],
+            )),
+        );
+        assert!(catalog(changed).check_embedded_consumers(&imports).is_err());
+
+        let mut cycle = imports.clone();
+        cycle.insert("directory".into(), embedded(&caller, "caller.who"));
+        assert!(
+            catalog(BTreeMap::from([
+                ("directory".into(), selected(directory)),
+                ("caller".into(), selected(caller)),
+            ]))
+            .check_embedded_consumers(&cycle)
+            .is_err()
+        );
     }
 }

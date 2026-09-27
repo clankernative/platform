@@ -213,6 +213,7 @@ impl ReleaseLease {
 
 pub struct ReleaseExecutionHost {
     journal: PathBuf,
+    catalog_store: Option<PathBuf>,
     company: Name,
     owner: Name,
     durability: BindingRef,
@@ -231,12 +232,21 @@ impl ReleaseExecutionHost {
     ) -> Self {
         Self {
             journal,
+            catalog_store: None,
             company,
             owner,
             durability,
             capabilities,
             recipe,
         }
+    }
+
+    /// Enrolls accepted release scopes in active-catalog qualification. The
+    /// artifact store contains verified artifacts named by their SHA-256 ID.
+    pub fn with_catalog_store(mut self, artifact_store: PathBuf) -> Result<Self> {
+        ensure!(artifact_store.is_dir(), "catalog artifact store missing");
+        self.catalog_store = Some(artifact_store.canonicalize()?);
+        Ok(self)
     }
 
     fn validate_scope(
@@ -269,6 +279,21 @@ impl ReleaseExecutionHost {
         let approval = release::read_approval(&journal.connection, &plan.release)?.approval;
         self.validate(plan, &approval)?;
         self.capabilities.validate(plan, &approval)?;
+        if let Some(store) = &self.catalog_store {
+            journal.enable_catalog_scope(
+                &approval.target.company,
+                &approval.target.environment,
+                store,
+            )?;
+        } else {
+            ensure!(
+                !journal.catalog_scope_enabled(
+                    &approval.target.company,
+                    &approval.target.environment
+                )?,
+                "catalog-managed release host requires an artifact store"
+            );
+        }
         Ok(journal.accept_release_execution(plan)?.id)
     }
 
@@ -364,7 +389,19 @@ impl ReleaseExecutionHost {
         // Receipt settlement does not require current Git approval: exact scope
         // and implementation pins are checked, then the journal drains/rejects it.
         self.validate(&lease.execution.plan, &lease.approval)?;
-        let snapshot = Journal::open(&self.journal)?.settle_release_step(lease, &result, now)?;
+        let mut journal = Journal::open(&self.journal)?;
+        let catalog = if matches!(result, ReleaseEffectResult::Activate {}) {
+            self.catalog_store
+                .as_ref()
+                .map(|store| {
+                    let approved = journal.load_approved_release(&lease.execution.plan.release)?;
+                    journal.candidate_catalog(&approved, store)
+                })
+                .transpose()
+        } else {
+            Ok(None)
+        };
+        let snapshot = journal.settle_release_step_with_catalog(lease, &result, now, catalog)?;
         Ok(progress(&snapshot))
     }
 
@@ -846,6 +883,16 @@ impl Journal {
         result: &ReleaseEffectResult,
         now: u64,
     ) -> Result<ReleaseSnapshot> {
+        self.settle_release_step_with_catalog(lease, result, now, Ok(None))
+    }
+
+    pub(crate) fn settle_release_step_with_catalog(
+        &mut self,
+        lease: &ReleaseLease,
+        result: &ReleaseEffectResult,
+        now: u64,
+        catalog: Result<Option<crate::release_catalog::ReleaseCatalogCandidate>>,
+    ) -> Result<ReleaseSnapshot> {
         let tx = day2::write_queue::immediate(&mut self.connection)?;
         let mut stored = read_execution(&tx, &lease.execution.id)?;
         let row = step_row(&tx, &lease.execution.id, lease.step.ordinal)?
@@ -944,7 +991,12 @@ impl Journal {
                             .ok_or_else(|| anyhow::anyhow!("missing release readiness"))?,
                         release: stored.snapshot.plan.release.clone(),
                     };
-                    stored.activation = Some(Journal::activate_release_in(&tx, &ready)?);
+                    let catalog = catalog?;
+                    stored.activation = Some(Journal::activate_release_in_checked(
+                        &tx,
+                        &ready,
+                        catalog.as_ref(),
+                    )?);
                     stored.snapshot.phase = ReleasePhase::Active;
                     stored.snapshot.terminal = Some(ReleaseTerminal::Activated);
                     stored.snapshot.waiting = None;

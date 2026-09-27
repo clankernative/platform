@@ -485,6 +485,54 @@ fn main() -> Result<()> {
                 serde_json::to_string_pretty(&catalog.check_consumers(&locks)?)?
             );
         }
+        "catalog-active" => {
+            let journal = PathBuf::from(args.next().context(
+                "usage: xtask catalog-active RELEASE_JOURNAL ARTIFACT_STORE COMPANY ENVIRONMENT",
+            )?);
+            let store = PathBuf::from(args.next().context(
+                "usage: xtask catalog-active RELEASE_JOURNAL ARTIFACT_STORE COMPANY ENVIRONMENT",
+            )?);
+            let company: day2_control::Name = args.next().context(
+                "usage: xtask catalog-active RELEASE_JOURNAL ARTIFACT_STORE COMPANY ENVIRONMENT",
+            )?.try_into()?;
+            let environment: day2_control::Name = args.next().context(
+                "usage: xtask catalog-active RELEASE_JOURNAL ARTIFACT_STORE COMPANY ENVIRONMENT",
+            )?.try_into()?;
+            ensure!(
+                args.next().is_none() && fs::metadata(&journal)?.is_file(),
+                "release journal or usage"
+            );
+            let control = day2_control::journal::Journal::open(&journal)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&control.active_catalog(
+                    &company,
+                    &environment,
+                    &store
+                )?)?
+            );
+        }
+        "catalog-release-candidate" => {
+            let journal = PathBuf::from(args.next().context(
+                "usage: xtask catalog-release-candidate RELEASE_JOURNAL ARTIFACT_STORE RELEASE_ID",
+            )?);
+            let store = PathBuf::from(args.next().context(
+                "usage: xtask catalog-release-candidate RELEASE_JOURNAL ARTIFACT_STORE RELEASE_ID",
+            )?);
+            let id: day2_control::Digest = args.next().context(
+                "usage: xtask catalog-release-candidate RELEASE_JOURNAL ARTIFACT_STORE RELEASE_ID",
+            )?.try_into()?;
+            ensure!(
+                args.next().is_none() && fs::metadata(&journal)?.is_file(),
+                "release journal or usage"
+            );
+            let control = day2_control::journal::Journal::open(&journal)?;
+            let approved = control.load_approved_release(&id)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&control.candidate_catalog(&approved, &store)?)?
+            );
+        }
         "build-receipt" => {
             let source = PathBuf::from(
                 args.next()
