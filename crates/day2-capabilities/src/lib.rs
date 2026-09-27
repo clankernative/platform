@@ -1,6 +1,7 @@
 //! Provider-free installation contracts. This crate has no runtime or effect APIs.
 #![forbid(unsafe_code)]
 
+pub mod credentials;
 pub mod integrations;
 pub mod oauth;
 pub mod registry;

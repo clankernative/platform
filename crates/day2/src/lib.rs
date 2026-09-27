@@ -37,6 +37,8 @@ pub mod invocations;
 pub mod journal;
 pub mod json;
 mod live;
+#[allow(dead_code)]
+mod managed_credentials;
 pub mod mcp;
 pub mod migration;
 pub mod numeric;

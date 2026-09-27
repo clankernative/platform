@@ -544,6 +544,7 @@ impl Runtime {
         crate::execution::upgrade(&tx)?;
         upgrade_selection_cursors(&tx)?;
         crate::authority_state::upgrade(&tx)?;
+        crate::managed_credentials::store::install_schema(&tx)?;
         tx.commit()?;
         Ok(())
     }
