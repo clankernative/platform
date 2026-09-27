@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 pub mod integrations;
+pub mod oauth;
 pub mod registry;
 pub mod resources;
 pub mod runtime;
