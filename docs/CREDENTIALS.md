@@ -52,7 +52,10 @@ lineage/version, verifier, encrypted material, delivery and deduplication receip
 with any product writes. A retry of the same accepted invocation and intent
 returns the original public identity; changed intent fails. The pending result
 has no token or delivery permit. The containing product coordinator owns commit
-and unknown-commit recovery.
+and unknown-commit recovery. `prepare_issue` now requires a verified family
+manifest and refuses a changed family contract, undeclared or enlarged root,
+fixed-grant narrowing and a lifetime beyond the family bound. The host still
+must establish the current selected instance binding and interactive authority.
 
 `stage_rotation` checks the expected head/revision in that transaction and a
 unique predecessor constraint allows at most one successor. It preserves the
@@ -62,6 +65,14 @@ deliveries. The initial private kernel implements atomic replacement; overlap,
 selectable-grant narrowing, callback use budgets and impersonation handoff have
 not been implemented.
 
+The private `verify_ingress` selector checks the current head, lineage and
+version state, namespace, family contract, security epoch, expiry, authenticated
+material identity, verifier and immutable operation ceiling. A malformed,
+unknown, rotated or revoked token yields no identity. It is not wired to an API
+route or dispatcher yet. The host must still establish current instance binding,
+key readiness, audience, principal policy and resource authorization before
+accepting an ingress invocation.
+
 `authorize_reveal` serializes an available delivery check and an authorization
 record in SQLite. Only a known successful commit produces a process-local,
 consuming permit. A closure committed first denies; an authorization committed
@@ -70,7 +81,8 @@ produce a permit. The selected lineage independently supplies the expected
 namespace, owner, version, recipient, epoch and material revision. The security
 origin, session/CSRF/intent verification and no-store HTTP sink are still absent;
 the current `VerifiedHumanPost` is an internal staging input, not proof of those
-checks.
+checks. Reveal authorization also checks issue, version expiry, grant expiry and
+delivery expiry times.
 
 ## Verification and remaining gates
 
