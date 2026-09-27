@@ -1,8 +1,7 @@
-//! Roc type declarations generated from a caller's exact imported closure.
+//! Roc query clients generated from a caller's exact imported closure.
 //!
-//! The first compiler stage exposes checked structural contracts only. It does
-//! not generate a callable remote operation before the host has an authenticated
-//! app-call capability; a placeholder call would make type checking misleading.
+//! Commands retain their checked types; query functions construct observations
+//! whose contract and resource authority are verified by the host.
 
 use anyhow::{Context, Result, ensure};
 use std::collections::BTreeSet;
@@ -31,11 +30,28 @@ fn type_name(operation: &str) -> Result<String> {
 }
 
 pub fn module(imports: &ImportedContracts) -> Result<String> {
+    render(imports, false)
+}
+
+pub fn admission_module(imports: &ImportedContracts) -> Result<String> {
+    render(imports, true)
+}
+
+fn render(imports: &ImportedContracts, admission: bool) -> Result<String> {
     imports.verify()?;
     let mut names = BTreeSet::new();
-    let mut source = String::from(
-        "# Generated from exact checked import contracts.\nImportedContracts :: [].{\n",
-    );
+    let mut functions = BTreeSet::new();
+    let mut source = if imports
+        .operations
+        .values()
+        .any(|package| package.operation.kind == crate::operation_contract::Kind::Query)
+    {
+        String::from("import pf.Observe\n\n")
+    } else {
+        String::new()
+    };
+    source
+        .push_str("# Generated from exact checked import contracts.\nImportedContracts :: [].{\n");
     for package in imports.operations.values() {
         let prefix = type_name(&package.operation.id)?;
         ensure!(names.insert(prefix.clone()), "imported type name collision");
@@ -92,6 +108,29 @@ pub fn module(imports: &ImportedContracts) -> Result<String> {
             "\t{prefix}Input : {input_type}\n\n\t{prefix}Output : {}\n\n",
             output.shape.wire_annotation()
         ));
+        if package.operation.kind == crate::operation_contract::Kind::Query {
+            let function = package.operation.id.replace(['.', '-'], "_");
+            crate::schema::identifier(&function)?;
+            ensure!(
+                functions.insert(function.clone()),
+                "imported function name collision"
+            );
+            let capability = if admission {
+                "admission_capability"
+            } else {
+                "capability"
+            };
+            let from_host = if admission {
+                "admission_from_host"
+            } else {
+                "from_host"
+            };
+            let operation = serde_json::to_string(&package.operation.id)?;
+            let digest = serde_json::to_string(&package.digest)?;
+            source.push_str(&format!(
+                "\t{function} : {prefix}Input -> Observe({prefix}Output)\n\t{function} = |input|\n\t\tObserve.{capability}(\n\t\t\t\"app.query.v1\",\n\t\t\tJson.to_str({{ contract: {{ operation: {operation}, digest: {digest} }}, input: Json.to_str(input) }}),\n\t\t).and_then(|raw| {{\n\t\t\tparsed : Try({prefix}Output, _)\n\t\t\tparsed = Json.parse(raw)\n\t\t\tObserve.{from_host}(parsed.map_err(|_| \"invalid_imported_response\"))\n\t\t}})\n\n"
+            ));
+        }
     }
     source.push_str("}\n");
     Ok(source)
@@ -163,6 +202,16 @@ mod tests {
         let source = module(&imports).unwrap();
         assert!(source.contains("DirectoryLookupInput : {}"));
         assert!(source.contains("DirectoryLookupOutput : { name : Str }"));
+        assert!(
+            source.contains(
+                "directory_lookup : DirectoryLookupInput -> Observe(DirectoryLookupOutput)"
+            )
+        );
+        assert!(source.contains("Observe.capability("));
+        assert!(source.contains(&imports.operations["directory.lookup"].digest));
+        let admission = admission_module(&imports).unwrap();
+        assert!(admission.contains("Observe.admission_capability("));
+        assert!(admission.contains("Observe.admission_from_host("));
         assert!(!source.contains("directory.manager"));
     }
 
@@ -171,6 +220,23 @@ mod tests {
         let mut imports = imported();
         imports.types.remove("directory.operation.lookup.output.v1");
         assert!(module(&imports).is_err());
+    }
+
+    #[test]
+    fn commands_have_contract_types_without_a_read_function() {
+        let mut imports = imported();
+        let package = imports.operations.get_mut("directory.lookup").unwrap();
+        let objects = package
+            .types
+            .values()
+            .map(|pin| (pin.object.id.clone(), pin.object.clone()))
+            .collect();
+        let mut operation = package.operation.clone();
+        operation.kind = Kind::Command;
+        *package = Package::derive(operation, &objects).unwrap();
+        let source = module(&imports).unwrap();
+        assert!(!source.contains("import pf.Observe"));
+        assert!(!source.contains("directory_lookup ="));
     }
 
     #[test]

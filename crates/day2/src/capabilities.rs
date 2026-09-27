@@ -392,7 +392,18 @@ pub(crate) fn authorized(
                 #[serde(rename = "handle")]
                 _handle: String,
             }
-            let read: DelegatedRead = serde_json::from_str(&instruction.data)?;
+            let (input, pinned_contract) =
+                if serde_json::from_str::<serde_json::Value>(&instruction.data)?
+                    .get("contract")
+                    .is_some()
+                {
+                    let read: crate::resources::ImportedQuery =
+                        crate::json::decode(instruction.data.as_bytes())?;
+                    (read.input, Some(read.contract.digest))
+                } else {
+                    let read: DelegatedRead = crate::json::decode(instruction.data.as_bytes())?;
+                    (read.input, None)
+                };
             let ResourceTarget::AppOperation {
                 app,
                 operation,
@@ -408,7 +419,8 @@ pub(crate) fn authorized(
                 app: app.clone(),
                 operation: operation.clone(),
                 schema_digest: schema_digest.clone(),
-                input: read.input,
+                input,
+                contract_digest: pinned_contract,
                 // Never the caller's choice. A delegated call runs as the person
                 // the caller was already running as.
                 actor: request.context.actor.clone(),

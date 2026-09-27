@@ -20,6 +20,7 @@ struct Prepared {
     platform_hashes: BTreeMap<String, String>,
     inference_sources: BTreeMap<String, String>,
     imports: Option<day2::instance_catalog::ImportedContracts>,
+    import_fixtures: Vec<day2::development::ImportedQueryFixture>,
 }
 
 struct Bound {
@@ -71,6 +72,7 @@ fn prepare(
         day2::app_inference::namespace(&fs::read_to_string(stage.join("app/App.roc"))?)?;
     let projection =
         day2::registry::Projection::declared(&fs::read_to_string(stage.join("app/App.roc"))?)?;
+    let mut import_fixtures = Vec::new();
     let imports = if let Some(context) = import_context {
         let metadata = fs::symlink_metadata(&context.lock)?;
         ensure!(
@@ -87,6 +89,7 @@ fn prepare(
             day2::instance_catalog::CandidateCatalog::from_instance_file(&context.instance)?;
         let imports =
             day2::instance_catalog::ImportedContracts::from_resolved(catalog.resolve(&lock)?)?;
+        import_fixtures = day2::development::imported_query_fixtures(&context.instance, &imports)?;
         fs::write(
             stage.join("app").join(day2::import_codegen::MODULE),
             day2::import_codegen::module(&imports)?,
@@ -148,6 +151,7 @@ fn prepare(
         platform_hashes,
         inference_sources,
         imports,
+        import_fixtures,
     })
 }
 
@@ -281,6 +285,7 @@ fn bind(root: &Path, prepared: &mut Prepared, bound: &mut Bound) -> Result<()> {
         &bound.schema,
         &bound.outputs,
         &prepared.assets,
+        prepared.imports.as_ref(),
     )?;
     Ok(())
 }
@@ -668,12 +673,13 @@ pub fn execute(
                         "candidate contract admission required"
                     );
                     let artifact = published.as_ref().context("candidate required")?;
-                    let evidence = day2::development::verify_with_runner(
+                    let evidence = day2::development::verify_with_runner_imports(
                         artifact,
                         &stage.join("verification"),
                         day2::development::DEFAULT_SEED,
                         2,
                         runner,
+                        &prepared.import_fixtures,
                     )?;
                     ensure!(
                         evidence.verification_complete,

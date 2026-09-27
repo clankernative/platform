@@ -107,6 +107,20 @@ pub fn read(runtime: &Runtime, call: &Call) -> Result<String> {
         "delegated_schema_changed: {} now has {actual}",
         call.operation
     );
+    if let Some(expected) = &call.contract_digest {
+        let package = callee
+            .artifact()
+            .contract()
+            .export_manifest
+            .as_ref()
+            .and_then(|manifest| manifest.exports.get(&call.operation))
+            .ok_or_else(|| anyhow::anyhow!("delegated_contract_not_exported"))?;
+        ensure!(
+            &package.digest == expected,
+            "delegated_contract_changed: {}",
+            call.operation
+        );
+    }
     // Derived from the caller's invocation and the step within it, so a retried
     // preparation reaches the same invocation of the callee rather than a second
     // one, and a replay of the caller reuses the receipt the first run left.
@@ -141,6 +155,7 @@ pub struct Call {
     pub app: String,
     pub operation: String,
     pub schema_digest: String,
+    pub contract_digest: Option<String>,
     pub input: String,
     pub actor: String,
     pub origin: String,
@@ -155,8 +170,15 @@ pub struct Call {
 /// Derived from the callee's own contract rather than declared beside it, so
 /// the digest an operator reviews cannot drift from the schema that will run.
 pub fn schema_digest(runtime: &Runtime, operation: &str) -> Result<String> {
-    let definition = runtime.artifact().route(operation)?;
-    let schema = &runtime.artifact().contract().schema;
+    schema_digest_for_artifact(runtime.artifact(), operation)
+}
+
+pub fn schema_digest_for_artifact(
+    artifact: &crate::artifact::LoadedArtifact,
+    operation: &str,
+) -> Result<String> {
+    let definition = artifact.route(operation)?;
+    let schema = &artifact.contract().schema;
     let input = schema.inputs.get(&definition.input_type);
     let output = schema.inputs.get(&definition.output_type);
     Ok(crate::digest(&serde_json::to_vec(&(

@@ -152,10 +152,23 @@ The instance scope, selected artifact IDs and unrelated exports stay out of that
 artifact, so those changes alone do not alter its compiled contract input.
 For a supported structural contract, caller modules can `import ImportedContracts`
 and refer to types such as `ImportedContracts.DirectoryLookupInput` and
-`ImportedContracts.DirectoryLookupOutput`. Nominal inputs are rejected until
-the generator can preserve their identities. The generated module currently
-provides types only; authenticated cross-app calls, active catalog publication,
-and release dependency inventory are subsequent work.
+`ImportedContracts.DirectoryLookupOutput`. A pinned query also generates a
+function such as `ImportedContracts.directory_lookup(input)`, returning an
+`Observe(ImportedContracts.DirectoryLookupOutput)` for a prepared handler. The
+host finds one matching operator-granted app-operation binding for the current
+invocation; app code supplies neither a binding name nor an actor. It checks the
+callee's exported contract digest before dispatch. A missing, ambiguous or stale
+grant fails the observation. Nominal inputs are rejected until the generator can
+preserve their identities. Commands currently have types only; command receipts,
+separate-host transport, active catalog publication, and release dependency
+inventory are subsequent work.
+
+During a normal build, mandatory verification supplies each imported query with
+the selected callee's checked contract example and a disposable, operation-pinned
+grant. The simulated reply is available only for that example input; a different
+request fails verification unless it matches the callee's example. These
+build-time grants do not become instance authority. An operator still grants the
+exact app operation when installing the caller.
 
 ## Future app creation
 
