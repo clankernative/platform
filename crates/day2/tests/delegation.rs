@@ -78,6 +78,7 @@ impl Pair {
             app: "callee".into(),
             operation: operation.into(),
             schema_digest: digest.into(),
+            contract_digest: None,
             input: json!({"after":"","limit":20}).to_string(),
             actor: "alice".into(),
             origin: "origin-invocation".into(),

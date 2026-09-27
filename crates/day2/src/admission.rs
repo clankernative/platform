@@ -409,6 +409,7 @@ pub fn prepare(
     schema: &Schema,
     outputs: &output_schema::Catalog,
     images: &assets::Catalog,
+    imports: Option<&crate::instance_catalog::ImportedContracts>,
 ) -> Result<()> {
     let stage = stage.canonicalize()?;
     ensure!(!target.exists(), "admission target must be fresh");
@@ -424,6 +425,12 @@ pub fn prepare(
     let mut count = 0;
     copy_modules(&stage.join("app"), &target.join("app"), 0, &mut count)?;
     copy_modules(&stage.join("sdk"), &target.join("sdk"), 0, &mut count)?;
+    if let Some(imports) = imports {
+        fs::write(
+            target.join("app").join(crate::import_codegen::MODULE),
+            crate::import_codegen::admission_module(imports)?,
+        )?;
+    }
     for (module, _) in FACTORIES {
         let path = target.join("sdk").join(module);
         let restricted = restrict_sdk(module, &fs::read_to_string(&path)?)?;

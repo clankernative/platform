@@ -10,16 +10,22 @@ use crate::store::{Runtime, open};
 use crate::{
     artifact::LoadedArtifact,
     integration_host,
+    operation_contract::{Codec, Kind, OperationSpec, Package, TypeObject},
     protocol::{Instruction, Request},
 };
 use rusqlite::TransactionBehavior;
 use serde_json::json;
-use std::{fs, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    sync::Arc,
+};
 
 struct Granted {
     /// Held so the instance outlives the runtime that reads it; never read.
     _directory: tempfile::TempDir,
     caller: Runtime,
+    imported_digest: String,
 }
 
 impl Granted {
@@ -68,12 +74,60 @@ impl Granted {
                 "resource_policies":[{"policy":{"id":"reading","revision":1},
                     "operation":"ask","bindings":{"directory":{"id":"callee_list","revision":1}}}]}}});
         fs::write(&path, serde_json::to_vec(&instance)?)?;
+        let objects = BTreeMap::from([
+            (
+                "callee.operation.list.input.v1".into(),
+                TypeObject {
+                    id: "callee.operation.list.input.v1".into(),
+                    codec: Codec::RocJsonV1,
+                    schema: json!({"fields":{}}),
+                    dependencies: BTreeSet::new(),
+                },
+            ),
+            (
+                "callee.operation.list.output.v1".into(),
+                TypeObject {
+                    id: "callee.operation.list.output.v1".into(),
+                    codec: Codec::RocJsonV1,
+                    schema: json!({"shape":{"record":{"actor":"string"}},"roc_type":"{ actor : Str }"}),
+                    dependencies: BTreeSet::new(),
+                },
+            ),
+            (
+                "callee.operation.list.error.v1".into(),
+                TypeObject {
+                    id: "callee.operation.list.error.v1".into(),
+                    codec: Codec::RocJsonV1,
+                    schema: json!([]),
+                    dependencies: BTreeSet::new(),
+                },
+            ),
+        ]);
+        let package = Package::derive(
+            OperationSpec {
+                id: "callee.list".into(),
+                version: 1,
+                kind: Kind::Query,
+                input: "callee.operation.list.input.v1".into(),
+                output: "callee.operation.list.output.v1".into(),
+                error: "callee.operation.list.error.v1".into(),
+                semantics: json!({}),
+            },
+            &objects,
+        )?;
+        let imported_digest = package.digest.clone();
+        let imports = crate::instance_catalog::ImportedContracts::from_resolved(
+            crate::instance_catalog::ResolvedImports {
+                operations: BTreeMap::from([("callee.list".into(), package.clone())]),
+                types: package.types,
+            },
+        )?;
         let contract = serde_json::from_value(json!({
             "format":crate::artifact::CURRENT_FORMAT,"roc_version":"delegation-test",
             "worker_digest":"delegation-test","schema_digest":"delegation-test",
             "schema":{"models":{"items":{"fields":{"value":"text"}}},"inputs":{"input":{"fields":{}}},"foreign_keys":[]},
             "operations":[{"name":"ask","kind":"command","input_type":"input","output_type":""}],
-            "sources":{},"admission":"local-spike-only"}))?;
+            "sources":{},"admission":"local-spike-only","imports":imports}))?;
         let caller = Runtime {
             integrations: Arc::new(integration_host::Host::local(&path)?),
             instance_path: path,
@@ -92,8 +146,72 @@ impl Granted {
         Ok(Self {
             _directory: directory,
             caller,
+            imported_digest,
         })
     }
+}
+
+#[test]
+fn pinned_import_selects_one_grant_without_app_chosen_identity_or_binding() -> Result<()> {
+    let granted = Granted::new()?;
+    granted
+        .caller
+        .accept("ask", "alice", "imported", &json!({}), 100)?;
+    let request = |digest: &str, extra: serde_json::Value| {
+        let mut connection = open(granted.caller.db())?;
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let request = Request {
+            operation: "ask".into(),
+            input: "{}".into(),
+            context: crate::store::invocation_context(&tx, "imported")?,
+            observations: Vec::new(),
+        };
+        let mut data = json!({"contract":{"operation":"callee.list","digest":digest},"input":"{}"});
+        data.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let active = crate::authority_state::current(&tx)?;
+        let authorized = crate::capabilities::authorized(
+            &tx,
+            &granted.caller,
+            &request,
+            &Instruction {
+                kind: "observe".into(),
+                model: "app.query.v1".into(),
+                data: data.to_string(),
+                ..Instruction::default()
+            },
+            active.policy()?,
+            "ob_imported_0",
+        )?;
+        let binding = authorized.resource().binding.clone();
+        let call = authorized
+            .delegated_call()
+            .context("delegated call")?
+            .clone();
+        tx.commit()?;
+        Ok::<_, anyhow::Error>((binding, call))
+    };
+    let (binding, call) = request(&granted.imported_digest, json!({}))?;
+    assert_eq!(binding, "directory");
+    assert_eq!(call.actor, "alice");
+    assert_eq!(call.app, "callee");
+    assert_eq!(call.operation, "callee.list");
+    assert_eq!(
+        call.contract_digest.as_deref(),
+        Some(granted.imported_digest.as_str())
+    );
+    assert!(request(&format!("sha256:{}", "0".repeat(64)), json!({})).is_err());
+    assert!(
+        request(
+            &granted.imported_digest,
+            json!({"contract":{"operation":"callee.other","digest":granted.imported_digest}})
+        )
+        .is_err()
+    );
+    assert!(request(&granted.imported_digest, json!({"actor":"mallory"})).is_err());
+    assert!(request(&granted.imported_digest, json!({"handle":"forged"})).is_err());
+    Ok(())
 }
 
 /// The grant decides what may be called; the request decides who is calling.
