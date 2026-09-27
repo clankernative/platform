@@ -207,6 +207,8 @@ pub struct Artifact {
     pub app_contract: Option<crate::app_contract::Definition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub export_manifest: Option<crate::operation_contract::Manifest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imports: Option<crate::instance_catalog::ImportedContracts>,
     #[serde(default)]
     pub namespace: String,
     #[serde(default)]
@@ -596,6 +598,9 @@ impl LoadedArtifact {
             } else {
                 ensure!(expected.exports.is_empty(), "export manifest missing");
             }
+            if let Some(imports) = &contract.imports {
+                imports.verify()?;
+            }
         } else {
             ensure!(
                 contract.app_contract.is_none(),
@@ -605,6 +610,7 @@ impl LoadedArtifact {
                 contract.export_manifest.is_none(),
                 "legacy artifact has export manifest"
             );
+            ensure!(contract.imports.is_none(), "legacy artifact has imports");
         }
         ensure!(
             contract.format >= 3 || contract.pages.is_empty(),

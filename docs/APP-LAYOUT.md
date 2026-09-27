@@ -137,8 +137,25 @@ shapes. Candidate discovery does not mean an operation is serving or permitted.
 `catalog-check-consumers INSTANCE_JSON CONSUMER_LOCKS_JSON` also checks the
 supplied caller locks against one candidate and refuses an app import cycle.
 The supplied locks are not yet a complete release dependency inventory.
-Generated Roc client modules, build staging, active catalog publication, and
-cross-app dispatch are later parts of the delegation implementation.
+
+The normal caller build can resolve that lock against the selected instance:
+
+```text
+cargo run --locked -p xtask -- build path/to/caller-app --instance path/to/instance.json --imports path/to/import-lock.json
+```
+
+Both options are required together. The build rejects a stale pin, another
+instance scope, a self-import, or an imported shape it cannot represent. It
+stages `ImportedContracts.roc` beside the caller modules and includes the exact
+consumed operation packages and transitive type closure in the caller artifact.
+The instance scope, selected artifact IDs and unrelated exports stay out of that
+artifact, so those changes alone do not alter its compiled contract input.
+For a supported structural contract, caller modules can `import ImportedContracts`
+and refer to types such as `ImportedContracts.DirectoryLookupInput` and
+`ImportedContracts.DirectoryLookupOutput`. Nominal inputs are rejected until
+the generator can preserve their identities. The generated module currently
+provides types only; authenticated cross-app calls, active catalog publication,
+and release dependency inventory are subsequent work.
 
 ## Future app creation
 
