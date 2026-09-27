@@ -3,8 +3,13 @@
 //! transitions. Code and token bytes are held only by private custody.
 
 use anyhow::{Result, ensure};
+use day2_capabilities::BindingRef;
 use day2_capabilities::Digest;
+use day2_capabilities::oauth::{
+    ProductReturnRef, ProviderCallbackRef, ProviderIssuerRef, SecurityOriginRef,
+};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use serde::{Deserialize, Serialize};
 
 const MAX_CONNECT_SECONDS: i64 = 900;
 
@@ -21,6 +26,107 @@ pub struct ConnectIntent {
     pub callback: String,
     pub consent: String,
     pub expires_at: i64,
+}
+
+/// Host-owned evidence for one authorization redirect. The raw state and
+/// security session credential never enter SQLite.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CallbackBinding {
+    state_hash: Digest,
+    issuer: ProviderIssuerRef,
+    issuer_url: String,
+    security_origin: SecurityOriginRef,
+    profile: BindingRef,
+    callback: ProviderCallbackRef,
+    binding_namespace: String,
+    session: Digest,
+    product_return: ProductReturnRef,
+}
+
+pub struct CallbackBindingSpec {
+    pub issuer: ProviderIssuerRef,
+    pub issuer_url: String,
+    pub security_origin: SecurityOriginRef,
+    pub profile: BindingRef,
+    pub callback: ProviderCallbackRef,
+    pub binding_namespace: String,
+    pub session: Digest,
+    pub product_return: ProductReturnRef,
+}
+
+impl CallbackBinding {
+    pub fn from_secret_state(state: &[u8], spec: CallbackBindingSpec) -> Result<Self> {
+        Ok(Self {
+            state_hash: callback_state_hash(state)?,
+            issuer: spec.issuer,
+            issuer_url: spec.issuer_url,
+            security_origin: spec.security_origin,
+            profile: spec.profile,
+            callback: spec.callback,
+            binding_namespace: spec.binding_namespace,
+            session: spec.session,
+            product_return: spec.product_return,
+        })
+    }
+
+    pub(super) fn verify(&self, intent: &ConnectIntent) -> Result<()> {
+        let issuer = url::Url::parse(&self.issuer_url)?;
+        ensure!(
+            issuer.scheme() == "https"
+                && issuer.username().is_empty()
+                && issuer.password().is_none()
+                && issuer.query().is_none()
+                && issuer.fragment().is_none()
+                && issuer.as_str() == self.issuer_url
+                && self.issuer_url.len() <= 512,
+            "invalid reviewed provider issuer"
+        );
+        ensure!(
+            self.profile.id.as_str() == intent.profile
+                && Digest::of(&self.callback)?.as_str() == intent.callback,
+            "callback binding does not match connect intent"
+        );
+        self.callback.verify_derived(
+            &self.security_origin,
+            &self.profile,
+            &self.binding_namespace,
+        )?;
+        identifier(&self.binding_namespace)?;
+        Ok(())
+    }
+
+    pub(super) fn state_hash(&self) -> &Digest {
+        &self.state_hash
+    }
+
+    pub(super) fn issuer(&self) -> &ProviderIssuerRef {
+        &self.issuer
+    }
+
+    pub(super) fn issuer_url(&self) -> &str {
+        &self.issuer_url
+    }
+
+    pub(super) fn callback(&self) -> &ProviderCallbackRef {
+        &self.callback
+    }
+
+    pub(super) fn session(&self) -> &Digest {
+        &self.session
+    }
+
+    pub(super) fn product_return(&self) -> &ProductReturnRef {
+        &self.product_return
+    }
+}
+
+pub(super) fn callback_state_hash(state: &[u8]) -> Result<Digest> {
+    ensure!(
+        (32..=512).contains(&state.len()),
+        "invalid provider state length"
+    );
+    Digest::of(&("oauth-outbound-state-v1", state))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -56,6 +162,9 @@ pub fn install_schema(db: &Connection) -> Result<()> {
         "CREATE TABLE IF NOT EXISTS oauth_connect_schema_version (
             version INTEGER PRIMARY KEY
         );
+        CREATE TABLE IF NOT EXISTS oauth_callback_schema_version (
+            version INTEGER PRIMARY KEY
+        );
         CREATE TABLE IF NOT EXISTS oauth_connect_attempts (
             attempt TEXT PRIMARY KEY,
             slot TEXT NOT NULL,
@@ -81,6 +190,10 @@ pub fn install_schema(db: &Connection) -> Result<()> {
                   'exchange_uncertain')) = (code_ref IS NOT NULL)),
             CHECK((state IN ('awaiting_account_approval', 'activated')) =
                   (account IS NOT NULL AND scope_evidence IS NOT NULL))
+        );
+        CREATE TABLE IF NOT EXISTS oauth_callback_bindings (
+            attempt TEXT PRIMARY KEY REFERENCES oauth_connect_attempts(attempt),
+            binding TEXT NOT NULL
         );",
     )?;
     let mut versions = db.prepare("SELECT version FROM oauth_connect_schema_version")?;
@@ -94,12 +207,45 @@ pub fn install_schema(db: &Connection) -> Result<()> {
     if known.is_empty() {
         db.execute("INSERT INTO oauth_connect_schema_version VALUES (1)", [])?;
     }
+    let mut versions = db.prepare("SELECT version FROM oauth_callback_schema_version")?;
+    let known = versions
+        .query_map([], |row| row.get::<_, i64>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    ensure!(
+        known.is_empty() || known == [1],
+        "unsupported OAuth callback schema version"
+    );
+    if known.is_empty() {
+        db.execute("INSERT INTO oauth_callback_schema_version VALUES (1)", [])?;
+    }
     Ok(())
 }
 
 /// Records an already authorized interactive intent. The exact active pointer
 /// and security epoch are captured before redirecting to the provider.
-pub fn begin(db: &mut Connection, intent: &ConnectIntent, now: i64) -> Result<bool> {
+pub(super) fn begin(db: &mut Connection, intent: &ConnectIntent, now: i64) -> Result<bool> {
+    begin_inner(db, intent, None, now)
+}
+
+/// Production authorization attempts persist the reviewed callback evidence
+/// atomically with the attempt. Unbound legacy/test attempts cannot pass the
+/// private callback adapter.
+pub fn begin_bound(
+    db: &mut Connection,
+    intent: &ConnectIntent,
+    binding: &CallbackBinding,
+    now: i64,
+) -> Result<bool> {
+    binding.verify(intent)?;
+    begin_inner(db, intent, Some(binding), now)
+}
+
+fn begin_inner(
+    db: &mut Connection,
+    intent: &ConnectIntent,
+    binding: Option<&CallbackBinding>,
+    now: i64,
+) -> Result<bool> {
     validate(intent)?;
     ensure!(
         intent
@@ -132,13 +278,21 @@ pub fn begin(db: &mut Connection, intent: &ConnectIntent, now: i64) -> Result<bo
             intent.expires_at
         ],
     )?;
+    if inserted == 1
+        && let Some(binding) = binding
+    {
+        tx.execute(
+            "INSERT INTO oauth_callback_bindings (attempt, binding) VALUES (?1, ?2)",
+            params![intent.attempt, serde_json::to_string(binding)?],
+        )?;
+    }
     tx.commit()?;
     Ok(inserted == 1)
 }
 
 /// `code_ref` names quarantined private custody, never a raw authorization code.
 /// A duplicate callback cannot move the attempt back to ExchangeReady.
-pub fn claim_callback(
+pub(super) fn claim_callback(
     db: &mut Connection,
     attempt: &str,
     code_ref: &str,
@@ -572,7 +726,7 @@ fn validate(intent: &ConnectIntent) -> Result<()> {
     Ok(())
 }
 
-fn identifier(value: &str) -> Result<()> {
+pub(super) fn identifier(value: &str) -> Result<()> {
     ensure!(
         !value.is_empty()
             && value.len() <= 160
