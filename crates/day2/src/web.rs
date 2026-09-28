@@ -779,6 +779,18 @@ impl Host {
             crate::error::Failure::UnsupportedMethod
         );
         self.appearance.check_binding(&self.runtime)?;
+        // A provider delivery carries no browser origin, form encoding or
+        // session: what establishes it is the signature over these exact bytes,
+        // so it is dispatched before the browser guards and the session check.
+        if method == Method::POST && uri.path().starts_with(crate::ingress::ROUTE_PREFIX) {
+            ensure!(uri.query().is_none(), crate::error::Failure::UnknownFields);
+            return self.delivery(
+                &uri.path()[crate::ingress::ROUTE_PREFIX.len()..],
+                headers,
+                body,
+                at,
+            );
+        }
         if headers.contains_key(crate::web_api::ACT_AS_HEADER) {
             ensure!(
                 self.api
@@ -981,17 +993,6 @@ impl Host {
                 let input = self.page_input(name, uri.query().unwrap_or(""))?;
                 let content = self.page(name, &input, session, at, None, None)?;
                 self.app_response(StatusCode::OK, name, &input, session, content)
-            }
-            ("POST", path) if path.starts_with(crate::ingress::ROUTE_PREFIX) => {
-                // No session, no CSRF, no ticket: the sender is a provider, and
-                // what establishes it is the signature over these exact bytes.
-                ensure!(uri.query().is_none(), crate::error::Failure::UnknownFields);
-                self.delivery(
-                    &path[crate::ingress::ROUTE_PREFIX.len()..],
-                    headers,
-                    body,
-                    at,
-                )
             }
             ("POST", "/actions") => {
                 ensure!(uri.query().is_none(), crate::error::Failure::UnknownFields);
