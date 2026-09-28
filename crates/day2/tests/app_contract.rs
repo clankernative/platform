@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, ensure};
 use day2::{
-    artifact::LoadedArtifact,
+    artifact::{Artifact, LoadedArtifact},
     development, protocol,
     store::{Fault, replay},
     worker::Worker,
@@ -88,6 +88,62 @@ fn artifact() -> Result<PathBuf> {
 }
 
 #[test]
+fn checked_credential_closure_fences_child_growth_and_provider_paths() -> Result<()> {
+    let loaded = LoadedArtifact::load(&artifact()?)?;
+    let mut value = serde_json::to_value(loaded.contract())?;
+    let operations = &mut value["app_contract"]["operations"];
+    operations["reports.submit"]["credential_access"] = json!({"enabled":true,"local_reads":[]});
+    operations["reports.analyze"]["credential_access"] = json!({"enabled":true,"local_reads":[]});
+    // This fixture exercises one complete child edge without the later provider
+    // leg. The real checked app keeps that leg, which must be rejected below.
+    operations["reports.analyze"]["execution"]["effects"]
+        .as_array_mut()
+        .context("analyze effects")?
+        .retain(|effect| effect["kind"] != "request");
+    value["credential_declarations"] = json!([{
+        "registration":"family", "id":"reports_key", "profile":{"kind":"client"},
+        "grant":"fixed", "roots":["reports.submit"], "lifetime_seconds":3600,
+        "source":{"file":"App.roc","line":1}
+    }]);
+    let baseline: Artifact = serde_json::from_value(value.clone())?;
+    let old = day2::credential_authority::manifest(&baseline)?;
+    let old_root = &old[0].roots["reports.submit"];
+    assert!(old_root.closure.children.contains_key("reports.analyze"));
+
+    let model = baseline
+        .schema
+        .models
+        .keys()
+        .next()
+        .context("report model")?
+        .clone();
+    value["app_contract"]["operations"]["reports.analyze"]["credential_access"] =
+        json!({"enabled":true,"local_reads":[model]});
+    let expanded: Artifact = serde_json::from_value(value.clone())?;
+    let new = day2::credential_authority::manifest(&expanded)?;
+    let new_root = &new[0].roots["reports.submit"];
+    assert_eq!(old_root.operation_contract, new_root.operation_contract);
+    assert!(!new_root.closure.is_within(&old_root.closure));
+    assert_ne!(old[0].contract, new[0].contract);
+
+    value["app_contract"]["operations"]["reports.analyze"]["execution"]["effects"]
+        .as_array_mut()
+        .context("analyze effects")?
+        .push(json!({"kind":"request","model":"","fields":[],"command":"reports.notify"}));
+    value["app_contract"]["operations"]["reports.notify"]["credential_access"] =
+        json!({"enabled":true,"local_reads":[]});
+    let unsupported: Artifact = serde_json::from_value(value)?;
+    assert!(
+        format!(
+            "{:#}",
+            day2::credential_authority::manifest(&unsupported).unwrap_err()
+        )
+        .contains("credential provider write requires a selected permission contract")
+    );
+    Ok(())
+}
+
+#[test]
 fn native_required_all_rows_builders_preserve_typed_definitions() -> Result<()> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -144,6 +200,9 @@ expect (command.contract().example)({}) == Ok({input: {reason: "example"}, outpu
 expect (query.contract().example)({}) == Ok({input: {path: "/root"}, output: {count: 5}}) and (query.verification().input)("{}", 1) == Ok({path: "/generated"})
 expect (command.verification().check)("{}", {accepted: Bool.True}, "{}") == Ok(Bool.True) and (query.verification().check)("{}", {count: 10}, "{}") == Ok(Bool.True)
 expect command.execution().effects.map(|effect| effect.kind) == ["create"] and command.require_all_rows(rows).required_all_rows() == ["rows", "logs", "rows"]
+expect !command_base.credential_access().enabled and !query_base.credential_access().enabled
+expect command_base.credential_read(rows).credential_read(logs).credential_access().local_reads == ["rows", "logs"]
+expect query_base.credential_ready().credential_read(rows).credential_access() == { enabled: Bool.True, local_reads: ["rows"] }
 "#,
     )?;
     let output = day2::sandbox::compiler(
@@ -160,7 +219,7 @@ expect command.execution().effects.map(|effect| effect.kind) == ["create"] and c
         String::from_utf8_lossy(&output.stderr)
     );
     ensure!(
-        output.status.success() && diagnostics.contains("All (6) tests passed"),
+        output.status.success() && diagnostics.contains("All (9) tests passed"),
         "native read requirements: {diagnostics}"
     );
     Ok(())

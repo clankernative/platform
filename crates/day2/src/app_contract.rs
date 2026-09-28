@@ -30,6 +30,13 @@ pub struct Execution {
     pub effects: Vec<Effect>,
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialAccess {
+    pub enabled: bool,
+    pub local_reads: Vec<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Operation {
@@ -40,6 +47,8 @@ pub struct Operation {
     #[serde(default)]
     pub export_version: u32,
     pub execution: Execution,
+    #[serde(default)]
+    pub credential_access: CredentialAccess,
     pub errors: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required_all_rows: Vec<String>,
@@ -401,6 +410,7 @@ impl Definition {
                 &serde_json::from_str(&definition.response_example)?,
             )?;
             definition.execution.validate(artifact, operation, input)?;
+            definition.credential_access.validate(artifact, name)?;
             ensure!(
                 definition.export_version <= 1,
                 "unsupported cross-app export version: {name}"
@@ -424,6 +434,27 @@ impl Definition {
                     "declared presentation resource is missing or has the wrong type: {path}"
                 );
             }
+        }
+        Ok(())
+    }
+}
+
+impl CredentialAccess {
+    fn validate(&self, artifact: &Artifact, operation: &str) -> Result<()> {
+        ensure!(
+            self.enabled || self.local_reads.is_empty(),
+            "credential reads require an enabled authority contract: {operation}"
+        );
+        ensure!(
+            self.local_reads.len() <= 64,
+            "credential read budget: {operation}"
+        );
+        let mut seen = BTreeSet::new();
+        for model in &self.local_reads {
+            ensure!(
+                artifact.schema.models.contains_key(model) && seen.insert(model),
+                "unknown or duplicate credential read model: {operation}/{model}"
+            );
         }
         Ok(())
     }
@@ -770,7 +801,7 @@ pub fn modules(
                 &crate::operation_catalog::output_schema(&output.shape),
                 "contract.outputs",
             );
-            source.push_str(&format!("    contract_{name} : AppContract.Product -> Try(Api.Metadata, Str)\n    contract_{name} = |product| {{\n        contract = product.operations.{name}.contract()\n        example = (contract.example)({{}})?\n        request_example = Inputs.{}.encode(example.input)\n        _ = Inputs.{}.decode(request_example)?\n        {execution}\n        Ok({{ intent: {{ target: Api.{}({handle}.{name}), title: contract.title, usage: contract.usage, inputs: {inputs}, outputs: {out}, input_sources: contract.input_sources, follow_ups: contract.follow_ups }}, request_example, response_example: Outputs.{}.encode(example.output), deprecated: contract.deprecated, execution: execution_metadata, required_all_rows: product.operations.{name}.required_all_rows(), export_version: product.operations.{name}.export_version() }})\n    }}\n", operation.input, operation.input, if kind == "command" { "write" } else { "read" }, operation.output));
+            source.push_str(&format!("    contract_{name} : AppContract.Product -> Try(Api.Metadata, Str)\n    contract_{name} = |product| {{\n        contract = product.operations.{name}.contract()\n        example = (contract.example)({{}})?\n        request_example = Inputs.{}.encode(example.input)\n        _ = Inputs.{}.decode(request_example)?\n        {execution}\n        Ok({{ intent: {{ target: Api.{}({handle}.{name}), title: contract.title, usage: contract.usage, inputs: {inputs}, outputs: {out}, input_sources: contract.input_sources, follow_ups: contract.follow_ups }}, request_example, response_example: Outputs.{}.encode(example.output), deprecated: contract.deprecated, execution: execution_metadata, credential_access: product.operations.{name}.credential_access(), required_all_rows: product.operations.{name}.required_all_rows(), export_version: product.operations.{name}.export_version() }})\n    }}\n", operation.input, operation.input, if kind == "command" { "write" } else { "read" }, operation.output));
         }
         bindings.insert(kind, bound.join(", "));
     }
