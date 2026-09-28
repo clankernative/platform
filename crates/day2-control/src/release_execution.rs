@@ -214,6 +214,7 @@ impl ReleaseLease {
 pub struct ReleaseExecutionHost {
     journal: PathBuf,
     catalog_store: Option<PathBuf>,
+    catalog_instance: Option<PathBuf>,
     company: Name,
     owner: Name,
     durability: BindingRef,
@@ -233,6 +234,7 @@ impl ReleaseExecutionHost {
         Self {
             journal,
             catalog_store: None,
+            catalog_instance: None,
             company,
             owner,
             durability,
@@ -246,6 +248,14 @@ impl ReleaseExecutionHost {
     pub fn with_catalog_store(mut self, artifact_store: PathBuf) -> Result<Self> {
         ensure!(artifact_store.is_dir(), "catalog artifact store missing");
         self.catalog_store = Some(artifact_store.canonicalize()?);
+        Ok(self)
+    }
+
+    /// Re-read the instance's admitted bindings at candidate qualification.
+    /// Imported releases require this configuration before activation.
+    pub fn with_catalog_instance(mut self, instance_path: PathBuf) -> Result<Self> {
+        ensure!(instance_path.is_file(), "catalog instance file missing");
+        self.catalog_instance = Some(instance_path.canonicalize()?);
         Ok(self)
     }
 
@@ -275,6 +285,10 @@ impl ReleaseExecutionHost {
     }
 
     pub fn accept(&self, plan: &ReleaseExecutionPlan) -> Result<Digest> {
+        ensure!(
+            self.catalog_instance.is_none() || self.catalog_store.is_some(),
+            "catalog instance requires an artifact store"
+        );
         let mut journal = Journal::open(&self.journal)?;
         let approval = release::read_approval(&journal.connection, &plan.release)?.approval;
         self.validate(plan, &approval)?;
@@ -395,7 +409,16 @@ impl ReleaseExecutionHost {
                 .as_ref()
                 .map(|store| {
                     let approved = journal.load_approved_release(&lease.execution.plan.release)?;
-                    journal.candidate_catalog(&approved, store)
+                    if let Some(instance) = &self.catalog_instance {
+                        journal.candidate_catalog_with_instance(
+                            &approved,
+                            store,
+                            instance,
+                            i64::try_from(now)?,
+                        )
+                    } else {
+                        journal.candidate_catalog(&approved, store)
+                    }
                 })
                 .transpose()
         } else {
@@ -547,6 +570,44 @@ struct StoredExecution {
     incarnation: Option<DeploymentIncarnation>,
     readback: Option<ReleaseProviderFact>,
     activation: Option<ActivationReceipt>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct ValidatedServingBinding {
+    pub target: ReleaseTarget,
+    pub artifact: Digest,
+    deployment: BindingRef,
+    incarnation: DeploymentIncarnation,
+    readback: ReleaseProviderFact,
+}
+
+pub(crate) fn validated_execution_binding(
+    connection: &Connection,
+    release: &Digest,
+    active: bool,
+) -> Result<ValidatedServingBinding> {
+    let id = Digest::of(&("day2-release-workflow-v1", release))?;
+    let stored = read_execution(connection, &id)?;
+    ensure!(
+        stored.snapshot.phase
+            == if active {
+                ReleasePhase::Active
+            } else {
+                ReleasePhase::DeploymentReady
+            },
+        "imported serving target lacks exact deployment readback"
+    );
+    Ok(ValidatedServingBinding {
+        target: stored.snapshot.target,
+        artifact: stored.approval.artifact,
+        deployment: stored.snapshot.plan.deployment,
+        incarnation: stored
+            .incarnation
+            .ok_or_else(|| anyhow::anyhow!("serving incarnation missing"))?,
+        readback: stored
+            .readback
+            .ok_or_else(|| anyhow::anyhow!("serving readback missing"))?,
+    })
 }
 
 impl ReleaseOperation {
