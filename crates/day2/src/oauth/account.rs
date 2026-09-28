@@ -2,21 +2,201 @@
 //! email and provider list order never participate in account selection.
 
 use super::connect::ConnectIntent;
-use super::profiles::ValidatedTokenResponse;
+use super::profiles::{AccountBindingEvidence, OutboundInstanceEvidence, ValidatedTokenResponse};
 use anyhow::{Result, ensure};
+use day2_capabilities::BindingRef;
 use day2_capabilities::Digest;
+use day2_capabilities::oauth::SecurityOriginRef;
 use day2_capabilities::oauth::{
     AccountBindingPolicy, ConnectionRequirement, ProviderPermissionContract,
 };
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProviderAccount {
     pub issuer: String,
     pub subject: String,
     pub tenant: String,
     /// Presentation only; never compared for linkage or account identity.
     pub display_email: String,
+}
+
+/// Verified provider identity for the explicit-account policy. The security
+/// shell must separately confirm this exact account before activation.
+pub struct VerifiedExternalAccount {
+    intent: ConnectIntent,
+    account: String,
+    scope_evidence: String,
+    observed: ProviderAccount,
+    approval: BindingRef,
+    security_origin: SecurityOriginRef,
+}
+
+impl VerifiedExternalAccount {
+    pub fn verify(
+        intent: &ConnectIntent,
+        requirement: &ConnectionRequirement,
+        permission: &ProviderPermissionContract,
+        instance: &OutboundInstanceEvidence,
+        observed: &ProviderAccount,
+        response: &ValidatedTokenResponse,
+    ) -> Result<Self> {
+        ensure!(
+            requirement.account_policy == AccountBindingPolicy::ExplicitExternalAccount
+                && response.matches_permission(permission)
+                && intent.profile == permission.profile.id.as_str()
+                && intent.consent == permission.consent_digest(requirement)?.as_str(),
+            "external account does not match the consented policy"
+        );
+        let AccountBindingEvidence::ExplicitExternal {
+            instance: account_instance,
+            approval,
+            constraints,
+            owner,
+        } = &instance.account
+        else {
+            anyhow::bail!("external account evidence missing");
+        };
+        constraints.verify(&observed.issuer)?;
+        ensure!(
+            account_instance == &instance.instance
+                && owner == &intent.owner
+                && observed.issuer == constraints.issuer_url
+                && constraints.allowed_tenants.contains(&observed.tenant)
+                && constraints
+                    .allowed_subjects
+                    .as_ref()
+                    .is_none_or(|subjects| subjects.contains(&observed.subject)),
+            "provider account exceeds admitted external constraints"
+        );
+        stable_part(&observed.issuer)?;
+        stable_part(&observed.subject)?;
+        stable_part(&observed.tenant)?;
+        ensure!(
+            observed.display_email.len() <= 320
+                && !observed.display_email.chars().any(char::is_control),
+            "invalid external account presentation"
+        );
+        let required = permission
+            .action_scopes
+            .values()
+            .flat_map(|scopes| scopes.iter().cloned())
+            .collect::<BTreeSet<_>>();
+        ensure!(
+            response.scopes() == &required,
+            "provider returned missing or unreviewed scopes"
+        );
+        let account = provider_account_digest(observed)?;
+        let scope_evidence = Digest::of(&(
+            "oauth-accepted-scopes-v1",
+            permission.consent_digest(requirement)?,
+            &required,
+        ))?;
+        Ok(Self {
+            intent: intent.clone(),
+            account: account.as_str().to_owned(),
+            scope_evidence: scope_evidence.as_str().to_owned(),
+            observed: observed.clone(),
+            approval: approval.clone(),
+            security_origin: instance.shell.origin.clone(),
+        })
+    }
+
+    pub(super) fn intent(&self) -> &ConnectIntent {
+        &self.intent
+    }
+
+    pub(super) fn account(&self) -> &str {
+        &self.account
+    }
+
+    pub(super) fn scope_evidence(&self) -> &str {
+        &self.scope_evidence
+    }
+
+    pub(super) fn observed(&self) -> &ProviderAccount {
+        &self.observed
+    }
+
+    pub(super) fn approval(&self) -> &BindingRef {
+        &self.approval
+    }
+
+    pub(super) fn security_origin(&self) -> &SecurityOriginRef {
+        &self.security_origin
+    }
+}
+
+pub(super) fn provider_account_digest(observed: &ProviderAccount) -> Result<Digest> {
+    Digest::of(&(
+        "oauth-provider-account-v1",
+        &observed.issuer,
+        &observed.subject,
+        &observed.tenant,
+    ))
+}
+
+pub(super) fn validate_pending_external(
+    intent: &ConnectIntent,
+    requirement: &ConnectionRequirement,
+    permission: &ProviderPermissionContract,
+    instance: &OutboundInstanceEvidence,
+    observed: &ProviderAccount,
+    account: &str,
+    scope_evidence: &str,
+) -> Result<()> {
+    ensure!(
+        requirement.account_policy == AccountBindingPolicy::ExplicitExternalAccount
+            && intent.profile == permission.profile.id.as_str()
+            && intent.consent == permission.consent_digest(requirement)?.as_str(),
+        "pending external account consent mismatch"
+    );
+    let AccountBindingEvidence::ExplicitExternal {
+        instance: account_instance,
+        constraints,
+        owner,
+        ..
+    } = &instance.account
+    else {
+        anyhow::bail!("pending external account evidence missing");
+    };
+    constraints.verify(&observed.issuer)?;
+    ensure!(
+        account_instance == &instance.instance
+            && owner == &intent.owner
+            && constraints.allowed_tenants.contains(&observed.tenant)
+            && constraints
+                .allowed_subjects
+                .as_ref()
+                .is_none_or(|subjects| subjects.contains(&observed.subject)),
+        "pending external account exceeds admitted constraints"
+    );
+    stable_part(&observed.issuer)?;
+    stable_part(&observed.subject)?;
+    stable_part(&observed.tenant)?;
+    ensure!(
+        observed.display_email.len() <= 320
+            && !observed.display_email.chars().any(char::is_control),
+        "invalid pending external account presentation"
+    );
+    let required = permission
+        .action_scopes
+        .values()
+        .flat_map(|scopes| scopes.iter().cloned())
+        .collect::<BTreeSet<_>>();
+    let expected_scope = Digest::of(&(
+        "oauth-accepted-scopes-v1",
+        permission.consent_digest(requirement)?,
+        &required,
+    ))?;
+    ensure!(
+        provider_account_digest(observed)?.as_str() == account
+            && expected_scope.as_str() == scope_evidence,
+        "pending external account or scopes changed"
+    );
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

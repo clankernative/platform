@@ -205,7 +205,55 @@ pub enum ClientRegistrationClass {
     PublicPkceS256,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Reviewed issuer, tenant, and optional subject ceiling for an external
+/// account. The nominal revision covers every allowed identity value.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ExternalAccountConstraints {
+    pub binding: BindingRef,
+    pub issuer_url: String,
+    pub allowed_tenants: BTreeSet<String>,
+    pub allowed_subjects: Option<BTreeSet<String>>,
+}
+
+impl ExternalAccountConstraints {
+    pub fn verify(&self, reviewed_issuer: &str) -> Result<()> {
+        ensure!(
+            self.issuer_url == reviewed_issuer
+                && https_url(&self.issuer_url, true).is_ok()
+                && !self.allowed_tenants.is_empty()
+                && self.allowed_tenants.len() <= 64
+                && self
+                    .allowed_subjects
+                    .as_ref()
+                    .is_none_or(|subjects| !subjects.is_empty() && subjects.len() <= 64),
+            "invalid external account constraints"
+        );
+        for value in self
+            .allowed_tenants
+            .iter()
+            .chain(self.allowed_subjects.iter().flatten())
+        {
+            ensure!(
+                !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control),
+                "invalid external account constraint value"
+            );
+        }
+        ensure!(
+            self.binding.revision
+                == Digest::of(&(
+                    "oauth-external-account-constraints-v1",
+                    &self.binding.id,
+                    &self.issuer_url,
+                    &self.allowed_tenants,
+                    &self.allowed_subjects,
+                ))?,
+            "external account constraints revision mismatch"
+        );
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub enum AccountBindingEvidence {
     MappedHuman {
         instance: BindingRef,
@@ -215,6 +263,7 @@ pub enum AccountBindingEvidence {
     ExplicitExternal {
         instance: BindingRef,
         approval: BindingRef,
+        constraints: ExternalAccountConstraints,
         owner: String,
     },
     Installation {
@@ -391,6 +440,9 @@ pub(super) fn qualify_outbound_connect(
         ),
         "profile account evidence does not match the required owner policy"
     );
+    if let AccountBindingEvidence::ExplicitExternal { constraints, .. } = &instance.account {
+        constraints.verify(&reviewed.issuer_url)?;
+    }
     Ok(QualifiedOutboundConnect {
         intent: intent.clone(),
         binding: binding.clone(),
@@ -500,6 +552,7 @@ mod tests {
         self, CallbackBinding, CallbackBindingSpec, ConnectIntent, ConnectState,
     };
     use crate::oauth::exchange::{self, ExchangeObservation, TokenHttpResponse};
+    use crate::oauth::external::{self, FreshExternalApproval, ShellApprovalKeyLease};
     use crate::oauth::outbound::{CallbackIngress, CallbackOutcome};
     use day2_capabilities::Name;
     use day2_capabilities::oauth::{ConnectionOwner, ProductReturnRef};
@@ -559,13 +612,21 @@ mod tests {
     }
 
     fn qualification_fixture() -> QualificationFixture {
+        qualification_fixture_for(AccountBindingPolicy::MappedHuman)
+    }
+
+    fn external_fixture() -> QualificationFixture {
+        qualification_fixture_for(AccountBindingPolicy::ExplicitExternalAccount)
+    }
+
+    fn qualification_fixture_for(policy: AccountBindingPolicy) -> QualificationFixture {
         let requirement = ConnectionRequirement {
             logical_id: "workspace.calendar".into(),
             revision: 1,
             capability: "calendar.events".into(),
             actions: BTreeSet::from(["read".into()]),
             owner: ConnectionOwner::CurrentHuman,
-            account_policy: AccountBindingPolicy::MappedHuman,
+            account_policy: policy.clone(),
             usage: "Read calendar events".into(),
         };
         let mut permission = ProviderPermissionContract {
@@ -590,7 +651,13 @@ mod tests {
             adapter: pin("calendar_adapter"),
             simulator: pin("calendar_simulator"),
             conformance: pin("calendar_conformance"),
-            account_evidence: AccountEvidenceContract::MappedHuman,
+            account_evidence: match &policy {
+                AccountBindingPolicy::MappedHuman => AccountEvidenceContract::MappedHuman,
+                AccountBindingPolicy::ExplicitExternalAccount => {
+                    AccountEvidenceContract::ExternalAccount
+                }
+                AccountBindingPolicy::InstallationAccount => AccountEvidenceContract::Installation,
+            },
         };
         let revision = reviewed.review_revision().unwrap();
         permission.profile.revision = revision.clone();
@@ -689,10 +756,21 @@ mod tests {
                 class,
             },
             custody: pin("private_oauth_custody"),
-            account: AccountBindingEvidence::MappedHuman {
-                instance: instance_ref,
-                mapping: pin("human_subject_map"),
-                owner: "human_1".into(),
+            account: match policy {
+                AccountBindingPolicy::MappedHuman => AccountBindingEvidence::MappedHuman {
+                    instance: instance_ref,
+                    mapping: pin("human_subject_map"),
+                    owner: "human_1".into(),
+                },
+                AccountBindingPolicy::ExplicitExternalAccount => {
+                    AccountBindingEvidence::ExplicitExternal {
+                        instance: instance_ref,
+                        approval: pin("security_shell_account_approval"),
+                        constraints: external_constraints(),
+                        owner: "human_1".into(),
+                    }
+                }
+                AccountBindingPolicy::InstallationAccount => unreachable!("test fixture policy"),
             },
             product_return,
         };
@@ -735,6 +813,379 @@ mod tests {
         assert!(matches!(outcome, CallbackOutcome::CodeAccepted { .. }));
     }
 
+    fn quarantine_external_fixture(
+        db: &mut rusqlite::Connection,
+        fixture: &QualificationFixture,
+        key: &KeyLease,
+    ) {
+        connect::install_schema(db).unwrap();
+        let prepared = exchange::prepare_authorization(
+            fixture.input(),
+            key,
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~",
+        )
+        .unwrap();
+        let code_ref = prepared.code_ref().to_owned();
+        assert!(prepared.begin(db, 1).unwrap());
+        private_callback(db, fixture, &code_ref, key);
+        let permit = exchange::authorize_and_commit_qualified_exchange(db, fixture.input(), 3)
+            .unwrap()
+            .unwrap();
+        let response = match permit.send(|_| Ok(TokenHttpResponse {
+            status: 200,
+            content_type: "application/json".into(),
+            body: br#"{"access_token":"secret_external_access","token_type":"Bearer","expires_in":3600,"scope":"calendar.read"}"#.to_vec(),
+        })) {
+            ExchangeObservation::Response(response) => response,
+            ExchangeObservation::Uncertain(_) => panic!("external response lost"),
+        };
+        let (_, observed) = mapped_account(fixture);
+        let prepared = response
+            .validate_external(fixture.input(), &observed)
+            .unwrap()
+            .prepare_quarantine(key, 4)
+            .unwrap();
+        assert!(external::quarantine_external(db, prepared, fixture.input(), 4).unwrap());
+    }
+
+    fn shell_key(pending: &external::PendingExternalApproval) -> ShellApprovalKeyLease {
+        ShellApprovalKeyLease::new(
+            &[12; 32],
+            "shell_v1".into(),
+            pending.security_origin().clone(),
+            pending.approval_binding().clone(),
+        )
+        .unwrap()
+    }
+
+    fn fresh_approval(
+        pending: &external::PendingExternalApproval,
+        shell: &ShellApprovalKeyLease,
+    ) -> FreshExternalApproval {
+        shell
+            .attest(
+                pending,
+                Digest::of(&"fresh-security-session").unwrap(),
+                5,
+                5,
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn external_approval_survives_reopen_and_activates_exact_quarantine_once() {
+        let fixture = external_fixture();
+        let key = exchange_key();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("external-approval.sqlite");
+        {
+            let mut db = rusqlite::Connection::open(&path).unwrap();
+            quarantine_external_fixture(&mut db, &fixture, &key);
+            assert!(matches!(
+                connect::state(&db, &fixture.intent.attempt).unwrap(),
+                Some(ConnectState::AwaitingAccountApproval)
+            ));
+            let active: i64 = db
+                .query_row("SELECT COUNT(*) FROM oauth_private_tokens", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(active, 0);
+        }
+        let mut db = rusqlite::Connection::open(&path).unwrap();
+        connect::install_schema(&db).unwrap();
+        let pending = external::load_pending_external(&db, fixture.input(), &key, 5)
+            .unwrap()
+            .unwrap();
+        assert_eq!(pending.observed_account().subject, "subject_1");
+        let shell = shell_key(&pending);
+        let approval = fresh_approval(&pending, &shell);
+        assert!(
+            external::approve_external(&mut db, fixture.input(), &key, &shell, approval, 5)
+                .unwrap()
+        );
+        assert!(matches!(
+            connect::state(&db, &fixture.intent.attempt).unwrap(),
+            Some(ConnectState::Activated { .. })
+        ));
+        assert!(
+            external::load_pending_external(&db, fixture.input(), &key, 6)
+                .unwrap()
+                .is_none()
+        );
+        let ciphertext: Vec<u8> = db
+            .query_row("SELECT ciphertext FROM oauth_private_tokens", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert!(
+            !ciphertext
+                .windows(b"secret_external_access".len())
+                .any(|part| part == b"secret_external_access")
+        );
+        let pending_count: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM oauth_external_quarantine",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(pending_count, 0);
+        assert!(
+            !external::approve_external(
+                &mut db,
+                fixture.input(),
+                &key,
+                &shell,
+                fresh_approval(&pending, &shell),
+                6
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn external_approval_rejects_changed_account_scope_and_stale_session() {
+        let fixture = external_fixture();
+        let key = exchange_key();
+        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        quarantine_external_fixture(&mut db, &fixture, &key);
+        let pending = external::load_pending_external(&db, fixture.input(), &key, 5)
+            .unwrap()
+            .unwrap();
+        let shell = shell_key(&pending);
+        let mut wrong_account = fresh_approval(&pending, &shell);
+        wrong_account.account = Digest::of(&"another-account").unwrap().as_str().into();
+        assert!(
+            external::approve_external(&mut db, fixture.input(), &key, &shell, wrong_account, 5)
+                .is_err()
+        );
+        let mut wrong_scope = fresh_approval(&pending, &shell);
+        wrong_scope.scope_evidence = Digest::of(&"another-scope").unwrap().as_str().into();
+        assert!(
+            external::approve_external(&mut db, fixture.input(), &key, &shell, wrong_scope, 5)
+                .is_err()
+        );
+        let mut wrong_generation = fresh_approval(&pending, &shell);
+        wrong_generation.generation += 1;
+        assert!(
+            external::approve_external(&mut db, fixture.input(), &key, &shell, wrong_generation, 5)
+                .is_err()
+        );
+        let mut wrong_challenge = fresh_approval(&pending, &shell);
+        wrong_challenge.challenge = Digest::of(&"another-challenge").unwrap();
+        assert!(
+            external::approve_external(&mut db, fixture.input(), &key, &shell, wrong_challenge, 5)
+                .is_err()
+        );
+        let stale = shell
+            .attest(
+                &pending,
+                Digest::of(&"fresh-security-session").unwrap(),
+                3,
+                5,
+            )
+            .unwrap();
+        assert!(
+            external::approve_external(&mut db, fixture.input(), &key, &shell, stale, 5).is_err()
+        );
+        let reused_session = shell
+            .attest(&pending, fixture.binding.session().clone(), 5, 5)
+            .unwrap();
+        assert!(
+            external::approve_external(&mut db, fixture.input(), &key, &shell, reused_session, 5)
+                .is_err()
+        );
+        let other_shell = ShellApprovalKeyLease::new(
+            &[13; 32],
+            "shell_v1".into(),
+            pending.security_origin().clone(),
+            pending.approval_binding().clone(),
+        )
+        .unwrap();
+        assert!(
+            external::approve_external(
+                &mut db,
+                fixture.input(),
+                &key,
+                &other_shell,
+                fresh_approval(&pending, &shell),
+                5,
+            )
+            .is_err()
+        );
+        let mut changed = fixture.clone();
+        if let AccountBindingEvidence::ExplicitExternal { constraints, .. } =
+            &mut changed.instance.account
+        {
+            constraints
+                .allowed_tenants
+                .insert("unreviewed-tenant".into());
+        }
+        assert!(external::load_pending_external(&db, changed.input(), &key, 5).is_err());
+        assert!(matches!(
+            connect::state(&db, &fixture.intent.attempt).unwrap(),
+            Some(ConnectState::AwaitingAccountApproval)
+        ));
+        let active: i64 = db
+            .query_row("SELECT COUNT(*) FROM oauth_private_tokens", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(active, 0);
+    }
+
+    #[test]
+    fn external_quarantine_tamper_rolls_back_and_expiry_cleans_custody() {
+        let fixture = external_fixture();
+        let key = exchange_key();
+        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        quarantine_external_fixture(&mut db, &fixture, &key);
+        let pending = external::load_pending_external(&db, fixture.input(), &key, 5)
+            .unwrap()
+            .unwrap();
+        let shell = shell_key(&pending);
+        db.execute(
+            "UPDATE oauth_external_quarantine SET token_ciphertext = x'00'",
+            [],
+        )
+        .unwrap();
+        assert!(
+            external::approve_external(
+                &mut db,
+                fixture.input(),
+                &key,
+                &shell,
+                fresh_approval(&pending, &shell),
+                5
+            )
+            .is_err()
+        );
+        assert!(matches!(
+            connect::state(&db, &fixture.intent.attempt).unwrap(),
+            Some(ConnectState::AwaitingAccountApproval)
+        ));
+        let active: i64 = db
+            .query_row("SELECT COUNT(*) FROM oauth_private_tokens", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(active, 0);
+        assert!(connect::expire(&mut db, &fixture.intent.attempt, 101, |_| Ok(())).unwrap());
+        let pending_count: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM oauth_external_quarantine",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(pending_count, 0);
+    }
+
+    #[test]
+    fn external_quarantine_write_failure_keeps_exchange_fence_and_private_code() {
+        let fixture = external_fixture();
+        let key = exchange_key();
+        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        connect::install_schema(&db).unwrap();
+        let prepared = exchange::prepare_authorization(
+            fixture.input(),
+            &key,
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~",
+        )
+        .unwrap();
+        let code_ref = prepared.code_ref().to_owned();
+        assert!(prepared.begin(&mut db, 1).unwrap());
+        private_callback(&mut db, &fixture, &code_ref, &key);
+        let _permit =
+            exchange::authorize_and_commit_qualified_exchange(&mut db, fixture.input(), 3)
+                .unwrap()
+                .unwrap();
+        let (_, observed) = mapped_account(&fixture);
+        let response = fixture.reviewed.protocol.validate_token_response(
+            br#"{"access_token":"secret_external_access","token_type":"Bearer","expires_in":3600,"scope":"calendar.read"}"#,
+            &fixture.permission,
+        ).unwrap();
+        let verified = crate::oauth::account::VerifiedExternalAccount::verify(
+            &fixture.intent,
+            &fixture.requirement,
+            &fixture.permission,
+            &fixture.instance,
+            &observed,
+            &response,
+        )
+        .unwrap();
+        let binding = exchange::load_binding(&db, &fixture.intent.attempt)
+            .unwrap()
+            .unwrap();
+        assert!(
+            connect::quarantine_external_bound(&mut db, &verified, &binding, 4, |_| anyhow::bail!(
+                "custody write rejected"
+            ),)
+            .is_err()
+        );
+        assert_eq!(
+            connect::state(&db, &fixture.intent.attempt).unwrap(),
+            Some(ConnectState::ExchangeMayHaveBeenSent)
+        );
+        let codes: i64 = db
+            .query_row("SELECT COUNT(*) FROM oauth_private_codes", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let verifiers: i64 = db
+            .query_row("SELECT COUNT(*) FROM oauth_private_verifiers", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let pending: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM oauth_external_quarantine",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!((codes, verifiers, pending), (1, 1, 0));
+    }
+
+    #[test]
+    fn external_constraints_reject_wrong_tenant_and_subject() {
+        let fixture = external_fixture();
+        fixture.qualify().unwrap();
+        let raw = br#"{"access_token":"secret_external_access","token_type":"Bearer","expires_in":3600,"scope":"calendar.read"}"#;
+        let response = fixture
+            .reviewed
+            .protocol
+            .validate_token_response(raw, &fixture.permission)
+            .unwrap();
+        let (_, mut observed) = mapped_account(&fixture);
+        observed.tenant = "other-tenant".into();
+        assert!(
+            crate::oauth::account::VerifiedExternalAccount::verify(
+                &fixture.intent,
+                &fixture.requirement,
+                &fixture.permission,
+                &fixture.instance,
+                &observed,
+                &response,
+            )
+            .is_err()
+        );
+        observed.tenant = "tenant_1".into();
+        observed.subject = "other-subject".into();
+        assert!(
+            crate::oauth::account::VerifiedExternalAccount::verify(
+                &fixture.intent,
+                &fixture.requirement,
+                &fixture.permission,
+                &fixture.instance,
+                &observed,
+                &response,
+            )
+            .is_err()
+        );
+    }
+
     fn mapped_account(fixture: &QualificationFixture) -> (MappedHumanEvidence, ProviderAccount) {
         let mapping = MappedHumanEvidence {
             human: fixture.intent.owner.clone(),
@@ -750,6 +1201,27 @@ mod tests {
             display_email: "display@example.com".into(),
         };
         (mapping, account)
+    }
+
+    fn external_constraints() -> ExternalAccountConstraints {
+        let issuer_url = "https://issuer.example/tenant".to_owned();
+        let allowed_tenants = BTreeSet::from(["tenant_1".to_owned()]);
+        let allowed_subjects = Some(BTreeSet::from(["subject_1".to_owned()]));
+        let name = Name::try_from("external_constraints".to_owned()).unwrap();
+        let revision = Digest::of(&(
+            "oauth-external-account-constraints-v1",
+            &name,
+            &issuer_url,
+            &allowed_tenants,
+            &allowed_subjects,
+        ))
+        .unwrap();
+        ExternalAccountConstraints {
+            binding: BindingRef { id: name, revision },
+            issuer_url,
+            allowed_tenants,
+            allowed_subjects,
+        }
     }
 
     #[test]
@@ -1029,6 +1501,7 @@ mod tests {
         changed.instance.account = AccountBindingEvidence::ExplicitExternal {
             instance: fixture.instance.instance.clone(),
             approval: pin("approval"),
+            constraints: external_constraints(),
             owner: fixture.intent.owner.clone(),
         };
         rejects(&changed, "account evidence does not match");

@@ -1,7 +1,7 @@
 //! OAuth material in reserved per-app SQLite tables. Encryption uses the
 //! credential track's admitted key lease; no key or raw token enters SQLite.
 
-use super::account::VerifiedMappedAccount;
+use super::account::ProviderAccount;
 use super::connect::ConnectIntent;
 use super::exchange::ExchangeBinding;
 use super::profiles::ValidatedTokenResponse;
@@ -10,6 +10,7 @@ use anyhow::{Result, ensure};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use day2_capabilities::oauth::ProviderCallbackRef;
 use day2_capabilities::{BindingRef, Digest};
+use getrandom::fill;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -19,6 +20,7 @@ enum MaterialPurpose {
     AuthorizationCode,
     PkceVerifier,
     ConnectionTokens,
+    ExternalApprovalIdentity,
 }
 
 #[derive(Serialize)]
@@ -210,6 +212,10 @@ pub(super) fn delete_code(
 
 pub(super) fn delete_attempt_material(tx: &Transaction<'_>, attempt: &str) -> Result<()> {
     tx.execute(
+        "DELETE FROM oauth_external_quarantine WHERE attempt = ?1",
+        [attempt],
+    )?;
+    tx.execute(
         "DELETE FROM oauth_private_codes WHERE attempt = ?1",
         [attempt],
     )?;
@@ -351,7 +357,8 @@ struct TokenBundle {
 
 pub(super) fn prepare_tokens(
     key: &KeyLease,
-    verified: &VerifiedMappedAccount,
+    intent: &ConnectIntent,
+    account: &str,
     binding: &ExchangeBinding,
     tokens: ValidatedTokenResponse,
 ) -> Result<PreparedTokenMaterial> {
@@ -366,17 +373,17 @@ pub(super) fn prepare_tokens(
         key,
         &identity(
             MaterialPurpose::ConnectionTokens,
-            verified.intent(),
+            intent,
             binding,
-            Some(verified.account()),
+            Some(account),
         ),
         &plaintext,
     );
     plaintext.fill(0);
     Ok(PreparedTokenMaterial {
-        slot: verified.intent().slot.clone(),
-        generation: verified.intent().proposed_generation,
-        account: verified.account().to_owned(),
+        slot: intent.slot.clone(),
+        generation: intent.proposed_generation,
+        account: account.to_owned(),
         reference: binding.token_slot_ref.clone(),
         material: material?,
     })
@@ -398,6 +405,293 @@ pub(super) fn publish_tokens(tx: &Transaction<'_>, prepared: PreparedTokenMateri
             prepared.material.ciphertext,
         ],
     )?;
+    Ok(())
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct PendingExternalIdentity {
+    pub observed: ProviderAccount,
+    pub challenge: Digest,
+    pub quarantined_at: i64,
+}
+
+pub(super) struct PreparedExternalQuarantine {
+    attempt: String,
+    scope_evidence: String,
+    token: PreparedTokenMaterial,
+    identity: EncryptedMaterial,
+    challenge: Digest,
+    quarantined_at: i64,
+}
+
+impl PreparedExternalQuarantine {
+    pub(super) fn quarantined_at(&self) -> i64 {
+        self.quarantined_at
+    }
+}
+
+pub(super) fn prepare_external_quarantine(
+    key: &KeyLease,
+    intent: &ConnectIntent,
+    account_scope: (&str, &str),
+    observed: &ProviderAccount,
+    binding: &ExchangeBinding,
+    tokens: ValidatedTokenResponse,
+    now: i64,
+) -> Result<PreparedExternalQuarantine> {
+    let (account, scope_evidence) = account_scope;
+    ensure!(
+        now >= 0 && now < intent.expires_at,
+        "invalid external approval lifetime"
+    );
+    let mut random = [0u8; 32];
+    fill(&mut random).map_err(|_| anyhow::anyhow!("approval challenge entropy unavailable"))?;
+    let challenge = Digest::of(&(
+        "oauth-external-approval-challenge-v1",
+        &intent.attempt,
+        account,
+        scope_evidence,
+        intent.proposed_generation,
+        now,
+        random,
+    ))?;
+    random.fill(0);
+    let pending = PendingExternalIdentity {
+        observed: observed.clone(),
+        challenge: challenge.clone(),
+        quarantined_at: now,
+    };
+    let mut plaintext = serde_json::to_vec(&pending)?;
+    let identity = encrypt(
+        key,
+        &identity(
+            MaterialPurpose::ExternalApprovalIdentity,
+            intent,
+            binding,
+            Some(account),
+        ),
+        &plaintext,
+    );
+    plaintext.fill(0);
+    Ok(PreparedExternalQuarantine {
+        attempt: intent.attempt.clone(),
+        scope_evidence: scope_evidence.to_owned(),
+        token: prepare_tokens(key, intent, account, binding, tokens)?,
+        identity: identity?,
+        challenge,
+        quarantined_at: now,
+    })
+}
+
+pub(super) fn publish_external_quarantine(
+    tx: &Transaction<'_>,
+    prepared: PreparedExternalQuarantine,
+) -> Result<()> {
+    tx.execute(
+        "INSERT INTO oauth_external_quarantine
+         (attempt, slot, generation, account, scope_evidence, challenge, quarantined_at,
+          token_reference, token_identity_digest, token_key_version, token_nonce, token_ciphertext,
+          identity_digest, identity_key_version, identity_nonce, identity_ciphertext)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+        params![
+            prepared.attempt,
+            prepared.token.slot,
+            prepared.token.generation,
+            prepared.token.account,
+            prepared.scope_evidence,
+            prepared.challenge.as_str(),
+            prepared.quarantined_at,
+            prepared.token.reference,
+            prepared.token.material.identity_digest.as_str(),
+            prepared.token.material.key_version,
+            prepared.token.material.nonce.as_slice(),
+            prepared.token.material.ciphertext,
+            prepared.identity.identity_digest.as_str(),
+            prepared.identity.key_version,
+            prepared.identity.nonce.as_slice(),
+            prepared.identity.ciphertext,
+        ],
+    )?;
+    Ok(())
+}
+
+struct QuarantineRow {
+    slot: String,
+    generation: i64,
+    account: String,
+    scope_evidence: String,
+    challenge: String,
+    quarantined_at: i64,
+    token_reference: String,
+    token_identity_digest: String,
+    token_key_version: String,
+    token_nonce: Vec<u8>,
+    token_ciphertext: Vec<u8>,
+    identity_digest: String,
+    identity_key_version: String,
+    identity_nonce: Vec<u8>,
+    identity_ciphertext: Vec<u8>,
+}
+
+fn quarantine_row(db: &Connection, attempt: &str) -> Result<Option<QuarantineRow>> {
+    Ok(db
+        .query_row(
+            "SELECT slot, generation, account, scope_evidence, challenge, quarantined_at,
+                token_reference, token_identity_digest, token_key_version, token_nonce,
+                token_ciphertext, identity_digest, identity_key_version, identity_nonce,
+                identity_ciphertext
+         FROM oauth_external_quarantine WHERE attempt = ?1",
+            [attempt],
+            |row| {
+                Ok(QuarantineRow {
+                    slot: row.get(0)?,
+                    generation: row.get(1)?,
+                    account: row.get(2)?,
+                    scope_evidence: row.get(3)?,
+                    challenge: row.get(4)?,
+                    quarantined_at: row.get(5)?,
+                    token_reference: row.get(6)?,
+                    token_identity_digest: row.get(7)?,
+                    token_key_version: row.get(8)?,
+                    token_nonce: row.get(9)?,
+                    token_ciphertext: row.get(10)?,
+                    identity_digest: row.get(11)?,
+                    identity_key_version: row.get(12)?,
+                    identity_nonce: row.get(13)?,
+                    identity_ciphertext: row.get(14)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
+fn validate_external_identity(
+    row: &QuarantineRow,
+    key: &KeyLease,
+    intent: &ConnectIntent,
+    binding: &ExchangeBinding,
+    account: &str,
+    scope_evidence: &str,
+) -> Result<PendingExternalIdentity> {
+    ensure!(
+        row.slot == intent.slot
+            && row.generation == intent.proposed_generation
+            && row.account == account
+            && row.scope_evidence == scope_evidence
+            && row.quarantined_at >= 0
+            && row.quarantined_at < intent.expires_at,
+        "external approval quarantine identity mismatch"
+    );
+    let expected = identity(
+        MaterialPurpose::ExternalApprovalIdentity,
+        intent,
+        binding,
+        Some(account),
+    );
+    ensure!(
+        row.identity_digest
+            == Digest::of(&("oauth-private-material-identity-v1", &expected))?.as_str()
+            && row.identity_key_version == key.encryption_version,
+        "external approval identity or key version mismatch"
+    );
+    let nonce: [u8; 12] = row
+        .identity_nonce
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("invalid external approval nonce"))?;
+    let mut plaintext = key.open_oauth(&aad(key, &expected)?, nonce, &row.identity_ciphertext)?;
+    let pending: PendingExternalIdentity = serde_json::from_slice(&plaintext)
+        .map_err(|_| anyhow::anyhow!("invalid external approval identity"))?;
+    plaintext.fill(0);
+    ensure!(
+        pending.challenge.as_str() == row.challenge
+            && pending.quarantined_at == row.quarantined_at
+            && super::account::provider_account_digest(&pending.observed)?.as_str() == account,
+        "external approval identity does not match quarantine"
+    );
+    Ok(pending)
+}
+
+pub(super) fn load_pending_external_identity(
+    db: &Connection,
+    key: &KeyLease,
+    intent: &ConnectIntent,
+    binding: &ExchangeBinding,
+    account: &str,
+    scope_evidence: &str,
+) -> Result<Option<PendingExternalIdentity>> {
+    quarantine_row(db, &intent.attempt)?
+        .map(|row| validate_external_identity(&row, key, intent, binding, account, scope_evidence))
+        .transpose()
+}
+
+pub(super) fn commit_external_quarantine(
+    tx: &Transaction<'_>,
+    key: &KeyLease,
+    intent: &ConnectIntent,
+    binding: &ExchangeBinding,
+    account: &str,
+    scope_evidence: &str,
+    challenge: &Digest,
+) -> Result<()> {
+    let row = quarantine_row(tx, &intent.attempt)?
+        .ok_or_else(|| anyhow::anyhow!("external approval quarantine missing"))?;
+    let pending = validate_external_identity(&row, key, intent, binding, account, scope_evidence)?;
+    ensure!(
+        pending.challenge == *challenge,
+        "external approval challenge changed"
+    );
+    let expected = identity(
+        MaterialPurpose::ConnectionTokens,
+        intent,
+        binding,
+        Some(account),
+    );
+    ensure!(
+        row.token_reference == binding.token_slot_ref
+            && row.token_identity_digest
+                == Digest::of(&("oauth-private-material-identity-v1", &expected))?.as_str()
+            && row.token_key_version == key.encryption_version,
+        "quarantined token identity or key version mismatch"
+    );
+    let nonce: [u8; 12] = row
+        .token_nonce
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("invalid quarantined token nonce"))?;
+    let mut plaintext = key.open_oauth(&aad(key, &expected)?, nonce, &row.token_ciphertext)?;
+    let token: TokenBundle = serde_json::from_slice(&plaintext)
+        .map_err(|_| anyhow::anyhow!("invalid quarantined token bundle"))?;
+    plaintext.fill(0);
+    let valid = !token.access_token.is_empty();
+    let mut access = token.access_token.into_bytes();
+    access.fill(0);
+    if let Some(refresh) = token.refresh_token {
+        let mut refresh = refresh.into_bytes();
+        refresh.fill(0);
+    }
+    ensure!(valid, "empty quarantined access token");
+    tx.execute(
+        "INSERT INTO oauth_private_tokens
+         (reference, slot, generation, account, identity_digest, key_version, nonce, ciphertext)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            row.token_reference,
+            row.slot,
+            row.generation,
+            row.account,
+            row.token_identity_digest,
+            row.token_key_version,
+            row.token_nonce,
+            row.token_ciphertext,
+        ],
+    )?;
+    let deleted = tx.execute(
+        "DELETE FROM oauth_external_quarantine WHERE attempt = ?1 AND challenge = ?2",
+        params![intent.attempt, challenge.as_str()],
+    )?;
+    ensure!(deleted == 1, "external approval quarantine lost");
     Ok(())
 }
 
@@ -432,6 +726,24 @@ pub(super) fn install_schema(db: &Connection) -> Result<()> {
             nonce BLOB NOT NULL,
             ciphertext BLOB NOT NULL,
             UNIQUE(slot, generation)
+        );
+        CREATE TABLE IF NOT EXISTS oauth_external_quarantine (
+            attempt TEXT PRIMARY KEY REFERENCES oauth_connect_attempts(attempt),
+            slot TEXT NOT NULL,
+            generation INTEGER NOT NULL CHECK(generation > 0),
+            account TEXT NOT NULL,
+            scope_evidence TEXT NOT NULL,
+            challenge TEXT NOT NULL UNIQUE,
+            quarantined_at INTEGER NOT NULL,
+            token_reference TEXT NOT NULL,
+            token_identity_digest TEXT NOT NULL,
+            token_key_version TEXT NOT NULL,
+            token_nonce BLOB NOT NULL,
+            token_ciphertext BLOB NOT NULL,
+            identity_digest TEXT NOT NULL,
+            identity_key_version TEXT NOT NULL,
+            identity_nonce BLOB NOT NULL,
+            identity_ciphertext BLOB NOT NULL
         );",
     )?;
     let mut versions = db.prepare("SELECT version FROM oauth_custody_schema_version")?;
@@ -439,11 +751,38 @@ pub(super) fn install_schema(db: &Connection) -> Result<()> {
         .query_map([], |row| row.get::<_, i64>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     ensure!(
-        known.is_empty() || known == [1],
+        known.is_empty() || known == [1] || known == [2],
         "unsupported OAuth custody schema version"
     );
     if known.is_empty() {
-        db.execute("INSERT INTO oauth_custody_schema_version VALUES (1)", [])?;
+        db.execute("INSERT INTO oauth_custody_schema_version VALUES (2)", [])?;
+    } else if known == [1] {
+        db.execute("UPDATE oauth_custody_schema_version SET version = 2", [])?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn custody_schema_adds_quarantine_to_existing_version_and_rejects_unknown() {
+        let db = Connection::open_in_memory().unwrap();
+        super::super::connect::install_schema(&db).unwrap();
+        db.execute("UPDATE oauth_custody_schema_version SET version = 1", [])
+            .unwrap();
+        super::super::connect::install_schema(&db).unwrap();
+        let version: i64 = db
+            .query_row(
+                "SELECT version FROM oauth_custody_schema_version",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, 2);
+        db.execute("UPDATE oauth_custody_schema_version SET version = 99", [])
+            .unwrap();
+        assert!(super::super::connect::install_schema(&db).is_err());
+    }
 }
