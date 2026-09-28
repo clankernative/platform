@@ -183,6 +183,10 @@ impl PendingExternalApproval {
     pub fn security_origin(&self) -> &SecurityOriginRef {
         &self.security_origin
     }
+
+    pub(crate) fn quarantined_at(&self) -> i64 {
+        self.quarantined_at
+    }
 }
 
 pub(crate) fn load_pending_external(
