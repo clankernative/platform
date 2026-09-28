@@ -150,7 +150,7 @@ pub enum ConnectState {
     AwaitingProviderAuthorization,
     ExchangeReady,
     ExchangeMayHaveBeenSent,
-    AwaitingAccountApproval { account: String },
+    AwaitingAccountApproval,
     Activated { generation: i64, account: String },
     Denied,
     Cancelled,
@@ -507,7 +507,7 @@ fn finish_blocked(
 /// For explicit-account policy the verified response is encrypted in private
 /// quarantine in the same transaction as the approval state. The caller supplies
 /// stable verified account and scope evidence, never display email selection.
-pub fn await_account_approval(
+pub(super) fn await_account_approval(
     db: &mut Connection,
     attempt: &str,
     account: &str,
@@ -541,6 +541,71 @@ pub fn await_account_approval(
         params![attempt, account, scope_evidence, now],
     )?;
     ensure!(changed == 1, "approval quarantine fence lost");
+    tx.commit()?;
+    Ok(true)
+}
+
+pub(super) fn quarantine_external_bound(
+    db: &mut Connection,
+    verified: &super::account::VerifiedExternalAccount,
+    exchange: &super::exchange::ExchangeBinding,
+    now: i64,
+    custody_write: impl FnOnce(&Transaction<'_>) -> Result<()>,
+) -> Result<bool> {
+    let intent = verified.intent();
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let stored: Option<(ConnectIntent, String)> = tx
+        .query_row(
+            "SELECT slot, expected_generation, expected_epoch, proposed_generation, owner,
+                profile, registration, callback, consent, expires_at, state
+         FROM oauth_connect_attempts WHERE attempt = ?1",
+            [&intent.attempt],
+            |row| {
+                Ok((
+                    ConnectIntent {
+                        attempt: intent.attempt.clone(),
+                        slot: row.get(0)?,
+                        expected_generation: row.get(1)?,
+                        expected_epoch: row.get(2)?,
+                        proposed_generation: row.get(3)?,
+                        owner: row.get(4)?,
+                        profile: row.get(5)?,
+                        registration: row.get(6)?,
+                        callback: row.get(7)?,
+                        consent: row.get(8)?,
+                        expires_at: row.get(9)?,
+                    },
+                    row.get(10)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((stored_intent, state)) = stored else {
+        return Ok(false);
+    };
+    if stored_intent != *intent
+        || state != "exchange_may_have_been_sent"
+        || now >= intent.expires_at
+        || !slot_matches(&tx, intent)?
+        || super::exchange::load_binding(&tx, &intent.attempt)?.as_ref() != Some(exchange)
+    {
+        return Ok(false);
+    }
+    custody_write(&tx)?;
+    super::custody::delete_code(&tx, intent, exchange)?;
+    super::custody::delete_verifier(&tx, intent, exchange)?;
+    let changed = tx.execute(
+        "UPDATE oauth_connect_attempts SET state = 'awaiting_account_approval',
+         account = ?2, scope_evidence = ?3, code_ref = NULL
+         WHERE attempt = ?1 AND state = 'exchange_may_have_been_sent' AND expires_at > ?4",
+        params![
+            intent.attempt,
+            verified.account(),
+            verified.scope_evidence(),
+            now
+        ],
+    )?;
+    ensure!(changed == 1, "external approval quarantine fence lost");
     tx.commit()?;
     Ok(true)
 }
@@ -622,8 +687,11 @@ fn activate_mapped_inner(
         db,
         verified.attempt(),
         (verified.account(), verified.scope_evidence()),
-        None,
-        exchange,
+        ActivationGuard {
+            expected_intent: Some(verified.intent()),
+            approved_account: None,
+            exchange,
+        },
         now,
         custody_publish,
     )
@@ -643,8 +711,40 @@ fn activate(
         db,
         attempt,
         (account, scope_evidence),
-        approved_account,
-        None,
+        ActivationGuard {
+            expected_intent: None,
+            approved_account,
+            exchange: None,
+        },
+        now,
+        custody_publish,
+    )
+}
+
+struct ActivationGuard<'a> {
+    expected_intent: Option<&'a ConnectIntent>,
+    approved_account: Option<&'a str>,
+    exchange: Option<&'a super::exchange::ExchangeBinding>,
+}
+
+pub(super) fn activate_external_bound(
+    db: &mut Connection,
+    intent: &ConnectIntent,
+    exchange: &super::exchange::ExchangeBinding,
+    account: &str,
+    scope_evidence: &str,
+    now: i64,
+    custody_publish: impl FnOnce(&Transaction<'_>) -> Result<()>,
+) -> Result<bool> {
+    activate_bound(
+        db,
+        &intent.attempt,
+        (account, scope_evidence),
+        ActivationGuard {
+            expected_intent: Some(intent),
+            approved_account: Some(account),
+            exchange: Some(exchange),
+        },
         now,
         custody_publish,
     )
@@ -654,8 +754,7 @@ fn activate_bound(
     db: &mut Connection,
     attempt: &str,
     account_scope: (&str, &str),
-    approved_account: Option<&str>,
-    exchange: Option<&super::exchange::ExchangeBinding>,
+    guard: ActivationGuard<'_>,
     now: i64,
     custody_publish: impl FnOnce(&Transaction<'_>) -> Result<()>,
 ) -> Result<bool> {
@@ -695,7 +794,13 @@ fn activate_bound(
     let Some((intent, state, stored_account, stored_scope)) = row else {
         return Ok(false);
     };
-    if let Some(exchange) = exchange {
+    if guard
+        .expected_intent
+        .is_some_and(|expected| expected != &intent)
+    {
+        return Ok(false);
+    }
+    if let Some(exchange) = guard.exchange {
         let stored = super::exchange::load_binding(&tx, attempt)?;
         if stored.as_ref() != Some(exchange) {
             return Ok(false);
@@ -703,11 +808,11 @@ fn activate_bound(
     }
     let approved = match state.as_str() {
         "awaiting_account_approval" => {
-            approved_account == Some(account)
+            guard.approved_account == Some(account)
                 && stored_account.as_deref() == Some(account)
                 && stored_scope.as_deref() == Some(scope_evidence)
         }
-        "exchange_may_have_been_sent" | "exchange_uncertain" => approved_account.is_none(),
+        "exchange_may_have_been_sent" | "exchange_uncertain" => guard.approved_account.is_none(),
         _ => false,
     };
     if !approved {
@@ -736,7 +841,9 @@ fn activate_bound(
         intent.expected_epoch,
     ))?;
     custody_publish(&tx)?;
-    if let Some(exchange) = exchange {
+    if let Some(exchange) = guard.exchange
+        && state != "awaiting_account_approval"
+    {
         super::custody::delete_code(&tx, &intent, exchange)?;
         super::custody::delete_verifier(&tx, &intent, exchange)?;
     }
@@ -790,9 +897,10 @@ pub fn state(db: &Connection, attempt: &str) -> Result<Option<ConnectState>> {
         "awaiting_provider_authorization" => Ok(ConnectState::AwaitingProviderAuthorization),
         "exchange_ready" => Ok(ConnectState::ExchangeReady),
         "exchange_may_have_been_sent" => Ok(ConnectState::ExchangeMayHaveBeenSent),
-        "awaiting_account_approval" => Ok(ConnectState::AwaitingAccountApproval {
-            account: account.ok_or_else(|| anyhow::anyhow!("missing verified account"))?,
-        }),
+        "awaiting_account_approval" => {
+            ensure!(account.is_some(), "missing verified account");
+            Ok(ConnectState::AwaitingAccountApproval)
+        }
         "activated" => Ok(ConnectState::Activated {
             generation: generation.ok_or_else(|| anyhow::anyhow!("missing generation"))?,
             account: account.ok_or_else(|| anyhow::anyhow!("missing active account"))?,
@@ -1056,9 +1164,7 @@ mod tests {
         );
         assert_eq!(
             state(&db, "attempt_1").unwrap(),
-            Some(ConnectState::AwaitingAccountApproval {
-                account: "issuer:subject_1".into(),
-            })
+            Some(ConnectState::AwaitingAccountApproval)
         );
         assert!(
             !activate(
