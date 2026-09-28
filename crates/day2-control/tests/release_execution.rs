@@ -85,26 +85,32 @@ impl Capabilities for Provider {
             ReleaseOperation::ObserveSecret => ReleaseObserved::Secret {
                 metadata: self.secret.lock().unwrap().clone(),
             },
-            ReleaseOperation::ObserveDeployment => ReleaseObserved::Deployment {
-                ready: self.resources.lock().unwrap().get(&fact.resource) == Some(&fact.readiness),
-                evidence: StateEvidence::Qualified {
-                    revision: RevisionToken::Ordered {
-                        stream: fact.resource.clone(),
-                        sequence: 1_u64.try_into().unwrap(),
+            ReleaseOperation::ObserveDeployment => {
+                let prepared = self
+                    .preparations
+                    .lock()
+                    .unwrap()
+                    .get(&fact.resource)
+                    .cloned()
+                    .expect("prepared deployment effect");
+                ReleaseObserved::Deployment {
+                    ready: self.resources.lock().unwrap().get(&fact.resource)
+                        == Some(&fact.readiness),
+                    incarnation: incarnation(&prepared),
+                    evidence: StateEvidence::Qualified {
+                        revision: RevisionToken::Ordered {
+                            stream: fact.resource.clone(),
+                            sequence: 1_u64.try_into().unwrap(),
+                        },
+                        barrier: ReadBarrier {
+                            authority: lease.execution.plan.deployment.clone(),
+                            resource: fact.resource.clone(),
+                            after_effect: Some(prepared),
+                            receipt: Digest::new(b"qualified-deployment-read"),
+                        },
                     },
-                    barrier: ReadBarrier {
-                        authority: lease.execution.plan.deployment.clone(),
-                        resource: fact.resource.clone(),
-                        after_effect: self
-                            .preparations
-                            .lock()
-                            .unwrap()
-                            .get(&fact.resource)
-                            .cloned(),
-                        receipt: Digest::new(b"qualified-deployment-read"),
-                    },
-                },
-            },
+                }
+            }
             ReleaseOperation::Activate => anyhow::bail!("activation must never reach provider"),
         };
         Ok(ReleaseEffectResult::Observed(Box::new(
@@ -307,11 +313,12 @@ fn deployment_readback_requires_qualified_exact_prepared_effect_not_weak_state()
     );
     let lease = fixture.lease(now);
     let original = fixture.host.perform_at(&lease, now).unwrap();
-    for field in 0..3 {
+    for field in 0..5 {
         let ReleaseEffectResult::Observed(mut wrong) = original.clone() else {
             panic!("expected deployment read")
         };
         let ReleaseObserved::Deployment {
+            incarnation,
             evidence: StateEvidence::Qualified { barrier, .. },
             ..
         } = &mut wrong.outcome
@@ -321,7 +328,9 @@ fn deployment_readback_requires_qualified_exact_prepared_effect_not_weak_state()
         match field {
             0 => barrier.after_effect = Some(Digest::new(b"other-deployment-effect")),
             1 => barrier.resource = Digest::new(b"other-resource"),
-            _ => barrier.authority.revision = Digest::new(b"other-authority"),
+            2 => barrier.authority.revision = Digest::new(b"other-authority"),
+            3 => incarnation.controller = "other-controller".to_owned().try_into().unwrap(),
+            _ => incarnation.generation = "other-generation".to_owned().try_into().unwrap(),
         }
         let before = fixture.host.inspect(&fixture.id).unwrap();
         let journal = Journal::open(&fixture.path).unwrap();

@@ -162,6 +162,7 @@ impl Capabilities for Provider {
                 };
                 observed(ReleaseObserved::Deployment {
                     ready: true,
+                    incarnation: support::incarnation(&prepared.fact.effect),
                     evidence: StateEvidence::Qualified {
                         revision: RevisionToken::Ordered {
                             stream: prepared.fact.resource.clone(),
