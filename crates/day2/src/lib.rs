@@ -43,6 +43,7 @@ mod managed_credentials;
 pub mod mcp;
 pub mod migration;
 pub mod numeric;
+mod release_binding;
 // Protocol kernels are staged behind host-only verification and custody wiring.
 #[allow(dead_code)]
 mod oauth;

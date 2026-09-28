@@ -188,6 +188,14 @@ target leaves the active pointer unchanged. The instance document is checked
 at qualification time; request authorization remains a runtime decision against
 activated app authority.
 
+At live dispatch, a compiled imported query reads the release journal's active
+caller and callee receipts and checks them against the loaded artifacts. It also
+pins the callee's activated authority stamp and document for the duration of the
+read. A missing journal or selected release, a stale activated artifact, or an
+authority change during the call fails the read closed, even when the old
+artifact still exports the pinned contract. Simulated build verification uses
+its recorded world and does not consult a live release journal.
+
 ## Future app creation
 
 The platform's future app-creation workflow must initialize this layout and a complete

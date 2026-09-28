@@ -11,6 +11,7 @@ use day2::{
     delegation,
     store::Runtime,
 };
+use day2_capabilities::{Digest, InstallationControl};
 use serde_json::json;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -92,6 +93,109 @@ impl Pair {
     fn digest_of(&self, operation: &str) -> Result<String> {
         delegation::schema_digest(&self.callee()?, operation)
     }
+
+    fn release_managed(&mut self) -> Result<PathBuf> {
+        let path = self.directory.path().join("instance.json");
+        let mut instance = Instance::load(&path)?;
+        let state = self.directory.path().join("control");
+        fs::create_dir(&state)?;
+        instance.control = Some(InstallationControl {
+            version: 1,
+            state_directory: state.display().to_string(),
+            operators: BTreeSet::from(["operator".to_owned()]),
+            sources: BTreeMap::new(),
+            apps: BTreeMap::new(),
+            builders: BTreeMap::new(),
+            runtimes: BTreeMap::new(),
+            secrets: BTreeMap::new(),
+        });
+        fs::write(&path, serde_json::to_vec(&instance)?)?;
+        self.caller = Runtime::load(&path, "caller")?;
+        Ok(state.join("build-journal.sqlite"))
+    }
+}
+
+fn select_release(connection: &rusqlite::Connection, app: &str, artifact: &Digest) -> Result<()> {
+    let target = json!({"company":"delegationco","environment":"test","app":app});
+    let release = Digest::of(&(app, artifact))?;
+    let readiness = Digest::new(format!("ready-{app}").as_bytes());
+    let id = Digest::of(&("day2-release-activation-v1", &release, &readiness))?;
+    let receipt = json!({
+        "id":id,"target":target,"release":release,"generation":1,
+        "artifact":artifact,"readiness":readiness,
+    });
+    let body = receipt.to_string();
+    let target_key =
+        format!("{{\"company\":\"delegationco\",\"environment\":\"test\",\"app\":\"{app}\"}}");
+    connection.execute(
+        "INSERT OR REPLACE INTO release_slots(target,generation,active) VALUES(?1,1,?2)",
+        (target_key, &body),
+    )?;
+    connection.execute(
+        "INSERT OR REPLACE INTO release_activations(release,body) VALUES(?1,?2)",
+        (release.as_str(), &body),
+    )?;
+    connection.execute(
+        "INSERT OR REPLACE INTO release_approvals(id,body) VALUES(?1,?2)",
+        (
+            release.as_str(),
+            json!({"approval":{"target":target,"artifact":artifact},"generation":1}).to_string(),
+        ),
+    )?;
+    Ok(())
+}
+
+#[test]
+fn imported_read_rejects_a_stale_serving_artifact_before_contract_dispatch() -> Result<()> {
+    let mut pair = Pair::new()?;
+    let journal = pair.release_managed()?;
+    let connection = rusqlite::Connection::open(journal)?;
+    connection.execute_batch(
+        "CREATE TABLE release_slots(target TEXT PRIMARY KEY,generation INTEGER,active TEXT);
+         CREATE TABLE release_activations(release TEXT PRIMARY KEY,body TEXT);
+         CREATE TABLE release_approvals(id TEXT PRIMARY KEY,body TEXT);",
+    )?;
+    let artifact: Digest = pair.caller.artifact().id().to_owned().try_into()?;
+    select_release(&connection, "caller", &artifact)?;
+    select_release(
+        &connection,
+        "callee",
+        &Digest::new(b"other-selected-artifact"),
+    )?;
+
+    let mut call = pair.call("reports.list", &pair.digest_of("reports.list")?);
+    call.contract_digest = Some("sha256:pinned-import".to_owned());
+    let error = delegation::read(&pair.caller, &call).unwrap_err();
+    assert_eq!(error.to_string(), "delegated_serving_artifact_changed");
+    select_release(&connection, "callee", &artifact)?;
+    assert_eq!(
+        delegation::read(&pair.caller, &call)
+            .unwrap_err()
+            .to_string(),
+        "delegated_contract_not_exported",
+        "a selected callee must pass the serving fence and reach contract validation"
+    );
+    let callee = pair.callee()?;
+    let connection = rusqlite::Connection::open(callee.db())?;
+    let count: i64 = connection.query_row("SELECT count(*) FROM day2_invocations", [], |row| {
+        row.get(0)
+    })?;
+    assert_eq!(count, 0, "the stale callee must not be invoked");
+    Ok(())
+}
+
+#[test]
+fn imported_read_requires_a_release_selection() -> Result<()> {
+    let pair = Pair::new()?;
+    let mut call = pair.call("reports.list", &pair.digest_of("reports.list")?);
+    call.contract_digest = Some("sha256:pinned-import".to_owned());
+    assert_eq!(
+        delegation::read(&pair.caller, &call)
+            .unwrap_err()
+            .to_string(),
+        "delegated_release_binding_unavailable"
+    );
+    Ok(())
 }
 
 /// A delegated read runs as the caller's actor and says where it came from.

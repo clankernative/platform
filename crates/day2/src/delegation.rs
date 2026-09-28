@@ -92,6 +92,15 @@ pub fn read(runtime: &Runtime, call: &Call) -> Result<String> {
 
     let callee = Runtime::load(runtime.instance_path(), &call.app)
         .map_err(|_| anyhow::anyhow!("delegated_app_not_installed: {}", call.app))?;
+    // A compiled import is release-managed. Its package digest establishes the
+    // API shape, while the journal and activated database establish which code
+    // and authority are actually serving it.
+    let fence = if call.contract_digest.is_some() || runtime.artifact().contract().imports.is_some()
+    {
+        Some(crate::release_binding::Fence::begin(runtime, &callee)?)
+    } else {
+        None
+    };
     let definition = callee
         .artifact()
         .route(&call.operation)
@@ -141,6 +150,9 @@ pub fn read(runtime: &Runtime, call: &Call) -> Result<String> {
         crate::store::Cause::delegated(&call.actor, &chain, &authenticated),
     )?;
     let outcome = callee.execute(&id, crate::store::Fault::None)?;
+    if let Some(fence) = &fence {
+        fence.check(runtime, &callee)?;
+    }
     ensure!(
         outcome.status == "success",
         "delegated_call_failed: {}",
