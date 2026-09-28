@@ -584,6 +584,108 @@ pub(crate) struct ValidatedServingBinding {
     readback: ReleaseProviderFact,
 }
 
+/// A fresh observation made by a trusted serving-provider adapter. Request
+/// payloads, instance configuration and release-journal values are not probes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ObservedServingBinding {
+    pub target: ReleaseTarget,
+    pub artifact: Digest,
+    pub deployment: BindingRef,
+    pub incarnation: DeploymentIncarnation,
+}
+
+pub trait ServingProbe {
+    /// Observe the actual serving workload outside the release-journal read
+    /// transaction. The adapter must authenticate the workload before returning.
+    fn observe(&self, target: &ReleaseTarget) -> Result<ObservedServingBinding>;
+}
+
+impl Journal {
+    /// Bracket one host-side call with fresh serving-provider observations and
+    /// active-release checks. A result is never returned after either binding
+    /// changes. The probe and transport must authenticate the remote workload;
+    /// this method does not turn a request claim into provider evidence.
+    pub fn with_serving_fence<T>(
+        &self,
+        target: &ReleaseTarget,
+        probe: &dyn ServingProbe,
+        call: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        let observed = probe.observe(target)?;
+        let (activation, expected) = selected_active_serving(&self.connection, target)?;
+        ensure!(
+            observed == expected,
+            "observed workload differs from active serving binding"
+        );
+        let result = call();
+        let after = probe.observe(target)?;
+        ensure!(
+            after == observed,
+            "serving workload changed during delegated call"
+        );
+        let (current, expected) = selected_active_serving(&self.connection, target)?;
+        ensure!(
+            current == activation && after == expected,
+            "active serving binding changed during delegated call"
+        );
+        result
+    }
+}
+
+fn selected_active_serving(
+    connection: &Connection,
+    target: &ReleaseTarget,
+) -> Result<(Digest, ObservedServingBinding)> {
+    let tx = connection.unchecked_transaction()?;
+    let state = release::read_state(&tx, target)?;
+    let active = state
+        .active
+        .ok_or_else(|| anyhow::anyhow!("serving release is not active"))?;
+    ensure!(
+        active.target == *target && active.generation <= state.generation,
+        "active serving release selection changed"
+    );
+    ensure!(
+        active.id
+            == Digest::of(&(
+                "day2-release-activation-v1",
+                &active.release,
+                &active.readiness
+            ))?,
+        "active serving receipt identity changed"
+    );
+    let body: String = tx.query_row(
+        "SELECT body FROM release_activations WHERE release=?1",
+        [active.release.as_str()],
+        |row| row.get(0),
+    )?;
+    let immutable: ActivationReceipt = serde_json::from_str(&body)?;
+    ensure!(
+        immutable == active,
+        "active serving release differs from immutable activation"
+    );
+    let approved = release::read_approval(&tx, &active.release)?;
+    ensure!(
+        approved.generation == active.generation
+            && approved.approval.target == *target
+            && approved.approval.artifact == active.artifact,
+        "active serving release differs from approval"
+    );
+    let binding = validated_execution_binding(&tx, &active.release, true)?;
+    ensure!(
+        binding.target == *target && binding.artifact == active.artifact,
+        "active serving workflow differs from selection"
+    );
+    let observed = ObservedServingBinding {
+        target: binding.target,
+        artifact: binding.artifact,
+        deployment: binding.deployment,
+        incarnation: binding.incarnation,
+    };
+    tx.commit()?;
+    Ok((active.id, observed))
+}
+
 pub(crate) fn validated_execution_binding(
     connection: &Connection,
     release: &Digest,
