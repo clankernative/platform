@@ -191,7 +191,7 @@ const SEALED: &[(&str, &str, &str)] = &[
     (
         "Tx.roc",
         "evaluate",
-        "131e457ed8159c11ce849e84392141bde35e24efc93b5f884d619c752dc80b16",
+        "ed798d02d17a5356a6f02f6ddd01016fb09d078daa004bd06befaf2bce99eff6",
     ),
     (
         "Operation.roc",

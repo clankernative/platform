@@ -57,90 +57,113 @@ SubmitReport :: [].{
 			}
 		} else if input.title.to_str() == "defer"
 			or input.title.to_str() == "for"
-			or input.title.to_str() == "long_delay"
-			or input.title.to_str() == "past"
-			or input.title.to_str() == "far"
-			or input.title.to_str() == "both"
-		{
-			due =
-				if input.title.to_str() == "past" {
-					context.now() - 1
-				} else if input.title.to_str() == "far" {
-					context.now() + 2_592_001
+				or input.title.to_str() == "long_delay"
+					or input.title.to_str() == "past"
+						or input.title.to_str() == "far"
+							or input.title.to_str() == "both"
+			{
+				due =
+					if input.title.to_str() == "past" {
+						context.now() - 1
+					} else if input.title.to_str() == "far" {
+						context.now() + 2_592_001
+					} else {
+						context.now() + 10
+					}
+				delay : I64
+				delay = if input.title.to_str() == "long_delay" {
+					2_592_001
 				} else {
-					context.now() + 10
+					10
 				}
-			delay : I64
-			delay = if input.title.to_str() == "long_delay" { 2_592_001 } else { 10 }
-			Tx.create(Data.reports, value)
-				.and_then(
-					|
-						report,
-					|
-						if input.title.to_str() == "both" {
+				Tx.create(Data.reports, value)
+					.and_then(
+						|
+							report,
+						|
+							if input.title.to_str() == "both" {
+								Commands.analyze
+									.request(
+										Data.reports,
+										report,
+										{
+											report_id: report.id,
+											expected_version: report.version,
+											text: report.value.text,
+										},
+									)
+									.and_then(
+										|_|
+											Commands.analyze
+												.defer_until(
+													Data.reports,
+													report,
+													{
+														report_id: report.id,
+														expected_version: report.version,
+														text: report.value.text,
+													},
+													due,
+												)
+												.map(|_| { id: report.id, version: report.version }),
+									)
+							} else if input.title.to_str() == "for" or input.title.to_str() == "long_delay" {
+								Commands.analyze
+									.defer_for(
+										Data.reports,
+										report,
+										{
+											report_id: report.id,
+											expected_version: report.version,
+											text: report.value.text,
+										},
+										delay,
+									)
+									.map(|_| { id: report.id, version: report.version })
+							} else {
+								Commands.analyze
+									.defer_until(
+										Data.reports,
+										report,
+										{
+											report_id: report.id,
+											expected_version: report.version,
+											text: report.value.text,
+										},
+										due,
+									)
+									.map(|_| { id: report.id, version: report.version })
+							},
+					)
+			} else {
+				Tx.create(Data.reports, value)
+					.and_then(
+						|
+							report,
+						|
 							Commands.analyze
 								.request(
 									Data.reports,
 									report,
 									{ report_id: report.id, expected_version: report.version, text: report.value.text },
 								)
-								.and_then(|_|
-									Commands.analyze
-										.defer_until(
-											Data.reports,
-											report,
-											{ report_id: report.id, expected_version: report.version, text: report.value.text },
-											due,
-										)
-										.map(|_| { id: report.id, version: report.version }),
-								)
-						} else if input.title.to_str() == "for" or input.title.to_str() == "long_delay" {
-							Commands.analyze
-								.defer_for(
-									Data.reports,
-									report,
-									{ report_id: report.id, expected_version: report.version, text: report.value.text },
-									delay,
-								)
-								.map(|_| { id: report.id, version: report.version })
-						} else {
-							Commands.analyze
-								.defer_until(
-									Data.reports,
-									report,
-									{ report_id: report.id, expected_version: report.version, text: report.value.text },
-									due,
-								)
-								.map(|_| { id: report.id, version: report.version })
-						},
-				)
-		} else {
-			Tx.create(Data.reports, value)
-				.and_then(
-					|
-						report,
-					|
-						Commands.analyze
-							.request(
-								Data.reports,
-								report,
-								{ report_id: report.id, expected_version: report.version, text: report.value.text },
-							)
-							.and_then(
-								|_| {
-									if input.title.to_str() == "after_request" {
-										match Domains.document(input.title.to_str().concat(" changed after request")) {
-											Ok(text) => Tx.update(Data.reports, report, { ..report.value, text })
-												.map(|changed| { id: changed.id, version: changed.version })
-										Err(_) => Tx.succeed({ id: report.id, version: report.version })
-									}
-								} else {
-									Tx.succeed({ id: report.id, version: report.version })
-								}
-								},
-							),
-				)
-		}
+								.and_then(
+									|_| {
+										if input.title.to_str() == "after_request" {
+											match Domains.document(
+												input.title.to_str().concat(" changed after request"),
+											) {
+												Ok(text) => Tx.update(Data.reports, report, { ..report.value, text })
+													.map(|changed| { id: changed.id, version: changed.version })
+												Err(_) => Tx.succeed({ id: report.id, version: report.version })
+											}
+										} else {
+											Tx.succeed({ id: report.id, version: report.version })
+										}
+									},
+								),
+					)
+			}
 	}
 
 	contract = {

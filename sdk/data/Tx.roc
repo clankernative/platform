@@ -104,9 +104,9 @@ Tx(a) :: { resume : List(Wire.Observation), U64 -> Step(a) }.{
 			payload,
 			due,
 		|
-			# The public signature stays I64 to match Context.now. Encoding this record with an
-			# I64 field segfaults the pinned compiler's `roc build` (September 12 nightly) although
-			# `roc check` passes, so the due time is converted first. The host rejects negative dues.
+		# The public signature stays I64 to match Context.now. Encoding this record with an
+		# I64 field segfaults the pinned compiler's `roc build` (September 12 nightly) although
+		# `roc check` passes, so the due time is converted first. The host rejects negative dues.
 			match due.to_u64_try() {
 				Err(_) => host_reject("invalid_deferral_due")
 				Ok(timestamp) =>
@@ -118,7 +118,7 @@ Tx(a) :: { resume : List(Wire.Observation), U64 -> Step(a) }.{
 						data: Json.to_str({ command, input_type, output_type, payload, due: timestamp }),
 					})
 						.map(|_| {})
-			}
+				}
 
 	invoke_deferral_for : Str, Str, Str, Model(model), Model.Entity(model), Str, I64 -> Tx({})
 	invoke_deferral_for =
@@ -131,9 +131,9 @@ Tx(a) :: { resume : List(Wire.Observation), U64 -> Step(a) }.{
 			payload,
 			delay,
 		|
-			# Same boundary as invoke_deferral: passing a U64 from app code through Write into this
-			# sealed method segfaults the pinned compiler's `roc build` while `roc check` passes.
-			# Accept I64 and convert here; the host computes due = Context.now + delay and bounds it.
+		# Same boundary as invoke_deferral: passing a U64 from app code through Write into this
+		# sealed method segfaults the pinned compiler's `roc build` while `roc check` passes.
+		# Accept I64 and convert here; the host computes due = Context.now + delay and bounds it.
 			match delay.to_u64_try() {
 				Err(_) => host_reject("invalid_deferral_delay")
 				Ok(seconds) =>
@@ -145,7 +145,7 @@ Tx(a) :: { resume : List(Wire.Observation), U64 -> Step(a) }.{
 						data: Json.to_str({ command, input_type, output_type, payload, delay: seconds }),
 					})
 						.map(|_| {})
-			}
+				}
 
 	get : Model(a), Ref(a) -> Tx(Model.Entity(a))
 	get = |model, id| request({ ..Wire.empty, kind: "get", model: model.name(), id: id.to_str() })
