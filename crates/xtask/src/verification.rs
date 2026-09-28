@@ -242,10 +242,16 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
 fn build_fixture(root: &Path, fixture: &str) -> Result<PathBuf> {
     match fixture {
         "reports" => build(root, &root.join("examples/reports")),
+        "oncall" => build(root, &root.join("examples/oncall")),
         "reports-probe" => build_with_overrides(
             root,
             &root.join("examples/reports"),
             Some(&root.join("fixtures/command-target-adversaries")),
+        ),
+        "reports-deferrals" => build_with_overrides(
+            root,
+            &root.join("examples/reports"),
+            Some(&root.join("fixtures/deferrals-conformance")),
         ),
         "http" => build_with_overrides(
             root,
@@ -284,6 +290,7 @@ fn verification_snapshot(root: &Path, recipe: &str) -> Result<String> {
     ];
     if ["verify-fast", "verify-reports", "verify"].contains(&recipe) {
         sources.push(("apps/reports", root.join("examples/reports")));
+        sources.push(("apps/oncall", root.join("examples/oncall")));
     }
     for (label, directory) in sources {
         hash_verification_tree(&directory, &directory, label, &mut hashes)?;
@@ -525,6 +532,10 @@ fn tests(
             "reports_http",
             "--test",
             "live_updates",
+            "--test",
+            "deferrals",
+            "--test",
+            "oncall_escalation",
         ],
         "all-runtime" => &[
             "-p",
@@ -656,6 +667,8 @@ fn tests(
         ("reports", "DAY2_TEST_REPORTS_ARTIFACT"),
         ("reports", "DAY2_TEST_REPORTS_API_ARTIFACT"),
         ("reports-probe", "DAY2_TEST_REPORTS_PROBE_ARTIFACT"),
+        ("reports-deferrals", "DAY2_TEST_REPORTS_DEFERRALS_ARTIFACT"),
+        ("oncall", "DAY2_TEST_ONCALL_ARTIFACT"),
         ("relational", "DAY2_TEST_RELATIONAL_ARTIFACT"),
         ("collection", "DAY2_TEST_COLLECTION_ARTIFACT"),
         ("delegation", "DAY2_TEST_DELEGATION_ARTIFACT"),

@@ -622,6 +622,13 @@ fn main() -> Result<()> {
                 Some(&root.join("fixtures/command-target-adversaries")),
             )?;
         }
+        "build-deferrals-conformance" => {
+            build_with_overrides(
+                &root,
+                &root.join("examples/reports"),
+                Some(&root.join("fixtures/deferrals-conformance")),
+            )?;
+        }
         "brand" => {
             let source = PathBuf::from(args.next().context("usage: xtask brand SOURCE OUTPUT")?);
             let output = PathBuf::from(args.next().context("usage: xtask brand SOURCE OUTPUT")?);

@@ -37,6 +37,12 @@ pub struct Receipt {
     pub result: serde_json::Value,
     pub error: String,
     pub children: Vec<Invocation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub successor: Option<String>,
 }
 
 /// Public receipts are actor-bound and contain no prepared facts or provider payloads.
@@ -85,18 +91,37 @@ fn status_as(
         .optional()?
         .context(crate::error::Failure::NotFound)?;
     ensure!(owner == actor, crate::error::Failure::Forbidden);
+    let resolution: Option<(String, Option<String>, i64)> = connection
+        .query_row(
+            "SELECT resolution,successor,revision FROM day2_recoveries WHERE invocation=?1 ORDER BY revision DESC LIMIT 1",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let abandoned_old_artifact = artifact != runtime.artifact().id()
+        && resolution
+            .as_ref()
+            .is_some_and(|(resolution, _, _)| resolution == "abandoned");
     ensure!(
-        artifact == runtime.artifact().id(),
+        artifact == runtime.artifact().id() || abandoned_old_artifact,
         crate::error::Failure::ArtifactBindingChanged
     );
-    let authority = crate::authority_state::authorize_in(&connection, runtime, &operation, actor)?;
-    if let Some(authenticated) = authenticated {
-        let rule = authority.policy()?.may_act_as(
-            authenticated,
+    let authority = if abandoned_old_artifact {
+        None
+    } else {
+        Some(crate::authority_state::authorize_in(
+            &connection,
+            runtime,
+            &operation,
             actor,
-            "request",
-            &runtime.operators()?,
-        )?;
+        )?)
+    };
+    if let Some(authenticated) = authenticated {
+        let rule = authority
+            .as_ref()
+            .context("delegation_authority_unavailable")?
+            .policy()?
+            .may_act_as(authenticated, actor, "request", &runtime.operators()?)?;
         let same_request: bool = connection.query_row(
             "SELECT COALESCE(NULLIF(authenticated,''),actor)=?2 AND delegation_rule=?3
              AND trigger='request' AND caller='' FROM day2_invocations WHERE id=?1",
@@ -106,14 +131,20 @@ fn status_as(
         ensure!(same_request, crate::error::Failure::Forbidden);
     }
     let blocked = status == "pending" && crate::authority_state::is_blocked(&connection, id)?;
-    let outcome = if status == "pending" {
+    let terminal_resolution = resolution
+        .as_ref()
+        .is_some_and(|(resolution, _, _)| matches!(resolution.as_str(), "abandoned" | "reissued"));
+    let outcome = if status == "pending" || terminal_resolution || abandoned_old_artifact {
         None
     } else {
         Some(store::completed_outcome(
             &connection,
             id,
             outcome.as_deref(),
-            authority.policy()?,
+            authority
+                .as_ref()
+                .context("receipt_authority_unavailable")?
+                .policy()?,
         )?)
     };
     Ok(Receipt {
@@ -125,11 +156,52 @@ fn status_as(
             .map_or(serde_json::Value::Null, |value| value.result.clone()),
         error: if blocked {
             "authority_policy_changed".into()
+        } else if let Some((resolution, _, _)) = &resolution
+            && terminal_resolution
+        {
+            if resolution == "abandoned" {
+                "invocation_abandoned".into()
+            } else {
+                "invocation_reissued".into()
+            }
         } else {
             outcome.map_or(String::new(), |value| value.error)
         },
         children: children_in(&connection, id)?,
+        resolution: resolution.as_ref().map(|value| value.0.clone()),
+        revision: resolution
+            .as_ref()
+            .map(|value| u64::try_from(value.2))
+            .transpose()?,
+        successor: resolution.and_then(|value| value.1),
     })
+}
+
+pub(crate) fn observed_target_in_decision(
+    observations: &[Observation],
+    model: &str,
+    row: &crate::protocol::Row,
+) -> bool {
+    let start = observations
+        .iter()
+        .rposition(|entry| matches!(entry.instruction.kind.as_str(), "decide" | "complete"))
+        .map_or(0, |at| at + 1);
+    observations[start..]
+        .iter()
+        .any(|entry| store::observed_target(entry, model, row))
+}
+
+pub(crate) fn child_ordinal(observations: &[Observation]) -> usize {
+    observations
+        .iter()
+        .filter(|entry| matches!(entry.instruction.kind.as_str(), "request" | "defer"))
+        .count()
+}
+
+pub(crate) fn checked_child_ordinal(observations: &[Observation]) -> Result<usize> {
+    let ordinal = child_ordinal(observations);
+    ensure!(ordinal < 8, "command_request_budget");
+    Ok(ordinal)
 }
 
 pub(crate) fn upgrade(connection: &Connection) -> Result<()> {
@@ -204,15 +276,8 @@ pub(crate) fn request(
         row.version == instruction.expected_version,
         crate::error::Failure::Conflict
     );
-    let start = origin
-        .observations
-        .iter()
-        .rposition(|entry| matches!(entry.instruction.kind.as_str(), "decide" | "complete"))
-        .map_or(0, |at| at + 1);
     ensure!(
-        origin.observations[start..]
-            .iter()
-            .any(|entry| store::observed_target(entry, &instruction.model, &row)),
+        observed_target_in_decision(&origin.observations, &instruction.model, &row),
         "command_target_requires_transaction_observation"
     );
     for name in [operation, envelope.command.as_str()] {
@@ -223,12 +288,7 @@ pub(crate) fn request(
             &serde_json::from_str(&row.data)?,
         )?;
     }
-    let ordinal = origin
-        .observations
-        .iter()
-        .filter(|entry| entry.instruction.kind == "request")
-        .count();
-    ensure!(ordinal < 8, "command_request_budget");
+    let ordinal = checked_child_ordinal(&origin.observations)?;
     let active: i64 = connection.query_row(
         "SELECT COUNT(*) FROM day2_invocations i WHERE status='pending' AND NOT EXISTS(SELECT 1 FROM day2_authority_blocks b WHERE b.invocation=i.id)",
         [],
@@ -323,7 +383,7 @@ pub(crate) fn validate_requests(
         .map_or(0, |at| {
             request.observations[..at]
                 .iter()
-                .filter(|entry| entry.instruction.kind == "request")
+                .filter(|entry| matches!(entry.instruction.kind.as_str(), "request" | "defer"))
                 .count()
         });
     let mut statement = connection.prepare(
@@ -358,7 +418,7 @@ pub fn children(runtime: &Runtime, parent: &str) -> Result<Vec<Invocation>> {
 }
 
 fn children_in(connection: &Connection, parent: &str) -> Result<Vec<Invocation>> {
-    let mut statement = connection.prepare("SELECT i.id,r.parent,i.operation,CASE WHEN EXISTS(SELECT 1 FROM day2_authority_blocks b WHERE b.invocation=i.id) THEN 'blocked' ELSE i.status END FROM day2_command_requests r JOIN day2_invocations i ON i.id=r.id WHERE r.parent=?1 ORDER BY r.ordinal")?;
+    let mut statement = connection.prepare("SELECT id,parent,operation,status FROM (SELECT i.id AS id,r.parent AS parent,i.operation AS operation,CASE WHEN EXISTS(SELECT 1 FROM day2_authority_blocks b WHERE b.invocation=i.id) THEN 'blocked' ELSE i.status END AS status,r.ordinal AS ordinal FROM day2_command_requests r JOIN day2_invocations i ON i.id=r.id WHERE r.parent=?1 UNION ALL SELECT d.id AS id,d.parent AS parent,d.command AS operation,CASE WHEN d.offered_ms IS NULL THEN 'deferred' WHEN EXISTS(SELECT 1 FROM day2_authority_blocks b WHERE b.invocation=d.id) THEN 'blocked' ELSE COALESCE(i.status,'blocked') END AS status,d.ordinal AS ordinal FROM day2_deferrals d LEFT JOIN day2_invocations i ON i.id=d.id WHERE d.parent=?1) ORDER BY ordinal")?;
     Ok(statement
         .query_map([parent], |row| {
             Ok(Invocation {
@@ -417,4 +477,25 @@ pub fn drain(runtime: &Runtime, budget: usize) -> Result<Vec<Invocation>> {
         return Err(error);
     }
     Ok(completed)
+}
+
+#[cfg(test)]
+mod child_ordinal_tests {
+    use super::*;
+
+    #[test]
+    fn requests_and_deferrals_consume_the_same_eight_child_slots() {
+        let observations = (0..8)
+            .map(|index| Observation {
+                instruction: Instruction {
+                    kind: if index % 2 == 0 { "request" } else { "defer" }.into(),
+                    ..Instruction::default()
+                },
+                result: String::new(),
+                error: String::new(),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(child_ordinal(&observations), 8);
+        assert!(checked_child_ordinal(&observations).is_err());
+    }
 }

@@ -82,6 +82,11 @@ pub(crate) enum Step<'a> {
         version: i64,
         data: &'a str,
     },
+    Defer {
+        model: &'a str,
+        id: crate::identity::Id,
+        data: &'a str,
+    },
     Observe {
         capability: &'a str,
         input: &'a str,
@@ -97,7 +102,7 @@ impl Step<'_> {
     pub(crate) fn mutation(self) -> bool {
         matches!(
             self,
-            Self::Database(Database::Write { .. }) | Self::Request { .. }
+            Self::Database(Database::Write { .. }) | Self::Request { .. } | Self::Defer { .. }
         )
     }
 }
@@ -140,7 +145,10 @@ impl Phase {
             (Self::Prepare, Step::Boundary(Decide)) => Self::Decide,
             (
                 Self::Decide | Self::Complete,
-                Step::Database(_) | Step::Request { .. } | Step::Boundary(Commit),
+                Step::Database(_)
+                | Step::Request { .. }
+                | Step::Defer { .. }
+                | Step::Boundary(Commit),
             ) => self,
             (Self::Decide, Step::Boundary(Effects)) => Self::Effects,
             (Self::Effects, Step::External { .. }) => self,
@@ -454,6 +462,17 @@ impl Instruction {
                     }
                 }
             }
+            "defer" => {
+                ensure!(
+                    named && self.id.valid() && self.expected_version == 0 && empty_page && payload,
+                    "invalid_deferral_instruction"
+                );
+                Step::Defer {
+                    model: &self.model,
+                    id: self.id,
+                    data: &self.data,
+                }
+            }
             "observe" | "external" => {
                 ensure!(
                     named && empty_row && empty_page && payload && self.data.len() <= 16_384,
@@ -585,6 +604,50 @@ mod instruction_tests {
                 assert!(!forged.only_kind("commit"));
             }
         }
+    }
+
+    #[test]
+    fn deferral_uses_an_unfenced_target_and_is_decision_only() {
+        let instruction = Instruction {
+            kind: "defer".into(),
+            model: "reports".into(),
+            id: 7.into(),
+            data: r#"{"command":"reports.send","input_type":"SendInput","output_type":"SendOutput","payload":"{}","due":1700000000}"#.into(),
+            ..Instruction::default()
+        };
+        assert!(
+            matches!(instruction.decode(), Ok(Step::Defer { model: "reports", id, .. }) if id == 7.into())
+        );
+        assert_eq!(
+            Phase::Decide
+                .advance(instruction.decode().unwrap())
+                .unwrap(),
+            Phase::Decide
+        );
+        assert_eq!(
+            Phase::Complete
+                .advance(instruction.decode().unwrap())
+                .unwrap(),
+            Phase::Complete
+        );
+        assert!(
+            Phase::Prepare
+                .advance(instruction.decode().unwrap())
+                .is_err()
+        );
+        assert!(
+            Phase::Effects
+                .advance(instruction.decode().unwrap())
+                .is_err()
+        );
+        assert!(
+            Instruction {
+                expected_version: 1,
+                ..instruction
+            }
+            .decode()
+            .is_err()
+        );
     }
 
     #[test]

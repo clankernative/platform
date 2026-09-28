@@ -32,6 +32,12 @@ Context :: { value : Wire.Context }.{
 		# Another command in this application requested it inside its own
 		# transaction. The actor is the one that command was running as.
 		CommandRequest,
+		# No actor asked now; a command deferred this earlier and this instance
+		# admitted it afresh when due. `Context.actor` is the deferring actor.
+		Deferral,
+		# No actor asked now; an operator reissued a blocked invocation and this
+		# instance admitted it afresh. `Context.actor` is the original actor.
+		Recovery,
 		# A verified inbound delivery. No actor asked; a signature established
 		# the sender, and the instance bound the endpoint.
 		Ingress,
@@ -100,6 +106,8 @@ Context :: { value : Wire.Context }.{
 			"request" => Request
 			"schedule" => Schedule
 			"command_request" => CommandRequest
+			"deferral" => Deferral
+			"recovery" => Recovery
 			"ingress" => Ingress
 			"delegated" => Delegated
 			other => Other(other)

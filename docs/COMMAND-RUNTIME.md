@@ -214,11 +214,62 @@ Expected host failures carry typed categories and stable codes. HTML, HTTP API
 and MCP share one mapping; diagnostic context cannot change the status or public
 code. Serialized application failures remain part of the admitted app contract.
 
+## Recovery
+
+A local operator can resolve a **blocked** invocation through native
+`recovery-abandon`, `recovery-reissue`, and `recovery-readmit` commands. Recovery
+is not an app capability. Each request supplies `expected_revision`, the count of
+prior recoveries; stale requests fail with `recovery_revision_conflict`. Repeating
+the same request ID and payload returns its original receipt. Recoveries are
+append-only revisions without a cap. `abandoned` and `reissued` are terminal;
+after either, further recovery fails with `recovery_already_resolved`.
+
+Abandon fences the old invocation from new dispatch and completion, and stores
+native effect evidence as **never admitted**, **known result**, or **unknown
+outcome**. It may abandon blocked work whose artifact is no longer active, but
+`expected_artifact` must still match that invocation. Status receipts expose the
+latest resolution and revision, successor identity, and redacted evidence counts.
+Unknown outcomes keep their existing budget reservations. A permit checked before
+the fence commits may already be in flight; recovery cannot cancel that provider
+call, but its late result is still settled and does not run app completion.
+Committed child command requests and deferrals remain committed business and are
+reported in the recovery receipt; recovery does not recursively abandon them.
+
+Readmit re-admits the **same** blocked invocation against the active artifact
+and current authority, after verifying that the recorded actor may still invoke
+its operation. It preserves the original journal and effect identities, so known
+results are reused and never re-sent; a never-admitted effect can be dispatched
+under current authority. An unknown outcome is allowed only when that effect's
+capability deduplicates retries. Otherwise readmit fails with
+`recovery_readmit_requires_known_outcomes` and identifies the effects. The
+original trace guard remains unchanged as evidence of its first decision; the
+readmission records its current authority stamp and policy, updates the live
+invocation pin, and moves the active block into append-only block history. A
+subsequent authority change creates a new active block as usual. For command
+request children, readmit refreshes the captured policy only after rechecking the
+captured target-row version. Recovery is one invocation at a time; it does not
+fence descendants or cascade.
+
+Reissue is narrower: it requires a blocked invocation with no committed decision,
+children, or external effects/attempts. It admits the same operation, actor, and
+input afresh against current authority, with a deterministic successor identity
+and `recovery` authentication. If fresh admission fails, the recovery transaction
+rolls back. In-flight calls cannot be cancelled; there is no operator-attested
+outcome path or automatic retry/backoff. Local operator assertions are not
+production authentication. The recovery schema changed directly in this
+undeployed branch; no migration for a deployed database is included.
+
+## Deferrals
+
+A deferral records that a command should be invoked with an input at a due time. It commits atomically with the command that creates it, but it is not a command request: while waiting it has no invocation row, authority pin, or target-version fence. This lets it survive policy changes, deploys, and target edits.
+
+The identity is derived from the instance scope, parent invocation, and shared child ordinal. `Write.defer_until` accepts a due Unix time in seconds; `Write.defer_for` accepts a delay in seconds, with the host computing due time as the origin invocation's recorded clock plus the delay. Both take `I64` publicly, matching `Context.now`, and are converted to unsigned values inside the sealed SDK because the pinned Roc compiler's `roc build` segfaults when an app passes a `U64` through this boundary; negative values are rejected. The delay is encoded distinctly from a due time, and the host validates both against the same 30-day bound (zero delay is due now). When due, the deferral is offered once and freshly admitted against the active artifact and current policy. An admitted invocation is pinned to the current authority stamp; an incompatible command/input is blocked as `deferral_incompatible`, and a currently unauthorized actor is blocked as `deferral_forbidden`. Blocked invocations are retained and excluded from draining. Artifact activation checks every unoffered deferral for command contract and input compatibility. The instance holds at most 1,000 unoffered deferrals. Restore never resurrects pending work held by a backup: each unoffered deferral is marked offered and recorded as a blocked invocation with reason `deferral_restored` in the restore transaction.
+
 ## Current scope
 
 This is a local spike with bounded execution: 32 preparation observations, 32
 external effects, 64 total interpreter steps, 64 KiB observation results and eight
-child requests per invocation. Native computation retains the worker timeout.
+combined child command requests and deferrals per invocation. Native computation retains the worker timeout.
 There is no HA scheduler, automatic worker classification, arbitrary hour-long
 backfill, public cancellation API for the new engine, timers, external signals,
 human approval waits or generic compensation engine yet. The SDK leaves room to

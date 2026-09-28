@@ -375,7 +375,16 @@ pub(crate) fn upgrade(connection: &Connection) -> Result<()> {
         ) STRICT;
         CREATE TABLE IF NOT EXISTS day2_authority_blocks(
             invocation TEXT PRIMARY KEY REFERENCES day2_invocations(id), reason TEXT NOT NULL
-        ) STRICT;",
+        ) STRICT;
+        CREATE TABLE IF NOT EXISTS day2_authority_block_history(
+            invocation TEXT NOT NULL REFERENCES day2_invocations(id),
+            revision INTEGER NOT NULL CHECK(revision>0), reason TEXT NOT NULL, at_ms INTEGER NOT NULL,
+            PRIMARY KEY(invocation,revision)
+        ) STRICT;
+        CREATE TRIGGER IF NOT EXISTS day2_authority_block_history_no_update
+        BEFORE UPDATE ON day2_authority_block_history BEGIN SELECT RAISE(ABORT,'append_only_authority_block_history'); END;
+        CREATE TRIGGER IF NOT EXISTS day2_authority_block_history_no_delete
+        BEFORE DELETE ON day2_authority_block_history BEGIN SELECT RAISE(ABORT,'append_only_authority_block_history'); END;",
     )?;
     for (table, key, previously_created) in [
         (
@@ -697,6 +706,48 @@ pub(crate) fn pin_invocation(
         Failure::AuthorityPolicyChanged
     );
     Ok(())
+}
+
+pub(crate) fn pin_readmitted_invocation(
+    connection: &Connection,
+    id: &str,
+    stamp: &AuthorityStamp,
+) -> Result<()> {
+    require_transaction(connection)?;
+    ensure!(
+        current(connection)?.stamp == *stamp,
+        Failure::AuthorityPolicyChanged
+    );
+    ensure!(is_blocked(connection, id)?, Failure::AuthorityPolicyChanged);
+    connection.execute(
+        "INSERT INTO day2_invocation_authority(invocation,epoch,revision) VALUES(?1,?2,?3)
+         ON CONFLICT(invocation) DO UPDATE SET epoch=excluded.epoch,revision=excluded.revision",
+        params![id, stamp.epoch, i64::try_from(stamp.revision)?],
+    )?;
+    Ok(())
+}
+
+pub(crate) fn readmission_matches(
+    connection: &Connection,
+    id: &str,
+    stamp: &AuthorityStamp,
+    policy: &crate::authority::Policy,
+) -> Result<bool> {
+    let readmission: Option<(String, i64, String)> = connection
+        .query_row(
+            "SELECT authority_epoch,authority_revision,policy FROM day2_recoveries
+             WHERE invocation=?1 AND resolution='readmitted' ORDER BY revision DESC LIMIT 1",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let Some((epoch, revision, recorded_policy)) = readmission else {
+        return Ok(false);
+    };
+    Ok(epoch == stamp.epoch
+        && u64::try_from(revision)? == stamp.revision
+        && serde_json::from_str::<crate::authority::Policy>(&recorded_policy)? == *policy
+        && current(connection)?.stamp == *stamp)
 }
 
 pub(crate) fn is_blocked(connection: &Connection, id: &str) -> Result<bool> {
@@ -1153,6 +1204,7 @@ fn fence_restored_in(
     relocated: &Path,
 ) -> Result<()> {
     require_transaction(connection)?;
+    crate::deferrals::fence_restored(connection, &active.artifact_id)?;
     crate::budget::invalidate_restored(connection)?;
     let mut entropy = [0_u8; 32];
     getrandom::fill(&mut entropy)

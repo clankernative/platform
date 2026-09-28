@@ -331,7 +331,7 @@ pub fn local_policy_for(artifact: &LoadedArtifact, actor: &str) -> Result<Policy
                             .execution
                             .effects
                             .iter()
-                            .filter(|effect| effect.kind == "request")
+                            .filter(|effect| matches!(effect.kind.as_str(), "request" | "defer"))
                             .map(|effect| effect.command.clone())
                             .collect()
                     })

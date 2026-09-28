@@ -371,7 +371,13 @@ fn load(
             && claims.actor == request.context.actor
             && claims.artifact == runtime.artifact().id()
             && claims.scope == runtime.scope()
-            && claims.authority == active.stamp,
+            && (claims.authority == active.stamp
+                || authority_state::readmission_matches(
+                    connection,
+                    &request.context.invocation_id,
+                    &active.stamp,
+                    active.policy()?,
+                )?),
         Failure::ResourceForbidden
     );
     let grant = active
