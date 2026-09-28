@@ -222,6 +222,7 @@ impl Capabilities for Provider {
                 let prepared = deployments.get(&lease.execution.id);
                 ReleaseObserved::Deployment {
                     ready: prepared.is_some_and(|prepared| prepared.readiness == fact.readiness),
+                    incarnation: incarnation(prepared.expect("prepared deployment")),
                     evidence: StateEvidence::Qualified {
                         revision: RevisionToken::Ordered {
                             stream: fact.resource.clone(),

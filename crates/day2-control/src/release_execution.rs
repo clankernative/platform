@@ -156,6 +156,9 @@ pub enum ReleaseObserved {
     },
     Deployment {
         ready: bool,
+        /// Observed again at readback by the provider, not copied from the
+        /// preparation receipt or release journal.
+        incarnation: DeploymentIncarnation,
         evidence: StateEvidence,
     },
 }
@@ -1340,10 +1343,19 @@ fn validate_stored_state(connection: &Connection, stored: &StoredExecution) -> R
                         Some(incarnation) == stored.incarnation.as_ref(),
                         "stored deployment incarnation differs from preparation receipt"
                     ),
-                    ReleaseObserved::Deployment { ready, evidence } => {
+                    ReleaseObserved::Deployment {
+                        ready,
+                        incarnation,
+                        evidence,
+                    } => {
                         ensure!(
                             *ready,
                             "stored deployment readiness lacks positive readback"
+                        );
+                        incarnation.validate()?;
+                        ensure!(
+                            Some(incarnation) == stored.incarnation.as_ref(),
+                            "stored deployment incarnation differs from readback"
                         );
                         let prepared = stored
                             .deployment
@@ -1819,7 +1831,14 @@ fn apply_observation(
             stored.snapshot.phase = ReleasePhase::WaitingDeployment;
             stored.snapshot.waiting = Some(ReleaseWait::Deployment);
         }
-        (ReleaseOperation::ObserveDeployment, ReleaseObserved::Deployment { ready, evidence }) => {
+        (
+            ReleaseOperation::ObserveDeployment,
+            ReleaseObserved::Deployment {
+                ready,
+                incarnation,
+                evidence,
+            },
+        ) => {
             ensure!(
                 stored
                     .deployment
@@ -1827,6 +1846,11 @@ fn apply_observation(
                     .is_some_and(|prepared| prepared.resource == observation.fact.resource
                         && prepared.readiness == observation.fact.readiness),
                 "deployment readback lacks exact preparation"
+            );
+            incarnation.validate()?;
+            ensure!(
+                Some(incarnation) == stored.incarnation.as_ref(),
+                "deployment incarnation changed at readback"
             );
             if evidence.barrier().is_none() {
                 stored.snapshot.phase = ReleasePhase::WaitingDeployment;

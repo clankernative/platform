@@ -725,6 +725,7 @@ impl Capabilities for Provider {
                 };
                 ReleaseObserved::Deployment {
                     evidence,
+                    incarnation: incarnation.clone(),
                     ready: state.resources.get(&fact.resource).is_some_and(|resource| {
                         resource.visible_at <= state.now
                             && resource.fact.readiness == fact.readiness
