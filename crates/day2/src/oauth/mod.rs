@@ -8,4 +8,5 @@ pub mod inbound;
 pub mod outbound;
 pub mod profiles;
 pub mod protocol;
+pub(crate) mod security_shell;
 pub mod store;

@@ -554,6 +554,10 @@ mod tests {
     use crate::oauth::exchange::{self, ExchangeObservation, TokenHttpResponse};
     use crate::oauth::external::{self, FreshExternalApproval, ShellApprovalKeyLease};
     use crate::oauth::outbound::{CallbackIngress, CallbackOutcome};
+    use crate::oauth::security_shell::{
+        ApprovalContext, ApprovalRegistry, FreshAuthenticator, FreshHuman, SecurityShell,
+    };
+    use axum::http::{HeaderMap, Method, StatusCode, header};
     use day2_capabilities::Name;
     use day2_capabilities::oauth::{ConnectionOwner, ProductReturnRef};
     use std::collections::BTreeMap;
@@ -870,6 +874,224 @@ mod tests {
                 5,
             )
             .unwrap()
+    }
+
+    struct TestApprovalRegistry(QualificationFixture);
+
+    impl ApprovalRegistry for TestApprovalRegistry {
+        fn resolve(&self, attempt: &str) -> Result<Option<ApprovalContext>> {
+            if attempt != self.0.intent.attempt {
+                return Ok(None);
+            }
+            let fixture = self.0.clone();
+            let AccountBindingEvidence::ExplicitExternal { approval, .. } =
+                &fixture.instance.account
+            else {
+                unreachable!()
+            };
+            let shell_key = ShellApprovalKeyLease::new(
+                &[12; 32],
+                "shell_v1".into(),
+                fixture.instance.shell.origin.clone(),
+                approval.clone(),
+            )?;
+            Ok(Some(ApprovalContext {
+                intent: fixture.intent,
+                binding: fixture.binding,
+                requirement: fixture.requirement,
+                permission: fixture.permission,
+                reviewed: fixture.reviewed,
+                instance: fixture.instance,
+                custody_key: exchange_key(),
+                shell_key,
+            }))
+        }
+    }
+
+    struct TestFreshAuth {
+        human: &'static str,
+        authenticated_at: i64,
+    }
+
+    impl FreshAuthenticator for TestFreshAuth {
+        fn verify_fresh(&self, _: &HeaderMap, _: i64) -> Result<FreshHuman> {
+            Ok(FreshHuman {
+                human: self.human.into(),
+                authenticated_at: self.authenticated_at,
+            })
+        }
+    }
+
+    #[test]
+    fn security_shell_form_activates_only_after_fresh_session_and_exact_confirmation() {
+        let fixture = external_fixture();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shell.sqlite");
+        let mut db = rusqlite::Connection::open(&path).unwrap();
+        quarantine_external_fixture(&mut db, &fixture, &exchange_key());
+        let pending = external::load_pending_external(&db, fixture.input(), &exchange_key(), 5)
+            .unwrap()
+            .unwrap();
+        let shell = SecurityShell::new(
+            fixture.instance.shell.origin_url.clone(),
+            path,
+            std::sync::Arc::new(TestApprovalRegistry(fixture.clone())),
+            std::sync::Arc::new(TestFreshAuth {
+                human: "human_1",
+                authenticated_at: 5,
+            }),
+        )
+        .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, "security.example".parse().unwrap());
+        let response = shell
+            .dispatch(
+                &Method::GET,
+                "/oauth/approvals/attempt_1",
+                None,
+                &headers,
+                &[],
+                5,
+            )
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let cookie = response.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let body = tokio::runtime::Runtime::new().unwrap().block_on(async {
+            axum::body::to_bytes(response.into_body(), 65536)
+                .await
+                .unwrap()
+        });
+        let body = std::str::from_utf8(&body).unwrap();
+        assert!(body.contains("subject_1"));
+        assert!(body.contains("Read calendar events"));
+        assert!(body.contains("calendar.read"));
+        assert!(!body.contains("secret_external_access"));
+        let csrf = body
+            .split("name=\"csrf\" value=\"")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap();
+        let form = format!("csrf={csrf}&challenge={}", pending.challenge().as_str());
+        let mut post_headers = headers.clone();
+        post_headers.insert(header::COOKIE, cookie.parse().unwrap());
+        post_headers.insert(
+            header::CONTENT_TYPE,
+            "application/x-www-form-urlencoded".parse().unwrap(),
+        );
+        post_headers.insert(header::ORIGIN, "https://app.example".parse().unwrap());
+        assert!(
+            shell
+                .dispatch(
+                    &Method::POST,
+                    "/oauth/approvals/attempt_1",
+                    None,
+                    &post_headers,
+                    form.as_bytes(),
+                    5
+                )
+                .is_err()
+        );
+        assert!(matches!(
+            connect::state(&db, "attempt_1").unwrap(),
+            Some(ConnectState::AwaitingAccountApproval)
+        ));
+        post_headers.insert(header::ORIGIN, "https://security.example".parse().unwrap());
+        let wrong_csrf = format!("csrf=wrong&challenge={}", pending.challenge().as_str());
+        assert!(
+            shell
+                .dispatch(
+                    &Method::POST,
+                    "/oauth/approvals/attempt_1",
+                    None,
+                    &post_headers,
+                    wrong_csrf.as_bytes(),
+                    5
+                )
+                .is_err()
+        );
+        assert!(matches!(
+            connect::state(&db, "attempt_1").unwrap(),
+            Some(ConnectState::AwaitingAccountApproval)
+        ));
+        assert_eq!(
+            shell
+                .dispatch(
+                    &Method::POST,
+                    "/oauth/approvals/attempt_1",
+                    None,
+                    &post_headers,
+                    form.as_bytes(),
+                    5
+                )
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        assert!(matches!(
+            connect::state(&db, "attempt_1").unwrap(),
+            Some(ConnectState::Activated { .. })
+        ));
+        assert_eq!(
+            shell
+                .dispatch(
+                    &Method::POST,
+                    "/oauth/approvals/attempt_1",
+                    None,
+                    &post_headers,
+                    form.as_bytes(),
+                    6
+                )
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[test]
+    fn security_shell_refuses_stale_or_different_human_authentication() {
+        let fixture = external_fixture();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shell-refusal.sqlite");
+        let mut db = rusqlite::Connection::open(&path).unwrap();
+        quarantine_external_fixture(&mut db, &fixture, &exchange_key());
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, "security.example".parse().unwrap());
+        for (human, authenticated_at) in [("human_1", 4), ("another_human", 5)] {
+            let shell = SecurityShell::new(
+                fixture.instance.shell.origin_url.clone(),
+                path.clone(),
+                std::sync::Arc::new(TestApprovalRegistry(fixture.clone())),
+                std::sync::Arc::new(TestFreshAuth {
+                    human,
+                    authenticated_at,
+                }),
+            )
+            .unwrap();
+            assert!(
+                shell
+                    .dispatch(
+                        &Method::GET,
+                        "/oauth/approvals/attempt_1",
+                        None,
+                        &headers,
+                        &[],
+                        5
+                    )
+                    .is_err()
+            );
+        }
+        assert!(matches!(
+            connect::state(&db, "attempt_1").unwrap(),
+            Some(ConnectState::AwaitingAccountApproval)
+        ));
     }
 
     #[test]
