@@ -462,6 +462,20 @@ fn platform_paths_and_page_routes_keep_precedence() -> Result<()> {
     assert!(response.text()?.contains("openapi"));
     assert_eq!(server.visits("docs")?, 0);
 
+    // A provider delivery has no browser origin, IAP assertion or form
+    // encoding. It reaches ingress admission, which refuses an undeclared
+    // endpoint itself, rather than the browser guards.
+    let delivery = server
+        .client
+        .post(format!("{}/ingress/unknown", server.origin))
+        .header(HOST, AUTHORITY)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .header("x-gitea-signature", "0".repeat(64))
+        .body("{}")
+        .send()?;
+    assert_eq!(delivery.status(), StatusCode::UNAUTHORIZED);
+    assert!(delivery.text()?.contains("ingress_refused"));
+
     // Platform namespaces never reach a command, whatever lies beneath them.
     for (path, status) in [
         ("/api/unknown", StatusCode::NOT_FOUND),
