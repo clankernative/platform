@@ -4,12 +4,13 @@
 
 use super::crypto::{
     KeyLease, MaterialIdentity, PreparedMaterial, decrypt_for_human, prepare_managed,
+    token_selector, verify_managed,
 };
 use anyhow::{Context, Result, ensure};
 use day2_capabilities::{
     Digest,
-    credentials::{ManagementSnapshot, Namespace},
-    oauth::GrantCeiling,
+    credentials::{GrantMode, ManagedProfile, ManagementSnapshot, ManifestFamily, Namespace},
+    oauth::{GrantCeiling, OperationAuthorityContract},
 };
 use getrandom::fill;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
@@ -150,9 +151,53 @@ impl PendingIssue {
     }
 }
 
-pub(crate) fn prepare_issue(lease: &KeyLease, intent: IssueIntent) -> Result<PreparedIssue> {
+pub(crate) fn prepare_issue(
+    lease: &KeyLease,
+    family: &ManifestFamily,
+    intent: IssueIntent,
+) -> Result<PreparedIssue> {
+    family.verify()?;
+    ensure!(
+        family.id.as_str() == intent.family && family.contract == intent.family_contract,
+        "credential issuance family contract mismatch"
+    );
+    ensure!(
+        !matches!(family.profile, ManagedProfile::Impersonation { .. }),
+        "impersonation requires protected session handoff"
+    );
+    ensure!(
+        intent
+            .expires_at
+            .checked_sub(intent.issued_at)
+            .and_then(|seconds| u64::try_from(seconds).ok())
+            .is_some_and(|seconds| seconds > 0 && seconds <= family.lifetime_seconds),
+        "credential issuance exceeds family lifetime"
+    );
     intent.namespace.validate()?;
     intent.ceiling.verify()?;
+    ensure!(
+        matches!(family.grant, GrantMode::Selectable)
+            || intent.ceiling.roots.len() == family.roots.len(),
+        "fixed credential grant must include every family root"
+    );
+    for (name, selected) in &intent.ceiling.roots {
+        let declared = family
+            .roots
+            .get(name)
+            .context("credential grant selected an undeclared root")?;
+        ensure!(
+            selected.operation == declared.operation
+                && selected.version == declared.version
+                && selected.operation_contract == declared.operation_contract
+                && selected.kind == declared.kind
+                && selected.closure.is_within(&declared.closure),
+            "credential grant exceeds declared family authority"
+        );
+        ensure!(
+            matches!(family.grant, GrantMode::Selectable) || selected == declared,
+            "fixed credential grant cannot narrow a declared root"
+        );
+    }
     for id in [
         &intent.family,
         &intent.invocation,
@@ -584,6 +629,158 @@ pub(crate) fn stage_revoke(
     Ok(changed == 1)
 }
 
+/// Current host evidence, established before a managed token reaches the app
+/// dispatcher. The caller must also check the selected instance binding, the
+/// principal's current policy, audience and resource authorization.
+pub(crate) struct IngressVerification<'a> {
+    pub namespace: &'a Namespace,
+    pub family: &'a str,
+    pub family_contract: &'a Digest,
+    pub security_epoch: u64,
+    pub now: i64,
+    pub operation: &'a OperationAuthorityContract,
+}
+
+/// Verified private evidence. It cannot be serialized into an app input or
+/// treated as an interactive human session.
+pub(crate) struct VerifiedIngress {
+    pub principal: String,
+    pub lineage: String,
+    pub version: String,
+    pub ceiling: GrantCeiling,
+}
+
+/// Select only an active current version in the expected namespace. A malformed,
+/// unknown, expired, rotated or revoked token has the same absent result. Store
+/// corruption and unavailable exact key versions are errors, not denials.
+pub(crate) fn verify_ingress(
+    db: &Connection,
+    lease: &KeyLease,
+    current: IngressVerification<'_>,
+    token: &str,
+) -> Result<Option<VerifiedIngress>> {
+    current.namespace.validate()?;
+    validate_id(current.family)?;
+    ensure!(
+        current.security_epoch > 0,
+        "invalid current credential epoch"
+    );
+    current.operation.verify()?;
+    let Ok(selector) = token_selector(token) else {
+        return Ok(None);
+    };
+    let namespace = namespace_key(current.namespace)?;
+    struct IngressRow {
+        lineage: String,
+        version: String,
+        namespace_json: String,
+        family: String,
+        family_contract: String,
+        principal: String,
+        recipient: String,
+        grant_json: String,
+        grant_digest: String,
+        grant_valid_until: i64,
+        epoch: i64,
+        issued_at: i64,
+        expires_at: i64,
+        verifier: Vec<u8>,
+        verifier_version: String,
+        material_revision: i64,
+        material_identity: String,
+    }
+    let row: Option<IngressRow> = db
+        .query_row(
+            "SELECT l.id, v.id, l.namespace_json, l.family, l.family_contract,
+                    l.principal, l.recipient, l.grant_json, l.grant_digest,
+                    l.grant_valid_until, l.security_epoch, v.issued_at, v.expires_at,
+                    v.verifier, v.verifier_key_version, m.material_revision, m.identity_json
+             FROM day2_credential_versions v
+             JOIN day2_credential_lineages l ON l.id = v.lineage
+             JOIN day2_credential_material m ON m.version = v.id
+             WHERE v.selector = ?1 AND l.namespace = ?2 AND l.family = ?3
+               AND l.head = v.id AND l.state = 'active' AND v.state = 'active'
+               AND v.security_epoch = l.security_epoch AND v.grant_digest = l.grant_digest",
+            params![selector, namespace, current.family],
+            |row| {
+                Ok(IngressRow {
+                    lineage: row.get(0)?,
+                    version: row.get(1)?,
+                    namespace_json: row.get(2)?,
+                    family: row.get(3)?,
+                    family_contract: row.get(4)?,
+                    principal: row.get(5)?,
+                    recipient: row.get(6)?,
+                    grant_json: row.get(7)?,
+                    grant_digest: row.get(8)?,
+                    grant_valid_until: row.get(9)?,
+                    epoch: row.get(10)?,
+                    issued_at: row.get(11)?,
+                    expires_at: row.get(12)?,
+                    verifier: row.get(13)?,
+                    verifier_version: row.get(14)?,
+                    material_revision: row.get(15)?,
+                    material_identity: row.get(16)?,
+                })
+            },
+        )
+        .optional()?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    if row.family_contract != current.family_contract.as_str()
+        || row.epoch != i64::try_from(current.security_epoch)?
+        || current.now < row.issued_at
+        || current.now >= row.expires_at
+        || current.now >= row.grant_valid_until
+    {
+        return Ok(None);
+    }
+    let stored_namespace: Namespace = serde_json::from_str(&row.namespace_json)?;
+    ensure!(
+        stored_namespace == *current.namespace,
+        "stored credential namespace mismatch"
+    );
+    let expected_identity = MaterialIdentity {
+        namespace: stored_namespace,
+        family: row.family,
+        lineage: row.lineage.clone(),
+        version: row.version.clone(),
+        recipient: row.recipient,
+        security_epoch: u64::try_from(row.epoch)?,
+        material_revision: u64::try_from(row.material_revision)?,
+    };
+    let stored_identity: MaterialIdentity = serde_json::from_str(&row.material_identity)?;
+    ensure!(
+        stored_identity == expected_identity,
+        "stored credential material identity mismatch"
+    );
+    let ceiling: GrantCeiling = serde_json::from_str(&row.grant_json)?;
+    ceiling.verify()?;
+    ensure!(
+        ceiling.digest.as_str() == row.grant_digest && ceiling.subject == row.principal,
+        "stored credential grant mismatch"
+    );
+    if !ceiling.allows(current.operation)?
+        || !verify_managed(
+            lease,
+            &expected_identity,
+            &selector,
+            &row.verifier,
+            &row.verifier_version,
+            token,
+        )?
+    {
+        return Ok(None);
+    }
+    Ok(Some(VerifiedIngress {
+        principal: row.principal,
+        lineage: row.lineage,
+        version: row.version,
+        ceiling,
+    }))
+}
+
 pub(crate) struct VerifiedHumanPost {
     pub namespace: Namespace,
     pub version: String,
@@ -641,6 +838,9 @@ pub(crate) fn authorize_reveal(
         epoch: i64,
         recipient: String,
         session: String,
+        issued_at: i64,
+        version_expires_at: i64,
+        grant_valid_until: i64,
         expires_at: i64,
         nonce: Vec<u8>,
         ciphertext: Vec<u8>,
@@ -649,7 +849,8 @@ pub(crate) fn authorize_reveal(
         .query_row(
             "SELECT m.identity_json, l.namespace_json, l.family, l.id, m.material_revision,
                 m.envelope_revision, m.encryption_key_version, l.security_epoch,
-                d.recipient, d.session, d.expires_at, m.nonce, m.ciphertext
+                d.recipient, d.session, v.issued_at, v.expires_at,
+                l.grant_valid_until, d.expires_at, m.nonce, m.ciphertext
          FROM day2_credential_deliveries d
          JOIN day2_credential_versions v ON v.id = d.version
          JOIN day2_credential_lineages l ON l.id = v.lineage
@@ -671,9 +872,12 @@ pub(crate) fn authorize_reveal(
                     epoch: row.get(7)?,
                     recipient: row.get(8)?,
                     session: row.get(9)?,
-                    expires_at: row.get(10)?,
-                    nonce: row.get(11)?,
-                    ciphertext: row.get(12)?,
+                    issued_at: row.get(10)?,
+                    version_expires_at: row.get(11)?,
+                    grant_valid_until: row.get(12)?,
+                    expires_at: row.get(13)?,
+                    nonce: row.get(14)?,
+                    ciphertext: row.get(15)?,
                 })
             },
         )
@@ -684,6 +888,9 @@ pub(crate) fn authorize_reveal(
     if u64::try_from(row.epoch)? != post.security_epoch
         || row.recipient != post.recipient
         || row.session != post.session
+        || post.now < row.issued_at
+        || post.now >= row.version_expires_at
+        || post.now >= row.grant_valid_until
         || post.now >= row.expires_at
     {
         return Ok(None);
@@ -804,7 +1011,10 @@ mod tests {
     use super::*;
     use day2_capabilities::{
         BindingRef, Name,
-        credentials::{LineageRef, ManagementState, VersionRef},
+        credentials::{
+            CredentialRoot, FamilyDeclaration, LineageRef, ManagementState, SourceLocation,
+            VersionRef,
+        },
         oauth::{
             AuthorityAction, AuthorityNode, OperationAuthorityContract, OperationKind,
             ResourceAudienceRef,
@@ -862,11 +1072,38 @@ mod tests {
         .unwrap()
     }
 
+    fn family() -> ManifestFamily {
+        ManifestFamily::derive(
+            FamilyDeclaration {
+                registration: name("transcription"),
+                id: name("transcription-client"),
+                profile: ManagedProfile::Client,
+                grant: GrantMode::Fixed,
+                roots: vec!["SubmitTranscription".into()],
+                lifetime_seconds: 2_000,
+                source: SourceLocation {
+                    file: "ClientKeys.roc".into(),
+                    line: 1,
+                },
+            },
+            &BTreeMap::from([(
+                "SubmitTranscription".into(),
+                CredentialRoot {
+                    authority: ceiling().roots["SubmitTranscription"].clone(),
+                    direct_ingress: true,
+                    interactive_security: false,
+                    single_resource_model: None,
+                },
+            )]),
+        )
+        .unwrap()
+    }
+
     fn issue(invocation: &str) -> IssueIntent {
         IssueIntent {
             namespace: namespace(),
             family: "transcription-client".into(),
-            family_contract: Digest::of(&"family-v1").unwrap(),
+            family_contract: family().contract,
             invocation: invocation.into(),
             instruction_slot: 0,
             principal: "client-1".into(),
@@ -891,7 +1128,7 @@ mod tests {
     }
 
     fn committed_issue(db: &mut Connection) -> Result<PublicReceipt> {
-        let prepared = prepare_issue(&lease(), issue("invocation-1"))?;
+        let prepared = prepare_issue(&lease(), &family(), issue("invocation-1"))?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let receipt = stage_issue(&tx, prepared)?.public_identity().clone();
         tx.commit()?;
@@ -927,12 +1164,67 @@ mod tests {
         }
     }
 
+    fn ingress<'a>(
+        namespace: &'a Namespace,
+        contract: &'a Digest,
+        operation: &'a OperationAuthorityContract,
+        epoch: u64,
+        now: i64,
+    ) -> IngressVerification<'a> {
+        IngressVerification {
+            namespace,
+            family: "transcription-client",
+            family_contract: contract,
+            security_epoch: epoch,
+            now,
+            operation,
+        }
+    }
+
+    #[test]
+    fn issuance_requires_exact_declared_family_and_grant() -> Result<()> {
+        let family = family();
+        let mut wrong = issue("wrong-contract");
+        wrong.family_contract = Digest::of(&"another-family")?;
+        assert!(prepare_issue(&lease(), &family, wrong).is_err());
+
+        let mut excessive = issue("excessive-grant");
+        let extra = OperationAuthorityContract::derive(
+            "OtherOperation".into(),
+            1,
+            Digest::of(&"other")?,
+            OperationKind::Command,
+            AuthorityNode {
+                actions: BTreeSet::new(),
+                children: BTreeMap::new(),
+            },
+        )?;
+        let mut roots = excessive.ceiling.roots.clone();
+        roots.insert(extra.operation.clone(), extra);
+        excessive.ceiling = GrantCeiling::derive(
+            excessive.ceiling.client.clone(),
+            excessive.principal.clone(),
+            excessive.ceiling.audience.clone(),
+            roots,
+        )?;
+        assert!(prepare_issue(&lease(), &family, excessive).is_err());
+
+        let mut too_long = issue("excessive-lifetime");
+        too_long.expires_at = too_long.issued_at + 2_001;
+        too_long.grant_valid_until = too_long.expires_at;
+        assert!(prepare_issue(&lease(), &family, too_long).is_err());
+        Ok(())
+    }
+
     #[test]
     fn issue_rolls_back_with_product_write_and_retries_recover_same_receipt() -> Result<()> {
         let (_dir, mut db) = database()?;
         db.execute_batch("CREATE TABLE product_registration (credential TEXT NOT NULL)")?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let pending = stage_issue(&tx, prepare_issue(&lease(), issue("invocation-1"))?)?;
+        let pending = stage_issue(
+            &tx,
+            prepare_issue(&lease(), &family(), issue("invocation-1"))?,
+        )?;
         tx.execute(
             "INSERT INTO product_registration VALUES (?1)",
             [&pending.public_identity().lineage],
@@ -953,7 +1245,10 @@ mod tests {
 
         let committed = committed_issue(&mut db)?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let retried = stage_issue(&tx, prepare_issue(&lease(), issue("invocation-1"))?)?;
+        let retried = stage_issue(
+            &tx,
+            prepare_issue(&lease(), &family(), issue("invocation-1"))?,
+        )?;
         assert_eq!(retried.public_identity(), &committed);
         tx.commit()?;
         assert_eq!(
@@ -966,7 +1261,7 @@ mod tests {
         let mut changed = issue("invocation-1");
         changed.label = "Changed intent".into();
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        assert!(stage_issue(&tx, prepare_issue(&lease(), changed)?).is_err());
+        assert!(stage_issue(&tx, prepare_issue(&lease(), &family(), changed)?).is_err());
         Ok(())
     }
 
@@ -1050,6 +1345,26 @@ mod tests {
         let (_dir, mut db) = database()?;
         let first = committed_issue(&mut db)?;
         let version = first.version.as_ref().unwrap();
+        assert!(
+            authorize_reveal(
+                &mut db,
+                VerifiedHumanPost {
+                    now: 999,
+                    ..post(version, "before-issuance")
+                }
+            )?
+            .is_none()
+        );
+        assert!(
+            authorize_reveal(
+                &mut db,
+                VerifiedHumanPost {
+                    now: 1_300,
+                    ..post(version, "after-delivery-window")
+                }
+            )?
+            .is_none()
+        );
         let wrong = VerifiedHumanPost {
             recipient: "issuer/other".into(),
             ..post(version, "wrong")
@@ -1111,6 +1426,194 @@ mod tests {
             params![version, serde_json::to_string(&identity)?],
         )?;
         assert!(authorize_reveal(&mut db, post(version, "substituted")).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn ingress_requires_current_family_epoch_contract_and_operation_ceiling() -> Result<()> {
+        let (_dir, mut db) = database()?;
+        let receipt = committed_issue(&mut db)?;
+        let permit = authorize_reveal(
+            &mut db,
+            post(receipt.version.as_ref().unwrap(), "ingress-token"),
+        )?
+        .unwrap();
+        let token = permit.into_response_body(&lease())?;
+        let namespace = namespace();
+        let contract = family().contract;
+        let root = ceiling().roots["SubmitTranscription"].clone();
+        let verified = verify_ingress(
+            &db,
+            &lease(),
+            ingress(&namespace, &contract, &root, 7, 1_100),
+            &token,
+        )?
+        .context("committed active credential should verify")?;
+        assert_eq!(verified.principal, "client-1");
+        assert_eq!(verified.lineage, receipt.lineage);
+        assert_eq!(verified.version, receipt.version.unwrap());
+        assert_eq!(verified.ceiling.digest, ceiling().digest);
+
+        let mut foreign = namespace.clone();
+        foreign.app = name("other-app");
+        assert!(
+            verify_ingress(
+                &db,
+                &lease(),
+                ingress(&foreign, &contract, &root, 7, 1_100),
+                &token
+            )?
+            .is_none()
+        );
+        let changed = Digest::of(&"changed-family")?;
+        assert!(
+            verify_ingress(
+                &db,
+                &lease(),
+                ingress(&namespace, &changed, &root, 7, 1_100),
+                &token
+            )?
+            .is_none()
+        );
+        assert!(
+            verify_ingress(
+                &db,
+                &lease(),
+                ingress(&namespace, &contract, &root, 8, 1_100),
+                &token
+            )?
+            .is_none()
+        );
+        assert!(
+            verify_ingress(
+                &db,
+                &lease(),
+                ingress(&namespace, &contract, &root, 7, 999),
+                &token
+            )?
+            .is_none()
+        );
+        assert!(
+            verify_ingress(
+                &db,
+                &lease(),
+                ingress(&namespace, &contract, &root, 7, 2_000),
+                &token
+            )?
+            .is_none()
+        );
+        let ungranted = OperationAuthorityContract::derive(
+            "OtherOperation".into(),
+            root.version,
+            root.operation_contract.clone(),
+            root.kind.clone(),
+            root.closure.clone(),
+        )?;
+        assert!(
+            verify_ingress(
+                &db,
+                &lease(),
+                ingress(&namespace, &contract, &ungranted, 7, 1_100),
+                &token
+            )?
+            .is_none()
+        );
+        let mut tampered = token.into_bytes();
+        let last = tampered.last_mut().context("token byte")?;
+        *last = if *last == b'A' { b'B' } else { b'A' };
+        assert!(
+            verify_ingress(
+                &db,
+                &lease(),
+                ingress(&namespace, &contract, &root, 7, 1_100),
+                std::str::from_utf8(&tampered)?
+            )?
+            .is_none()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ingress_rejects_rotated_and_revoked_versions() -> Result<()> {
+        let (_dir, mut db) = database()?;
+        let first = committed_issue(&mut db)?;
+        let first_token = authorize_reveal(
+            &mut db,
+            post(first.version.as_ref().unwrap(), "initial-ingress"),
+        )?
+        .unwrap()
+        .into_response_body(&lease())?;
+        let namespace = namespace();
+        let contract = family().contract;
+        let root = ceiling().roots["SubmitTranscription"].clone();
+        assert!(
+            verify_ingress(
+                &db,
+                &lease(),
+                ingress(&namespace, &contract, &root, 7, 1_300),
+                &first_token
+            )?
+            .is_some()
+        );
+
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let rotated = match stage_rotation(
+            &tx,
+            &lease(),
+            &snapshot(&first),
+            RotationIntent {
+                invocation: "rotation-ingress",
+                instruction_slot: 0,
+                recipient: "issuer/human-1",
+                session: "session-1",
+                issued_at: 1_200,
+                expires_at: 2_100,
+                reveal_until: 1_400,
+            },
+        )? {
+            RotationResult::Rotated(pending) => pending.public_identity().clone(),
+            RotationResult::Conflict => anyhow::bail!("first rotation conflicted"),
+        };
+        tx.commit()?;
+        assert!(
+            verify_ingress(
+                &db,
+                &lease(),
+                ingress(&namespace, &contract, &root, 7, 1_300),
+                &first_token
+            )?
+            .is_none()
+        );
+        let next_token = authorize_reveal(
+            &mut db,
+            VerifiedHumanPost {
+                now: 1_300,
+                ..post(rotated.version.as_ref().unwrap(), "rotated-ingress")
+            },
+        )?
+        .unwrap()
+        .into_response_body(&lease())?;
+        assert!(
+            verify_ingress(
+                &db,
+                &lease(),
+                ingress(&namespace, &contract, &root, 7, 1_300),
+                &next_token
+            )?
+            .is_some()
+        );
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        assert!(stage_revoke(&tx, &namespace, &first.lineage)?);
+        tx.commit()?;
+        assert!(
+            verify_ingress(
+                &db,
+                &lease(),
+                ingress(&namespace, &contract, &root, 7, 1_300),
+                &next_token
+            )?
+            .is_none()
+        );
         Ok(())
     }
 
