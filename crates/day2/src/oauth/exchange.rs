@@ -6,7 +6,7 @@
 use super::account::{MappedHumanEvidence, ProviderAccount, VerifiedMappedAccount};
 use super::connect::{self, CallbackBinding, ConnectIntent};
 use super::custody::{self, PreparedTokenMaterial, PreparedVerifier};
-use super::profiles::{OutboundQualification, ValidatedTokenResponse};
+use super::profiles::{AccountBindingEvidence, OutboundQualification, ValidatedTokenResponse};
 use anyhow::{Result, ensure};
 use day2_capabilities::oauth::{ProviderCallbackRef, ProviderIssuerRef};
 use day2_capabilities::{BindingRef, Digest};
@@ -27,6 +27,8 @@ pub(super) struct ExchangeBinding {
     pub(super) token_endpoint: String,
     pub(super) client_credential: BindingRef,
     pub(super) custody: BindingRef,
+    #[serde(default)]
+    pub(super) account_evidence: Option<Digest>,
     pub(super) code_ref: String,
     pub(super) verifier_ref: String,
     pub(super) token_slot_ref: String,
@@ -74,6 +76,10 @@ impl ExchangeBinding {
             token_endpoint: input.reviewed.token_endpoint.clone(),
             client_credential: registration.client_credential.clone(),
             custody: input.instance.custody.clone(),
+            account_evidence: match &input.instance.account {
+                AccountBindingEvidence::MappedHuman { .. } => None,
+                _ => Some(Digest::of(&input.instance.account)?),
+            },
             code_ref: code_ref.as_str().to_owned(),
             verifier_ref: verifier_ref.as_str().to_owned(),
             token_slot_ref: token_slot_ref.as_str().to_owned(),
@@ -81,7 +87,7 @@ impl ExchangeBinding {
         })
     }
 
-    fn matches_current(&self, input: &OutboundQualification<'_>) -> Result<bool> {
+    pub(super) fn matches_current(&self, input: &OutboundQualification<'_>) -> Result<bool> {
         Ok(self == &Self::derive(input, &self.code_challenge)?)
     }
 
@@ -292,9 +298,9 @@ impl ExchangeUncertain {
 }
 
 pub struct PrivateExchangeResponse {
-    intent: ConnectIntent,
-    binding: ExchangeBinding,
-    http: TokenHttpResponse,
+    pub(super) intent: ConnectIntent,
+    pub(super) binding: ExchangeBinding,
+    pub(super) http: TokenHttpResponse,
 }
 
 impl ExchangeDispatchPermit {
@@ -492,7 +498,13 @@ impl VerifiedMappedExchange {
         self,
         key: &crate::managed_credentials::crypto::KeyLease,
     ) -> Result<PreparedMappedSettlement> {
-        let material = custody::prepare_tokens(key, &self.verified, &self.binding, self.tokens)?;
+        let material = custody::prepare_tokens(
+            key,
+            self.verified.intent(),
+            self.verified.account(),
+            &self.binding,
+            self.tokens,
+        )?;
         Ok(PreparedMappedSettlement {
             verified: self.verified,
             binding: self.binding,

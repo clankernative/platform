@@ -698,6 +698,19 @@ resource "kubernetes_ingress_v1" "app" {
       host = var.domain
 
       http {
+        dynamic "path" {
+          for_each = var.signed_webhook_paths
+          content {
+            path      = path.value
+            path_type = "Exact"
+            backend {
+              service {
+                name = kubernetes_service_v1.signed_webhooks[0].metadata[0].name
+                port { name = "http" }
+              }
+            }
+          }
+        }
         path {
           path      = "/"
           path_type = "Prefix"

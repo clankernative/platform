@@ -370,6 +370,9 @@ fn publish(root: &Path, prepared: &mut Prepared, bound: &Bound) -> Result<PathBu
                 &worker.exchange(b"credential-contract")?,
                 &checked,
             )?)?;
+        let with_declarations: day2::artifact::Artifact = serde_json::from_value(artifact.clone())?;
+        artifact["credential_manifest"] =
+            serde_json::to_value(day2::credential_authority::manifest(&with_declarations)?)?;
     }
     artifact["export_manifest"] = serde_json::to_value(
         day2::operation_contract::Manifest::from_checked_artifact(&checked)?,

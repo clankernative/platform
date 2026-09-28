@@ -11,6 +11,11 @@ use std::{io::Read, time::Duration};
 pub(crate) struct Credentials(String);
 
 impl Credentials {
+    pub(super) fn slack_webhook_url(&self, digest: &str) -> Result<&str, AdapterError> {
+        super::slack_webhook::validate_url(&self.0, digest)?;
+        Ok(&self.0)
+    }
+
     pub(crate) fn bearer(value: String) -> Result<Self, AdapterError> {
         if value.is_empty() || value.len() > 16_384 || !value.bytes().all(|b| b.is_ascii_graphic())
         {
@@ -96,6 +101,8 @@ impl Method {
 pub(crate) enum Authorization<'a> {
     Bearer(&'a Credentials),
     Presigned,
+    /// The secret URL is already validated and pinned; attach JSON headers only.
+    Webhook,
 }
 
 /// Object metadata worth reading off a response, and nothing else.
@@ -243,6 +250,9 @@ impl Transport for HttpTransport {
             // attaching the secret it was derived from would hand the store the
             // key to every other object in the bucket.
             Authorization::Presigned => {}
+            Authorization::Webhook => {
+                builder = builder.header("content-type", "application/json; charset=utf-8");
+            }
         }
         for (name, value) in &request.headers {
             let value =

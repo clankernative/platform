@@ -13,6 +13,12 @@ path = "src/main.rs"
 name = "day2-backup"
 path = "src/bin/day2-backup.rs"
 
+# Shipped in the runtime image to register an app's mounted provider
+# credentials before it starts (the GKE day2-app init container).
+[[bin]]
+name = "day2-provision-credentials"
+path = "src/bin/day2-provision-credentials.rs"
+
 [dependencies]
 anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }

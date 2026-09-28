@@ -52,6 +52,8 @@ Api :: [].{
 
 	ExecutionMetadata : { internal : Bool, model : Str, id_field : Str, version_field : Str, effects : List(Effect) }
 
+	CredentialAccess : { enabled : Bool, local_reads : List(Str) }
+
 	Metadata : {
 		intent : Entry,
 		request_example : Str,
@@ -59,6 +61,7 @@ Api :: [].{
 		deprecated : Bool,
 		export_version : U64,
 		execution : ExecutionMetadata,
+		credential_access : CredentialAccess,
 		errors : List(Str),
 		required_all_rows : List(Str),
 	}
@@ -193,6 +196,7 @@ Api :: [].{
 		handler : (Context, input -> Tx(output)),
 		contract : Contract(input, output, input_fields, output_fields),
 		execution : Execution(input),
+		credential_access : CredentialAccess,
 		verification : Verification(input, output),
 		required_all_rows : List(Str),
 		export_version : U64,
@@ -202,6 +206,32 @@ Api :: [].{
 			{ version : U64 } ->
 				CommandDef(input, output, input_fields, output_fields)
 		cross_app = |definition, options| { ..definition, export_version: options.version }
+
+		# Opt in to a bounded credential authority contract. Every local read
+		# reached by this operation must be added with credential_read.
+		credential_ready :
+			CommandDef(input, output, input_fields, output_fields) ->
+				CommandDef(input, output, input_fields, output_fields)
+		credential_ready =
+			|definition| { ..definition, credential_access: { ..definition.credential_access, enabled: Bool.True } }
+
+		credential_read :
+			CommandDef(input, output, input_fields, output_fields),
+			Model(model) ->
+				CommandDef(input, output, input_fields, output_fields)
+		credential_read =
+			|
+				definition,
+				model,
+			|
+				{
+					..definition,
+					credential_access: {
+						enabled: Bool.True,
+						local_reads: definition.credential_access.local_reads.append(model.name()),
+					},
+
+				}
 
 		export_version : CommandDef(input, output, input_fields, output_fields) -> U64
 		export_version = |definition| definition.export_version
@@ -216,6 +246,9 @@ Api :: [].{
 
 		execution : CommandDef(input, output, input_fields, output_fields) -> Execution(input)
 		execution = |definition| definition.execution
+
+		credential_access : CommandDef(input, output, input_fields, output_fields) -> CredentialAccess
+		credential_access = |definition| definition.credential_access
 
 		verification : CommandDef(input, output, input_fields, output_fields) -> Verification(input, output)
 		verification = |definition| definition.verification
@@ -239,6 +272,7 @@ Api :: [].{
 		handler : (Context, input -> Tx(output)),
 		contract : Contract(input, output, input_fields, output_fields),
 		verification : Verification(input, output),
+		credential_access : CredentialAccess,
 		required_all_rows : List(Str),
 		export_version : U64,
 	}.{
@@ -247,6 +281,29 @@ Api :: [].{
 			{ version : U64 } ->
 				QueryDef(input, output, input_fields, output_fields)
 		cross_app = |definition, options| { ..definition, export_version: options.version }
+
+		credential_ready :
+			QueryDef(input, output, input_fields, output_fields) -> QueryDef(input, output, input_fields, output_fields)
+		credential_ready =
+			|definition| { ..definition, credential_access: { ..definition.credential_access, enabled: Bool.True } }
+
+		credential_read :
+			QueryDef(input, output, input_fields, output_fields),
+			Model(model) ->
+				QueryDef(input, output, input_fields, output_fields)
+		credential_read =
+			|
+				definition,
+				model,
+			|
+				{
+					..definition,
+					credential_access: {
+						enabled: Bool.True,
+						local_reads: definition.credential_access.local_reads.append(model.name()),
+					},
+
+				}
 
 		export_version : QueryDef(input, output, input_fields, output_fields) -> U64
 		export_version = |definition| definition.export_version
@@ -260,6 +317,9 @@ Api :: [].{
 
 		verification : QueryDef(input, output, input_fields, output_fields) -> Verification(input, output)
 		verification = |definition| definition.verification
+
+		credential_access : QueryDef(input, output, input_fields, output_fields) -> CredentialAccess
+		credential_access = |definition| definition.credential_access
 
 		# Refuse execution unless current policy allows every row; grant no access.
 		require_all_rows :
@@ -290,6 +350,7 @@ Api :: [].{
 			handler: |context, input| Handler.program(handler, context, input, |body| body),
 			contract: definition.contract,
 			execution: definition.execution,
+			credential_access: { enabled: Bool.False, local_reads: [] },
 			verification: definition.verification,
 			required_all_rows: [],
 			export_version: 0,
@@ -311,6 +372,7 @@ Api :: [].{
 			handler: |context, input| Handler.program(handler, context, input, |body| body.as_transaction()),
 			contract: definition.contract,
 			verification: definition.verification,
+			credential_access: { enabled: Bool.False, local_reads: [] },
 			required_all_rows: [],
 			export_version: 0,
 		}

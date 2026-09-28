@@ -289,7 +289,11 @@ run "no_first_generation_platform_resources" {
         "terraform_data",
         "terraform_remote_state",
         "local-exec",
-        "google_secret_manager",
+        # Secrets and their values stay outside this root. It may only grant
+        # the runtime principal read access to named secrets (runtime-secrets.tf);
+        # day2-app, not this root, projects them.
+        "google_secret_manager_secret\"",
+        "google_secret_manager_secret_version",
         "SecretProviderClass\"",
         "app-owner-read-only",
         "app-debug-access",
@@ -299,6 +303,69 @@ run "no_first_generation_platform_resources" {
       ] :
       !strcontains(join("\n", [for name in fileset(path.module, "*.tf") : file("${path.module}/${name}") if name != "moved.tf"]), forbidden)
     ])
-    error_message = "This root must not declare the first-generation platform's secret projection, owner/debug RBAC, observability wiring, control-plane grants or script hooks."
+    error_message = "This root must not declare the first-generation platform's secrets or secret projection, owner/debug RBAC, observability wiring, control-plane grants or script hooks."
   }
+}
+
+run "provider_bypass_is_exact_and_human_backend_remains_iap" {
+  command = plan
+  variables {
+    backend_service_name = ""
+    signed_webhook_paths = ["/ingress/gitea"]
+  }
+  assert {
+    condition = (
+      length(kubernetes_service_v1.signed_webhooks) == 1 &&
+      kubernetes_manifest.signed_webhooks[0].manifest.spec.iap.enabled == false &&
+      kubernetes_manifest.backend_config.manifest.spec.iap.enabled == true &&
+      kubernetes_ingress_v1.app.spec[0].default_backend[0].service[0].name == "app" &&
+      length([for path in kubernetes_ingress_v1.app.spec[0].rule[0].http[0].path : path if path.path == "/ingress/gitea" && path.path_type == "Exact" && path.backend[0].service[0].name == "signed-webhooks"]) == 1
+    )
+    error_message = "Only the exact signed ingress endpoint may bypass IAP; default and human routes must retain it."
+  }
+}
+
+run "refuses_public_human_route" {
+  command = plan
+  variables {
+    backend_service_name = ""
+    signed_webhook_paths = ["/"]
+  }
+  expect_failures = [var.signed_webhook_paths]
+}
+
+run "refuses_wildcard_provider_route" {
+  command = plan
+  variables {
+    backend_service_name = ""
+    signed_webhook_paths = ["/ingress/*"]
+  }
+  expect_failures = [var.signed_webhook_paths]
+}
+
+run "grants_the_runtime_principal_only_its_named_secrets" {
+  command = plan
+  variables {
+    backend_service_name = ""
+    runtime_secret_ids   = ["example-gitea-token", "example-slack-webhook"]
+  }
+  assert {
+    condition = (
+      toset(keys(google_secret_manager_secret_iam_member.runtime)) == toset(["example-gitea-token", "example-slack-webhook"]) &&
+      alltrue([for grant in google_secret_manager_secret_iam_member.runtime :
+        grant.role == "roles/secretmanager.secretAccessor" && grant.project == var.project_id &&
+        grant.member == "principal://iam.googleapis.com/projects/${var.project_number}/locations/global/workloadIdentityPools/${var.project_id}.svc.id.goog/subject/ns/${var.namespace_prefix}${var.app_id}/sa/runtime"
+      ])
+    )
+    error_message = "Only the runtime service account's Workload Identity principal may read exactly the named secrets."
+  }
+}
+
+run "refuses_a_secret_resource_name" {
+  command = plan
+  variables {
+    backend_service_name = ""
+    runtime_secret_ids   = ["projects/example/secrets/token"]
+  }
+  expect_failures = [var.runtime_secret_ids]
 }

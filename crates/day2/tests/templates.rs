@@ -128,6 +128,7 @@ fn commands() -> (Vec<Operation>, Schema) {
             ),
         ]),
         foreign_keys: vec![],
+        rollups: Vec::new(),
         indexes: vec![],
     };
     (operations, schema)

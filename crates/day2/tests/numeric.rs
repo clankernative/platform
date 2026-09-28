@@ -40,6 +40,7 @@ fn schema() -> Schema {
             ),
         )]),
         foreign_keys: vec![],
+        rollups: Vec::new(),
         indexes: vec![],
     }
 }

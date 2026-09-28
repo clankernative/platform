@@ -58,6 +58,15 @@ Ingress(a) :: { binding : IngressBinding }.{
 	github_webhook : Write(a, b) -> Ingress(a)
 	github_webhook = |command| bind(command, "github.webhook.v1")
 
+	# Gitea Actions workflow_run/workflow_job notifications. The command input
+	# has five Str fields (delivery_id, event_name, action, owner, repo) and two
+	# I64 fields (run_id, run_attempt). Signature verification covers the original
+	# body before the host projects these identifiers. Read authoritative state
+	# through GiteaActions; webhook transport headers are not signed by Gitea.
+	# Each redelivery attempt can have a new ID, so upsert by run and attempt.
+	gitea_actions : Write(a, b) -> Ingress(a)
+	gitea_actions = |command| bind(command, "gitea.actions.v1")
+
 	bind : Write(a, b), Str -> Ingress(a)
 	bind = |command, provider| {
 		operation = command.metadata()

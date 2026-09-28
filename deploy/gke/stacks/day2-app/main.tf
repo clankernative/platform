@@ -37,7 +37,7 @@ locals {
   # Shape: platform/crates/day2/src/artifact.rs (Instance, AppBinding, Edge,
   # IdentityProvider) and day2-capabilities/src/runtime.rs (RuntimeProfile).
   # Every struct denies unknown fields; do not add keys here.
-  instance = {
+  instance = merge({
     installation = var.installation
     environment  = var.environment
     identity = {
@@ -45,7 +45,7 @@ locals {
       hosted_domain = var.hosted_domain
     }
     apps = {
-      (var.app_id) = {
+      (var.app_id) = merge({
         artifact  = "artifacts/${var.artifact_id}"
         readers   = sort(distinct(var.readers))
         writers   = sort(distinct(var.writers))
@@ -69,9 +69,12 @@ locals {
           origin       = var.edge_origin
           iap_audience = local.iap_audience
         }
-      }
+        },
+        length(var.resource_policies) == 0 ? {} : { resource_policies = var.resource_policies },
+        length(var.schedules) == 0 ? {} : { schedules = var.schedules },
+      length(var.ingress) == 0 ? {} : { ingress = var.ingress })
     }
-  }
+  }, var.resource_catalog == null ? {} : { resources = var.resource_catalog })
   instance_json = jsonencode(local.instance)
 
   selector_labels = {
@@ -177,10 +180,12 @@ resource "kubernetes_stateful_set_v1" "day2" {
     template {
       metadata {
         labels = local.pod_labels
-        annotations = {
+        annotations = merge({
           # subPath mounts do not follow ConfigMap updates; roll the pod instead.
           "day2.dev/instance-sha256" = sha256(local.instance_json)
-        }
+          }, local.has_credentials ? {
+          "day2.dev/credentials-sha256" = sha256(local.provisioning_plan_json)
+        } : {})
       }
 
       spec {
@@ -258,6 +263,141 @@ resource "kubernetes_stateful_set_v1" "day2" {
           }
         }
 
+        # See credentials.tf. BusyBox install sets the owner before the mode,
+        # so changing the mode of the now-10001-owned file needs CAP_FOWNER.
+        dynamic "init_container" {
+          for_each = local.has_credentials ? [true] : []
+
+          content {
+            name              = "credential-files"
+            image             = var.state_ownership_image
+            image_pull_policy = "IfNotPresent"
+            command = concat(
+              ["/busybox/install", "-o", "10001", "-g", "10001", "-m", "0400", "-t", local.credential_dir],
+              [for credential in local.credentials : "${local.credential_source_dir}/${credential.key}"],
+            )
+
+            security_context {
+              run_as_non_root            = false
+              run_as_user                = 0
+              run_as_group               = 0
+              allow_privilege_escalation = false
+              read_only_root_filesystem  = true
+              privileged                 = false
+
+              capabilities {
+                drop = ["ALL"]
+                add  = ["CHOWN", "FOWNER"]
+              }
+
+              seccomp_profile {
+                type = "RuntimeDefault"
+              }
+            }
+
+            resources {
+              requests = {
+                cpu               = "50m"
+                memory            = "32Mi"
+                ephemeral-storage = "16Mi"
+              }
+              limits = {
+                cpu               = "100m"
+                memory            = "32Mi"
+                ephemeral-storage = "16Mi"
+              }
+            }
+
+            volume_mount {
+              name       = "credential-sources"
+              mount_path = local.credential_source_dir
+              read_only  = true
+            }
+
+            volume_mount {
+              name       = "credentials"
+              mount_path = local.credential_dir
+            }
+          }
+        }
+
+        dynamic "init_container" {
+          for_each = local.has_credentials ? [true] : []
+
+          content {
+            name              = "credential-registration"
+            image             = var.image
+            image_pull_policy = "IfNotPresent"
+            command           = ["/usr/local/bin/day2-provision-credentials"]
+            args              = [local.operator_instance, var.app_id, var.credential_operator, local.provisioning_plan]
+
+            security_context {
+              run_as_non_root            = true
+              run_as_user                = 10001
+              run_as_group               = 10001
+              allow_privilege_escalation = false
+              read_only_root_filesystem  = true
+              privileged                 = false
+
+              capabilities {
+                drop = ["ALL"]
+              }
+
+              seccomp_profile {
+                type = "RuntimeDefault"
+              }
+            }
+
+            resources {
+              requests = local.container_limits
+              limits   = local.container_limits
+            }
+
+            # Every input is a regular file (subPath): provisioning refuses
+            # symlinks, which a ConfigMap directory mount would present.
+            volume_mount {
+              name       = "credential-metadata"
+              mount_path = local.operator_instance
+              sub_path   = "operator-instance.json"
+              read_only  = true
+            }
+
+            volume_mount {
+              name       = "credential-metadata"
+              mount_path = local.provisioning_plan
+              sub_path   = "provisioning.json"
+              read_only  = true
+            }
+
+            dynamic "volume_mount" {
+              for_each = keys(local.provisioning_inputs)
+
+              content {
+                name       = "credential-metadata"
+                mount_path = "${local.provisioning_dir}/${volume_mount.value}"
+                sub_path   = volume_mount.value
+                read_only  = true
+              }
+            }
+
+            volume_mount {
+              name       = "credentials"
+              mount_path = local.credential_dir
+              read_only  = true
+            }
+
+            volume_mount {
+              name       = "state"
+              mount_path = local.state_dir
+            }
+
+            volume_mount {
+              name       = "tmp"
+              mount_path = "/tmp"
+            }
+          }
+        }
+
         container {
           name              = "day2"
           image             = var.image
@@ -310,6 +450,17 @@ resource "kubernetes_stateful_set_v1" "day2" {
           volume_mount {
             name       = "tmp"
             mount_path = "/tmp"
+          }
+
+          # The registered mounts' paths; see credentials.tf.
+          dynamic "volume_mount" {
+            for_each = local.has_credentials ? [true] : []
+
+            content {
+              name       = "credentials"
+              mount_path = local.credential_dir
+              read_only  = true
+            }
           }
 
           # /srv/day2/artifacts/<artifact_id> is baked into the image and read-only
@@ -365,6 +516,48 @@ resource "kubernetes_stateful_set_v1" "day2" {
           empty_dir {
             medium     = "Memory"
             size_limit = var.tmp_size_limit
+          }
+        }
+
+        dynamic "volume" {
+          for_each = local.has_credentials ? [true] : []
+
+          content {
+            name = "credential-sources"
+
+            csi {
+              driver    = "secrets-store-gke.csi.k8s.io"
+              read_only = true
+              volume_attributes = {
+                secretProviderClass = kubernetes_manifest.credentials[0].manifest.metadata.name
+              }
+            }
+          }
+        }
+
+        dynamic "volume" {
+          for_each = local.has_credentials ? [true] : []
+
+          content {
+            name = "credentials"
+
+            empty_dir {
+              medium     = "Memory"
+              size_limit = "1Mi"
+            }
+          }
+        }
+
+        dynamic "volume" {
+          for_each = local.has_credentials ? [true] : []
+
+          content {
+            name = "credential-metadata"
+
+            config_map {
+              name         = kubernetes_config_map_v1.credentials[0].metadata[0].name
+              default_mode = "0444"
+            }
           }
         }
       }

@@ -385,3 +385,190 @@ run "refuses_a_backup_deadline_past_the_hour" {
 
   expect_failures = [var.backup_active_deadline_seconds]
 }
+
+run "renders_explicit_schedules_and_signed_ingress" {
+  command = plan
+  variables {
+    resource_catalog = {
+      version = 1
+      connections = {
+        forge = {
+          revision = 1
+          provider = "gitea_actions"
+          live = {
+            provider           = "gitea_actions"
+            endpoint           = "https://git.example.com"
+            credential_ref     = { id = "token", revision = 1 }
+            signing_secret_ref = { id = "signer", revision = 1 }
+          }
+        }
+      }
+      resources = {}
+      policies  = {}
+    }
+    schedules = { "example.refresh" = { actor = "owner@example.com", disabled = true } }
+    ingress   = { gitea = { actor = "owner@example.com", connection = { id = "forge", revision = 1 } } }
+  }
+  assert {
+    condition = (
+      jsondecode(kubernetes_config_map_v1.instance.data["instance.json"]).apps.example_app.schedules["example.refresh"].disabled &&
+      jsondecode(kubernetes_config_map_v1.instance.data["instance.json"]).apps.example_app.ingress.gitea.connection.id == "forge" &&
+      jsondecode(kubernetes_config_map_v1.instance.data["instance.json"]).resources.connections.forge.live.signing_secret_ref.id == "signer"
+    )
+    error_message = "Explicit trigger actors, pauses and secret references must survive rendering."
+  }
+}
+
+run "rejects_signed_ingress_without_catalog" {
+  command = plan
+  variables {
+    ingress = { gitea = { actor = "owner@example.com", connection = { id = "forge", revision = 1 } } }
+  }
+  expect_failures = [var.ingress]
+}
+
+# Keys are day2's reference_key: SHA-256 of {"id":...,"revision":...}. The
+# literals were computed outside OpenTofu so a change in encoding fails here.
+run "provisions_outbound_and_verification_secrets_from_exact_versions" {
+  command = plan
+  variables {
+    resource_catalog = {
+      version = 1
+      connections = {
+        forge = {
+          revision = 1
+          provider = "gitea_actions"
+          live = {
+            provider           = "gitea_actions"
+            endpoint           = "https://git.example.com"
+            credential_ref     = { id = "forge-token", revision = 1 }
+            signing_secret_ref = { id = "forge-signer", revision = 1 }
+          }
+        }
+        # A second provider shape: the catalog is a tuple of unlike objects.
+        alerts = {
+          revision = 1
+          provider = "slack_webhook"
+          live = {
+            provider       = "slack_webhook"
+            credential_ref = { id = "alerts-webhook", revision = 1 }
+          }
+        }
+      }
+      resources = {}
+      policies  = {}
+    }
+    ingress             = { gitea = { actor = "owner@example.com", connection = { id = "forge", revision = 1 } } }
+    credential_operator = "operator@example.com"
+    provider_credentials = [
+      {
+        credential_ref = { id = "forge-token", revision = 1 }
+        secret_version = "projects/example-tools/secrets/forge-token/versions/3"
+        fingerprint    = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+      },
+      {
+        credential_ref = { id = "forge-signer", revision = 1 }
+        secret_version = "projects/example-tools/secrets/forge-signer/versions/1"
+        fingerprint    = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+      },
+    ]
+  }
+
+  assert {
+    condition = (
+      jsondecode(kubernetes_config_map_v1.credentials[0].data["credential-a5a7f32250a55cfbb38de1f5486d175644a40d22f95411b6acd303ca29c08d4c.json"]) == {
+        connection           = { provider = "gitea_actions", endpoint = "https://git.example.com", credential_ref = { id = "forge-token", revision = 1 }, signing_secret_ref = { id = "forge-signer", revision = 1 } }
+        credential_file      = "/run/day2/credentials/a5a7f32250a55cfbb38de1f5486d175644a40d22f95411b6acd303ca29c08d4c"
+        expected_fingerprint = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+      } &&
+      jsondecode(kubernetes_config_map_v1.credentials[0].data["credential-51af0efaac59f9189aad4f7e27487636512661c49b0b7d003e22971c8a7c2602.json"]).reference == { id = "forge-signer", revision = 1 }
+    )
+    error_message = "The outbound token mounts without a reference; the signing secret names its own."
+  }
+
+  assert {
+    condition = (
+      jsondecode(kubernetes_config_map_v1.credentials[0].data["provisioning.json"]).instance_digest == "sha256:${sha256(kubernetes_config_map_v1.credentials[0].data["operator-instance.json"])}" &&
+      alltrue([for pin in jsondecode(kubernetes_config_map_v1.credentials[0].data["provisioning.json"]).inputs :
+      pin.digest == "sha256:${sha256(kubernetes_config_map_v1.credentials[0].data[pin.file])}"]) &&
+      jsondecode(kubernetes_config_map_v1.credentials[0].data["operator-instance.json"]).control == {
+        version = 1, state_directory = "/srv/day2/.state/operator-control", operators = ["operator@example.com"], sources = {}, apps = {}
+      } &&
+      !can(jsondecode(kubernetes_config_map_v1.instance.data["instance.json"]).control)
+    )
+    error_message = "The plan must pin the exact operator-only instance and inputs; the serving instance has no control section."
+  }
+
+  assert {
+    condition = (
+      yamldecode(kubernetes_manifest.credentials[0].manifest.spec.parameters.secrets) == [
+        { resourceName = "projects/example-tools/secrets/forge-token/versions/3", path = "a5a7f32250a55cfbb38de1f5486d175644a40d22f95411b6acd303ca29c08d4c" },
+        { resourceName = "projects/example-tools/secrets/forge-signer/versions/1", path = "51af0efaac59f9189aad4f7e27487636512661c49b0b7d003e22971c8a7c2602" },
+      ] &&
+      kubernetes_manifest.credentials[0].manifest.spec.provider == "gke"
+    )
+    error_message = "The CSI add-on must read exactly the named versions."
+  }
+
+  assert {
+    condition = (
+      [for init in kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].init_container : init.name] == ["state-ownership", "credential-files", "credential-registration"] &&
+      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].init_container[1].security_context[0].capabilities[0].add == tolist(["CHOWN", "FOWNER"]) &&
+      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].init_container[1].command == tolist(["/busybox/install", "-o", "10001", "-g", "10001", "-m", "0400", "-t", "/run/day2/credentials",
+        "/run/day2/credential-sources/a5a7f32250a55cfbb38de1f5486d175644a40d22f95411b6acd303ca29c08d4c",
+      "/run/day2/credential-sources/51af0efaac59f9189aad4f7e27487636512661c49b0b7d003e22971c8a7c2602"]) &&
+      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].init_container[2].image == var.image &&
+      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].init_container[2].args == tolist(["/srv/day2/operator-instance.json", "example_app", "operator@example.com", "/srv/day2/provisioning.json"]) &&
+      try(length(kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].init_container[2].security_context[0].capabilities[0].add), 0) == 0 &&
+      alltrue([for mount in kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].init_container[2].volume_mount :
+      mount.sub_path != "" if mount.name == "credential-metadata"]) &&
+      anytrue([for mount in kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[0].volume_mount :
+      mount.name == "credentials" && mount.mount_path == "/run/day2/credentials" && mount.read_only])
+    )
+    error_message = "Credentials are copied as root with CHOWN and FOWNER only, registered by the runtime image as 10001 from regular files, and mounted read-only into day2."
+  }
+}
+
+run "renders_no_credential_machinery_without_credentials" {
+  command = plan
+
+  assert {
+    condition = (
+      length(kubernetes_config_map_v1.credentials) == 0 && length(kubernetes_manifest.credentials) == 0 &&
+      [for init in kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].init_container : init.name] == ["state-ownership"] &&
+      !contains(keys(kubernetes_stateful_set_v1.day2.spec[0].template[0].metadata[0].annotations), "day2.dev/credentials-sha256")
+    )
+    error_message = "An app without provider credentials must render exactly as before."
+  }
+}
+
+run "refuses_a_floating_secret_version" {
+  command = plan
+  variables {
+    provider_credentials = [{
+      credential_ref = { id = "forge-token", revision = 1 }
+      secret_version = "projects/example-tools/secrets/forge-token/versions/latest"
+      fingerprint    = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+    }]
+  }
+  expect_failures = [var.provider_credentials]
+}
+
+run "refuses_a_credential_no_connection_declares" {
+  command = plan
+  variables {
+    resource_catalog = {
+      version     = 1
+      connections = {}
+      resources   = {}
+      policies    = {}
+    }
+    credential_operator = "operator@example.com"
+    provider_credentials = [{
+      credential_ref = { id = "stray", revision = 1 }
+      secret_version = "projects/example-tools/secrets/stray/versions/1"
+      fingerprint    = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+    }]
+  }
+  expect_failures = [kubernetes_config_map_v1.credentials]
+}

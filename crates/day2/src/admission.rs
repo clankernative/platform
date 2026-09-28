@@ -39,6 +39,11 @@ const FACTORIES: &[(&str, &str)] = &[
 
 const SEALED: &[(&str, &str, &str)] = &[
     (
+        "SlackWebhook.roc",
+        "",
+        "198ee562a477efee5d456d72a95fbf2d83674d8c59a0f8cfb512530150fbaec8",
+    ),
+    (
         "Slack.roc",
         "",
         "bddae0f023114db9f74806a5e9dcae905b490dcc012a409060ed33641ef1ccaf",
@@ -94,6 +99,11 @@ const SEALED: &[(&str, &str, &str)] = &[
         "e944b953ebf16fa5735c983e6928bdacac27b75002ad0ccd1ce43ade6aa2e1f1",
     ),
     (
+        "GiteaActions.roc",
+        "",
+        "b31a62d8f671720124813ad2fc399ba2d7a1f418917585a46998f7f96013ac9f",
+    ),
+    (
         "GitHubActions.roc",
         "",
         "ec8b99e1af651a481cd15ac742038f8854cdba67ef9f8dc6ff37582da07447df",
@@ -121,7 +131,7 @@ const SEALED: &[(&str, &str, &str)] = &[
     (
         "Api.roc",
         "",
-        "187cf0a1d1d91b0ff82c3572b8bbb888328d1052f9efa110a496e2c12823c7b8",
+        "3ae0ba50d5ad60e49186113eb643a2488f7bb7c06ab0412b807816c3ceb658fb",
     ),
     (
         "Effects.roc",

@@ -233,6 +233,13 @@ fn apply_plan(
         return Ok(());
     }
     ensure!(current == supplied.source_schema, "stale_migration_plan");
+    for rollup in source
+        .rollups
+        .iter()
+        .filter(|rollup| supplied.convert_ids || !target.rollups.contains(rollup))
+    {
+        tx.execute_batch(&rollup.drop_sql())?;
+    }
     if supplied.convert_ids {
         convert_ids(&tx, source, target)?;
     }
@@ -254,6 +261,17 @@ fn apply_plan(
         .filter(|_| !supplied.convert_ids)
     {
         tx.execute_batch(&index.ddl())?;
+    }
+    for rollup in target
+        .rollups
+        .iter()
+        .filter(|rollup| supplied.convert_ids || !source.rollups.contains(rollup))
+    {
+        for ddl in rollup.ddl(&target.models[&rollup.model])? {
+            tx.execute_batch(&ddl)?;
+        }
+        rollup.rebuild(&tx)?;
+        ensure!(rollup.mismatches(&tx)? == 0, "rollup_recount_mismatch");
     }
     // Retirement removes the model from admitted app handles, not from storage.
     // Keep its data and outgoing foreign keys intact, and reject accidental
@@ -956,6 +974,70 @@ mod tests {
                 .check_successor(&changed.identities)
                 .is_err()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn rollup_migrations_rebuild_change_remove_and_rollback_atomically() -> Result<()> {
+        let (_, target_schema) = crate::rollup::tests::fixture()?;
+        let mut source_schema = target_schema.clone();
+        source_schema.rollups.clear();
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("rollups.sqlite");
+        let db = open(&path)?;
+        for sql in source_schema.ddl()? {
+            db.execute_batch(&sql)?;
+        }
+        db.execute_batch("CREATE TABLE day2_meta(key TEXT PRIMARY KEY,value TEXT); CREATE TABLE day2_migrations(id TEXT PRIMARY KEY,source TEXT,target TEXT); CREATE TABLE day2_invocations(id TEXT PRIMARY KEY,status TEXT); INSERT INTO events(id,version,created_at,owner,time,amount) VALUES(1,1,0,'a',1,7),(2,1,0,'a',4000,8);")?;
+        for (key, value) in [
+            ("scope", "test".to_owned()),
+            ("schema", source_schema.hash()?),
+            ("schema_json", serde_json::to_string(&source_schema)?),
+        ] {
+            db.execute("INSERT INTO day2_meta VALUES(?1,?2)", params![key, value])?;
+        }
+        let plan =
+            |source: &crate::schema::Schema, target: &crate::schema::Schema| -> Result<Plan> {
+                Ok(Plan {
+                    format: 1,
+                    scope: "test".into(),
+                    source_artifact: "source".into(),
+                    target_artifact: "target".into(),
+                    source_schema: source.hash()?,
+                    target_schema: target.hash()?,
+                    add_nullable_text: vec![],
+                    add_indexes: vec![],
+                    retire_models: vec![],
+                    convert_ids: false,
+                })
+            };
+        let first = plan(&source_schema, &target_schema)?;
+        apply_plan(&path, &source_schema, &target_schema, &first, &first)?;
+        apply_plan(&path, &source_schema, &target_schema, &first, &first)?;
+        assert_eq!(target_schema.rollups[0].mismatches(&db)?, 0);
+        let mut changed = target_schema.clone();
+        changed.rollups[0].group[1].bucket = Some(crate::rollup::Bucket::Hour);
+        let next = plan(&target_schema, &changed)?;
+        apply_plan(&path, &target_schema, &changed, &next, &next)?;
+        assert_eq!(changed.rollups[0].mismatches(&db)?, 0);
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM events_daily", [], |r| r
+                .get::<_, i64>(0))?,
+            2
+        );
+        db.execute_batch("UPDATE events SET amount=9223372036854775807 WHERE id=1")?;
+        let back = plan(&changed, &target_schema)?;
+        assert!(apply_plan(&path, &changed, &target_schema, &back, &back).is_err());
+        assert_eq!(changed.rollups[0].mismatches(&db)?, 0);
+        assert_eq!(
+            db.query_row("SELECT value FROM day2_meta WHERE key='schema'", [], |r| {
+                r.get::<_, String>(0)
+            })?,
+            changed.hash()?
+        );
+        let remove = plan(&changed, &source_schema)?;
+        apply_plan(&path, &changed, &source_schema, &remove, &remove)?;
+        assert_eq!(db.query_row("SELECT count(*) FROM sqlite_master WHERE name LIKE 'day2_rollup_%' OR name='events_daily'",[],|r|r.get::<_,i64>(0))?,0);
         Ok(())
     }
 

@@ -91,7 +91,7 @@ enum Demonstration {
 fn demonstration(action: Action) -> Demonstration {
     match action {
         Action::SlackRead | Action::SnowflakeRead => Demonstration::ResultReflectsWorld,
-        Action::SlackPost => Demonstration::EffectLandsInWorld,
+        Action::SlackPost | Action::SlackWebhookPost => Demonstration::EffectLandsInWorld,
         // Head reads the object record; a grant refuses a key the world does not
         // hold, so both depend on the world's contents rather than only on config.
         // Both grants are pure: a signature over the credential, key and clock,
@@ -112,6 +112,7 @@ fn demonstration(action: Action) -> Demonstration {
         // Both are reads whose answers are the repository's contents: a job's
         // conclusion, and where its log lives.
         Action::GitHubJob | Action::GitHubJobLog => Demonstration::ResultReflectsWorld,
+        Action::GiteaRuns | Action::GiteaRun | Action::GiteaRunJobs | Action::GiteaJob | Action::GiteaJobLog | Action::GiteaRunners => Demonstration::ResultReflectsWorld,
         Action::LinearWorkReassign => Demonstration::EffectLandsInWorld,
         // Billable but stateless: its dependence on the world is visible in the
         // usage the simulated account reports, not in a record it leaves behind.
@@ -164,9 +165,15 @@ fn fixture(variant: Variant) -> SimulatedFixture {
         Variant::B => ("failure", "https://pipelines.example/logs/beta"),
     };
     SimulatedFixture {
+        slack_webhook: crate::integrations::simulated::slack_webhook_fixture(),
         delegation: Default::default(),
         // The job's conclusion and its log location differ between the worlds,
         // so neither read can answer from anywhere but the world it was given.
+        gitea_actions: super::simulated::gitea_actions_fixture(
+            "coverage-org",
+            "coverage-repo",
+            conclusion,
+        ),
         github_actions: GitHubActionsWorld {
             owner: "coverage-org".into(),
             repo: "coverage-repo".into(),
@@ -273,6 +280,15 @@ fn reference() -> VersionRef {
 /// The connection and target for an action, plus the app input that invokes it.
 fn invocation(action: Action, variant: Variant) -> (LiveConnection, ResourceTarget, Value) {
     match action {
+        Action::SlackWebhookPost => (
+            LiveConnection::SlackWebhook {
+                credential_ref: reference(),
+            },
+            ResourceTarget::SlackWebhookDestination {
+                endpoint_sha256: super::simulated::slack_webhook_digest(),
+            },
+            json!({"handle":"opaque","text":"posted by the coverage gate"}),
+        ),
         Action::SlackRead | Action::SlackPost => (
             LiveConnection::Slack {
                 credential_ref: reference(),
@@ -335,6 +351,26 @@ fn invocation(action: Action, variant: Variant) -> (LiveConnection, ResourceTarg
                 },
             },
             json!({"handle":"opaque","text":"generate for the coverage gate","max_output_tokens":64}),
+        ),
+        Action::GiteaRuns
+        | Action::GiteaRun
+        | Action::GiteaRunJobs
+        | Action::GiteaJob
+        | Action::GiteaJobLog
+        | Action::GiteaRunners => (
+            LiveConnection::GiteaActions {
+                signing_secret_ref: None,
+                credential_ref: reference(),
+                endpoint: "https://git.example.test".into(),
+            },
+            ResourceTarget::GiteaOrganization {
+                owner: "coverage-org".into(),
+            },
+            if matches!(action, Action::GiteaRuns | Action::GiteaRunners) {
+                json!({"handle":"opaque"})
+            } else {
+                json!({"handle":"opaque","repo":"coverage-repo","id":7})
+            },
         ),
         Action::GitHubJob | Action::GitHubJobLog => (
             LiveConnection::GitHubActions {

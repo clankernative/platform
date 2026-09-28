@@ -17,6 +17,7 @@ pub mod budget;
 pub mod capabilities;
 pub mod carta;
 pub mod compatibility;
+pub mod credential_authority;
 pub mod credential_declaration;
 pub mod deferrals;
 pub mod delegation;
@@ -44,6 +45,7 @@ mod managed_credentials;
 pub mod mcp;
 pub mod migration;
 pub mod numeric;
+mod release_binding;
 // Protocol kernels are staged behind host-only verification and custody wiring.
 #[allow(dead_code)]
 mod oauth;
@@ -64,6 +66,7 @@ pub mod resource_admin;
 mod resource_catalog_history;
 mod resources;
 pub mod retention;
+pub mod rollup;
 pub mod routing;
 pub mod sandbox;
 pub mod schedules;

@@ -134,6 +134,7 @@ pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
         };
         Phase::Prepare.advance(step)?;
         let instruction = response.instruction.clone();
+        crate::credential_authority::check_step(runtime.artifact().contract(), &operation, step)?;
         if step == Step::Boundary(Boundary::Decide) {
             // This observation belongs to the decision transaction, not the frozen
             // preparation journal. Revalidation may refuse this boundary.

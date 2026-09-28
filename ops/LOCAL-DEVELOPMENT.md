@@ -47,7 +47,10 @@ reuses a running session. Use explicit data options to initialize a fresh sessio
 ```
 
 Examples and generated commands go through the shared Roc check recipe, normal
-app transactions, durable commands, replay and property checks. Seeding happens once;
+app transactions, durable commands, replay and property checks. Artifact-owned
+examples may include internal scheduled commands when the provider host is
+simulated; attempts to run those examples with live providers are refused. Internal
+commands remain unavailable through HTTP, CLI and MCP. Seeding happens once;
 restarts and rebuilds do not duplicate it. `--reset` selects a new managed instance
 and retains the old instance/checkpoints. It never deletes an unrelated directory.
 
