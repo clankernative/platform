@@ -1,0 +1,14 @@
+{
+  "format": 1,
+  "models": [
+    {
+      "identity": {
+        "key": "97026e11a746dca770bd0d791c264dac",
+        "prefix": "inc"
+      },
+      "table": "incidents",
+      "roc_type": "Models.Incident",
+      "retired": false
+    }
+  ]
+}
