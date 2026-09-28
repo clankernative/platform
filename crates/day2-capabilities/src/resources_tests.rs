@@ -492,12 +492,20 @@ mod connections {
                 signing_secret_ref: None,
                 workspace_id: "T00000001".into(),
             }),
+            Provider::SlackWebhook => Some(LiveConnection::SlackWebhook {
+                credential_ref: reference("slack_webhook_url"),
+            }),
             Provider::ObjectStore => Some(LiveConnection::ObjectStore {
                 credential_ref: reference("object_secret"),
                 endpoint: "https://s3.example.com".into(),
                 region: "us-east-1".into(),
                 bucket: "example-bucket".into(),
                 access_key_id: "AKIAEXAMPLE".into(),
+            }),
+            Provider::GiteaActions => Some(LiveConnection::GiteaActions {
+                signing_secret_ref: None,
+                credential_ref: reference("gitea_token"),
+                endpoint: "https://git.example.com".into(),
             }),
             Provider::GitHubActions => Some(LiveConnection::GitHubActions {
                 credential_ref: reference("github_token"),
@@ -623,6 +631,9 @@ mod narrowing {
                     label: "compliance".into(),
                 },
             },
+            ResourceKind::GiteaOrganization => ResourceTarget::GiteaOrganization {
+                owner: "example-org".into(),
+            },
             ResourceKind::GitHubRepository => ResourceTarget::GitHubRepository {
                 owner: "exampleco".into(),
                 repo: "platform".into(),
@@ -644,6 +655,9 @@ mod narrowing {
                 channel: SlackChannel {
                     channel_id: "C0000001".into(),
                 },
+            },
+            ResourceKind::SlackWebhookDestination => ResourceTarget::SlackWebhookDestination {
+                endpoint_sha256: "0".repeat(64),
             },
             ResourceKind::SnowflakeView => ResourceTarget::SnowflakeView {
                 query: SnowflakeView {

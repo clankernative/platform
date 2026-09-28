@@ -682,6 +682,7 @@ mod tests {
             models: models(&[("orders", "Order")]),
             inputs: BTreeMap::new(),
             foreign_keys: vec![],
+            rollups: Vec::new(),
             indexes: vec![],
         };
         assert!(prepare(app.path(), &schema, true).is_err());
@@ -695,6 +696,7 @@ mod tests {
             models: models(&[("purchases", "Purchase")]),
             inputs: BTreeMap::new(),
             foreign_keys: vec![],
+            rollups: Vec::new(),
             indexes: vec![],
         };
         let next = prepare(app.path(), &renamed, true)?;

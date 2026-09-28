@@ -43,7 +43,7 @@ fn native_campaign_cannot_receipt_omitted_checks_or_invented_commands() -> Resul
 fn reports_examples_and_generated_commands_replay_with_independent_statistics() -> Result<()> {
     let artifact_path = artifact()?;
     let artifact = LoadedArtifact::load(&artifact_path)?;
-    assert_eq!(development::examples(&artifact)?[0].steps.len(), 2);
+    assert_eq!(development::examples(&artifact)?[0].steps.len(), 3);
     let samples = development::samples(&artifact, u64::MAX, 4)?;
     assert_eq!(
         samples
@@ -85,11 +85,11 @@ fn reports_examples_and_generated_commands_replay_with_independent_statistics() 
     let (second_values, second_ids) = without_ids(&second.snapshot)?;
     assert_eq!(first_values, second_values);
     assert!(first_ids.is_disjoint(&second_ids));
-    // Eight generated commands per obligation. Seven operations carry one now that
-    // the reconciliation sweep exists, so the totals move by exactly eight.
+    // Eight generated cases for each of seven operations, plus the two
+    // public submissions and one offline internal sweep in the demo.
     assert_eq!(
         (first.examples, first.generated, first.traces.len()),
-        (1, 56, 58)
+        (1, 56, 59)
     );
     assert!(first.verification_complete);
     assert_eq!(first.obligations.len(), 7);

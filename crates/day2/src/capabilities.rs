@@ -203,6 +203,7 @@ pub(crate) fn authorized(
     let action = match instruction.model.as_str() {
         "slack.read.v1"
         | "slack.post.v1"
+        | "slack_webhook.post.v1"
         | "snowflake.read.v1"
         | "openai.generate.v1"
         | "linear_work.issues.v1"
@@ -210,7 +211,13 @@ pub(crate) fn authorized(
         | "linear_work.assignable_users.v1"
         | "linear_work.reassign.v1"
         | "github.job.v1"
-        | "github.job_log.v1" => {
+        | "github.job_log.v1"
+        | "gitea.runs.v1"
+        | "gitea.run.v1"
+        | "gitea.run_jobs.v1"
+        | "gitea.job.v1"
+        | "gitea.job_log.v1"
+        | "gitea.runners.v1" => {
             let connection = resource
                 .grant
                 .live

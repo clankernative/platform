@@ -1,12 +1,14 @@
 //! Closed live adapters. Only already-authorized, pinned profiles enter here.
 //! Provider wire data and credentials never become error strings or logs.
 
+mod gitea_actions;
 mod github_actions;
 mod linear_work;
 mod object_store;
 mod openai;
 pub mod simulated;
 mod slack;
+mod slack_webhook;
 mod snowflake;
 mod transport;
 
@@ -66,6 +68,9 @@ pub(crate) struct PreparedCall {
 }
 
 enum ResponseProfile {
+    SlackWebhook {
+        endpoint_sha256: String,
+    },
     SlackRead {
         channel: String,
         limit: u16,
@@ -80,6 +85,14 @@ enum ResponseProfile {
     OpenAi {
         profile: day2_capabilities::integrations::OpenAiText,
         output_limit: u64,
+    },
+    Gitea {
+        action: Action,
+        endpoint: String,
+        owner: String,
+        target: gitea_actions::Target,
+        page: u64,
+        limit: u64,
     },
     GitHubJob,
     /// Answered by a redirect rather than a body: the result is the signed URL.
@@ -200,6 +213,11 @@ pub(crate) fn prepare(
     }
     let mut call = match (action, connection, target) {
         (
+            Action::SlackWebhookPost,
+            LiveConnection::SlackWebhook { .. },
+            ResourceTarget::SlackWebhookDestination { endpoint_sha256 },
+        ) => slack_webhook::prepare(connection, endpoint_sha256, request_json)?,
+        (
             Action::SlackRead | Action::SlackPost,
             LiveConnection::Slack { .. },
             ResourceTarget::SlackChannel { channel },
@@ -214,6 +232,16 @@ pub(crate) fn prepare(
             LiveConnection::OpenAi { .. },
             ResourceTarget::OpenAiText { profile },
         ) => openai::prepare(connection, profile, request_json)?,
+        (
+            Action::GiteaRuns
+            | Action::GiteaRun
+            | Action::GiteaRunJobs
+            | Action::GiteaJob
+            | Action::GiteaJobLog
+            | Action::GiteaRunners,
+            LiveConnection::GiteaActions { .. },
+            ResourceTarget::GiteaOrganization { owner },
+        ) => gitea_actions::prepare(*action, connection, owner, request_json)?,
         (
             Action::GitHubJob | Action::GitHubJobLog,
             LiveConnection::GitHubActions { .. },
@@ -281,7 +309,9 @@ pub(crate) fn execute(
         };
         Some(credentials)
     };
+    let webhook = matches!(call.connection, LiveConnection::SlackWebhook { .. });
     let authorization = match &credentials {
+        Some(_) if webhook => Authorization::Webhook,
         Some(credentials) => Authorization::Bearer(credentials),
         None => Authorization::Presigned,
     };
@@ -318,6 +348,15 @@ pub(crate) fn execute(
     // Once this point is reached, POST outcomes may include an accepted effect
     // or charge even if the HTTP response is lost. No adapter retries a request.
     let mut request = call.request.clone();
+    if let ResponseProfile::SlackWebhook { endpoint_sha256 } = &call.response {
+        let Some(credential) = &credentials else {
+            return outcome;
+        };
+        let Ok(url) = credential.slack_webhook_url(endpoint_sha256) else {
+            return outcome;
+        };
+        request.url = url.to_owned();
+    }
     if matches!(call.connection, LiveConnection::OpenAi { .. }) {
         // Diagnostic correlation only; the API does not promise deduplication.
         request
@@ -358,6 +397,24 @@ pub(crate) fn execute(
         outcome.outcome_unknown = unknown;
         return outcome;
     }
+    if matches!(
+        call.response,
+        ResponseProfile::Gitea {
+            action: Action::GiteaJobLog,
+            ..
+        }
+    ) {
+        outcome.result = gitea_actions::log_response(&response).map(|value| value.to_string());
+        outcome.monetary_microusd = Some(0);
+        outcome.outcome_unknown = false;
+        return outcome;
+    }
+    if matches!(call.response, ResponseProfile::SlackWebhook { .. }) {
+        let (result, unknown) = slack_webhook::response(&response);
+        outcome.result = result.map(|value| value.to_string());
+        outcome.outcome_unknown = unknown;
+        return outcome;
+    }
     let parsed = parse_http_json(&response);
     if let Err(error) = parsed {
         outcome.result = Err(error);
@@ -369,6 +426,7 @@ pub(crate) fn execute(
     }
     let json = parsed.expect("checked JSON result");
     let (result, cost, unknown) = match &call.response {
+        ResponseProfile::SlackWebhook { .. } => (Err(AdapterError::ResponseInvalid), Some(0), true),
         ResponseProfile::SlackRead { channel, limit } => {
             (slack::read_response(&json, channel, *limit), Some(0), false)
         }
@@ -385,6 +443,19 @@ pub(crate) fn execute(
             profile,
             output_limit,
         } => openai::response(&json, profile, *output_limit),
+        ResponseProfile::Gitea {
+            action,
+            endpoint,
+            owner,
+            target,
+            page,
+            limit,
+        } => (
+            gitea_actions::response(*action, &json, endpoint, owner, *page, *limit)
+                .and_then(|value| gitea_actions::validate_target(*action, value, target)),
+            Some(0),
+            false,
+        ),
         ResponseProfile::GitHubJob => (github_actions::job_response(&json), Some(0), false),
         // Handled above, before any JSON parsing was attempted.
         ResponseProfile::GitHubJobLog => (Err(AdapterError::ResponseInvalid), Some(0), true),

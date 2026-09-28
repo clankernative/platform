@@ -66,6 +66,7 @@ pub const PROVIDERS: &[&str] = &[
     "slack.events.v1",
     "slack.interactivity.v1",
     "github.webhook.v1",
+    "gitea.actions.v1",
 ];
 
 /// How a provider signs a delivery.
@@ -90,6 +91,8 @@ pub enum Scheme {
     /// that makes Slack's own retries safe — but it holds only while the
     /// invocation record survives, where Slack's window holds unconditionally.
     GitHubSha256,
+    /// Gitea signs the body with HMAC-SHA256, hex without a prefix.
+    GiteaSha256,
 }
 
 /// Where the parts of a signature live on the wire, and how they combine.
@@ -118,8 +121,37 @@ pub fn signing(provider: &str) -> anyhow::Result<Signing> {
             signature_header: "x-hub-signature-256",
             timestamp_header: None,
         }),
+        "gitea.actions.v1" => Ok(Signing {
+            scheme: Scheme::GiteaSha256,
+            signature_header: "x-gitea-signature",
+            timestamp_header: None,
+        }),
         other => anyhow::bail!("unregistered ingress provider: {other}"),
     }
+}
+
+/// Fail during configuration loading when the endpoint and credential profile disagree.
+pub(crate) fn validate_connection(
+    provider: &str,
+    connection: &day2_capabilities::integrations::LiveConnection,
+) -> anyhow::Result<()> {
+    use day2_capabilities::integrations::LiveConnection;
+    let compatible = matches!(
+        (provider, connection),
+        ("gitea.actions.v1", LiveConnection::GiteaActions { .. })
+            | (
+                "slack.events.v1" | "slack.interactivity.v1",
+                LiveConnection::Slack { .. }
+            )
+            | ("github.webhook.v1", LiveConnection::GitHubActions { .. })
+    );
+    anyhow::ensure!(compatible, "endpoint_connection_provider_mismatch");
+    connection.validate()?;
+    anyhow::ensure!(
+        connection.verification_ref().is_some(),
+        "endpoint_connection_signing_secret_missing"
+    );
+    Ok(())
 }
 
 impl Scheme {
@@ -149,6 +181,7 @@ impl Scheme {
                 ("v0=", Some(timestamp))
             }
             Self::GitHubSha256 => ("sha256=", None),
+            Self::GiteaSha256 => ("", None),
         };
         let offered = signature.strip_prefix(prefix).ok_or(Refused::Signature)?;
         let offered = decode_hex(offered).ok_or(Refused::Signature)?;
@@ -191,6 +224,9 @@ pub fn identity_source(provider: &str) -> anyhow::Result<IdentitySource> {
         // reused when a delivery is replayed from the UI or the API — which is what
         // lets a redelivered webhook resolve to the invocation that already ran.
         "github.webhook.v1" => Ok(IdentitySource::Header("x-github-delivery")),
+        // Gitea identifies an attempt. A redelivery may have a new UUID, so
+        // domain commands must also deduplicate the underlying run/job.
+        "gitea.actions.v1" => Ok(IdentitySource::Header("x-gitea-delivery")),
         other => anyhow::bail!("unregistered ingress provider: {other}"),
     }
 }
@@ -297,6 +333,117 @@ pub struct Endpoint {
     /// decision, and paired with `provider_identity` so an endpoint cannot end up
     /// verifying as one provider while identifying as another.
     pub signing: Signing,
+    /// The provider-owned command envelope, assembled only after verification.
+    pub input: Input,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Input {
+    Payload,
+    GiteaActions,
+}
+
+impl Input {
+    pub fn for_provider(provider: &str) -> anyhow::Result<Self> {
+        match provider {
+            "slack.events.v1" | "slack.interactivity.v1" | "github.webhook.v1" => Ok(Self::Payload),
+            "gitea.actions.v1" => Ok(Self::GiteaActions),
+            other => anyhow::bail!("unregistered ingress provider: {other}"),
+        }
+    }
+
+    pub fn validate(self, record: &crate::schema::Record) -> anyhow::Result<()> {
+        if self == Self::GiteaActions {
+            let expected = BTreeMap::from([
+                ("delivery_id".to_owned(), crate::schema::Kind::Text),
+                ("event_name".to_owned(), crate::schema::Kind::Text),
+                ("owner".to_owned(), crate::schema::Kind::Text),
+                ("repo".to_owned(), crate::schema::Kind::Text),
+                ("action".to_owned(), crate::schema::Kind::Text),
+                ("run_id".to_owned(), crate::schema::Kind::Integer),
+                ("run_attempt".to_owned(), crate::schema::Kind::Integer),
+            ]);
+            anyhow::ensure!(
+                record.fields == expected,
+                "Gitea Actions input must contain delivery_id, event_name, owner, repo, action (Str), run_id and run_attempt (I64)"
+            );
+        }
+        Ok(())
+    }
+
+    fn decode(
+        self,
+        delivery: &Delivery<'_>,
+        payload: Value,
+        identifier: &str,
+    ) -> Result<Value, Refused> {
+        match self {
+            Self::Payload => Ok(payload),
+            Self::GiteaActions => {
+                let event = delivery
+                    .headers
+                    .get("x-gitea-event")
+                    .ok_or(Refused::Unidentified)?;
+                if event.is_empty()
+                    || event.len() > 64
+                    || !event.bytes().all(|c| c.is_ascii_lowercase() || c == b'_')
+                    || identifier.is_empty()
+                    || identifier.len() > 128
+                    || !payload.is_object()
+                {
+                    return Err(Refused::Unidentified);
+                }
+                let (record, id_field) = match event.as_str() {
+                    "workflow_run" => (payload.get("workflow_run"), "id"),
+                    "workflow_job" => (payload.get("workflow_job"), "run_id"),
+                    _ => return Err(Refused::Untrusted),
+                };
+                let record = record.ok_or(Refused::Untrusted)?;
+                let run_id = record
+                    .get(id_field)
+                    .and_then(Value::as_i64)
+                    .filter(|id| *id > 0)
+                    .ok_or(Refused::Untrusted)?;
+                let run_attempt = record
+                    .get("run_attempt")
+                    .and_then(Value::as_i64)
+                    .filter(|id| *id >= 0)
+                    .ok_or(Refused::Untrusted)?;
+                let owner = payload
+                    .pointer("/repository/owner/login")
+                    .and_then(Value::as_str)
+                    .ok_or(Refused::Untrusted)?;
+                let repo = payload
+                    .pointer("/repository/name")
+                    .and_then(Value::as_str)
+                    .ok_or(Refused::Untrusted)?;
+                let action = payload
+                    .get("action")
+                    .and_then(Value::as_str)
+                    .ok_or(Refused::Untrusted)?;
+                if [owner, repo].iter().any(|v| {
+                    v.is_empty()
+                        || v.len() > 100
+                        || *v == "."
+                        || *v == ".."
+                        || !v
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b"-._".contains(&b))
+                }) || action.is_empty()
+                    || action.len() > 64
+                {
+                    return Err(Refused::Untrusted);
+                }
+                // A webhook identifies what changed. The app reads authoritative
+                // run/job state through its scoped Actions resource. Large user,
+                // repository and step objects never become command input.
+                Ok(serde_json::json!({
+                    "delivery_id": identifier, "event_name": event, "owner": owner,
+                    "repo": repo, "action": action, "run_id": run_id, "run_attempt": run_attempt,
+                }))
+            }
+        }
+    }
 }
 
 impl Endpoint {
@@ -423,6 +570,7 @@ pub fn admit(
         .extract(delivery.headers, &payload)
         .ok_or(Refused::Unidentified)?;
     let identity = endpoint.identity(&identifier);
+    let input = endpoint.input.decode(delivery, payload, &identifier)?;
     // A repeated delivery resolves to the identity that already ran, so accepting
     // it again is a reuse rather than a second invocation.
     // Providers abandon a delivery after a short deadline (GitHub: ten seconds) and
@@ -433,7 +581,7 @@ pub fn admit(
             &endpoint.operation,
             binding.actor,
             &identity,
-            &decoded_input(&payload),
+            &input,
             now_seconds,
             crate::audit::Trigger::Ingress,
         )
@@ -446,15 +594,6 @@ pub fn admit(
         }
     })?;
     Ok(identity)
-}
-
-/// The command input carried by a delivery.
-///
-/// The application's decode function is part of its compiled contract, so the
-/// envelope is handed to the command as-is and decoded inside it. The host does
-/// not run application code to build this.
-fn decoded_input(payload: &Value) -> Value {
-    payload.clone()
 }
 
 #[cfg(test)]
@@ -715,8 +854,94 @@ mod tests {
             );
         }
         // An unregistered name has nobody to answer either question.
-        assert!(signing("github.webhook.v2").is_err());
-        assert!(identity_source("github.webhook.v2").is_err());
+        assert!(signing("github.webhook.v3").is_err());
+        assert!(identity_source("github.webhook.v3").is_err());
+    }
+
+    #[test]
+    fn endpoint_connection_configuration_fails_before_delivery() {
+        use day2_capabilities::{integrations::LiveConnection, resources::VersionRef};
+        let token = VersionRef {
+            id: "gitea-token".into(),
+            revision: 1,
+        };
+        let key = VersionRef {
+            id: "gitea-signing".into(),
+            revision: 1,
+        };
+        let connection = LiveConnection::GiteaActions {
+            credential_ref: token.clone(),
+            endpoint: "https://git.example.test".into(),
+            signing_secret_ref: Some(key),
+        };
+        assert!(validate_connection("gitea.actions.v1", &connection).is_ok());
+        assert!(
+            validate_connection("slack.events.v1", &connection)
+                .unwrap_err()
+                .to_string()
+                .contains("provider_mismatch")
+        );
+        assert!(validate_connection("github.webhook.v1", &connection).is_err());
+        let missing_key = LiveConnection::GiteaActions {
+            credential_ref: token,
+            endpoint: "https://git.example.test".into(),
+            signing_secret_ref: None,
+        };
+        assert!(
+            validate_connection("gitea.actions.v1", &missing_key)
+                .unwrap_err()
+                .to_string()
+                .contains("signing_secret_missing")
+        );
+    }
+
+    #[test]
+    fn gitea_verifies_unprefixed_hmac_and_projects_only_action_identifiers() {
+        // The published GitHub vector uses the same HMAC basestring as Gitea.
+        let digest = GITHUB_SIGNATURE.strip_prefix("sha256=").unwrap();
+        assert_eq!(
+            Scheme::GiteaSha256.verify(GITHUB_SECRET, None, digest, b"Hello, World!", 0),
+            Ok(())
+        );
+        assert_eq!(
+            Scheme::GiteaSha256.verify(GITHUB_SECRET, None, GITHUB_SIGNATURE, b"Hello, World!", 0),
+            Err(Refused::Signature)
+        );
+        assert_eq!(
+            Scheme::GiteaSha256.verify(GITHUB_SECRET, None, digest, b"changed", 0),
+            Err(Refused::Untrusted)
+        );
+        let payload = json!({
+            "action":"completed",
+            "repository":{"owner":{"login":"example-org"},"name":"example-repo","description":"x".repeat(100_000)},
+            "workflow_job":{"id":23,"run_id":7,"run_attempt":2}
+        });
+        let headers = BTreeMap::from([
+            ("x-gitea-event".into(), "workflow_job".into()),
+            ("x-gitea-delivery".into(), "attempt-one".into()),
+        ]);
+        let bytes = serde_json::to_vec(&payload).unwrap();
+        let delivery = Delivery {
+            body: &bytes,
+            headers: &headers,
+        };
+        let envelope = Input::GiteaActions
+            .decode(&delivery, payload.clone(), "attempt-one")
+            .unwrap();
+        assert_eq!(
+            envelope,
+            json!({
+                "delivery_id":"attempt-one","event_name":"workflow_job","action":"completed",
+                "owner":"example-org","repo":"example-repo","run_id":7,"run_attempt":2,
+            })
+        );
+        assert!(envelope.to_string().len() < 1024);
+        let mut malformed = payload;
+        malformed["workflow_job"]["run_id"] = json!(0);
+        assert_eq!(
+            Input::GiteaActions.decode(&delivery, malformed, "attempt-one"),
+            Err(Refused::Untrusted)
+        );
     }
 
     #[test]
@@ -740,6 +965,7 @@ mod tests {
             operation: "ci.record".into(),
             provider_identity: identity_source("github.webhook.v1").expect("registered"),
             signing: signing("github.webhook.v1").expect("registered"),
+            input: Input::Payload,
         };
         assert_eq!(endpoint.identity(guid), format!("ingress.ci.status.{guid}"));
     }
@@ -751,6 +977,7 @@ mod tests {
             operation: "slack.interactivity".into(),
             provider_identity,
             signing: signing("slack.interactivity.v1").expect("registered"),
+            input: Input::Payload,
         }
     }
 

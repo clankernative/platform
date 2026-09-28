@@ -63,6 +63,7 @@ pub mod resource_admin;
 mod resource_catalog_history;
 mod resources;
 pub mod retention;
+pub mod rollup;
 pub mod routing;
 pub mod sandbox;
 pub mod schedules;

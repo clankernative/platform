@@ -192,12 +192,29 @@ providers! {
             GitHubJobLog => "github.job_log.v1" (read),
         },
     },
+    GiteaActions {
+        kind: GiteaOrganization,
+        world: "gitea_actions.simulated.sqlite",
+        actions: {
+            GiteaRuns => "gitea.runs.v1" (read),
+            GiteaRun => "gitea.run.v1" (read),
+            GiteaRunJobs => "gitea.run_jobs.v1" (read),
+            GiteaJob => "gitea.job.v1" (read),
+            GiteaJobLog => "gitea.job_log.v1" (read),
+            GiteaRunners => "gitea.runners.v1" (read),
+        },
+    },
     SyntheticOperatorAlerts {
         kind: OperatorAlertDestination,
         world: "operator_alerts.synthetic.sqlite",
         actions: {
             OperatorAlertsSend => "operator_alerts.send.v1" (write),
         },
+    },
+    SlackWebhook {
+        kind: SlackWebhookDestination,
+        world: "slack_webhook.simulated.sqlite",
+        actions: { SlackWebhookPost => "slack_webhook.post.v1" (write) },
     },
     Slack {
         kind: SlackChannel,

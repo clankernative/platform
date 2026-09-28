@@ -50,11 +50,13 @@ simulated!(OperatorAlerts => SyntheticOperatorAlerts, "operator_alerts.synthetic
 // The three adapters admitted live-first. Their worlds are served by
 // `integrations::simulated`, at the transport seam, so the offline lane and the
 // live lane differ only in the socket.
+simulated!(SlackWebhook => SlackWebhook, "slack_webhook.simulated.sqlite");
 simulated!(Slack => Slack, "slack.simulated.sqlite");
 simulated!(ObjectStore => ObjectStore, "object_store.simulated.sqlite");
 simulated!(Snowflake => Snowflake, "snowflake.simulated.sqlite");
 simulated!(OpenAi => OpenAi, "openai.simulated.sqlite");
 simulated!(LinearWork => LinearWork, "linear_work.simulated.sqlite");
+simulated!(GiteaActions => GiteaActions, "gitea_actions.simulated.sqlite");
 simulated!(GitHubActions => GitHubActions, "github_actions.simulated.sqlite");
 
 /// The world each provider's simulation commits to. Exhaustive by construction:
@@ -69,12 +71,14 @@ pub const fn simulation(provider: Provider) -> &'static str {
         Provider::SyntheticGoogleDirectory => GoogleDirectory::WORLD,
         Provider::SyntheticLinear => Linear::WORLD,
         Provider::SyntheticOperatorAlerts => OperatorAlerts::WORLD,
+        Provider::SlackWebhook => SlackWebhook::WORLD,
         Provider::Slack => Slack::WORLD,
         Provider::ObjectStore => ObjectStore::WORLD,
         Provider::Snowflake => Snowflake::WORLD,
         Provider::OpenAi => OpenAi::WORLD,
         Provider::LinearWork => LinearWork::WORLD,
         Provider::GitHubActions => GitHubActions::WORLD,
+        Provider::GiteaActions => GiteaActions::WORLD,
     }
 }
 
@@ -117,12 +121,14 @@ pub const fn supply(provider: Provider) -> Supply {
         | Provider::SyntheticLinear
         | Provider::SyntheticOperatorAlerts => Supply::SyntheticPeople,
         Provider::LocalDelegation
+        | Provider::SlackWebhook
         | Provider::Slack
         | Provider::Snowflake
         | Provider::OpenAi
         | Provider::ObjectStore
         | Provider::LinearWork
-        | Provider::GitHubActions => Supply::SimulatedFixture,
+        | Provider::GitHubActions
+        | Provider::GiteaActions => Supply::SimulatedFixture,
     }
 }
 

@@ -40,11 +40,22 @@ const MAX_FAULTS: usize = 1_024;
 /// rather than restated here: the registry is what backup and the deterministic
 /// campaign enumerate, so a name declared in one place and used in another is a
 /// drift the compiler would not catch.
+pub const SLACK_WEBHOOK_WORLD: &str = world_of(Provider::SlackWebhook);
+/// Deliberately fake credential, only ever used with the offline transport.
+pub const SLACK_WEBHOOK_URL: &str =
+    "https://hooks.slack.com/services/TSYNTHETIC/BSYNTHETIC/offline-only";
+pub fn slack_webhook_digest() -> String {
+    crate::digest(SLACK_WEBHOOK_URL.as_bytes())
+        .trim_start_matches("sha256:")
+        .into()
+}
+
 pub const SLACK_WORLD: &str = world_of(Provider::Slack);
 pub const SNOWFLAKE_WORLD: &str = world_of(Provider::Snowflake);
 pub const OPENAI_WORLD: &str = world_of(Provider::OpenAi);
 pub const OBJECT_STORE_WORLD: &str = world_of(Provider::ObjectStore);
 pub const LINEAR_WORK_WORLD: &str = world_of(Provider::LinearWork);
+pub const GITEA_ACTIONS_WORLD: &str = world_of(Provider::GiteaActions);
 pub const GITHUB_ACTIONS_WORLD: &str = world_of(Provider::GitHubActions);
 pub const DELEGATION_WORLD: &str = world_of(Provider::LocalDelegation);
 
@@ -278,13 +289,122 @@ pub struct GitHubActionsWorld {
     pub jobs: Vec<GitHubJob>,
 }
 
+/// Provider-shaped wire fixtures, keyed by the exact API path and query.
+/// Missing routes return 404; the simulation never invents an empty success.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GiteaActionsWorld {
+    pub origin: String,
+    pub responses: BTreeMap<String, Value>,
+    pub logs: BTreeMap<String, String>,
+}
+
+/// Explicit synthetic Actions data for development and provider parity campaigns.
+pub fn gitea_actions_fixture(owner: &str, repo: &str, outcome: &str) -> GiteaActionsWorld {
+    let origin = "https://git.example.test";
+    let base = format!("{origin}/api/v1/repos/{owner}/{repo}/actions");
+    let run = json!({
+        "id":7,"run_attempt":1,"url":format!("{base}/runs/7"),
+        "display_title":"Deploy example","path":"deploy.yml@refs/heads/main",
+        "event":"push","head_branch":"main","head_sha":"abc123",
+        "status":"completed","conclusion":outcome,
+        "started_at":"2026-01-02T11:00:00Z","completed_at":"2026-01-02T11:10:00Z",
+        "html_url":format!("{origin}/{owner}/{repo}/actions/runs/7")
+    });
+    let job = json!({
+        "id":7,"run_id":7,"run_attempt":1,"url":format!("{base}/jobs/7"),
+        "name":"Deploy example","status":"completed","conclusion":outcome,
+        "created_at":"2026-01-02T10:59:00Z","started_at":"2026-01-02T11:00:00Z",
+        "completed_at":"2026-01-02T11:10:00Z","runner_id":1,"runner_name":"runner-example",
+        "labels":["linux"],"html_url":format!("{origin}/{owner}/{repo}/actions/runs/7/jobs/7")
+    });
+    let runner = json!({"id":1,"name":format!("runner-{outcome}"),"status":"online",
+        "busy":false,"disabled":false,"ephemeral":false,"labels":[{"name":"linux"}]});
+    let mut responses = BTreeMap::from([
+        (
+            format!("/api/v1/repos/{owner}/{repo}/actions/jobs/7"),
+            job.clone(),
+        ),
+        (
+            format!("/api/v1/repos/{owner}/{repo}/actions/runs/7"),
+            run.clone(),
+        ),
+        (
+            format!("/api/v1/repos/{owner}/{repo}/actions/runs/7/attempts/1"),
+            run.clone(),
+        ),
+        (
+            format!("/api/v1/orgs/{owner}/actions/runners"),
+            json!({"runners":[runner],"total_count":1}),
+        ),
+    ]);
+    for limit in [5, 10, 20, 50] {
+        for page in 1..=3 {
+            responses.insert(format!("/api/v1/orgs/{owner}/actions/runs?page={page}&limit={limit}&status="),
+                json!({"workflow_runs":if page == 1 { vec![run.clone()] } else { vec![] },"total_count":1}));
+            responses.insert(
+                format!(
+                    "/api/v1/repos/{owner}/{repo}/actions/runs/7/jobs?page={page}&limit={limit}"
+                ),
+                json!({"jobs":if page == 1 { vec![job.clone()] } else { vec![] },"total_count":1}),
+            );
+            responses.insert(format!("/api/v1/repos/{owner}/{repo}/actions/runs/7/attempts/1/jobs?page={page}&limit={limit}"),
+                json!({"jobs":if page == 1 { vec![job.clone()] } else { vec![] },"total_count":1}));
+            for status in ["queued", "pending", "in_progress"] {
+                responses.insert(format!("/api/v1/orgs/{owner}/actions/runs?page={page}&limit={limit}&status={status}"),
+                    json!({"workflow_runs":[],"total_count":0}));
+            }
+        }
+    }
+    GiteaActionsWorld {
+        origin: origin.into(),
+        responses,
+        logs: BTreeMap::from([(
+            format!("/api/v1/repos/{owner}/{repo}/actions/jobs/7/logs"),
+            format!("Build finished: {outcome}"),
+        )]),
+    }
+}
+
+pub fn gitea_development_fixture() -> GiteaActionsWorld {
+    let mut world = gitea_actions_fixture("synthetic-org", "synthetic-repo", "failure");
+    let other = gitea_actions_fixture("synthetic-tools", "synthetic-repo", "success");
+    world.logs.insert(
+        "/api/v1/repos/synthetic-org/synthetic-repo/actions/jobs/7/logs".into(),
+        "The runner has received a shutdown signal".into(),
+    );
+    world.responses.extend(other.responses);
+    world.logs.extend(other.logs);
+    world
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SlackWebhookWorld {
+    pub endpoint_sha256: String,
+    pub messages: Vec<String>,
+    pub archived: bool,
+}
+
+pub fn slack_webhook_fixture() -> SlackWebhookWorld {
+    SlackWebhookWorld {
+        endpoint_sha256: slack_webhook_digest(),
+        messages: vec![],
+        archived: false,
+    }
+}
+
 /// The offline fixture a scenario seeds. Seeding is explicit: an unconfigured
 /// world reports the provider as unreachable rather than inventing a reply.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SimulatedFixture {
+    #[serde(default)]
+    pub slack_webhook: SlackWebhookWorld,
     pub delegation: DelegationWorld,
     pub github_actions: GitHubActionsWorld,
+    #[serde(default)]
+    pub gitea_actions: GiteaActionsWorld,
     pub linear_work: LinearWorkWorld,
     pub object_store: ObjectStoreWorld,
     pub slack: SlackWorld,
@@ -314,12 +434,14 @@ impl DelegationWorld {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Endpoint {
+    SlackWebhook,
     SlackIdentity,
     SlackHistory,
     SlackPost,
     SnowflakeStatement,
     OpenAiResponses,
     LinearGraphQL,
+    GiteaActions,
     GitHubJobStatus,
     GitHubJobLogs,
     /// Any S3-compatible store. One endpoint rather than one per vendor: the
@@ -332,11 +454,15 @@ impl Endpoint {
     fn classify(url: &str) -> Option<Self> {
         let path = url.split_once('?').map_or(url, |(base, _)| base);
         Some(match path {
+            SLACK_WEBHOOK_URL => Self::SlackWebhook,
             _ if path == slack::IDENTITY => Self::SlackIdentity,
             _ if path == slack::HISTORY => Self::SlackHistory,
             _ if path == slack::POST => Self::SlackPost,
             "https://api.openai.com/v1/responses" => Self::OpenAiResponses,
             _ if path == super::linear_work::GRAPHQL => Self::LinearGraphQL,
+            other if other.contains("/api/v1/") && other.contains("/actions/") => {
+                Self::GiteaActions
+            }
             // Logs first: the log path is the job path with a suffix, so
             // matching the shorter one first would swallow it.
             other if other.contains("/actions/jobs/") && other.ends_with("/logs") => {
@@ -360,17 +486,20 @@ impl Endpoint {
 
     fn world(self) -> &'static str {
         match self {
+            Self::SlackWebhook => SLACK_WEBHOOK_WORLD,
             Self::SlackIdentity | Self::SlackHistory | Self::SlackPost => SLACK_WORLD,
             Self::SnowflakeStatement => SNOWFLAKE_WORLD,
             Self::OpenAiResponses => OPENAI_WORLD,
             Self::ObjectStore => OBJECT_STORE_WORLD,
             Self::LinearGraphQL => LINEAR_WORK_WORLD,
             Self::GitHubJobStatus | Self::GitHubJobLogs => GITHUB_ACTIONS_WORLD,
+            Self::GiteaActions => GITEA_ACTIONS_WORLD,
         }
     }
 
     fn name(self) -> &'static str {
         match self {
+            Self::SlackWebhook => "incoming-webhook",
             Self::SlackIdentity => "auth.test",
             Self::SlackHistory => "conversations.history",
             Self::SlackPost => "chat.postMessage",
@@ -378,6 +507,7 @@ impl Endpoint {
             Self::OpenAiResponses => "responses",
             Self::ObjectStore => "object",
             Self::LinearGraphQL => "graphql",
+            Self::GiteaActions => "gitea-actions",
             Self::GitHubJobStatus => "job",
             Self::GitHubJobLogs => "job-logs",
         }
@@ -404,7 +534,13 @@ impl CredentialResolver for SimulatedCredentials {
         if !self.available {
             return Err(AdapterError::CredentialUnavailable);
         }
-        Credentials::bearer("simulated-offline-credential".into())
+        Credentials::bearer(
+            if matches!(connection, LiveConnection::SlackWebhook { .. }) {
+                SLACK_WEBHOOK_URL.into()
+            } else {
+                "simulated-offline-credential".into()
+            },
+        )
     }
 }
 
@@ -463,6 +599,8 @@ pub fn seed(database: &Path, scope: &str, fixture: &SimulatedFixture) -> Result<
         GITHUB_ACTIONS_WORLD,
         &fixture.github_actions,
     )?;
+    seed_world(database, scope, GITEA_ACTIONS_WORLD, &fixture.gitea_actions)?;
+    seed_world(database, scope, SLACK_WEBHOOK_WORLD, &fixture.slack_webhook)?;
     seed_world(database, scope, SLACK_WORLD, &fixture.slack)?;
     seed_world(database, scope, SNOWFLAKE_WORLD, &fixture.snowflake)?;
     seed_world(database, scope, OPENAI_WORLD, &fixture.openai)?;
@@ -730,6 +868,11 @@ impl Transport for SimulatedTransport {
         };
         let path = self.path(endpoint.world());
         let result = match endpoint {
+            Endpoint::SlackWebhook => {
+                with_world::<SlackWebhookWorld, _, _>(&path, &self.scope, |state| {
+                    serve_slack_webhook(state, request, max_response_bytes)
+                })
+            }
             Endpoint::SlackIdentity | Endpoint::SlackHistory | Endpoint::SlackPost => {
                 with_world::<SlackWorld, _, _>(&path, &self.scope, |state| {
                     serve_slack(state, endpoint, request, max_response_bytes)
@@ -748,6 +891,36 @@ impl Transport for SimulatedTransport {
             Endpoint::ObjectStore => {
                 with_world::<ObjectStoreWorld, _, _>(&path, &self.scope, |state| {
                     serve_object_store(state, request)
+                })
+            }
+            Endpoint::GiteaActions => {
+                with_world::<GiteaActionsWorld, _, _>(&path, &self.scope, |state| {
+                    state.calls.push(endpoint.name().into());
+                    ensure!(state.calls.len() <= MAX_MESSAGES, "simulated_call_budget");
+                    let route = request
+                        .url
+                        .strip_prefix(&state.world.origin)
+                        .ok_or_else(|| anyhow::anyhow!("simulated_gitea_origin_mismatch"))?;
+                    ensure!(route.starts_with("/api/v1/"), "simulated_gitea_api_path");
+                    Ok(Ok(if let Some(value) = state.world.responses.get(route) {
+                        json_response(value)
+                    } else if let Some(log) = state.world.logs.get(route) {
+                        WireResponse {
+                            status: 200,
+                            json_content_type: false,
+                            body: log.as_bytes().to_vec(),
+                            request_id: None,
+                            metadata: vec![],
+                        }
+                    } else {
+                        WireResponse {
+                            status: 404,
+                            json_content_type: true,
+                            body: b"{}".to_vec(),
+                            request_id: None,
+                            metadata: vec![],
+                        }
+                    }))
                 })
             }
             Endpoint::GitHubJobStatus | Endpoint::GitHubJobLogs => {
@@ -1079,6 +1252,50 @@ fn decode_key(encoded: &str) -> String {
         at += 1;
     }
     String::from_utf8(out).unwrap_or_default()
+}
+
+fn serve_slack_webhook(
+    state: &mut World<SlackWebhookWorld>,
+    request: &WireRequest,
+    limit: u64,
+) -> Result<Served> {
+    let endpoint = Endpoint::SlackWebhook;
+    state.calls.push(endpoint.name().into());
+    ensure!(state.calls.len() <= MAX_MESSAGES, "simulated_call_budget");
+    let fault = take_fault(state, endpoint);
+    if let Some(response) = fault.and_then(|fault| fault_response(fault, limit)) {
+        return Ok(response);
+    }
+    let denied = fault == Some(SimulatedFault::Rejected)
+        || state.world.archived
+        || state.world.endpoint_sha256 != slack_webhook_digest();
+    if !denied {
+        let body: Value = serde_json::from_slice(&request.body)?;
+        ensure!(
+            body.get("channel").is_none(),
+            "simulated_webhook_channel_override"
+        );
+        let text = body
+            .pointer("/blocks/0/text/text")
+            .and_then(Value::as_str)
+            .context("simulated_webhook_text")?;
+        state.world.messages.push(text.into());
+        ensure!(
+            state.world.messages.len() <= MAX_MESSAGES,
+            "simulated_slack_message_budget"
+        );
+    }
+    Ok(Ok(WireResponse {
+        status: if denied { 403 } else { 200 },
+        json_content_type: false,
+        body: if denied {
+            b"action_prohibited".to_vec()
+        } else {
+            b"ok".to_vec()
+        },
+        request_id: None,
+        metadata: vec![],
+    }))
 }
 
 fn serve_slack(

@@ -428,3 +428,40 @@ and `tofu test`. Tests use mocked providers and never provision cloud resources.
 The qualification VM's existing `startup.sh` installs native host prerequisites;
 platform operational recipes remain in Roc. There is no claim that cloud bootstrap
 is shell-free. Public CI does not hold cloud credentials or deploy infrastructure.
+
+## Apps with providers and signed webhooks
+
+`day2-app` accepts an operator-owned `resource_catalog`, `resource_policies`,
+`schedules` and `ingress`. They use the same contracts as a native Day2 instance;
+no credential bytes belong in these inputs. A declared schedule runs only when
+bound to an actor. Keep bindings disabled until the fresh app's source coverage
+has been initialized. Startup refuses an enabled signed endpoint whose signing
+secret is not registered.
+
+Provider credentials come from Secret Manager through the cluster's Secret
+Manager CSI add-on; no secret value passes through OpenTofu. For each secret:
+
+1. Store it in Secret Manager in the app's project and note its version number.
+2. List the secret id in `app-edge.runtime_secret_ids`. That grants only the
+   app's `runtime` Kubernetes service account's Workload Identity principal
+   `roles/secretmanager.secretAccessor` on that secret.
+3. In `day2-app.provider_credentials`, pair the day2 credential reference that a
+   catalog connection declares (`credential_ref` or `signing_secret_ref`) with
+   the exact version (`projects/P/secrets/S/versions/N`, never `latest`) and its
+   fingerprint: `sha256:` and the hex SHA-256 of the value without trailing
+   newlines. Set `credential_operator` to the installation administrator
+   recorded as the registrant.
+
+Before `day2-serve` starts, the pod copies each version into memory as a
+10001-owned 0400 file and runs the runtime image's `day2-provision-credentials`
+against the reviewed plan, exactly as `day2 platform provision-credentials`
+does for a Compose package. It refuses a missing, extra or changed secret. To
+rotate, add a new version, advance the credential's revision in the catalog,
+and update the version and fingerprint together.
+
+`app-edge.signed_webhook_paths` optionally routes exact `/ingress/<endpoint>`
+paths through a separate backend without IAP. This is for provider deliveries:
+Day2 still requires the configured signature before admission. The ordinary
+backend and every other path retain IAP. Prefixes, wildcards, queries and paths
+outside `/ingress/` are refused. With no paths configured, no additional Service
+or BackendConfig exists. The separate backend is never the default backend.

@@ -805,6 +805,7 @@ pub fn app_platform(shape: Option<&AppShape>) -> String {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Projection {
     pub schedules: bool,
+    pub ingress: bool,
     pub redirects: bool,
     pub credentials: bool,
 }
@@ -814,6 +815,7 @@ impl Projection {
     pub fn declared(app_source: &str) -> Result<Self> {
         Ok(Self {
             schedules: crate::app_inference::declares_schedules(app_source)?,
+            ingress: crate::app_inference::declares_ingress(app_source)?,
             redirects: crate::app_inference::declares_redirects(app_source)?,
             credentials: crate::app_inference::declares_credentials(app_source)?,
         })
@@ -824,6 +826,7 @@ pub fn app_platform_for(shape: Option<&AppShape>, projection: Projection) -> Str
     let mut source = include_str!("../../../tools/app-platform.roc").to_string();
     for (declared, category) in [
         (projection.schedules, "schedules"),
+        (projection.ingress, "ingress"),
         (projection.redirects, "redirects"),
         (projection.credentials, "credentials"),
     ] {
@@ -1067,6 +1070,28 @@ impl Catalog {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn optional_trigger_categories_survive_app_shape_projection() -> Result<()> {
+        for fields in [
+            "",
+            "ingress: { gitea: notice },",
+            "schedules: { poll: timer }, ingress: { gitea: notice }, redirects: { go: route },",
+        ] {
+            let app = format!(
+                "App :: [].{{ definition = {{ namespace: \"test\", operations: {{}}, pages: {{}}, properties: {{}}, errors: {{}}, {fields} }} }}"
+            );
+            let generated = app_platform_for(None, Projection::declared(&app)?);
+            for category in ["schedules", "ingress", "redirects"] {
+                assert_eq!(
+                    generated.contains(&format!("{category}: App.definition.{category},")),
+                    fields.contains(&format!("{category}:")),
+                    "app shape lost or invented {category}: {fields}",
+                );
+            }
+        }
+        Ok(())
+    }
+
     use super::*;
     use serde_json::{Value, json};
 

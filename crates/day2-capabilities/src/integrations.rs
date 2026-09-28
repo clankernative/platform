@@ -8,6 +8,8 @@ use std::collections::{BTreeMap, BTreeSet};
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "provider", rename_all = "snake_case", deny_unknown_fields)]
 pub enum LiveConnection {
+    /// An incoming webhook URL mounted as a secret, never serialized in configuration.
+    SlackWebhook { credential_ref: VersionRef },
     Slack {
         credential_ref: VersionRef,
         /// Verifies inbound deliveries. A different kind of secret from the bot
@@ -43,6 +45,13 @@ pub enum LiveConnection {
         /// pointed at another workspace by swapping the credential alone.
         organization_id: String,
     },
+    /// A reviewed Gitea origin. The adapter supplies the fixed /api/v1 prefix.
+    GiteaActions {
+        credential_ref: VersionRef,
+        endpoint: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signing_secret_ref: Option<VersionRef>,
+    },
     /// GitHub Actions, for reading CI job outcomes.
     ///
     /// Named for GitHub rather than for a generic forge on purpose. Repository,
@@ -71,15 +80,17 @@ pub enum LiveConnection {
 }
 
 impl LiveConnection {
-    /// The outbound bearer credential. Unchanged: every caller that transmits a
-    /// credential to a provider wants exactly this one.
+    /// The outbound credential. Its connection variant determines how it is used:
+    /// SlackWebhook authenticates in the reviewed URL, never a bearer header.
     pub fn credential_ref(&self) -> &VersionRef {
         match self {
-            Self::Slack { credential_ref, .. }
+            Self::SlackWebhook { credential_ref }
+            | Self::Slack { credential_ref, .. }
             | Self::Snowflake { credential_ref, .. }
             | Self::ObjectStore { credential_ref, .. }
             | Self::LinearWork { credential_ref, .. }
             | Self::GitHubActions { credential_ref, .. }
+            | Self::GiteaActions { credential_ref, .. }
             | Self::OpenAi { credential_ref, .. } => credential_ref,
         }
     }
@@ -90,8 +101,12 @@ impl LiveConnection {
         match self {
             Self::Slack {
                 signing_secret_ref, ..
+            }
+            | Self::GiteaActions {
+                signing_secret_ref, ..
             } => signing_secret_ref.as_ref(),
-            Self::Snowflake { .. }
+            Self::SlackWebhook { .. }
+            | Self::Snowflake { .. }
             | Self::OpenAi { .. }
             | Self::ObjectStore { .. }
             | Self::LinearWork { .. }
@@ -110,6 +125,7 @@ impl LiveConnection {
     /// thing is a secret.
     pub fn credential_refs(&self) -> Vec<&VersionRef> {
         match self {
+            Self::SlackWebhook { credential_ref } => vec![credential_ref],
             Self::Slack {
                 credential_ref,
                 signing_secret_ref,
@@ -140,6 +156,14 @@ impl LiveConnection {
                 credential_ref,
                 organization_id: _,
             } => vec![credential_ref],
+            Self::GiteaActions {
+                credential_ref,
+                endpoint: _,
+                signing_secret_ref,
+            } => [Some(credential_ref), signing_secret_ref.as_ref()]
+                .into_iter()
+                .flatten()
+                .collect(),
             Self::GitHubActions {
                 credential_ref,
                 endpoint: _,
@@ -165,6 +189,7 @@ impl LiveConnection {
             "duplicate_credential_reference"
         );
         match self {
+            Self::SlackWebhook { .. } => Ok(()),
             Self::Slack { workspace_id, .. } => slack_id(workspace_id, b"T"),
             Self::ObjectStore {
                 endpoint,
@@ -219,6 +244,22 @@ impl LiveConnection {
                 );
                 sql_identifier(role)?;
                 sql_identifier(warehouse)
+            }
+            Self::GiteaActions { endpoint, .. } => {
+                let host = endpoint.strip_prefix("https://").unwrap_or_default();
+                ensure!(
+                    !host.is_empty()
+                        && host.len() <= 253
+                        && host.split('.').all(|label| !label.is_empty()
+                            && label.len() <= 63
+                            && !label.starts_with('-')
+                            && !label.ends_with('-')
+                            && label
+                                .bytes()
+                                .all(|b| b.is_ascii_alphanumeric() || b == b'-')),
+                    "invalid_gitea_endpoint"
+                );
+                Ok(())
             }
             Self::GitHubActions { endpoint, .. } => {
                 // Host only, https only: an API base carrying a path is not the

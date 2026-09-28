@@ -181,6 +181,40 @@ pub async fn serve_docs_preview(
     Ok(())
 }
 
+fn validate_ingress_credentials(runtime: &Runtime) -> Result<()> {
+    let instance = crate::artifact::Instance::load(runtime.instance_path())?;
+    let binding = instance
+        .apps
+        .get(runtime.app())
+        .context("app binding missing")?;
+    for (name, endpoint) in binding
+        .ingress
+        .iter()
+        .filter(|(_, endpoint)| !endpoint.disabled)
+    {
+        let declared = runtime
+            .artifact()
+            .contract()
+            .ingress
+            .iter()
+            .find(|declared| &declared.name == name)
+            .context("endpoint declaration missing")?;
+        let live = instance
+            .resources
+            .as_ref()
+            .and_then(|catalog| catalog.connections.get(&endpoint.connection.id))
+            .filter(|definition| definition.revision == endpoint.connection.revision)
+            .and_then(|definition| definition.live.as_ref())
+            .with_context(|| format!("endpoint_connection_missing_or_stale: {name}"))?;
+        crate::ingress::validate_connection(&declared.provider, live)?;
+        let mounts = crate::integration_host::MountedCredentials::new(runtime.instance_path())?;
+        mounts
+            .verification_key(live)
+            .map_err(|_| anyhow::anyhow!("endpoint_signing_secret_unavailable: {name}"))?;
+    }
+    Ok(())
+}
+
 impl LocalServer {
     /// Deliberately not a production authentication adapter. This API cannot bind
     /// a public address or trust identity headers from a caller/reverse proxy.
@@ -299,6 +333,7 @@ impl LocalServer {
         runtime.artifact().require_current_api()?;
         let api = crate::openapi::Catalog::from_artifact(runtime.artifact().contract())?;
         runtime.initialize()?;
+        validate_ingress_credentials(&runtime)?;
         // `__Host-` makes the browser refuse the cookie unless it is Secure,
         // host-only and path `/`, so no sibling subdomain at the edge can set or
         // shadow it. Development is plain HTTP on loopback and cannot use it.
@@ -563,11 +598,17 @@ async fn handle(State(host): State<Arc<Host>>, request: Request) -> Response {
         },
     };
     let (parts, body) = request.into_parts();
-    let body = match tokio::time::timeout(Duration::from_secs(3), to_bytes(body, 65_536)).await {
-        Ok(Ok(body)) => Ok(body),
-        Ok(Err(_)) => Err(StatusCode::PAYLOAD_TOO_LARGE),
-        Err(_) => Err(StatusCode::REQUEST_TIMEOUT),
+    let maximum_body = if parts.uri.path().starts_with(crate::ingress::ROUTE_PREFIX) {
+        1_048_576
+    } else {
+        65_536
     };
+    let body =
+        match tokio::time::timeout(Duration::from_secs(3), to_bytes(body, maximum_body)).await {
+            Ok(Ok(body)) => Ok(body),
+            Ok(Err(_)) => Err(StatusCode::PAYLOAD_TOO_LARGE),
+            Err(_) => Err(StatusCode::REQUEST_TIMEOUT),
+        };
     let response = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let at = now()?;
@@ -1074,6 +1115,9 @@ impl Host {
         else {
             return refused();
         };
+        if crate::ingress::validate_connection(&endpoint.provider, &connection).is_err() {
+            return refused();
+        }
         let mounts =
             crate::integration_host::MountedCredentials::new(self.runtime.instance_path())?;
         let Ok(key) = mounts.verification_key(&connection) else {
@@ -1098,6 +1142,7 @@ impl Host {
                 operation: endpoint.operation.clone(),
                 provider_identity: crate::ingress::identity_source(&endpoint.provider)?,
                 signing: crate::ingress::signing(&endpoint.provider)?,
+                input: crate::ingress::Input::for_provider(&endpoint.provider)?,
             },
             &crate::ingress::Binding {
                 actor: &binding.actor,

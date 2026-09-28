@@ -160,6 +160,13 @@ impl Endpoint {
             command.input_type == self.input_type,
             "endpoint input type differs from the bound command"
         );
+        crate::ingress::Input::for_provider(&self.provider)?.validate(
+            artifact
+                .schema
+                .inputs
+                .get(&self.input_type)
+                .context("endpoint input schema missing")?,
+        )?;
         Ok(())
     }
 }

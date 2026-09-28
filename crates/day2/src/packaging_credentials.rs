@@ -106,11 +106,38 @@ fn input_bytes(path: &Path) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// One secret the selected app needs mounted: the connection it belongs to and,
+/// for any secret other than that connection's outbound credential, which one.
+#[derive(Clone, Debug, PartialEq)]
+struct Required {
+    connection: LiveConnection,
+    reference: Option<VersionRef>,
+}
+
+impl Required {
+    fn credential_ref(&self) -> &VersionRef {
+        self.reference
+            .as_ref()
+            .unwrap_or(self.connection.credential_ref())
+    }
+}
+
+fn require(required: &mut BTreeMap<String, Required>, secret: Required) -> Result<()> {
+    let key = reference_key(secret.credential_ref())?;
+    if let Some(previous) = required.insert(key, secret.clone()) {
+        ensure!(
+            previous == secret,
+            "credential_reference_has_conflicting_profiles"
+        );
+    }
+    Ok(())
+}
+
 fn connections(
     instance: &Instance,
     app: &str,
     artifact: &LoadedArtifact,
-) -> Result<BTreeMap<String, LiveConnection>> {
+) -> Result<BTreeMap<String, Required>> {
     let resolved = crate::authority_state::AuthorityDocument::resolve(instance, app, artifact)?;
     let mut required = BTreeMap::new();
     for grant in resolved
@@ -120,14 +147,38 @@ fn connections(
         .flat_map(|slots| slots.values())
     {
         if let Some(live) = &grant.live {
-            let key = reference_key(live.credential_ref())?;
-            if let Some(previous) = required.insert(key, live.clone()) {
-                ensure!(
-                    previous == *live,
-                    "credential_reference_has_conflicting_profiles"
-                );
-            }
+            require(
+                &mut required,
+                Required {
+                    connection: live.clone(),
+                    reference: None,
+                },
+            )?;
         }
+    }
+    // A signed endpoint verifies deliveries with its connection's verification
+    // secret, which no grant names, so it is provisioned with the outbound
+    // credentials. A paused endpoint keeps its connection and so its secret:
+    // resuming it then changes no credential.
+    let binding = instance.apps.get(app).context("app_not_installed")?;
+    for (name, endpoint) in &binding.ingress {
+        let live = instance
+            .resources
+            .as_ref()
+            .and_then(|catalog| catalog.connections.get(&endpoint.connection.id))
+            .filter(|definition| definition.revision == endpoint.connection.revision)
+            .and_then(|definition| definition.live.as_ref())
+            .with_context(|| format!("endpoint_connection_missing_or_stale: {name}"))?;
+        let reference = live
+            .verification_ref()
+            .with_context(|| format!("endpoint_connection_has_no_verification_secret: {name}"))?;
+        require(
+            &mut required,
+            Required {
+                connection: live.clone(),
+                reference: Some(reference.clone()),
+            },
+        )?;
     }
     Ok(required)
 }
@@ -164,7 +215,7 @@ fn prepare_connections(
     app: &str,
     compose: &Value,
     request: &Provisioning,
-    mut required: BTreeMap<String, LiveConnection>,
+    mut required: BTreeMap<String, Required>,
 ) -> Result<Prepared> {
     image_digest(&request.tooling_image)?;
     crate::authority::valid_actor(&request.operator)?;
@@ -197,7 +248,7 @@ fn prepare_connections(
     let mut mounts = Vec::new();
     for source in &request.credentials {
         let key = reference_key(&source.credential_ref)?;
-        let connection = required
+        let secret = required
             .remove(&key)
             .context("provisioning_credential_not_approved_or_duplicate")?;
         let credential_digest = secret_digest(&source.source_file)?;
@@ -212,10 +263,10 @@ fn prepare_connections(
         let destination = target(&source.credential_ref)?;
         let file = format!("credential-{key}.json");
         let input = serde_json::to_vec_pretty(&crate::integration_host::Mount {
-            connection,
-            // Packaging installs the outbound credential; a second secret is
-            // mounted by its own request naming its reference.
-            reference: None,
+            connection: secret.connection,
+            // Absent for the outbound credential; a verification secret names
+            // itself so that registration cannot install it as a bearer token.
+            reference: secret.reference,
             credential_file: PathBuf::from(&destination),
             expected_fingerprint: Some(credential_digest.clone()),
         })?;
@@ -335,11 +386,15 @@ pub fn provisioning_inputs(
             "provisioning_input_changed"
         );
         let mount: crate::integration_host::Mount = crate::json::decode(&bytes)?;
-        let key = reference_key(mount.connection.credential_ref())?;
+        let secret = Required {
+            connection: mount.connection.clone(),
+            reference: mount.reference.clone(),
+        };
+        let key = reference_key(secret.credential_ref())?;
         ensure!(
             pin.file == format!("credential-{key}.json")
-                && required.remove(&key).as_ref() == Some(&mount.connection)
-                && mount.credential_file == Path::new(&target(mount.connection.credential_ref())?),
+                && required.remove(&key).as_ref() == Some(&secret)
+                && mount.credential_file == Path::new(&target(secret.credential_ref())?),
             "provisioning_connection_changed"
         );
         ensure!(

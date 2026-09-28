@@ -27,6 +27,7 @@ Demo :: [].{
 					text: release_text,
 				},
 			),
+			Example.Step.command(Commands.sweep, {}),
 		])
 	}
 }

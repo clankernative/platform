@@ -1,0 +1,41 @@
+{
+  "workflow_runs": [
+    {
+      "id": 49144,
+      "url": "https://git.example.test/api/v1/repos/example-org/example-repo/actions/runs/49144",
+      "previous_attempt_url": null,
+      "html_url": "https://git.example.test/example-org/example-repo/actions/runs/49144",
+      "display_title": "Example workflow",
+      "path": "deploy.yml@refs/heads/main",
+      "event": "workflow_run",
+      "run_attempt": 1,
+      "run_number": 915,
+      "repository_id": 0,
+      "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "head_branch": "main",
+      "status": "completed",
+      "conclusion": "skipped",
+      "started_at": "2026-09-25T05:48:36Z",
+      "completed_at": "2026-09-25T05:48:36Z"
+    },
+    {
+      "id": 49143,
+      "url": "https://git.example.test/api/v1/repos/example-org/example-repo/actions/runs/49143",
+      "previous_attempt_url": null,
+      "html_url": "https://git.example.test/example-org/example-repo/actions/runs/49143",
+      "display_title": "Example workflow",
+      "path": "deploy.yml@refs/heads/main",
+      "event": "workflow_run",
+      "run_attempt": 1,
+      "run_number": 4097,
+      "repository_id": 0,
+      "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "head_branch": "main",
+      "status": "completed",
+      "conclusion": "skipped",
+      "started_at": "2026-09-25T05:47:28Z",
+      "completed_at": "2026-09-25T05:47:30Z"
+    }
+  ],
+  "total_count": 48802
+}
