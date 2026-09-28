@@ -1424,6 +1424,7 @@ fn create_for_with_imports(
         // Development signs in with the printed link, which an identity
         // declaration would refuse.
         identity: None,
+        security_shell: None,
         apps: BTreeMap::from([(
             "app".into(),
             AppBinding {

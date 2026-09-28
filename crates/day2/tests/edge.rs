@@ -562,6 +562,42 @@ fn the_edge_is_declared_once_for_the_installation_and_never_loosely() -> Result<
 }
 
 #[test]
+fn security_shell_has_its_own_verified_origin_and_iap_audience() -> Result<()> {
+    let mut document = instance("artifacts/unused");
+    assert!(
+        Instance::from_bytes(&serde_json::to_vec(&document)?)?
+            .security_edge()
+            .is_err()
+    );
+    document["security_shell"] = json!({
+        "origin": "https://security.v2.exampleco.test",
+        "iap_audience": "/projects/1234/global/backendServices/10"
+    });
+    let installed = Instance::from_bytes(&serde_json::to_vec(&document)?)?;
+    let (identity, shell) = installed.security_edge()?;
+    assert_eq!(identity.hosted_domain, "exampleco.test");
+    assert_eq!(shell.origin, "https://security.v2.exampleco.test");
+
+    let mut changed = document.clone();
+    changed.as_object_mut().unwrap().remove("identity");
+    assert!(Instance::from_bytes(&serde_json::to_vec(&changed)?).is_err());
+
+    let mut changed = document.clone();
+    changed["security_shell"]["origin"] = document["apps"]["go"]["edge"]["origin"].clone();
+    assert!(Instance::from_bytes(&serde_json::to_vec(&changed)?).is_err());
+
+    let mut changed = document.clone();
+    changed["security_shell"]["iap_audience"] =
+        document["apps"]["go"]["edge"]["iap_audience"].clone();
+    assert!(Instance::from_bytes(&serde_json::to_vec(&changed)?).is_err());
+
+    let mut changed = document;
+    changed["security_shell"]["origin"] = json!("https://security.v2.exampleco.test/app");
+    assert!(Instance::from_bytes(&serde_json::to_vec(&changed)?).is_err());
+    Ok(())
+}
+
+#[test]
 fn an_installation_with_an_identity_provider_has_no_development_bundle() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("instance.json");

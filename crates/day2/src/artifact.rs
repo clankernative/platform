@@ -1171,7 +1171,7 @@ pub enum IdentityScheme {
     GoogleIap,
 }
 
-/// One application's address at the edge.
+/// One isolated address at the edge, for an app or the security shell.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Edge {
@@ -1249,6 +1249,10 @@ pub struct Instance {
     /// which both are available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<IdentityProvider>,
+    /// The platform-owned security origin. It has its own IAP backend service
+    /// and may never share an app origin or audience.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub security_shell: Option<Edge>,
     pub apps: BTreeMap<String, AppBinding>,
 }
 
@@ -1346,6 +1350,12 @@ impl Instance {
             ensure!(dns_name(&identity.hosted_domain), "invalid_hosted_domain");
         }
         let (mut origins, mut audiences) = (BTreeSet::new(), BTreeSet::new());
+        if let Some(edge) = &self.security_shell {
+            ensure!(self.identity.is_some(), "security_shell_requires_identity");
+            edge.validate()?;
+            origins.insert(&edge.origin);
+            audiences.insert(&edge.iap_audience);
+        }
         for binding in self.apps.values() {
             let Some(edge) = &binding.edge else { continue };
             // An address with nothing to verify requests against would be an
@@ -1401,6 +1411,17 @@ impl Instance {
         let binding = self.apps.get(app).context("app_not_installed")?;
         let identity = self.identity.as_ref().context("identity_not_declared")?;
         let edge = binding.edge.as_ref().context("edge_not_declared")?;
+        Ok((identity, edge))
+    }
+
+    /// The installation-owned security shell edge, independent of app routing.
+    pub fn security_edge(&self) -> Result<(&IdentityProvider, &Edge)> {
+        self.validate_edges()?;
+        let identity = self.identity.as_ref().context("identity_not_declared")?;
+        let edge = self
+            .security_shell
+            .as_ref()
+            .context("security_shell_not_declared")?;
         Ok((identity, edge))
     }
     pub fn scope(&self, app: &str) -> Result<String> {

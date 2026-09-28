@@ -2,7 +2,7 @@
 //! its own origin and short-lived cookie; app sessions never authorize it.
 
 use super::{connect, external, profiles, shell_oidc};
-use crate::iap;
+use crate::{artifact::Instance, iap};
 use crate::{managed_credentials::crypto::KeyLease, store::open, web_security};
 use anyhow::{Context, Result, ensure};
 use axum::{
@@ -117,6 +117,27 @@ pub(crate) struct SecurityShell {
 }
 
 impl SecurityShell {
+    /// Resolve both the browser origin and IAP verifier from the selected
+    /// installation, so a caller cannot mount the shell on an app edge.
+    pub(crate) fn from_instance(
+        instance: &Instance,
+        db: PathBuf,
+        registry: Arc<dyn ApprovalRegistry>,
+        client_id: String,
+        client_secret: String,
+    ) -> Result<Arc<Self>> {
+        let (identity, edge) = instance.security_edge()?;
+        let origin = format!("{}/", edge.origin);
+        let authenticator = Arc::new(shell_oidc::GoogleFreshAuthenticator::new(
+            &edge.iap_audience,
+            &identity.hosted_domain,
+            &origin,
+            client_id,
+            client_secret,
+        )?);
+        Self::new(origin, db, registry, authenticator)
+    }
+
     pub(crate) fn new(
         origin: String,
         db: PathBuf,

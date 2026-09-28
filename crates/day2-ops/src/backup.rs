@@ -224,6 +224,7 @@ pub fn take(instance_path: &Path, app: &str, output: &Path) -> Result<Manifest> 
             // The binding keeps its edge, so the manifest keeps the provider
             // that edge is verified against.
             identity: instance.identity,
+            security_shell: None,
             apps: BTreeMap::from([(app.into(), binding)]),
         },
     };

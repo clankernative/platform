@@ -746,6 +746,7 @@ impl World {
                 },
             )]),
             identity: None,
+            security_shell: None,
         };
         let path = directory.path().join("instance.json");
         fs::write(&path, serde_json::to_vec(&instance)?)?;
@@ -765,6 +766,7 @@ impl World {
             control: None,
             resources: None,
             identity: None,
+            security_shell: None,
             apps: BTreeMap::from([
                 (
                     "links".into(),
