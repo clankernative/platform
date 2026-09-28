@@ -662,6 +662,11 @@ pub struct Catalog {
     pub policies: BTreeMap<String, ReusablePolicy>,
     #[serde(default)]
     pub budgets: BTreeMap<String, BudgetDefinition>,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::credentials::CredentialCatalog::is_empty"
+    )]
+    pub credentials: crate::credentials::CredentialCatalog,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -778,6 +783,7 @@ impl Catalog {
                 && self.budgets.len() <= 1024,
             "resource_catalog_budget"
         );
+        self.credentials.validate()?;
         let mut providers = BTreeSet::new();
         for (id, connection) in &self.connections {
             name(id)?;

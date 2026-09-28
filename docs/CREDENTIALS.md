@@ -31,10 +31,17 @@ observations or external effects. Cycles, unmarked children and provider write
 effects fail the build. These declarations are an enforced upper bound; a
 handler need not exercise every declared action.
 
-Selected-instance qualification and credential-specific host admission must
-be implemented before any declared family can issue or receive a key. Provider,
-resource and imported-operation credential paths remain unsupported until they
-have selected permission contracts and step-level enforcement.
+The instance resource catalog now holds named management policies and approved
+authority ceilings, and each app binding selects its credential families with
+an exact namespace and pinned references. A catalog-managed release candidate
+qualifies every selected artifact's families against those definitions and
+records composition-bound receipts. Activation refuses a credential-bearing
+candidate without those receipts. Missing bindings, changed policies, enlarged
+child authority and provider/resource authority fail qualification. This is
+static release evidence; credential-specific host admission still must be
+implemented before a declared family can issue or receive a key. Imported
+operation credential paths remain unsupported until they have selected
+permission contracts and step-level enforcement.
 
 `day2-capabilities::credentials` defines the managed family declaration,
 manifest, public metadata/result shapes, selected-instance binding and static
@@ -129,10 +136,11 @@ Before activation, complete the following gates from the proposal:
    selected provider/resource/import contracts. Prove the interactive context and
    negative compiler fixtures with the pinned compiler. The declaration-only
    client/personal build path is present.
-2. Connect selected-instance bindings to the resource catalog and release
-   qualification, including principal/context compatibility across child,
+2. Complete selected-instance principal/context compatibility across child,
    delegated and provider paths. Resolve actual key/custody readiness and
-   current management/metadata policy.
+   current management/metadata policy. The catalog-managed release path now
+   checks exact local family bindings and approved authority; other release
+   paths must be fenced before credential activation.
 3. Add credential ingress verification and mandatory propagated identity and
    immutable ceiling checks to the dispatcher. Add bounded metadata readers,
    recipient-specific security shell and protected HTTP response sink.

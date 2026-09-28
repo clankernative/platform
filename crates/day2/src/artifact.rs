@@ -1037,6 +1037,9 @@ pub struct AppBinding {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resource_policies: Vec<day2_capabilities::resources::Attachment>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub credential_families:
+        BTreeMap<String, day2_capabilities::credentials::CredentialFamilyBinding>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub schedules: BTreeMap<String, ScheduleBinding>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub ingress: BTreeMap<String, EndpointBinding>,
@@ -1084,6 +1087,8 @@ struct StoredBinding {
     #[serde(default)]
     resource_policies: Vec<day2_capabilities::resources::Attachment>,
     #[serde(default)]
+    credential_families: BTreeMap<String, day2_capabilities::credentials::CredentialFamilyBinding>,
+    #[serde(default)]
     schedules: BTreeMap<String, ScheduleBinding>,
     #[serde(default)]
     ingress: BTreeMap<String, EndpointBinding>,
@@ -1105,6 +1110,7 @@ impl From<StoredBinding> for AppBinding {
             writers: stored.writers,
             authority: stored.authority,
             resource_policies: stored.resource_policies,
+            credential_families: stored.credential_families,
             schedules: stored.schedules,
             ingress: stored.ingress,
             retention: stored.retention,
@@ -1275,9 +1281,27 @@ impl Instance {
                 instance
                     .apps
                     .values()
-                    .all(|binding| binding.resource_policies.is_empty()),
+                    .all(|binding| binding.resource_policies.is_empty()
+                        && binding.credential_families.is_empty()),
                 "resource_catalog_missing"
             );
+        }
+        for (app, selected) in &instance.apps {
+            ensure!(
+                selected.credential_families.len() <= 64,
+                "credential family binding budget"
+            );
+            for (id, binding) in &selected.credential_families {
+                crate::schema::identifier(id)?;
+                binding.namespace.validate()?;
+                ensure!(
+                    binding.namespace.installation.as_str() == instance.installation
+                        && binding.namespace.environment.as_str() == instance.environment
+                        && binding.namespace.app.as_str() == app
+                        && binding.family.as_str() == id,
+                    "credential binding namespace or family mismatch: {app}/{id}"
+                );
+            }
         }
         for binding in instance.apps.values() {
             for (model, rule) in &binding.retention {
