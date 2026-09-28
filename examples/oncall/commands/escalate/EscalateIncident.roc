@@ -60,7 +60,11 @@ EscalateIncident :: [].{
 			result: "Whether the rung advanced, its current value, and the app-owned stop reason.",
 		},
 		inputs: { incident_id: "The incident whose current state controls escalation." },
-		outputs: { escalated: "Whether this attempt raised the rung.", rung: "The current escalation rung.", reason: "The app-owned result reason." },
+		outputs: {
+			escalated: "Whether this attempt raised the rung.",
+			rung: "The current escalation rung.",
+			reason: "The app-owned result reason.",
+		},
 		example: example,
 		input_sources: |_| [],
 		follow_ups: [],

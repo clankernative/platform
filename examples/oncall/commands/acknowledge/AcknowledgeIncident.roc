@@ -25,8 +25,12 @@ AcknowledgeIncident :: [].{
 	handle = |_context, input|
 		Tx.get(Data.incidents, input.incident_id)
 			.and_then(|incident|
-				Tx.update(Data.incidents, incident, { ..incident.value, status: "Acknowledged" })
-					.map(|changed| { id: changed.id, version: changed.version }),
+				if incident.value.status == "Open" {
+					Tx.update(Data.incidents, incident, { ..incident.value, status: "Acknowledged" })
+						.map(|changed| { id: changed.id, version: changed.version })
+				} else {
+					Tx.succeed({ id: incident.id, version: incident.version })
+				},
 			)
 
 	contract = {
@@ -40,7 +44,10 @@ AcknowledgeIncident :: [].{
 			effects: ["Changes the incident status to Acknowledged."],
 			result: "The incident identifier and committed revision.",
 		},
-		inputs: { incident_id: "The incident to acknowledge.", expected_version: "The incident revision read by the responder." },
+		inputs: {
+			incident_id: "The incident to acknowledge.",
+			expected_version: "The incident revision read by the responder.",
+		},
 		outputs: { id: "The incident identifier.", version: "The committed incident revision." },
 		example: example,
 		input_sources: |_| [],
@@ -59,13 +66,21 @@ AcknowledgeIncident :: [].{
 
 	verify_input : Str, U64 -> Try(AcknowledgeIncidentTypes.Input, Str)
 	verify_input = |snapshot, _seed| {
-		incident = Data.snapshot(snapshot)?.incidents.find_first(|row| row.value.status == "Open").map_err(|_| "open incident missing")?
+		incident =
+			Data.snapshot(snapshot)?
+				.incidents
+				.find_first(|row| row.value.status == "Open")
+				.map_err(|_| "open incident missing")?
 		Ok({ incident_id: incident.id, expected_version: incident.version })
 	}
 
 	verify_result : Str, AcknowledgeIncidentTypes.Saved, Str -> Try(Bool, Str)
 	verify_result = |_before, saved, after| {
-		incident = Data.snapshot(after)?.incidents.find_first(|row| row.id == saved.id).map_err(|_| "acknowledged incident missing")?
+		incident =
+			Data.snapshot(after)?
+				.incidents
+				.find_first(|row| row.id == saved.id)
+				.map_err(|_| "acknowledged incident missing")?
 		Ok(incident.version == saved.version and incident.value.status == "Acknowledged")
 	}
 }

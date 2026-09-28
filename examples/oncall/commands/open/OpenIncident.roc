@@ -45,14 +45,21 @@ OpenIncident :: [].{
 	}
 
 	example : {} -> Try({ input : OpenIncidentTypes.Input, output : OpenIncidentTypes.Saved }, Str)
-	example = |_| Ok({ input: { title: "Example incident" }, output: { id: Ref.from_str("inc_0000000000e008000000000000").map_err(|_| "invalid example reference")?, version: RowVersion.one } })
+	example = |_| {
+		id = Ref.from_str("inc_0000000000e008000000000000").map_err(|_| "invalid example reference")?
+		Ok({ input: { title: "Example incident" }, output: { id, version: RowVersion.one } })
+	}
 
 	verify_input : Str, U64 -> Try(OpenIncidentTypes.Input, Str)
 	verify_input = |_snapshot, seed| Ok({ title: "Generated incident ${seed.to_str()}" })
 
 	verify_result : Str, OpenIncidentTypes.Saved, Str -> Try(Bool, Str)
 	verify_result = |_before, saved, after| {
-		incident = Data.snapshot(after)?.incidents.find_first(|row| row.id == saved.id).map_err(|_| "created incident missing")?
+		incident =
+			Data.snapshot(after)?
+				.incidents
+				.find_first(|row| row.id == saved.id)
+				.map_err(|_| "created incident missing")?
 		Ok(incident.version == saved.version and incident.value.status == "Open" and incident.value.rung == 0)
 	}
 }
