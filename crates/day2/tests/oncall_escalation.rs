@@ -117,8 +117,12 @@ fn admitted_escalation_observes_acknowledgement_committed_before_drain() -> Resu
     );
     let acknowledged = world.acknowledge(&incident, "ack-race-ack", 1, 401)?;
     assert_eq!(acknowledged.status, "success", "{}", acknowledged.error);
-    let result = world.runtime.execute(&deferred, day2::store::Fault::None)?;
-    assert_eq!(result.status, "success", "{}", result.error);
+    let drained = invocations::drain(&world.runtime, 64)?;
+    assert!(
+        drained
+            .iter()
+            .any(|item| item.id == deferred && item.status == "success")
+    );
     assert_eq!(
         world.runtime.trace(&deferred)?.outcome.result["reason"],
         "acknowledged"

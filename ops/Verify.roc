@@ -32,6 +32,7 @@ Verify :: [].{
 			"reports",
 			"reports-probe",
 			"reports-deferrals",
+			"oncall",
 			"owned",
 			"owned-probe",
 			"repeated-field",
@@ -63,6 +64,7 @@ Verify :: [].{
 			"reports",
 			"reports-probe",
 			"reports-deferrals",
+			"oncall",
 		] {
 			_ = Capability.call!("verify-build", Json.to_str({ fixture: fixture }), host!)?
 		}

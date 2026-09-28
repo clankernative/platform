@@ -16,7 +16,7 @@ impl World {
     pub fn new() -> Result<Self> {
         let artifact = std::env::var_os("DAY2_TEST_ONCALL_ARTIFACT")
             .map(PathBuf::from)
-            .context("run xtask verify-reports with compiled fixtures")?;
+            .context("run xtask verify-reports with the on-call fixture built")?;
         let directory = tempfile::tempdir()?;
         let policy: Value = serde_json::from_str(include_str!(
             "../../../../fixtures/authority-policies/oncall.json"
