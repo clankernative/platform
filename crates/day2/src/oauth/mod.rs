@@ -9,4 +9,5 @@ pub mod outbound;
 pub mod profiles;
 pub mod protocol;
 pub(crate) mod security_shell;
+pub(crate) mod shell_oidc;
 pub mod store;
