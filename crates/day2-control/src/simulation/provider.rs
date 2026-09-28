@@ -166,6 +166,7 @@ impl Provider {
                             builder: plan.profile.builder.clone(),
                             artifact: Self::artifact(plan)?,
                             checks,
+                            credential_presence: crate::kernel::CredentialPresence::Absent,
                         },
                     }
                 })

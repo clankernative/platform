@@ -126,6 +126,7 @@ fn mutable_lease_fields_cannot_erase_persisted_publication_ambiguity() -> Result
         builder: plan.profile.builder.clone(),
         artifact: Digest::new(b"artifact"),
         checks: Digest::new(b"checks"),
+        credential_presence: day2_control::kernel::CredentialPresence::Absent,
     };
     journal.complete(&verified, &Observation::Verified { evidence }, 3)?;
     let first_publish = claim(&mut journal, &id, 4)?;

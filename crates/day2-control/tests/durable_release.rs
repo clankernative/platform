@@ -145,6 +145,7 @@ impl Capabilities for FakeCapabilities {
                         builder: self.plan.profile.builder.clone(),
                         artifact: Digest::new(b"synthetic-artifact"),
                         checks: Digest::new(b"synthetic-verified-checks"),
+                        credential_presence: day2_control::kernel::CredentialPresence::Absent,
                     },
                 })
             }

@@ -6,6 +6,7 @@
 use crate::{
     Digest, Name,
     journal::Journal,
+    kernel::{CredentialPresence, EffectKind, Observation},
     release::{ActivationReceipt, ApprovedRelease, ReleaseApproval, ReleaseTarget},
 };
 use anyhow::{Context, Result, ensure};
@@ -19,7 +20,7 @@ use day2_capabilities::{
     credentials::{ManifestFamily, QualificationReceipt},
     resources::{Action, Provider, ResourceTarget},
 };
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -440,6 +441,10 @@ pub(crate) fn check_activation_candidate(
     let target = &approval.target;
     let enabled = catalog_scope_enabled_in(connection, &target.company, &target.environment)?;
     if !enabled && candidate.is_none() {
+        ensure!(
+            verified_credential_presence_in(connection, approval)? == CredentialPresence::Absent,
+            "credential release requires a qualified catalog candidate and selected instance"
+        );
         return Ok(());
     }
     let candidate = candidate.context("catalog-managed release requires qualified candidate")?;
@@ -452,6 +457,33 @@ pub(crate) fn check_activation_candidate(
         &approval.artifact,
         candidate,
     )
+}
+
+/// The legacy path has no artifact store at activation. Its only trustworthy
+/// negative claim is the verification observation from the build that the
+/// approval pins. Missing historical claims fail closed on this path.
+fn verified_credential_presence_in(
+    connection: &Connection,
+    approval: &ReleaseApproval,
+) -> Result<CredentialPresence> {
+    let observation: String = connection
+        .query_row(
+            "SELECT observation FROM effects WHERE execution=?1 AND kind=?2 AND status='complete'",
+            params![
+                approval.build_execution.as_str(),
+                serde_json::to_string(&EffectKind::VerifyArtifact)?
+            ],
+            |row| row.get(0),
+        )
+        .context("verified build observation missing for release")?;
+    let Observation::Verified { evidence } = serde_json::from_str(&observation)? else {
+        anyhow::bail!("release build observation is not verified artifact evidence")
+    };
+    ensure!(
+        evidence.artifact == approval.artifact && Digest::of(&evidence)? == approval.evidence,
+        "release credential classification differs from approved build evidence"
+    );
+    Ok(evidence.credential_presence)
 }
 
 fn check_candidate_selection(

@@ -43,6 +43,15 @@ implemented before a declared family can issue or receive a key. Imported
 operation credential paths remain unsupported until they have selected
 permission contracts and step-level enforcement.
 
+The trusted build runner classifies credential presence from the loaded
+artifact and includes that claim in its verification evidence. An activation
+without a catalog candidate now checks the exact completed verification
+observation pinned by the release approval and requires verified absence.
+Historical evidence without a classification is unknown and cannot use this
+path. Credential-bearing artifacts therefore require a qualified catalog
+candidate and selected instance at activation, including when the workflow
+host has no catalog store.
+
 `day2-capabilities::credentials` defines the managed family declaration,
 manifest, public metadata/result shapes, selected-instance binding and static
 qualification receipt. A family has a stable ID distinct from its code-facing
@@ -139,8 +148,8 @@ Before activation, complete the following gates from the proposal:
 2. Complete selected-instance principal/context compatibility across child,
    delegated and provider paths. Resolve actual key/custody readiness and
    current management/metadata policy. The catalog-managed release path now
-   checks exact local family bindings and approved authority; other release
-   paths must be fenced before credential activation.
+   checks exact local family bindings and approved authority; legacy activation
+   requires a verified credential-free artifact.
 3. Add credential ingress verification and mandatory propagated identity and
    immutable ceiling checks to the dispatcher. Add bounded metadata readers,
    recipient-specific security shell and protected HTTP response sink.

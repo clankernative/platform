@@ -79,6 +79,26 @@ pub struct VerificationEvidence {
     pub builder: crate::BindingRef,
     pub artifact: Digest,
     pub checks: Digest,
+    /// Derived by the trusted runner from the loaded artifact. Historical
+    /// evidence without this claim is unclassified and cannot use the legacy
+    /// release activation path.
+    #[serde(default, skip_serializing_if = "CredentialPresence::is_unknown")]
+    pub credential_presence: CredentialPresence,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialPresence {
+    #[default]
+    Unknown,
+    Absent,
+    Present,
+}
+
+impl CredentialPresence {
+    pub fn is_unknown(&self) -> bool {
+        *self == Self::Unknown
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

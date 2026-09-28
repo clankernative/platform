@@ -7,7 +7,7 @@ use day2_control::{
     BindingRef, BuildPlan, Digest, GitOid, Name,
     contracts::BuildProfile,
     journal::{Claim, Journal, OperatorActor},
-    kernel::{Observation, State, VerificationEvidence},
+    kernel::{CredentialPresence, Observation, State, VerificationEvidence},
     release::{
         GitApproval, ImmutableSecretRef, ReleaseApproval, ReleaseAuthority, ReleaseTarget,
         SecretObservation,
@@ -69,6 +69,14 @@ pub fn configure(journal: &mut Journal, target: &ReleaseTarget, plan: &BuildPlan
 }
 
 pub fn succeed(journal: &mut Journal, plan: &BuildPlan) -> (Digest, Digest) {
+    succeed_with_presence(journal, plan, CredentialPresence::Absent)
+}
+
+pub fn succeed_with_presence(
+    journal: &mut Journal,
+    plan: &BuildPlan,
+    credential_presence: CredentialPresence,
+) -> (Digest, Digest) {
     journal.accept_as(plan, "developer").unwrap();
     let id = plan.execution_id().unwrap();
     for now in 0..3 {
@@ -88,6 +96,7 @@ pub fn succeed(journal: &mut Journal, plan: &BuildPlan) -> (Digest, Digest) {
                     builder: plan.profile.builder.clone(),
                     artifact: Digest::of(&(&plan.company, &plan.commit, "artifact")).unwrap(),
                     checks: Digest::new(b"all-checks-pass"),
+                    credential_presence,
                 },
             },
             State::Verified { evidence, .. } => Observation::Published {
@@ -113,8 +122,24 @@ pub fn approval(
     revision: u8,
     generation: u64,
 ) -> ReleaseApproval {
+    approval_with_presence(
+        journal,
+        company,
+        revision,
+        generation,
+        CredentialPresence::Absent,
+    )
+}
+
+pub fn approval_with_presence(
+    journal: &mut Journal,
+    company: &str,
+    revision: u8,
+    generation: u64,
+    credential_presence: CredentialPresence,
+) -> ReleaseApproval {
     let plan = plan(company, revision);
-    let (artifact, evidence) = succeed(journal, &plan);
+    let (artifact, evidence) = succeed_with_presence(journal, &plan, credential_presence);
     let policy = authority(&plan).policy;
     let approval = ReleaseApproval {
         target: target(company),

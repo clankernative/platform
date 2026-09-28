@@ -584,8 +584,16 @@ fn real_isolated_owned_links_build_produces_bound_evidence_and_recovers_receipt(
     })?;
     assert_eq!(verified.source, *request.source.digest());
     assert_eq!(verified.plan, request.plan.fingerprint()?);
+    assert_eq!(
+        verified.credential_presence,
+        day2_control::kernel::CredentialPresence::Absent
+    );
     let receipt = runner.execute(&request, &platform, directory.path())?;
     assert_eq!(receipt.digest()?, evidence.digest()?);
+    assert_eq!(
+        receipt.verification_evidence()?.credential_presence,
+        verified.credential_presence
+    );
     let result = TrustedRunner::evidence_directory(&request, directory.path())?;
     assert_eq!(
         day2::artifact::LoadedArtifact::load(&evidence.artifact_directory(&result)?)?.id(),
