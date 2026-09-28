@@ -373,3 +373,58 @@ fn selected_build_evidence_covers_every_declared_obligation() -> Result<()> {
     assert!(obligations.values().all(|value| value == count));
     Ok(())
 }
+
+#[test]
+fn internal_examples_are_offline_only_and_do_not_expose_public_commands() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let runtime = development::create(&artifact()?, &directory.path().join("instance"), None)?;
+    let catalog = development::examples(runtime.artifact())?;
+    assert!(
+        catalog
+            .iter()
+            .flat_map(|example| &example.steps)
+            .any(|step| step.operation == "reports.sweep")
+    );
+    assert_eq!(
+        runtime
+            .accept(
+                "reports.sweep",
+                development::ACTOR,
+                "public",
+                &json!({}),
+                100
+            )
+            .unwrap_err()
+            .to_string(),
+        "unknown_operation"
+    );
+    let live = day2::store::Runtime::load(runtime.instance_path(), runtime.app())?;
+    let mut campaign = development::Campaign::new(live, Some("demo"), 42, 0)?;
+    let request = day2::json::decode(br#"{"protocol":1,"action":"dev-examples","input":"{}"}"#)?;
+    assert_eq!(
+        campaign.effect(request).unwrap_err().to_string(),
+        "internal_examples_require_simulated_providers"
+    );
+    let evidence = development::exercise(&runtime, Some("demo"), 42, 0)?;
+    assert!(evidence.failure.is_none());
+    assert!(
+        evidence
+            .traces
+            .iter()
+            .any(|trace| trace.request.operation == "reports.sweep")
+    );
+    assert_eq!(
+        runtime
+            .accept(
+                "reports.sweep",
+                development::ACTOR,
+                "still-private",
+                &json!({}),
+                101
+            )
+            .unwrap_err()
+            .to_string(),
+        "unknown_operation"
+    );
+    Ok(())
+}

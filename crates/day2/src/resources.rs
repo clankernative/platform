@@ -740,6 +740,10 @@ pub(crate) fn reserve_in(
         "provider_monetary_bound_not_qualified"
     );
     let physical_connection = match &resource.grant.live {
+        // Pool conservatively across destinations; never use the secret URL as a key.
+        Some(day2_capabilities::integrations::LiveConnection::SlackWebhook { .. }) => {
+            "slack_webhook".into()
+        }
         Some(day2_capabilities::integrations::LiveConnection::Slack { workspace_id, .. }) => {
             format!("slack/{workspace_id}")
         }
@@ -763,6 +767,9 @@ pub(crate) fn reserve_in(
         // than per host, which this cannot see — so several installations on one
         // host share a budget. That pools conservatively: the error is spending
         // less than allowed, never more.
+        Some(day2_capabilities::integrations::LiveConnection::GiteaActions {
+            endpoint, ..
+        }) => format!("gitea_actions/{endpoint}"),
         Some(day2_capabilities::integrations::LiveConnection::GitHubActions {
             endpoint, ..
         }) => format!("github_actions/{endpoint}"),

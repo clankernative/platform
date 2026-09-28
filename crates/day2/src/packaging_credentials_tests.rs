@@ -5,7 +5,7 @@ type Fixture = (
     Instance,
     Value,
     Provisioning,
-    BTreeMap<String, LiveConnection>,
+    BTreeMap<String, Required>,
 );
 
 fn fixture(path: &Path) -> Result<Fixture> {
@@ -49,7 +49,13 @@ fn fixture(path: &Path) -> Result<Fixture> {
         exported,
         compose,
         request,
-        BTreeMap::from([(reference_key(&reference)?, live)]),
+        BTreeMap::from([(
+            reference_key(&reference)?,
+            Required {
+                connection: live,
+                reference: None,
+            },
+        )]),
     ))
 }
 
@@ -269,5 +275,104 @@ fn registration_rechecks_reviewed_fingerprint_before_creating_registry() -> Resu
             .get::<_, i64>(0))?,
         1
     );
+    Ok(())
+}
+
+#[test]
+fn verification_secrets_are_provisioned_by_their_own_reference() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (token_path, signer_path) = (temp.path().join("token"), temp.path().join("signer"));
+    secret(&token_path)?;
+    fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(&signer_path)?
+        .write_all(b"SYNTHETIC_NEVER_EXPORT_SIGNER")?;
+    let (original, exported, compose, mut request, _) = fixture(&token_path)?;
+    let (token, signer) = (
+        VersionRef {
+            id: "forge-token".into(),
+            revision: 1,
+        },
+        VersionRef {
+            id: "forge-signer".into(),
+            revision: 1,
+        },
+    );
+    let live = LiveConnection::GiteaActions {
+        credential_ref: token.clone(),
+        endpoint: "https://git.example.com".into(),
+        signing_secret_ref: Some(signer.clone()),
+    };
+    let mut required = BTreeMap::new();
+    require(
+        &mut required,
+        Required {
+            connection: live.clone(),
+            reference: None,
+        },
+    )?;
+    require(
+        &mut required,
+        Required {
+            connection: live.clone(),
+            reference: Some(signer.clone()),
+        },
+    )?;
+    // The same secret required twice with a different profile is refused.
+    let mut retargeted = live.clone();
+    if let LiveConnection::GiteaActions { endpoint, .. } = &mut retargeted {
+        *endpoint = "https://other.example.com".into();
+    }
+    assert!(
+        require(
+            &mut required.clone(),
+            Required {
+                connection: retargeted,
+                reference: Some(signer.clone()),
+            },
+        )
+        .is_err()
+    );
+    request.credentials = vec![
+        CredentialSource {
+            credential_ref: token.clone(),
+            source_file: token_path.clone(),
+        },
+        CredentialSource {
+            credential_ref: signer.clone(),
+            source_file: signer_path.clone(),
+        },
+    ];
+    let prepared = prepare_connections(
+        &original, &exported, "reports", &compose, &request, required,
+    )?;
+    let mounts: Vec<crate::integration_host::Mount> = prepared
+        .inputs
+        .iter()
+        .map(|(_, bytes)| crate::json::decode(bytes))
+        .collect::<Result<_>>()?;
+    assert_eq!(mounts[0].reference, None);
+    assert_eq!(mounts[1].reference, Some(signer.clone()));
+    assert_eq!(mounts[1].credential_file, Path::new(&target(&signer)?));
+    assert_ne!(mounts[0].credential_file, mounts[1].credential_file);
+    for (_, bytes) in &prepared.inputs {
+        assert!(!std::str::from_utf8(bytes)?.contains("SYNTHETIC_NEVER_EXPORT"));
+    }
+    // Registration records the signer under its own reference, not the token's.
+    let instance = temp.path().join("operator-instance.json");
+    fs::write(&instance, &prepared.operator)?;
+    for (mut mount, path) in mounts.into_iter().zip([&token_path, &signer_path]) {
+        mount.credential_file = path.clone();
+        crate::integration_host::mount(&instance, &request.operator, &mount)?;
+    }
+    let connection =
+        rusqlite::Connection::open(temp.path().join(".state/provider-credentials.sqlite"))?;
+    let ids: Vec<String> = connection
+        .prepare("SELECT id FROM mounts ORDER BY id")?
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    assert_eq!(ids, ["forge-signer", "forge-token"]);
     Ok(())
 }

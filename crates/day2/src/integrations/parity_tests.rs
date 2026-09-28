@@ -422,7 +422,9 @@ fn the_simulation_emits_no_field_the_provider_does_not() -> Result<()> {
         &database,
         "parity/app",
         &crate::integrations::simulated::SimulatedFixture {
+            slack_webhook: super::simulated::slack_webhook_fixture(),
             delegation: Default::default(),
+            gitea_actions: Default::default(),
             github_actions: Default::default(),
             linear_work: Default::default(),
             object_store: Default::default(),

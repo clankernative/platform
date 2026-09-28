@@ -196,6 +196,7 @@ mod tests {
             inputs: BTreeMap::new(),
             domains: BTreeMap::from([("title".into(), "Title".into())]),
             foreign_keys: vec![],
+            rollups: Vec::new(),
             indexes: vec![],
         };
         let mut domains = Catalog::from([(

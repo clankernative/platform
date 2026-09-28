@@ -77,6 +77,7 @@ fn endpoint() -> Endpoint {
         // An ordinary command. It does not know a webhook triggered it.
         operation: "reports.submit".into(),
         provider_identity: IdentitySource::Header("x-delivery-id"),
+        input: ingress::Input::Payload,
         // This gate is about admission and exactly-once, not about any one
         // provider's signature scheme, so it signs the way the published Slack
         // vector beside the verifier does.

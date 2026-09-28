@@ -92,6 +92,10 @@ pub enum ResourceTarget {
     /// application can read job outcomes in the repository it was granted and in
     /// no other, which matters because a CI log can contain anything a build
     /// printed — tokens, customer data, source.
+    /// Actions in one explicitly granted Gitea organization. Reads only.
+    GiteaOrganization {
+        owner: String,
+    },
     GitHubRepository {
         owner: String,
         repo: String,
@@ -132,6 +136,10 @@ pub enum ResourceTarget {
         destination: String,
         topics: TopicScope,
     },
+    SlackWebhookDestination {
+        /// SHA-256 of the exact operator-reviewed URL; the URL itself is secret.
+        endpoint_sha256: String,
+    },
     SlackChannel {
         channel: crate::integrations::SlackChannel,
     },
@@ -152,7 +160,9 @@ impl ResourceTarget {
             Self::LinearOrganization { .. } => ResourceKind::LinearOrganization,
             Self::LinearIssueSource { .. } => ResourceKind::LinearIssueSource,
             Self::GitHubRepository { .. } => ResourceKind::GitHubRepository,
+            Self::GiteaOrganization { .. } => ResourceKind::GiteaOrganization,
             Self::OperatorAlertDestination { .. } => ResourceKind::OperatorAlertDestination,
+            Self::SlackWebhookDestination { .. } => ResourceKind::SlackWebhookDestination,
             Self::SlackChannel { .. } => ResourceKind::SlackChannel,
             Self::SnowflakeView { .. } => ResourceKind::SnowflakeView,
             Self::OpenAiText { .. } => ResourceKind::OpenAiText,
@@ -191,6 +201,16 @@ impl ResourceTarget {
 
     pub fn validate(&self) -> Result<()> {
         match self {
+            Self::SlackWebhookDestination { endpoint_sha256 } => {
+                ensure!(
+                    endpoint_sha256.len() == 64
+                        && endpoint_sha256
+                            .bytes()
+                            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+                    "invalid_slack_webhook_digest"
+                );
+                Ok(())
+            }
             Self::SlackChannel { channel } => channel.validate(),
             Self::SnowflakeView { query } => query.validate(),
             Self::OpenAiText { profile } => profile.validate(),
@@ -240,6 +260,19 @@ impl ResourceTarget {
                 email_domain_text(email_domain)
             }
             Self::LinearIssueSource { source } => source.validate(),
+            Self::GiteaOrganization { owner } => {
+                ensure!(
+                    !owner.is_empty()
+                        && owner.len() <= 100
+                        && owner
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b"-._".contains(&b))
+                        && owner != "."
+                        && owner != "..",
+                    "invalid_gitea_organization"
+                );
+                Ok(())
+            }
             Self::GitHubRepository { owner, repo } => {
                 // GitHub's own rules: owners and repositories are bounded and
                 // restricted, and interpolating anything else into a path would
@@ -268,6 +301,12 @@ impl ResourceTarget {
 
     pub fn is_subset_of(&self, parent: &Self) -> bool {
         match (self, parent) {
+            (
+                Self::SlackWebhookDestination { endpoint_sha256 },
+                Self::SlackWebhookDestination {
+                    endpoint_sha256: parent,
+                },
+            ) => endpoint_sha256 == parent,
             (Self::SlackChannel { channel }, Self::SlackChannel { channel: parent }) => {
                 channel == parent
             }
@@ -324,6 +363,9 @@ impl ResourceTarget {
                     source: parent_source,
                 },
             ) => source == parent_source,
+            (Self::GiteaOrganization { owner }, Self::GiteaOrganization { owner: parent }) => {
+                owner == parent
+            }
             // A repository grant narrows only to the identical repository.
             (
                 Self::GitHubRepository { owner, repo },
@@ -702,11 +744,13 @@ fn validate_connection(
 ) -> Result<()> {
     use crate::integrations::LiveConnection;
     match (provider, live) {
-        (Provider::Slack, Some(value @ LiveConnection::Slack { .. }))
+        (Provider::SlackWebhook, Some(value @ LiveConnection::SlackWebhook { .. }))
+        | (Provider::Slack, Some(value @ LiveConnection::Slack { .. }))
         | (Provider::Snowflake, Some(value @ LiveConnection::Snowflake { .. }))
         | (Provider::ObjectStore, Some(value @ LiveConnection::ObjectStore { .. }))
         | (Provider::LinearWork, Some(value @ LiveConnection::LinearWork { .. }))
         | (Provider::GitHubActions, Some(value @ LiveConnection::GitHubActions { .. }))
+        | (Provider::GiteaActions, Some(value @ LiveConnection::GiteaActions { .. }))
         | (Provider::OpenAi, Some(value @ LiveConnection::OpenAi { .. })) => value.validate(),
         (
             Provider::LocalNotifications

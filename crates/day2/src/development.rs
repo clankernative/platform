@@ -251,10 +251,11 @@ pub fn samples(artifact: &LoadedArtifact, seed: u64, count: u64) -> Result<Vec<S
 
 fn validate_step(artifact: &LoadedArtifact, step: &Step) -> Result<()> {
     ensure!(step.input.len() <= 65_536, "example input budget");
-    let operation = artifact.operation(&step.operation)?;
+    let operation = artifact.route(&step.operation)?;
     ensure!(
-        operation.kind == "command" || operation.kind == "query",
-        "verification may invoke public operations only"
+        operation.name == step.operation
+            && (operation.kind == "command" || operation.kind == "query"),
+        "verification requires a declared command or query"
     );
     let input: Value = serde_json::from_str(&step.input)?;
     artifact
@@ -648,6 +649,111 @@ pub fn github_actions_resource_fixture(
     Ok((catalog, attachments))
 }
 
+pub fn gitea_actions_resource_fixture(
+    app: &str,
+    policy: &Policy,
+) -> Result<(
+    day2_capabilities::resources::Catalog,
+    Vec<day2_capabilities::resources::Attachment>,
+)> {
+    use day2_capabilities::resources::*;
+    let (mut catalog, mut attachments) = local_resource_fixture(app, policy, None, None)?;
+    for (operation_name, operation) in &policy.operations {
+        if operation.actors.is_empty() {
+            continue;
+        }
+        let actions: BTreeSet<_> = [
+            Action::GiteaRuns,
+            Action::GiteaRun,
+            Action::GiteaRunJobs,
+            Action::GiteaJob,
+            Action::GiteaJobLog,
+            Action::GiteaRunners,
+        ]
+        .into_iter()
+        .filter(|action| operation.observations.contains(action.capability()))
+        .collect();
+        if actions.is_empty() {
+            continue;
+        }
+        for (name, owner) in [
+            ("gitea_actions", "synthetic-org"),
+            ("gitea_internal_tools", "synthetic-tools"),
+        ] {
+            let resource = VersionRef {
+                id: name.into(),
+                revision: 1,
+            };
+            catalog.connections.insert(
+                name.into(),
+                ConnectionDefinition {
+                    live: Some(
+                        day2_capabilities::integrations::LiveConnection::GiteaActions {
+                            signing_secret_ref: None,
+                            credential_ref: VersionRef {
+                                id: "gitea_token".into(),
+                                revision: 1,
+                            },
+                            endpoint: "https://git.example.test".into(),
+                        },
+                    ),
+                    revision: 1,
+                    provider: Provider::GiteaActions,
+                },
+            );
+            catalog.resources.insert(
+                name.into(),
+                ResourceDefinition {
+                    revision: 1,
+                    connection: resource.clone(),
+                    target: ResourceTarget::GiteaOrganization {
+                        owner: owner.into(),
+                    },
+                },
+            );
+            let reusable = ReusablePolicy {
+                revision: 1,
+                owner: "local-fixture-operator".into(),
+                delegates: BTreeSet::new(),
+                actors: operation.actors.clone(),
+                allowed_apps: BTreeSet::from([app.into()]),
+                slots: BTreeMap::from([(
+                    name.to_owned(),
+                    PolicySlot {
+                        kind: ResourceKind::GiteaOrganization,
+                        allowed_resources: BTreeSet::from([resource.clone()]),
+                        actions: actions.clone(),
+                        limits: Limits {
+                            max_request_bytes: 65_536,
+                            max_response_bytes: 1_048_576,
+                            max_calls_per_invocation: 20_000,
+                        },
+                        budgets: Vec::new(),
+                    },
+                )]),
+                max_duration_seconds: None,
+            };
+            let policy_id = format!(
+                "fixture_{}",
+                &crate::digest(&serde_json::to_vec(&reusable)?)[7..31]
+            );
+            catalog.policies.insert(policy_id.clone(), reusable);
+            attachments.push(Attachment {
+                policy: VersionRef {
+                    id: policy_id,
+                    revision: 1,
+                },
+                operation: operation_name.clone(),
+                bindings: BTreeMap::from([(name.to_owned(), resource)]),
+                actors: None,
+                expires_at_ms: None,
+            });
+        }
+    }
+    catalog.validate()?;
+    Ok((catalog, attachments))
+}
+
 /// Explicit work-compliance disposable authority.
 ///
 /// One resource per configured Linear source, because a grant names one source:
@@ -974,6 +1080,90 @@ fn resource_fixture_for_artifact_with_imports(
         Some(day2_capabilities::resources::TopicScope::Any),
         Some("synthetic-issuer-1"),
     )?;
+    if policy.operations.values().any(|op| {
+        op.observations
+            .iter()
+            .any(|name| name.starts_with("gitea."))
+    }) {
+        let (gitea, gitea_attachments) = gitea_actions_resource_fixture(app, policy)?;
+        catalog.connections.extend(gitea.connections);
+        catalog.resources.extend(gitea.resources);
+        catalog.policies.extend(gitea.policies);
+        attachments.extend(gitea_attachments);
+    }
+    for (operation_name, operation) in &policy.operations {
+        if operation.actors.is_empty() || !operation.effects.contains("slack_webhook.post.v1") {
+            continue;
+        }
+        use day2_capabilities::resources::*;
+        let name = "slack_alerts";
+        let resource = VersionRef {
+            id: name.into(),
+            revision: 1,
+        };
+        catalog.connections.insert(
+            name.into(),
+            ConnectionDefinition {
+                revision: 1,
+                provider: Provider::SlackWebhook,
+                live: Some(
+                    day2_capabilities::integrations::LiveConnection::SlackWebhook {
+                        credential_ref: VersionRef {
+                            id: "slack_webhook_url".into(),
+                            revision: 1,
+                        },
+                    },
+                ),
+            },
+        );
+        catalog.resources.insert(
+            name.into(),
+            ResourceDefinition {
+                revision: 1,
+                connection: resource.clone(),
+                target: ResourceTarget::SlackWebhookDestination {
+                    endpoint_sha256: crate::integrations::simulated::slack_webhook_digest(),
+                },
+            },
+        );
+        let reusable = ReusablePolicy {
+            revision: 1,
+            owner: "local-fixture-operator".into(),
+            delegates: BTreeSet::new(),
+            actors: operation.actors.clone(),
+            allowed_apps: BTreeSet::from([app.into()]),
+            max_duration_seconds: None,
+            slots: BTreeMap::from([(
+                name.into(),
+                PolicySlot {
+                    kind: ResourceKind::SlackWebhookDestination,
+                    allowed_resources: BTreeSet::from([resource.clone()]),
+                    actions: BTreeSet::from([Action::SlackWebhookPost]),
+                    limits: Limits {
+                        max_request_bytes: 65_536,
+                        max_response_bytes: 65_536,
+                        max_calls_per_invocation: 8,
+                    },
+                    budgets: vec![],
+                },
+            )]),
+        };
+        let policy_id = format!(
+            "fixture_{}",
+            &crate::digest(&serde_json::to_vec(&reusable)?)[7..31]
+        );
+        catalog.policies.insert(policy_id.clone(), reusable);
+        attachments.push(Attachment {
+            policy: VersionRef {
+                id: policy_id,
+                revision: 1,
+            },
+            operation: operation_name.clone(),
+            bindings: BTreeMap::from([(name.into(), resource)]),
+            actors: None,
+            expires_at_ms: None,
+        });
+    }
     if reads_github_actions(policy) {
         let (github, github_attachments) = github_actions_resource_fixture(app, policy)?;
         catalog.connections.extend(github.connections);
@@ -1376,6 +1566,7 @@ fn disposable_provider_worlds() -> crate::integrations::simulated::SimulatedFixt
         view_ids: vec![view.into()],
     };
     SimulatedFixture {
+        slack_webhook: crate::integrations::simulated::slack_webhook_fixture(),
         // Exact disposable peer, not a fallback for arbitrary delegated reads.
         // Native request-identity conformance installs and calls a real callee.
         delegation: DelegationWorld {
@@ -1386,6 +1577,7 @@ fn disposable_provider_worlds() -> crate::integrations::simulated::SimulatedFixt
         },
         // One finished job and one still running, so a watcher has both the
         // case it closes and the case it leaves open.
+        gitea_actions: crate::integrations::simulated::gitea_development_fixture(),
         github_actions: GitHubActionsWorld {
             owner: "synthetic-org".into(),
             repo: "synthetic-repo".into(),
@@ -1597,6 +1789,23 @@ impl Campaign {
                 } else {
                     Vec::new()
                 };
+                // An artifact-owned example can exercise scheduled/private work
+                // only with the offline provider host. This never changes the
+                // public operation lookup used by HTTP, CLI or MCP.
+                ensure!(
+                    self.runtime.integrations().is_simulated()
+                        || catalog
+                            .iter()
+                            .flat_map(|example| &example.steps)
+                            .all(|step| {
+                                !self
+                                    .runtime
+                                    .artifact()
+                                    .contract()
+                                    .internal_command(&step.operation)
+                            }),
+                    "internal_examples_require_simulated_providers"
+                );
                 let result = serde_json::to_value(&catalog)?;
                 self.catalog = Some(catalog);
                 return Ok(result);
@@ -1714,7 +1923,17 @@ impl Campaign {
                 self.prepared = false;
                 // Internal definitions also have mandatory app-owned verification.
                 // Only this artifact-bound campaign can admit those generated samples.
-                if obligation {
+                let internal_example = !obligation
+                    && self
+                        .runtime
+                        .artifact()
+                        .contract()
+                        .internal_command(&step.operation);
+                ensure!(
+                    !internal_example || self.runtime.integrations().is_simulated(),
+                    "internal_examples_require_simulated_providers"
+                );
+                if obligation || internal_example {
                     self.runtime.accept_route(
                         &step.operation,
                         &self.actor,
@@ -1868,12 +2087,11 @@ impl Campaign {
             }
             "dev-duplicate" => {
                 let active = self.active.as_mut().context("active command required")?;
-                let duplicate = if active.obligation
-                    && self
-                        .runtime
-                        .artifact()
-                        .contract()
-                        .internal_command(&active.step.operation)
+                let duplicate = if self
+                    .runtime
+                    .artifact()
+                    .contract()
+                    .internal_command(&active.step.operation)
                 {
                     self.runtime.accept_route(
                         &active.step.operation,

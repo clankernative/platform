@@ -72,6 +72,9 @@ pub struct Schema {
     pub foreign_keys: Vec<ForeignKey>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub indexes: Vec<Index>,
+    /// Totals the host maintains from each model's rows; see [`crate::rollup`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rollups: Vec<crate::rollup::Rollup>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub domains: BTreeMap<String, String>,
 }
@@ -136,7 +139,7 @@ impl Table {
         &self,
         models: &BTreeMap<String, Record>,
         model_types: &BTreeMap<String, String>,
-    ) -> Result<Vec<Index>> {
+    ) -> Result<(Vec<Index>, Vec<crate::rollup::Rollup>)> {
         let entries = self
             .entries
             .iter()
@@ -144,7 +147,7 @@ impl Table {
             .collect::<Vec<_>>();
         ensure!(entries.len() <= 1, "duplicate storage witness");
         let Some(entry) = entries.first() else {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         };
         let function = self.node(entry.type_id)?;
         ensure!(
@@ -177,6 +180,7 @@ impl Table {
             Ok(list.item)
         };
         let mut indexes = Vec::new();
+        let mut rollups = Vec::new();
         for declared in &tables.fields {
             let model = models
                 .get(&declared.name)
@@ -204,6 +208,16 @@ impl Table {
                     "a key requires Table.unique or Table.non_unique"
                 );
                 let tag = &key.tags[0];
+                if tag.name == "Rollup" {
+                    rollups.push(self.rollup(
+                        &declared.name,
+                        &definition.name,
+                        model,
+                        tag,
+                        model_types,
+                    )?);
+                    continue;
+                }
                 ensure!(
                     matches!(tag.name.as_str(), "Unique" | "NonUnique") && tag.payload.len() == 1,
                     "a key requires Table.unique or Table.non_unique"
@@ -247,7 +261,107 @@ impl Table {
             }
         }
         indexes.sort_by(|left, right| (&left.model, &left.name).cmp(&(&right.model, &right.name)));
-        Ok(indexes)
+        rollups.sort_by(|left, right| (&left.model, &left.name).cmp(&(&right.model, &right.name)));
+        Ok((indexes, rollups))
+    }
+
+    /// `Table.rollup(group, measures)` reflects as `Rollup(List(group), List(measures))`.
+    /// A group column is `column: row.column` or `column: Table.day(row.column)`;
+    /// a measure is `name: Table.count` or `column: Table.sum(row.column)`. As with
+    /// keys, a label names the column it reads, which the source lint checks.
+    fn rollup(
+        &self,
+        table: &str,
+        name: &str,
+        model: &Record,
+        tag: &Tag,
+        model_types: &BTreeMap<String, String>,
+    ) -> Result<crate::rollup::Rollup> {
+        use crate::rollup::{Aggregate, Bucket, Group, Measure};
+        ensure!(tag.payload.len() == 2, "invalid rollup witness");
+        let record = |id: usize, what: &str| -> Result<&Node> {
+            let list = self.node(id)?;
+            ensure!(list.kind == "list", "invalid rollup witness");
+            let record = self.node(list.item)?;
+            ensure!(
+                record.kind == "record"
+                    && record.name.starts_with("__")
+                    && !record.fields.is_empty(),
+                "rollup {table}.{name} must {what}"
+            );
+            Ok(record)
+        };
+        let mut group = Vec::new();
+        for column in &record(tag.payload[0], "group by a record of columns")?.fields {
+            let expected = model.fields.get(&column.name).with_context(|| {
+                format!(
+                    "rollup {table}.{name} groups by {}, which is not a column",
+                    column.name
+                )
+            })?;
+            let node = self.node(column.type_id)?;
+            let bucket = if node.kind == "union"
+                && node.tags.len() == 1
+                && let Some(bucket) = Bucket::from_tag(&node.tags[0].name)
+            {
+                ensure!(
+                    node.tags[0].payload.len() == 1
+                        && self.kind(node.tags[0].payload[0], model_types)? == *expected,
+                    "rollup {table}.{name} buckets {} from another column",
+                    column.name
+                );
+                Some(bucket)
+            } else {
+                ensure!(
+                    &self.kind(column.type_id, model_types)? == expected,
+                    "rollup {table}.{name} column {} does not read the model's {} column",
+                    column.name,
+                    column.name
+                );
+                None
+            };
+            group.push(Group {
+                field: column.name.clone(),
+                bucket,
+            });
+        }
+        let mut measures = Vec::new();
+        for column in &record(tag.payload[1], "measure a record of totals")?.fields {
+            let node = self.node(column.type_id)?;
+            ensure!(
+                node.kind == "union" && node.tags.len() == 1,
+                "rollup {table}.{name} measure {} requires Table.count or Table.sum",
+                column.name
+            );
+            let measure = match (node.tags[0].name.as_str(), node.tags[0].payload.len()) {
+                ("Count", 0) => Measure::Count,
+                ("Sum", 1) => {
+                    ensure!(
+                        model.fields.get(&column.name) == Some(&Kind::Integer)
+                            && self.kind(node.tags[0].payload[0], model_types)? == Kind::Integer,
+                        "rollup {table}.{name} sums {}, which must be an integer column of the same name",
+                        column.name
+                    );
+                    Measure::Sum
+                }
+                _ => bail!(
+                    "rollup {table}.{name} measure {} requires Table.count or Table.sum",
+                    column.name
+                ),
+            };
+            measures.push(Aggregate {
+                name: column.name.clone(),
+                measure,
+            });
+        }
+        group.sort_by(|left, right| left.field.cmp(&right.field));
+        measures.sort_by(|left, right| left.name.cmp(&right.name));
+        Ok(crate::rollup::Rollup {
+            model: table.to_owned(),
+            name: name.to_owned(),
+            group,
+            measures,
+        })
     }
 
     fn domains(&self) -> Result<BTreeMap<String, String>> {
@@ -811,12 +925,13 @@ impl Schema {
                     })
             })
             .collect();
-        let indexes = table.indexes(&models, &model_types)?;
+        let (indexes, rollups) = table.indexes(&models, &model_types)?;
         let schema = Self {
             models,
             inputs,
             foreign_keys,
             indexes,
+            rollups,
             domains: table.domains()?,
         };
         schema.validate_typed()?;
@@ -824,6 +939,31 @@ impl Schema {
     }
     pub fn validate(&self) -> Result<()> {
         ensure!(self.indexes.len() <= 128, "index count budget");
+        ensure!(self.rollups.len() <= 32, "rollup count budget");
+        let mut rollup_tables = std::collections::BTreeSet::new();
+        for rollup in &self.rollups {
+            identifier(&rollup.model)?;
+            let source = self
+                .models
+                .get(&rollup.model)
+                .context("rollup references unknown model")?;
+            rollup.validate(source)?;
+            ensure!(
+                !self.models.contains_key(&rollup.table())
+                    && !self.inputs.contains_key(&rollup.table())
+                    && rollup_tables.insert(rollup.table()),
+                "rollup table name collision: {}",
+                rollup.table()
+            );
+            ensure!(
+                !self
+                    .indexes
+                    .iter()
+                    .any(|index| index.model == rollup.model && index.name == rollup.name),
+                "rollup and key share a name: {}",
+                rollup.table()
+            );
+        }
         let mut index_names = std::collections::BTreeSet::new();
         let mut sql_index_names = std::collections::BTreeSet::new();
         for index in &self.indexes {
@@ -1011,9 +1151,29 @@ impl Schema {
         Ok(())
     }
     pub fn hash(&self) -> Result<String> {
-        Ok(crate::digest(&serde_json::to_vec(
-            &serde_json::json!({"models":self.models,"foreign_keys":self.foreign_keys}),
-        )?))
+        // Rollups are storage the host must create, so they bind the database like
+        // models do. Absent, the digest is unchanged from before rollups existed.
+        let value = if self.rollups.is_empty() {
+            serde_json::json!({"models":self.models,"foreign_keys":self.foreign_keys})
+        } else {
+            serde_json::json!({"models":self.models,"foreign_keys":self.foreign_keys,"rollups":self.rollups})
+        };
+        Ok(crate::digest(&serde_json::to_vec(&value)?))
+    }
+
+    pub fn rollup(&self, table: &str) -> Option<&crate::rollup::Rollup> {
+        self.rollups.iter().find(|rollup| rollup.table() == table)
+    }
+
+    /// How reads see a table: a model's own record, or a rollup's.
+    pub fn readable(&self, table: &str) -> Option<std::borrow::Cow<'_, Record>> {
+        if let Some(record) = self.models.get(table) {
+            return Some(std::borrow::Cow::Borrowed(record));
+        }
+        let rollup = self.rollup(table)?;
+        Some(std::borrow::Cow::Owned(
+            rollup.record(self.models.get(&rollup.model)?),
+        ))
     }
     pub fn validate_typed(&self) -> Result<()> {
         self.validate()?;
@@ -1066,6 +1226,31 @@ impl Schema {
                     ensure!(
                         handles.insert(format!("{model}_{field}_{suffix}")),
                         "generated Data name collision: {model}.{field}"
+                    );
+                }
+            }
+        }
+        for rollup in &self.rollups {
+            let table = rollup.table();
+            ensure!(
+                handles.insert(table.clone()) && handles.insert(format!("all_{table}")),
+                "generated Data name collision: {table}"
+            );
+            let record = rollup.record(&self.models[&rollup.model]);
+            for (field, kind) in &record.fields {
+                for suffix in ["equal", "asc", "desc"] {
+                    ensure!(
+                        handles.insert(format!("{table}_{field}_{suffix}")),
+                        "generated Data name collision: {table}.{field}"
+                    );
+                }
+                if matches!(
+                    kind,
+                    Kind::Text | Kind::TextDomain { .. } | Kind::StandardText { .. }
+                ) {
+                    ensure!(
+                        handles.insert(format!("{table}_{field}_like")),
+                        "generated Data name collision: {table}.{field}"
                     );
                 }
             }
@@ -1198,6 +1383,9 @@ impl Schema {
         if indexes {
             for index in &self.indexes {
                 statements.push(index.ddl());
+            }
+            for rollup in &self.rollups {
+                statements.extend(rollup.ddl(&self.models[&rollup.model])?);
             }
         }
         Ok(statements)
@@ -1480,6 +1668,7 @@ mod empty_input_tests {
             )]),
             inputs: BTreeMap::from([("empty".into(), input(unit())?)]),
             foreign_keys: vec![],
+            rollups: Vec::new(),
             indexes: vec![],
             domains: BTreeMap::new(),
         };
@@ -1532,6 +1721,7 @@ mod structured_input_tests {
             )]),
             inputs: BTreeMap::from([("update".into(), record)]),
             foreign_keys: vec![],
+            rollups: Vec::new(),
             indexes: vec![],
             domains: BTreeMap::new(),
         }

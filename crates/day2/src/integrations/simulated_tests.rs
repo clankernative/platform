@@ -71,7 +71,9 @@ impl Fixture {
 
 fn fixture() -> SimulatedFixture {
     SimulatedFixture {
+        slack_webhook: crate::integrations::simulated::slack_webhook_fixture(),
         delegation: Default::default(),
+        gitea_actions: Default::default(),
         github_actions: Default::default(),
         linear_work: Default::default(),
         object_store: Default::default(),

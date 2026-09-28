@@ -16,7 +16,7 @@ RUN ["target/debug/xtask", "cli"]
 RUN ["install", "-d", "-o", "10001", "-g", "10001", "-m", "0700", "/srv/day2/.state"]
 
 FROM tooling AS runtime-build
-RUN ["cargo", "build", "--locked", "--release", "-p", "day2", "--bin", "day2-serve", "--bin", "day2-health", "--bin", "day2-inspect", "-p", "day2-sandbox", "--bin", "day2-sandbox", "--bin", "day2-sandbox-probe", "-p", "day2-ops", "--bin", "day2-backup"]
+RUN ["cargo", "build", "--locked", "--release", "-p", "day2", "--bin", "day2-serve", "--bin", "day2-health", "--bin", "day2-inspect", "-p", "day2-sandbox", "--bin", "day2-sandbox", "--bin", "day2-sandbox-probe", "-p", "day2-ops", "--bin", "day2-backup", "--bin", "day2-provision-credentials"]
 RUN ["install", "-d", "-o", "10001", "-g", "10001", "-m", "0700", "/runtime-state"]
 
 # Distroless Debian 13: the same glibc release family as the tooling image (a
@@ -27,6 +27,8 @@ RUN ["install", "-d", "-o", "10001", "-g", "10001", "-m", "0700", "/runtime-stat
 # that needs to look inside a running container uses day2-inspect.
 # day2-backup takes and verifies an online backup beside a serving day2-serve
 # (scheduled off-cluster backups); it runs no app code.
+# day2-provision-credentials registers reviewed provider credential mounts
+# before the app starts (GKE init container); it contacts no provider.
 FROM gcr.io/distroless/cc-debian13@sha256:4594d59540d1948417f6ca2829ddd9294493a7c68b7528f4dd459de7f203a750 AS runtime
 # Distroless ships its own packages' notices under /usr/share/doc; no native
 # library is copied in from the build image any more. Add the notices for the
@@ -38,6 +40,7 @@ COPY --from=runtime-build /workspace/platform/target/release/day2-serve /usr/loc
 COPY --from=runtime-build /workspace/platform/target/release/day2-health /usr/local/bin/day2-health
 COPY --from=runtime-build /workspace/platform/target/release/day2-inspect /usr/local/bin/day2-inspect
 COPY --from=runtime-build /workspace/platform/target/release/day2-backup /usr/local/bin/day2-backup
+COPY --from=runtime-build /workspace/platform/target/release/day2-provision-credentials /usr/local/bin/day2-provision-credentials
 COPY --from=runtime-build /workspace/platform/target/release/day2-sandbox /usr/local/bin/day2-sandbox
 COPY --from=runtime-build /workspace/platform/target/release/day2-sandbox-probe /usr/local/bin/day2-sandbox-probe
 COPY --from=runtime-build --chown=10001:10001 /runtime-state /srv/day2/.state
