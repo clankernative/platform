@@ -1,9 +1,10 @@
 //! Isolated browser approval for an external provider account. The shell has
 //! its own origin and short-lived cookie; app sessions never authorize it.
 
-use super::{connect, external, profiles};
+use super::{connect, external, profiles, shell_oidc};
+use crate::iap;
 use crate::{managed_credentials::crypto::KeyLease, store::open, web_security};
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use axum::{
     Router,
     body::to_bytes,
@@ -63,11 +64,33 @@ pub(crate) trait ApprovalRegistry: Send + Sync {
 /// edge. An ordinary IAP assertion or the app's web session is insufficient:
 /// neither proves when the human last authenticated.
 pub(crate) trait FreshAuthenticator: Send + Sync {
-    fn verify_fresh(&self, headers: &HeaderMap, now: i64) -> Result<FreshHuman>;
+    fn identify(&self, headers: &HeaderMap, now: i64) -> Result<iap::Verified>;
+    fn begin(
+        &self,
+        identity: &iap::Verified,
+        attempt: &str,
+        challenge: &Digest,
+        now: i64,
+    ) -> Result<ReauthStart>;
+    fn complete(
+        &self,
+        _query: &str,
+        _identity: &iap::Verified,
+        _now: i64,
+    ) -> Result<shell_oidc::Reauthenticated> {
+        anyhow::bail!("reauthentication callback unavailable")
+    }
+}
+
+pub(crate) enum ReauthStart {
+    #[cfg(test)]
+    Authenticated(FreshHuman),
+    Redirect(String),
 }
 
 pub(crate) struct FreshHuman {
     pub human: String,
+    pub subject: String,
     pub authenticated_at: i64,
 }
 
@@ -75,6 +98,7 @@ pub(crate) struct FreshHuman {
 struct ShellSession {
     attempt: String,
     human: String,
+    subject: String,
     challenge: Digest,
     authenticated_at: i64,
     expires_at: i64,
@@ -141,15 +165,19 @@ impl SecurityShell {
             Ok(time) => time.as_secs() as i64,
             Err(_) => return protected(StatusCode::SERVICE_UNAVAILABLE.into_response()),
         };
-        let response = self.dispatch(
-            &parts.method,
-            parts.uri.path(),
-            parts.uri.query(),
-            &parts.headers,
-            &body,
-            at,
-        );
-        protected(response.unwrap_or_else(|_| StatusCode::FORBIDDEN.into_response()))
+        let method = parts.method;
+        let path = parts.uri.path().to_owned();
+        let query = parts.uri.query().map(str::to_owned);
+        let headers = parts.headers;
+        let response = tokio::task::spawn_blocking(move || {
+            self.dispatch(&method, &path, query.as_deref(), &headers, &body, at)
+        })
+        .await;
+        protected(match response {
+            Ok(Ok(response)) => response,
+            Ok(Err(_)) => StatusCode::FORBIDDEN.into_response(),
+            Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        })
     }
 
     pub(super) fn dispatch(
@@ -167,10 +195,22 @@ impl SecurityShell {
                     .get(header::HOST)
                     .and_then(|value| value.to_str().ok())
                     == Some(self.authority.as_str())
-                && query.is_none()
                 && !headers.contains_key("x-http-method-override"),
             "invalid security shell request"
         );
+        let identity = self.authenticator.identify(headers, at)?;
+        if path == shell_oidc::GoogleOidc::callback_path() {
+            ensure!(
+                *method == Method::GET && body.is_empty(),
+                "invalid reauthentication callback method"
+            );
+            return self.reauth_callback(
+                query.context("missing reauthentication callback")?,
+                &identity,
+                at,
+            );
+        }
+        ensure!(query.is_none(), "security shell query refused");
         let attempt = path.strip_prefix(PREFIX).unwrap_or_default();
         if attempt.is_empty()
             || attempt.len() > 128
@@ -183,7 +223,7 @@ impl SecurityShell {
         match *method {
             Method::GET => {
                 ensure!(body.is_empty(), "GET body refused");
-                self.page(attempt, headers, at)
+                self.page(attempt, headers, &identity, at)
             }
             Method::POST => {
                 ensure!(
@@ -198,7 +238,7 @@ impl SecurityShell {
                             == Some("application/x-www-form-urlencoded"),
                     "security shell form origin or type mismatch"
                 );
-                self.confirm(attempt, headers, body, at)
+                self.confirm(attempt, headers, body, &identity, at)
             }
             _ => Ok((
                 StatusCode::METHOD_NOT_ALLOWED,
@@ -211,6 +251,7 @@ impl SecurityShell {
     fn pending(
         &self,
         attempt: &str,
+        identity: &iap::Verified,
         at: i64,
     ) -> Result<Option<(ApprovalContext, external::PendingExternalApproval)>> {
         let Some(context) = self.registry.resolve(attempt)? else {
@@ -223,6 +264,7 @@ impl SecurityShell {
             "security shell registry origin mismatch"
         );
         let db = open(&self.db)?;
+        iap::bind_subject(&db, identity, at)?;
         let pending = external::load_pending_external(
             &db,
             context.qualification(),
@@ -232,45 +274,40 @@ impl SecurityShell {
         Ok(pending.map(|pending| (context, pending)))
     }
 
-    fn page(&self, attempt: &str, headers: &HeaderMap, at: i64) -> Result<Response> {
-        let Some((context, pending)) = self.pending(attempt, at)? else {
+    fn page(
+        &self,
+        attempt: &str,
+        headers: &HeaderMap,
+        identity: &iap::Verified,
+        at: i64,
+    ) -> Result<Response> {
+        let Some((context, pending)) = self.pending(attempt, identity, at)? else {
             return Ok(StatusCode::NOT_FOUND.into_response());
         };
-        let (session, issued) = match self.read_session(headers, at)? {
-            Some(session) if valid_session(&session, &pending, at) => (session, None),
+        ensure!(
+            identity.email == pending.human(),
+            "shell human does not own pending approval"
+        );
+        let (session, issued): (ShellSession, Option<String>) = match self
+            .read_session(headers, at)?
+        {
+            Some(session) if valid_session(&session, &pending, identity, at) => (session, None),
             _ => {
-                let human = self.authenticator.verify_fresh(headers, at)?;
-                ensure!(
-                    human.human == pending.human()
-                        && human.authenticated_at > pending.quarantined_at()
-                        && human.authenticated_at <= at
-                        && at - human.authenticated_at <= SESSION_SECONDS,
-                    "fresh shell authentication required"
-                );
-                let token = web_security::random()?;
-                let session = ShellSession {
-                    attempt: attempt.to_owned(),
-                    human: human.human,
-                    challenge: pending.challenge().clone(),
-                    authenticated_at: human.authenticated_at,
-                    expires_at: (human.authenticated_at + SESSION_SECONDS)
-                        .min(at + SESSION_SECONDS),
-                    csrf: web_security::random()?,
-                };
-                let mut sessions = self
-                    .sessions
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("shell session lock failed"))?;
-                sessions.retain(|_, value| at < value.expires_at);
-                ensure!(
-                    sessions.len() < MAX_SESSIONS,
-                    "shell session capacity reached"
-                );
-                sessions.insert(
-                    Digest::new(token.as_bytes()).as_str().to_owned(),
-                    session.clone(),
-                );
-                (session, Some(token))
+                match self
+                    .authenticator
+                    .begin(identity, attempt, pending.challenge(), at)?
+                {
+                    #[cfg(test)]
+                    ReauthStart::Authenticated(human) => {
+                        let (session, token) = self.issue_session(&pending, identity, human, at)?;
+                        (session, Some(token))
+                    }
+                    ReauthStart::Redirect(url) => {
+                        return Ok(
+                            (StatusCode::SEE_OTHER, [(header::LOCATION, url)]).into_response()
+                        );
+                    }
+                }
             }
         };
         let account = pending.observed_account();
@@ -320,14 +357,87 @@ impl SecurityShell {
         Ok(response)
     }
 
+    fn issue_session(
+        &self,
+        pending: &external::PendingExternalApproval,
+        identity: &iap::Verified,
+        human: FreshHuman,
+        at: i64,
+    ) -> Result<(ShellSession, String)> {
+        ensure!(
+            human.human == pending.human()
+                && human.human == identity.email
+                && human.subject == identity.subject
+                && human.authenticated_at > pending.quarantined_at()
+                && human.authenticated_at <= at
+                && at - human.authenticated_at <= SESSION_SECONDS,
+            "fresh shell authentication required"
+        );
+        let token = web_security::random()?;
+        let session = ShellSession {
+            attempt: pending.attempt().to_owned(),
+            human: human.human,
+            subject: human.subject,
+            challenge: pending.challenge().clone(),
+            authenticated_at: human.authenticated_at,
+            expires_at: human.authenticated_at + SESSION_SECONDS,
+            csrf: web_security::random()?,
+        };
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| anyhow::anyhow!("shell session lock failed"))?;
+        sessions.retain(|_, value| at < value.expires_at);
+        ensure!(
+            sessions.len() < MAX_SESSIONS,
+            "shell session capacity reached"
+        );
+        sessions.insert(
+            Digest::new(token.as_bytes()).as_str().to_owned(),
+            session.clone(),
+        );
+        Ok((session, token))
+    }
+
+    fn reauth_callback(&self, query: &str, identity: &iap::Verified, at: i64) -> Result<Response> {
+        let proof = self.authenticator.complete(query, identity, at)?;
+        let Some((_, pending)) = self.pending(&proof.attempt, identity, at)? else {
+            return Ok(StatusCode::NOT_FOUND.into_response());
+        };
+        ensure!(
+            proof.challenge == *pending.challenge(),
+            "reauthentication challenge changed"
+        );
+        let (_, token) = self.issue_session(
+            &pending,
+            identity,
+            FreshHuman {
+                human: proof.human,
+                subject: identity.subject.clone(),
+                authenticated_at: proof.authenticated_at,
+            },
+            at,
+        )?;
+        let mut response = (
+            StatusCode::SEE_OTHER,
+            [(header::LOCATION, path_for(pending.attempt()))],
+        )
+            .into_response();
+        response.headers_mut().insert(header::SET_COOKIE, format!(
+            "{COOKIE}={token}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age={SESSION_SECONDS}"
+        ).parse()?);
+        Ok(response)
+    }
+
     fn confirm(
         &self,
         attempt: &str,
         headers: &HeaderMap,
         body: &[u8],
+        identity: &iap::Verified,
         at: i64,
     ) -> Result<Response> {
-        let Some((context, pending)) = self.pending(attempt, at)? else {
+        let Some((context, pending)) = self.pending(attempt, identity, at)? else {
             return Ok(StatusCode::NOT_FOUND.into_response());
         };
         let Some(token) = cookie_token(headers)? else {
@@ -350,7 +460,8 @@ impl SecurityShell {
                 return Ok(StatusCode::UNAUTHORIZED.into_response());
             };
             ensure!(
-                valid_session(session, &pending, at) && fields.get("csrf") == Some(&session.csrf),
+                valid_session(session, &pending, identity, at)
+                    && fields.get("csrf") == Some(&session.csrf),
                 "security shell session or CSRF mismatch"
             );
             sessions.remove(&key).expect("checked shell session")
@@ -401,10 +512,13 @@ impl SecurityShell {
 fn valid_session(
     session: &ShellSession,
     pending: &external::PendingExternalApproval,
+    identity: &iap::Verified,
     at: i64,
 ) -> bool {
     session.attempt == pending.attempt()
         && session.human == pending.human()
+        && session.human == identity.email
+        && session.subject == identity.subject
         && session.challenge == *pending.challenge()
         && session.authenticated_at > pending.quarantined_at()
         && at >= session.authenticated_at

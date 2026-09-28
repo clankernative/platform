@@ -555,7 +555,8 @@ mod tests {
     use crate::oauth::external::{self, FreshExternalApproval, ShellApprovalKeyLease};
     use crate::oauth::outbound::{CallbackIngress, CallbackOutcome};
     use crate::oauth::security_shell::{
-        ApprovalContext, ApprovalRegistry, FreshAuthenticator, FreshHuman, SecurityShell,
+        ApprovalContext, ApprovalRegistry, FreshAuthenticator, FreshHuman, ReauthStart,
+        SecurityShell,
     };
     use axum::http::{HeaderMap, Method, StatusCode, header};
     use day2_capabilities::Name;
@@ -914,12 +915,145 @@ mod tests {
     }
 
     impl FreshAuthenticator for TestFreshAuth {
-        fn verify_fresh(&self, _: &HeaderMap, _: i64) -> Result<FreshHuman> {
-            Ok(FreshHuman {
-                human: self.human.into(),
-                authenticated_at: self.authenticated_at,
+        fn identify(&self, _: &HeaderMap, _: i64) -> Result<crate::iap::Verified> {
+            Ok(crate::iap::Verified {
+                email: self.human.into(),
+                subject: "accounts.google.com:test-human".into(),
             })
         }
+
+        fn begin(
+            &self,
+            identity: &crate::iap::Verified,
+            _: &str,
+            _: &Digest,
+            _: i64,
+        ) -> Result<ReauthStart> {
+            Ok(ReauthStart::Authenticated(FreshHuman {
+                human: identity.email.clone(),
+                subject: identity.subject.clone(),
+                authenticated_at: self.authenticated_at,
+            }))
+        }
+    }
+
+    struct TestCallbackAuth(Digest);
+
+    impl FreshAuthenticator for TestCallbackAuth {
+        fn identify(&self, _: &HeaderMap, _: i64) -> Result<crate::iap::Verified> {
+            Ok(crate::iap::Verified {
+                email: "human_1".into(),
+                subject: "accounts.google.com:test-human".into(),
+            })
+        }
+
+        fn begin(
+            &self,
+            _: &crate::iap::Verified,
+            _: &str,
+            _: &Digest,
+            _: i64,
+        ) -> Result<ReauthStart> {
+            Ok(ReauthStart::Redirect(
+                "https://accounts.google.com/o/oauth2/v2/auth?state=opaque".into(),
+            ))
+        }
+
+        fn complete(
+            &self,
+            _: &str,
+            _: &crate::iap::Verified,
+            _: i64,
+        ) -> Result<crate::oauth::shell_oidc::Reauthenticated> {
+            Ok(crate::oauth::shell_oidc::Reauthenticated {
+                attempt: "attempt_1".into(),
+                challenge: self.0.clone(),
+                human: "human_1".into(),
+                authenticated_at: 5,
+            })
+        }
+    }
+
+    #[test]
+    fn security_shell_oidc_callback_issues_bound_session_then_page() {
+        let fixture = external_fixture();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shell-oidc.sqlite");
+        let mut db = rusqlite::Connection::open(&path).unwrap();
+        quarantine_external_fixture(&mut db, &fixture, &exchange_key());
+        db.execute_batch(crate::audit::PRINCIPALS_DDL).unwrap();
+        let pending = external::load_pending_external(&db, fixture.input(), &exchange_key(), 5)
+            .unwrap()
+            .unwrap();
+        let shell = SecurityShell::new(
+            fixture.instance.shell.origin_url.clone(),
+            path,
+            std::sync::Arc::new(TestApprovalRegistry(fixture)),
+            std::sync::Arc::new(TestCallbackAuth(pending.challenge().clone())),
+        )
+        .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, "security.example".parse().unwrap());
+        let redirect = shell
+            .dispatch(
+                &Method::GET,
+                "/oauth/approvals/attempt_1",
+                None,
+                &headers,
+                &[],
+                5,
+            )
+            .unwrap();
+        assert_eq!(redirect.status(), StatusCode::SEE_OTHER);
+        assert!(
+            redirect.headers()[header::LOCATION]
+                .to_str()
+                .unwrap()
+                .starts_with("https://accounts.google.com/")
+        );
+        let callback = shell
+            .dispatch(
+                &Method::GET,
+                "/_day2/reauth/callback",
+                Some("state=opaque&code=secret-code&iss=https%3A%2F%2Faccounts.google.com"),
+                &headers,
+                &[],
+                5,
+            )
+            .unwrap();
+        assert_eq!(callback.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            callback.headers()[header::LOCATION],
+            "/oauth/approvals/attempt_1"
+        );
+        assert!(
+            !callback.headers()[header::LOCATION]
+                .to_str()
+                .unwrap()
+                .contains("secret-code")
+        );
+        headers.insert(
+            header::COOKIE,
+            callback.headers()[header::SET_COOKIE]
+                .to_str()
+                .unwrap()
+                .split(';')
+                .next()
+                .unwrap()
+                .parse()
+                .unwrap(),
+        );
+        let page = shell
+            .dispatch(
+                &Method::GET,
+                "/oauth/approvals/attempt_1",
+                None,
+                &headers,
+                &[],
+                5,
+            )
+            .unwrap();
+        assert_eq!(page.status(), StatusCode::OK);
     }
 
     #[test]
@@ -929,6 +1063,7 @@ mod tests {
         let path = dir.path().join("shell.sqlite");
         let mut db = rusqlite::Connection::open(&path).unwrap();
         quarantine_external_fixture(&mut db, &fixture, &exchange_key());
+        db.execute_batch(crate::audit::PRINCIPALS_DDL).unwrap();
         let pending = external::load_pending_external(&db, fixture.input(), &exchange_key(), 5)
             .unwrap()
             .unwrap();
@@ -1062,6 +1197,7 @@ mod tests {
         let path = dir.path().join("shell-refusal.sqlite");
         let mut db = rusqlite::Connection::open(&path).unwrap();
         quarantine_external_fixture(&mut db, &fixture, &exchange_key());
+        db.execute_batch(crate::audit::PRINCIPALS_DDL).unwrap();
         let mut headers = HeaderMap::new();
         headers.insert(header::HOST, "security.example".parse().unwrap());
         for (human, authenticated_at) in [("human_1", 4), ("another_human", 5)] {
