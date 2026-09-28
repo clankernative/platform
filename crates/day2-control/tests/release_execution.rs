@@ -6,9 +6,9 @@ use day2_control::journal::{Journal, RecoveryMode};
 use day2_control::provider_evidence::{ReadBarrier, RevisionToken, StateEvidence};
 use day2_control::release::{ReleaseApproval, SecretObservation};
 use day2_control::release_execution::{
-    Capabilities, LEASE_MILLIS, Recipe, ReleaseClaim, ReleaseEffectResult, ReleaseExecutionHost,
-    ReleaseExecutionPlan, ReleaseLease, ReleaseObservation, ReleaseObserved, ReleaseOperation,
-    ReleasePhase, ReleaseRejection, ReleaseTerminal,
+    Capabilities, LEASE_MILLIS, ObservedServingBinding, Recipe, ReleaseClaim, ReleaseEffectResult,
+    ReleaseExecutionHost, ReleaseExecutionPlan, ReleaseLease, ReleaseObservation, ReleaseObserved,
+    ReleaseOperation, ReleasePhase, ReleaseRejection, ReleaseTerminal, ServingProbe,
 };
 use day2_control::release_recipe::CompiledReleaseRecipe;
 use day2_control::{BindingRef, Digest};
@@ -126,6 +126,117 @@ struct Fixture {
     recipe: Arc<CompiledReleaseRecipe>,
     provider: Arc<Provider>,
     id: Digest,
+}
+
+struct WorkloadProbe(Mutex<ObservedServingBinding>);
+
+impl ServingProbe for WorkloadProbe {
+    fn observe(&self, _: &day2_control::release::ReleaseTarget) -> Result<ObservedServingBinding> {
+        Ok(self.0.lock().unwrap().clone())
+    }
+}
+
+impl Fixture {
+    fn serving_probe(&self) -> WorkloadProbe {
+        let effect = self
+            .provider
+            .preparations
+            .lock()
+            .unwrap()
+            .values()
+            .next()
+            .cloned()
+            .expect("prepared deployment");
+        WorkloadProbe(Mutex::new(ObservedServingBinding {
+            target: self.provider.approval.target.clone(),
+            artifact: self.provider.approval.artifact.clone(),
+            deployment: self.provider.plan.deployment.clone(),
+            incarnation: incarnation(&effect),
+        }))
+    }
+}
+
+#[test]
+fn serving_fence_requires_an_active_release_and_fresh_matching_workload() {
+    let fixture = Fixture::new(true);
+    let mut now = 0;
+    fixture.until(ReleasePhase::WaitingDeployment, &mut now);
+    let probe = fixture.serving_probe();
+    let target = &fixture.provider.approval.target;
+    let journal = Journal::open(&fixture.path).unwrap();
+    let mut called = false;
+    assert!(
+        journal
+            .with_serving_fence(target, &probe, || {
+                called = true;
+                Ok(())
+            })
+            .is_err()
+    );
+    assert!(!called);
+
+    fixture.until(ReleasePhase::Active, &mut now);
+    assert_eq!(
+        journal
+            .with_serving_fence(target, &probe, || Ok(7))
+            .unwrap(),
+        7
+    );
+    let original = probe.0.lock().unwrap().clone();
+    let audit = journal.release_event_count(target).unwrap();
+    for field in 0..5 {
+        let mut changed = original.clone();
+        match field {
+            0 => changed.target.app = name("another"),
+            1 => changed.artifact = Digest::new(b"other-serving-artifact"),
+            2 => changed.deployment.revision = Digest::new(b"other-deployment-binding"),
+            3 => changed.incarnation.controller = "other-controller".to_owned().try_into().unwrap(),
+            _ => changed.incarnation.generation = "other-generation".to_owned().try_into().unwrap(),
+        }
+        *probe.0.lock().unwrap() = changed;
+        called = false;
+        assert!(
+            journal
+                .with_serving_fence(target, &probe, || {
+                    called = true;
+                    Ok(())
+                })
+                .is_err()
+        );
+        assert!(!called);
+        assert_eq!(journal.release_event_count(target).unwrap(), audit);
+    }
+    *probe.0.lock().unwrap() = original;
+    assert!(
+        journal
+            .with_serving_fence(target, &probe, || {
+                probe.0.lock().unwrap().incarnation.generation =
+                    "replacement-generation".to_owned().try_into().unwrap();
+                Ok("answer")
+            })
+            .is_err(),
+        "a changed provider generation must suppress a completed result"
+    );
+    assert_eq!(journal.release_event_count(target).unwrap(), audit);
+}
+
+#[test]
+fn serving_fence_rechecks_the_selected_release_after_the_call() {
+    let fixture = Fixture::new(true);
+    fixture.until(ReleasePhase::Active, &mut 0);
+    let probe = fixture.serving_probe();
+    let target = &fixture.provider.approval.target;
+    let journal = Journal::open(&fixture.path).unwrap();
+    assert!(
+        journal
+            .with_serving_fence(target, &probe, || {
+                Connection::open(&fixture.path)?
+                    .execute("UPDATE release_slots SET active=NULL", [])?;
+                Ok("answer")
+            })
+            .is_err(),
+        "a changed release selection must suppress a completed result"
+    );
 }
 
 impl Fixture {
