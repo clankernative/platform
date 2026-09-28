@@ -340,7 +340,7 @@ pub fn gitea_actions_fixture(owner: &str, repo: &str, outcome: &str) -> GiteaAct
     ]);
     for limit in [5, 10, 20, 50] {
         for page in 1..=3 {
-            responses.insert(format!("/api/v1/orgs/{owner}/actions/runs?page={page}&limit={limit}&status="),
+            responses.insert(format!("/api/v1/orgs/{owner}/actions/runs?page={page}&limit={limit}"),
                 json!({"workflow_runs":if page == 1 { vec![run.clone()] } else { vec![] },"total_count":1}));
             responses.insert(
                 format!(

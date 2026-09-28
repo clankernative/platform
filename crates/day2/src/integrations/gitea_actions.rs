@@ -100,11 +100,17 @@ pub(super) fn prepare(
     let base = format!("{endpoint}/api/v1");
     let pagination = format!("page={}&limit={}", request.page, request.limit);
     let url = match action {
+        // Gitea 1.27 rejects an empty status ("invalid status"); an
+        // unfiltered listing omits the parameter.
         Action::GiteaRuns if request.repo.is_empty() && request.id == 0 => {
-            format!(
-                "{base}/orgs/{owner}/actions/runs?{pagination}&status={}",
-                request.status
-            )
+            if request.status.is_empty() {
+                format!("{base}/orgs/{owner}/actions/runs?{pagination}")
+            } else {
+                format!(
+                    "{base}/orgs/{owner}/actions/runs?{pagination}&status={}",
+                    request.status
+                )
+            }
         }
         Action::GiteaRunners
             if request.repo.is_empty() && request.id == 0 && request.status.is_empty() =>
@@ -574,6 +580,22 @@ mod tests {
             call.request.url,
             "https://git.example.test/api/v1/repos/example-org/example-repo/actions/runs/7/attempts/2/jobs?page=3&limit=20"
         );
+        for (status, query) in [
+            ("", "page=1&limit=5"),
+            ("queued", "page=1&limit=5&status=queued"),
+        ] {
+            let call = prepare(
+                Action::GiteaRuns,
+                &connection,
+                OWNER,
+                &json!({"handle":"h","page":1,"limit":5,"status":status}).to_string(),
+            )
+            .unwrap();
+            assert_eq!(
+                call.request.url,
+                format!("https://git.example.test/api/v1/orgs/example-org/actions/runs?{query}")
+            );
+        }
     }
 
     #[test]
