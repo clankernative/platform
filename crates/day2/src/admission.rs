@@ -121,7 +121,7 @@ const SEALED: &[(&str, &str, &str)] = &[
     (
         "Api.roc",
         "",
-        "3bd589133c5d797020d16af16c84ef51d660d3717abaee242eae9fbcfb65f29a",
+        "187cf0a1d1d91b0ff82c3572b8bbb888328d1052f9efa110a496e2c12823c7b8",
     ),
     (
         "Effects.roc",
@@ -412,6 +412,7 @@ pub fn prepare(
     schema: &Schema,
     outputs: &output_schema::Catalog,
     images: &assets::Catalog,
+    imports: Option<&crate::instance_catalog::ImportedContracts>,
 ) -> Result<()> {
     let stage = stage.canonicalize()?;
     ensure!(!target.exists(), "admission target must be fresh");
@@ -427,6 +428,12 @@ pub fn prepare(
     let mut count = 0;
     copy_modules(&stage.join("app"), &target.join("app"), 0, &mut count)?;
     copy_modules(&stage.join("sdk"), &target.join("sdk"), 0, &mut count)?;
+    if let Some(imports) = imports {
+        fs::write(
+            target.join("app").join(crate::import_codegen::MODULE),
+            crate::import_codegen::admission_module(imports)?,
+        )?;
+    }
     for (module, _) in FACTORIES {
         let path = target.join("sdk").join(module);
         let restricted = restrict_sdk(module, &fs::read_to_string(&path)?)?;

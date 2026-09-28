@@ -21,6 +21,66 @@ pub const DEFAULT_SEED: u64 = 0xDA72_2026;
 pub const DEFAULT_CASES: u64 = 16;
 const MAX_STEPS: usize = 128;
 
+/// A selected callee's checked example, used only by disposable verification.
+/// The target and schema pin also authorize the caller's simulated read.
+#[derive(Clone, Debug)]
+pub struct ImportedQueryFixture {
+    pub app: String,
+    pub operation: String,
+    pub schema_digest: String,
+    pub request: String,
+    pub response: String,
+}
+
+pub fn imported_query_fixtures(
+    instance_path: &Path,
+    imports: &crate::instance_catalog::ImportedContracts,
+) -> Result<Vec<ImportedQueryFixture>> {
+    let instance_path = instance_path.canonicalize()?;
+    let instance = Instance::load(&instance_path)?;
+    let parent = instance_path.parent().context("instance directory")?;
+    let mut fixtures = Vec::new();
+    for (operation, package) in &imports.operations {
+        if package.operation.kind != crate::operation_contract::Kind::Query {
+            continue;
+        }
+        let app = instance
+            .apps
+            .keys()
+            .find(|name| operation.starts_with(&format!("{name}.")))
+            .context("imported query app is not selected")?;
+        let selected = &instance.apps[app];
+        let artifact = LoadedArtifact::load(&parent.join(&selected.artifact))?;
+        ensure!(
+            artifact.contract().namespace == *app,
+            "imported query namespace changed"
+        );
+        let export = artifact
+            .contract()
+            .export_manifest
+            .as_ref()
+            .and_then(|manifest| manifest.exports.get(operation))
+            .context("imported query is not exported")?;
+        ensure!(export == package, "imported query contract changed");
+        let definition = artifact
+            .contract()
+            .app_contract
+            .as_ref()
+            .context("imported query definitions missing")?
+            .operations
+            .get(operation)
+            .context("imported query definition missing")?;
+        fixtures.push(ImportedQueryFixture {
+            app: app.clone(),
+            operation: operation.clone(),
+            schema_digest: crate::delegation::schema_digest_for_artifact(&artifact, operation)?,
+            request: definition.request_example.clone(),
+            response: definition.response_example.clone(),
+        });
+    }
+    Ok(fixtures)
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Step {
@@ -895,6 +955,19 @@ pub fn resource_fixture_for_artifact(
     day2_capabilities::resources::Catalog,
     Vec<day2_capabilities::resources::Attachment>,
 )> {
+    resource_fixture_for_artifact_with_imports(app, artifact, policy, &[])
+}
+
+fn resource_fixture_for_artifact_with_imports(
+    app: &str,
+    artifact: &LoadedArtifact,
+    policy: &Policy,
+    imports: &[ImportedQueryFixture],
+) -> Result<(
+    day2_capabilities::resources::Catalog,
+    Vec<day2_capabilities::resources::Attachment>,
+)> {
+    use day2_capabilities::resources::*;
     let (mut catalog, mut attachments) = local_resource_fixture(
         app,
         policy,
@@ -924,6 +997,106 @@ pub fn resource_fixture_for_artifact(
         catalog.policies.extend(people.policies);
         catalog.budgets.extend(people.budgets);
         attachments.extend(people_attachments);
+    }
+    if !imports.is_empty() {
+        catalog.connections.insert(
+            "imported_queries".into(),
+            ConnectionDefinition {
+                revision: 1,
+                provider: Provider::LocalDelegation,
+                live: None,
+            },
+        );
+        let mut imported_resources = BTreeMap::new();
+        for import in imports {
+            let id = format!(
+                "import_{}",
+                &crate::digest(&serde_json::to_vec(&(&import.app, &import.operation))?)[7..31]
+            );
+            ensure!(
+                imported_resources
+                    .insert(import.operation.clone(), id.clone())
+                    .is_none(),
+                "duplicate imported query fixture"
+            );
+            catalog.resources.insert(
+                id,
+                ResourceDefinition {
+                    revision: 1,
+                    connection: VersionRef {
+                        id: "imported_queries".into(),
+                        revision: 1,
+                    },
+                    target: ResourceTarget::AppOperation {
+                        app: import.app.clone(),
+                        operation: import.operation.clone(),
+                        schema_digest: import.schema_digest.clone(),
+                    },
+                },
+            );
+        }
+        for (operation_name, operation) in &policy.operations {
+            if operation.actors.is_empty() || !operation.observations.contains("app.query.v1") {
+                continue;
+            }
+            let bindings: BTreeMap<_, _> = imported_resources
+                .values()
+                .map(|id| {
+                    (
+                        id.clone(),
+                        VersionRef {
+                            id: id.clone(),
+                            revision: 1,
+                        },
+                    )
+                })
+                .collect();
+            let slots = bindings
+                .iter()
+                .map(|(name, resource)| {
+                    (
+                        name.clone(),
+                        PolicySlot {
+                            kind: ResourceKind::AppOperation,
+                            allowed_resources: BTreeSet::from([resource.clone()]),
+                            actions: BTreeSet::from([Action::DelegateQuery]),
+                            limits: Limits {
+                                max_request_bytes: 16_384,
+                                max_response_bytes: 65_536,
+                                max_calls_per_invocation: 4,
+                            },
+                            budgets: Vec::new(),
+                        },
+                    )
+                })
+                .collect();
+            let policy_id = format!(
+                "imported_{}",
+                &crate::digest(operation_name.as_bytes())[7..31]
+            );
+            catalog.policies.insert(
+                policy_id.clone(),
+                ReusablePolicy {
+                    revision: 1,
+                    owner: "local-fixture-operator".into(),
+                    delegates: BTreeSet::new(),
+                    actors: operation.actors.clone(),
+                    allowed_apps: BTreeSet::from([app.into()]),
+                    slots,
+                    max_duration_seconds: None,
+                },
+            );
+            attachments.push(Attachment {
+                policy: VersionRef {
+                    id: policy_id,
+                    revision: 1,
+                },
+                operation: operation_name.clone(),
+                bindings,
+                actors: None,
+                expires_at_ms: None,
+            });
+        }
     }
     // An exact disposable peer for the request-identity conformance query.
     // The native HTTP suite supplies a real callee and its actual schema pin.
@@ -1034,6 +1207,16 @@ pub fn create_for(
     policy: Option<Policy>,
     actor: &str,
 ) -> Result<Runtime> {
+    create_for_with_imports(artifact_path, directory, policy, actor, &[])
+}
+
+fn create_for_with_imports(
+    artifact_path: &Path,
+    directory: &Path,
+    policy: Option<Policy>,
+    actor: &str,
+    imports: &[ImportedQueryFixture],
+) -> Result<Runtime> {
     use std::{io::Write, os::unix::fs::PermissionsExt};
     let artifact_path = artifact_path.canonicalize()?;
     let artifact = LoadedArtifact::load(&artifact_path)?;
@@ -1093,13 +1276,14 @@ pub fn create_for(
             },
         )]),
     };
-    let (resources, attachments) = resource_fixture_for_artifact(
+    let (resources, attachments) = resource_fixture_for_artifact_with_imports(
         "app",
         &artifact,
         instance.apps["app"]
             .authority
             .as_ref()
             .expect("explicit local policy"),
+        imports,
     )?;
     instance.resources = Some(resources);
     instance
@@ -1127,7 +1311,23 @@ pub fn create_for(
     // differs. Synthetic providers are unaffected: they never reach this host.
     let database = runtime.db().to_path_buf();
     let scope = runtime.scope().to_owned();
-    crate::integrations::simulated::seed(&database, &scope, &disposable_provider_worlds())?;
+    let mut worlds = disposable_provider_worlds();
+    for import in imports {
+        let key = crate::integrations::simulated::DelegationWorld::key(
+            &import.app,
+            &import.operation,
+            &import.request,
+        );
+        ensure!(
+            worlds
+                .delegation
+                .reads
+                .insert(key, import.response.clone())
+                .is_none(),
+            "duplicate delegated read fixture"
+        );
+    }
+    crate::integrations::simulated::seed(&database, &scope, &worlds)?;
     Ok(runtime.with_integrations(crate::integration_host::Host::simulated(&database, &scope)))
 }
 
@@ -1896,11 +2096,27 @@ pub fn verify_with_runner(
     count: u64,
     runner: &Path,
 ) -> Result<Evidence> {
+    verify_with_runner_imports(artifact, directory, seed, count, runner, &[])
+}
+
+pub fn verify_with_runner_imports(
+    artifact: &Path,
+    directory: &Path,
+    seed: u64,
+    count: u64,
+    runner: &Path,
+    imports: &[ImportedQueryFixture],
+) -> Result<Evidence> {
     ensure!(
         (1..=100).contains(&count),
         "verification requires positive bounded cases"
     );
-    let mut campaign = Campaign::new(create(artifact, directory, None)?, None, seed, count)?;
+    let mut campaign = Campaign::new(
+        create_for_with_imports(artifact, directory, None, ACTOR, imports)?,
+        None,
+        seed,
+        count,
+    )?;
     let outcome =
         crate::automation::run(runner, &["exercise", "", &count.to_string()], |request| {
             campaign.effect(request)

@@ -17,6 +17,7 @@ pub mod budget;
 pub mod capabilities;
 pub mod carta;
 pub mod compatibility;
+pub mod credential_declaration;
 pub mod deferrals;
 pub mod delegation;
 pub mod deployment;
@@ -28,19 +29,27 @@ mod host;
 pub mod iap;
 pub mod identity;
 pub mod import;
+pub mod import_codegen;
 pub mod ingress;
 pub mod input_shape;
+pub mod instance_catalog;
 pub mod integration_host;
 pub mod integrations;
 pub mod invocations;
 pub mod journal;
 pub mod json;
 mod live;
+#[allow(dead_code)]
+mod managed_credentials;
 pub mod mcp;
 pub mod migration;
 pub mod numeric;
+// Protocol kernels are staged behind host-only verification and custody wiring.
+#[allow(dead_code)]
+mod oauth;
 pub mod openapi;
 pub mod operation_catalog;
+pub mod operation_contract;
 pub mod operation_metadata;
 pub mod output_schema;
 pub mod packaging;

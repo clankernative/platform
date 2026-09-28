@@ -10,8 +10,13 @@ ops/Runner.roc. Keep Rust capabilities small enough that they do not hide anothe
 recipe. Atomic native operations and mandatory admission/evidence guards remain
 Rust. Update the explicit automation::SOURCES catalog when adding a workflow;
 the workflow source and executable pins are part of the CI build identity.
-Do not add shell, Python, Ruby, or JavaScript automation. This is a local spike,
-not production admission. Never change the sibling day2 workspace.
+Do not add shell, Python, Ruby, or JavaScript automation. The one exception is a
+VM first-boot script (a stack's GCE startup-script, today
+deploy/gke/stacks/qualification-runner/startup.sh and
+deploy/gke/stacks/gitea-instance-ci/startup.sh.tftpl): it runs before any day2
+tooling exists on the machine, so it may be shell. Keep it to installing and
+starting what the VM needs; anything after boot is an ops recipe. This is a local
+spike, not production admission. Never change the sibling day2 workspace.
 
 Persistent models are nominal Roc records. Derive relationships and indexed
 selections from checked Ref(Model) fields, never from naming guesses. Keep one

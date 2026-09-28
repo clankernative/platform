@@ -8,6 +8,11 @@ license.workspace = true
 name = "day2-host"
 path = "src/main.rs"
 
+# Shipped in the distroless runtime image for scheduled off-cluster backups.
+[[bin]]
+name = "day2-backup"
+path = "src/bin/day2-backup.rs"
+
 [dependencies]
 anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
@@ -17,7 +22,13 @@ day2-capabilities = { path = "../day2-capabilities" }
 tempfile = "3.27"
 rusqlite = { version = "=0.40.2", features = ["bundled", "backup"] }
 rustix = { version = "1.1.4", features = ["process"] }
+# The same features day2 already locks (IAP key fetch): blocking + rustls.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 tokio = { version = "1", features = ["rt-multi-thread", "signal"] }
+# Maintenance: read the artifact layer of a digest-pinned app image (no xattr).
+flate2 = "1.1"
+tar = { version = "0.4", default-features = false }
+sha2 = "0.10"
 
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "cookies"] }

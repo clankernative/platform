@@ -1,7 +1,15 @@
 terraform {
-  required_version = ">= 1.11.5"
+  required_version = ">= 1.8.0"
+
+  # Partial backend: pass -backend-config=<instance>/backend/app/<app-id>.hcl
+  # (one prefix per app, e.g. platform/app/<app-id>).
   backend "gcs" {}
+
   required_providers {
+    cloudflare = {
+      source  = "cloudflare/cloudflare"
+      version = "~> 5.0"
+    }
     google = {
       source  = "hashicorp/google"
       version = "~> 6.0"
@@ -11,9 +19,4 @@ terraform {
       version = "~> 2.35"
     }
   }
-}
-provider "google" { project = var.project_id }
-provider "kubernetes" {
-  config_path    = pathexpand(var.kubeconfig_path)
-  config_context = var.kube_context
 }

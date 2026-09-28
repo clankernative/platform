@@ -124,6 +124,7 @@ impl Fixture {
             &self.contract.schema,
             &self.contract.outputs,
             &self.contract.assets,
+            None,
         )?;
         for profile in [&self.stage, &restricted] {
             let output = sandbox::compiler(

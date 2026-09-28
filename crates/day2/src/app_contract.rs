@@ -37,6 +37,8 @@ pub struct Operation {
     pub request_example: String,
     pub response_example: String,
     pub deprecated: bool,
+    #[serde(default)]
+    pub export_version: u32,
     pub execution: Execution,
     pub errors: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -399,6 +401,14 @@ impl Definition {
                 &serde_json::from_str(&definition.response_example)?,
             )?;
             definition.execution.validate(artifact, operation, input)?;
+            ensure!(
+                definition.export_version <= 1,
+                "unsupported cross-app export version: {name}"
+            );
+            ensure!(
+                definition.export_version == 0 || !definition.execution.internal,
+                "internal command cannot be a cross-app export: {name}"
+            );
             definition.validate_required_all_rows(&artifact.schema)?;
         }
         for (path, media) in [
@@ -760,7 +770,7 @@ pub fn modules(
                 &crate::operation_catalog::output_schema(&output.shape),
                 "contract.outputs",
             );
-            source.push_str(&format!("    contract_{name} : AppContract.Product -> Try(Api.Metadata, Str)\n    contract_{name} = |product| {{\n        contract = product.operations.{name}.contract()\n        example = (contract.example)({{}})?\n        request_example = Inputs.{}.encode(example.input)\n        _ = Inputs.{}.decode(request_example)?\n        {execution}\n        Ok({{ intent: {{ target: Api.{}({handle}.{name}), title: contract.title, usage: contract.usage, inputs: {inputs}, outputs: {out}, input_sources: contract.input_sources, follow_ups: contract.follow_ups }}, request_example, response_example: Outputs.{}.encode(example.output), deprecated: contract.deprecated, execution: execution_metadata, required_all_rows: product.operations.{name}.required_all_rows() }})\n    }}\n", operation.input, operation.input, if kind == "command" { "write" } else { "read" }, operation.output));
+            source.push_str(&format!("    contract_{name} : AppContract.Product -> Try(Api.Metadata, Str)\n    contract_{name} = |product| {{\n        contract = product.operations.{name}.contract()\n        example = (contract.example)({{}})?\n        request_example = Inputs.{}.encode(example.input)\n        _ = Inputs.{}.decode(request_example)?\n        {execution}\n        Ok({{ intent: {{ target: Api.{}({handle}.{name}), title: contract.title, usage: contract.usage, inputs: {inputs}, outputs: {out}, input_sources: contract.input_sources, follow_ups: contract.follow_ups }}, request_example, response_example: Outputs.{}.encode(example.output), deprecated: contract.deprecated, execution: execution_metadata, required_all_rows: product.operations.{name}.required_all_rows(), export_version: product.operations.{name}.export_version() }})\n    }}\n", operation.input, operation.input, if kind == "command" { "write" } else { "read" }, operation.output));
         }
         bindings.insert(kind, bound.join(", "));
     }
@@ -771,6 +781,36 @@ pub fn modules(
     source.push_str(&verification);
     source.push_str(&format!("    definition : AppContract.Product -> Try(Api.Definition, Str)\n    definition = |product| Ok({{ operations: [{}], presentation: product.presentation, identities: SchemaSource.identities }})\n", metadata.join(", ")));
     source.push_str(&format!("    {prefix}step : AppContract.Product, Str -> Str\n    {prefix}step = |product, raw| {{\n        if raw == \"app-contract\" {{\n            result = definition(product)\n            empty : Api.Definition\n            empty = {{ operations: [], presentation: product.presentation, identities: SchemaSource.identities }}\n            return match result {{\n                Ok(value) => Json.to_str({{ definition: value, error: \"\" }})\n                Err(error) => Json.to_str({{ definition: empty, error }})\n            }}\n        }}\n        if raw == \"examples\" {{ return Example.encode(product.examples) }}\n        Product.{prefix}step({{ namespace: product.namespace, commands: [{}], queries: [{}], pages: product.pages, properties: product.properties }}, raw)\n    }}\n}}\n", bindings["command"], bindings["query"]));
+    if !catalog.credentials.is_empty() {
+        let families = catalog
+            .credentials
+            .iter()
+            .map(|(name, profile)| {
+                format!(
+                    "{{ registration: \"{name}\", profile: \"{profile}\", id: product.credentials.{name}.metadata().id, grant_mode: product.credentials.{name}.metadata().grant.mode, roots: product.credentials.{name}.metadata().grant.roots.map(|root| \"${{root.operation}}|${{root.input_type}}|${{root.output_type}}\"), lifetime_seconds: product.credentials.{name}.metadata().lifetime_seconds }}"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        source = source.replacen(
+            "        if raw == \"examples\"",
+            &format!(
+                "        if raw == \"credential-contract\" {{ return Json.to_str([{families}]) }}\n        if raw == \"examples\""
+            ),
+            1,
+        );
+        source = source.replacen(
+            "import pf.Api\n",
+            "import pf.Api\nimport pf.Credential\n",
+            1,
+        );
+    } else {
+        source = source.replacen(
+            "        if raw == \"examples\"",
+            "        if raw == \"credential-contract\" { return \"[]\" }\n        if raw == \"examples\"",
+            1,
+        );
+    }
     source = source.replacen("        if raw == \"app-contract\"", "        if raw.starts_with(\"verify:\") {\n            parsed : Try(Api.VerificationRequest, _)\n            parsed = Json.parse(raw.drop_prefix(\"verify:\"))\n            result = parsed.map_err(|_| \"invalid verification request\").and_then(|request| verify(product, request))\n            return match result {\n                Ok(value) => Json.to_str({ value, error: \"\" })\n                Err(error) => Json.to_str({ value: \"\", error })\n            }\n        }\n        if raw == \"app-contract\"", 1);
     let pages = catalog
         .pages
@@ -946,6 +986,37 @@ pub fn modules(
         "{imports}import pf.Api\nimport pf.PageBinding\nimport pf.Property\nimport pf.Example\n{schedule_import}{ingress_import}{redirect_import}AppContract :: [].{{\n    Product : {{ namespace : Str, operations : {{ {} }}, pages : List(PageBinding), properties : List(Property), examples : List(Example), presentation : Api.Presentation{schedule_field}{ingress_field}{redirect_field} }}\n}}\n",
         operation_types.join(", ")
     );
+    let credential_type = format!(
+        "{{ {} }}",
+        catalog
+            .credentials
+            .iter()
+            .map(|(name, profile)| {
+                let nominal = match profile.as_str() {
+                    "client" => "ClientFamily",
+                    "personal" => "PersonalFamily",
+                    _ => unreachable!("checked credential profile"),
+                };
+                format!("{name} : Credential.{nominal}")
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let contract = if catalog.credentials.is_empty() {
+        contract
+    } else {
+        contract
+            .replacen(
+                "import pf.Api\n",
+                "import pf.Api\nimport pf.Credential\n",
+                1,
+            )
+            .replacen(
+                "presentation : Api.Presentation",
+                &format!("presentation : Api.Presentation, credentials : {credential_type}"),
+                1,
+            )
+    };
     for (name, operation) in catalog.commands.iter().chain(catalog.queries.iter()) {
         let start = source
             .find(&format!("    contract_{name} ="))

@@ -182,8 +182,8 @@ step_for_host = |raw| step(raw)
         )?;
     }
     let target = temporary.path().join("admission");
-    admission::prepare(&stage, &target, &schema, &outputs, &images)?;
-    assert!(admission::prepare(&stage, &target, &schema, &outputs, &images).is_err());
+    admission::prepare(&stage, &target, &schema, &outputs, &images, None)?;
+    assert!(admission::prepare(&stage, &target, &schema, &outputs, &images, None).is_err());
     let roc = root.join("../.toolchains/roc").canonicalize()?;
     for (name, _, expected) in fixtures {
         let path = format!("app/{name}.roc");

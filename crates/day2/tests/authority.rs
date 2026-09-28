@@ -471,3 +471,102 @@ fn seeded_text_constraint_property_matches_unicode_and_byte_rules() -> Result<()
     })?;
     Ok(())
 }
+
+#[test]
+fn a_domain_entry_grants_operations_but_never_ownership_or_administration() -> Result<()> {
+    let (operations, schema) = contracts()?;
+    let mut document = policy_json();
+    for name in ["links.list", "links.create", "links.edit"] {
+        document["operations"][name]["actors"] = json!(["domain:wonderly.com", "admin"]);
+    }
+    let policy: Policy = serde_json::from_value(document.clone())?;
+    policy.validate(&operations, &schema)?;
+    policy.validate_domains(Some("wonderly.com"))?;
+    // Validation binds the entry to the installation's verified domain.
+    assert!(policy.validate_domains(None).is_err());
+    assert!(policy.validate_domains(Some("example.com")).is_err());
+
+    let hire = "newhire@wonderly.com";
+    policy.authorize("links.edit", hire)?;
+    for outsider in [
+        "newhire@evil-wonderly.com",
+        "newhire@sub.wonderly.com",
+        "NewHire@wonderly.com",
+        "alice",
+        "svc:links@wonderly.com",
+        "domain:wonderly.com",
+    ] {
+        assert!(
+            policy.authorize("links.edit", outsider).is_err(),
+            "{outsider}"
+        );
+    }
+    assert!(policy.authorize("admin.salaries", hire).is_err());
+    // Row authority is unchanged: members of the domain see their own rows,
+    // under their own address, and only the named admin sees everyone's.
+    assert_eq!(
+        policy.read_scope("links.list", "links", hire)?,
+        RowFilter::Owner {
+            field: "owner".into(),
+            actor: hire.into()
+        }
+    );
+    assert_eq!(
+        policy.read_scope("links.list", "links", "admin")?,
+        RowFilter::All
+    );
+    assert!(
+        policy
+            .read_scope("links.list", "links", "eve@evil-wonderly.com")
+            .is_err()
+    );
+    policy.check_read("links.list", "links", hire, &value(hire, "Mine"))?;
+    assert!(
+        policy
+            .check_read(
+                "links.list",
+                "links",
+                hire,
+                &value("bob@wonderly.com", "Theirs")
+            )
+            .is_err()
+    );
+    policy.check_create("links.create", "links", hire, &value(hire, "Initial"))?;
+    // A row owned by the entry is not a row anybody owns.
+    assert!(
+        policy
+            .check_create(
+                "links.create",
+                "links",
+                hire,
+                &value("domain:wonderly.com", "Initial")
+            )
+            .is_err()
+    );
+
+    // Administrators and both sides of a delegation stay named people.
+    let mut admins = document.clone();
+    admins["admins"] = json!(["domain:wonderly.com"]);
+    let mut authenticated = document.clone();
+    authenticated["delegations"] = json!({"support":{"authenticated":["domain:wonderly.com"],
+        "may_act_as":{"kind":"any_human"},"paths":["request"]}});
+    let mut targets = document.clone();
+    targets["delegations"] = json!({"support":{"authenticated":["support@wonderly.com"],
+        "may_act_as":{"kind":"actors","actors":["domain:wonderly.com"]},"paths":["request"]}});
+    let mut malformed = document;
+    malformed["operations"]["links.list"]["actors"] = json!(["domain:Wonderly.com"]);
+    for (name, refused) in [
+        ("admins", admins),
+        ("delegation authenticated", authenticated),
+        ("delegation targets", targets),
+        ("malformed domain", malformed),
+    ] {
+        assert!(
+            serde_json::from_value::<Policy>(refused)?
+                .validate(&operations, &schema)
+                .is_err(),
+            "{name}"
+        );
+    }
+    Ok(())
+}

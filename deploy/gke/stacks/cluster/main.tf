@@ -1,128 +1,259 @@
-resource "google_project_service" "api" {
-  for_each           = toset(["compute.googleapis.com", "container.googleapis.com", "artifactregistry.googleapis.com", "iap.googleapis.com", "dns.googleapis.com"])
-  service            = each.value
-  disable_on_destroy = false
+# Zonal Standard GKE cluster for day2, its dedicated VPC and one shared node
+# pool.
+#
+# Nodes run Ubuntu: the COS kernel does not enable the Landlock LSM, which the
+# day2 worker sandbox requires. A kubelet podPidsLimit bounds every pod's
+# processes, since day2 apps enforce their process limit per pod.
+#
+# Networking as deployed: VPC-native with fixed secondary ranges, Calico
+# network policy, nodes with external IPs (no Cloud NAT), and a public
+# control-plane IP endpoint without authorized networks. Changing any of that
+# is a separate, reviewed change.
+#
+# Expects artifactregistry, compute, container, iap and secretmanager enabled
+# (the project stack enables them).
+
+locals {
+  workload_pool = "${var.project_id}.svc.id.goog"
+  node_sa_email = "serviceAccount:${google_service_account.nodes.email}"
+
+  # Landlock: see the header.
+  shared_node_image_type = "UBUNTU_CONTAINERD"
 }
-resource "google_compute_network" "cluster" {
-  name                    = var.name
+
+# API enablement moved to the project stack. Forget, never disable.
+removed {
+  from = google_project_service.cluster
+
+  lifecycle {
+    destroy = false
+  }
+}
+
+# Logging to Cloud Logging is no longer optional.
+moved {
+  from = google_project_iam_member.nodes_logging_writer[0]
+  to   = google_project_iam_member.nodes_logging_writer
+}
+
+resource "google_compute_network" "gke" {
+  name                    = var.network_name
+  project                 = var.project_id
   auto_create_subnetworks = false
-  depends_on              = [google_project_service.api]
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
-resource "google_compute_subnetwork" "cluster" {
-  name                     = var.name
-  network                  = google_compute_network.cluster.id
+
+resource "google_compute_subnetwork" "gke" {
+  name                     = var.subnet_name
+  project                  = var.project_id
   region                   = var.region
-  ip_cidr_range            = "10.20.0.0/20"
+  network                  = google_compute_network.gke.id
+  ip_cidr_range            = var.subnet_cidr
   private_ip_google_access = true
+
   secondary_ip_range {
-    range_name    = "pods"
-    ip_cidr_range = "10.24.0.0/14"
+    range_name    = var.pod_range_name
+    ip_cidr_range = var.pod_cidr
   }
+
   secondary_ip_range {
-    range_name    = "services"
-    ip_cidr_range = "10.28.0.0/20"
+    range_name    = var.svc_range_name
+    ip_cidr_range = var.service_cidr
+  }
+
+  lifecycle {
+    prevent_destroy = true
   }
 }
-resource "google_compute_router" "cluster" {
-  name    = var.name
-  network = google_compute_network.cluster.id
-  region  = var.region
-}
-resource "google_compute_router_nat" "cluster" {
-  name                               = var.name
-  router                             = google_compute_router.cluster.name
-  region                             = var.region
-  nat_ip_allocate_option             = "AUTO_ONLY"
-  source_subnetwork_ip_ranges_to_nat = "LIST_OF_SUBNETWORKS"
-  subnetwork {
-    name                    = google_compute_subnetwork.cluster.id
-    source_ip_ranges_to_nat = ["ALL_IP_RANGES"]
-  }
-}
+
+# The display name predates day2; renaming it is a no-risk in-place update
+# left for a later change.
 resource "google_service_account" "nodes" {
-  account_id   = "${var.name}-nodes"
-  display_name = "Day2 GKE nodes"
-  depends_on   = [google_project_service.api]
+  account_id   = var.node_sa_name
+  display_name = "Internal Tools GKE node service account"
+  project      = var.project_id
 }
-resource "google_project_iam_member" "nodes" {
+
+resource "google_project_iam_member" "nodes_artifact_reader" {
   project = var.project_id
-  role    = "roles/container.defaultNodeServiceAccount"
-  member  = "serviceAccount:${google_service_account.nodes.email}"
+  role    = "roles/artifactregistry.reader"
+  member  = local.node_sa_email
 }
-resource "google_artifact_registry_repository" "apps" {
-  repository_id = var.name
-  location      = var.region
-  format        = "DOCKER"
-  depends_on    = [google_project_service.api]
+
+resource "google_project_iam_member" "nodes_logging_writer" {
+  project = var.project_id
+  role    = "roles/logging.logWriter"
+  member  = local.node_sa_email
 }
-resource "google_artifact_registry_repository_iam_member" "pull" {
-  repository = google_artifact_registry_repository.apps.name
-  location   = var.region
-  role       = "roles/artifactregistry.reader"
-  member     = "serviceAccount:${google_service_account.nodes.email}"
+
+resource "google_project_iam_member" "nodes_metric_writer" {
+  project = var.project_id
+  role    = "roles/monitoring.metricWriter"
+  member  = local.node_sa_email
 }
-resource "google_container_cluster" "cluster" {
-  name                     = var.name
+
+resource "google_project_iam_member" "nodes_monitoring_viewer" {
+  project = var.project_id
+  role    = "roles/monitoring.viewer"
+  member  = local.node_sa_email
+}
+
+resource "google_project_iam_member" "nodes_resource_metadata_writer" {
+  project = var.project_id
+  role    = "roles/stackdriver.resourceMetadata.writer"
+  member  = local.node_sa_email
+}
+
+resource "google_container_cluster" "primary" {
+  name                     = var.cluster_name
+  project                  = var.project_id
   location                 = var.zone
-  network                  = google_compute_network.cluster.id
-  subnetwork               = google_compute_subnetwork.cluster.id
+  network                  = google_compute_network.gke.id
+  subnetwork               = google_compute_subnetwork.gke.id
   remove_default_node_pool = true
   initial_node_count       = 1
-  deletion_protection      = var.deletion_protection
   networking_mode          = "VPC_NATIVE"
-  datapath_provider        = "ADVANCED_DATAPATH"
-  enable_shielded_nodes    = true
-  release_channel { channel = "REGULAR" }
-  ip_allocation_policy {
-    cluster_secondary_range_name  = "pods"
-    services_secondary_range_name = "services"
+
+  # The live cluster was created with false. prevent_destroy below guards it;
+  # turning this on is a state-only update left for a later change.
+  deletion_protection = false
+
+  logging_config {
+    enable_components = ["SYSTEM_COMPONENTS", "WORKLOADS"]
   }
-  private_cluster_config {
-    enable_private_nodes    = true
-    enable_private_endpoint = false
-    master_ipv4_cidr_block  = "172.16.0.0/28"
+
+  release_channel {
+    channel = "STABLE"
   }
-  master_authorized_networks_config {
-    dynamic "cidr_blocks" {
-      for_each = var.admin_cidrs
-      content { cidr_block = cidr_blocks.value }
+
+  maintenance_policy {
+    daily_maintenance_window {
+      start_time = var.daily_maintenance_window_start_time_utc
     }
   }
-  workload_identity_config { workload_pool = "${var.project_id}.svc.id.goog" }
-  addons_config {
-    gce_persistent_disk_csi_driver_config { enabled = true }
+
+  workload_identity_config {
+    workload_pool = local.workload_pool
   }
-  depends_on = [google_project_iam_member.nodes]
+
+  ip_allocation_policy {
+    cluster_secondary_range_name  = var.pod_range_name
+    services_secondary_range_name = var.svc_range_name
+  }
+
+  addons_config {
+    gce_persistent_disk_csi_driver_config {
+      enabled = true
+    }
+
+    dns_cache_config {
+      enabled = true
+    }
+
+    gke_backup_agent_config {
+      enabled = true
+    }
+
+    network_policy_config {
+      disabled = false
+    }
+  }
+
+  network_policy {
+    enabled  = true
+    provider = "CALICO"
+  }
+
+  secret_manager_config {
+    enabled = true
+  }
+
+  resource_labels = var.cluster_labels
+
+  lifecycle {
+    prevent_destroy = true
+  }
+
+  depends_on = [
+    google_project_iam_member.nodes_artifact_reader,
+    google_project_iam_member.nodes_logging_writer,
+    google_project_iam_member.nodes_metric_writer,
+    google_project_iam_member.nodes_monitoring_viewer,
+    google_project_iam_member.nodes_resource_metadata_writer,
+  ]
 }
-resource "google_container_node_pool" "apps" {
-  name       = "apps"
-  cluster    = google_container_cluster.cluster.name
+
+resource "google_container_node_pool" "shared" {
+  name       = var.node_pool_name
+  project    = var.project_id
+  cluster    = google_container_cluster.primary.name
   location   = var.zone
-  node_count = var.node_count
+  node_count = var.shared_node_min_count
+
+  lifecycle {
+    ignore_changes = [
+      node_count,
+    ]
+  }
+
+  autoscaling {
+    min_node_count = var.shared_node_min_count
+    max_node_count = var.shared_node_max_count
+  }
+
   management {
     auto_repair  = true
     auto_upgrade = true
   }
+
+  # Replace one node at a time and bring its replacement up first. The 100 GB
+  # boot disk keeps image churn below kubelet DiskPressure thresholds.
+  upgrade_settings {
+    strategy        = "SURGE"
+    max_surge       = 1
+    max_unavailable = 0
+  }
+
   node_config {
-    machine_type    = var.machine_type
-    image_type      = "UBUNTU_CONTAINERD"
-    service_account = google_service_account.nodes.email
-    oauth_scopes    = ["https://www.googleapis.com/auth/cloud-platform"]
+    machine_type    = var.shared_node_machine_type
+    image_type      = local.shared_node_image_type
     disk_size_gb    = 100
     disk_type       = "pd-balanced"
-    metadata        = { disable-legacy-endpoints = "true" }
-    workload_metadata_config { mode = "GKE_METADATA" }
-    shielded_instance_config {
-      enable_secure_boot          = true
-      enable_integrity_monitoring = true
+    service_account = google_service_account.nodes.email
+
+    metadata = {
+      disable-legacy-endpoints = "true"
     }
-    kubelet_config { pod_pids_limit = var.pod_pids_limit }
-    linux_node_config { cgroup_mode = "CGROUP_MODE_V2" }
+
+    labels = {
+      pool       = var.node_pool_name
+      managed_by = "opentofu"
+    }
+
+    # Many file-watching workloads share one host UID per node.
+    linux_node_config {
+      sysctls = {
+        "fs.inotify.max_user_instances" = tostring(var.shared_node_inotify_max_user_instances)
+        "fs.inotify.max_user_watches"   = tostring(var.shared_node_inotify_max_user_watches)
+      }
+    }
+
+    # With a kubelet_config block present, CFS quota enforcement must stay on:
+    # CPU limits, and workloads that read their cpu.max, depend on it.
+    kubelet_config {
+      pod_pids_limit = var.shared_node_pod_pids_limit
+      cpu_cfs_quota  = true
+    }
+
+    gvnic {
+      enabled = true
+    }
+
+    workload_metadata_config {
+      mode = "GKE_METADATA"
+    }
   }
-  depends_on = [google_compute_router_nat.cluster, google_artifact_registry_repository_iam_member.pull]
 }
-output "cluster_name" { value = google_container_cluster.cluster.name }
-output "network" { value = google_compute_network.cluster.self_link }
-output "subnetwork" { value = google_compute_subnetwork.cluster.self_link }
-output "registry" { value = "${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.apps.repository_id}" }
-output "pod_pids_limit" { value = var.pod_pids_limit }

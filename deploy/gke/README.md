@@ -1,16 +1,21 @@
 # Company internal tools on GKE
 
-These public OpenTofu roots create a dedicated Standard GKE cluster, then one
-IAP-protected edge and single-replica SQLite workload per app. All company inputs
+These public OpenTofu roots create a dedicated project foundation and Standard
+GKE cluster, then one IAP-protected edge and single-replica SQLite workload per
+app. They are the whole control plane of an instance: nothing is shared with
+another platform's infrastructure code. All company inputs
 come from a separate private instance repository; start with the
 [synthetic template](../../examples/instance/README.md).
 
 | Root | Ownership |
 | --- | --- |
-| [cluster](stacks/cluster/main.tf) | Dedicated VPC, private nodes, NAT, GKE Dataplane V2, node identity, Artifact Registry |
-| [app-edge](stacks/app-edge/main.tf) | Namespace, service account, retained disk, quotas, Service, IAP BackendConfig, certificate, DNS, Ingress, network policy and contract |
-| [day2-app](stacks/day2-app/main.tf) | Instance ConfigMap and one-replica StatefulSet |
+| [project](stacks/project/main.tf) | APIs, the OpenTofu state bucket and its per-prefix IAM, storage audit logs, the DNS provider token's secret |
+| [cluster](stacks/cluster/main.tf) | Dedicated VPC, zonal Standard cluster with Workload Identity and Calico network policy, one Ubuntu node pool with a pod PID limit, node identity |
+| [tenancy](stacks/tenancy/main.tf) | Retained SQLite storage and snapshot classes, admission policies for app namespaces (including the backup Job service account exception) |
+| [app-edge](stacks/app-edge/main.tf) | Per app: namespace, runtime service account, retained disk, quotas, Service, IAP BackendConfig, HTTPS redirect, managed certificate, static IP, Cloudflare DNS, Ingress, network policy, image repository, workload state bucket, GKE backup plan, off-cluster backup bucket with its object-create-only Workload Identity uploader, and the platform contract |
+| [day2-app](stacks/day2-app/main.tf) | Instance ConfigMap, one-replica StatefulSet and the hourly off-cluster backup CronJob |
 | [qualification-runner](stacks/qualification-runner/main.tf) | Optional x86_64 native Docker VM, off by default, private IP and IAP SSH |
+| [gitea-instance-ci](stacks/gitea-instance-ci/main.tf) | Optional plan-on-PR / apply-on-main CI for an instance repository on Gitea |
 
 The cluster example is zonal and uses fixed non-overlapping private ranges in a
 new dedicated VPC. It is a reference deployment, not a multi-zone HA service.
@@ -34,8 +39,10 @@ required deployment step, not a claim supplied by the source tests.
    bucket-level access, public-access prevention and object versioning. Grant only
    the provisioning identity bucket-scoped object access. State contains private
    configuration. Keep backend configuration and all tfvars in the private repo.
-4. Create a public Cloud DNS managed zone for the app subdomain and delegate it
-   at the parent zone. Put its name and real app domain in private edge tfvars.
+4. The app domain's zone is on Cloudflare. Create an API token scoped to DNS
+   edit on that zone, store it in the project's Secret Manager secret the
+   project stack creates, and put the zone id and app domain in the private
+   edge tfvars. Applies read the token into the process environment only.
 5. Configure Google Auth Platform branding/audience for the organization's IAP
    use. This stack uses the Google-managed OAuth client available with GKE
    1.29.4-gke.1043000 and later. It requires no OAuth client secret in Terraform.
@@ -57,10 +64,11 @@ tofu -chdir=deploy/gke/stacks/cluster apply /private/instance/cluster.tfplan
 gcloud container clusters get-credentials CLUSTER --zone ZONE --project PROJECT
 ```
 
-The Kubernetes API permits only `admin_cidrs`. Use your actual operator egress
-address; the template's TEST-NET address intentionally cannot work. Nodes have
-no public addresses and use NAT for external HTTPS. The node pool uses Ubuntu,
-cgroup v2 and an explicit `pod_pids_limit` (1024 by default). Verify the actual
+Apply `project` first, then `cluster`, then `tenancy`, each with its own
+backend prefix. The cluster's control-plane endpoint is public and its nodes
+have external addresses (no Cloud NAT); making both private is a separate,
+planned change. The node pool uses Ubuntu, cgroup v2 and an explicit
+`pod_pids_limit` (1024 or more; GKE's minimum). Verify the actual
 kernel with the probe before deploying. Do not substitute COS or Autopilot and
 assume containment is equivalent.
 
@@ -81,13 +89,12 @@ plan/apply `app-edge` again. It reads the backend's numeric ID, grants IAP acces
 and publishes the exact `/projects/NUMBER/global/backendServices/ID` audience.
 Wait for the managed certificate to become Active and DNS to resolve. Initial
 provisioning may take tens of minutes; inspect Ingress events for controller errors.
-The reference disables HTTP immediately; if a GKE version requires a staged TLS
-bootstrap, resolve certificate provisioning before deploying an app, and leave
-HTTP disabled in the final plan.
+A FrontendConfig redirects HTTP to HTTPS.
 
-The network policy allows only GFE health/proxy ranges to port 8080, kube-dns, and
-public IPv4 HTTPS egress (including IAP's public signing keys). It excludes private
-and metadata ranges. Kubernetes NetworkPolicy cannot express an FQDN allowlist;
+The network policy denies everything by default and allows only GFE health/proxy
+ranges to port 8080, kube-dns, the GKE metadata server (Workload Identity), and
+public IPv4 egress (including IAP's public signing keys); cluster ranges are
+excluded. Kubernetes NetworkPolicy cannot express an FQDN allowlist;
 companies needing narrower external egress must supply a controlled proxy. No
 pod service account token or cloud IAM role is granted to the runtime.
 
@@ -122,6 +129,28 @@ Initialize, plan and apply `day2-app` with its separate backend. Confirm rollout
 readiness, authenticated access, denial for an unauthorized account, app operation
 authority and rejection of unsigned direct requests. Retain this evidence privately.
 
+## Instance CI on Gitea
+
+`stacks/gitea-instance-ci` gives an instance configuration repository on Gitea
+plan-on-pull-request, apply-on-main CI with no key:
+
+- a dedicated runner VM (no external IP; SSH through IAP), registered to that
+  one repository. Its controller is act_runner's Docker-in-Docker build, run
+  privileged as in the fleet runner profile; jobs run in its inner daemon in a
+  pinned slim image, with no Docker socket, privileges or host volumes;
+- a workload identity provider for workflow tokens from `git-oidc`, which
+  trusts only the repository's native Gitea ids and maps a pull-request run of
+  the plan workflow to a read-only plan identity it creates, and a
+  `push`/`workflow_dispatch` run of the apply workflow on `refs/heads/main` to
+  the instance's apply identity. Anything else maps to no role.
+
+Before the first apply, create the runner registration secret (the root reads
+it once) and enable Actions on the repository. `git-oidc` issues tokens for
+pull-request runs only for an explicitly trusted audience and workflow path, so
+the provider's canonical audience and the plan workflow must also be listed in
+its `trustedPullRequestPolicies`; main-branch runs need no entry. Workflows use
+the auth action's default audience, which is the provider's canonical URL.
+
 ## Updates, rollback and data recovery
 
 Keep platform, app source, artifacts, provider locks and image digests versioned
@@ -139,8 +168,65 @@ For tooling against the PVC, scale the StatefulSet to zero and wait for terminat
 before attaching a trusted maintenance pod with the tooling image. Never run two
 servers or maintenance writers against the same state. Remove maintenance pods
 before restoring the one-replica workload. The runtime image intentionally lacks
-operator tools. Backup/restore Jobs are operator-owned, not automatically scheduled
-by this reference stack.
+operator tools other than the read-only `day2-inspect` and the online
+`day2-backup`. Online backups are scheduled (below); restore is an operator
+procedure.
+
+### Maintenance: `day2 platform maintain`
+
+`day2 platform maintain OPERATION REQUEST_JSON` runs day2's own operations
+against a stopped app. `ops/Maintain.roc` orders the steps; the Rust session
+behind its `maintenance-*` capabilities (`crates/day2-ops/src/maintenance.rs`)
+does every native action with `kubectl` and the registry API. Operations:
+
+| Operation | What it does | App afterwards |
+| --- | --- | --- |
+| `inspect` | Reads the active authority stamp and policy | restored |
+| `backup` | Verified backup, copied to `~/day2-backups/<namespace>/<stamp>/` | restored |
+| `authority-apply` | Backup, then applies the policy in the current ConfigMap, after a typed `apply` | restored |
+| `activate` | Backup, migration plan, typed `activate`, migration, fresh activation of the target artifact | stopped: apply day2-app for the new image next |
+
+The request file names the target exactly:
+
+```json
+{
+  "namespace": "app-go", "statefulset": "day2-go", "configmap": "day2-go-instance",
+  "app": "go", "pvc": "data",
+  "app_image": "REGISTRY/go/golinks@sha256:...", "artifact_id": "64 hex",
+  "tooling_image": "REGISTRY/go/day2-tooling@sha256:...",
+  "operator": "you@example.com",
+  "pod_label": {"key": "internal-tools.wonderly.io/service", "value": "background"},
+  "request_id": "release-2026-09-26",
+  "target": {"instance": "desired-instance.json", "app_image": "REGISTRY/go/golinks@sha256:...", "artifact_id": "64 hex"}
+}
+```
+
+`request_id` is for `authority-apply` and `activate`; `target` (the desired
+instance, e.g. rendered from the day2-app plan) is for `activate` only;
+`backup_dir` and `"yes": true` (skip the typed confirmation, recorded) are
+optional. The tooling image must come from the same platform build as the app's
+artifact.
+
+What the session guarantees, whatever the recipe does:
+
+- The maintenance pod ([k8s/maintenance-pod.yaml](k8s/maintenance-pod.yaml),
+  rendered from a fixed placeholder set) is removed on every exit, including
+  Ctrl-C; its one-hour deadline is the backstop.
+- Before the migration fence, any failure restores the StatefulSet's replicas on
+  its original image. After the fence the old image is never restarted on the
+  migrated volume; the session prints the two ways forward instead.
+- The fence needs a verified local backup, a migration plan and a confirmation
+  from the same session, and `migration apply` refuses to run without it.
+- Artifacts come from the digest-pinned app images: manifest, layer, artifact
+  identity and worker digests are checked, and links or devices are refused.
+- The local backup copy must match a SHA-256 manifest computed in the pod; a
+  mismatching copy is renamed `<stamp>.INCOMPLETE` and refused.
+- One session per namespace; the running image must equal `app_image`.
+- Every step is journalled to `~/day2-backups/<namespace>/<stamp>.session.json`
+  before it runs, for recovery after the operator's machine dies mid-session.
+
+`deploy/gke/scripts/day2-maintain.sh` remains until this command has run a
+production activation; it will then be removed.
 
 To roll back code, plan the prior qualified image and configuration. After a schema
 migration, first prove backward compatibility or restore the matching backup;
@@ -148,6 +234,126 @@ never point an old artifact at incompatible state. Node upgrades require rerunni
 the probe and a representative application acceptance campaign. Namespace/PVC
 `prevent_destroy`, Retain storage and cluster deletion protection guard accidents;
 removing them is an explicit decommissioning change after verified backups.
+
+## Scheduled off-cluster backups
+
+`day2-app` creates the CronJob `day2-<app>-backup` (schedule `backup_schedule`,
+default `17 * * * *`, UTC; `concurrencyPolicy: Forbid`, a 10-minute start
+deadline, a 30-minute run deadline, one retry, three successful and three failed
+Jobs kept). Each run:
+
+1. is scheduled only onto the app pod's node (required pod affinity on
+   `app.kubernetes.io/name=day2-<app>`), because the state disk is
+   ReadWriteOnce. While the app is stopped, for example during maintenance, the
+   run stays Pending and fails at its deadline instead of taking the volume;
+2. runs one container of the StatefulSet's exact app image:
+   `/usr/local/bin/day2-backup /srv/day2/instance.json <app_id> /backup/snapshot
+   --upload-gcs <project>-<app>-backups --object-prefix <app_id>`, with the same
+   instance ConfigMap (`subPath`), state volume and baked artifact. It takes an
+   online SQLite snapshot beside the serving pod without its lock and verifies
+   the bundle ([Linux guide](../linux-sqlite/README.md#online-backup-in-the-runtime-image));
+3. in the same process, takes the pod's access token from the GKE metadata
+   server and uploads every file of the verified bundle as its own object
+   `<app_id>/<UTC yyyymmddThhmmssZ>/<relative path>` (the binary appends the
+   timestamp), streaming each file as a JSON API media upload with
+   `ifGenerationMatch=0`, so an existing object is never replaced. Each
+   response must name the object with the file's exact size. Only then is
+   `<app_id>/<stamp>/COMPLETE` written, listing every object, its size and the
+   manifest's sha256. Nothing is retried; any failure fails the Job and leaves
+   a prefix without `COMPLETE`, which is never a backup.
+
+The container runs as 10001 with a read-only root, no capabilities,
+`RuntimeDefault` seccomp and no mounted token; there is no shell and no second
+image in the pod. The pod runs as the Kubernetes
+service account `backup` (labels `internal-tools.wonderly.io/service=backup`
+plus the app's o11y label), which the tenancy policy admits only for such Jobs
+with token automount off. `app-edge` binds it through Workload Identity to the
+Google service account `<app>-backup`, whose only grant is
+`roles/storage.objectCreator` on the backup bucket: it cannot list, read,
+overwrite or delete backups. The bucket has uniform access, enforced public
+access prevention, an **unlocked** retention policy of
+`offsite_backup_retention_days` (default 30; nobody can delete or replace an
+object earlier, and the policy can still be shortened or removed by an
+administrator) and a lifecycle rule deleting objects one day later. The bucket
+has `prevent_destroy`. Principals in `offsite_backup_readers` get
+`roles/storage.objectViewer` to download backups.
+
+Watch for failed `day2-<app>-backup` Jobs (`kubectl -n app-<app> get jobs`) and
+for the age of the newest `COMPLETE` object; a missed schedule creates no Job.
+Each hourly prefix holds the full, uncompressed bundle (databases and
+artifact), so storage is about 24 × 30 bundles at the default settings.
+
+Wire it by applying `app-edge` first and passing its `backup_bucket` output to
+`day2-app`'s required `backup_bucket` variable. Both the CronJob and the
+`backup` service account are platform-owned objects in the app namespace
+(`forbid-platform-resource-mutation`, `forbid-app-service-account-mutation`),
+so the identities in the tenancy stack's `platform_automation_usernames` apply
+them.
+
+### Restore from an off-cluster backup
+
+A downloaded backup is verified and restored only by the tooling image of the
+same platform build (`day2 platform restore` verifies the bundle, then writes a
+new directory). Restore never activates historical grants: it disables them,
+rotates browser sessions and signing secrets, and requires a fresh authority
+activation.
+
+Pick a backup whose prefix has `COMPLETE`, download the whole prefix, and
+check it against the marker before trusting it (an x86_64 Docker host; the
+restore itself runs with no network):
+
+```console
+gcloud storage ls gs://PROJECT-APP-backups/APP_ID/          # one prefix per run
+gcloud storage cat gs://PROJECT-APP-backups/APP_ID/STAMP/COMPLETE
+mkdir restore && gcloud storage cp -r gs://PROJECT-APP-backups/APP_ID/STAMP restore/
+mv restore/STAMP restore/snapshot
+```
+
+`COMPLETE` lists every object name and byte count, and the sha256 of
+`backup.json`. Require that the downloaded tree has exactly those files and
+sizes (plus `COMPLETE` itself) and that `sha256sum restore/snapshot/backup.json`
+matches (the marker's value is `sha256:<hex>`). A prefix without `COMPLETE` is
+an interrupted upload: do not use it. Then verify and restore with the tooling
+image:
+
+```console
+rm restore/snapshot/COMPLETE
+docker run --rm --network none --user "$(id -u):$(id -g)" -v "$PWD/restore:/work" \
+  --entrypoint /workspace/platform/cli/day2 TOOLING_IMAGE@sha256:... \
+  platform restore /work/snapshot /work/restored
+```
+
+`restored/` then holds `instance.json` (grants cleared), `artifacts/<id>/` and
+`.state/` with the app database and provider stores. Exercise it in a separate
+private environment before relying on it.
+
+Restoring into the app's own volume replaces its current data, so take a fresh
+backup first (`day2 platform maintain backup REQUEST_JSON`, which also copies
+it off-cluster). Then, with the app stopped
+(`kubectl -n NS scale statefulset day2-APP --replicas=0`, wait for the pod to
+terminate; backup runs cannot start without it), attach the maintenance pod
+from [k8s/maintenance-pod.yaml](k8s/maintenance-pod.yaml) rendered exactly as
+`day2-maintain.sh` renders it, and in it:
+
+1. `kubectl cp` the downloaded, checked `snapshot/` to `/srv/day2/restore-in`, the current
+   desired `instance.json` (ConfigMap `day2-APP-instance`) to
+   `/srv/day2/instance.json`, and the running artifact (as `day2-maintain.sh`
+   fetches it) to `/srv/day2/artifacts/ARTIFACT_ID`;
+2. `/workspace/platform/cli/day2 platform restore /srv/day2/restore-in /srv/day2/restored`;
+3. remove the app's current `.state/APP.sqlite`, `.state/APP.sqlite-wal` and
+   `.state/APP.sqlite-shm` (and the same three files of every provider store in
+   `restored/.state/`), then copy `restored/.state/*` into `/srv/day2/.state/`.
+   A stale `-wal` left beside a restored database would be replayed into it;
+4. activate current authority on the restored database with the `day2-host`
+   workflow `authority activate /srv/day2/instance.json APP
+   /srv/day2/artifacts/ARTIFACT_ID OPERATOR EXPECTED_STAMP REQUEST_ID`, where
+   `EXPECTED_STAMP` is the restored database's stamp from `authority inspect`
+   (both as `day2-maintain.sh` invokes them; always check `.ok`);
+5. delete the maintenance pod and scale the StatefulSet back to one replica.
+
+Linux qualification exercises this restore-then-fresh-activation sequence
+(`linux-runtime-restore`); `day2-maintain.sh` has no `restore` operation yet,
+and this in-cluster procedure has not been exercised on GKE.
 
 ## The rendered instance.json
 
@@ -173,6 +379,9 @@ Several fields are fixed or seeded once:
 
 - `installation`, `environment` and the app key are fixed after the first
   start.
+- Readers, writers and operation actors are lowercase e-mail addresses, or
+  `domain:<hosted_domain>` for everyone at the domain IAP verifies. The root
+  refuses any other `domain:` entry, as day2 does.
 - Readers, writers and authority are copied into the app's database
   on the first start only. Later changes need explicit activation (`day2
   activate`).

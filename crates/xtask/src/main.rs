@@ -139,6 +139,7 @@ fn snapshot(
                         "Commands.roc",
                         "Reads.roc",
                         "AppContract.roc",
+                        "ImportedContracts.roc",
                         "Registry.roc",
                     ]
                     .contains(&name.as_str()))
@@ -163,7 +164,12 @@ fn build(root: &Path, app: &Path) -> Result<PathBuf> {
 }
 
 fn build_with_overrides(root: &Path, app: &Path, overrides: Option<&Path>) -> Result<PathBuf> {
-    build_recipe(root, app, overrides, None)
+    build_recipe(root, app, overrides, None, None)
+}
+
+struct BuildImportContext {
+    instance: PathBuf,
+    lock: PathBuf,
 }
 
 fn build_recipe(
@@ -171,6 +177,7 @@ fn build_recipe(
     app: &Path,
     overrides: Option<&Path>,
     isolated_job: Option<&Path>,
+    imports: Option<&BuildImportContext>,
 ) -> Result<PathBuf> {
     let runner = if let Some(job) = isolated_job {
         for (name, expected) in day2::automation::SOURCES {
@@ -183,7 +190,7 @@ fn build_recipe(
     } else {
         workflows::build(root)?
     };
-    build_native::execute(root, app, overrides, isolated_job, &runner)
+    build_native::execute(root, app, overrides, isolated_job, imports, &runner)
 }
 
 fn main() -> Result<()> {
@@ -388,16 +395,151 @@ fn main() -> Result<()> {
                 &isolated_app.context("isolated app root")?,
                 None,
                 Some(root.parent().context("isolated workspace parent")?),
+                None,
             )?;
         }
         "build" => {
-            build(
-                &root,
-                &args
-                    .next()
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| root.join("examples/reports")),
-            )?;
+            let app = args
+                .next()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| root.join("examples/reports"));
+            let context = match args.next() {
+                None => None,
+                Some(flag) => {
+                    ensure!(
+                        flag == "--instance",
+                        "usage: xtask build APP [--instance INSTANCE_JSON --imports IMPORT_LOCK_JSON]"
+                    );
+                    let instance = PathBuf::from(args.next().context("missing build instance")?);
+                    ensure!(
+                        args.next().as_deref() == Some("--imports"),
+                        "missing --imports build lock"
+                    );
+                    let lock = PathBuf::from(args.next().context("missing build import lock")?);
+                    ensure!(args.next().is_none(), "unexpected build argument");
+                    Some(BuildImportContext { instance, lock })
+                }
+            };
+            build_recipe(&root, &app, None, None, context.as_ref())?;
+        }
+        "catalog-candidate" => {
+            let instance = PathBuf::from(
+                args.next()
+                    .context("usage: xtask catalog-candidate INSTANCE_JSON")?,
+            );
+            ensure!(
+                args.next().is_none(),
+                "usage: xtask catalog-candidate INSTANCE_JSON"
+            );
+            let catalog = day2::instance_catalog::CandidateCatalog::from_instance_file(&instance)?;
+            println!("{}", serde_json::to_string_pretty(&catalog)?);
+        }
+        "catalog-pin" => {
+            let instance = PathBuf::from(
+                args.next()
+                    .context("usage: xtask catalog-pin INSTANCE_JSON OPERATION...")?,
+            );
+            let operations = args.collect::<Vec<_>>();
+            let catalog = day2::instance_catalog::CandidateCatalog::from_instance_file(&instance)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&catalog.pin(&operations)?)?
+            );
+        }
+        "catalog-resolve" => {
+            let instance = PathBuf::from(
+                args.next()
+                    .context("usage: xtask catalog-resolve INSTANCE_JSON IMPORT_LOCK_JSON")?,
+            );
+            let lock = PathBuf::from(
+                args.next()
+                    .context("usage: xtask catalog-resolve INSTANCE_JSON IMPORT_LOCK_JSON")?,
+            );
+            ensure!(
+                args.next().is_none() && fs::metadata(&lock)?.len() <= 1_048_576,
+                "import lock byte budget or usage"
+            );
+            let lock: day2::instance_catalog::ImportLock = day2::json::decode(&fs::read(lock)?)?;
+            let catalog = day2::instance_catalog::CandidateCatalog::from_instance_file(&instance)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&catalog.resolve(&lock)?)?
+            );
+        }
+        "catalog-check-consumers" => {
+            let instance = PathBuf::from(args.next().context(
+                "usage: xtask catalog-check-consumers INSTANCE_JSON CONSUMER_LOCKS_JSON",
+            )?);
+            let locks = PathBuf::from(args.next().context(
+                "usage: xtask catalog-check-consumers INSTANCE_JSON CONSUMER_LOCKS_JSON",
+            )?);
+            ensure!(
+                args.next().is_none() && fs::metadata(&locks)?.len() <= 1_048_576,
+                "consumer locks byte budget or usage"
+            );
+            let locks: BTreeMap<String, day2::instance_catalog::ImportLock> =
+                day2::json::decode(&fs::read(locks)?)?;
+            let catalog = day2::instance_catalog::CandidateCatalog::from_instance_file(&instance)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&catalog.check_consumers(&locks)?)?
+            );
+        }
+        "catalog-active" => {
+            let journal = PathBuf::from(args.next().context(
+                "usage: xtask catalog-active RELEASE_JOURNAL ARTIFACT_STORE COMPANY ENVIRONMENT",
+            )?);
+            let store = PathBuf::from(args.next().context(
+                "usage: xtask catalog-active RELEASE_JOURNAL ARTIFACT_STORE COMPANY ENVIRONMENT",
+            )?);
+            let company: day2_control::Name = args.next().context(
+                "usage: xtask catalog-active RELEASE_JOURNAL ARTIFACT_STORE COMPANY ENVIRONMENT",
+            )?.try_into()?;
+            let environment: day2_control::Name = args.next().context(
+                "usage: xtask catalog-active RELEASE_JOURNAL ARTIFACT_STORE COMPANY ENVIRONMENT",
+            )?.try_into()?;
+            ensure!(
+                args.next().is_none() && fs::metadata(&journal)?.is_file(),
+                "release journal or usage"
+            );
+            let control = day2_control::journal::Journal::open(&journal)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&control.active_catalog(
+                    &company,
+                    &environment,
+                    &store
+                )?)?
+            );
+        }
+        "catalog-release-candidate" => {
+            let journal = PathBuf::from(args.next().context(
+                "usage: xtask catalog-release-candidate RELEASE_JOURNAL ARTIFACT_STORE RELEASE_ID [INSTANCE]",
+            )?);
+            let store = PathBuf::from(args.next().context(
+                "usage: xtask catalog-release-candidate RELEASE_JOURNAL ARTIFACT_STORE RELEASE_ID [INSTANCE]",
+            )?);
+            let id: day2_control::Digest = args.next().context(
+                "usage: xtask catalog-release-candidate RELEASE_JOURNAL ARTIFACT_STORE RELEASE_ID [INSTANCE]",
+            )?.try_into()?;
+            let instance = args.next().map(PathBuf::from);
+            ensure!(
+                args.next().is_none() && fs::metadata(&journal)?.is_file(),
+                "release journal or usage"
+            );
+            let control = day2_control::journal::Journal::open(&journal)?;
+            let approved = control.load_approved_release(&id)?;
+            let candidate = if let Some(instance) = instance {
+                let now_ms = i64::try_from(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)?
+                        .as_millis(),
+                )?;
+                control.candidate_catalog_with_instance(&approved, &store, &instance, now_ms)?
+            } else {
+                control.candidate_catalog(&approved, &store)?
+            };
+            println!("{}", serde_json::to_string_pretty(&candidate)?);
         }
         "build-receipt" => {
             let source = PathBuf::from(

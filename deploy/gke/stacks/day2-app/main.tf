@@ -125,6 +125,11 @@ resource "kubernetes_config_map_v1" "instance" {
     }
 
     precondition {
+      condition     = alltrue([for actor in concat(var.readers, var.writers) : !startswith(actor, "domain:") || actor == "domain:${var.hosted_domain}"])
+      error_message = "A domain: entry in readers or writers must be exactly domain:${var.hosted_domain}. Day2 admits a domain only when it is the hosted_domain its identity provider verifies, and refuses the instance otherwise."
+    }
+
+    precondition {
       condition     = try(var.authority.version == 1 && length(keys(var.authority.operations)) > 0, false)
       error_message = "authority must be a version 1 day2 authority policy that lists the artifact's operations; the placeholder has not been replaced."
     }
@@ -369,5 +374,216 @@ resource "kubernetes_stateful_set_v1" "day2" {
   timeouts {
     create = "15m"
     update = "15m"
+  }
+}
+
+# --- Scheduled off-cluster backup -------------------------------------------
+# Every run is one container of the app's own image running day2-backup: an
+# online snapshot beside the serving pod, without its lock, verified (the same
+# native backup and verification as `day2 platform backup`), then uploaded file
+# by file to the app-edge backup bucket under <app_id>/<UTC stamp>/ with a
+# COMPLETE marker written last. The uploader identity (Workload Identity via
+# the GKE metadata server; no key, no mounted token) may only create objects,
+# and every upload uses ifGenerationMatch=0. The state PVC is ReadWriteOnce, so
+# the pod must run on the app pod's node: while the app is stopped
+# (maintenance) a run stays Pending and fails at its deadline instead of
+# competing for the volume.
+
+locals {
+  backup_name = "${local.workload_name}-backup"
+  # Outside the Service selector (the required label says backup, not app) and
+  # outside the StatefulSet's app.kubernetes.io/name, which the maintenance
+  # procedure uses to find the app's pods.
+  backup_labels = merge(var.extra_pod_labels, local.contract_pod_labels, {
+    (local.required_label_key)     = "backup"
+    "app.kubernetes.io/name"       = local.backup_name
+    "app.kubernetes.io/component"  = "backup"
+    "app.kubernetes.io/managed-by" = "opentofu"
+    "app.kubernetes.io/part-of"    = "day2"
+  })
+  backup_output = "/backup"
+  # day2-backup appends /<UTC yyyymmddThhmmssZ> to the object prefix itself.
+  backup_args = [
+    local.instance_path, var.app_id, "${local.backup_output}/snapshot",
+    "--upload-gcs", var.backup_bucket,
+    "--object-prefix", var.app_id,
+  ]
+}
+
+resource "kubernetes_cron_job_v1" "backup" {
+  metadata {
+    name      = local.backup_name
+    namespace = var.namespace
+    labels    = local.backup_labels
+  }
+
+  spec {
+    schedule                      = var.backup_schedule
+    timezone                      = "Etc/UTC"
+    concurrency_policy            = "Forbid"
+    starting_deadline_seconds     = var.backup_starting_deadline_seconds
+    successful_jobs_history_limit = 3
+    failed_jobs_history_limit     = 3
+    suspend                       = false
+
+    job_template {
+      metadata {
+        labels = local.backup_labels
+      }
+
+      spec {
+        backoff_limit           = 1
+        active_deadline_seconds = var.backup_active_deadline_seconds
+
+        template {
+          metadata {
+            labels = local.backup_labels
+          }
+
+          spec {
+            # The tenancy policy admits serviceAccountName=backup only for Jobs
+            # labelled service=backup with token automount off. Workload Identity
+            # needs no mounted token: the GKE metadata server issues it.
+            service_account_name            = var.backup_service_account_name
+            automount_service_account_token = false
+            enable_service_links            = false
+            restart_policy                  = "Never"
+
+            node_selector = var.node_selector
+
+            security_context {
+              run_as_non_root = true
+              run_as_user     = 10001
+              run_as_group    = 10001
+
+              seccomp_profile {
+                type = "RuntimeDefault"
+              }
+            }
+
+            affinity {
+              pod_affinity {
+                required_during_scheduling_ignored_during_execution {
+                  label_selector {
+                    match_labels = {
+                      "app.kubernetes.io/name" = local.workload_name
+                    }
+                  }
+                  topology_key = "kubernetes.io/hostname"
+                }
+              }
+            }
+
+            # The app's own image (the same digest as the StatefulSet), so the
+            # active artifact the database names is present at the same path.
+            container {
+              name              = "backup"
+              image             = var.image
+              image_pull_policy = "IfNotPresent"
+              command           = ["/usr/local/bin/day2-backup"]
+              args              = local.backup_args
+
+              security_context {
+                run_as_non_root            = true
+                run_as_user                = 10001
+                run_as_group               = 10001
+                allow_privilege_escalation = false
+                read_only_root_filesystem  = true
+                privileged                 = false
+
+                capabilities {
+                  drop = ["ALL"]
+                }
+
+                seccomp_profile {
+                  type = "RuntimeDefault"
+                }
+              }
+
+              resources {
+                requests = {
+                  cpu               = "100m"
+                  memory            = "256Mi"
+                  ephemeral-storage = "64Mi"
+                }
+                limits = {
+                  cpu               = "1"
+                  memory            = var.backup_memory
+                  ephemeral-storage = var.backup_scratch_size_limit
+                }
+              }
+
+              # Mirrors the StatefulSet: instance.json as a regular read-only
+              # file (subPath), the artifact baked into the image under
+              # /srv/day2/artifacts, and the state volume read-write (SQLite
+              # opens the WAL's -shm even for a read-only connection).
+              volume_mount {
+                name       = "instance"
+                mount_path = local.instance_path
+                sub_path   = "instance.json"
+                read_only  = true
+              }
+
+              volume_mount {
+                name       = "state"
+                mount_path = local.state_dir
+              }
+
+              volume_mount {
+                name       = "tmp"
+                mount_path = "/tmp"
+              }
+
+              volume_mount {
+                name       = "backup"
+                mount_path = local.backup_output
+              }
+            }
+
+            volume {
+              name = "instance"
+
+              config_map {
+                name         = kubernetes_config_map_v1.instance.metadata[0].name
+                default_mode = "0444"
+
+                items {
+                  key  = "instance.json"
+                  path = "instance.json"
+                }
+              }
+            }
+
+            volume {
+              name = "state"
+
+              persistent_volume_claim {
+                claim_name = local.pvc_name
+              }
+            }
+
+            volume {
+              name = "tmp"
+
+              # day2-backup loads the artifact as day2-serve does, copying its
+              # worker executable here first: the same size as the app's /tmp.
+              empty_dir {
+                medium     = "Memory"
+                size_limit = var.tmp_size_limit
+              }
+            }
+
+            # The verified bundle before upload; gone with the pod.
+            volume {
+              name = "backup"
+
+              empty_dir {
+                size_limit = var.backup_scratch_size_limit
+              }
+            }
+          }
+        }
+      }
+    }
   }
 }

@@ -22,6 +22,9 @@ const BODY_LIMIT: u64 = 2 * 1024 * 1024;
 /// The runtime image is distroless: no shell or coreutils. Every look inside a
 /// running runtime container goes through this fixed, read-only inspector.
 const INSPECT: &str = "/usr/local/bin/day2-inspect";
+/// The runtime image's online backup, which scheduled GKE backups run beside
+/// the serving pod.
+const BACKUP: &str = "/usr/local/bin/day2-backup";
 
 struct Company {
     directory: PathBuf,
@@ -1084,6 +1087,7 @@ impl RuntimeSession {
                 == self.native_evidence(0, INSTANCE)?["authority"]["stamp"],
             "backup or restore changed source authority"
         );
+        let runtime_backup = self.runtime_backup(0, &before)?;
         let (startup, activation, override_digest) = self.start_restored(&restored)?;
         Ok(
             json!({"coverage":"backup-restore-fencing","domain":before["domain"],"journal":before["journal"],
@@ -1091,7 +1095,102 @@ impl RuntimeSession {
             "historical_grants_disabled":true,"browser_sessions_rotated":true,
             "restored_server_started":true,"restored_startup":startup,"fresh_policy_activation":activation,
             "recovery_compose_digest":override_digest,"fresh_restored_session":true,"old_session_http":401,
-            "explanation":"Native restore preserves complete domain and journal contents and disables historical grants. Explicit fresh policy activation binds the final read-only artifact path before a separate recovered runtime starts. The recovered read uses a fresh browser session; provider write budgets remain fenced."}),
+            "runtime_image_backup":runtime_backup,
+            "explanation":"Native restore preserves complete domain and journal contents and disables historical grants. Explicit fresh policy activation binds the final read-only artifact path before a separate recovered runtime starts. The recovered read uses a fresh browser session; provider write budgets remain fenced. The runtime image's day2-backup, run beside the serving runtime on its live volume, produces a bundle the tooling restore accepts with the same domain and journal contents."}),
+        )
+    }
+
+    /// Scheduled GKE backups run the runtime image's day2-backup beside the
+    /// serving pod, on its state volume. Run it the same way against the live
+    /// company volume (read-only root, no network, no capabilities), then
+    /// verify and restore its bundle with the tooling image's own recipe.
+    fn runtime_backup(&mut self, index: usize, before: &Value) -> Result<Value> {
+        ensure!(
+            self.companies[index].container.is_some(),
+            "runtime backup requires the serving runtime"
+        );
+        let name = format!(
+            "day2-linux-{}-runtime-backup-{}",
+            self.identity, self.sequence
+        );
+        let mut args: Vec<String> = vec![
+            "run".into(),
+            "--rm".into(),
+            "--name".into(),
+            name.clone(),
+            "--platform".into(),
+            super::linux_qualification::native_platform()?.docker.into(),
+            "--user".into(),
+            "10001:10001".into(),
+            "--network".into(),
+            "none".into(),
+            "--read-only".into(),
+            // day2 copies the artifact's worker into /tmp and executes it
+            // there, as it does in day2-serve. Docker makes a tmpfs noexec
+            // unless told otherwise; Kubernetes' memory emptyDir is exec.
+            "--tmpfs".into(),
+            "/tmp:rw,exec,nosuid,nodev,mode=1777,size=64m".into(),
+            "--cap-drop".into(),
+            "ALL".into(),
+            "--security-opt".into(),
+            "no-new-privileges:true".into(),
+            "--memory".into(),
+            "1g".into(),
+            "--cpus".into(),
+            "1".into(),
+            "--pids-limit".into(),
+            "64".into(),
+            "--cgroupns".into(),
+            "private".into(),
+            "--entrypoint".into(),
+            BACKUP.into(),
+        ];
+        for mount in self.operator_mounts(index) {
+            args.extend(["--mount".into(), mount]);
+        }
+        args.extend([
+            self.image.clone(),
+            INSTANCE.into(),
+            APP.into(),
+            "/evidence/runtime-backup".into(),
+        ]);
+        self.helpers.insert(name.clone());
+        let output = self.docker(&args)?;
+        self.helpers.remove(&name);
+        let summary: Value =
+            serde_json::from_str(output.trim()).context("runtime backup summary")?;
+        ensure!(
+            summary["verified"] == true
+                && summary["app"] == APP
+                && summary["artifact"] == self.artifact_id
+                && summary["backup"] == "/evidence/runtime-backup",
+            "runtime backup summary"
+        );
+        self.native(
+            index,
+            "/workspace/platform/cli/day2",
+            &[
+                "platform",
+                "restore",
+                "/evidence/runtime-backup",
+                "/evidence/runtime-restored",
+            ],
+        )?;
+        let restored = self.native_evidence(index, "/evidence/runtime-restored/instance.json")?;
+        ensure!(
+            before["domain"] == restored["domain"] && before["journal"] == restored["journal"],
+            "runtime image backup restored different domain or journal contents"
+        );
+        ensure!(
+            restored["authority"]["document"]["enabled"] == false
+                && restored["sessions"] == 0
+                && restored["session_secrets"] == 0,
+            "runtime image backup restore retained historical authority"
+        );
+        Ok(
+            json!({"executable":BACKUP,"image":self.image,"beside_serving_runtime":true,
+            "read_only_root":true,"summary":summary,"tooling_restore_verified":true,
+            "domain_and_journal_equal":true}),
         )
     }
 
@@ -1238,7 +1337,6 @@ impl RuntimeSession {
             .tooling_image
             .clone()
             .context("immutable tooling image required for operator effects")?;
-        let company = &self.companies[index];
         let name = format!("day2-linux-{}-operator-{}", self.identity, self.sequence);
         let mut args = vec![
             "run".into(),
@@ -1266,7 +1364,27 @@ impl RuntimeSession {
             "--entrypoint".into(),
             executable.into(),
         ];
-        for mount in [
+        for mount in self.operator_mounts(index) {
+            args.extend(["--mount".into(), mount]);
+        }
+        for mount in extra_mounts {
+            args.extend(["--mount".into(), mount.clone()]);
+        }
+        args.push(image);
+        args.extend(arguments.iter().map(|value| (*value).into()));
+        self.helpers.insert(name.clone());
+        let result = self.docker(&args);
+        if result.is_ok() {
+            self.helpers.remove(&name);
+        }
+        result
+    }
+
+    /// The serving runtime's instance, artifacts and state volume, at the paths
+    /// the runtime sees them, plus the shared operator output directory.
+    fn operator_mounts(&self, index: usize) -> [String; 4] {
+        let company = &self.companies[index];
+        [
             format!(
                 "type=bind,source={},target={INSTANCE},readonly",
                 company.directory.join("instance.json").display()
@@ -1283,20 +1401,7 @@ impl RuntimeSession {
                 "type=bind,source={},target=/evidence",
                 self.output.join("operator-output").display()
             ),
-        ] {
-            args.extend(["--mount".into(), mount]);
-        }
-        for mount in extra_mounts {
-            args.extend(["--mount".into(), mount.clone()]);
-        }
-        args.push(image);
-        args.extend(arguments.iter().map(|value| (*value).into()));
-        self.helpers.insert(name.clone());
-        let result = self.docker(&args);
-        if result.is_ok() {
-            self.helpers.remove(&name);
-        }
-        result
+        ]
     }
 
     fn request(

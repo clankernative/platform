@@ -205,10 +205,16 @@ pub struct Artifact {
     pub format: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app_contract: Option<crate::app_contract::Definition>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub export_manifest: Option<crate::operation_contract::Manifest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imports: Option<crate::instance_catalog::ImportedContracts>,
     #[serde(default)]
     pub namespace: String,
     #[serde(default)]
     pub declarations: crate::registry::Catalog,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credential_declarations: Vec<day2_capabilities::credentials::FamilyDeclaration>,
     #[serde(default)]
     pub checked_types_digest: String,
     pub roc_version: String,
@@ -549,6 +555,7 @@ impl LoadedArtifact {
         }
         if contract.format >= 10 {
             contract.declarations.validate_artifact(&contract)?;
+            crate::credential_declaration::validate(&contract.credential_declarations, &contract)?;
             validate_checked_contracts(&directory, &contract)?;
         } else {
             ensure!(
@@ -585,11 +592,28 @@ impl LoadedArtifact {
                 .as_ref()
                 .context("complete application contract required")?
                 .validate(&contract)?;
+            let expected = crate::operation_contract::Manifest::from_checked_artifact(&contract)?;
+            if let Some(actual) = &contract.export_manifest {
+                ensure!(
+                    actual == &expected,
+                    "export manifest differs from checked definitions"
+                );
+            } else {
+                ensure!(expected.exports.is_empty(), "export manifest missing");
+            }
+            if let Some(imports) = &contract.imports {
+                imports.verify()?;
+            }
         } else {
             ensure!(
                 contract.app_contract.is_none(),
                 "legacy artifact has current application contract"
             );
+            ensure!(
+                contract.export_manifest.is_none(),
+                "legacy artifact has export manifest"
+            );
+            ensure!(contract.imports.is_none(), "legacy artifact has imports");
         }
         ensure!(
             contract.format >= 3 || contract.pages.is_empty(),
@@ -737,6 +761,16 @@ impl LoadedArtifact {
                     == serde_json::to_value(&loaded.contract.app_contract)?,
                 "application contract differs from compiled App.definition"
             );
+            if !loaded.contract.credential_declarations.is_empty() {
+                let compiled = crate::credential_declaration::decode(
+                    &worker.exchange(b"credential-contract")?,
+                    &loaded.contract,
+                )?;
+                ensure!(
+                    compiled == loaded.contract.credential_declarations,
+                    "credential declarations differ from compiled App.definition"
+                );
+            }
             let mut manifest: serde_json::Value =
                 serde_json::from_slice(&worker.exchange(b"manifest")?)?;
             // Earlier format-14 workers predate optional live-page metadata.
@@ -1161,7 +1195,7 @@ fn digits(value: &str) -> bool {
 
 /// A lowercase DNS name of at least two labels. Lowercase only, because the
 /// origin is compared byte for byte and a browser always sends it lowercased.
-fn dns_name(value: &str) -> bool {
+pub(crate) fn dns_name(value: &str) -> bool {
     value.len() <= 253
         && value.split('.').count() >= 2
         && value.split('.').all(|label| {
@@ -1236,6 +1270,7 @@ impl Instance {
             }
         }
         instance.validate_edges()?;
+        instance.validate_domain_entries()?;
         let mut queues = BTreeSet::new();
         for binding in instance.apps.values() {
             if let Some(runtime) = &binding.runtime {
@@ -1285,6 +1320,40 @@ impl Instance {
         }
         Ok(())
     }
+    /// The domain whose people the installation's edge verifies on every
+    /// request, and so the only domain a `domain:` entry may name. Absent
+    /// without an identity provider, when no entry may name any domain.
+    pub fn hosted_domain(&self) -> Option<&str> {
+        self.identity
+            .as_ref()
+            .map(|identity| match identity.scheme {
+                IdentityScheme::GoogleIap => identity.hosted_domain.as_str(),
+            })
+    }
+
+    /// Refuse a `domain:` entry the installation's identity provider does not
+    /// verify, at load, where the operator sees which app named it. The
+    /// activated document is held to the same rule on every authorization.
+    fn validate_domain_entries(&self) -> Result<()> {
+        for (app, binding) in &self.apps {
+            let entries = binding
+                .readers
+                .iter()
+                .chain(&binding.writers)
+                .filter(|entry| entry.starts_with(crate::authority::DOMAIN_PREFIX));
+            for entry in entries {
+                crate::authority::valid_entry(entry, self.hosted_domain())
+                    .with_context(|| format!("apps.{app} membership"))?;
+            }
+            if let Some(policy) = &binding.authority {
+                policy
+                    .validate_domains(self.hosted_domain())
+                    .with_context(|| format!("apps.{app}.authority"))?;
+            }
+        }
+        Ok(())
+    }
+
     /// The edge an application is served at, with the installation's identity.
     pub fn edge(&self, app: &str) -> Result<(&IdentityProvider, &Edge)> {
         let binding = self.apps.get(app).context("app_not_installed")?;
@@ -1298,8 +1367,8 @@ impl Instance {
     }
     pub fn authorize(&self, app: &str, operation: &Operation, actor: &str) -> Result<()> {
         let binding = self.apps.get(app).context("app_not_installed")?;
-        let permitted = binding.writers.contains(actor)
-            || (operation.kind == "query" && binding.readers.contains(actor));
+        let permitted = crate::authority::admits(&binding.writers, actor)
+            || (operation.kind == "query" && crate::authority::admits(&binding.readers, actor));
         ensure!(permitted, crate::error::Failure::Forbidden);
         binding
             .authority

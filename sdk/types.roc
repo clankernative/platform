@@ -1,1 +1,1 @@
-package [Ref, Text, TextSpec, WebUrl, Declaration, Cursor, PageSize, CollectionPage, RowVersion, Table] {}
+package [Ref, Text, TextSpec, WebUrl, Declaration, Credential, Cursor, PageSize, CollectionPage, RowVersion, Table] {}

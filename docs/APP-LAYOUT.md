@@ -113,6 +113,81 @@ Folders never register operations. An unregistered helper remains a helper, and
 deleting a registered dependency fails compilation. There is no second authored
 module manifest or catalog.
 
+## Cross-app contract discovery (in progress)
+
+An operation may opt into a checked export with
+`Api.query(...).cross_app({ version: 1 })` or
+`Api.command(...).cross_app({ version: 1 })`. The normal build derives its export
+manifest from the registered operation and checked types. Unsupported codecs and
+internal operations fail admission. The app does not maintain a second schema.
+
+For a selected instance checkout, platform tooling can inspect candidate exports
+and create an exact import lock without copying contract digests by hand:
+
+```text
+cargo run --locked -p xtask -- catalog-candidate path/to/instance.json
+cargo run --locked -p xtask -- catalog-pin path/to/instance.json directory.lookup
+cargo run --locked -p xtask -- catalog-resolve path/to/instance.json path/to/import-lock.json
+```
+
+These commands verify the instance's selected artifacts. A lock names the
+installation, environment, target apps, and consumed operation/version/digests;
+resolution rejects missing or changed contracts and conflicting nominal type
+shapes. Candidate discovery does not mean an operation is serving or permitted.
+`catalog-check-consumers INSTANCE_JSON CONSUMER_LOCKS_JSON` also checks the
+supplied caller locks against one candidate and refuses an app import cycle.
+The supplied locks are not yet a complete release dependency inventory.
+
+The normal caller build can resolve that lock against the selected instance:
+
+```text
+cargo run --locked -p xtask -- build path/to/caller-app --instance path/to/instance.json --imports path/to/import-lock.json
+```
+
+Both options are required together. The build rejects a stale pin, another
+instance scope, a self-import, or an imported shape it cannot represent. It
+stages `ImportedContracts.roc` beside the caller modules and includes the exact
+consumed operation packages and transitive type closure in the caller artifact.
+The instance scope, selected artifact IDs and unrelated exports stay out of that
+artifact, so those changes alone do not alter its compiled contract input.
+For a supported structural contract, caller modules can `import ImportedContracts`
+and refer to types such as `ImportedContracts.DirectoryLookupInput` and
+`ImportedContracts.DirectoryLookupOutput`. A pinned query also generates a
+function such as `ImportedContracts.directory_lookup(input)`, returning an
+`Observe(ImportedContracts.DirectoryLookupOutput)` for a prepared handler. The
+host finds one matching operator-granted app-operation binding for the current
+invocation; app code supplies neither a binding name nor an actor. It checks the
+callee's exported contract digest before dispatch. A missing, ambiguous or stale
+grant fails the observation. Nominal inputs are rejected until the generator can
+preserve their identities. Commands currently have types only; command receipts,
+separate-host transport and delegated command receipts are subsequent work.
+
+During a normal build, mandatory verification supplies each imported query with
+the selected callee's checked contract example and a disposable, operation-pinned
+grant. The simulated reply is available only for that example input; a different
+request fails verification unless it matches the callee's example. These
+build-time grants do not become instance authority. An operator still grants the
+exact app operation when installing the caller.
+
+For a release-managed installation, `xtask catalog-active RELEASE_JOURNAL
+ARTIFACT_STORE COMPANY ENVIRONMENT` derives discovery from activated release
+receipts and verifies the selected artifact bytes. `xtask catalog-release-candidate
+RELEASE_JOURNAL ARTIFACT_STORE RELEASE_ID` replaces only the approved app and
+checks every selected caller's embedded imports against the candidate exports.
+Its `base_selection` digest identifies the active composition the candidate
+was checked against. Add `INSTANCE` as the last argument to qualify imported
+queries against the instance's resource catalog and access policy, and against
+validated deployment readbacks for their selected serving targets. A
+`ReleaseExecutionHost` configured with `with_catalog_store` enrolls its
+installation/environment in catalog-managed activation; configure
+`with_catalog_instance` as well for releases with imports. At settlement, the
+host qualifies the approved artifact and all selected callers again. The
+journal compares the candidate's base selection and serving binding evidence
+inside the activation transaction. A missing, changed, or unready imported
+target leaves the active pointer unchanged. The instance document is checked
+at qualification time; request authorization remains a runtime decision against
+activated app authority.
+
 ## Future app creation
 
 The platform's future app-creation workflow must initialize this layout and a complete

@@ -27,10 +27,12 @@ Host :: [].{
 			values = Json.parse(decoded.input).map_err(|_| "invalid workflow arguments")?
 			values.first() == Ok("local-dev")
 				or (values.first() == Ok("authority") and values.drop_first(1).first() == Ok("admin"))
+					or values.first() == Ok("maintain")
 		} else Bool.False
 		if streaming {
-			code = command.exec_exit_code!().map_err(|_| "cannot start local server")?
-			return if code == 0 Ok("") else Err("local server failed")
+			# The host has already written its own error to the terminal.
+			code = command.exec_exit_code!().map_err(|_| "cannot start the platform host; run xtask cli")?
+			return if code == 0 Ok("") else Err("platform workflow failed")
 		}
 		result = command.exec_output!().map_err(|_| "cannot start platform host; run xtask cli")?
 		response : Response

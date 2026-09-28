@@ -534,3 +534,107 @@ fn failed_watched_build_recovers_without_pausing_the_working_server() -> Result<
     );
     Ok(())
 }
+
+#[test]
+fn maintain_activate_runs_every_guarded_step_in_order() -> Result<()> {
+    let mut effects = Vec::new();
+    automation::run(
+        &automation::runner()?,
+        &["platform", "maintain", "activate", "request.json"],
+        |request| {
+            let step = match request.action.as_str() {
+                "maintenance-workflow" => format!(
+                    "workflow:{}",
+                    request.decode::<Value>()?["workflow"]
+                        .as_str()
+                        .unwrap_or_default()
+                ),
+                "maintenance-migration" => format!(
+                    "migration:{}",
+                    request.decode::<Value>()?["step"]
+                        .as_str()
+                        .unwrap_or_default()
+                ),
+                "maintenance-open" => {
+                    let input: Value = request.decode()?;
+                    assert_eq!(
+                        input,
+                        json!({"operation": "activate", "request": "request.json"})
+                    );
+                    "open".into()
+                }
+                other => other.trim_start_matches("maintenance-").to_owned(),
+            };
+            effects.push(step);
+            Ok(json!({}))
+        },
+    )?;
+    assert_eq!(
+        effects,
+        [
+            "open",
+            "artifacts",
+            "stop",
+            "pod",
+            "workflow:backup",
+            "copy-backup",
+            "migration:plan",
+            "confirm",
+            "fence",
+            "migration:apply",
+            "workflow:authority-inspect",
+            "workflow:authority-activate",
+            "finish",
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn maintain_stops_at_a_refused_confirmation_before_the_fence() -> Result<()> {
+    let mut effects = Vec::new();
+    let result = automation::run(
+        &automation::runner()?,
+        &["platform", "maintain", "activate", "request.json"],
+        |request| {
+            effects.push(request.action.clone());
+            if request.action == "maintenance-confirm" {
+                bail!("not confirmed; nothing was changed");
+            }
+            Ok(json!({}))
+        },
+    );
+    assert!(result.unwrap_err().to_string().contains("not confirmed"));
+    assert_eq!(
+        effects.last().map(String::as_str),
+        Some("maintenance-confirm")
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|name| name == "maintenance-fence" || name == "maintenance-finish")
+    );
+    let mut inspected = Vec::new();
+    automation::run(
+        &automation::runner()?,
+        &["platform", "maintain", "inspect", "request.json"],
+        |request| {
+            inspected.push(request.action.clone());
+            Ok(json!({}))
+        },
+    )?;
+    assert!(
+        !inspected
+            .iter()
+            .any(|name| name == "maintenance-copy-backup" || name == "maintenance-confirm")
+    );
+    assert!(
+        automation::run(
+            &automation::runner()?,
+            &["platform", "maintain", "restart", "request.json"],
+            |_| Ok(json!({}))
+        )
+        .is_err()
+    );
+    Ok(())
+}

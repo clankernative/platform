@@ -19,6 +19,8 @@ struct Prepared {
     shape: Option<day2::registry::AppShape>,
     platform_hashes: BTreeMap<String, String>,
     inference_sources: BTreeMap<String, String>,
+    imports: Option<day2::instance_catalog::ImportedContracts>,
+    import_fixtures: Vec<day2::development::ImportedQueryFixture>,
 }
 
 struct Bound {
@@ -29,7 +31,12 @@ struct Bound {
     declarations: day2::registry::Catalog,
 }
 
-fn prepare(root: &Path, app: &Path, overrides: Option<&Path>) -> Result<Prepared> {
+fn prepare(
+    root: &Path,
+    app: &Path,
+    overrides: Option<&Path>,
+    import_context: Option<&BuildImportContext>,
+) -> Result<Prepared> {
     let platform_hashes = platform_sources(root)?;
     let native_pin = native_toolchain::load(root)?;
     let roc = native_pin.verified_compiler(root)?;
@@ -65,6 +72,32 @@ fn prepare(root: &Path, app: &Path, overrides: Option<&Path>) -> Result<Prepared
         day2::app_inference::namespace(&fs::read_to_string(stage.join("app/App.roc"))?)?;
     let projection =
         day2::registry::Projection::declared(&fs::read_to_string(stage.join("app/App.roc"))?)?;
+    let mut import_fixtures = Vec::new();
+    let imports = if let Some(context) = import_context {
+        let metadata = fs::symlink_metadata(&context.lock)?;
+        ensure!(
+            metadata.file_type().is_file() && metadata.len() <= 1_048_576,
+            "invalid import lock file"
+        );
+        let lock: day2::instance_catalog::ImportLock =
+            day2::json::decode(&fs::read(&context.lock)?)?;
+        ensure!(
+            !lock.apps.contains_key(&namespace),
+            "app cannot import its own exported contract"
+        );
+        let catalog =
+            day2::instance_catalog::CandidateCatalog::from_instance_file(&context.instance)?;
+        let imports =
+            day2::instance_catalog::ImportedContracts::from_resolved(catalog.resolve(&lock)?)?;
+        import_fixtures = day2::development::imported_query_fixtures(&context.instance, &imports)?;
+        fs::write(
+            stage.join("app").join(day2::import_codegen::MODULE),
+            day2::import_codegen::module(&imports)?,
+        )?;
+        Some(imports)
+    } else {
+        None
+    };
     fs::write(
         stage.join("app/AppIdentity.roc"),
         day2::app_inference::identity_module(&namespace)?,
@@ -117,6 +150,8 @@ fn prepare(root: &Path, app: &Path, overrides: Option<&Path>) -> Result<Prepared
         shape: None,
         platform_hashes,
         inference_sources,
+        imports,
+        import_fixtures,
     })
 }
 
@@ -250,6 +285,7 @@ fn bind(root: &Path, prepared: &mut Prepared, bound: &mut Bound) -> Result<()> {
         &bound.schema,
         &bound.outputs,
         &prepared.assets,
+        prepared.imports.as_ref(),
     )?;
     Ok(())
 }
@@ -262,6 +298,7 @@ fn publish(root: &Path, prepared: &mut Prepared, bound: &Bound) -> Result<PathBu
         web_resources,
         templates,
         pin,
+        imports,
         ..
     } = prepared;
     let Bound {
@@ -309,7 +346,7 @@ fn publish(root: &Path, prepared: &mut Prepared, bound: &Bound) -> Result<PathBu
         "platform inputs changed during build; rebuild from one stable snapshot"
     );
     hashes.extend(platform_hashes);
-    let artifact = serde_json::json!({
+    let mut artifact = serde_json::json!({
         "format": day2::artifact::CURRENT_FORMAT, "identities": identities, "namespace": manifest.namespace, "declarations": declarations,
         "checked_types_digest": digest(checked_types),
         "roc_version": pin["roc_version"], "worker_digest": worker_digest,
@@ -326,6 +363,20 @@ fn publish(root: &Path, prepared: &mut Prepared, bound: &Bound) -> Result<PathBu
         "app_contract": app_contract,
         "sources": &*hashes, "admission": "local-spike-only",
     });
+    let checked: day2::artifact::Artifact = serde_json::from_value(artifact.clone())?;
+    if !declarations.credentials.is_empty() {
+        artifact["credential_declarations"] =
+            serde_json::to_value(day2::credential_declaration::decode(
+                &worker.exchange(b"credential-contract")?,
+                &checked,
+            )?)?;
+    }
+    artifact["export_manifest"] = serde_json::to_value(
+        day2::operation_contract::Manifest::from_checked_artifact(&checked)?,
+    )?;
+    if let Some(imports) = imports {
+        artifact["imports"] = serde_json::to_value(imports)?;
+    }
     publish_contract(
         root,
         stage,
@@ -456,6 +507,7 @@ pub fn execute(
     app: &Path,
     overrides: Option<&Path>,
     isolated_job: Option<&Path>,
+    import_context: Option<&BuildImportContext>,
     runner: &Path,
 ) -> Result<PathBuf> {
     let mut prepared = None;
@@ -470,7 +522,7 @@ pub fn execute(
         );
         ensure!(!done.contains(&request.action), "duplicate compiler effect");
         if request.action == "build-stage" {
-            prepared = Some(prepare(root, app, overrides)?);
+            prepared = Some(prepare(root, app, overrides, import_context)?);
         } else {
             let prepared = prepared
                 .as_mut()
@@ -628,12 +680,13 @@ pub fn execute(
                         "candidate contract admission required"
                     );
                     let artifact = published.as_ref().context("candidate required")?;
-                    let evidence = day2::development::verify_with_runner(
+                    let evidence = day2::development::verify_with_runner_imports(
                         artifact,
                         &stage.join("verification"),
                         day2::development::DEFAULT_SEED,
                         2,
                         runner,
+                        &prepared.import_fixtures,
                     )?;
                     ensure!(
                         evidence.verification_complete,

@@ -64,6 +64,20 @@ struct Binding {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+pub(crate) struct ImportedContractRef {
+    pub operation: String,
+    pub digest: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ImportedQuery {
+    pub contract: ImportedContractRef,
+    pub input: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Attenuation {
     handle: String,
     #[serde(default)]
@@ -479,9 +493,88 @@ pub(crate) fn authorize(
     action: Action,
 ) -> Result<ResourceUse> {
     let value: serde_json::Value = crate::json::decode(instruction.data.as_bytes())?;
-    let token = value
-        .get("handle")
-        .and_then(|handle| handle.as_str())
+    let issued = if value.get("contract").is_some() {
+        ensure!(action == Action::DelegateQuery, Failure::ResourceForbidden);
+        let imported: ImportedQuery = crate::json::decode(instruction.data.as_bytes())?;
+        let package = runtime
+            .artifact()
+            .contract()
+            .imports
+            .as_ref()
+            .and_then(|imports| imports.operations.get(&imported.contract.operation))
+            .ok_or(Failure::ResourceForbidden)?;
+        ensure!(
+            package.digest == imported.contract.digest
+                && package.operation.kind == crate::operation_contract::Kind::Query,
+            Failure::ResourceForbidden
+        );
+        let (app, _) = imported
+            .contract
+            .operation
+            .split_once('.')
+            .ok_or(Failure::ResourceForbidden)?;
+        ensure!(app != runtime.app(), Failure::ResourceForbidden);
+        let active = authority_state::require_invocation_in(
+            connection,
+            runtime,
+            &request.context.invocation_id,
+            &request.operation,
+            &request.context.actor,
+        )?;
+        let grants = active
+            .document
+            .resources
+            .operations
+            .get(&runtime.artifact().route(&request.operation)?.name)
+            .ok_or(Failure::ResourceForbidden)?;
+        let mut matches = grants.iter().filter(|(_, grant)| {
+            matches!(
+                &grant.target,
+                ResourceTarget::AppOperation { app: target, operation, .. }
+                    if target == app && operation == &imported.contract.operation
+            ) && grant.provider == day2_capabilities::resources::Provider::LocalDelegation
+                && grant.actions.contains(&Action::DelegateQuery)
+        });
+        let (binding, grant) = matches.next().ok_or(Failure::ResourceForbidden)?;
+        ensure!(matches.next().is_none(), Failure::ResourceForbidden);
+        ensure!(
+            grant.actors.contains(&request.context.actor),
+            Failure::ResourceForbidden
+        );
+        ensure!(
+            grant
+                .expires_at_ms
+                .is_none_or(|expiry| runtime.host().now_ms().is_ok_and(|now| now < expiry)),
+            Failure::ResourceAuthorityExpired
+        );
+        let root = root_in(connection, &request.context.invocation_id)?;
+        let response = issue(
+            connection,
+            Claims {
+                invocation: request.context.invocation_id.clone(),
+                root,
+                operation: request.operation.clone(),
+                actor: request.context.actor.clone(),
+                artifact: runtime.artifact().id().into(),
+                scope: runtime.scope().into(),
+                authority: active.stamp,
+                binding: binding.clone(),
+                grant: grant.clone(),
+                parent: None,
+            },
+        )?;
+        Some(
+            serde_json::from_str::<serde_json::Value>(&response)?["token"]
+                .as_str()
+                .ok_or(Failure::ResourceForbidden)?
+                .to_owned(),
+        )
+    } else {
+        None
+    };
+    let token = issued
+        .as_deref()
+        .or_else(|| value.get("handle").and_then(|handle| handle.as_str()))
         .ok_or(Failure::ResourceForbidden)?;
     let claims = load(connection, runtime, request, token)?;
     // Nothing an application invokes destroys anything. This is the choke point
