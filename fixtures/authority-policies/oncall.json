@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "admins": ["admin"],
+  "operations": {
+    "oncall.open": {
+      "actors": ["developer", "alice", "admin"],
+      "mode": {"kind": "current_state"},
+      "models": {
+        "incidents": {"read": true, "create": true, "rows": {"kind": "all"}}
+      },
+      "commands": ["oncall.escalate"]
+    },
+    "oncall.acknowledge": {
+      "actors": ["developer", "alice", "admin"],
+      "mode": {
+        "kind": "edit",
+        "model": "incidents",
+        "id_field": "incident_id",
+        "version_field": "expected_version"
+      },
+      "models": {
+        "incidents": {"read": true, "update_fields": ["status"], "rows": {"kind": "all"}}
+      }
+    },
+    "oncall.escalate": {
+      "actors": ["developer", "alice", "admin"],
+      "mode": {"kind": "current_state"},
+      "models": {
+        "incidents": {"read": true, "update_fields": ["rung"], "rows": {"kind": "all"}}
+      },
+      "commands": ["oncall.escalate"]
+    }
+  },
+  "constraints": {
+    "incidents": {
+      "title": {"nonempty": true, "max_bytes": 200}
+    }
+  }
+}
