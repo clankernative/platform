@@ -7,6 +7,22 @@ ingress or revealed through a browser route.
 
 ## Portable contracts
 
+Unified apps can now register `credentials` in `App.definition`. The sealed
+`pf.Credential` module supports `client_family` and `personal_family` with fixed
+or selectable grants over canonical `Api.write(Commands.<name>)` and
+`Api.read(Reads.<name>)` targets. The family constructor fixes the profile in
+the checked compiler type. The app supplies a stable ID and a bounded lifetime
+in seconds; registration names remain separate from IDs. This is declaration
+intent only. No family-specific lifecycle methods are generated yet.
+
+The normal build reflects registered families into the artifact and recompares
+them with the native worker at artifact load. It rejects duplicate IDs,
+registration/profile drift, empty or duplicate roots, unsupported lifetimes,
+internal command roots and target signatures that differ from the checked
+operation catalog. Resource and impersonation families remain unsupported.
+Exact authority closure, selected-instance qualification and host admission
+must be implemented before any declared family can issue or receive a key.
+
 `day2-capabilities::credentials` defines the managed family declaration,
 manifest, public metadata/result shapes, selected-instance binding and static
 qualification receipt. A family has a stable ID distinct from its code-facing
@@ -96,9 +112,10 @@ strength or browser isolation.
 Before activation, complete the following gates from the proposal:
 
 1. Generate and native-typecheck the complete family-specific Roc API and
-   security actions; integrate declarations and exact authority summaries into
-   the normal app build and admission path. Prove the interactive context and
-   negative compiler fixtures with the pinned compiler.
+   security actions; derive exact authority summaries from registered
+   operations and bind them at admission. Prove the interactive context and
+   negative compiler fixtures with the pinned compiler. The declaration-only
+   client/personal build path is present.
 2. Connect selected-instance bindings to the resource catalog and release
    qualification, including principal/context compatibility across child,
    delegated and provider paths. Resolve actual key/custody readiness and

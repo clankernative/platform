@@ -213,6 +213,8 @@ pub struct Artifact {
     pub namespace: String,
     #[serde(default)]
     pub declarations: crate::registry::Catalog,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credential_declarations: Vec<day2_capabilities::credentials::FamilyDeclaration>,
     #[serde(default)]
     pub checked_types_digest: String,
     pub roc_version: String,
@@ -553,6 +555,7 @@ impl LoadedArtifact {
         }
         if contract.format >= 10 {
             contract.declarations.validate_artifact(&contract)?;
+            crate::credential_declaration::validate(&contract.credential_declarations, &contract)?;
             validate_checked_contracts(&directory, &contract)?;
         } else {
             ensure!(
@@ -758,6 +761,16 @@ impl LoadedArtifact {
                     == serde_json::to_value(&loaded.contract.app_contract)?,
                 "application contract differs from compiled App.definition"
             );
+            if !loaded.contract.credential_declarations.is_empty() {
+                let compiled = crate::credential_declaration::decode(
+                    &worker.exchange(b"credential-contract")?,
+                    &loaded.contract,
+                )?;
+                ensure!(
+                    compiled == loaded.contract.credential_declarations,
+                    "credential declarations differ from compiled App.definition"
+                );
+            }
             let mut manifest: serde_json::Value =
                 serde_json::from_slice(&worker.exchange(b"manifest")?)?;
             // Earlier format-14 workers predate optional live-page metadata.

@@ -20,6 +20,8 @@ pub struct Catalog {
     pub ingress: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub redirects: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub credentials: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -561,6 +563,7 @@ pub struct AppShape {
     pub schedules: Vec<String>,
     pub ingress: Vec<String>,
     pub redirects: Vec<String>,
+    pub credentials: BTreeMap<String, String>,
 }
 
 fn app_table(tables: &[Table]) -> Result<&Table> {
@@ -608,7 +611,7 @@ impl AppShape {
         // `schedules` is optional: an application that declares none omits the
         // field entirely, so existing applications keep their exact shape.
         let optional = if unified {
-            BTreeSet::from(["schedules", "ingress", "redirects"])
+            BTreeSet::from(["schedules", "ingress", "redirects", "credentials"])
         } else {
             BTreeSet::new()
         };
@@ -681,6 +684,35 @@ impl AppShape {
         } else {
             (category("commands")?, category("queries")?)
         };
+        let credentials = if unified && declared.contains("credentials") {
+            category("credentials")?;
+            let registration = product
+                .fields
+                .iter()
+                .find(|field| field.name == "credentials")
+                .context("credential registrations missing")?;
+            let mut profiles = BTreeMap::new();
+            for field in &table.node(registration.type_id)?.fields {
+                let family = table.node(field.type_id)?;
+                ensure!(family.kind == "record", "credential family must be nominal");
+                let profile = match family.name.as_str() {
+                    "Credential.ClientFamily" => "client",
+                    "Credential.PersonalFamily" => "personal",
+                    _ => anyhow::bail!(
+                        "App.definition.credentials.{} requires a supported Credential family",
+                        field.name
+                    ),
+                };
+                profiles.insert(field.name.clone(), profile.to_owned());
+            }
+            ensure!(
+                profiles.len() <= 64,
+                "credential family registration budget"
+            );
+            profiles
+        } else {
+            BTreeMap::new()
+        };
         let shape = Self {
             unified,
             commands,
@@ -715,6 +747,7 @@ impl AppShape {
             } else {
                 Vec::new()
             },
+            credentials,
         };
         ensure!(
             !shape.commands.is_empty() || !shape.queries.is_empty(),
@@ -773,6 +806,7 @@ pub fn app_platform(shape: Option<&AppShape>) -> String {
 pub struct Projection {
     pub schedules: bool,
     pub redirects: bool,
+    pub credentials: bool,
 }
 
 impl Projection {
@@ -781,6 +815,7 @@ impl Projection {
         Ok(Self {
             schedules: crate::app_inference::declares_schedules(app_source)?,
             redirects: crate::app_inference::declares_redirects(app_source)?,
+            credentials: crate::app_inference::declares_credentials(app_source)?,
         })
     }
 }
@@ -790,6 +825,7 @@ pub fn app_platform_for(shape: Option<&AppShape>, projection: Projection) -> Str
     for (declared, category) in [
         (projection.schedules, "schedules"),
         (projection.redirects, "redirects"),
+        (projection.credentials, "credentials"),
     ] {
         if declared {
             source = source.replacen(
@@ -859,6 +895,7 @@ fn inferred_catalog(table: &Table) -> Result<Catalog> {
         schedules: shape.schedules.clone(),
         ingress: shape.ingress.clone(),
         redirects: shape.redirects.clone(),
+        credentials: shape.credentials.clone(),
         errors: shape.errors.clone(),
         ..Catalog::default()
     };

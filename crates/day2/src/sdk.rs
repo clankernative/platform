@@ -175,6 +175,11 @@ const MODULES: &[Module] = &[
         app_export: true,
     },
     Module {
+        file: "Credential.roc",
+        source: "contracts/Credential.roc",
+        app_export: true,
+    },
+    Module {
         file: "Control.roc",
         source: "web/Control.roc",
         app_export: true,
