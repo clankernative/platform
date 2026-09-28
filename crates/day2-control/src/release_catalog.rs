@@ -9,11 +9,17 @@ use crate::{
     release::{ActivationReceipt, ApprovedRelease, ReleaseApproval, ReleaseTarget},
 };
 use anyhow::{Context, Result, ensure};
-use day2::instance_catalog::{QualifiedCatalog, qualify_artifacts};
+use day2::{
+    artifact::{Instance, LoadedArtifact},
+    authority_state::AuthorityDocument,
+    instance_catalog::{QualifiedCatalog, qualify_artifacts},
+    operation_contract::Kind,
+};
+use day2_capabilities::resources::{Action, Provider, ResourceTarget};
 use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
 };
 
@@ -35,6 +41,14 @@ pub struct ReleaseCatalogCandidate {
     base_selection: Digest,
     target: ReleaseTarget,
     qualified: QualifiedCatalog,
+    bindings: Option<QualifiedBindings>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct QualifiedBindings {
+    pub instance: Digest,
+    pub authority: BTreeMap<String, Digest>,
+    pub serving: BTreeMap<String, Digest>,
 }
 
 impl Journal {
@@ -143,8 +157,169 @@ impl Journal {
             base_selection: selection.digest,
             target: target.clone(),
             qualified,
+            bindings: None,
         })
     }
+
+    /// Qualify the selected contract against instance-owned grants and the
+    /// exact deployment readbacks for its imported serving targets.
+    pub fn candidate_catalog_with_instance(
+        &self,
+        approved: &ApprovedRelease,
+        artifact_store: &Path,
+        instance_path: &Path,
+        now_ms: i64,
+    ) -> Result<ReleaseCatalogCandidate> {
+        let mut candidate = self.candidate_catalog(approved, artifact_store)?;
+        let instance = Instance::load(instance_path)?;
+        ensure!(
+            instance.installation == candidate.target.company.as_str()
+                && instance.environment == candidate.target.environment.as_str(),
+            "instance scope differs from release candidate"
+        );
+        let selection = self
+            .active_catalog_selection(&candidate.target.company, &candidate.target.environment)?;
+        ensure!(
+            selection.digest == candidate.base_selection,
+            "active catalog changed during binding qualification"
+        );
+        let mut paths = artifact_paths(&selection, artifact_store)?;
+        paths.insert(
+            candidate.target.app.as_str().to_owned(),
+            artifact_path(
+                artifact_store,
+                &candidate.qualified.catalog.apps[candidate.target.app.as_str()]
+                    .artifact
+                    .clone()
+                    .try_into()?,
+            )?,
+        );
+        let mut artifacts = BTreeMap::new();
+        for (app, path) in paths {
+            artifacts.insert(app, LoadedArtifact::load(&path)?);
+        }
+        let mut authority = BTreeMap::new();
+        let mut serving = BTreeMap::new();
+        for (caller, imports) in &candidate.qualified.consumers.imports {
+            let caller_artifact = artifacts
+                .get(caller)
+                .context("selected caller artifact missing")?;
+            let document =
+                AuthorityDocument::resolve_at(&instance, caller, caller_artifact, now_ms)
+                    .with_context(|| format!("caller authority: {caller}"))?;
+            authority.insert(caller.clone(), Digest::of(&document)?);
+            for (operation, package) in &imports.operations {
+                let (callee, _) = operation
+                    .split_once('.')
+                    .context("import target namespace")?;
+                let callee_artifact = artifacts
+                    .get(callee)
+                    .context("selected callee artifact missing")?;
+                let exported = callee_artifact
+                    .contract()
+                    .operations
+                    .iter()
+                    .find(|exported| exported.name == *operation)
+                    .context("imported serving operation missing")?;
+                ensure!(
+                    package.operation.kind == Kind::Query && exported.kind == "query",
+                    "imported serving operation is not a query: {operation}"
+                );
+                let schema =
+                    day2::delegation::schema_digest_for_artifact(callee_artifact, operation)?;
+                let actors = check_import_grant(&document, caller, operation, &schema)?;
+                let callee_document =
+                    AuthorityDocument::resolve_at(&instance, callee, callee_artifact, now_ms)
+                        .with_context(|| format!("callee authority: {callee}"))?;
+                ensure!(
+                    actors
+                        .iter()
+                        .any(|actor| callee_document.authorize(exported, actor).is_ok()),
+                    "callee access policy rejects every granted caller: {operation}"
+                );
+                authority.insert(callee.to_owned(), Digest::of(&callee_document)?);
+                if !serving.contains_key(callee) {
+                    let (release, active) = if callee == candidate.target.app.as_str() {
+                        (&candidate.release, false)
+                    } else {
+                        (
+                            &selection
+                                .releases
+                                .get(callee)
+                                .context("imported callee not active")?
+                                .release,
+                            true,
+                        )
+                    };
+                    serving.insert(
+                        callee.to_owned(),
+                        serving_binding_in(
+                            &self.connection,
+                            release,
+                            callee,
+                            callee_artifact.id(),
+                            active,
+                        )?,
+                    );
+                }
+            }
+        }
+        candidate.bindings = Some(QualifiedBindings {
+            instance: Digest::of(&instance)?,
+            authority,
+            serving,
+        });
+        Ok(candidate)
+    }
+}
+
+fn check_import_grant(
+    document: &AuthorityDocument,
+    caller: &str,
+    operation: &str,
+    schema: &str,
+) -> Result<BTreeSet<String>> {
+    let mut actors = BTreeSet::new();
+    for grants in document.resources.operations.values() {
+        let mut matches = grants.values().filter(|grant| {
+            matches!(&grant.target, ResourceTarget::AppOperation { operation: target, .. } if target == operation)
+        });
+        if let Some(grant) = matches.next() {
+            ensure!(
+                matches.next().is_none(),
+                "ambiguous imported grant: {caller} -> {operation}"
+            );
+            ensure!(
+                matches!(&grant.target, ResourceTarget::AppOperation { app, schema_digest, .. }
+                    if app == operation.split_once('.').map(|(app, _)| app).unwrap_or("") && schema_digest == schema)
+                    && grant.provider == Provider::LocalDelegation
+                    && grant.actions.contains(&Action::DelegateQuery),
+                "stale or incompatible imported grant: {caller} -> {operation}"
+            );
+            actors.extend(grant.actors.iter().cloned());
+        }
+    }
+    ensure!(
+        !actors.is_empty(),
+        "imported operation has no configured grant: {caller} -> {operation}"
+    );
+    Ok(actors)
+}
+
+fn serving_binding_in(
+    connection: &Connection,
+    release: &Digest,
+    app: &str,
+    artifact: &str,
+    active: bool,
+) -> Result<Digest> {
+    let execution =
+        crate::release_execution::validated_execution_binding(connection, release, active)?;
+    ensure!(
+        execution.target.app.as_str() == app && execution.artifact.as_str() == artifact,
+        "selected serving binding differs from imported target: {app}"
+    );
+    Digest::of(&("day2-import-serving-binding-v1", execution))
 }
 
 fn active_selection_in(
@@ -247,10 +422,18 @@ pub(crate) fn check_activation_candidate(
     }
     let candidate = candidate.context("catalog-managed release requires qualified candidate")?;
     let active = active_selection_in(connection, &target.company, &target.environment)?;
-    check_candidate_selection(&active, release, target, &approval.artifact, candidate)
+    check_candidate_selection(
+        connection,
+        &active,
+        release,
+        target,
+        &approval.artifact,
+        candidate,
+    )
 }
 
 fn check_candidate_selection(
+    connection: &Connection,
     active: &ActiveSelection,
     release: &Digest,
     target: &ReleaseTarget,
@@ -298,6 +481,59 @@ fn check_candidate_selection(
         candidate.qualified.consumers.catalog_digest == catalog.digest,
         "candidate consumer evidence belongs to another catalog"
     );
+    if !candidate.qualified.consumers.imports.is_empty() {
+        let bindings = candidate
+            .bindings
+            .as_ref()
+            .context("imported release requires qualified instance bindings and access policy")?;
+        ensure!(
+            !bindings.authority.is_empty(),
+            "imported release has no qualified authority"
+        );
+        let targets: std::collections::BTreeSet<_> = candidate
+            .qualified
+            .consumers
+            .imports
+            .values()
+            .flat_map(|imports| imports.operations.keys())
+            .map(|operation| operation.split_once('.').map(|(app, _)| app))
+            .collect::<Option<_>>()
+            .context("import target namespace")?;
+        ensure!(
+            bindings
+                .serving
+                .keys()
+                .map(String::as_str)
+                .collect::<std::collections::BTreeSet<_>>()
+                == targets,
+            "qualified serving target set changed"
+        );
+        for app in targets {
+            let (selected_release, is_active) = if app == target.app.as_str() {
+                (release, false)
+            } else {
+                (
+                    &active
+                        .releases
+                        .get(app)
+                        .context("imported callee not active")?
+                        .release,
+                    true,
+                )
+            };
+            let actual = serving_binding_in(
+                connection,
+                selected_release,
+                app,
+                &catalog.apps[app].artifact,
+                is_active,
+            )?;
+            ensure!(
+                bindings.serving.get(app) == Some(&actual),
+                "selected serving binding changed since qualification: {app}"
+            );
+        }
+    }
     Ok(())
 }
 
@@ -323,9 +559,58 @@ fn artifact_path(root: &Path, id: &Digest) -> Result<PathBuf> {
 mod tests {
     use super::*;
     use day2::{
-        instance_catalog::{CandidateCatalog, CheckedConsumers, SelectedApp},
+        instance_catalog::{CandidateCatalog, CheckedConsumers, ResolvedImports, SelectedApp},
         operation_contract::Manifest,
     };
+    use serde_json::json;
+
+    fn authority_with_import_grant(schema: &str) -> Result<AuthorityDocument> {
+        Ok(serde_json::from_value(json!({
+            "enabled": true,
+            "readers": [],
+            "writers": [],
+            "policy": null,
+            "resources": {
+                "operations": {"ask": {"directory": {
+                    "policy": {"id": "reading", "revision": 1},
+                    "resource": {"id": "lookup", "revision": 1},
+                    "connection": {"id": "delegation", "revision": 1},
+                    "provider": "local_delegation",
+                    "target": {"kind": "app_operation", "app": "directory",
+                        "operation": "directory.lookup", "schema_digest": schema},
+                    "actions": ["delegate_query"],
+                    "actors": ["alice"],
+                    "limits": {"max_request_bytes": 16384,
+                        "max_response_bytes": 65536, "max_calls_per_invocation": 4},
+                    "budgets": [],
+                    "expires_at_ms": null
+                }}},
+                "budgets": {}
+            }
+        }))?)
+    }
+
+    #[test]
+    fn imported_query_requires_one_exact_resolved_grant() -> Result<()> {
+        let schema = Digest::new(b"directory.lookup schema").as_str().to_owned();
+        let mut document = authority_with_import_grant(&schema)?;
+        check_import_grant(&document, "caller", "directory.lookup", &schema)?;
+        assert!(
+            check_import_grant(&document, "caller", "directory.lookup", "sha256:stale").is_err()
+        );
+        document.resources.operations.clear();
+        assert!(check_import_grant(&document, "caller", "directory.lookup", &schema).is_err());
+        let mut document = authority_with_import_grant(&schema)?;
+        let grant = document.resources.operations["ask"]["directory"].clone();
+        document
+            .resources
+            .operations
+            .get_mut("ask")
+            .unwrap()
+            .insert("other".into(), grant);
+        assert!(check_import_grant(&document, "caller", "directory.lookup", &schema).is_err());
+        Ok(())
+    }
 
     #[test]
     fn candidate_fence_rejects_a_changed_active_selection() -> Result<()> {
@@ -347,7 +632,7 @@ mod tests {
                 },
             )]),
         )?;
-        let candidate = ReleaseCatalogCandidate {
+        let mut candidate = ReleaseCatalogCandidate {
             release: release.clone(),
             base_selection: Digest::new(b"base selection"),
             target: target.clone(),
@@ -359,21 +644,57 @@ mod tests {
                 },
                 catalog,
             },
+            bindings: None,
         };
         let active = ActiveSelection {
             digest: candidate.base_selection.clone(),
             releases: BTreeMap::new(),
         };
-        check_candidate_selection(&active, &release, &target, &artifact, &candidate)?;
+        let connection = Connection::open_in_memory()?;
+        check_candidate_selection(
+            &connection,
+            &active,
+            &release,
+            &target,
+            &artifact,
+            &candidate,
+        )?;
         let changed = ActiveSelection {
             digest: Digest::new(b"new selection"),
             releases: BTreeMap::new(),
         };
         assert!(
-            check_candidate_selection(&changed, &release, &target, &artifact, &candidate)
-                .unwrap_err()
-                .to_string()
-                .contains("changed since candidate qualification")
+            check_candidate_selection(
+                &connection,
+                &changed,
+                &release,
+                &target,
+                &artifact,
+                &candidate
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("changed since candidate qualification")
+        );
+        candidate.qualified.consumers.imports.insert(
+            "reports".into(),
+            ResolvedImports {
+                operations: BTreeMap::new(),
+                types: BTreeMap::new(),
+            },
+        );
+        assert!(
+            check_candidate_selection(
+                &connection,
+                &active,
+                &release,
+                &target,
+                &artifact,
+                &candidate
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("requires qualified instance bindings")
         );
         Ok(())
     }

@@ -160,8 +160,7 @@ invocation; app code supplies neither a binding name nor an actor. It checks the
 callee's exported contract digest before dispatch. A missing, ambiguous or stale
 grant fails the observation. Nominal inputs are rejected until the generator can
 preserve their identities. Commands currently have types only; command receipts,
-separate-host transport, serving bindings and policy qualification are
-subsequent work.
+separate-host transport and delegated command receipts are subsequent work.
 
 During a normal build, mandatory verification supplies each imported query with
 the selected callee's checked contract example and a disposable, operation-pinned
@@ -176,13 +175,18 @@ receipts and verifies the selected artifact bytes. `xtask catalog-release-candid
 RELEASE_JOURNAL ARTIFACT_STORE RELEASE_ID` replaces only the approved app and
 checks every selected caller's embedded imports against the candidate exports.
 Its `base_selection` digest identifies the active composition the candidate
-was checked against. A `ReleaseExecutionHost` configured with
-`with_catalog_store` enrolls its installation/environment in catalog-managed
-activation. At settlement, the host qualifies the approved artifact and all
-selected callers again; the journal compares the candidate's base selection
-inside the activation transaction. An unqualified or stale candidate leaves
-the active pointer unchanged. This checks contract dependencies; serving
-bindings and access policy still require their separate release guards.
+was checked against. Add `INSTANCE` as the last argument to qualify imported
+queries against the instance's resource catalog and access policy, and against
+validated deployment readbacks for their selected serving targets. A
+`ReleaseExecutionHost` configured with `with_catalog_store` enrolls its
+installation/environment in catalog-managed activation; configure
+`with_catalog_instance` as well for releases with imports. At settlement, the
+host qualifies the approved artifact and all selected callers again. The
+journal compares the candidate's base selection and serving binding evidence
+inside the activation transaction. A missing, changed, or unready imported
+target leaves the active pointer unchanged. The instance document is checked
+at qualification time; request authorization remains a runtime decision against
+activated app authority.
 
 ## Future app creation
 
