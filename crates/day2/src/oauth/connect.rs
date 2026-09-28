@@ -92,6 +92,10 @@ impl CallbackBinding {
             &self.profile,
             &self.binding_namespace,
         )?;
+        ensure!(
+            self.binding_namespace == intent.slot,
+            "callback namespace does not match connect slot"
+        );
         identifier(&self.binding_namespace)?;
         Ok(())
     }
@@ -106,6 +110,18 @@ impl CallbackBinding {
 
     pub(super) fn issuer_url(&self) -> &str {
         &self.issuer_url
+    }
+
+    pub(super) fn security_origin(&self) -> &SecurityOriginRef {
+        &self.security_origin
+    }
+
+    pub(super) fn profile(&self) -> &BindingRef {
+        &self.profile
+    }
+
+    pub(super) fn binding_namespace(&self) -> &str {
+        &self.binding_namespace
     }
 
     pub(super) fn callback(&self) -> &ProviderCallbackRef {
@@ -227,10 +243,28 @@ pub(super) fn begin(db: &mut Connection, intent: &ConnectIntent, now: i64) -> Re
     begin_inner(db, intent, None, now)
 }
 
-/// Production authorization attempts persist the reviewed callback evidence
-/// atomically with the attempt. Unbound legacy/test attempts cannot pass the
-/// private callback adapter.
-pub fn begin_bound(
+/// The public begin path requires exact provider and instance qualification.
+/// A current authority/registration source must supply the evidence at this
+/// boundary; this kernel cannot establish external provider readiness alone.
+pub fn begin_qualified(
+    db: &mut Connection,
+    input: super::profiles::OutboundQualification<'_>,
+    now: i64,
+) -> Result<bool> {
+    let qualified = super::profiles::qualify_outbound_connect(
+        input.intent,
+        input.binding,
+        input.requirement,
+        input.permission,
+        input.reviewed,
+        input.instance,
+    )?;
+    begin_bound(db, qualified.intent(), qualified.binding(), now)
+}
+
+/// Internal protocol tests may record a callback binding directly. Production
+/// callers use `begin_qualified` so registration evidence is checked first.
+pub(super) fn begin_bound(
     db: &mut Connection,
     intent: &ConnectIntent,
     binding: &CallbackBinding,
