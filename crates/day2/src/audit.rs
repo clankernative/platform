@@ -605,6 +605,7 @@ pub enum AttemptOutcome {
     Interrupted,
     Abandoned,
     Reissued,
+    Readmitted,
 }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -672,6 +673,7 @@ pub(crate) fn record_recovery(
     let outcome = match resolution {
         "abandoned" => AttemptOutcome::Abandoned,
         "reissued" => AttemptOutcome::Reissued,
+        "readmitted" => AttemptOutcome::Readmitted,
         _ => anyhow::bail!("invalid_recovery_resolution"),
     };
     record_attempt(

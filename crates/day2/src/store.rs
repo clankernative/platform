@@ -591,7 +591,13 @@ impl Runtime {
             &request.context.actor,
         )?;
         ensure!(
-            active.policy()? == policy,
+            active.policy()? == policy
+                || crate::authority_state::readmission_matches(
+                    connection,
+                    &request.context.invocation_id,
+                    &active.stamp,
+                    policy,
+                )?,
             crate::error::Failure::AuthorityPolicyChanged
         );
         Ok(())
@@ -1058,7 +1064,13 @@ impl Runtime {
             );
             guard = saved.guard.context("continuation_guard_missing")?;
             ensure!(
-                guard.policy == policy && guard.authority.as_ref() == Some(&active.stamp),
+                (guard.policy == policy && guard.authority.as_ref() == Some(&active.stamp))
+                    || crate::authority_state::readmission_matches(
+                        &tx,
+                        id,
+                        &active.stamp,
+                        &policy,
+                    )?,
                 crate::error::Failure::ContinuationAuthorityChanged
             );
             request = saved.request;
@@ -1540,8 +1552,8 @@ pub(crate) fn completed_outcome(
     let active = crate::authority_state::current(connection)?;
     let stamp = crate::authority_state::invocation_stamp(connection, id)?;
     ensure!(
-        guard.policy == *policy
-            && guard.authority.as_ref() == Some(&stamp)
+        (guard.policy == *policy && guard.authority.as_ref() == Some(&stamp)
+            || crate::authority_state::readmission_matches(connection, id, &stamp, policy)?)
             && active.stamp == stamp,
         crate::error::Failure::ReceiptPolicyChanged
     );
@@ -1568,7 +1580,9 @@ fn compacted_outcome(
     let active = crate::authority_state::current(connection)?;
     let stamp = crate::authority_state::invocation_stamp(connection, id)?;
     ensure!(
-        recorded == crate::journal::policy_digest(policy)? && active.stamp == stamp,
+        (recorded == crate::journal::policy_digest(policy)?
+            || crate::authority_state::readmission_matches(connection, id, &active.stamp, policy)?)
+            && active.stamp == stamp,
         crate::error::Failure::ReceiptPolicyChanged
     );
     let outcome: Outcome = serde_json::from_str(outcome.context("missing durable outcome")?)?;

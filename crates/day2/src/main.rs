@@ -96,6 +96,15 @@ fn main() -> Result<()> {
                 &request,
             )?)?
         }
+        ["recovery-readmit", instance, app, operator, request] => {
+            let runtime = Runtime::load(Path::new(instance), app)?;
+            let request: day2::recovery::Request = serde_json::from_str(request)?;
+            serde_json::to_value(day2::recovery::readmit(
+                &runtime,
+                &day2::authority_state::LocalOperator::assert_local(operator)?,
+                &request,
+            )?)?
+        }
         ["audit-events", instance, app, actor, before] => {
             let mut events = Runtime::load(Path::new(instance), app)?
                 .audit_events(actor, before.parse().context("invalid audit cursor")?)?;
@@ -178,7 +187,7 @@ fn main() -> Result<()> {
             )?
         }
         _ => bail!(
-            "usage: day2 init INSTANCE APP | invoke INSTANCE APP OPERATION ACTOR ID JSON | resume INSTANCE APP ID | inspect INSTANCE APP | audit-events INSTANCE APP ACTOR BEFORE | describe INSTANCE APP | check-properties INSTANCE APP EVIDENCE_DIR | replay-properties ARTIFACT EVIDENCE | trace INSTANCE APP ID | replay ARTIFACT TRACE | migration-plan INSTANCE APP TARGET PLAN_FILE | migration-apply INSTANCE APP TARGET PLAN_FILE | activate INSTANCE APP TARGET LOCAL_OPERATOR EXPECTED_STAMP_JSON REQUEST_ID | recovery-abandon INSTANCE APP LOCAL_OPERATOR REQUEST_JSON | recovery-reissue INSTANCE APP LOCAL_OPERATOR REQUEST_JSON | lab-crash INSTANCE APP ID WRITE_INDEX"
+            "usage: day2 init INSTANCE APP | invoke INSTANCE APP OPERATION ACTOR ID JSON | resume INSTANCE APP ID | inspect INSTANCE APP | audit-events INSTANCE APP ACTOR BEFORE | describe INSTANCE APP | check-properties INSTANCE APP EVIDENCE_DIR | replay-properties ARTIFACT EVIDENCE | trace INSTANCE APP ID | replay ARTIFACT TRACE | migration-plan INSTANCE APP TARGET PLAN_FILE | migration-apply INSTANCE APP TARGET PLAN_FILE | activate INSTANCE APP TARGET LOCAL_OPERATOR EXPECTED_STAMP_JSON REQUEST_ID | recovery-abandon INSTANCE APP LOCAL_OPERATOR REQUEST_JSON | recovery-reissue INSTANCE APP LOCAL_OPERATOR REQUEST_JSON | recovery-readmit INSTANCE APP LOCAL_OPERATOR REQUEST_JSON | lab-crash INSTANCE APP ID WRITE_INDEX"
         ),
     };
     println!("{}", serde_json::to_string_pretty(&output)?);

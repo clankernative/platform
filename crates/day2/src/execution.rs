@@ -239,11 +239,18 @@ fn require_authority(
         &trace.request.operation,
         &trace.request.context.actor,
     )?;
+    let guard_matches = trace.guard.as_ref().is_some_and(|guard| {
+        guard.authority.as_ref() == Some(&active.stamp)
+            && active.policy().is_ok_and(|policy| &guard.policy == policy)
+    });
+    let readmission_matches = crate::authority_state::readmission_matches(
+        connection,
+        &trace.request.context.invocation_id,
+        &active.stamp,
+        active.policy()?,
+    )?;
     ensure!(
-        trace.guard.as_ref().is_some_and(|guard| {
-            guard.authority.as_ref() == Some(&active.stamp)
-                && active.policy().is_ok_and(|policy| &guard.policy == policy)
-        }),
+        guard_matches || readmission_matches,
         crate::error::Failure::EffectAuthorityChanged
     );
     for observation in &trace.request.observations {
@@ -416,8 +423,17 @@ pub(crate) fn check_settlement_binding(
         scope == runtime.scope() && artifact == runtime.artifact().id(),
         "execution_binding_changed"
     );
+    let pinned = crate::authority_state::invocation_stamp(connection, invocation)?;
+    let readmitted_settlement = if pinned != *authority {
+        let active = crate::authority_state::current(connection)?;
+        let policy = active.policy()?;
+        crate::authority_state::readmission_matches(connection, invocation, &active.stamp, policy)?
+            && pinned == active.stamp
+    } else {
+        false
+    };
     ensure!(
-        crate::authority_state::invocation_stamp(connection, invocation)? == *authority,
+        pinned == *authority || readmitted_settlement,
         "settlement_authority_mismatch"
     );
     Ok(())
@@ -521,8 +537,11 @@ pub(crate) fn perform(runtime: &Runtime, permit: DispatchPermit) -> Result<Perfo
     let tx = database.transaction_with_behavior(TransactionBehavior::Immediate)?;
     runtime.check_binding(&tx)?;
     let resolved: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM day2_recoveries WHERE invocation=(SELECT invocation FROM day2_external_effects WHERE identity=?1))",
-        [&permit.effect], |row| row.get(0),
+        "SELECT EXISTS(SELECT 1 FROM day2_recoveries r
+         JOIN day2_external_effects e ON e.invocation=r.invocation
+         WHERE e.identity=?1 AND r.resolution IN ('abandoned','reissued'))",
+        [&permit.effect],
+        |row| row.get(0),
     )?;
     ensure!(!resolved, "resolved_invocation_perform_fenced");
     tx.commit()?;

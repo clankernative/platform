@@ -40,6 +40,8 @@ pub struct Receipt {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resolution: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub successor: Option<String>,
 }
 
@@ -89,18 +91,37 @@ fn status_as(
         .optional()?
         .context(crate::error::Failure::NotFound)?;
     ensure!(owner == actor, crate::error::Failure::Forbidden);
+    let resolution: Option<(String, Option<String>, i64)> = connection
+        .query_row(
+            "SELECT resolution,successor,revision FROM day2_recoveries WHERE invocation=?1 ORDER BY revision DESC LIMIT 1",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let abandoned_old_artifact = artifact != runtime.artifact().id()
+        && resolution
+            .as_ref()
+            .is_some_and(|(resolution, _, _)| resolution == "abandoned");
     ensure!(
-        artifact == runtime.artifact().id(),
+        artifact == runtime.artifact().id() || abandoned_old_artifact,
         crate::error::Failure::ArtifactBindingChanged
     );
-    let authority = crate::authority_state::authorize_in(&connection, runtime, &operation, actor)?;
-    if let Some(authenticated) = authenticated {
-        let rule = authority.policy()?.may_act_as(
-            authenticated,
+    let authority = if abandoned_old_artifact {
+        None
+    } else {
+        Some(crate::authority_state::authorize_in(
+            &connection,
+            runtime,
+            &operation,
             actor,
-            "request",
-            &runtime.operators()?,
-        )?;
+        )?)
+    };
+    if let Some(authenticated) = authenticated {
+        let rule = authority
+            .as_ref()
+            .context("delegation_authority_unavailable")?
+            .policy()?
+            .may_act_as(authenticated, actor, "request", &runtime.operators()?)?;
         let same_request: bool = connection.query_row(
             "SELECT COALESCE(NULLIF(authenticated,''),actor)=?2 AND delegation_rule=?3
              AND trigger='request' AND caller='' FROM day2_invocations WHERE id=?1",
@@ -109,22 +130,21 @@ fn status_as(
         )?;
         ensure!(same_request, crate::error::Failure::Forbidden);
     }
-    let resolution: Option<(String, Option<String>)> = connection
-        .query_row(
-            "SELECT resolution,successor FROM day2_recoveries WHERE invocation=?1",
-            [id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()?;
     let blocked = status == "pending" && crate::authority_state::is_blocked(&connection, id)?;
-    let outcome = if status == "pending" || resolution.is_some() {
+    let terminal_resolution = resolution
+        .as_ref()
+        .is_some_and(|(resolution, _, _)| matches!(resolution.as_str(), "abandoned" | "reissued"));
+    let outcome = if status == "pending" || terminal_resolution || abandoned_old_artifact {
         None
     } else {
         Some(store::completed_outcome(
             &connection,
             id,
             outcome.as_deref(),
-            authority.policy()?,
+            authority
+                .as_ref()
+                .context("receipt_authority_unavailable")?
+                .policy()?,
         )?)
     };
     Ok(Receipt {
@@ -136,7 +156,9 @@ fn status_as(
             .map_or(serde_json::Value::Null, |value| value.result.clone()),
         error: if blocked {
             "authority_policy_changed".into()
-        } else if let Some((resolution, _)) = &resolution {
+        } else if let Some((resolution, _, _)) = &resolution
+            && terminal_resolution
+        {
             if resolution == "abandoned" {
                 "invocation_abandoned".into()
             } else {
@@ -147,6 +169,10 @@ fn status_as(
         },
         children: children_in(&connection, id)?,
         resolution: resolution.as_ref().map(|value| value.0.clone()),
+        revision: resolution
+            .as_ref()
+            .map(|value| u64::try_from(value.2))
+            .transpose()?,
         successor: resolution.and_then(|value| value.1),
     })
 }

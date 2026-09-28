@@ -106,6 +106,7 @@ pub(crate) struct Authorized {
     action: Action,
     resource: crate::resources::ResourceUse,
     quote: crate::resources::ProviderQuote,
+    idempotent_retry: bool,
 }
 
 enum Action {
@@ -130,6 +131,18 @@ enum Action {
     },
 }
 
+pub(crate) fn retries_are_idempotent_instruction(instruction: &Instruction) -> bool {
+    matches!(
+        instruction.decode(),
+        Ok(crate::protocol::Step::External { .. })
+    ) && capability_retries_are_idempotent(&instruction.model)
+}
+
+fn capability_retries_are_idempotent(capability: &str) -> bool {
+    capability == "notifications.send.v1"
+        || crate::people_providers::retries_are_idempotent_capability(capability)
+}
+
 impl Authorized {
     /// The delegated call this authorization resolved to, for tests that need
     /// to see what the grant and the request between them decided.
@@ -149,12 +162,7 @@ impl Authorized {
     }
 
     pub(crate) fn retries_are_idempotent(&self) -> bool {
-        // The mailbox and explicitly synthetic People providers deduplicate
-        // stable effect IDs with a committed payload/result ledger. A future
-        // live adapter must explicitly supply deduplication/reconciliation
-        // before admitting a second attempt after an unknown outcome.
-        matches!(self.action, Action::Send(_))
-            || matches!(&self.action, Action::People(action) if action.is_write())
+        self.idempotent_retry
     }
 }
 
@@ -447,10 +455,13 @@ pub(crate) fn authorized(
         }
         _ => anyhow::bail!("unknown_capability"),
     };
+    let idempotent_retry = matches!(action, Action::Send(_))
+        || matches!(&action, Action::People(action) if action.is_write());
     Ok(Authorized {
         action,
         resource,
         quote,
+        idempotent_retry,
     })
 }
 
@@ -603,6 +614,16 @@ pub(crate) fn execute(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recorded_capability_idempotency_matches_provider_retry_contracts() {
+        assert!(capability_retries_are_idempotent("notifications.send.v1"));
+        assert!(capability_retries_are_idempotent(
+            "google_directory.create_user.v1"
+        ));
+        assert!(!capability_retries_are_idempotent("slack.post.v1"));
+        assert!(!capability_retries_are_idempotent("unknown.capability"));
+    }
 
     #[test]
     fn accepted_response_loss_and_duplicate_retries_preserve_one_notification() -> Result<()> {

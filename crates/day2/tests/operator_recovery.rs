@@ -48,6 +48,7 @@ fn request(runtime: &day2::store::Runtime, id: &str, request_id: &str) -> Reques
         request_id: request_id.into(),
         invocation: id.into(),
         expected_artifact: runtime.artifact().id().into(),
+        expected_revision: 0,
         reason: "restore access after policy review".into(),
     }
 }
@@ -228,6 +229,7 @@ fn an_issued_permit_is_fenced_and_unknown_budget_is_retained() -> Result<()> {
         request_id: "effect-reissue-refused".into(),
         invocation: notify.clone(),
         expected_artifact: world.runtime.artifact().id().into(),
+        expected_revision: 0,
         reason: "must not replay an effect".into(),
     };
     assert!(
@@ -243,6 +245,7 @@ fn an_issued_permit_is_fenced_and_unknown_budget_is_retained() -> Result<()> {
             request_id: "permit-fence".into(),
             invocation: notify.clone(),
             expected_artifact: world.runtime.artifact().id().into(),
+            expected_revision: 0,
             reason: "operator stopped blocked send".into(),
         },
     )?;
@@ -297,6 +300,7 @@ fn late_settlement_after_abandon_records_provider_knowledge_without_completion()
             request_id: "late-settle".into(),
             invocation: notify.clone(),
             expected_artifact: world.runtime.artifact().id().into(),
+            expected_revision: 0,
             reason: "preserve late provider result".into(),
         },
     )?;
@@ -357,6 +361,428 @@ fn reissue_admission_failure_leaves_old_invocation_unresolved() -> Result<()> {
 }
 
 #[test]
+fn readmit_reuses_known_result_and_completes_without_resending_provider_effect() -> Result<()> {
+    let (world, notify) = blocked_notify_by_unrelated_policy_change(51, |simulation, notify| {
+        let effect = simulation.claim_effect(notify)?.context("claimed effect")?;
+        simulation.settle_effect(simulation.perform_effect(effect)?)
+    })?;
+    let operator = LocalOperator::assert_local("test-operator")?;
+    let receipt = recovery::readmit(
+        &world.runtime,
+        &operator,
+        &request(&world.runtime, &notify, "known-readmit"),
+    )?;
+    assert_eq!(
+        (receipt.resolution.as_str(), receipt.revision),
+        ("readmitted", 1)
+    );
+    let drained = invocations::drain(&world.runtime, 16)?;
+    assert!(
+        drained
+            .iter()
+            .any(|row| row.id == notify && row.status == "success")
+    );
+    let status = invocations::status(&world.runtime, &notify, "alice")?;
+    assert_eq!(status.resolution.as_deref(), Some("readmitted"));
+    assert_eq!(status.revision, Some(1));
+    assert_eq!(status.status, "success");
+    let trace = world.runtime.trace(&notify)?;
+    day2::store::replay(world.runtime.artifact(), &trace)?;
+    let db = rusqlite::Connection::open(world.runtime.db())?;
+    assert_eq!(db.query_row("SELECT count(*) FROM day2_external_attempts WHERE effect IN (SELECT identity FROM day2_external_effects WHERE invocation=?1)", [&notify], |row| row.get::<_, i64>(0))?, 1);
+    let provider =
+        rusqlite::Connection::open(world.runtime.db().with_file_name("notifications.sqlite"))?;
+    let state: String = provider.query_row(
+        "SELECT state FROM notification_world WHERE id=1",
+        [],
+        |row| row.get(0),
+    )?;
+    let accepted: serde_json::Value = serde_json::from_str(&state)?;
+    assert_eq!(
+        accepted["order"]
+            .as_array()
+            .context("provider order")?
+            .len(),
+        1
+    );
+    Ok(())
+}
+
+#[test]
+fn readmit_retries_unknown_mailbox_outcome_with_the_same_effect_identity() -> Result<()> {
+    let mut world = World::artifact("DAY2_TEST_REPORTS_ARTIFACT")?;
+    let simulation = Simulation::new(world.runtime.clone(), [52; 32], 100_000)?;
+    world.runtime = simulation.runtime().clone();
+    world.runtime.initialize()?;
+    world.submit("submit", Fault::None)?;
+    let analyze = world.child("submit")?;
+    world.finish(&analyze)?;
+    let notify = world.child(&analyze)?;
+    world.runtime.execute(&notify, Fault::None)?;
+    let effect = simulation
+        .claim_effect(&notify)?
+        .context("claimed effect")?;
+    let db = rusqlite::Connection::open(world.runtime.db())?;
+    let identity: String = db.query_row(
+        "SELECT identity FROM day2_external_effects WHERE invocation=?1",
+        [&notify],
+        |row| row.get(0),
+    )?;
+    let performed = simulation.perform_effect(effect)?;
+    drop(performed);
+    world.change_policy(|policy| {
+        policy
+            .operations
+            .get_mut("reports.detail")
+            .unwrap()
+            .actors
+            .insert("reviewer".into());
+    })?;
+    assert_eq!(
+        world.runtime.execute(&notify, Fault::None)?.status,
+        "blocked"
+    );
+    let operator = LocalOperator::assert_local("test-operator")?;
+    recovery::readmit(
+        &world.runtime,
+        &operator,
+        &request(&world.runtime, &notify, "unknown-readmit"),
+    )?;
+    let drained = invocations::drain(&world.runtime, 16)?;
+    assert!(
+        drained
+            .iter()
+            .any(|row| row.id == notify && row.status == "success")
+    );
+    let db = rusqlite::Connection::open(world.runtime.db())?;
+    let effects: (i64, i64, String) = db.query_row(
+        "SELECT count(*),count(DISTINCT identity),min(identity) FROM day2_external_effects WHERE invocation=?1",
+        [&notify],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    assert_eq!(effects, (1, 1, identity.clone()));
+    let attempts: i64 = db.query_row(
+        "SELECT count(*) FROM day2_external_attempts WHERE effect=?1",
+        [&identity],
+        |row| row.get(0),
+    )?;
+    assert_eq!(attempts, 2);
+    let provider =
+        rusqlite::Connection::open(world.runtime.db().with_file_name("notifications.sqlite"))?;
+    let state: String = provider.query_row(
+        "SELECT state FROM notification_world WHERE id=1",
+        [],
+        |row| row.get(0),
+    )?;
+    let accepted: serde_json::Value = serde_json::from_str(&state)?;
+    assert_eq!(
+        accepted["order"]
+            .as_array()
+            .context("provider order")?
+            .len(),
+        1
+    );
+    Ok(())
+}
+
+#[test]
+fn readmit_dispatches_a_never_admitted_effect_once() -> Result<()> {
+    let (world, notify) = blocked_notify_by_unrelated_policy_change(53, |simulation, notify| {
+        simulation.claim_effect(notify)?.context("claimed effect")?;
+        Ok(())
+    })?;
+    let operator = LocalOperator::assert_local("test-operator")?;
+    let receipt = recovery::readmit(
+        &world.runtime,
+        &operator,
+        &request(&world.runtime, &notify, "never-readmit"),
+    )?;
+    assert_eq!(receipt.evidence.never_admitted, 1);
+    assert!(
+        invocations::drain(&world.runtime, 16)?
+            .iter()
+            .any(|row| row.id == notify && row.status == "success")
+    );
+    let db = rusqlite::Connection::open(world.runtime.db())?;
+    assert_eq!(db.query_row("SELECT count(*) FROM day2_external_attempts WHERE effect IN (SELECT identity FROM day2_external_effects WHERE invocation=?1)", [&notify], |row| row.get::<_, i64>(0))?, 1);
+    Ok(())
+}
+
+#[test]
+fn repeated_readmission_rechecks_authority_and_revision_and_terminal_abandon_wins() -> Result<()> {
+    let (world, id) = blocked_notify_by_unrelated_policy_change(54, |simulation, notify| {
+        let effect = simulation.claim_effect(notify)?.context("claimed effect")?;
+        simulation.settle_effect(simulation.perform_effect(effect)?)
+    })?;
+    let operator = LocalOperator::assert_local("test-operator")?;
+    recovery::readmit(
+        &world.runtime,
+        &operator,
+        &request(&world.runtime, &id, "readmit-one"),
+    )?;
+    world.change_policy(|policy| {
+        policy
+            .operations
+            .get_mut("reports.detail")
+            .unwrap()
+            .actors
+            .insert("second_reviewer".into());
+    })?;
+    assert_eq!(world.runtime.execute(&id, Fault::None)?.status, "blocked");
+    let stale = Request {
+        expected_revision: 0,
+        request_id: "stale-revision".into(),
+        ..request(&world.runtime, &id, "unused")
+    };
+    assert!(
+        recovery::readmit(&world.runtime, &operator, &stale)
+            .unwrap_err()
+            .to_string()
+            .contains("recovery_revision_conflict")
+    );
+    let second = Request {
+        expected_revision: 1,
+        request_id: "readmit-two".into(),
+        ..request(&world.runtime, &id, "unused")
+    };
+    let receipt = recovery::readmit(&world.runtime, &operator, &second)?;
+    assert_eq!(receipt.revision, 2);
+    assert!(
+        invocations::drain(&world.runtime, 16)?
+            .iter()
+            .any(|row| row.id == id && row.status == "success")
+    );
+    Ok(())
+}
+
+#[test]
+fn readmit_refuses_actor_no_longer_authorized_without_mutating_block_or_recovery() -> Result<()> {
+    let (world, id) = blocked_deferral()?;
+    let request = request(&world.runtime, &id, "unauthorized-readmit");
+    assert!(
+        recovery::readmit(
+            &world.runtime,
+            &LocalOperator::assert_local("test-operator")?,
+            &request
+        )
+        .is_err()
+    );
+    let db = rusqlite::Connection::open(world.runtime.db())?;
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM day2_recoveries WHERE invocation=?1",
+            [&id],
+            |row| row.get::<_, i64>(0)
+        )?,
+        0
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM day2_authority_blocks WHERE invocation=?1",
+            [&id],
+            |row| row.get::<_, i64>(0)
+        )?,
+        1
+    );
+    Ok(())
+}
+
+#[test]
+fn abandon_accepts_blocked_invocation_from_previous_artifact() -> Result<()> {
+    let (world, id) = blocked_notify(55, |_, _| Ok(()))?;
+    let old_artifact = world.runtime.artifact().id().to_owned();
+    let target_path = std::env::var("DAY2_TEST_REPORTS_DEFERRALS_ARTIFACT")?;
+    let target = day2::artifact::LoadedArtifact::load(std::path::Path::new(&target_path))?;
+    let active = day2::authority_state::current(&rusqlite::Connection::open(world.runtime.db())?)?;
+    day2::migration::activate_checked(
+        &world.runtime,
+        &target,
+        &LocalOperator::assert_local("test-operator")?,
+        &active.stamp,
+        "activate-before-old-abandon",
+    )?;
+    let active_runtime = day2::store::Runtime::load(world.runtime.instance_path(), "reports")?;
+    let request = Request {
+        request_id: "abandon-old-artifact".into(),
+        invocation: id.clone(),
+        expected_artifact: old_artifact,
+        expected_revision: 0,
+        reason: "old artifact work must remain abandonable".into(),
+    };
+    let receipt = recovery::abandon(
+        &active_runtime,
+        &LocalOperator::assert_local("test-operator")?,
+        &request,
+    )?;
+    assert_eq!(receipt.resolution, "abandoned");
+    assert_eq!(
+        invocations::status(&active_runtime, &id, "alice")?
+            .resolution
+            .as_deref(),
+        Some("abandoned")
+    );
+    Ok(())
+}
+
+#[test]
+fn readmit_then_terminal_abandon_is_final() -> Result<()> {
+    let (world, id) = blocked_deferral()?;
+    world.change_policy(|policy| {
+        policy
+            .operations
+            .get_mut("reports.analyze")
+            .unwrap()
+            .actors
+            .insert("alice".into());
+    })?;
+    let operator = LocalOperator::assert_local("test-operator")?;
+    recovery::readmit(
+        &world.runtime,
+        &operator,
+        &request(&world.runtime, &id, "readmit-before-abandon"),
+    )?;
+    world.change_policy(|policy| {
+        policy
+            .operations
+            .get_mut("reports.detail")
+            .unwrap()
+            .actors
+            .insert("reviewer".into());
+    })?;
+    assert_eq!(world.runtime.execute(&id, Fault::None)?.status, "blocked");
+    let abandon = Request {
+        expected_revision: 1,
+        request_id: "terminal-abandon".into(),
+        ..request(&world.runtime, &id, "unused")
+    };
+    assert_eq!(
+        recovery::abandon(&world.runtime, &operator, &abandon)?.resolution,
+        "abandoned"
+    );
+    let later = Request {
+        expected_revision: 2,
+        request_id: "after-terminal".into(),
+        ..request(&world.runtime, &id, "unused")
+    };
+    assert!(
+        recovery::readmit(&world.runtime, &operator, &later)
+            .unwrap_err()
+            .to_string()
+            .contains("recovery_already_resolved")
+    );
+    Ok(())
+}
+
+#[test]
+fn readmit_refreshes_command_child_policy_but_preserves_target_version_fence() -> Result<()> {
+    let world = World::new()?;
+    let saved = world.submit("submit", Fault::None)?;
+    let child = world.child("submit")?;
+    world.change_policy(|policy| {
+        policy
+            .operations
+            .get_mut("reports.detail")
+            .unwrap()
+            .actors
+            .insert("reviewer".into());
+    })?;
+    assert_eq!(
+        world.runtime.execute(&child, Fault::None)?.status,
+        "blocked"
+    );
+    let receipt = recovery::readmit(
+        &world.runtime,
+        &LocalOperator::assert_local("test-operator")?,
+        &request(&world.runtime, &child, "child-policy-readmit"),
+    )?;
+    assert_eq!(receipt.resolution, "readmitted");
+    assert!(
+        invocations::drain(&world.runtime, 16)?
+            .iter()
+            .any(|row| row.id == child && row.status == "success")
+    );
+    let db = rusqlite::Connection::open(world.runtime.db())?;
+    let captured: String = db.query_row(
+        "SELECT policy FROM day2_command_requests WHERE id=?1",
+        [&child],
+        |row| row.get(0),
+    )?;
+    let active = day2::authority_state::current(&db)?;
+    assert_eq!(
+        serde_json::from_str::<day2::authority::Policy>(&captured)?,
+        active.policy()?.clone()
+    );
+    assert!(
+        world.runtime.inspect()?["reports"]
+            .as_array()
+            .context("reports")?
+            .iter()
+            .any(|row| row["id"] == saved.result["id"])
+    );
+
+    let world = World::new()?;
+    let saved = world.submit("submit", Fault::None)?;
+    let child = world.child("submit")?;
+    world.change_policy(|policy| {
+        policy
+            .operations
+            .get_mut("reports.detail")
+            .unwrap()
+            .actors
+            .insert("reviewer".into());
+    })?;
+    assert_eq!(
+        world.runtime.execute(&child, Fault::None)?.status,
+        "blocked"
+    );
+    world.runtime.invoke(
+        "reports.revise",
+        "alice",
+        "edit-child-target",
+        &json!({"report_id":saved.result["id"],"expected_version":1,"text":"changed"}),
+        101,
+        Fault::None,
+    )?;
+    let before: String = rusqlite::Connection::open(world.runtime.db())?.query_row(
+        "SELECT policy FROM day2_command_requests WHERE id=?1",
+        [&child],
+        |row| row.get(0),
+    )?;
+    let failed = recovery::readmit(
+        &world.runtime,
+        &LocalOperator::assert_local("test-operator")?,
+        &request(&world.runtime, &child, "changed-target-readmit"),
+    );
+    assert!(failed.unwrap_err().to_string().contains("conflict"));
+    let db = rusqlite::Connection::open(world.runtime.db())?;
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM day2_recoveries WHERE invocation=?1",
+            [&child],
+            |row| row.get::<_, i64>(0)
+        )?,
+        0
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT policy FROM day2_command_requests WHERE id=?1",
+            [&child],
+            |row| row.get::<_, String>(0)
+        )?,
+        before
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM day2_authority_blocks WHERE invocation=?1",
+            [&child],
+            |row| row.get::<_, i64>(0)
+        )?,
+        1
+    );
+    Ok(())
+}
+
+#[test]
 fn nonblocked_invocation_and_wrong_artifact_are_rejected() -> Result<()> {
     let world = World::artifact("DAY2_TEST_REPORTS_DEFERRALS_ARTIFACT")?;
     world.submit("ordinary", Fault::None)?;
@@ -401,6 +827,35 @@ fn blocked_notify(
             .unwrap()
             .effects
             .clear();
+    })?;
+    assert_eq!(
+        world.runtime.execute(&notify, Fault::None)?.status,
+        "blocked"
+    );
+    Ok((world, notify))
+}
+
+fn blocked_notify_by_unrelated_policy_change(
+    seed: u8,
+    before_block: impl FnOnce(&Simulation, &str) -> Result<()>,
+) -> Result<(World, String)> {
+    let mut world = World::artifact("DAY2_TEST_REPORTS_ARTIFACT")?;
+    let simulation = Simulation::new(world.runtime.clone(), [seed; 32], 100_000)?;
+    world.runtime = simulation.runtime().clone();
+    world.runtime.initialize()?;
+    world.submit("submit", Fault::None)?;
+    let analyze = world.child("submit")?;
+    world.finish(&analyze)?;
+    let notify = world.child(&analyze)?;
+    world.runtime.execute(&notify, Fault::None)?;
+    before_block(&simulation, &notify)?;
+    world.change_policy(|policy| {
+        policy
+            .operations
+            .get_mut("reports.detail")
+            .unwrap()
+            .actors
+            .insert("reviewer".into());
     })?;
     assert_eq!(
         world.runtime.execute(&notify, Fault::None)?.status,
@@ -498,5 +953,46 @@ fn a_committed_decision_without_effects_cannot_be_reissued() -> Result<()> {
         1
     );
     refuses_reissue(&world, &notify, "decided-reissue")?;
+    Ok(())
+}
+
+#[test]
+fn readmit_refuses_an_unknown_outcome_on_a_non_deduplicating_capability() -> Result<()> {
+    let (world, notify) = blocked_notify_by_unrelated_policy_change(53, |simulation, notify| {
+        let effect = simulation.claim_effect(notify)?.context("claimed effect")?;
+        // Performed but never settled: the host does not know the outcome.
+        drop(simulation.perform_effect(effect)?);
+        Ok(())
+    })?;
+    let db = rusqlite::Connection::open(world.runtime.db())?;
+    // Public fixtures only reach the deduplicating mailbox. Record the same
+    // unknown outcome as if a capability without deduplication had produced it.
+    assert_eq!(
+        db.execute(
+            "UPDATE day2_external_effects SET instruction=json_set(instruction,'$.model','slack.post.v1') WHERE invocation=?1",
+            [&notify],
+        )?,
+        1
+    );
+    let error = recovery::readmit(
+        &world.runtime,
+        &LocalOperator::assert_local("test-operator")?,
+        &request(&world.runtime, &notify, "unknown-slack-readmit"),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("recovery_readmit_requires_known_outcomes"),
+        "{error}"
+    );
+    let unchanged: (String, i64, i64) = db.query_row(
+        "SELECT i.status,
+                (SELECT count(*) FROM day2_authority_blocks WHERE invocation=i.id),
+                (SELECT count(*) FROM day2_recoveries WHERE invocation=i.id)
+         FROM day2_invocations i WHERE i.id=?1",
+        [&notify],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    assert_eq!(unchanged, ("pending".into(), 1, 0));
     Ok(())
 }

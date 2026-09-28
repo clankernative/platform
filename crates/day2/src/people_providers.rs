@@ -363,6 +363,18 @@ pub(crate) enum Action {
     },
 }
 
+pub(crate) fn retries_are_idempotent_capability(capability: &str) -> bool {
+    matches!(
+        capability,
+        "google_directory.create_user.v1"
+            | "google_directory.patch_attributes.v1"
+            | "google_directory.ensure_group_member.v1"
+            | "linear.ensure_access.v1"
+            | "linear.suspend.v1"
+            | "operator_alerts.send.v1"
+    )
+}
+
 impl Action {
     pub(crate) fn is_write(&self) -> bool {
         !matches!(self, Self::Snapshot { .. } | Self::Next { .. })

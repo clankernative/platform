@@ -4,7 +4,7 @@ use crate::{
     store::{self, Runtime},
 };
 use anyhow::{Context as _, Result, ensure};
-use rusqlite::{OptionalExtension, TransactionBehavior, params};
+use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -13,6 +13,7 @@ pub struct Request {
     pub request_id: String,
     pub invocation: String,
     pub expected_artifact: String,
+    pub expected_revision: u64,
     pub reason: String,
 }
 
@@ -21,6 +22,7 @@ pub struct Request {
 pub struct Receipt {
     pub invocation: String,
     pub resolution: String,
+    pub revision: u64,
     pub successor: Option<String>,
     pub evidence: EvidenceSummary,
     pub children: Vec<String>,
@@ -37,12 +39,16 @@ pub(crate) fn upgrade(connection: &rusqlite::Connection) -> Result<()> {
     connection.execute_batch(
         "CREATE TABLE IF NOT EXISTS day2_recoveries(
             request_id TEXT PRIMARY KEY,
-            invocation TEXT NOT NULL UNIQUE REFERENCES day2_invocations(id),
+            invocation TEXT NOT NULL REFERENCES day2_invocations(id),
+            revision INTEGER NOT NULL CHECK(revision>0),
             operator TEXT NOT NULL, reason TEXT NOT NULL,
-            resolution TEXT NOT NULL CHECK(resolution IN ('abandoned','reissued')),
+            resolution TEXT NOT NULL CHECK(resolution IN ('abandoned','reissued','readmitted')),
             successor TEXT REFERENCES day2_invocations(id), evidence TEXT NOT NULL,
-            payload TEXT NOT NULL, at_ms INTEGER NOT NULL
+            authority_epoch TEXT NOT NULL, authority_revision INTEGER NOT NULL CHECK(authority_revision>0),
+            policy TEXT NOT NULL, payload TEXT NOT NULL, at_ms INTEGER NOT NULL, receipt TEXT NOT NULL,
+            UNIQUE(invocation,revision)
         ) STRICT;
+        CREATE INDEX IF NOT EXISTS day2_recoveries_latest ON day2_recoveries(invocation,revision DESC);
         CREATE TRIGGER IF NOT EXISTS day2_recoveries_no_update
         BEFORE UPDATE ON day2_recoveries BEGIN SELECT RAISE(ABORT,'append_only_recovery'); END;
         CREATE TRIGGER IF NOT EXISTS day2_recoveries_no_delete
@@ -52,18 +58,43 @@ pub(crate) fn upgrade(connection: &rusqlite::Connection) -> Result<()> {
 }
 
 pub fn abandon(runtime: &Runtime, operator: &LocalOperator, request: &Request) -> Result<Receipt> {
-    resolve(runtime, operator, request, false)
+    resolve(runtime, operator, request, Resolution::Abandoned)
 }
 
 pub fn reissue(runtime: &Runtime, operator: &LocalOperator, request: &Request) -> Result<Receipt> {
-    resolve(runtime, operator, request, true)
+    resolve(runtime, operator, request, Resolution::Reissued)
+}
+
+pub fn readmit(runtime: &Runtime, operator: &LocalOperator, request: &Request) -> Result<Receipt> {
+    resolve(runtime, operator, request, Resolution::Readmitted)
+}
+
+#[derive(Clone, Copy)]
+enum Resolution {
+    Abandoned,
+    Reissued,
+    Readmitted,
+}
+
+impl Resolution {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Abandoned => "abandoned",
+            Self::Reissued => "reissued",
+            Self::Readmitted => "readmitted",
+        }
+    }
+
+    fn is_terminal(self) -> bool {
+        !matches!(self, Self::Readmitted)
+    }
 }
 
 fn resolve(
     runtime: &Runtime,
     operator: &LocalOperator,
     request: &Request,
-    reissue: bool,
+    resolution: Resolution,
 ) -> Result<Receipt> {
     ensure!(
         !request.request_id.trim().is_empty() && request.request_id.len() <= 128,
@@ -75,39 +106,33 @@ fn resolve(
             && !request.reason.chars().any(char::is_control),
         "invalid_recovery_reason"
     );
-    let payload = serde_json::to_string(&(request, operator.name(), reissue))?;
+    let payload = serde_json::to_string(&(request, operator.name(), resolution.as_str()))?;
     let mut database = store::open(runtime.db())?;
     let tx = database.transaction_with_behavior(TransactionBehavior::Immediate)?;
     runtime.check_binding(&tx)?;
-    let prior: Option<(String, String)> = tx
+    if let Some((stored, receipt)) = tx
         .query_row(
-            "SELECT payload,evidence FROM day2_recoveries WHERE request_id=?1",
+            "SELECT payload,receipt FROM day2_recoveries WHERE request_id=?1",
             [&request.request_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         )
-        .optional()?;
-    if let Some((stored, evidence)) = prior {
+        .optional()?
+    {
         ensure!(stored == payload, "recovery_request_conflict");
-        let (successor, resolution): (Option<String>, String) = tx.query_row(
-            "SELECT successor,resolution FROM day2_recoveries WHERE request_id=?1",
-            [&request.request_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
-        let receipt = Receipt {
-            invocation: request.invocation.clone(),
-            resolution,
-            successor,
-            evidence: serde_json::from_str(&evidence)?,
-            children: children_in(&tx, &request.invocation)?,
-        };
-        return Ok(receipt);
+        return Ok(serde_json::from_str(&receipt)?);
     }
-    let resolved: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM day2_recoveries WHERE invocation=?1)",
+
+    let (revision, terminal): (i64, bool) = tx.query_row(
+        "SELECT COUNT(*),COALESCE(MAX(resolution IN ('abandoned','reissued')),0)
+         FROM day2_recoveries WHERE invocation=?1",
         [&request.invocation],
-        |row| row.get(0),
+        |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
-    ensure!(!resolved, "recovery_already_resolved");
+    ensure!(!terminal, "recovery_already_resolved");
+    ensure!(
+        u64::try_from(revision)? == request.expected_revision,
+        "recovery_revision_conflict"
+    );
     let (artifact, status): (String, String) = tx
         .query_row(
             "SELECT artifact,status FROM day2_invocations WHERE id=?1",
@@ -117,63 +142,194 @@ fn resolve(
         .optional()?
         .context(crate::error::Failure::NotFound)?;
     ensure!(
-        artifact == request.expected_artifact && artifact == runtime.artifact().id(),
+        artifact == request.expected_artifact,
         crate::error::Failure::ArtifactBindingChanged
     );
+    if !matches!(resolution, Resolution::Abandoned) {
+        ensure!(
+            artifact == runtime.artifact().id(),
+            crate::error::Failure::ArtifactBindingChanged
+        );
+    }
     ensure!(status == "pending", "recovery_requires_blocked_invocation");
     ensure!(
         crate::authority_state::is_blocked(&tx, &request.invocation)?,
         "recovery_requires_blocked_invocation"
     );
 
+    let revision = revision
+        .checked_add(1)
+        .context("recovery_revision_overflow")?;
     let evidence = classify_effects(&tx, &request.invocation)?;
     let children = children_in(&tx, &request.invocation)?;
-    let successor = if reissue {
+    let mut successor = None;
+    let active_authority = crate::authority_state::current(&tx)?;
+    let has_pin: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM day2_invocation_authority WHERE invocation=?1)",
+        [&request.invocation],
+        |row| row.get(0),
+    )?;
+    let mut stamp = if has_pin {
+        crate::authority_state::invocation_stamp(&tx, &request.invocation)?
+    } else {
+        active_authority.stamp.clone()
+    };
+    let mut policy = active_authority.policy()?.clone();
+    if matches!(resolution, Resolution::Reissued) {
         ensure!(
             evidence == EvidenceSummary::default()
                 && !has_committed_decision(&tx, &request.invocation)?
                 && children.is_empty(),
             "recovery_reissue_requires_uncommitted_invocation"
         );
-        Some(admit_successor(runtime, &tx, &request.invocation)?)
-    } else {
-        None
-    };
-    let resolution = if reissue { "reissued" } else { "abandoned" };
-    let error = if reissue {
-        "invocation_reissued"
-    } else {
-        "invocation_abandoned"
-    };
-    let outcome = crate::protocol::Outcome {
-        status: "failure".into(),
-        result: serde_json::json!({}),
-        error: error.into(),
-    };
-    tx.execute(
-        "UPDATE day2_invocations SET status='failure',outcome=?1 WHERE id=?2 AND status='pending'",
-        params![serde_json::to_string(&outcome)?, request.invocation],
-    )?;
-    let evidence_json = serde_json::to_string(&evidence)?;
+        successor = Some(admit_successor(runtime, &tx, &request.invocation)?);
+    } else if matches!(resolution, Resolution::Readmitted) {
+        let (operation, actor, input): (String, String, String) = tx.query_row(
+            "SELECT operation,actor,input FROM day2_invocations WHERE id=?1",
+            [&request.invocation],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        let active = crate::authority_state::authorize_in(&tx, runtime, &operation, &actor)?;
+        stamp = active.stamp.clone();
+        policy = active.policy()?.clone();
+        let definition = runtime.artifact().route(&operation)?;
+        let value: serde_json::Value = serde_json::from_str(&input)?;
+        runtime.artifact().contract().schema.inputs[&definition.input_type]
+            .validate_input(&value)?;
+        let unknown = unknown_non_idempotent_effects(&tx, &request.invocation)?;
+        ensure!(
+            unknown.is_empty(),
+            "recovery_readmit_requires_known_outcomes: {}",
+            unknown.join(",")
+        );
+        refresh_command_child_policy(&tx, runtime, &request.invocation, &policy)?;
+        ensure_readmitted_resources(&tx, &request.invocation, &operation, &active)?;
+        let old_reason: String = tx.query_row(
+            "SELECT reason FROM day2_authority_blocks WHERE invocation=?1",
+            [&request.invocation],
+            |row| row.get(0),
+        )?;
+        tx.execute(
+            "INSERT INTO day2_authority_block_history(invocation,revision,reason,at_ms) VALUES(?1,?2,?3,?4)",
+            params![request.invocation, revision, old_reason, crate::resource_admin::now_ms()?],
+        )?;
+        crate::authority_state::pin_readmitted_invocation(&tx, &request.invocation, &stamp)?;
+        tx.execute(
+            "DELETE FROM day2_authority_blocks WHERE invocation=?1",
+            [&request.invocation],
+        )?;
+    }
+
+    let resolution_text = resolution.as_str();
     let now_ms = crate::resource_admin::now_ms()?;
-    tx.execute("INSERT INTO day2_recoveries(request_id,invocation,operator,reason,resolution,successor,evidence,payload,at_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)", params![request.request_id, request.invocation, operator.name(), request.reason, resolution, successor, evidence_json, payload, now_ms])?;
+    let evidence_json = serde_json::to_string(&evidence)?;
+    let receipt = Receipt {
+        invocation: request.invocation.clone(),
+        resolution: resolution_text.into(),
+        revision: u64::try_from(revision)?,
+        successor: successor.clone(),
+        evidence: evidence.clone(),
+        children,
+    };
+    if resolution.is_terminal() {
+        let error = if matches!(resolution, Resolution::Reissued) {
+            "invocation_reissued"
+        } else {
+            "invocation_abandoned"
+        };
+        let outcome = crate::protocol::Outcome {
+            status: "failure".into(),
+            result: serde_json::json!({}),
+            error: error.into(),
+        };
+        tx.execute(
+            "UPDATE day2_invocations SET status='failure',outcome=?1 WHERE id=?2 AND status='pending'",
+            params![serde_json::to_string(&outcome)?, request.invocation],
+        )?;
+    }
+    tx.execute(
+        "INSERT INTO day2_recoveries(request_id,invocation,revision,operator,reason,resolution,successor,evidence,authority_epoch,authority_revision,policy,payload,at_ms,receipt)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+        params![request.request_id, request.invocation, revision, operator.name(), request.reason,
+            resolution_text, successor, evidence_json, stamp.epoch, i64::try_from(stamp.revision)?,
+            serde_json::to_string(&policy)?, payload, now_ms, serde_json::to_string(&receipt)?],
+    )?;
     crate::audit::record_recovery(
         &tx,
         runtime,
         operator.name(),
         &request.invocation,
-        resolution,
+        resolution_text,
         &request.reason,
         now_ms,
     )?;
     tx.commit()?;
-    Ok(Receipt {
-        invocation: request.invocation.clone(),
-        resolution: resolution.into(),
-        successor,
-        evidence,
-        children,
-    })
+    Ok(receipt)
+}
+
+fn ensure_readmitted_resources(
+    connection: &Transaction<'_>,
+    invocation: &str,
+    operation: &str,
+    authority: &crate::authority_state::ActiveAuthority,
+) -> Result<()> {
+    crate::resources::capture_root_budgets(connection, invocation, operation, authority)?;
+    let has_seed: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM day2_id_seeds WHERE invocation=?1)",
+        [invocation],
+        |row| row.get(0),
+    )?;
+    if !has_seed {
+        let parent: String = connection.query_row(
+            "SELECT parent FROM day2_command_requests WHERE id=?1
+             UNION ALL SELECT parent FROM day2_deferrals WHERE id=?1 LIMIT 1",
+            [invocation],
+            |row| row.get(0),
+        )?;
+        let parent_seed: Vec<u8> = connection.query_row(
+            "SELECT seed FROM day2_id_seeds WHERE invocation=?1",
+            [&parent],
+            |row| row.get(0),
+        )?;
+        use sha2::{Digest, Sha256};
+        let mut hash = Sha256::new();
+        hash.update(parent_seed);
+        hash.update(invocation.as_bytes());
+        connection.execute(
+            "INSERT INTO day2_id_seeds VALUES(?1,?2)",
+            params![invocation, hash.finalize().to_vec()],
+        )?;
+    }
+    Ok(())
+}
+
+fn refresh_command_child_policy(
+    connection: &Transaction<'_>,
+    runtime: &Runtime,
+    invocation: &str,
+    policy: &crate::authority::Policy,
+) -> Result<()> {
+    let target: Option<(String, String, i64)> = connection
+        .query_row(
+            "SELECT model,target,version FROM day2_command_requests WHERE id=?1",
+            [invocation],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    if let Some((model, target, version)) = target {
+        let row = store::get(
+            connection,
+            &model,
+            &runtime.artifact().contract().schema.models[&model],
+            crate::identity::parse_public_or_legacy(&target)?,
+        )?;
+        ensure!(row.version == version, crate::error::Failure::Conflict);
+        connection.execute(
+            "UPDATE day2_command_requests SET policy=?1 WHERE id=?2",
+            params![serde_json::to_string(policy)?, invocation],
+        )?;
+    }
+    Ok(())
 }
 
 fn classify_effects(
@@ -181,12 +337,16 @@ fn classify_effects(
     invocation: &str,
 ) -> Result<EvidenceSummary> {
     let mut summary = EvidenceSummary::default();
-    let mut statement = connection.prepare("SELECT e.identity,e.observation,COUNT(a.identity),SUM(CASE WHEN a.observation IS NOT NULL THEN 1 ELSE 0 END) FROM day2_external_effects e LEFT JOIN day2_external_attempts a ON a.effect=e.identity WHERE e.invocation=?1 GROUP BY e.identity,e.observation ORDER BY e.ordinal")?;
+    let mut statement = connection.prepare(
+        "SELECT e.observation,COUNT(a.identity),SUM(CASE WHEN a.observation IS NOT NULL THEN 1 ELSE 0 END)
+         FROM day2_external_effects e LEFT JOIN day2_external_attempts a ON a.effect=e.identity
+         WHERE e.invocation=?1 GROUP BY e.identity,e.observation ORDER BY e.ordinal",
+    )?;
     let rows = statement.query_map([invocation], |row| {
         Ok((
-            row.get::<_, Option<String>>(1)?,
+            row.get::<_, Option<String>>(0)?,
+            row.get::<_, i64>(1)?,
             row.get::<_, i64>(2)?,
-            row.get::<_, i64>(3)?,
         ))
     })?;
     for row in rows {
@@ -202,8 +362,34 @@ fn classify_effects(
     Ok(summary)
 }
 
+fn unknown_non_idempotent_effects(
+    connection: &rusqlite::Connection,
+    invocation: &str,
+) -> Result<Vec<String>> {
+    let mut statement = connection.prepare(
+        "SELECT e.identity,e.instruction FROM day2_external_effects e
+         WHERE e.invocation=?1 AND e.observation IS NULL
+           AND EXISTS(SELECT 1 FROM day2_external_attempts a WHERE a.effect=e.identity AND a.observation IS NULL)
+         ORDER BY e.ordinal",
+    )?;
+    let rows = statement.query_map([invocation], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut refused = Vec::new();
+    for row in rows {
+        let (identity, instruction) = row?;
+        let instruction: crate::protocol::Instruction = serde_json::from_str(&instruction)?;
+        if !crate::capabilities::retries_are_idempotent_instruction(&instruction) {
+            refused.push(identity);
+        }
+    }
+    Ok(refused)
+}
+
 fn children_in(connection: &rusqlite::Connection, invocation: &str) -> Result<Vec<String>> {
-    let mut statement = connection.prepare("SELECT id FROM day2_command_requests WHERE parent=?1 UNION ALL SELECT id FROM day2_deferrals WHERE parent=?1 ORDER BY 1")?;
+    let mut statement = connection.prepare(
+        "SELECT id FROM day2_command_requests WHERE parent=?1 UNION ALL SELECT id FROM day2_deferrals WHERE parent=?1 ORDER BY 1",
+    )?;
     Ok(statement
         .query_map([invocation], |row| row.get(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?)
@@ -223,7 +409,7 @@ fn has_committed_decision(connection: &rusqlite::Connection, invocation: &str) -
 
 fn admit_successor(
     runtime: &Runtime,
-    connection: &rusqlite::Transaction<'_>,
+    connection: &Transaction<'_>,
     old_id: &str,
 ) -> Result<String> {
     let (operation, actor, input): (String, String, String) = connection.query_row(
@@ -247,7 +433,10 @@ fn admit_successor(
     )?;
     ensure!(!existing, "recovery_successor_identity_conflict");
     let now = crate::resource_admin::now_ms()?.div_euclid(1000);
-    connection.execute("INSERT INTO day2_invocations(id,operation,actor,input,artifact,now,status,trigger) VALUES(?1,?2,?3,?4,?5,?6,'pending','recovery')", params![id,operation,actor,input,runtime.artifact().id(),now])?;
+    connection.execute(
+        "INSERT INTO day2_invocations(id,operation,actor,input,artifact,now,status,trigger) VALUES(?1,?2,?3,?4,?5,?6,'pending','recovery')",
+        params![id, operation, actor, input, runtime.artifact().id(), now],
+    )?;
     crate::authority_state::pin_invocation(connection, &id, &active.stamp)?;
     // The successor continues the original work, so it stays within the old
     // invocation's root and its root-wide budgets. The recovery row records

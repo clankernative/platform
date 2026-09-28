@@ -161,7 +161,7 @@ const SEALED: &[(&str, &str, &str)] = &[
     (
         "Write.roc",
         "define",
-        "62d39272912ad8c2a78a0abfd88d3552a937ae01c2ec1359ba1beb2f032fd08e",
+        "2738db7dd4ebc9165c2af69b6aedb63851d865839d210709e4b4e58aac0c3502",
     ),
     (
         "Read.roc",
@@ -191,7 +191,7 @@ const SEALED: &[(&str, &str, &str)] = &[
     (
         "Tx.roc",
         "evaluate",
-        "af63c16bc2bcd0a49630c84ab4a6d0beda49b5f5b48fa1288c075688bb6ef1a2",
+        "131e457ed8159c11ce849e84392141bde35e24efc93b5f884d619c752dc80b16",
     ),
     (
         "Operation.roc",
@@ -214,6 +214,7 @@ const RESTRICTED_CALLS: &[(&str, &str)] = &[
     ("Tx", "begin_decision"),
     ("Tx", "invoke_command"),
     ("Tx", "invoke_deferral"),
+    ("Tx", "invoke_deferral_for"),
     ("Tx", "begin_effects"),
     ("Tx", "begin_completion"),
     ("Tx", "capability"),

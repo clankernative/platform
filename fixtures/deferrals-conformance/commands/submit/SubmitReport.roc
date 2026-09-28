@@ -56,6 +56,8 @@ SubmitReport :: [].{
 				}
 			}
 		} else if input.title.to_str() == "defer"
+			or input.title.to_str() == "for"
+			or input.title.to_str() == "long_delay"
 			or input.title.to_str() == "past"
 			or input.title.to_str() == "far"
 			or input.title.to_str() == "both"
@@ -68,6 +70,8 @@ SubmitReport :: [].{
 				} else {
 					context.now() + 10
 				}
+			delay : I64
+			delay = if input.title.to_str() == "long_delay" { 2_592_001 } else { 10 }
 			Tx.create(Data.reports, value)
 				.and_then(
 					|
@@ -90,6 +94,15 @@ SubmitReport :: [].{
 										)
 										.map(|_| { id: report.id, version: report.version }),
 								)
+						} else if input.title.to_str() == "for" or input.title.to_str() == "long_delay" {
+							Commands.analyze
+								.defer_for(
+									Data.reports,
+									report,
+									{ report_id: report.id, expected_version: report.version, text: report.value.text },
+									delay,
+								)
+								.map(|_| { id: report.id, version: report.version })
 						} else {
 							Commands.analyze
 								.defer_until(

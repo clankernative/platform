@@ -298,6 +298,56 @@ fn due_bounds_reject_past_and_more_than_thirty_days() -> Result<()> {
 }
 
 #[test]
+fn defer_for_computes_due_from_origin_clock_and_offers_once_at_due() -> Result<()> {
+    let world = world()?;
+    let outcome = submit(&world, "defer-for", "for", Fault::None)?;
+    assert_eq!(outcome.status, "success", "{}", outcome.error);
+    let id = deferral_id(&world, "defer-for")?;
+    let db = rusqlite::Connection::open(world.runtime.db())?;
+    assert_eq!(
+        db.query_row(
+            "SELECT due_ms FROM day2_deferrals WHERE id=?1",
+            [&id],
+            |row| row.get::<_, i64>(0)
+        )?,
+        110_000
+    );
+    assert!(deferrals::tick(&world.runtime, 109_999)?.is_empty());
+    assert_eq!(deferrals::tick(&world.runtime, 110_000)?.len(), 1);
+    assert!(deferrals::tick(&world.runtime, 110_000)?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn defer_for_rejects_delay_beyond_thirty_days() -> Result<()> {
+    let world = world()?;
+    let outcome = submit(&world, "defer-long-delay", "long_delay", Fault::None)?;
+    assert_eq!(outcome.status, "failure");
+    assert!(
+        outcome.error.contains("deferral_due_too_far"),
+        "{}",
+        outcome.error
+    );
+    assert_eq!(
+        count(
+            &world,
+            "SELECT count(*) FROM day2_deferrals WHERE parent=?1",
+            "defer-long-delay"
+        )?,
+        0
+    );
+    assert_eq!(
+        count(
+            &world,
+            "SELECT count(*) FROM reports WHERE title=?1",
+            "long_delay"
+        )?,
+        0
+    );
+    Ok(())
+}
+
+#[test]
 fn offered_invocation_has_deferral_context_and_audit_trigger() -> Result<()> {
     let world = world()?;
     submit(&world, "defer-context", "defer", Fault::None)?;

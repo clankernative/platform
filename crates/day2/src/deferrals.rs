@@ -19,7 +19,10 @@ pub struct Deferral {
     pub input_type: String,
     pub output_type: String,
     pub payload: String,
-    pub due: i64,
+    #[serde(default)]
+    pub due: Option<u64>,
+    #[serde(default)]
+    pub delay: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -107,15 +110,21 @@ pub(crate) fn defer(
             &serde_json::from_str(&row.data)?,
         )?;
     }
-    ensure!(envelope.due >= origin.context.now, "deferral_due_in_past");
+    let due = match (envelope.due, envelope.delay) {
+        (Some(due), None) => i64::try_from(due).context("deferral_due_overflow")?,
+        (None, Some(delay)) => origin
+            .context
+            .now
+            .checked_add(i64::try_from(delay).context("deferral_due_overflow")?)
+            .context("deferral_due_overflow")?,
+        _ => anyhow::bail!("invalid_deferral_time"),
+    };
+    ensure!(due >= origin.context.now, "deferral_due_in_past");
     ensure!(
-        envelope.due <= origin.context.now.saturating_add(MAX_DEFERRAL_SECONDS),
+        due <= origin.context.now.saturating_add(MAX_DEFERRAL_SECONDS),
         "deferral_due_too_far"
     );
-    let due_ms = envelope
-        .due
-        .checked_mul(1000)
-        .context("deferral_due_overflow")?;
+    let due_ms = due.checked_mul(1000).context("deferral_due_overflow")?;
     let outstanding: i64 = connection.query_row(
         "SELECT COUNT(*) FROM day2_deferrals WHERE offered_ms IS NULL",
         [],
