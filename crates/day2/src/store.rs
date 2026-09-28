@@ -1244,6 +1244,11 @@ impl Runtime {
                     );
                     self.check_authority(connection, request, policy)?;
                     let next_phase = phase.advance(step)?;
+                    crate::credential_authority::check_step(
+                        self.artifact.contract(),
+                        operation,
+                        step,
+                    )?;
                     let instruction = response.instruction.clone();
                     if step == Step::Boundary(Boundary::Effects) {
                         ensure!(

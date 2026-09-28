@@ -215,6 +215,8 @@ pub struct Artifact {
     pub declarations: crate::registry::Catalog,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub credential_declarations: Vec<day2_capabilities::credentials::FamilyDeclaration>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credential_manifest: Vec<day2_capabilities::credentials::ManifestFamily>,
     #[serde(default)]
     pub checked_types_digest: String,
     pub roc_version: String,
@@ -556,6 +558,15 @@ impl LoadedArtifact {
         if contract.format >= 10 {
             contract.declarations.validate_artifact(&contract)?;
             crate::credential_declaration::validate(&contract.credential_declarations, &contract)?;
+            if !contract.credential_declarations.is_empty()
+                || !contract.credential_manifest.is_empty()
+            {
+                ensure!(
+                    contract.credential_manifest
+                        == crate::credential_authority::manifest(&contract)?,
+                    "credential authority manifest differs from checked operation closure"
+                );
+            }
             validate_checked_contracts(&directory, &contract)?;
         } else {
             ensure!(

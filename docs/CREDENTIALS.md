@@ -20,8 +20,21 @@ them with the native worker at artifact load. It rejects duplicate IDs,
 registration/profile drift, empty or duplicate roots, unsupported lifetimes,
 internal command roots and target signatures that differ from the checked
 operation catalog. Resource and impersonation families remain unsupported.
-Exact authority closure, selected-instance qualification and host admission
-must be implemented before any declared family can issue or receive a key.
+
+An operation can opt into a bounded credential authority contract with
+`credential_ready`, then add typed local models with `credential_read`. The
+normal build derives a credential manifest from checked operation definitions,
+including local write effects and recursive child command requests. Artifact
+load rederives it from the worker-checked app contract. Runtime execution of an
+opted-in operation rejects undeclared local reads and all provider/resource
+observations or external effects. Cycles, unmarked children and provider write
+effects fail the build. These declarations are an enforced upper bound; a
+handler need not exercise every declared action.
+
+Selected-instance qualification and credential-specific host admission must
+be implemented before any declared family can issue or receive a key. Provider,
+resource and imported-operation credential paths remain unsupported until they
+have selected permission contracts and step-level enforcement.
 
 `day2-capabilities::credentials` defines the managed family declaration,
 manifest, public metadata/result shapes, selected-instance binding and static
@@ -112,8 +125,8 @@ strength or browser isolation.
 Before activation, complete the following gates from the proposal:
 
 1. Generate and native-typecheck the complete family-specific Roc API and
-   security actions; derive exact authority summaries from registered
-   operations and bind them at admission. Prove the interactive context and
+   security actions; bind the derived authority manifest at admission, and add
+   selected provider/resource/import contracts. Prove the interactive context and
    negative compiler fixtures with the pinned compiler. The declaration-only
    client/personal build path is present.
 2. Connect selected-instance bindings to the resource catalog and release

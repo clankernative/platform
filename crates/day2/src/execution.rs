@@ -319,6 +319,11 @@ fn claim_with_worker(
         matches!(step, Step::External { .. }),
         "external_phase_database_io_forbidden"
     );
+    crate::credential_authority::check_step(
+        runtime.artifact().contract(),
+        &trace.request.operation,
+        step,
+    )?;
     let declaration = runtime
         .artifact()
         .contract()
