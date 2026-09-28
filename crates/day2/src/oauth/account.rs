@@ -129,6 +129,10 @@ impl VerifiedMappedAccount {
     pub fn attempt(&self) -> &str {
         &self.intent.attempt
     }
+
+    pub(super) fn intent(&self) -> &ConnectIntent {
+        &self.intent
+    }
 }
 
 fn stable_part(value: &str) -> Result<()> {

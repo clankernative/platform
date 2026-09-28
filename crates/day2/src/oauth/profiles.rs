@@ -172,6 +172,7 @@ pub struct OutboundInstanceEvidence {
     pub app_origin_url: String,
     pub shell: SecurityShellEvidence,
     pub registration: ProviderRegistrationEvidence,
+    pub custody: BindingRef,
     pub account: AccountBindingEvidence,
     pub product_return: ProductReturnRef,
 }
@@ -194,6 +195,7 @@ pub struct ProviderRegistrationEvidence {
     pub callback: ProviderCallbackRef,
     pub callback_url: String,
     pub provider_confirmation: Digest,
+    pub client_credential: BindingRef,
     pub class: ClientRegistrationClass,
 }
 
@@ -342,6 +344,7 @@ pub(super) fn qualify_outbound_connect(
                 &instance.registration.callback,
                 &instance.registration.callback_url,
                 &instance.registration.provider_confirmation,
+                &instance.registration.client_credential,
                 instance.registration.class,
             ))?,
         "provider registration evidence revision mismatch"
@@ -491,9 +494,13 @@ fn parse_scopes(raw: &str) -> Result<BTreeSet<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::managed_credentials::crypto::KeyLease;
+    use crate::oauth::account::{MappedHumanEvidence, ProviderAccount};
     use crate::oauth::connect::{
         self, CallbackBinding, CallbackBindingSpec, ConnectIntent, ConnectState,
     };
+    use crate::oauth::exchange::{self, ExchangeObservation, TokenHttpResponse};
+    use crate::oauth::outbound::{CallbackIngress, CallbackOutcome};
     use day2_capabilities::Name;
     use day2_capabilities::oauth::{ConnectionOwner, ProductReturnRef};
     use std::collections::BTreeMap;
@@ -513,6 +520,17 @@ mod tests {
     }
 
     impl QualificationFixture {
+        fn input(&self) -> OutboundQualification<'_> {
+            OutboundQualification {
+                intent: &self.intent,
+                binding: &self.binding,
+                requirement: &self.requirement,
+                permission: &self.permission,
+                reviewed: &self.reviewed,
+                instance: &self.instance,
+            }
+        }
+
         fn qualify(&self) -> Result<QualifiedOutboundConnect> {
             qualify_outbound_connect(
                 &self.intent,
@@ -598,6 +616,7 @@ mod tests {
             ProviderCallbackRef::derive(&security_origin, &permission.profile, slot).unwrap();
         let callback_url = derived_callback_url(&shell_url, &callback).unwrap();
         let confirmation = Digest::of(&"provider-accepted-redirect").unwrap();
+        let client_credential = pin("calendar_client_credential");
         let class = ClientRegistrationClass::ConfidentialPkceS256;
         let registration_revision = Digest::of(&(
             "oauth-provider-registration-evidence-v1",
@@ -608,6 +627,7 @@ mod tests {
             &callback,
             &callback_url,
             &confirmation,
+            &client_credential,
             class,
         ))
         .unwrap();
@@ -665,8 +685,10 @@ mod tests {
                 callback,
                 callback_url,
                 provider_confirmation: confirmation,
+                client_credential,
                 class,
             },
+            custody: pin("private_oauth_custody"),
             account: AccountBindingEvidence::MappedHuman {
                 instance: instance_ref,
                 mapping: pin("human_subject_map"),
@@ -682,6 +704,269 @@ mod tests {
             reviewed,
             instance,
         }
+    }
+
+    fn exchange_key() -> KeyLease {
+        KeyLease::new(&[7; 32], &[9; 32], "verify_v1".into(), "encrypt_v1".into()).unwrap()
+    }
+
+    fn private_callback(
+        db: &mut rusqlite::Connection,
+        fixture: &QualificationFixture,
+        code_ref: &str,
+        key: &KeyLease,
+    ) {
+        let raw = b"state=0123456789abcdefghijklmnopqrstuvwxyzABCDEF&code=secret_code&iss=https%3A%2F%2Fissuer.example%2Ftenant";
+        let outcome = exchange::handle_qualified_callback(
+            db,
+            fixture.input(),
+            CallbackIngress {
+                attempt: &fixture.intent.attempt,
+                raw_query: raw,
+                route: &fixture.instance.registration.callback,
+                session: fixture.binding.session(),
+                issuer_binding: &fixture.reviewed.issuer,
+                code_ref,
+                now: 2,
+            },
+            key,
+        )
+        .unwrap();
+        assert!(matches!(outcome, CallbackOutcome::CodeAccepted { .. }));
+    }
+
+    fn mapped_account(fixture: &QualificationFixture) -> (MappedHumanEvidence, ProviderAccount) {
+        let mapping = MappedHumanEvidence {
+            human: fixture.intent.owner.clone(),
+            issuer: fixture.reviewed.issuer_url.clone(),
+            provider_subject: "subject_1".into(),
+            tenant: "tenant_1".into(),
+            mapping_revision: Digest::of(&"mapping-v1").unwrap(),
+        };
+        let account = ProviderAccount {
+            issuer: mapping.issuer.clone(),
+            subject: mapping.provider_subject.clone(),
+            tenant: mapping.tenant.clone(),
+            display_email: "display@example.com".into(),
+        };
+        (mapping, account)
+    }
+
+    #[test]
+    fn qualified_exchange_encrypts_code_verifier_and_tokens_then_activates_once() {
+        let fixture = qualification_fixture();
+        let key = exchange_key();
+        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        connect::install_schema(&db).unwrap();
+        let prepared = exchange::prepare_authorization(
+            fixture.input(),
+            &key,
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~",
+        )
+        .unwrap();
+        let code_ref = prepared.code_ref().to_owned();
+        assert!(prepared.begin(&mut db, 1).unwrap());
+        private_callback(&mut db, &fixture, &code_ref, &key);
+        let code_ciphertext: Vec<u8> = db
+            .query_row("SELECT ciphertext FROM oauth_private_codes", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let verifier_ciphertext: Vec<u8> = db
+            .query_row(
+                "SELECT ciphertext FROM oauth_private_verifiers",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            !code_ciphertext
+                .windows(b"secret_code".len())
+                .any(|w| w == b"secret_code")
+        );
+        assert!(
+            !verifier_ciphertext
+                .windows(b"abcdefghij".len())
+                .any(|w| w == b"abcdefghij")
+        );
+        let permit = exchange::authorize_and_commit_qualified_exchange(&mut db, fixture.input(), 3)
+            .unwrap()
+            .unwrap();
+        assert!(
+            exchange::authorize_and_commit_qualified_exchange(&mut db, fixture.input(), 3)
+                .unwrap()
+                .is_none()
+        );
+        let response = match permit.send(|request| {
+            assert_eq!(request.token_endpoint(), fixture.reviewed.token_endpoint);
+            assert_eq!(request.code_ref(), code_ref);
+            assert_eq!(request.load_code(&db, &key)?, "secret_code");
+            assert_eq!(request.load_verifier(&db, &key)?,
+                "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~");
+            Ok(TokenHttpResponse {
+                status: 200,
+                content_type: "application/json".into(),
+                body: br#"{"access_token":"secret_access","token_type":"Bearer","expires_in":3600,"scope":"calendar.read"}"#.to_vec(),
+            })
+        }) {
+            ExchangeObservation::Response(response) => response,
+            ExchangeObservation::Uncertain(_) => panic!("response lost"),
+        };
+        let (mapping, observed) = mapped_account(&fixture);
+        let verified = response
+            .validate_mapped(fixture.input(), &mapping, &observed)
+            .unwrap();
+        let settlement = verified.prepare_tokens(&key).unwrap();
+        assert!(
+            exchange::settle_mapped(
+                &mut db,
+                settlement,
+                fixture.input(),
+                &mapping.mapping_revision,
+                4
+            )
+            .unwrap()
+        );
+        assert!(matches!(
+            connect::state(&db, &fixture.intent.attempt).unwrap(),
+            Some(ConnectState::Activated { .. })
+        ));
+        let ciphertext: Vec<u8> = db
+            .query_row("SELECT ciphertext FROM oauth_private_tokens", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert!(
+            !ciphertext
+                .windows(b"secret_access".len())
+                .any(|w| w == b"secret_access")
+        );
+        let code_count: i64 = db
+            .query_row("SELECT COUNT(*) FROM oauth_private_codes", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let verifier_count: i64 = db
+            .query_row("SELECT COUNT(*) FROM oauth_private_verifiers", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!((code_count, verifier_count), (0, 0));
+    }
+
+    #[test]
+    fn changed_registration_and_lost_response_never_issue_another_permit() {
+        let fixture = qualification_fixture();
+        let key = exchange_key();
+        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        connect::install_schema(&db).unwrap();
+        let prepared = exchange::prepare_authorization(
+            fixture.input(),
+            &key,
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~",
+        )
+        .unwrap();
+        let code_ref = prepared.code_ref().to_owned();
+        assert!(prepared.begin(&mut db, 1).unwrap());
+        private_callback(&mut db, &fixture, &code_ref, &key);
+        let mut changed = fixture.clone();
+        changed.instance.registration.client_credential = pin("different_credential");
+        assert!(
+            exchange::authorize_and_commit_qualified_exchange(&mut db, changed.input(), 3).is_err()
+        );
+        let permit = exchange::authorize_and_commit_qualified_exchange(&mut db, fixture.input(), 3)
+            .unwrap()
+            .unwrap();
+        let uncertain = match permit.send(|_| Err(anyhow::anyhow!("transport lost response"))) {
+            ExchangeObservation::Uncertain(uncertain) => uncertain,
+            ExchangeObservation::Response(_) => panic!("unexpected response"),
+        };
+        assert!(uncertain.record(&db).unwrap());
+        assert!(
+            exchange::authorize_and_commit_qualified_exchange(&mut db, fixture.input(), 4)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            connect::state(&db, &fixture.intent.attempt).unwrap(),
+            Some(ConnectState::ExchangeUncertain)
+        );
+        assert!(connect::expire(&mut db, &fixture.intent.attempt, 101, |_| Ok(())).unwrap());
+        let codes: i64 = db
+            .query_row("SELECT COUNT(*) FROM oauth_private_codes", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let verifiers: i64 = db
+            .query_row("SELECT COUNT(*) FROM oauth_private_verifiers", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!((codes, verifiers), (0, 0));
+    }
+
+    #[test]
+    fn failed_private_token_publication_rolls_back_activation() {
+        let fixture = qualification_fixture();
+        let key = exchange_key();
+        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        connect::install_schema(&db).unwrap();
+        let prepared = exchange::prepare_authorization(
+            fixture.input(),
+            &key,
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~",
+        )
+        .unwrap();
+        let code_ref = prepared.code_ref().to_owned();
+        assert!(prepared.begin(&mut db, 1).unwrap());
+        private_callback(&mut db, &fixture, &code_ref, &key);
+        let permit = exchange::authorize_and_commit_qualified_exchange(&mut db, fixture.input(), 3)
+            .unwrap()
+            .unwrap();
+        let response = match permit.send(|_| Ok(TokenHttpResponse {
+            status: 200,
+            content_type: "application/json".into(),
+            body: br#"{"access_token":"secret_access","token_type":"Bearer","expires_in":3600,"scope":"calendar.read"}"#.to_vec(),
+        })) {
+            ExchangeObservation::Response(response) => response,
+            ExchangeObservation::Uncertain(_) => panic!("response lost"),
+        };
+        let (mapping, observed) = mapped_account(&fixture);
+        let settlement = response
+            .validate_mapped(fixture.input(), &mapping, &observed)
+            .unwrap()
+            .prepare_tokens(&key)
+            .unwrap();
+        db.execute_batch(
+            "CREATE TRIGGER reject_oauth_token BEFORE INSERT ON oauth_private_tokens
+             BEGIN SELECT RAISE(ABORT, 'token write rejected'); END;",
+        )
+        .unwrap();
+        assert!(
+            exchange::settle_mapped(
+                &mut db,
+                settlement,
+                fixture.input(),
+                &mapping.mapping_revision,
+                4
+            )
+            .is_err()
+        );
+        assert_eq!(
+            connect::state(&db, &fixture.intent.attempt).unwrap(),
+            Some(ConnectState::ExchangeMayHaveBeenSent)
+        );
+        let tokens: i64 = db
+            .query_row("SELECT COUNT(*) FROM oauth_private_tokens", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let codes: i64 = db
+            .query_row("SELECT COUNT(*) FROM oauth_private_codes", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!((tokens, codes), (0, 1));
     }
 
     fn rejects(fixture: &QualificationFixture, reason: &str) {

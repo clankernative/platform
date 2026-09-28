@@ -161,12 +161,12 @@ pub enum ConnectState {
 
 /// A single process-local authorization-code dispatch permit. No re-creation
 /// from a durable fenced attempt is possible after a crash.
-pub struct ExchangeDispatchPermit {
+pub(super) struct LegacyExchangeDispatchPermit {
     attempt: String,
     code_ref: String,
 }
 
-impl ExchangeDispatchPermit {
+impl LegacyExchangeDispatchPermit {
     pub fn send<T>(self, transport: impl FnOnce(&str, &str) -> T) -> T {
         transport(&self.attempt, &self.code_ref)
     }
@@ -234,19 +234,20 @@ pub fn install_schema(db: &Connection) -> Result<()> {
     if known.is_empty() {
         db.execute("INSERT INTO oauth_callback_schema_version VALUES (1)", [])?;
     }
+    super::exchange::install_schema(db)?;
+    super::custody::install_schema(db)?;
     Ok(())
 }
 
 /// Records an already authorized interactive intent. The exact active pointer
 /// and security epoch are captured before redirecting to the provider.
 pub(super) fn begin(db: &mut Connection, intent: &ConnectIntent, now: i64) -> Result<bool> {
-    begin_inner(db, intent, None, now)
+    begin_inner(db, intent, None, None, now)
 }
 
-/// The public begin path requires exact provider and instance qualification.
-/// A current authority/registration source must supply the evidence at this
-/// boundary; this kernel cannot establish external provider readiness alone.
-pub fn begin_qualified(
+/// The legacy kernel path checks exact provider and instance qualification.
+/// Production exchange setup also prepares encrypted PKCE custody.
+pub(super) fn begin_qualified(
     db: &mut Connection,
     input: super::profiles::OutboundQualification<'_>,
     now: i64,
@@ -271,13 +272,27 @@ pub(super) fn begin_bound(
     now: i64,
 ) -> Result<bool> {
     binding.verify(intent)?;
-    begin_inner(db, intent, Some(binding), now)
+    begin_inner(db, intent, Some(binding), None, now)
+}
+
+pub(super) fn begin_prepared(
+    db: &mut Connection,
+    prepared: super::exchange::PreparedAuthorization,
+    now: i64,
+) -> Result<bool> {
+    let (intent, callback, exchange, verifier) = prepared.parts();
+    callback.verify(intent)?;
+    begin_inner(db, intent, Some(callback), Some((exchange, verifier)), now)
 }
 
 fn begin_inner(
     db: &mut Connection,
     intent: &ConnectIntent,
     binding: Option<&CallbackBinding>,
+    private: Option<(
+        &super::exchange::ExchangeBinding,
+        &super::custody::PreparedVerifier,
+    )>,
     now: i64,
 ) -> Result<bool> {
     validate(intent)?;
@@ -320,6 +335,12 @@ fn begin_inner(
             params![intent.attempt, serde_json::to_string(binding)?],
         )?;
     }
+    if inserted == 1
+        && let Some((exchange, verifier)) = private
+    {
+        super::exchange::store_binding(&tx, &intent.attempt, exchange)?;
+        super::custody::publish_verifier(&tx, verifier)?;
+    }
     tx.commit()?;
     Ok(inserted == 1)
 }
@@ -356,11 +377,11 @@ pub(super) fn claim_callback(
     Ok(changed == 1)
 }
 
-pub fn authorize_and_commit_exchange(
+pub(super) fn authorize_and_commit_exchange(
     db: &mut Connection,
     attempt: &str,
     now: i64,
-) -> Result<Option<ExchangeDispatchPermit>> {
+) -> Result<Option<LegacyExchangeDispatchPermit>> {
     identifier(attempt)?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let row: Option<(ConnectIntent, String)> = tx
@@ -403,7 +424,7 @@ pub fn authorize_and_commit_exchange(
     )?;
     ensure!(changed == 1, "exchange dispatch fence lost");
     tx.commit()?;
-    Ok(Some(ExchangeDispatchPermit {
+    Ok(Some(LegacyExchangeDispatchPermit {
         attempt: attempt.into(),
         code_ref,
     }))
@@ -472,6 +493,7 @@ fn finish_blocked(
         return Ok(false);
     }
     custody_cleanup(&tx)?;
+    super::custody::delete_attempt_material(&tx, attempt)?;
     let changed = tx.execute(
         "UPDATE oauth_connect_attempts SET state = ?2, code_ref = NULL,
          account = NULL, scope_evidence = NULL WHERE attempt = ?1",
@@ -523,12 +545,47 @@ pub fn await_account_approval(
     Ok(true)
 }
 
-/// Activation is one transaction with encrypted custody publication. For an
-/// explicit account, `approved_account` must be the exact account shown and
-/// confirmed by the security shell; mapped/installation policy passes None.
-pub fn activate_mapped(
+/// Kernel activation is one transaction with caller-supplied custody
+/// publication. The qualified exchange path also checks its sealed binding.
+pub(super) fn activate_mapped(
     db: &mut Connection,
     verified: &super::account::VerifiedMappedAccount,
+    current_mapping_revision: &Digest,
+    now: i64,
+    custody_publish: impl FnOnce(&Transaction<'_>) -> Result<()>,
+) -> Result<bool> {
+    activate_mapped_inner(
+        db,
+        verified,
+        None,
+        current_mapping_revision,
+        now,
+        custody_publish,
+    )
+}
+
+pub(super) fn activate_mapped_bound(
+    db: &mut Connection,
+    verified: &super::account::VerifiedMappedAccount,
+    binding: &super::exchange::ExchangeBinding,
+    current_mapping_revision: &Digest,
+    now: i64,
+    custody_publish: impl FnOnce(&Transaction<'_>) -> Result<()>,
+) -> Result<bool> {
+    activate_mapped_inner(
+        db,
+        verified,
+        Some(binding),
+        current_mapping_revision,
+        now,
+        custody_publish,
+    )
+}
+
+fn activate_mapped_inner(
+    db: &mut Connection,
+    verified: &super::account::VerifiedMappedAccount,
+    exchange: Option<&super::exchange::ExchangeBinding>,
     current_mapping_revision: &Digest,
     now: i64,
     custody_publish: impl FnOnce(&Transaction<'_>) -> Result<()>,
@@ -561,17 +618,18 @@ pub fn activate_mapped(
     {
         return Ok(false);
     }
-    activate(
+    activate_bound(
         db,
         verified.attempt(),
-        verified.account(),
-        verified.scope_evidence(),
+        (verified.account(), verified.scope_evidence()),
         None,
+        exchange,
         now,
         custody_publish,
     )
 }
 
+#[cfg(test)]
 fn activate(
     db: &mut Connection,
     attempt: &str,
@@ -581,6 +639,27 @@ fn activate(
     now: i64,
     custody_publish: impl FnOnce(&Transaction<'_>) -> Result<()>,
 ) -> Result<bool> {
+    activate_bound(
+        db,
+        attempt,
+        (account, scope_evidence),
+        approved_account,
+        None,
+        now,
+        custody_publish,
+    )
+}
+
+fn activate_bound(
+    db: &mut Connection,
+    attempt: &str,
+    account_scope: (&str, &str),
+    approved_account: Option<&str>,
+    exchange: Option<&super::exchange::ExchangeBinding>,
+    now: i64,
+    custody_publish: impl FnOnce(&Transaction<'_>) -> Result<()>,
+) -> Result<bool> {
+    let (account, scope_evidence) = account_scope;
     identifier(attempt)?;
     identifier(account)?;
     identifier(scope_evidence)?;
@@ -616,6 +695,12 @@ fn activate(
     let Some((intent, state, stored_account, stored_scope)) = row else {
         return Ok(false);
     };
+    if let Some(exchange) = exchange {
+        let stored = super::exchange::load_binding(&tx, attempt)?;
+        if stored.as_ref() != Some(exchange) {
+            return Ok(false);
+        }
+    }
     let approved = match state.as_str() {
         "awaiting_account_approval" => {
             approved_account == Some(account)
@@ -629,6 +714,7 @@ fn activate(
         return Ok(false);
     }
     if now >= intent.expires_at || !slot_matches(&tx, &intent)? {
+        super::custody::delete_attempt_material(&tx, attempt)?;
         tx.execute(
             "UPDATE oauth_connect_attempts SET state = 'activation_rejected',
             code_ref = NULL, account = NULL, scope_evidence = NULL WHERE attempt = ?1",
@@ -650,6 +736,10 @@ fn activate(
         intent.expected_epoch,
     ))?;
     custody_publish(&tx)?;
+    if let Some(exchange) = exchange {
+        super::custody::delete_code(&tx, &intent, exchange)?;
+        super::custody::delete_verifier(&tx, &intent, exchange)?;
+    }
     if let Some(previous) = intent.expected_generation {
         let changed = tx.execute(
             "UPDATE oauth_connection_slots SET generation = ?2, token_version = 1,
@@ -717,7 +807,7 @@ pub fn state(db: &Connection, attempt: &str) -> Result<Option<ConnectState>> {
     .transpose()
 }
 
-fn slot_matches(tx: &Transaction<'_>, intent: &ConnectIntent) -> Result<bool> {
+pub(super) fn slot_matches(tx: &Transaction<'_>, intent: &ConnectIntent) -> Result<bool> {
     let row: Option<(i64, i64, String)> = tx
         .query_row(
             "SELECT generation, security_epoch, status FROM oauth_connection_slots WHERE slot = ?1",

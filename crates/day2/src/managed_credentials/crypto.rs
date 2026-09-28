@@ -43,6 +43,44 @@ impl KeyLease {
             encryption_version,
         })
     }
+
+    /// OAuth custody uses the same admitted encryption lease with a separate
+    /// authenticated-data domain. The caller prepares material before SQLite.
+    pub(crate) fn seal_oauth(&self, aad: &[u8], plaintext: &[u8]) -> Result<([u8; 12], Vec<u8>)> {
+        ensure!(!aad.is_empty(), "missing OAuth custody identity");
+        let mut nonce = [0u8; 12];
+        fill(&mut nonce).map_err(|_| anyhow::anyhow!("credential entropy unavailable"))?;
+        let mut ciphertext = plaintext.to_vec();
+        self.encryption_key
+            .seal_in_place_append_tag(
+                aead::Nonce::assume_unique_for_key(nonce),
+                aead::Aad::from(aad),
+                &mut ciphertext,
+            )
+            .map_err(|_| anyhow::anyhow!("OAuth custody encryption failed"))?;
+        Ok((nonce, ciphertext))
+    }
+
+    pub(crate) fn open_oauth(
+        &self,
+        aad: &[u8],
+        nonce: [u8; 12],
+        ciphertext: &[u8],
+    ) -> Result<Vec<u8>> {
+        ensure!(!aad.is_empty(), "missing OAuth custody identity");
+        let mut buffer = ciphertext.to_vec();
+        let plaintext = self
+            .encryption_key
+            .open_in_place(
+                aead::Nonce::assume_unique_for_key(nonce),
+                aead::Aad::from(aad),
+                &mut buffer,
+            )
+            .map_err(|_| anyhow::anyhow!("OAuth custody authentication failed"))?;
+        let plaintext = plaintext.to_vec();
+        buffer.fill(0);
+        Ok(plaintext)
+    }
 }
 
 /// Expected identity comes from authorized current state, not the ciphertext.

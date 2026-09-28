@@ -33,7 +33,7 @@ pub enum CallbackOutcome {
 
 /// No raw callback parameter or provider error description reaches the result.
 /// A custody failure rolls back both private code storage and the attempt CAS.
-pub fn handle_callback(
+pub(super) fn handle_callback(
     db: &mut Connection,
     ingress: CallbackIngress<'_>,
     custody_write: impl FnOnce(&Transaction<'_>, &str) -> Result<()>,
@@ -94,6 +94,7 @@ pub fn handle_callback(
             }
         }
         ParsedCallback::Denied { reason, .. } => {
+            super::custody::delete_attempt_material(&tx, ingress.attempt)?;
             tx.execute(
                 "UPDATE oauth_connect_attempts SET state = 'denied'
                  WHERE attempt = ?1 AND state = 'awaiting_provider_authorization'",
