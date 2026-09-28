@@ -12,10 +12,13 @@ use anyhow::{Context, Result, ensure};
 use day2::{
     artifact::{Instance, LoadedArtifact},
     authority_state::AuthorityDocument,
-    instance_catalog::{QualifiedCatalog, qualify_artifacts},
+    instance_catalog::{QualifiedCatalog, qualify_artifacts, qualify_credentials},
     operation_contract::Kind,
 };
-use day2_capabilities::resources::{Action, Provider, ResourceTarget};
+use day2_capabilities::{
+    credentials::{ManifestFamily, QualificationReceipt},
+    resources::{Action, Provider, ResourceTarget},
+};
 use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
 use std::{
@@ -41,6 +44,7 @@ pub struct ReleaseCatalogCandidate {
     base_selection: Digest,
     target: ReleaseTarget,
     qualified: QualifiedCatalog,
+    credential_families: BTreeMap<String, Vec<ManifestFamily>>,
     bindings: Option<QualifiedBindings>,
 }
 
@@ -49,6 +53,7 @@ pub struct QualifiedBindings {
     pub instance: Digest,
     pub authority: BTreeMap<String, Digest>,
     pub serving: BTreeMap<String, Digest>,
+    pub credentials: BTreeMap<String, Vec<QualificationReceipt>>,
 }
 
 impl Journal {
@@ -139,6 +144,16 @@ impl Journal {
             target.environment.as_str().into(),
             &paths,
         )?;
+        let mut credential_families = BTreeMap::new();
+        for (app, path) in &paths {
+            let families = LoadedArtifact::load(path)?
+                .contract()
+                .credential_manifest
+                .clone();
+            if !families.is_empty() {
+                credential_families.insert(app.clone(), families);
+            }
+        }
         ensure!(
             qualified.catalog.apps[target.app.as_str()].artifact
                 == stored.approval.artifact.as_str(),
@@ -157,6 +172,7 @@ impl Journal {
             base_selection: selection.digest,
             target: target.clone(),
             qualified,
+            credential_families,
             bindings: None,
         })
     }
@@ -264,10 +280,16 @@ impl Journal {
                 }
             }
         }
+        let credentials = qualify_credentials(
+            &candidate.qualified.catalog,
+            &instance,
+            &candidate.credential_families,
+        )?;
         candidate.bindings = Some(QualifiedBindings {
             instance: Digest::of(&instance)?,
             authority,
             serving,
+            credentials,
         });
         Ok(candidate)
     }
@@ -481,6 +503,43 @@ fn check_candidate_selection(
         candidate.qualified.consumers.catalog_digest == catalog.digest,
         "candidate consumer evidence belongs to another catalog"
     );
+    if !candidate.credential_families.is_empty() {
+        let bindings = candidate
+            .bindings
+            .as_ref()
+            .context("credential release requires qualified instance family bindings")?;
+        ensure!(
+            bindings.credentials.len() == candidate.credential_families.len(),
+            "qualified credential app set changed"
+        );
+        let composition = Digest::of(&(
+            "credential-selected-composition-v1",
+            &catalog.digest,
+            &bindings.instance,
+        ))?;
+        for (app, families) in &candidate.credential_families {
+            let receipts = bindings
+                .credentials
+                .get(app)
+                .context("qualified credential app missing")?;
+            ensure!(
+                receipts.len() == families.len(),
+                "qualified credential family set changed"
+            );
+            for (family, receipt) in families.iter().zip(receipts) {
+                ensure!(
+                    receipt.namespace.installation.as_str() == target.company.as_str()
+                        && receipt.namespace.environment.as_str() == target.environment.as_str()
+                        && receipt.namespace.app.as_str() == app
+                        && receipt.family == family.id
+                        && receipt.family_contract == family.contract
+                        && receipt.composition == composition,
+                    "qualified credential family changed: {app}/{}",
+                    family.id.as_str()
+                );
+            }
+        }
+    }
     if !candidate.qualified.consumers.imports.is_empty() {
         let bindings = candidate
             .bindings
@@ -562,6 +621,11 @@ mod tests {
         instance_catalog::{CandidateCatalog, CheckedConsumers, ResolvedImports, SelectedApp},
         operation_contract::Manifest,
     };
+    use day2_capabilities::credentials::{
+        CredentialRoot, FamilyDeclaration, GrantMode, ManagedProfile, ManifestFamily,
+        SourceLocation,
+    };
+    use day2_capabilities::oauth::{AuthorityNode, OperationAuthorityContract, OperationKind};
     use serde_json::json;
 
     fn authority_with_import_grant(schema: &str) -> Result<AuthorityDocument> {
@@ -644,6 +708,7 @@ mod tests {
                 },
                 catalog,
             },
+            credential_families: BTreeMap::new(),
             bindings: None,
         };
         let active = ActiveSelection {
@@ -676,6 +741,56 @@ mod tests {
             .to_string()
             .contains("changed since candidate qualification")
         );
+        let root = OperationAuthorityContract::derive(
+            "submit".into(),
+            1,
+            Digest::new(b"submit contract"),
+            OperationKind::Command,
+            AuthorityNode {
+                actions: BTreeSet::new(),
+                children: BTreeMap::new(),
+            },
+        )?;
+        candidate.credential_families.insert(
+            "reports".into(),
+            vec![ManifestFamily::derive(
+                FamilyDeclaration {
+                    registration: "client".to_owned().try_into()?,
+                    id: "keys".to_owned().try_into()?,
+                    profile: ManagedProfile::Client,
+                    grant: GrantMode::Fixed,
+                    roots: vec!["submit".into()],
+                    lifetime_seconds: 3600,
+                    source: SourceLocation {
+                        file: "Keys.roc".into(),
+                        line: 1,
+                    },
+                },
+                &BTreeMap::from([(
+                    "submit".into(),
+                    CredentialRoot {
+                        authority: root,
+                        direct_ingress: true,
+                        interactive_security: false,
+                        single_resource_model: None,
+                    },
+                )]),
+            )?],
+        );
+        assert!(
+            check_candidate_selection(
+                &connection,
+                &active,
+                &release,
+                &target,
+                &artifact,
+                &candidate
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("credential release requires qualified instance")
+        );
+        candidate.credential_families.clear();
         candidate.qualified.consumers.imports.insert(
             "reports".into(),
             ResolvedImports {

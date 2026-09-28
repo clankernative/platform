@@ -51,6 +51,7 @@ impl World {
                     journal: None,
                     security: None,
                     resource_policies: Vec::new(),
+                    credential_families: Default::default(),
                     schedules: Default::default(),
                     ingress: Default::default(),
                     runtime: None,

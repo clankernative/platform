@@ -204,6 +204,7 @@ mod tests {
             connections: BTreeMap::new(),
             resources: BTreeMap::new(),
             policies: BTreeMap::new(),
+            credentials: Default::default(),
             budgets: BTreeMap::from([(
                 "shared".into(),
                 BudgetDefinition {

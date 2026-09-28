@@ -399,6 +399,7 @@ pub fn local_resource_fixture(
         resources: BTreeMap::new(),
         policies: BTreeMap::new(),
         budgets: BTreeMap::new(),
+        credentials: Default::default(),
     };
     let mut attachments = Vec::new();
     for (operation_name, operation) in &policy.operations {
@@ -1436,6 +1437,7 @@ fn create_for_with_imports(
                 writers: BTreeSet::from([actor.into()]),
                 authority: Some(policy.unwrap_or(local_policy_for(&artifact, actor)?)),
                 resource_policies: Vec::new(),
+                credential_families: Default::default(),
                 // Nothing is ever removed from a development instance either.
                 // A retention policy is an operator's decision about real
                 // records, and a default here would teach the opposite.

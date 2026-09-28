@@ -283,6 +283,48 @@ pub struct ManagementPolicy {
     pub revoke: ManagementPredicate,
 }
 
+/// Instance-owned definitions shared by app-local family bindings. A binding
+/// pins each definition by its content digest; changing an entry under the
+/// same name cannot silently expand an existing family's authority.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialCatalog {
+    #[serde(default)]
+    pub management: BTreeMap<String, ManagementPolicy>,
+    #[serde(default)]
+    pub approved_authority: BTreeMap<String, BTreeMap<String, OperationAuthorityContract>>,
+}
+
+impl CredentialCatalog {
+    pub fn is_empty(&self) -> bool {
+        self.management.is_empty() && self.approved_authority.is_empty()
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.management.len() <= 1024 && self.approved_authority.len() <= 1024,
+            "credential catalog budget"
+        );
+        for id in self.management.keys().chain(self.approved_authority.keys()) {
+            Name::try_from(id.clone())?;
+        }
+        for roots in self.approved_authority.values() {
+            ensure!(
+                !roots.is_empty() && roots.len() <= 64,
+                "credential authority root budget"
+            );
+            for (name, root) in roots {
+                root.verify()?;
+                ensure!(
+                    name == &root.operation,
+                    "credential authority root identity mismatch"
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RotationProfile {

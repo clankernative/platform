@@ -9,6 +9,11 @@ use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::Path};
 
 use crate::operation_contract::{ImportPin, Manifest, Package, TypePin, resolve_type_closure};
+use day2_capabilities::{
+    Digest,
+    credentials::{self, ManifestFamily, QualificationReceipt},
+    oauth::{AuthorityAction, AuthorityNode},
+};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -98,6 +103,98 @@ pub struct CheckedConsumers {
 pub struct QualifiedCatalog {
     pub catalog: CandidateCatalog,
     pub consumers: CheckedConsumers,
+}
+
+/// Resolve every selected family's app-local binding against the same instance
+/// resource catalog used by the release candidate. The receipt pins both the
+/// selected artifact composition and the instance definitions; it is evidence
+/// for activation, never permission to issue or verify a credential.
+pub fn qualify_credentials(
+    catalog: &CandidateCatalog,
+    instance: &crate::artifact::Instance,
+    families: &BTreeMap<String, Vec<ManifestFamily>>,
+) -> Result<BTreeMap<String, Vec<QualificationReceipt>>> {
+    catalog.verify()?;
+    ensure!(
+        catalog.installation == instance.installation
+            && catalog.environment == instance.environment,
+        "credential qualification instance scope mismatch"
+    );
+    let composition = Digest::of(&(
+        "credential-selected-composition-v1",
+        &catalog.digest,
+        Digest::of(instance)?,
+    ))?;
+    let mut receipts = BTreeMap::new();
+    for (app, selected) in families {
+        ensure!(
+            catalog.apps.contains_key(app),
+            "credential family app not selected: {app}"
+        );
+        let app_binding = instance
+            .apps
+            .get(app)
+            .context("credential app binding missing")?;
+        let definitions = instance.resources.as_ref();
+        let mut qualified = Vec::new();
+        for family in selected {
+            for root in family.roots.values() {
+                ensure!(
+                    local_credential_closure(&root.closure),
+                    "unsupported credential provider or resource authority: {app}/{}",
+                    family.id.as_str()
+                );
+            }
+            let binding = app_binding
+                .credential_families
+                .get(family.id.as_str())
+                .with_context(|| {
+                    format!(
+                        "{}:{}: CREDENTIAL_FAMILY_UNBOUND ({app}/{})",
+                        family.source.file,
+                        family.source.line,
+                        family.id.as_str()
+                    )
+                })?;
+            ensure!(
+                binding.namespace.installation.as_str() == instance.installation
+                    && binding.namespace.environment.as_str() == instance.environment
+                    && binding.namespace.app.as_str() == app
+                    && binding.family == family.id,
+                "credential binding scope mismatch: {app}/{}",
+                family.id.as_str()
+            );
+            let definitions = definitions.context("credential resource catalog missing")?;
+            let policy = definitions
+                .credentials
+                .management
+                .get(binding.management.id.as_str())
+                .context("credential management policy missing")?;
+            let approved = definitions
+                .credentials
+                .approved_authority
+                .get(binding.approved_authority.id.as_str())
+                .context("credential approved authority missing")?;
+            qualified.push(credentials::qualify(
+                family,
+                Some(binding),
+                policy,
+                approved,
+                composition.clone(),
+            )?);
+        }
+        if !qualified.is_empty() {
+            receipts.insert(app.clone(), qualified);
+        }
+    }
+    Ok(receipts)
+}
+
+fn local_credential_closure(node: &AuthorityNode) -> bool {
+    node.actions
+        .iter()
+        .all(|action| matches!(action, AuthorityAction::LocalData { .. }))
+        && node.children.values().all(local_credential_closure)
 }
 
 pub fn qualify_artifacts(
@@ -376,6 +473,17 @@ impl CandidateCatalog {
 mod tests {
     use super::*;
     use crate::operation_contract::{Codec, Kind, OperationSpec, TypeObject};
+    use day2_capabilities::{
+        BindingRef, Name,
+        credentials::{
+            CredentialFamilyBinding, CredentialRoot, DeliveryProfile, FamilyDeclaration, GrantMode,
+            ManagedProfile, ManagementPolicy, ManagementPredicate, Namespace, RotationProfile,
+            SourceLocation,
+        },
+        oauth::{
+            OperationAuthorityContract, OperationKind, ResourceAudienceRef, SecurityOriginRef,
+        },
+    };
     use serde_json::json;
     use std::collections::BTreeSet;
 
@@ -416,6 +524,181 @@ mod tests {
 
     fn catalog(apps: BTreeMap<String, SelectedApp>) -> CandidateCatalog {
         CandidateCatalog::derive("acme".into(), "dev".into(), apps).unwrap()
+    }
+
+    #[test]
+    fn selected_credential_binding_pins_policy_and_child_authority() -> Result<()> {
+        let name = |value: &str| -> Name { value.to_owned().try_into().unwrap() };
+        let pin = |value: &str| BindingRef::pin(name(value), &value).unwrap();
+        let root = |child: bool, provider: bool| -> Result<OperationAuthorityContract> {
+            let mut actions = BTreeSet::from([AuthorityAction::LocalData {
+                category: "records".into(),
+                policy: Digest::new(b"records policy"),
+                write: true,
+            }]);
+            if provider {
+                actions.insert(AuthorityAction::Provider {
+                    requirement: Digest::new(b"provider requirement"),
+                    action: "send".into(),
+                    permission: Digest::new(b"provider permission"),
+                    write: true,
+                });
+            }
+            OperationAuthorityContract::derive(
+                "submit".into(),
+                1,
+                Digest::new(b"submit contract"),
+                OperationKind::Command,
+                AuthorityNode {
+                    actions,
+                    children: if child {
+                        BTreeMap::from([(
+                            "followup".into(),
+                            AuthorityNode {
+                                actions: BTreeSet::from([AuthorityAction::LocalData {
+                                    category: "private".into(),
+                                    policy: Digest::new(b"private policy"),
+                                    write: false,
+                                }]),
+                                children: BTreeMap::new(),
+                            },
+                        )])
+                    } else {
+                        BTreeMap::new()
+                    },
+                },
+            )
+        };
+        let make_family = |authority: OperationAuthorityContract| -> Result<ManifestFamily> {
+            ManifestFamily::derive(
+                FamilyDeclaration {
+                    registration: name("client"),
+                    id: name("keys"),
+                    profile: ManagedProfile::Client,
+                    grant: GrantMode::Fixed,
+                    roots: vec!["submit".into()],
+                    lifetime_seconds: 3600,
+                    source: SourceLocation {
+                        file: "Keys.roc".into(),
+                        line: 7,
+                    },
+                },
+                &BTreeMap::from([(
+                    "submit".into(),
+                    CredentialRoot {
+                        authority,
+                        direct_ingress: true,
+                        interactive_security: false,
+                        single_resource_model: None,
+                    },
+                )]),
+            )
+        };
+        let approved: BTreeMap<String, OperationAuthorityContract> =
+            BTreeMap::from([("submit".into(), root(false, false)?)]);
+        let policy = ManagementPolicy {
+            identity_authority: pin("directory"),
+            issue: ManagementPredicate::Creator,
+            read_metadata: ManagementPredicate::Creator,
+            rotate: ManagementPredicate::Creator,
+            revoke: ManagementPredicate::Creator,
+        };
+        let binding = CredentialFamilyBinding {
+            namespace: Namespace {
+                installation: name("acme"),
+                environment: name("dev"),
+                app: name("reports"),
+                binding_generation: 1,
+            },
+            family: name("keys"),
+            approved_authority: BindingRef {
+                id: name("approved"),
+                revision: Digest::of(&("credential-approved-authority-v1", &approved))?,
+            },
+            management: BindingRef::pin(name("managers"), &policy)?,
+            rotation: RotationProfile::AtomicReplace,
+            delivery: DeliveryProfile::AuthenticatedCreatorReveal,
+            verifier: pin("verifier"),
+            custody: pin("custody"),
+            security_shell: SecurityOriginRef(pin("security")),
+            audience: ResourceAudienceRef(pin("audience")),
+            epoch_store: pin("epoch"),
+            quota: pin("quota"),
+            max_lifetime_seconds: 86400,
+            reveal_window_seconds: 300,
+        };
+        let instance = |binding: Option<&CredentialFamilyBinding>,
+                        policy: &ManagementPolicy|
+         -> Result<crate::artifact::Instance> {
+            let bindings = binding
+                .map(|value| BTreeMap::from([("keys", value)]))
+                .unwrap_or_default();
+            crate::artifact::Instance::from_bytes(&serde_json::to_vec(&json!({
+                "installation": "acme", "environment": "dev",
+                "apps": {"reports": {"artifact": "unused", "readers": [], "writers": [],
+                    "credential_families": bindings}},
+                "resources": {"version": 1, "connections": {}, "resources": {}, "policies": {},
+                    "credentials": {"management": {"managers": policy},
+                        "approved_authority": {"approved": approved}}}
+            }))?)
+        };
+        let selected = catalog(BTreeMap::from([(
+            "reports".into(),
+            selected(manifest("reports", &[])),
+        )]));
+        let family = make_family(root(false, false)?)?;
+        let families = |value: ManifestFamily| BTreeMap::from([("reports".into(), vec![value])]);
+        let qualified = qualify_credentials(
+            &selected,
+            &instance(Some(&binding), &policy)?,
+            &families(family.clone()),
+        )?;
+        assert_eq!(qualified["reports"][0].family_contract, family.contract);
+        assert!(
+            qualify_credentials(
+                &selected,
+                &instance(None, &policy)?,
+                &families(family.clone())
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("CREDENTIAL_FAMILY_UNBOUND")
+        );
+        let mut changed_policy = policy.clone();
+        changed_policy.issue = ManagementPredicate::MemberOf {
+            group: name("operators"),
+        };
+        assert!(
+            qualify_credentials(
+                &selected,
+                &instance(Some(&binding), &changed_policy)?,
+                &families(family.clone())
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("management policy revision mismatch")
+        );
+        assert!(
+            qualify_credentials(
+                &selected,
+                &instance(Some(&binding), &policy)?,
+                &families(make_family(root(true, false)?)?)
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("root exceeds approved authority")
+        );
+        assert!(
+            qualify_credentials(
+                &selected,
+                &instance(Some(&binding), &policy)?,
+                &families(make_family(root(false, true)?)?)
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported credential provider")
+        );
+        Ok(())
     }
 
     fn lock(app: &str, manifest: &Manifest, operation: &str) -> ImportLock {
