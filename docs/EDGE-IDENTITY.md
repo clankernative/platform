@@ -6,21 +6,26 @@ platform verifies that assertion on every request and takes the person's
 identity from it. There is no sign-in page, no login link and no actor argument
 at the edge.
 
-This is the only production sign-in the platform has. The development sign-in
-link, the printed one-use URL in `LocalServer::bind` and `day2-serve
+This is the production entry identity for app requests. Sensitive OAuth security
+shell approvals additionally require a new Google OIDC authentication event.
+The development sign-in link, the printed one-use URL in `LocalServer::bind` and `day2-serve
 --development-auth`, stays loopback-only and is refused for any installation
 that declares an identity provider.
 
 ## What the operator declares
 
-The identity provider belongs to the installation, and each app declares only
-its own address:
+The identity provider belongs to the installation. Each app declares its own
+address, while the installation may separately declare a security shell edge:
 
 ```json
 {
   "installation": "exampleco",
   "environment": "production",
   "identity": { "scheme": "google_iap", "hosted_domain": "example.com" },
+  "security_shell": {
+    "origin": "https://security.example.com",
+    "iap_audience": "/projects/123456789/global/backendServices/987654322"
+  },
   "apps": {
     "go": {
       "edge": {
@@ -47,6 +52,11 @@ its own address:
   origin.
 - **An `edge` needs an `identity`.** Without one, the edge would have nothing to
   check requests against and would trust whoever reached it.
+- **`security_shell` is an optional installation-owned edge.** It needs the
+  installation identity and a distinct HTTPS origin and IAP backend service.
+  Neither may be shared with any app. Declaring it does not start a listener or
+  prove that custody keys, the approval registry, or Google OIDC registration
+  are ready.
 
 The container is started as `day2-serve INSTANCE APP --edge`. Which form a
 container may use is set by its instance, not by its arguments:

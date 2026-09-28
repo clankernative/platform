@@ -61,6 +61,7 @@ impl Pair {
                 ("callee".into(), binding(&artifact)),
             ]),
             identity: None,
+            security_shell: None,
         };
         let path = directory.path().join("instance.json");
         fs::write(&path, serde_json::to_vec(&instance)?)?;

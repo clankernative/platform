@@ -292,6 +292,7 @@ pub fn export_with_provisioning(
         control: None,
         resources: original.resources.clone(),
         identity: None,
+        security_shell: None,
         apps: BTreeMap::from([(app.into(), selected)]),
     };
     let instance_bytes = serde_json::to_vec_pretty(&instance)?;
