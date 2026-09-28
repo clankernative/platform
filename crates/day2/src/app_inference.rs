@@ -225,6 +225,12 @@ pub fn declares_redirects(source: &str) -> Result<bool> {
     declares_category(source, "redirects")
 }
 
+/// Credential registrations are projected into the first checked app shape;
+/// their nominal family profiles are then read from the compiler type graph.
+pub fn declares_credentials(source: &str) -> Result<bool> {
+    declares_category(source, "credentials")
+}
+
 pub fn identity_module(namespace: &str) -> Result<String> {
     crate::schema::identifier(namespace)?;
     Ok(format!(
