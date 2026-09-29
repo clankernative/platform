@@ -2,10 +2,20 @@
 mod support;
 
 use anyhow::{Context, Result, ensure};
-use axum::{Router, body::Bytes, extract::State, http::StatusCode, routing::post};
+use axum::{
+    Router,
+    body::Bytes,
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    routing::post,
+};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use day2::{
     delegation::{self, Call},
-    delegation_wire::{Query, Scope, Signer, TrustedKey, Verifier},
+    delegation_wire::{
+        IssuerSigner, IssuerVerifier, Query, Scope, Signer, TrustedKey, Verifier, issued_query,
+    },
+    iap::{self, KeySource},
     store::Runtime,
 };
 use day2_control::journal::{Journal, RecoveryMode};
@@ -17,9 +27,14 @@ use day2_control::release_execution::{
     ReleaseOperation, ReleasePhase, ReleaseRejection, ReleaseTerminal, ServingProbe,
 };
 use day2_control::release_recipe::CompiledReleaseRecipe;
-use day2_control::remote_query::{RemoteQueryPort, RemoteQueryReceiver};
+use day2_control::remote_query::{
+    RemoteQueryAuth, RemoteQueryIssuer, RemoteQueryPort, RemoteQueryReceiver,
+};
 use day2_control::{BindingRef, Digest};
-use ring::{rand::SystemRandom, signature::Ed25519KeyPair};
+use ring::{
+    rand::SystemRandom,
+    signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, Ed25519KeyPair, KeyPair},
+};
 use rusqlite::Connection;
 use serde_json::{Value, json};
 use std::{
@@ -258,6 +273,62 @@ struct QueryServer {
     thread: Option<thread::JoinHandle<Result<()>>>,
 }
 
+struct FixtureIap {
+    key: EcdsaKeyPair,
+    keys: String,
+}
+
+struct FixtureKeys(String);
+
+impl KeySource for FixtureKeys {
+    fn fetch(&self) -> Result<String> {
+        Ok(self.0.clone())
+    }
+}
+
+impl FixtureIap {
+    fn new() -> Result<Self> {
+        let random = SystemRandom::new();
+        let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &random)
+            .map_err(|_| anyhow::anyhow!("test IAP key generation failed"))?;
+        let key =
+            EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8.as_ref(), &random)
+                .map_err(|_| anyhow::anyhow!("test IAP key loading failed"))?;
+        let point = key.public_key().as_ref();
+        let keys = json!({"keys":[{"kid":"fixture-iap","kty":"EC","crv":"P-256",
+            "x":URL_SAFE_NO_PAD.encode(&point[1..33]),
+            "y":URL_SAFE_NO_PAD.encode(&point[33..65])}]})
+        .to_string();
+        Ok(Self { key, keys })
+    }
+
+    fn assertion(&self, audience: &str, email: &str, at: i64) -> Result<String> {
+        let signed = format!(
+            "{}.{}",
+            URL_SAFE_NO_PAD.encode(json!({"alg":"ES256","kid":"fixture-iap"}).to_string()),
+            URL_SAFE_NO_PAD.encode(
+                json!({
+                    "iss":iap::ISSUER,"aud":audience,"exp":at+600,
+                    "sub":"service-account-fixture","email":email
+                })
+                .to_string()
+            )
+        );
+        let signature = self
+            .key
+            .sign(&SystemRandom::new(), signed.as_bytes())
+            .map_err(|_| anyhow::anyhow!("test IAP signing failed"))?;
+        Ok(format!(
+            "{signed}.{}",
+            URL_SAFE_NO_PAD.encode(signature.as_ref())
+        ))
+    }
+
+    fn verifier(&self, audience: &str, email: &str) -> Result<iap::Verifier> {
+        iap::Verifier::for_workload(audience, email, Box::new(FixtureKeys(self.keys.clone())))
+    }
+}
+
 impl QueryServer {
     fn start(receiver: RemoteQueryReceiver) -> Result<Self> {
         let receiver = Arc::new(receiver);
@@ -271,30 +342,40 @@ impl QueryServer {
                 .block_on(async move {
                     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
                     send.send(format!("http://{}", listener.local_addr()?))?;
-                    let router =
-                        Router::new()
-                            .route(
-                                "/_platform/app-query",
-                                post(
-                                    |State(receiver): State<Arc<RemoteQueryReceiver>>,
-                                     body: Bytes| async move {
-                                        let answer = tokio::task::spawn_blocking(move || {
-                                            let at = i64::try_from(
-                                                SystemTime::now()
-                                                    .duration_since(UNIX_EPOCH)?
-                                                    .as_secs(),
-                                            )?;
-                                            receiver.handle(&body, at)
-                                        })
-                                        .await;
-                                        match answer {
-                                            Ok(Ok(result)) => (StatusCode::OK, result),
-                                            _ => (StatusCode::FORBIDDEN, "refused".to_owned()),
+                    let router = Router::new()
+                        .route(
+                            "/_platform/app-query",
+                            post(
+                                |State(receiver): State<Arc<RemoteQueryReceiver>>,
+                                 headers: HeaderMap,
+                                 body: Bytes| async move {
+                                    let mut assertions =
+                                        headers.get_all(iap::ASSERTION_HEADER).iter();
+                                    let assertion = match (assertions.next(), assertions.next()) {
+                                        (Some(value), None) => {
+                                            value.to_str().ok().map(str::to_owned)
                                         }
-                                    },
-                                ),
-                            )
-                            .with_state(receiver);
+                                        _ => None,
+                                    };
+                                    let answer = tokio::task::spawn_blocking(move || {
+                                        let at = i64::try_from(
+                                            SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
+                                        )?;
+                                        receiver.handle(
+                                            &body,
+                                            assertion.as_deref().unwrap_or(""),
+                                            at,
+                                        )
+                                    })
+                                    .await;
+                                    match answer {
+                                        Ok(Ok(result)) => (StatusCode::OK, result),
+                                        _ => (StatusCode::FORBIDDEN, "refused".to_owned()),
+                                    }
+                                },
+                            ),
+                        )
+                        .with_state(receiver);
                     axum::serve(listener, router)
                         .with_graceful_shutdown(async {
                             let _ = done.await;
@@ -362,19 +443,53 @@ fn signed_query_crosses_separate_host_databases_and_fences_serving_generation() 
         .map_err(|_| anyhow::anyhow!("test key generation failed"))?;
     let signer = Signer::from_pkcs8("caller-key-1", pkcs8.as_ref())?;
     let source_scope = Scope::from_runtime(&caller)?;
-    let verifier = Verifier::new(BTreeMap::from([(
+    let issuer_workload_verifier = Verifier::new(BTreeMap::from([(
         "caller-key-1".to_owned(),
         TrustedKey {
             source: source_scope.clone(),
             public_key: signer.public_key(),
         },
     )]))?;
+    let receiver_workload_verifier = Verifier::new(BTreeMap::from([(
+        "caller-key-1".to_owned(),
+        TrustedKey {
+            source: source_scope.clone(),
+            public_key: signer.public_key(),
+        },
+    )]))?;
+    let issuer_pkcs8 = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new())
+        .map_err(|_| anyhow::anyhow!("test issuer key generation failed"))?;
+    let issuer_signer =
+        IssuerSigner::from_pkcs8("platform-issuer", "issuer-key-1", issuer_pkcs8.as_ref())?;
+    let issuer_verifier = IssuerVerifier::new(
+        "platform-issuer",
+        BTreeMap::from([("issuer-key-1".to_owned(), issuer_signer.public_key())]),
+        "/projects/123/global/backendServices/target",
+    )?;
+    let iap = FixtureIap::new()?;
+    let workload_email = "caller@project.iam.gserviceaccount.com";
+    let issuer_audience = "/projects/123/global/backendServices/issuer";
+    let target_audience = "/projects/123/global/backendServices/target";
+    let at = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())?;
+    let issuer_assertion = iap.assertion(issuer_audience, workload_email, at)?;
+    let target_assertion = iap.assertion(target_audience, workload_email, at)?;
+    let issuer = Arc::new(RemoteQueryIssuer::new(
+        source.clone(),
+        target.clone(),
+        workload_email,
+        issuer_audience,
+        iap.verifier(issuer_audience, workload_email)?,
+        issuer_workload_verifier,
+        issuer_signer,
+    )?);
     let receiver = RemoteQueryReceiver::new(
         fixture.path.clone(),
         probe.clone(),
         target.clone(),
         callee.clone(),
-        verifier,
+        receiver_workload_verifier,
+        issuer_verifier,
+        iap.verifier(target_audience, workload_email)?,
     )?;
     let server = QueryServer::start(receiver)?;
     let port = RemoteQueryPort::loopback_fixture(
@@ -383,7 +498,12 @@ fn signed_query_crosses_separate_host_databases_and_fences_serving_generation() 
         source,
         target.clone(),
         &format!("{}/_platform/app-query", server.origin),
-        signer,
+        RemoteQueryAuth {
+            workload_signer: signer,
+            issuer: issuer.clone(),
+            issuer_assertion: issuer_assertion.clone(),
+            target_assertion: target_assertion.clone(),
+        },
     )?;
     let caller = caller.with_app_call_port(Arc::new(port));
     let call = Call {
@@ -450,7 +570,6 @@ fn signed_query_crosses_separate_host_databases_and_fences_serving_generation() 
         client.post(&endpoint).body("{}").send()?.status(),
         StatusCode::FORBIDDEN
     );
-    let at = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())?;
     let signer = Signer::from_pkcs8("caller-key-1", pkcs8.as_ref())?;
     let active = Journal::open(&fixture.path)?
         .release_state(&target)?
@@ -478,48 +597,138 @@ fn signed_query_crosses_separate_host_databases_and_fences_serving_generation() 
     assert_eq!(
         client
             .post(&endpoint)
+            .header(iap::ASSERTION_HEADER, &target_assertion)
             .body(signer.sign(&forged)?)
             .send()?
             .status(),
         StatusCode::FORBIDDEN,
-        "a signed workload may not choose an unauthorized actor"
+        "a workload signature without issuer proof is refused"
     );
-    let mut wrong_generation = forged.clone();
-    wrong_generation.actor = "alice".into();
+    assert!(
+        issuer
+            .issue(
+                &caller,
+                &call,
+                &forged,
+                &signer.sign(&forged)?,
+                &issuer_assertion,
+                at
+            )
+            .is_err(),
+        "the issuer cannot endorse a workload-selected actor"
+    );
+    let mut valid = forged.clone();
+    valid.actor = call.actor.clone();
+    valid.origin = call.origin.clone();
+    valid.step = call.step.clone();
+    let valid_workload = signer.sign(&valid)?;
+    let valid_proof = issuer.issue(
+        &caller,
+        &call,
+        &valid,
+        &valid_workload,
+        &issuer_assertion,
+        at,
+    )?;
+    assert!(
+        issuer
+            .issue(
+                &caller,
+                &call,
+                &valid,
+                &valid_workload,
+                &target_assertion,
+                at
+            )
+            .is_err(),
+        "the target IAP audience cannot open the issuer gate"
+    );
+    assert_eq!(
+        client
+            .post(&endpoint)
+            .body(issued_query(&valid_workload, &valid_proof)?)
+            .send()?
+            .status(),
+        StatusCode::FORBIDDEN,
+        "the receiver requires its own IAP assertion"
+    );
+    assert_eq!(
+        client
+            .post(&endpoint)
+            .header(iap::ASSERTION_HEADER, &issuer_assertion)
+            .body(issued_query(&valid_workload, &valid_proof)?)
+            .send()?
+            .status(),
+        StatusCode::FORBIDDEN,
+        "an issuer-gated assertion is not a target-gated assertion"
+    );
+    assert_eq!(
+        client
+            .post(&endpoint)
+            .header(iap::ASSERTION_HEADER, &target_assertion)
+            .body(issued_query(&signer.sign(&forged)?, &valid_proof)?)
+            .send()?
+            .status(),
+        StatusCode::FORBIDDEN,
+        "issuer proof binds the exact signed workload request"
+    );
+    let mut wrong_generation = valid.clone();
     wrong_generation.generation += 1;
+    let wrong_workload = signer.sign(&wrong_generation)?;
+    let wrong_proof = issuer.issue(
+        &caller,
+        &call,
+        &wrong_generation,
+        &wrong_workload,
+        &issuer_assertion,
+        at,
+    )?;
     assert_eq!(
         client
             .post(&endpoint)
-            .body(signer.sign(&wrong_generation)?)
+            .header(iap::ASSERTION_HEADER, &target_assertion)
+            .body(issued_query(&wrong_workload, &wrong_proof)?)
             .send()?
             .status(),
         StatusCode::FORBIDDEN,
-        "a valid workload key cannot replay a different release generation"
+        "even two valid signatures cannot replay a different release generation"
     );
-    let mut wrong_audience = forged.clone();
-    wrong_audience.actor = "alice".into();
+    let mut wrong_audience = valid.clone();
     wrong_audience.target.app = "another".into();
-    assert_eq!(
-        client
-            .post(&endpoint)
-            .body(signer.sign(&wrong_audience)?)
-            .send()?
-            .status(),
-        StatusCode::FORBIDDEN,
-        "a signed query for another app has no receiver authority"
+    assert!(
+        issuer
+            .issue(
+                &caller,
+                &call,
+                &wrong_audience,
+                &signer.sign(&wrong_audience)?,
+                &issuer_assertion,
+                at,
+            )
+            .is_err(),
+        "issuer scope does not include another target"
     );
-    let mut expired = forged.clone();
-    expired.actor = "alice".into();
+    let mut expired = valid.clone();
     expired.issued_at = at - 60;
     expired.expires_at = at - 1;
+    let expired_workload = signer.sign(&expired)?;
+    let expired_proof = issuer.issue(
+        &caller,
+        &call,
+        &expired,
+        &expired_workload,
+        &issuer_assertion,
+        at - 50,
+    )?;
     assert_eq!(
         client
             .post(&endpoint)
-            .body(signer.sign(&expired)?)
+            .header(iap::ASSERTION_HEADER, &target_assertion)
+            .body(issued_query(&expired_workload, &expired_proof)?)
             .send()?
             .status(),
         StatusCode::FORBIDDEN,
-        "an expired transport proof cannot be replayed"
+        "expired workload and issuer proofs cannot be replayed"
     );
     let count: i64 = Connection::open(callee.db())?.query_row(
         "SELECT count(*) FROM day2_invocations WHERE id LIKE 'dlg_%'",

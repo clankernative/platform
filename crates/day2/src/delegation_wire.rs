@@ -1,8 +1,8 @@
 //! Host-only signed query envelope for a separate application workload.
 //!
-//! The signature authenticates a key bound by the host to one source workload;
-//! it does not authorize the inherited actor. Only the native caller host may
-//! construct requests, and the receiving app still checks its own policy.
+//! A workload signature binds the request to one calling app. A separate
+//! platform issuer proof binds its exact bytes to verified origin evidence;
+//! neither signature replaces the receiving app's own policy check.
 
 use anyhow::{Result, ensure};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -15,6 +15,8 @@ use std::collections::BTreeMap;
 const MAX_WIRE_BYTES: usize = 131_072;
 const MAX_PAYLOAD_BYTES: usize = 70_000;
 const DOMAIN: &[u8] = b"day2-app-query-v1\0";
+const ISSUER_DOMAIN: &[u8] = b"day2-app-issuer-v1\0";
+const MAX_ISSUED_WIRE_BYTES: usize = 200_000;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -43,7 +45,7 @@ impl Scope {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Query {
     pub version: u32,
@@ -127,6 +129,187 @@ pub struct VerifiedQuery(Query);
 impl VerifiedQuery {
     pub fn query(&self) -> &Query {
         &self.0
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IssuerClaims {
+    pub version: u32,
+    pub issuer: String,
+    pub key_id: String,
+    pub source: Scope,
+    pub target: Scope,
+    pub root: String,
+    pub principal: String,
+    pub subject_digest: String,
+    pub workload_email: String,
+    pub workload_subject_digest: String,
+    pub actor: String,
+    pub origin: String,
+    pub query_digest: String,
+    pub issued_at: i64,
+    pub expires_at: i64,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SignedIssuer {
+    key_id: String,
+    payload: String,
+    signature: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IssuedQuery {
+    workload: String,
+    issuer: String,
+}
+
+pub struct IssuerSigner {
+    issuer: String,
+    key_id: String,
+    key: signature::Ed25519KeyPair,
+}
+
+impl IssuerSigner {
+    pub fn from_pkcs8(issuer: &str, key_id: &str, pkcs8: &[u8]) -> Result<Self> {
+        valid_key_id(issuer)?;
+        valid_key_id(key_id)?;
+        let key = signature::Ed25519KeyPair::from_pkcs8(pkcs8)
+            .map_err(|_| anyhow::anyhow!("invalid_app_issuer_signing_key"))?;
+        Ok(Self {
+            issuer: issuer.to_owned(),
+            key_id: key_id.to_owned(),
+            key,
+        })
+    }
+
+    pub fn issuer(&self) -> &str {
+        &self.issuer
+    }
+
+    pub fn key_id(&self) -> &str {
+        &self.key_id
+    }
+
+    pub fn public_key(&self) -> Vec<u8> {
+        self.key.public_key().as_ref().to_vec()
+    }
+
+    pub fn sign(&self, claims: &IssuerClaims) -> Result<Vec<u8>> {
+        ensure!(
+            claims.issuer == self.issuer && claims.key_id == self.key_id,
+            "app_issuer_identity_changed"
+        );
+        let payload = serde_json::to_vec(claims)?;
+        ensure!(payload.len() <= 16_384, "app_issuer_proof_too_large");
+        let mut signed = Vec::with_capacity(ISSUER_DOMAIN.len() + payload.len());
+        signed.extend_from_slice(ISSUER_DOMAIN);
+        signed.extend_from_slice(&payload);
+        Ok(serde_json::to_vec(&SignedIssuer {
+            key_id: self.key_id.clone(),
+            payload: URL_SAFE_NO_PAD.encode(payload),
+            signature: URL_SAFE_NO_PAD.encode(self.key.sign(&signed).as_ref()),
+        })?)
+    }
+}
+
+pub fn issued_query(workload: &[u8], issuer: &[u8]) -> Result<Vec<u8>> {
+    let wire = serde_json::to_vec(&IssuedQuery {
+        workload: URL_SAFE_NO_PAD.encode(workload),
+        issuer: URL_SAFE_NO_PAD.encode(issuer),
+    })?;
+    ensure!(
+        wire.len() <= MAX_ISSUED_WIRE_BYTES,
+        "app_call_wire_too_large"
+    );
+    Ok(wire)
+}
+
+pub struct IssuerVerifier {
+    issuer: String,
+    keys: BTreeMap<String, Vec<u8>>,
+    target_audience: String,
+}
+
+impl IssuerVerifier {
+    pub fn new(
+        issuer: &str,
+        keys: BTreeMap<String, Vec<u8>>,
+        target_audience: &str,
+    ) -> Result<Self> {
+        valid_key_id(issuer)?;
+        ensure!(
+            !keys.is_empty() && keys.len() <= 64 && !target_audience.is_empty(),
+            "invalid_app_issuer_key_set"
+        );
+        for (key_id, key) in &keys {
+            valid_key_id(key_id)?;
+            ensure!(key.len() == 32, "invalid_app_issuer_public_key");
+        }
+        Ok(Self {
+            issuer: issuer.to_owned(),
+            keys,
+            target_audience: target_audience.to_owned(),
+        })
+    }
+
+    pub fn verify(
+        &self,
+        wire: &[u8],
+        at: i64,
+        gate: &crate::iap::Workload,
+        workload_verifier: &Verifier,
+    ) -> Result<VerifiedQuery> {
+        ensure!(
+            wire.len() <= MAX_ISSUED_WIRE_BYTES,
+            "invalid_app_issuer_proof"
+        );
+        let issued: IssuedQuery = crate::json::decode(wire)?;
+        let workload = URL_SAFE_NO_PAD.decode(&issued.workload)?;
+        let issuer = URL_SAFE_NO_PAD.decode(&issued.issuer)?;
+        let verified = workload_verifier.verify(&workload, at)?;
+        let signed: SignedIssuer = crate::json::decode(&issuer)?;
+        valid_key_id(&signed.key_id)?;
+        let key = self
+            .keys
+            .get(&signed.key_id)
+            .ok_or_else(|| anyhow::anyhow!("invalid_app_issuer_proof"))?;
+        let payload = URL_SAFE_NO_PAD.decode(&signed.payload)?;
+        ensure!(payload.len() <= 16_384, "invalid_app_issuer_proof");
+        let signature = URL_SAFE_NO_PAD.decode(&signed.signature)?;
+        let mut message = Vec::with_capacity(ISSUER_DOMAIN.len() + payload.len());
+        message.extend_from_slice(ISSUER_DOMAIN);
+        message.extend_from_slice(&payload);
+        signature::UnparsedPublicKey::new(&signature::ED25519, key)
+            .verify(&message, &signature)
+            .map_err(|_| anyhow::anyhow!("invalid_app_issuer_proof"))?;
+        let claims: IssuerClaims = crate::json::decode(&payload)?;
+        let query = verified.query();
+        ensure!(
+            claims.version == 1
+                && claims.issuer == self.issuer
+                && claims.key_id == signed.key_id
+                && claims.source == query.source
+                && claims.target == query.target
+                && claims.actor == query.actor
+                && claims.origin == query.origin
+                && !claims.root.is_empty()
+                && !claims.principal.is_empty()
+                && claims.subject_digest.starts_with("sha256:")
+                && claims.query_digest == crate::digest(&workload)
+                && claims.issued_at <= at
+                && at < claims.expires_at
+                && claims.expires_at <= query.expires_at
+                && claims.issued_at >= query.issued_at
+                && gate.audience() == self.target_audience
+                && gate.email() == claims.workload_email
+                && crate::digest(gate.subject().as_bytes()) == claims.workload_subject_digest,
+            "invalid_app_issuer_proof"
+        );
+        Ok(verified)
     }
 }
 
