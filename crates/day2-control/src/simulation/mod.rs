@@ -963,6 +963,7 @@ impl World {
                                 builder: other.profile.builder.clone(),
                                 artifact: provider::Provider::artifact(other)?,
                                 checks: Digest::new(b"forged"),
+                                credential_presence: crate::kernel::CredentialPresence::Absent,
                             },
                         };
                         let before = Journal::open(&self.path)?.get(&pending.lease.execution.id)?;

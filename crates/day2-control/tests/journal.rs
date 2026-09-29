@@ -51,6 +51,7 @@ fn observation(plan: &BuildPlan, state: &State) -> Observation {
                 builder: plan.profile.builder.clone(),
                 artifact: Digest::new(b"artifact"),
                 checks: Digest::new(b"checks"),
+                credential_presence: day2_control::kernel::CredentialPresence::Absent,
             },
         },
         State::Verified { evidence, .. } => Observation::Published {

@@ -1,7 +1,9 @@
 //! Fixed local build recipe. The trusted runner is an operator capability, not app input.
 
 use crate::{
-    BindingRef, BuildPlan, Digest, Name, kernel::VerificationEvidence, source::SourceSnapshot,
+    BindingRef, BuildPlan, Digest, Name,
+    kernel::{CredentialPresence, VerificationEvidence},
+    source::SourceSnapshot,
 };
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -240,6 +242,8 @@ pub struct BuildEvidence {
     recipe: Digest,
     builder: BindingRef,
     artifact: Option<Digest>,
+    #[serde(default, skip_serializing_if = "CredentialPresence::is_unknown")]
+    credential_presence: CredentialPresence,
     checks: Vec<BuildCheck>,
     log: Digest,
     inputs: Digest,
@@ -285,6 +289,8 @@ impl BuildEvidence {
             recipe: Digest,
             builder: BindingRef,
             artifact: Option<Digest>,
+            #[serde(default)]
+            credential_presence: CredentialPresence,
             checks: Vec<BuildCheck>,
             log: Digest,
             inputs: Digest,
@@ -305,6 +311,7 @@ impl BuildEvidence {
             recipe: value.recipe,
             builder: value.builder,
             artifact: value.artifact,
+            credential_presence: value.credential_presence,
             checks: value.checks,
             log: value.log,
             inputs: value.inputs,
@@ -342,6 +349,7 @@ impl BuildEvidence {
             builder: self.builder.clone(),
             artifact: self.artifact.clone().context("verified artifact missing")?,
             checks: self.digest()?,
+            credential_presence: self.credential_presence,
         })
     }
 }
@@ -480,7 +488,8 @@ impl TrustedRunner {
         let mut evidence = BuildEvidence {
             format: 1, plan: request.plan.fingerprint()?, source: request.source.digest().clone(),
             platform: platform.digest().clone(), recipe: recipe_digest(), builder: self.binding()?,
-            artifact: None, checks: Vec::new(), log: Digest::new(b""), inputs: Digest::new(b""),
+            artifact: None, credential_presence: CredentialPresence::Unknown,
+            checks: Vec::new(), log: Digest::new(b""), inputs: Digest::new(b""),
             properties: None, development: None, simulation: None, failure: None,
             containment: "trusted local supervisor; separate macOS arm64 Cargo/compiler/worker sandboxes; trusted OS/Xcode; no production hostile-code containment or resource-quota claim".into(),
             verification_scope: "pinned build/admission, empty-state properties and optional pure examples/generators through real commands, replay and duplicate delivery; no claim of full state-machine/DST certification".into(),
@@ -683,6 +692,12 @@ impl TrustedRunner {
                         passed: true,
                     });
                     admitted_artifact = Some(artifact);
+                    evidence.credential_presence =
+                        if admitted.contract().credential_manifest.is_empty() {
+                            CredentialPresence::Absent
+                        } else {
+                            CredentialPresence::Present
+                        };
                     admitted_target = Some(target);
                 }
                 "ci-properties" => {
@@ -858,6 +873,16 @@ impl TrustedRunner {
             ensure!(
                 admitted.id() == artifact.as_str(),
                 "cached artifact changed"
+            );
+            ensure!(
+                evidence.credential_presence == CredentialPresence::Unknown
+                    || evidence.credential_presence
+                        == if admitted.contract().credential_manifest.is_empty() {
+                            CredentialPresence::Absent
+                        } else {
+                            CredentialPresence::Present
+                        },
+                "cached credential presence changed"
             );
             evidence.verification_evidence()?;
             let empty = admitted
@@ -1291,6 +1316,7 @@ mod cached_evidence_tests {
                 &json!({"fixture":true}),
             )?,
             artifact: Some(Digest::new(b"artifact")),
+            credential_presence: CredentialPresence::Absent,
             checks: [
                 "control-simulation",
                 "fixed-offline-recipe",

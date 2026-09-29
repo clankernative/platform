@@ -1,5 +1,6 @@
 use anyhow::Result;
 use day2_control::journal::Journal;
+use day2_control::kernel::CredentialPresence;
 
 #[path = "support/release.rs"]
 mod support;
@@ -69,6 +70,72 @@ fn enrolled_scope_requires_a_qualified_candidate_at_activation() -> Result<()> {
     assert!(
         active.releases.is_empty(),
         "failed qualification must leave selection intact"
+    );
+    Ok(())
+}
+
+#[test]
+fn legacy_activation_requires_exact_verified_credential_absence() -> Result<()> {
+    for presence in [CredentialPresence::Present, CredentialPresence::Unknown] {
+        let directory = tempfile::tempdir()?;
+        let mut journal = Journal::open(&directory.path().join("journal.sqlite"))?;
+        let target = target("alpha");
+        configure(&mut journal, &target, &plan("alpha", 1));
+        let input = approval_with_presence(&mut journal, "alpha", 1, 0, presence);
+        let release = journal.approve_release(&input)?;
+        metadata(&mut journal, &input);
+        let ready = journal.prepare_release(&release)?;
+        assert!(
+            journal
+                .activate_release(&ready)
+                .unwrap_err()
+                .to_string()
+                .contains("credential release requires a qualified catalog candidate")
+        );
+        assert!(
+            journal
+                .active_catalog_selection(&target.company, &target.environment)?
+                .releases
+                .is_empty()
+        );
+    }
+
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("journal.sqlite");
+    let mut journal = Journal::open(&path)?;
+    let target = target("alpha");
+    configure(&mut journal, &target, &plan("alpha", 1));
+    let input = approval(&mut journal, "alpha", 1, 0);
+    let release = journal.approve_release(&input)?;
+    metadata(&mut journal, &input);
+    let ready = journal.prepare_release(&release)?;
+    let connection = rusqlite::Connection::open(path)?;
+    let body: String = connection.query_row(
+        "SELECT observation FROM effects WHERE execution=?1 AND kind='\"verify_artifact\"'",
+        [input.build_execution.as_str()],
+        |row| row.get(0),
+    )?;
+    let mut body: serde_json::Value = serde_json::from_str(&body)?;
+    body["evidence"]["credential_presence"] = serde_json::json!("present");
+    connection.execute(
+        "UPDATE effects SET observation=?1 WHERE execution=?2 AND kind='\"verify_artifact\"'",
+        rusqlite::params![
+            serde_json::to_string(&body)?,
+            input.build_execution.as_str()
+        ],
+    )?;
+    assert!(
+        journal
+            .activate_release(&ready)
+            .unwrap_err()
+            .to_string()
+            .contains("classification differs from approved build evidence")
+    );
+    assert!(
+        journal
+            .active_catalog_selection(&target.company, &target.environment)?
+            .releases
+            .is_empty()
     );
     Ok(())
 }
