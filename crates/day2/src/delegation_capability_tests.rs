@@ -130,6 +130,7 @@ impl Granted {
             "sources":{},"admission":"local-spike-only","imports":imports}))?;
         let caller = Runtime {
             integrations: Arc::new(integration_host::Host::local(&path)?),
+            app_calls: None,
             instance_path: path,
             app: "caller".into(),
             db: state.join("caller.sqlite"),
@@ -414,6 +415,7 @@ impl Impersonating {
             "sources":{},"admission":"local-spike-only"}))?;
         let runtime = Runtime {
             integrations: Arc::new(integration_host::Host::local(&path)?),
+            app_calls: None,
             instance_path: path,
             app: "support".into(),
             db: state.join("support.sqlite"),

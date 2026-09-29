@@ -69,13 +69,30 @@ pub fn configure(journal: &mut Journal, target: &ReleaseTarget, plan: &BuildPlan
 }
 
 pub fn succeed(journal: &mut Journal, plan: &BuildPlan) -> (Digest, Digest) {
-    succeed_with_presence(journal, plan, CredentialPresence::Absent)
+    succeed_with(journal, plan, CredentialPresence::Absent, None)
 }
 
 pub fn succeed_with_presence(
     journal: &mut Journal,
     plan: &BuildPlan,
     credential_presence: CredentialPresence,
+) -> (Digest, Digest) {
+    succeed_with(journal, plan, credential_presence, None)
+}
+
+pub fn succeed_with_artifact(
+    journal: &mut Journal,
+    plan: &BuildPlan,
+    artifact_override: Option<&Digest>,
+) -> (Digest, Digest) {
+    succeed_with(journal, plan, CredentialPresence::Absent, artifact_override)
+}
+
+fn succeed_with(
+    journal: &mut Journal,
+    plan: &BuildPlan,
+    credential_presence: CredentialPresence,
+    artifact_override: Option<&Digest>,
 ) -> (Digest, Digest) {
     journal.accept_as(plan, "developer").unwrap();
     let id = plan.execution_id().unwrap();
@@ -94,7 +111,9 @@ pub fn succeed_with_presence(
                     platform: plan.profile.platform.clone(),
                     recipe: plan.profile.recipe.clone(),
                     builder: plan.profile.builder.clone(),
-                    artifact: Digest::of(&(&plan.company, &plan.commit, "artifact")).unwrap(),
+                    artifact: artifact_override.cloned().unwrap_or_else(|| {
+                        Digest::of(&(&plan.company, &plan.commit, "artifact")).unwrap()
+                    }),
                     checks: Digest::new(b"all-checks-pass"),
                     credential_presence,
                 },
@@ -122,12 +141,13 @@ pub fn approval(
     revision: u8,
     generation: u64,
 ) -> ReleaseApproval {
-    approval_with_presence(
+    approval_with(
         journal,
         company,
         revision,
         generation,
         CredentialPresence::Absent,
+        None,
     )
 }
 
@@ -138,8 +158,43 @@ pub fn approval_with_presence(
     generation: u64,
     credential_presence: CredentialPresence,
 ) -> ReleaseApproval {
+    approval_with(
+        journal,
+        company,
+        revision,
+        generation,
+        credential_presence,
+        None,
+    )
+}
+
+pub fn approval_with_artifact(
+    journal: &mut Journal,
+    company: &str,
+    revision: u8,
+    generation: u64,
+    artifact_override: Option<&Digest>,
+) -> ReleaseApproval {
+    approval_with(
+        journal,
+        company,
+        revision,
+        generation,
+        CredentialPresence::Absent,
+        artifact_override,
+    )
+}
+
+fn approval_with(
+    journal: &mut Journal,
+    company: &str,
+    revision: u8,
+    generation: u64,
+    credential_presence: CredentialPresence,
+    artifact_override: Option<&Digest>,
+) -> ReleaseApproval {
     let plan = plan(company, revision);
-    let (artifact, evidence) = succeed_with_presence(journal, &plan, credential_presence);
+    let (artifact, evidence) = succeed_with(journal, &plan, credential_presence, artifact_override);
     let policy = authority(&plan).policy;
     let approval = ReleaseApproval {
         target: target(company),

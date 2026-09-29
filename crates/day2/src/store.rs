@@ -325,6 +325,7 @@ impl Fault {
 #[derive(Clone)]
 pub struct Runtime {
     integrations: Arc<crate::integration_host::Host>,
+    app_calls: Option<Arc<dyn crate::delegation::AppCallPort>>,
     instance_path: PathBuf,
     app: String,
     db: PathBuf,
@@ -353,6 +354,17 @@ pub(crate) fn open(path: &Path) -> Result<Connection> {
 }
 
 impl Runtime {
+    /// Install a host-owned app-call adapter. Application code cannot select an
+    /// endpoint or supply an identity proof; the host constructs both.
+    pub fn with_app_call_port(mut self, port: Arc<dyn crate::delegation::AppCallPort>) -> Self {
+        self.app_calls = Some(port);
+        self
+    }
+
+    pub(crate) fn app_call_port(&self) -> Option<&dyn crate::delegation::AppCallPort> {
+        self.app_calls.as_deref()
+    }
+
     pub(crate) fn integrations(&self) -> &crate::integration_host::Host {
         self.integrations.as_ref()
     }
@@ -506,6 +518,7 @@ impl Runtime {
         }
         let runtime = Self {
             integrations: Arc::new(crate::integration_host::Host::local(&instance_path)?),
+            app_calls: None,
             scope: instance.scope(app)?,
             hosted_domain: instance.hosted_domain().map(str::to_owned),
             instance_path,

@@ -14,7 +14,59 @@
 //! by calling the callee directly.
 use crate::store::Runtime;
 use anyhow::{Result, ensure};
+use rusqlite::{OptionalExtension, params};
 use serde_json::Value;
+
+/// Host-owned dispatch for a query whose grant and durable invocation context
+/// have already been checked. Implementations must authenticate the receiver
+/// and preserve the call's actor, causal identity, and target contract.
+pub trait AppCallPort: Send + Sync {
+    fn query(&self, caller: &Runtime, call: &Call) -> Result<String>;
+}
+
+/// A remote signer must inherit its actor and chain from the current durable
+/// invocation. A `Call` by itself is not identity evidence.
+pub fn verify_origin(runtime: &Runtime, call: &Call) -> Result<()> {
+    ensure!(call.caller == runtime.app(), "delegated_caller_changed");
+    let mut connection = crate::store::open(runtime.db())?;
+    let tx = connection.transaction()?;
+    runtime.check_binding(&tx)?;
+    let origin: Option<(String, String, String, String, i64, String)> = tx
+        .query_row(
+            "SELECT operation,actor,caller,artifact,now,status FROM day2_invocations WHERE id=?1",
+            params![call.origin],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .optional()?;
+    let (operation, actor, chain, artifact, now, status) =
+        origin.ok_or_else(|| anyhow::anyhow!("delegated_origin_missing"))?;
+    ensure!(
+        actor == call.actor
+            && chain == call.chain
+            && artifact == runtime.artifact().id()
+            && now == call.now
+            && status == "pending",
+        "delegated_origin_changed"
+    );
+    crate::authority_state::require_invocation_in(
+        &tx,
+        runtime,
+        &call.origin,
+        &operation,
+        &call.actor,
+    )?;
+    tx.commit()?;
+    Ok(())
+}
 
 /// The recorded chain, as applications.
 ///
@@ -73,6 +125,7 @@ pub fn read(runtime: &Runtime, call: &Call) -> Result<String> {
     ensure!(!call.step.is_empty(), "delegated_read_requires_a_step");
     // Cycle and depth are properties of the call, not of the callee, so they are
     // checked before anything is loaded and hold identically offline.
+    ensure!(call.caller == runtime.app(), "delegated_caller_changed");
     let chain = extend(&call.chain, &call.caller, &call.app)?;
 
     // A campaign stands up one application, so the other one is not installed to
@@ -90,6 +143,10 @@ pub fn read(runtime: &Runtime, call: &Call) -> Result<String> {
         );
     }
 
+    if let Some(port) = runtime.app_call_port() {
+        return port.query(runtime, call);
+    }
+
     let callee = Runtime::load(runtime.instance_path(), &call.app)
         .map_err(|_| anyhow::anyhow!("delegated_app_not_installed: {}", call.app))?;
     // A compiled import is release-managed. Its package digest establishes the
@@ -101,6 +158,43 @@ pub fn read(runtime: &Runtime, call: &Call) -> Result<String> {
     } else {
         None
     };
+    let result = execute_callee(&callee, call, &chain);
+    if let Some(fence) = &fence {
+        fence.check(runtime, &callee)?;
+    }
+    result
+}
+
+/// Receiver entry after a host adapter has verified the signed workload proof
+/// and fenced the actual serving generation around this invocation.
+pub fn receive_verified(
+    callee: &Runtime,
+    verified: &crate::delegation_wire::VerifiedQuery,
+) -> Result<String> {
+    let request = verified.query();
+    ensure!(
+        request.target.runtime_scope() == callee.scope()
+            && request.target == crate::delegation_wire::Scope::from_runtime(callee)?,
+        "delegated_target_changed"
+    );
+    let call = Call {
+        app: request.target.app.clone(),
+        operation: request.operation.clone(),
+        schema_digest: request.schema_digest.clone(),
+        contract_digest: request.contract_digest.clone(),
+        input: serde_json::to_string(&request.input)?,
+        actor: request.actor.clone(),
+        origin: request.origin.clone(),
+        step: request.step.clone(),
+        chain: request.chain.clone(),
+        caller: request.source.app.clone(),
+        now: request.now,
+    };
+    let chain = extend(&call.chain, &call.caller, &call.app)?;
+    execute_callee(callee, &call, &chain)
+}
+
+fn execute_callee(callee: &Runtime, call: &Call, chain: &str) -> Result<String> {
     let definition = callee
         .artifact()
         .route(&call.operation)
@@ -110,7 +204,7 @@ pub fn read(runtime: &Runtime, call: &Call) -> Result<String> {
         "delegated_operation_is_not_a_query: {}",
         call.operation
     );
-    let actual = schema_digest(&callee, &call.operation)?;
+    let actual = schema_digest(callee, &call.operation)?;
     ensure!(
         actual == call.schema_digest,
         "delegated_schema_changed: {} now has {actual}",
@@ -147,12 +241,9 @@ pub fn read(runtime: &Runtime, call: &Call) -> Result<String> {
         &id,
         &input,
         call.now,
-        crate::store::Cause::delegated(&call.actor, &chain, &authenticated),
+        crate::store::Cause::delegated(&call.actor, chain, &authenticated),
     )?;
     let outcome = callee.execute(&id, crate::store::Fault::None)?;
-    if let Some(fence) = &fence {
-        fence.check(runtime, &callee)?;
-    }
     ensure!(
         outcome.status == "success",
         "delegated_call_failed: {}",
