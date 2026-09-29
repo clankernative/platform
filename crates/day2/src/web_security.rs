@@ -65,10 +65,18 @@ pub(crate) fn session(
 }
 /// The live session a token names.
 pub(crate) fn session_for_token(runtime: &Runtime, token: &str, now: i64) -> Result<Session> {
-    ensure!(token.len() == 43, crate::error::Failure::SignInRequired);
-    let hash = digest(token.as_bytes());
     let db = open(runtime.db())?;
     runtime.check_binding(&db)?;
+    session_for_token_in(&db, token, now)
+}
+
+pub(crate) fn session_for_token_in(
+    db: &rusqlite::Connection,
+    token: &str,
+    now: i64,
+) -> Result<Session> {
+    ensure!(token.len() == 43, crate::error::Failure::SignInRequired);
+    let hash = digest(token.as_bytes());
     let session = db
         .query_row(
             "SELECT actor,expires FROM day2_web_sessions WHERE hash=?1",
@@ -365,6 +373,29 @@ pub(crate) fn field_value(kind: &crate::schema::Kind, raw: &str) -> Result<Value
         Kind::InputShape { .. } => anyhow::bail!("structured_form_field_not_supported"),
         _ => Value::String(raw.into()),
     })
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+
+    #[test]
+    fn metadata_session_lookup_rechecks_current_row_and_expiry() -> Result<()> {
+        let db = rusqlite::Connection::open_in_memory()?;
+        db.execute_batch(
+            "CREATE TABLE day2_web_sessions(hash TEXT PRIMARY KEY, actor TEXT NOT NULL, expires INTEGER NOT NULL)",
+        )?;
+        let token = URL_SAFE_NO_PAD.encode([7_u8; 32]);
+        db.execute(
+            "INSERT INTO day2_web_sessions VALUES(?1,'alice',100)",
+            [digest(token.as_bytes())],
+        )?;
+        assert_eq!(session_for_token_in(&db, &token, 99)?.actor, "alice");
+        assert!(session_for_token_in(&db, &token, 100).is_err());
+        db.execute("DELETE FROM day2_web_sessions", [])?;
+        assert!(session_for_token_in(&db, &token, 99).is_err());
+        Ok(())
+    }
 }
 
 #[cfg(test)]

@@ -135,6 +135,59 @@ fn activated_credential_selection_pins_policy_family_and_artifact() -> Result<()
         )
         .is_err()
     );
+    let mut document = document();
+    document.credentials = active;
+    let authority = ActiveAuthority {
+        stamp: AuthorityStamp {
+            epoch: "test".into(),
+            revision: 1,
+        },
+        document,
+        artifact_id: "artifact-one".into(),
+        artifact_path: String::new(),
+    };
+    let session = crate::web_security::Session {
+        hash: "test".into(),
+        actor: "alice".into(),
+        expires: 100,
+        origin: None,
+    };
+    let manifest = [family.clone()];
+    let read = crate::managed_credentials::metadata_read(
+        "reports",
+        "acme/dev/reports",
+        "artifact-one",
+        &manifest,
+        &authority,
+        &session,
+        "keys",
+    )?;
+    assert_eq!(read.policy, &policy);
+    assert_eq!(read.requester, "alice");
+    assert!(
+        crate::managed_credentials::metadata_read(
+            "reports",
+            "acme/prod/reports",
+            "artifact-one",
+            &manifest,
+            &authority,
+            &session,
+            "keys"
+        )
+        .is_err()
+    );
+    assert!(
+        crate::managed_credentials::metadata_read(
+            "reports",
+            "acme/dev/reports",
+            "artifact-two",
+            &manifest,
+            &authority,
+            &session,
+            "keys"
+        )
+        .is_err()
+    );
     let changed = ManagementPolicy {
         read_metadata: ManagementPredicate::MemberOf {
             group: name("admins"),
