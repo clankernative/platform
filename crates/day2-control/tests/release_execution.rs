@@ -1,25 +1,38 @@
 #[path = "support/release.rs"]
 mod support;
 
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
+use axum::{Router, body::Bytes, extract::State, http::StatusCode, routing::post};
+use day2::{
+    delegation::{self, Call},
+    delegation_wire::{Query, Scope, Signer, TrustedKey, Verifier},
+    store::Runtime,
+};
 use day2_control::journal::{Journal, RecoveryMode};
 use day2_control::provider_evidence::{ReadBarrier, RevisionToken, StateEvidence};
-use day2_control::release::{ReleaseApproval, SecretObservation};
+use day2_control::release::{ReleaseApproval, ReleaseTarget, SecretObservation};
 use day2_control::release_execution::{
     Capabilities, LEASE_MILLIS, ObservedServingBinding, Recipe, ReleaseClaim, ReleaseEffectResult,
     ReleaseExecutionHost, ReleaseExecutionPlan, ReleaseLease, ReleaseObservation, ReleaseObserved,
     ReleaseOperation, ReleasePhase, ReleaseRejection, ReleaseTerminal, ServingProbe,
 };
 use day2_control::release_recipe::CompiledReleaseRecipe;
+use day2_control::remote_query::{RemoteQueryPort, RemoteQueryReceiver};
 use day2_control::{BindingRef, Digest};
+use ring::{rand::SystemRandom, signature::Ed25519KeyPair};
 use rusqlite::Connection;
+use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
+    fs,
     path::PathBuf,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
+        mpsc,
     },
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use support::*;
 
@@ -239,13 +252,290 @@ fn serving_fence_rechecks_the_selected_release_after_the_call() {
     );
 }
 
+struct QueryServer {
+    origin: String,
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
+    thread: Option<thread::JoinHandle<Result<()>>>,
+}
+
+impl QueryServer {
+    fn start(receiver: RemoteQueryReceiver) -> Result<Self> {
+        let receiver = Arc::new(receiver);
+        let (send, receive) = mpsc::channel();
+        let (stop, done) = tokio::sync::oneshot::channel();
+        let thread = thread::spawn(move || {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()?
+                .block_on(async move {
+                    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+                    send.send(format!("http://{}", listener.local_addr()?))?;
+                    let router =
+                        Router::new()
+                            .route(
+                                "/_platform/app-query",
+                                post(
+                                    |State(receiver): State<Arc<RemoteQueryReceiver>>,
+                                     body: Bytes| async move {
+                                        let answer = tokio::task::spawn_blocking(move || {
+                                            let at = i64::try_from(
+                                                SystemTime::now()
+                                                    .duration_since(UNIX_EPOCH)?
+                                                    .as_secs(),
+                                            )?;
+                                            receiver.handle(&body, at)
+                                        })
+                                        .await;
+                                        match answer {
+                                            Ok(Ok(result)) => (StatusCode::OK, result),
+                                            _ => (StatusCode::FORBIDDEN, "refused".to_owned()),
+                                        }
+                                    },
+                                ),
+                            )
+                            .with_state(receiver);
+                    axum::serve(listener, router)
+                        .with_graceful_shutdown(async {
+                            let _ = done.await;
+                        })
+                        .await?;
+                    Ok(())
+                })
+        });
+        Ok(Self {
+            origin: receive.recv_timeout(Duration::from_secs(10))?,
+            stop: Some(stop),
+            thread: Some(thread),
+        })
+    }
+}
+
+impl Drop for QueryServer {
+    fn drop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(thread) = self.thread.take() {
+            assert!(thread.join().expect("query server").is_ok());
+        }
+    }
+}
+
+#[test]
+fn signed_query_crosses_separate_host_databases_and_fences_serving_generation() -> Result<()> {
+    let artifact = std::env::var_os("DAY2_TEST_REPORTS_ARTIFACT")
+        .map(PathBuf::from)
+        .context("run xtask verify with compiled fixtures")?;
+    let policy: Value = serde_json::from_str(include_str!(
+        "../../../fixtures/authority-policies/reports.json"
+    ))?;
+    let host = |app: &str| -> Result<(tempfile::TempDir, Runtime)> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("instance.json");
+        fs::write(
+            &path,
+            serde_json::to_vec(&json!({
+                "installation":"alpha","environment":"production",
+                "apps":{app:{
+                    "artifact":artifact,"readers":["alice"],"writers":["alice"],
+                    "authority":policy
+                }}
+            }))?,
+        )?;
+        let runtime = Runtime::load(&path, app)?;
+        runtime.initialize()?;
+        Ok((directory, runtime))
+    };
+    let (callee_directory, callee) = host("reports")?;
+    let (caller_directory, caller) = host("caller")?;
+    let artifact_id: Digest = callee.artifact().id().to_owned().try_into()?;
+    let fixture = Fixture::new_with_artifact(true, Some(&artifact_id));
+    fixture.until(ReleasePhase::Active, &mut 0);
+    let probe = Arc::new(fixture.serving_probe());
+    let target = fixture.provider.approval.target.clone();
+    let source = ReleaseTarget {
+        app: name("caller"),
+        ..target.clone()
+    };
+    let pkcs8 = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new())
+        .map_err(|_| anyhow::anyhow!("test key generation failed"))?;
+    let signer = Signer::from_pkcs8("caller-key-1", pkcs8.as_ref())?;
+    let source_scope = Scope::from_runtime(&caller)?;
+    let verifier = Verifier::new(BTreeMap::from([(
+        "caller-key-1".to_owned(),
+        TrustedKey {
+            source: source_scope.clone(),
+            public_key: signer.public_key(),
+        },
+    )]))?;
+    let receiver = RemoteQueryReceiver::new(
+        fixture.path.clone(),
+        probe.clone(),
+        target.clone(),
+        callee.clone(),
+        verifier,
+    )?;
+    let server = QueryServer::start(receiver)?;
+    let port = RemoteQueryPort::loopback_fixture(
+        fixture.path.clone(),
+        probe.clone(),
+        source,
+        target.clone(),
+        &format!("{}/_platform/app-query", server.origin),
+        signer,
+    )?;
+    let caller = caller.with_app_call_port(Arc::new(port));
+    let call = Call {
+        app: "reports".into(),
+        operation: "reports.list".into(),
+        schema_digest: delegation::schema_digest(&callee, "reports.list")?,
+        contract_digest: None,
+        input: json!({"after":"","limit":20}).to_string(),
+        actor: "alice".into(),
+        origin: "root-invocation".into(),
+        step: "ob_root-invocation_0".into(),
+        chain: String::new(),
+        caller: "caller".into(),
+        now: 100,
+    };
+    caller.accept(
+        "reports.list",
+        "alice",
+        "root-invocation",
+        &serde_json::from_str(&call.input)?,
+        100,
+    )?;
+    let answer: Value = serde_json::from_str(&delegation::read(&caller, &call)?)?;
+    assert!(answer.is_object() || answer.is_array());
+    assert!(
+        !caller_directory
+            .path()
+            .join(".state/reports.sqlite")
+            .exists()
+    );
+    assert!(
+        !callee_directory
+            .path()
+            .join(".state/caller.sqlite")
+            .exists()
+    );
+    let attribution: (String, String, String) = Connection::open(callee.db())?.query_row(
+        "SELECT actor,authenticated,caller FROM day2_invocations WHERE id LIKE 'dlg_%'",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    assert_eq!(
+        attribution,
+        ("alice".into(), "app:caller".into(), "caller".into())
+    );
+
+    let endpoint = format!("{}/_platform/app-query", server.origin);
+    let client = reqwest::blocking::Client::new();
+    assert_eq!(
+        client.post(&endpoint).body("{}").send()?.status(),
+        StatusCode::FORBIDDEN
+    );
+    let at = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())?;
+    let signer = Signer::from_pkcs8("caller-key-1", pkcs8.as_ref())?;
+    let active = Journal::open(&fixture.path)?
+        .release_state(&target)?
+        .active
+        .context("active test release")?;
+    let forged = Query {
+        version: 1,
+        source: source_scope,
+        target: Scope::from_runtime(&callee)?,
+        operation: call.operation.clone(),
+        schema_digest: call.schema_digest.clone(),
+        contract_digest: None,
+        input: serde_json::from_str(&call.input)?,
+        actor: "mallory".into(),
+        origin: "forged-origin".into(),
+        step: "ob_forged_0".into(),
+        chain: String::new(),
+        now: 100,
+        issued_at: at,
+        expires_at: at + 30,
+        activation: active.id,
+        generation: active.generation,
+        serving: serde_json::to_value(probe.0.lock().unwrap().clone())?,
+    };
+    assert_eq!(
+        client
+            .post(&endpoint)
+            .body(signer.sign(&forged)?)
+            .send()?
+            .status(),
+        StatusCode::FORBIDDEN,
+        "a signed workload may not choose an unauthorized actor"
+    );
+    let mut wrong_generation = forged.clone();
+    wrong_generation.actor = "alice".into();
+    wrong_generation.generation += 1;
+    assert_eq!(
+        client
+            .post(&endpoint)
+            .body(signer.sign(&wrong_generation)?)
+            .send()?
+            .status(),
+        StatusCode::FORBIDDEN,
+        "a valid workload key cannot replay a different release generation"
+    );
+    let mut wrong_audience = forged.clone();
+    wrong_audience.actor = "alice".into();
+    wrong_audience.target.app = "another".into();
+    assert_eq!(
+        client
+            .post(&endpoint)
+            .body(signer.sign(&wrong_audience)?)
+            .send()?
+            .status(),
+        StatusCode::FORBIDDEN,
+        "a signed query for another app has no receiver authority"
+    );
+    let mut expired = forged.clone();
+    expired.actor = "alice".into();
+    expired.issued_at = at - 60;
+    expired.expires_at = at - 1;
+    assert_eq!(
+        client
+            .post(&endpoint)
+            .body(signer.sign(&expired)?)
+            .send()?
+            .status(),
+        StatusCode::FORBIDDEN,
+        "an expired transport proof cannot be replayed"
+    );
+    let count: i64 = Connection::open(callee.db())?.query_row(
+        "SELECT count(*) FROM day2_invocations WHERE id LIKE 'dlg_%'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(count, 1, "denied requests never enter the callee");
+    let mut changed_actor = call.clone();
+    changed_actor.actor = "mallory".into();
+    assert!(
+        delegation::read(&caller, &changed_actor).is_err(),
+        "the source host cannot sign an actor absent from its durable invocation"
+    );
+    probe.0.lock().unwrap().incarnation.generation =
+        "replacement-generation".to_owned().try_into()?;
+    assert!(delegation::read(&caller, &call).is_err());
+    Ok(())
+}
+
 impl Fixture {
     fn new(secret_ready: bool) -> Self {
+        Self::new_with_artifact(secret_ready, None)
+    }
+
+    fn new_with_artifact(secret_ready: bool, artifact: Option<&Digest>) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("release.sqlite");
         let mut journal = Journal::open(&path).unwrap();
         configure(&mut journal, &target("alpha"), &plan("alpha", 1));
-        let approval = approval(&mut journal, "alpha", 1, 0);
+        let approval = approval_with_artifact(&mut journal, "alpha", 1, 0, artifact);
         let approved = journal.approve_release(&approval).unwrap();
         let recipe = Arc::new(CompiledReleaseRecipe::installed().unwrap());
         let plan = ReleaseExecutionPlan {

@@ -20,6 +20,7 @@ pub mod compatibility;
 pub mod credential_authority;
 pub mod credential_declaration;
 pub mod delegation;
+pub mod delegation_wire;
 pub mod deployment;
 pub mod development;
 pub mod domain;

@@ -586,12 +586,20 @@ pub(crate) struct ValidatedServingBinding {
 
 /// A fresh observation made by a trusted serving-provider adapter. Request
 /// payloads, instance configuration and release-journal values are not probes.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ObservedServingBinding {
     pub target: ReleaseTarget,
     pub artifact: Digest,
     pub deployment: BindingRef,
     pub incarnation: DeploymentIncarnation,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SelectedServing {
+    pub activation: Digest,
+    pub generation: u64,
+    pub binding: ObservedServingBinding,
 }
 
 pub trait ServingProbe {
@@ -611,21 +619,48 @@ impl Journal {
         probe: &dyn ServingProbe,
         call: impl FnOnce() -> Result<T>,
     ) -> Result<T> {
+        self.with_serving_binding(target, probe, |_| call())
+    }
+
+    /// As `with_serving_fence`, but pass the checked observation to a host
+    /// transport so it can bind the request to the exact serving generation.
+    pub fn with_serving_binding<T>(
+        &self,
+        target: &ReleaseTarget,
+        probe: &dyn ServingProbe,
+        call: impl FnOnce(&ObservedServingBinding) -> Result<T>,
+    ) -> Result<T> {
+        self.with_serving_selection(target, probe, |selection| call(&selection.binding))
+    }
+
+    /// Bracket a call while exposing the selected receipt and release generation
+    /// for a signed request. The receiver can require this exact selection.
+    pub fn with_serving_selection<T>(
+        &self,
+        target: &ReleaseTarget,
+        probe: &dyn ServingProbe,
+        call: impl FnOnce(&SelectedServing) -> Result<T>,
+    ) -> Result<T> {
         let observed = probe.observe(target)?;
-        let (activation, expected) = selected_active_serving(&self.connection, target)?;
+        let (activation, generation, expected) = selected_active_serving(&self.connection, target)?;
         ensure!(
             observed == expected,
             "observed workload differs from active serving binding"
         );
-        let result = call();
+        let result = call(&SelectedServing {
+            activation: activation.clone(),
+            generation,
+            binding: observed.clone(),
+        });
         let after = probe.observe(target)?;
         ensure!(
             after == observed,
             "serving workload changed during delegated call"
         );
-        let (current, expected) = selected_active_serving(&self.connection, target)?;
+        let (current, current_generation, expected) =
+            selected_active_serving(&self.connection, target)?;
         ensure!(
-            current == activation && after == expected,
+            current == activation && current_generation == generation && after == expected,
             "active serving binding changed during delegated call"
         );
         result
@@ -635,7 +670,7 @@ impl Journal {
 fn selected_active_serving(
     connection: &Connection,
     target: &ReleaseTarget,
-) -> Result<(Digest, ObservedServingBinding)> {
+) -> Result<(Digest, u64, ObservedServingBinding)> {
     let tx = connection.unchecked_transaction()?;
     let state = release::read_state(&tx, target)?;
     let active = state
@@ -683,7 +718,7 @@ fn selected_active_serving(
         incarnation: binding.incarnation,
     };
     tx.commit()?;
-    Ok((active.id, observed))
+    Ok((active.id, active.generation, observed))
 }
 
 pub(crate) fn validated_execution_binding(
