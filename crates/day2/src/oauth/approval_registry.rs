@@ -42,7 +42,7 @@ pub(crate) trait ApprovalAuthority: Send + Sync {
 
 /// Key material is fetched on every approval request. The provider must use a
 /// pinned secret version and return its actual identity with the bytes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum ApprovalKeyPurpose {
     CustodyVerifier,
     CustodyEncryption,
