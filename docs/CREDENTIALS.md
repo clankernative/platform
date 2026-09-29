@@ -110,6 +110,15 @@ deliveries. The initial private kernel implements atomic replacement; overlap,
 selectable-grant narrowing, callback use budgets and impersonation handoff have
 not been implemented.
 
+The private store also has bounded creator-visible metadata `list` and `inspect`
+readers for client and personal families. List visibility is applied in SQLite
+before a page limit; cursors bind the namespace, family contract, requester and
+management policy revision, and each call rechecks its supplied policy. These
+readers return only safe summary and rotation data. The host must still resolve
+the current instance policy and authenticated requester before calling them.
+Group and resource visibility, generated Roc methods and HTTP routes are not
+connected yet.
+
 The private `verify_ingress` selector checks the current head, lineage and
 version state, namespace, family contract, security epoch, expiry, authenticated
 material identity, verifier and immutable operation ceiling. A malformed,
