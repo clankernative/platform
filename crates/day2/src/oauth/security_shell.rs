@@ -18,7 +18,7 @@ use day2_capabilities::{
 };
 use maud::{DOCTYPE, html};
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     path::PathBuf,
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
@@ -33,6 +33,7 @@ const MAX_SESSIONS: usize = 1024;
 /// The host registry resolves these current, admitted values on each request.
 /// Request fields never select a requirement, key, registration or account.
 pub(crate) struct ApprovalContext {
+    pub db: PathBuf,
     pub intent: connect::ConnectIntent,
     pub binding: connect::CallbackBinding,
     pub requirement: ConnectionRequirement,
@@ -110,7 +111,6 @@ struct ShellSession {
 pub(crate) struct SecurityShell {
     origin: String,
     authority: String,
-    db: PathBuf,
     registry: Arc<dyn ApprovalRegistry>,
     authenticator: Arc<dyn FreshAuthenticator>,
     sessions: Mutex<HashMap<String, ShellSession>>,
@@ -121,12 +121,18 @@ impl SecurityShell {
     /// installation, so a caller cannot mount the shell on an app edge.
     pub(crate) fn from_instance(
         instance: &Instance,
-        db: PathBuf,
+        app_databases: BTreeMap<String, PathBuf>,
         authority: Arc<dyn approval_registry::ApprovalAuthority>,
         client_id: String,
         client_secret: String,
     ) -> Result<Arc<Self>> {
         let (identity, edge) = instance.security_edge()?;
+        ensure!(
+            app_databases
+                .keys()
+                .all(|app| instance.apps.contains_key(app)),
+            "OAuth shell database does not belong to selected installation"
+        );
         let origin = format!("{}/", edge.origin);
         let authenticator = Arc::new(shell_oidc::GoogleFreshAuthenticator::new(
             &edge.iap_audience,
@@ -136,15 +142,14 @@ impl SecurityShell {
             client_secret,
         )?);
         let registry = Arc::new(approval_registry::StoredApprovalRegistry::new(
-            db.clone(),
+            app_databases,
             authority,
-        ));
-        Self::new(origin, db, registry, authenticator)
+        )?);
+        Self::new(origin, registry, authenticator)
     }
 
     pub(crate) fn new(
         origin: String,
-        db: PathBuf,
         registry: Arc<dyn ApprovalRegistry>,
         authenticator: Arc<dyn FreshAuthenticator>,
     ) -> Result<Arc<Self>> {
@@ -164,7 +169,6 @@ impl SecurityShell {
         Ok(Arc::new(Self {
             origin: url.origin().ascii_serialization(),
             authority,
-            db,
             registry,
             authenticator,
             sessions: Mutex::new(HashMap::new()),
@@ -288,7 +292,7 @@ impl SecurityShell {
                 && context.instance.app_origin_url != format!("{}/", self.origin),
             "security shell registry origin mismatch"
         );
-        let db = open(&self.db)?;
+        let db = open(&context.db)?;
         iap::bind_subject(&db, identity, at)?;
         let pending = external::load_pending_external(
             &db,
@@ -497,7 +501,7 @@ impl SecurityShell {
             session.authenticated_at,
             at,
         )?;
-        let mut db = open(&self.db)?;
+        let mut db = open(&context.db)?;
         let approved = external::approve_external(
             &mut db,
             context.qualification(),

@@ -879,19 +879,24 @@ mod tests {
             .unwrap()
     }
 
-    struct TestApprovalAuthority(QualificationFixture);
+    struct TestApprovalAuthority {
+        app: &'static str,
+        fixture: QualificationFixture,
+    }
 
     impl ApprovalAuthority for TestApprovalAuthority {
         fn current(
             &self,
+            app: &str,
             intent: &ConnectIntent,
             binding: &CallbackBinding,
             _: i64,
         ) -> Result<Option<ApprovalTerms>> {
-            if intent != &self.0.intent || binding != &self.0.binding {
+            if app != self.app || intent != &self.fixture.intent || binding != &self.fixture.binding
+            {
                 return Ok(None);
             }
-            let fixture = self.0.clone();
+            let fixture = self.fixture.clone();
             let AccountBindingEvidence::ExplicitExternal { approval, .. } =
                 &fixture.instance.account
             else {
@@ -914,6 +919,22 @@ mod tests {
         }
     }
 
+    fn test_registry(
+        path: std::path::PathBuf,
+        fixture: QualificationFixture,
+    ) -> std::sync::Arc<StoredApprovalRegistry> {
+        std::sync::Arc::new(
+            StoredApprovalRegistry::new(
+                BTreeMap::from([("app".into(), path)]),
+                std::sync::Arc::new(TestApprovalAuthority {
+                    app: "app",
+                    fixture,
+                }),
+            )
+            .unwrap(),
+        )
+    }
+
     #[test]
     fn stored_approval_registry_uses_only_current_durable_pending_state() {
         let fixture = external_fixture();
@@ -921,10 +942,7 @@ mod tests {
         let path = dir.path().join("approval-registry.sqlite");
         let mut db = rusqlite::Connection::open(&path).unwrap();
         quarantine_external_fixture(&mut db, &fixture, &exchange_key());
-        let registry = StoredApprovalRegistry::new(
-            path,
-            std::sync::Arc::new(TestApprovalAuthority(fixture.clone())),
-        );
+        let registry = test_registry(path, fixture.clone());
         assert!(registry.resolve("other", 5).unwrap().is_none());
         assert!(registry.resolve("attempt_1", 100).unwrap().is_none());
         assert!(registry.resolve("attempt_1", 5).unwrap().is_some());
@@ -947,6 +965,43 @@ mod tests {
         )
         .unwrap();
         assert!(registry.resolve("attempt_1", 5).unwrap().is_none());
+    }
+
+    #[test]
+    fn shared_shell_routes_to_one_installed_app_and_refuses_duplicate_attempts() {
+        let fixture = external_fixture();
+        let dir = tempfile::tempdir().unwrap();
+        let first_path = dir.path().join("first.sqlite");
+        let second_path = dir.path().join("second.sqlite");
+        let mut first = rusqlite::Connection::open(&first_path).unwrap();
+        connect::install_schema(&first).unwrap();
+        let mut second = rusqlite::Connection::open(&second_path).unwrap();
+        quarantine_external_fixture(&mut second, &fixture, &exchange_key());
+        let registry = StoredApprovalRegistry::new(
+            BTreeMap::from([
+                ("aempty".into(), first_path),
+                ("zapp".into(), second_path.clone()),
+            ]),
+            std::sync::Arc::new(TestApprovalAuthority {
+                app: "zapp",
+                fixture: fixture.clone(),
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            registry.resolve("attempt_1", 5).unwrap().unwrap().db,
+            second_path.canonicalize().unwrap()
+        );
+        quarantine_external_fixture(&mut first, &fixture, &exchange_key());
+        assert!(registry.resolve("attempt_1", 5).is_err());
+        first
+            .execute(
+                "UPDATE oauth_connect_attempts SET state = 'denied',
+                        account = NULL, scope_evidence = NULL WHERE attempt = 'attempt_1'",
+                [],
+            )
+            .unwrap();
+        assert!(registry.resolve("attempt_1", 5).is_err());
     }
 
     struct TestFreshAuth {
@@ -1027,11 +1082,7 @@ mod tests {
             .unwrap();
         let shell = SecurityShell::new(
             fixture.instance.shell.origin_url.clone(),
-            path.clone(),
-            std::sync::Arc::new(StoredApprovalRegistry::new(
-                path,
-                std::sync::Arc::new(TestApprovalAuthority(fixture)),
-            )),
+            test_registry(path, fixture),
             std::sync::Arc::new(TestCallbackAuth(pending.challenge().clone())),
         )
         .unwrap();
@@ -1112,11 +1163,7 @@ mod tests {
             .unwrap();
         let shell = SecurityShell::new(
             fixture.instance.shell.origin_url.clone(),
-            path.clone(),
-            std::sync::Arc::new(StoredApprovalRegistry::new(
-                path,
-                std::sync::Arc::new(TestApprovalAuthority(fixture.clone())),
-            )),
+            test_registry(path, fixture.clone()),
             std::sync::Arc::new(TestFreshAuth {
                 human: "human_1",
                 authenticated_at: 5,
@@ -1249,11 +1296,7 @@ mod tests {
         for (human, authenticated_at) in [("human_1", 4), ("another_human", 5)] {
             let shell = SecurityShell::new(
                 fixture.instance.shell.origin_url.clone(),
-                path.clone(),
-                std::sync::Arc::new(StoredApprovalRegistry::new(
-                    path.clone(),
-                    std::sync::Arc::new(TestApprovalAuthority(fixture.clone())),
-                )),
+                test_registry(path.clone(), fixture.clone()),
                 std::sync::Arc::new(TestFreshAuth {
                     human,
                     authenticated_at,
