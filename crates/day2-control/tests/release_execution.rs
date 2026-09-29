@@ -6,8 +6,8 @@ use axum::{
     Router,
     body::Bytes,
     extract::State,
-    http::{HeaderMap, StatusCode},
-    routing::post,
+    http::{HeaderMap, Method, StatusCode, Uri},
+    routing::{any, post},
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use day2::{
@@ -18,6 +18,7 @@ use day2::{
     iap::{self, KeySource},
     store::Runtime,
 };
+use day2_control::iap_service_jwt::{Gate, GkeMetadataAccessTokens, IapServiceJwt};
 use day2_control::journal::{Journal, RecoveryMode};
 use day2_control::provider_evidence::{ReadBarrier, RevisionToken, StateEvidence};
 use day2_control::release::{ReleaseApproval, ReleaseTarget, SecretObservation};
@@ -330,8 +331,7 @@ impl FixtureIap {
 }
 
 impl QueryServer {
-    fn start(receiver: RemoteQueryReceiver) -> Result<Self> {
-        let receiver = Arc::new(receiver);
+    fn start(receiver: Arc<RemoteQueryReceiver>) -> Result<Self> {
         let (send, receive) = mpsc::channel();
         let (stop, done) = tokio::sync::oneshot::channel();
         let thread = thread::spawn(move || {
@@ -389,6 +389,207 @@ impl QueryServer {
             stop: Some(stop),
             thread: Some(thread),
         })
+    }
+}
+
+struct GatedServer {
+    origin: String,
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
+    thread: Option<thread::JoinHandle<Result<()>>>,
+}
+
+struct GatedState {
+    origin: String,
+    caller: Runtime,
+    issuer: Arc<RemoteQueryIssuer>,
+    receiver: Arc<RemoteQueryReceiver>,
+    iap: Arc<FixtureIap>,
+    workload_email: String,
+    issuer_audience: String,
+    target_audience: String,
+}
+
+impl GatedState {
+    // This is a protocol fixture for IAP. It checks the service-account JWT's
+    // exact claims, then supplies a separately signed IAP assertion. The real
+    // edge verifies the JWT signature before forwarding either request.
+    fn admit(&self, headers: &HeaderMap, path: &str, at: i64) -> Result<String> {
+        let mut values = headers.get_all("Authorization").iter();
+        let (Some(value), None) = (values.next(), values.next()) else {
+            anyhow::bail!("missing IAP bearer credential");
+        };
+        let token = value
+            .to_str()?
+            .strip_prefix("Bearer ")
+            .context("IAP bearer")?;
+        let mut parts = token.split('.');
+        let (Some(_), Some(body), Some(signature), None) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
+            anyhow::bail!("invalid IAP bearer credential");
+        };
+        ensure!(!signature.is_empty(), "unsigned IAP bearer credential");
+        let claims: Value = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(body)?)?;
+        ensure!(
+            claims["iss"] == self.workload_email
+                && claims["sub"] == self.workload_email
+                && claims["aud"] == format!("{}{path}", self.origin)
+                && claims["iat"].as_i64().is_some_and(|value| value <= at)
+                && claims["exp"].as_i64().is_some_and(|value| at < value),
+            "wrong IAP bearer scope"
+        );
+        let audience = if path == "/_platform/app-issue" {
+            &self.issuer_audience
+        } else {
+            &self.target_audience
+        };
+        self.iap.assertion(audience, &self.workload_email, at)
+    }
+}
+
+async fn gated_request(
+    State(state): State<Arc<GatedState>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> (StatusCode, Vec<u8>) {
+    if method == Method::GET
+        && uri.path() == "/computeMetadata/v1/instance/service-accounts/default/token"
+    {
+        if headers
+            .get("Metadata-Flavor")
+            .and_then(|value| value.to_str().ok())
+            == Some("Google")
+        {
+            return (
+                StatusCode::OK,
+                json!({"access_token":"metadata-access","token_type":"Bearer"})
+                    .to_string()
+                    .into_bytes(),
+            );
+        }
+        return (StatusCode::FORBIDDEN, Vec::new());
+    }
+    if method == Method::POST
+        && uri.path()
+            == "/v1/projects/-/serviceAccounts/caller@project.iam.gserviceaccount.com:signJwt"
+    {
+        if headers
+            .get("Authorization")
+            .and_then(|value| value.to_str().ok())
+            != Some("Bearer metadata-access")
+        {
+            return (StatusCode::FORBIDDEN, Vec::new());
+        }
+        let request: Value = match serde_json::from_slice(&body) {
+            Ok(request) => request,
+            Err(_) => return (StatusCode::BAD_REQUEST, Vec::new()),
+        };
+        let Some(payload) = request["payload"].as_str() else {
+            return (StatusCode::BAD_REQUEST, Vec::new());
+        };
+        let jwt = format!(
+            "{}.{}.{}",
+            URL_SAFE_NO_PAD.encode(json!({"alg":"RS256","kid":"managed-key"}).to_string()),
+            URL_SAFE_NO_PAD.encode(payload),
+            URL_SAFE_NO_PAD.encode([7_u8; 64])
+        );
+        return (
+            StatusCode::OK,
+            json!({"keyId":"managed-key","signedJwt":jwt})
+                .to_string()
+                .into_bytes(),
+        );
+    }
+    if method != Method::POST
+        || !matches!(uri.path(), "/_platform/app-issue" | "/_platform/app-query")
+    {
+        return (StatusCode::FORBIDDEN, Vec::new());
+    }
+    let at = match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(duration) => duration.as_secs() as i64,
+        Err(_) => return (StatusCode::FORBIDDEN, Vec::new()),
+    };
+    let assertion = match state.admit(&headers, uri.path(), at) {
+        Ok(assertion) => assertion,
+        Err(_) => return (StatusCode::FORBIDDEN, Vec::new()),
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        if uri.path() == "/_platform/app-issue" {
+            state.issuer.handle(&state.caller, &body, &assertion, at)
+        } else {
+            Ok(state.receiver.handle(&body, &assertion, at)?.into_bytes())
+        }
+    })
+    .await;
+    match result {
+        Ok(Ok(body)) => (StatusCode::OK, body),
+        _ => (StatusCode::FORBIDDEN, Vec::new()),
+    }
+}
+
+impl GatedServer {
+    fn start(
+        caller: Runtime,
+        issuer: Arc<RemoteQueryIssuer>,
+        receiver: Arc<RemoteQueryReceiver>,
+        iap: Arc<FixtureIap>,
+        workload_email: &str,
+        issuer_audience: &str,
+        target_audience: &str,
+    ) -> Result<Self> {
+        let (send, receive) = mpsc::channel();
+        let (stop, done) = tokio::sync::oneshot::channel();
+        let workload_email = workload_email.to_owned();
+        let issuer_audience = issuer_audience.to_owned();
+        let target_audience = target_audience.to_owned();
+        let thread = thread::spawn(move || -> Result<()> {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()?
+                .block_on(async move {
+                    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+                    let origin = format!("http://{}", listener.local_addr()?);
+                    let state = Arc::new(GatedState {
+                        origin: origin.clone(),
+                        caller,
+                        issuer,
+                        receiver,
+                        iap,
+                        workload_email,
+                        issuer_audience,
+                        target_audience,
+                    });
+                    send.send(origin)?;
+                    axum::serve(
+                        listener,
+                        Router::new().fallback(any(gated_request)).with_state(state),
+                    )
+                    .with_graceful_shutdown(async {
+                        let _ = done.await;
+                    })
+                    .await?;
+                    Ok(())
+                })
+        });
+        Ok(Self {
+            origin: receive.recv_timeout(Duration::from_secs(10))?,
+            stop: Some(stop),
+            thread: Some(thread),
+        })
+    }
+}
+
+impl Drop for GatedServer {
+    fn drop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
     }
 }
 
@@ -466,7 +667,7 @@ fn signed_query_crosses_separate_host_databases_and_fences_serving_generation() 
         BTreeMap::from([("issuer-key-1".to_owned(), issuer_signer.public_key())]),
         "/projects/123/global/backendServices/target",
     )?;
-    let iap = FixtureIap::new()?;
+    let iap = Arc::new(FixtureIap::new()?);
     let workload_email = "caller@project.iam.gserviceaccount.com";
     let issuer_audience = "/projects/123/global/backendServices/issuer";
     let target_audience = "/projects/123/global/backendServices/target";
@@ -482,7 +683,7 @@ fn signed_query_crosses_separate_host_databases_and_fences_serving_generation() 
         issuer_workload_verifier,
         issuer_signer,
     )?);
-    let receiver = RemoteQueryReceiver::new(
+    let receiver = Arc::new(RemoteQueryReceiver::new(
         fixture.path.clone(),
         probe.clone(),
         target.clone(),
@@ -490,12 +691,12 @@ fn signed_query_crosses_separate_host_databases_and_fences_serving_generation() 
         receiver_workload_verifier,
         issuer_verifier,
         iap.verifier(target_audience, workload_email)?,
-    )?;
-    let server = QueryServer::start(receiver)?;
+    )?);
+    let server = QueryServer::start(receiver.clone())?;
     let port = RemoteQueryPort::loopback_fixture(
         fixture.path.clone(),
         probe.clone(),
-        source,
+        source.clone(),
         target.clone(),
         &format!("{}/_platform/app-query", server.origin),
         RemoteQueryAuth {
@@ -542,6 +743,40 @@ fn signed_query_crosses_separate_host_databases_and_fences_serving_generation() 
     )?;
     let answer: Value = serde_json::from_str(&delegation::read(&caller, &call)?)?;
     assert!(answer.is_object() || answer.is_array());
+    let gated = GatedServer::start(
+        caller.clone(),
+        issuer.clone(),
+        receiver,
+        iap,
+        workload_email,
+        issuer_audience,
+        target_audience,
+    )?;
+    let tokens = Arc::new(GkeMetadataAccessTokens::transport_fixture(&format!(
+        "{}/computeMetadata/v1/instance/service-accounts/default/token",
+        gated.origin
+    ))?);
+    let credentials = Arc::new(IapServiceJwt::transport_fixture(
+        workload_email,
+        &format!("{}/_platform/app-issue", gated.origin),
+        &format!("{}/_platform/app-query", gated.origin),
+        &format!("{}/", gated.origin),
+        tokens,
+    )?);
+    let http_port = RemoteQueryPort::iap_http(
+        fixture.path.clone(),
+        probe.clone(),
+        source,
+        target.clone(),
+        Signer::from_pkcs8("caller-key-1", pkcs8.as_ref())?,
+        credentials.clone(),
+    )?;
+    let http_caller = caller.clone().with_app_call_port(Arc::new(http_port));
+    let http_answer: Value = serde_json::from_str(&delegation::read(&http_caller, &call)?)?;
+    assert_eq!(
+        http_answer, answer,
+        "both IAP gates and issuer HTTP preserve the query result"
+    );
     assert!(
         !caller_directory
             .path()
@@ -630,6 +865,28 @@ fn signed_query_crosses_separate_host_databases_and_fences_serving_generation() 
         &issuer_assertion,
         at,
     )?;
+    let gated_client = reqwest::blocking::Client::new();
+    let issued = issued_query(&valid_workload, &valid_proof)?;
+    assert_eq!(
+        gated_client
+            .post(format!("{}/_platform/app-query", gated.origin))
+            .header(iap::ASSERTION_HEADER, &target_assertion)
+            .body(issued.clone())
+            .send()?
+            .status(),
+        StatusCode::FORBIDDEN,
+        "a client cannot supply its own target IAP assertion"
+    );
+    assert_eq!(
+        gated_client
+            .post(format!("{}/_platform/app-query", gated.origin))
+            .bearer_auth(credentials.sign_for(Gate::Issuer)?.as_str())
+            .body(issued)
+            .send()?
+            .status(),
+        StatusCode::FORBIDDEN,
+        "an issuer URL credential cannot open the receiver gate"
+    );
     assert!(
         issuer
             .issue(

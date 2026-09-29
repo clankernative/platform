@@ -15,6 +15,7 @@
 use crate::store::Runtime;
 use anyhow::{Result, ensure};
 use rusqlite::{OptionalExtension, params};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Host-private root evidence. The assertion itself stays at the edge; only
@@ -355,7 +356,8 @@ fn execute_callee(callee: &Runtime, call: &Call, chain: &str) -> Result<String> 
 }
 
 /// What the caller is asking for, resolved from its grant and its context.
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Call {
     pub app: String,
     pub operation: String,
