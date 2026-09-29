@@ -125,6 +125,15 @@ pub(crate) fn compact_before(db: &std::path::Path, cutoff: i64, batch: usize) ->
             "UPDATE day2_execution SET trace='' WHERE invocation=?1 AND phase='complete'",
             [id],
         )?;
+        // Preparation rows and observation payloads are the input to preparing a
+        // pending invocation, which a completed one never does again; its receipt
+        // answers retries. The attempt rows stay, as resource accounting cites them.
+        tx.execute("DELETE FROM day2_preparation WHERE invocation=?1", [id])?;
+        tx.execute(
+            "UPDATE day2_observation_attempts SET observation=NULL
+             WHERE invocation=?1 AND observation IS NOT NULL",
+            [id],
+        )?;
     }
     tx.commit()?;
     Ok(rows.len())

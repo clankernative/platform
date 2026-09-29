@@ -310,7 +310,26 @@ fn compacted_journal_keeps_receipts_and_never_touches_unfinished_work() -> Resul
 
     let receipt = world.finish(&notify)?;
     assert_eq!(receipt.status, "success");
+    let prepared = |id: &str| -> Result<(i64, i64, i64)> {
+        Ok(db.query_row(
+            "SELECT (SELECT count(*) FROM day2_preparation WHERE invocation=?1),
+                    (SELECT count(*) FROM day2_observation_attempts WHERE invocation=?1),
+                    (SELECT count(*) FROM day2_observation_attempts WHERE invocation=?1 AND observation IS NOT NULL)",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?)
+    };
+    let (rows, attempts, payloads) = prepared(&notify)?;
+    assert!(
+        rows > 0 && attempts > 0 && payloads > 0,
+        "the notification observed its recipient"
+    );
     assert_eq!(compact()?, 1);
+    assert_eq!(
+        prepared(&notify)?,
+        (0, attempts, 0),
+        "a compacted invocation keeps its attempt rows but no preparation or observation payloads"
+    );
     assert_eq!(compact()?, 0, "compaction is idempotent");
     assert_eq!(
         db.query_row(
