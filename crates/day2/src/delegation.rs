@@ -84,7 +84,13 @@ pub trait AppCallPort: Send + Sync {
 
 /// A remote signer must inherit its actor and chain from the current durable
 /// invocation. A `Call` by itself is not identity evidence.
-pub fn verify_origin(runtime: &Runtime, call: &Call) -> Result<()> {
+pub struct OriginEvidence {
+    pub root: String,
+    pub principal: String,
+    pub subject: String,
+}
+
+pub fn verify_origin(runtime: &Runtime, call: &Call) -> Result<OriginEvidence> {
     ensure!(call.caller == runtime.app(), "delegated_caller_changed");
     let mut connection = crate::store::open(runtime.db())?;
     let tx = connection.transaction()?;
@@ -157,7 +163,11 @@ pub fn verify_origin(runtime: &Runtime, call: &Call) -> Result<()> {
     )?;
     ensure!(bound == subject, "delegated_origin_subject_changed");
     tx.commit()?;
-    Ok(())
+    Ok(OriginEvidence {
+        root,
+        principal,
+        subject,
+    })
 }
 
 /// The recorded chain, as applications.

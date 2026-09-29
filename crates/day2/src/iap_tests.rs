@@ -375,6 +375,27 @@ fn a_verifier_needs_an_audience_and_a_domain() {
 }
 
 #[test]
+fn workload_assertions_are_exactly_scoped_and_never_admit_a_browser_principal() {
+    let signer = Signer::new("machine");
+    let keys = Keys::default();
+    keys.publish(&[&signer]);
+    let email = "caller@project.iam.gserviceaccount.com";
+    let machine = Verifier::for_workload(AUDIENCE, email, Box::new(keys.clone())).unwrap();
+    let assertion = signer.sign(with(json!({"email": email, "hd": null})));
+    let verified = machine.verify_workload(&assertion, NOW).unwrap();
+    assert_eq!(verified.email(), email);
+    assert_eq!(verified.audience(), AUDIENCE);
+    assert!(machine.verify(&assertion, NOW).is_err());
+    assert!(verifier(&keys).verify(&assertion, NOW).is_err());
+    assert!(
+        machine
+            .verify_workload(&signer.sign(claims()), NOW)
+            .is_err()
+    );
+    assert!(Verifier::for_workload(AUDIENCE, "ada@example.com", Box::new(keys)).is_err());
+}
+
+#[test]
 fn an_address_stays_with_the_first_account_seen_for_it() {
     let db = rusqlite::Connection::open_in_memory().unwrap();
     db.execute_batch(crate::audit::PRINCIPALS_DDL).unwrap();

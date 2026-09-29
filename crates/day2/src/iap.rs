@@ -56,6 +56,29 @@ pub struct Verified {
     pub subject: String,
 }
 
+/// A service account assertion verified for one IAP audience. This is kept
+/// separate from a human principal: a workload never becomes an app actor.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Workload {
+    email: String,
+    subject: String,
+    audience: String,
+}
+
+impl Workload {
+    pub fn email(&self) -> &str {
+        &self.email
+    }
+
+    pub fn subject(&self) -> &str {
+        &self.subject
+    }
+
+    pub fn audience(&self) -> &str {
+        &self.audience
+    }
+}
+
 /// Where the signing keys come from. Google in production; a fixed set in tests,
 /// because a test that fetched real keys could only ever check real assertions.
 pub trait KeySource: Send + Sync {
@@ -85,9 +108,14 @@ struct Cache {
 
 pub struct Verifier {
     audience: String,
-    hosted_domain: String,
+    mode: Mode,
     source: Box<dyn KeySource>,
     cache: Mutex<Cache>,
+}
+
+enum Mode {
+    Human { hosted_domain: String },
+    Workload { email: String },
 }
 
 #[derive(Deserialize)]
@@ -134,7 +162,24 @@ impl Verifier {
         ensure!(!hosted_domain.trim().is_empty(), "hosted_domain_required");
         Ok(Self {
             audience: audience.to_owned(),
-            hosted_domain: hosted_domain.to_ascii_lowercase(),
+            mode: Mode::Human {
+                hosted_domain: hosted_domain.to_ascii_lowercase(),
+            },
+            source,
+            cache: Mutex::new(Cache::default()),
+        })
+    }
+
+    pub fn for_workload(audience: &str, email: &str, source: Box<dyn KeySource>) -> Result<Self> {
+        ensure!(!audience.trim().is_empty(), "iap_audience_required");
+        let email = email.trim().to_ascii_lowercase();
+        ensure!(
+            email.ends_with(".gserviceaccount.com") && email.contains('@'),
+            "iap_workload_email_required"
+        );
+        Ok(Self {
+            audience: audience.to_owned(),
+            mode: Mode::Workload { email },
             source,
             cache: Mutex::new(Cache::default()),
         })
@@ -147,6 +192,44 @@ impl Verifier {
     /// exception is a key set that cannot be fetched, which is an outage on our
     /// side and reported as one.
     pub fn verify(&self, assertion: &str, now: i64) -> Result<Verified> {
+        let Mode::Human { hosted_domain } = &self.mode else {
+            return Err(refuse());
+        };
+        let claims = self.verify_claims(assertion, now)?;
+        let email = claims.email.trim().to_ascii_lowercase();
+        ensure!(!email.is_empty() && email.contains('@'), refuse());
+        // A service account at the human front door has no person behind it.
+        ensure!(
+            !email.ends_with(".gserviceaccount.com"),
+            crate::error::Failure::MachineCallerRequiresDelegation
+        );
+        ensure!(
+            claims.hd.as_deref().map(str::to_ascii_lowercase).as_deref()
+                == Some(hosted_domain.as_str())
+                && email.ends_with(&format!("@{hosted_domain}")),
+            refuse()
+        );
+        Ok(Verified {
+            email,
+            subject: claims.sub,
+        })
+    }
+
+    pub fn verify_workload(&self, assertion: &str, now: i64) -> Result<Workload> {
+        let Mode::Workload { email: expected } = &self.mode else {
+            return Err(refuse());
+        };
+        let claims = self.verify_claims(assertion, now)?;
+        let email = claims.email.trim().to_ascii_lowercase();
+        ensure!(email == *expected, refuse());
+        Ok(Workload {
+            email,
+            subject: claims.sub,
+            audience: self.audience.clone(),
+        })
+    }
+
+    fn verify_claims(&self, assertion: &str, now: i64) -> Result<Claims> {
         ensure!(assertion.len() <= MAX_ASSERTION_BYTES, refuse());
         let mut parts = assertion.split('.');
         let (Some(head), Some(body), Some(signature), None) =
@@ -180,27 +263,7 @@ impl Verifier {
         ensure!(now <= claims.exp + CLOCK_SKEW, refuse());
         ensure!(!claims.sub.trim().is_empty(), refuse());
 
-        let email = claims.email.trim().to_ascii_lowercase();
-        ensure!(!email.is_empty() && email.contains('@'), refuse());
-        // A service account at the human front door has no person behind it to
-        // attribute work to. Machine callers carry the delegation protocol, and
-        // are refused here rather than admitted as someone.
-        ensure!(
-            !email.ends_with(".gserviceaccount.com"),
-            crate::error::Failure::MachineCallerRequiresDelegation
-        );
-        // The installation's domain, not the application's: a company uses one
-        // identity provider and one domain, and no app may widen it.
-        ensure!(
-            claims.hd.as_deref().map(str::to_ascii_lowercase).as_deref()
-                == Some(self.hosted_domain.as_str())
-                && email.ends_with(&format!("@{}", self.hosted_domain)),
-            refuse()
-        );
-        Ok(Verified {
-            email,
-            subject: claims.sub,
-        })
+        Ok(claims)
     }
 
     /// The public key a key id names, refreshing the set when it is stale or

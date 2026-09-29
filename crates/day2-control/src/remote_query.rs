@@ -1,9 +1,9 @@
 //! Loopback qualification adapter for authenticated separate-host queries.
 //!
-//! Production exposure still requires the platform issuer/IAP gates and a
-//! provider-backed serving probe. No app-selected endpoint or unsigned identity
-//! reaches this port. The loopback transport lets two independent hosts exercise
-//! the same signed receiver boundary without claiming cloud qualification.
+//! The fixture exercises issuer and target IAP checks with signed assertions.
+//! Production exposure still requires independently deployed gates, per-request
+//! workload tokens, managed keys and a provider-backed serving probe. No
+//! app-selected endpoint or unsigned identity reaches this port.
 
 use crate::{
     journal::Journal,
@@ -12,8 +12,11 @@ use crate::{
 };
 use anyhow::{Result, ensure};
 use day2::{
-    delegation::{AppCallPort, Call},
-    delegation_wire::{Query, Scope, Signer, Verifier},
+    delegation::{self, AppCallPort, Call},
+    delegation_wire::{
+        IssuerClaims, IssuerSigner, IssuerVerifier, Query, Scope, Signer, Verifier, issued_query,
+    },
+    iap,
     store::Runtime,
 };
 use reqwest::{blocking::Client, redirect::Policy};
@@ -50,8 +53,113 @@ pub struct RemoteQueryPort {
     source: ReleaseTarget,
     target: ReleaseTarget,
     endpoint: Url,
-    signer: Signer,
+    auth: RemoteQueryAuth,
     client: Client,
+}
+
+/// Fixture credentials stand in for the two IAP deliveries. Production tokens
+/// must be acquired per request by the platform-managed workload.
+pub struct RemoteQueryAuth {
+    pub workload_signer: Signer,
+    pub issuer: Arc<RemoteQueryIssuer>,
+    pub issuer_assertion: String,
+    pub target_assertion: String,
+}
+
+/// Issuance is a separate host boundary with its own key and IAP audience. It
+/// reopens current invocation evidence instead of trusting caller-supplied actor
+/// claims, and checks the exact workload-signed request it cosigns.
+pub struct RemoteQueryIssuer {
+    source: ReleaseTarget,
+    target: ReleaseTarget,
+    workload_email: String,
+    issuer_audience: String,
+    iap: iap::Verifier,
+    workload_verifier: Verifier,
+    signer: IssuerSigner,
+}
+
+impl RemoteQueryIssuer {
+    pub fn new(
+        source: ReleaseTarget,
+        target: ReleaseTarget,
+        workload_email: &str,
+        issuer_audience: &str,
+        iap: iap::Verifier,
+        workload_verifier: Verifier,
+        signer: IssuerSigner,
+    ) -> Result<Self> {
+        ensure!(
+            source.company == target.company
+                && source.environment == target.environment
+                && source.app != target.app
+                && workload_email.ends_with(".gserviceaccount.com")
+                && !issuer_audience.is_empty(),
+            "invalid_app_issuer_binding"
+        );
+        Ok(Self {
+            source,
+            target,
+            workload_email: workload_email.to_ascii_lowercase(),
+            issuer_audience: issuer_audience.to_owned(),
+            iap,
+            workload_verifier,
+            signer,
+        })
+    }
+
+    pub fn issue(
+        &self,
+        caller: &Runtime,
+        call: &Call,
+        query: &Query,
+        workload_wire: &[u8],
+        assertion: &str,
+        at: i64,
+    ) -> Result<Vec<u8>> {
+        let workload = self.iap.verify_workload(assertion, at)?;
+        ensure!(
+            workload.email() == self.workload_email && workload.audience() == self.issuer_audience,
+            "app_issuer_workload_changed"
+        );
+        let signed = self.workload_verifier.verify(workload_wire, at)?;
+        ensure!(
+            signed.query() == query
+                && query.source == scope(&self.source)
+                && query.source == Scope::from_runtime(caller)?
+                && query.target == scope(&self.target)
+                && call.caller == self.source.app.as_str()
+                && call.app == self.target.app.as_str()
+                && query.operation == call.operation
+                && query.schema_digest == call.schema_digest
+                && query.contract_digest == call.contract_digest
+                && query.input == serde_json::from_str::<Value>(&call.input)?
+                && query.actor == call.actor
+                && query.origin == call.origin
+                && query.step == call.step
+                && query.chain == call.chain
+                && query.now == call.now,
+            "app_issuer_query_changed"
+        );
+        let origin = delegation::verify_origin(caller, call)?;
+        self.signer.sign(&IssuerClaims {
+            version: 1,
+            issuer: self.signer.issuer().to_owned(),
+            key_id: self.signer.key_id().to_owned(),
+            source: query.source.clone(),
+            target: query.target.clone(),
+            root: origin.root,
+            principal: origin.principal,
+            subject_digest: day2::digest(origin.subject.as_bytes()),
+            workload_email: workload.email().to_owned(),
+            workload_subject_digest: day2::digest(workload.subject().as_bytes()),
+            actor: query.actor.clone(),
+            origin: query.origin.clone(),
+            query_digest: day2::digest(workload_wire),
+            issued_at: at,
+            expires_at: query.expires_at,
+        })
+    }
 }
 
 impl RemoteQueryPort {
@@ -61,7 +169,7 @@ impl RemoteQueryPort {
         source: ReleaseTarget,
         target: ReleaseTarget,
         endpoint: &str,
-        signer: Signer,
+        auth: RemoteQueryAuth,
     ) -> Result<Self> {
         let endpoint = Url::parse(endpoint)?;
         ensure!(
@@ -84,7 +192,7 @@ impl RemoteQueryPort {
             source,
             target,
             endpoint,
-            signer,
+            auth,
             client,
         })
     }
@@ -100,7 +208,6 @@ impl AppCallPort for RemoteQueryPort {
                 && self.source.environment == self.target.environment,
             "app_call_scope_changed"
         );
-        day2::delegation::verify_origin(caller, call)?;
         let input: Value = serde_json::from_str(&call.input)?;
         let journal = Journal::open(&self.journal)?;
         journal.with_serving_selection(&self.target, self.probe.as_ref(), |selection| {
@@ -124,11 +231,21 @@ impl AppCallPort for RemoteQueryPort {
                 generation: selection.generation,
                 serving: serde_json::to_value(&selection.binding)?,
             };
-            let wire = self.signer.sign(&request)?;
+            let workload = self.auth.workload_signer.sign(&request)?;
+            let issuer = self.auth.issuer.issue(
+                caller,
+                call,
+                &request,
+                &workload,
+                &self.auth.issuer_assertion,
+                issued_at,
+            )?;
+            let wire = issued_query(&workload, &issuer)?;
             let response = self
                 .client
                 .post(self.endpoint.clone())
                 .header("Content-Type", "application/vnd.day2.app-query+json")
+                .header(iap::ASSERTION_HEADER, &self.auth.target_assertion)
                 .body(wire)
                 .send()?;
             ensure!(response.status().is_success(), "remote_app_query_refused");
@@ -152,6 +269,8 @@ pub struct RemoteQueryReceiver {
     target: ReleaseTarget,
     runtime: Runtime,
     verifier: Verifier,
+    issuer_verifier: IssuerVerifier,
+    target_iap: iap::Verifier,
 }
 
 impl RemoteQueryReceiver {
@@ -161,6 +280,8 @@ impl RemoteQueryReceiver {
         target: ReleaseTarget,
         runtime: Runtime,
         verifier: Verifier,
+        issuer_verifier: IssuerVerifier,
+        target_iap: iap::Verifier,
     ) -> Result<Self> {
         ensure!(
             Scope::from_runtime(&runtime)? == scope(&target),
@@ -172,11 +293,16 @@ impl RemoteQueryReceiver {
             target,
             runtime,
             verifier,
+            issuer_verifier,
+            target_iap,
         })
     }
 
-    pub fn handle(&self, wire: &[u8], at: i64) -> Result<String> {
-        let verified = self.verifier.verify(wire, at)?;
+    pub fn handle(&self, wire: &[u8], assertion: &str, at: i64) -> Result<String> {
+        let workload = self.target_iap.verify_workload(assertion, at)?;
+        let verified = self
+            .issuer_verifier
+            .verify(wire, at, &workload, &self.verifier)?;
         ensure!(
             verified.query().target == scope(&self.target),
             "app_call_wrong_audience"
