@@ -275,10 +275,27 @@ pub(crate) fn request(
             instruction.model,
             instruction.id.to_string(),
             row.version,
-            serde_json::to_string(policy)?
+            captured_policy(policy)?
         ],
     )?;
     Ok("{}".into())
+}
+
+/// A request captures the authority it was admitted under by digest. The value is
+/// only ever compared with the policy in force when the request runs, and a full
+/// copy per request grew an app's database by the policy's size on every request.
+/// The policy serializes deterministically (ordered maps and sets only).
+fn captured_policy(policy: &Policy) -> Result<String> {
+    Ok(crate::digest(serde_json::to_string(policy)?.as_bytes()))
+}
+
+/// Rows written before digests keep the policy itself and compare as before.
+fn same_policy(captured: &str, policy: &Policy) -> Result<bool> {
+    if captured.starts_with("sha256:") {
+        Ok(captured == captured_policy(policy)?)
+    } else {
+        Ok(serde_json::from_str::<Policy>(captured)? == *policy)
+    }
 }
 
 pub(crate) fn validate_target(
@@ -295,10 +312,7 @@ pub(crate) fn validate_target(
         )
         .optional()?;
     if let Some((model, target, version, captured)) = target {
-        ensure!(
-            serde_json::from_str::<Policy>(&captured)? == *policy,
-            "command_authority_changed"
-        );
+        ensure!(same_policy(&captured, policy)?, "command_authority_changed");
         let row = store::get(
             connection,
             &model,
@@ -417,4 +431,32 @@ pub fn drain(runtime: &Runtime, budget: usize) -> Result<Vec<Invocation>> {
         return Err(error);
     }
     Ok(completed)
+}
+
+#[cfg(test)]
+mod captured_policy_tests {
+    use super::*;
+
+    fn policy(admin: &str) -> Policy {
+        serde_json::from_value(serde_json::json!({
+            "version": 1, "admins": [admin],
+            "operations": {"app.list": {"actors": ["alice"], "mode": {"kind": "read"}, "models": {}}}
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn requests_capture_a_digest_and_still_accept_legacy_copies() -> Result<()> {
+        let current = policy("owner");
+        let captured = captured_policy(&current)?;
+        assert!(captured.starts_with("sha256:") && captured.len() == 71);
+        assert!(captured.len() < serde_json::to_string(&current)?.len());
+        assert!(same_policy(&captured, &current)?);
+        assert!(!same_policy(&captured, &policy("other"))?);
+        // A row written before digests holds the policy JSON itself.
+        let legacy = serde_json::to_string(&current)?;
+        assert!(same_policy(&legacy, &current)?);
+        assert!(!same_policy(&legacy, &policy("other"))?);
+        Ok(())
+    }
 }

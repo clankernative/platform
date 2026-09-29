@@ -72,7 +72,8 @@ locals {
         },
         length(var.resource_policies) == 0 ? {} : { resource_policies = var.resource_policies },
         length(var.schedules) == 0 ? {} : { schedules = var.schedules },
-      length(var.ingress) == 0 ? {} : { ingress = var.ingress })
+        length(var.ingress) == 0 ? {} : { ingress = var.ingress },
+      var.journal_trace_hours == null ? {} : { journal = { trace_hours = var.journal_trace_hours } })
     }
   }, var.resource_catalog == null ? {} : { resources = var.resource_catalog })
   instance_json = jsonencode(local.instance)

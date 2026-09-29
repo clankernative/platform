@@ -459,6 +459,12 @@ does for a Compose package. It refuses a missing, extra or changed secret. To
 rotate, add a new version, advance the credential's revision in the catalog,
 and update the version and fingerprint together.
 
+Size the state volume for the app's invocation rate. A completed invocation keeps
+its full trace, which includes the authority it ran under, for 72 hours unless
+`journal_trace_hours` is set; an app with frequent schedules should set a few
+hours. Backups copy the database online within a fixed deadline, so a database
+that outgrows it stops the hourly backup before the disk fills.
+
 `app-edge.signed_webhook_paths` optionally routes exact `/ingress/<endpoint>`
 paths through a separate backend without IAP. This is for provider deliveries:
 Day2 still requires the configured signature before admission. The ordinary
