@@ -1,7 +1,157 @@
 use super::*;
 use crate::authority::{Mode, OperationPolicy};
+use day2_capabilities::{
+    BindingRef, Name,
+    credentials::{
+        CredentialRoot, DeliveryProfile, FamilyDeclaration, GrantMode, ManagedProfile,
+        ManagementPredicate, Namespace, RotationProfile, SourceLocation,
+    },
+    oauth::{
+        AuthorityNode, OperationAuthorityContract, OperationKind, ResourceAudienceRef,
+        SecurityOriginRef,
+    },
+};
 use rusqlite::TransactionBehavior;
 use std::{collections::BTreeMap, sync::mpsc, thread, time::Duration};
+
+#[test]
+fn activated_credential_selection_pins_policy_family_and_artifact() -> Result<()> {
+    fn name(value: &str) -> Name {
+        Name::try_from(value.to_owned()).unwrap()
+    }
+
+    fn pin(value: &str) -> BindingRef {
+        BindingRef::pin(name(value), &value).unwrap()
+    }
+
+    let root = OperationAuthorityContract::derive(
+        "submit".into(),
+        1,
+        Digest::of(&"submit-v1")?,
+        OperationKind::Command,
+        AuthorityNode {
+            actions: BTreeSet::new(),
+            children: BTreeMap::new(),
+        },
+    )?;
+    let approved: BTreeMap<String, OperationAuthorityContract> =
+        BTreeMap::from([("submit".into(), root.clone())]);
+    let family = day2_capabilities::credentials::ManifestFamily::derive(
+        FamilyDeclaration {
+            registration: name("keys"),
+            id: name("keys"),
+            profile: ManagedProfile::Client,
+            grant: GrantMode::Fixed,
+            roots: vec!["submit".into()],
+            lifetime_seconds: 3600,
+            source: SourceLocation {
+                file: "App.roc".into(),
+                line: 1,
+            },
+        },
+        &BTreeMap::from([(
+            "submit".into(),
+            CredentialRoot {
+                authority: root,
+                direct_ingress: true,
+                interactive_security: false,
+                single_resource_model: None,
+            },
+        )]),
+    )?;
+    let policy = ManagementPolicy {
+        identity_authority: pin("people"),
+        issue: ManagementPredicate::Creator,
+        read_metadata: ManagementPredicate::Creator,
+        rotate: ManagementPredicate::Creator,
+        revoke: ManagementPredicate::Creator,
+    };
+    let binding = CredentialFamilyBinding {
+        namespace: Namespace {
+            installation: name("acme"),
+            environment: name("dev"),
+            app: name("reports"),
+            binding_generation: 1,
+        },
+        family: name("keys"),
+        approved_authority: BindingRef {
+            id: name("approved"),
+            revision: Digest::of(&("credential-approved-authority-v1", &approved))?,
+        },
+        management: BindingRef::pin(name("managers"), &policy)?,
+        rotation: RotationProfile::AtomicReplace,
+        delivery: DeliveryProfile::AuthenticatedCreatorReveal,
+        verifier: pin("verifier"),
+        custody: pin("custody"),
+        security_shell: SecurityOriginRef(pin("security")),
+        audience: ResourceAudienceRef(pin("audience")),
+        epoch_store: pin("epoch"),
+        max_lifetime_seconds: 3600,
+        reveal_window_seconds: 300,
+        quota: pin("quota"),
+    };
+    let instance = |selected: Option<&CredentialFamilyBinding>, policy: &ManagementPolicy| {
+        let bindings = selected
+            .map(|value| BTreeMap::from([("keys", value)]))
+            .unwrap_or_default();
+        Instance::from_bytes(&serde_json::to_vec(&serde_json::json!({
+            "installation": "acme", "environment": "dev",
+            "apps": {"reports": {"artifact": "unused", "readers": [], "writers": [],
+                "credential_families": bindings}},
+            "resources": {"version": 1, "connections": {}, "resources": {}, "policies": {},
+                "credentials": {"management": {"managers": policy},
+                    "approved_authority": {"approved": approved}}}
+        }))?)
+    };
+    let selected = instance(Some(&binding), &policy)?;
+    let active = resolve_credentials(
+        &selected,
+        "reports",
+        "artifact-one",
+        std::slice::from_ref(&family),
+    )?;
+    assert_eq!(
+        active["keys"].qualification.family_contract,
+        family.contract
+    );
+    assert_eq!(active["keys"].management, policy);
+    assert_ne!(
+        active["keys"].qualification.composition,
+        resolve_credentials(
+            &selected,
+            "reports",
+            "artifact-two",
+            std::slice::from_ref(&family)
+        )?["keys"]
+            .qualification
+            .composition
+    );
+    assert!(
+        resolve_credentials(
+            &instance(None, &policy)?,
+            "reports",
+            "artifact-one",
+            std::slice::from_ref(&family)
+        )
+        .is_err()
+    );
+    let changed = ManagementPolicy {
+        read_metadata: ManagementPredicate::MemberOf {
+            group: name("admins"),
+        },
+        ..policy
+    };
+    assert!(
+        resolve_credentials(
+            &instance(Some(&binding), &changed)?,
+            "reports",
+            "artifact-one",
+            &[family]
+        )
+        .is_err()
+    );
+    Ok(())
+}
 
 #[test]
 fn desired_receipts_survive_expiry_and_artifact_changes_without_reactivating_grants() -> Result<()>
@@ -403,6 +553,7 @@ fn document() -> AuthorityDocument {
         security: None,
         hosted_domain: None,
         resources: Default::default(),
+        credentials: Default::default(),
         enabled: true,
         readers: BTreeSet::from(["viewer".into()]),
         writers: BTreeSet::from(["alice".into()]),

@@ -11,9 +11,17 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 pub use day2_capabilities::resources::ResolvedResources;
+use day2_capabilities::{
+    Digest,
+    credentials::{CredentialFamilyBinding, ManagementPolicy, QualificationReceipt, qualify},
+    oauth::OperationAuthorityContract,
+};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeSet, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -53,6 +61,19 @@ pub struct AuthorityDocument {
         skip_serializing_if = "day2_capabilities::resources::ResolvedResources::is_empty"
     )]
     pub resources: day2_capabilities::resources::ResolvedResources,
+    /// Resolved during activation, never read from mutable desired instance
+    /// configuration by a running credential instruction.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub credentials: BTreeMap<String, ActiveCredentialFamily>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ActiveCredentialFamily {
+    pub binding: CredentialFamilyBinding,
+    pub management: ManagementPolicy,
+    pub approved_roots: BTreeMap<String, OperationAuthorityContract>,
+    pub qualification: QualificationReceipt,
 }
 
 /// An activated document as it may already sit in an application database.
@@ -76,6 +97,8 @@ struct StoredDocument {
     policy: Option<Policy>,
     #[serde(default)]
     resources: day2_capabilities::resources::ResolvedResources,
+    #[serde(default)]
+    credentials: BTreeMap<String, ActiveCredentialFamily>,
 }
 
 impl From<StoredDocument> for AuthorityDocument {
@@ -88,6 +111,7 @@ impl From<StoredDocument> for AuthorityDocument {
             writers: stored.writers,
             policy: stored.policy,
             resources: stored.resources,
+            credentials: stored.credentials,
         }
     }
 }
@@ -102,6 +126,7 @@ impl AuthorityDocument {
             writers: binding.writers.clone(),
             policy: binding.authority.clone(),
             resources: Default::default(),
+            credentials: Default::default(),
         }
     }
 
@@ -133,6 +158,12 @@ impl AuthorityDocument {
             }
         };
         document.attenuate_resources(&artifact.contract().operations)?;
+        document.credentials = resolve_credentials(
+            instance,
+            app,
+            artifact.id(),
+            &artifact.contract().credential_manifest,
+        )?;
         document.validate(artifact)?;
         Ok(document)
     }
@@ -199,6 +230,32 @@ impl AuthorityDocument {
             policy.validate_domains(hosted_domain)?;
         }
         self.resources.validate()?;
+        ensure!(
+            self.credentials.len() == artifact.contract().credential_manifest.len(),
+            "activated credential family selection differs from artifact"
+        );
+        for family in &artifact.contract().credential_manifest {
+            let active = self
+                .credentials
+                .get(family.id.as_str())
+                .context("activated credential family missing")?;
+            let composition = credential_composition(
+                artifact.id(),
+                active.binding.namespace.app.as_str(),
+                &active.binding,
+            )?;
+            let expected = qualify(
+                family,
+                Some(&active.binding),
+                &active.management,
+                &active.approved_roots,
+                composition,
+            )?;
+            ensure!(
+                active.qualification == expected,
+                "activated credential qualification differs from selected authority"
+            );
+        }
         for (name, bindings) in &self.resources.operations {
             let operation = artifact.route(name)?;
             let policy = self
@@ -273,6 +330,74 @@ impl AuthorityDocument {
         );
         Ok(())
     }
+}
+
+fn resolve_credentials(
+    instance: &Instance,
+    app: &str,
+    artifact: &str,
+    families: &[day2_capabilities::credentials::ManifestFamily],
+) -> Result<BTreeMap<String, ActiveCredentialFamily>> {
+    let selected = instance.apps.get(app).context("app_not_installed")?;
+    ensure!(
+        selected.credential_families.len() == families.len(),
+        "credential family selection differs from artifact"
+    );
+    if families.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let catalog = &instance
+        .resources
+        .as_ref()
+        .context("credential catalog missing")?
+        .credentials;
+    let mut resolved = BTreeMap::new();
+    for family in families {
+        let binding = selected
+            .credential_families
+            .get(family.id.as_str())
+            .context("credential family binding missing")?;
+        ensure!(
+            binding.namespace.installation.as_str() == instance.installation
+                && binding.namespace.environment.as_str() == instance.environment
+                && binding.namespace.app.as_str() == app,
+            "credential family namespace differs from selected app"
+        );
+        let management = catalog
+            .management
+            .get(binding.management.id.as_str())
+            .context("credential management policy missing")?;
+        let approved_roots = catalog
+            .approved_authority
+            .get(binding.approved_authority.id.as_str())
+            .context("credential approved authority missing")?;
+        let composition = credential_composition(artifact, app, binding)?;
+        let qualification = qualify(
+            family,
+            Some(binding),
+            management,
+            approved_roots,
+            composition,
+        )?;
+        resolved.insert(
+            family.id.as_str().to_owned(),
+            ActiveCredentialFamily {
+                binding: binding.clone(),
+                management: management.clone(),
+                approved_roots: approved_roots.clone(),
+                qualification,
+            },
+        );
+    }
+    Ok(resolved)
+}
+
+fn credential_composition(
+    artifact: &str,
+    app: &str,
+    binding: &CredentialFamilyBinding,
+) -> Result<Digest> {
+    Digest::of(&("activated-credential-family-v1", artifact, app, binding))
 }
 
 /// Writers may be considered for any operation and readers for queries only,

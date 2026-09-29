@@ -43,6 +43,13 @@ implemented before a declared family can issue or receive a key. Imported
 operation credential paths remain unsupported until they have selected
 permission contracts and step-level enforcement.
 
+Activation now resolves each family binding, management policy and approved
+authority into the app's activated authority document. It verifies the family
+receipt against the loaded artifact and rejects a missing or stale selection.
+The selected snapshot is available to host admission without rereading mutable
+desired instance configuration. Live policy, key and epoch readiness checks are
+still required before issue or ingress.
+
 The trusted build runner classifies credential presence from the loaded
 artifact and includes that claim in its verification evidence. An activation
 without a catalog candidate now checks the exact completed verification
@@ -114,8 +121,9 @@ The private store also has bounded creator-visible metadata `list` and `inspect`
 readers for client and personal families. List visibility is applied in SQLite
 before a page limit; cursors bind the namespace, family contract, requester and
 management policy revision, and each call rechecks its supplied policy. These
-readers return only safe summary and rotation data. The host must still resolve
-the current instance policy and authenticated requester before calling them.
+readers return only safe summary and rotation data. The host must still verify
+the activated family selection, current policy and authenticated requester
+before calling them.
 Group and resource visibility, generated Roc methods and HTTP routes are not
 connected yet.
 
@@ -157,8 +165,8 @@ Before activation, complete the following gates from the proposal:
 2. Complete selected-instance principal/context compatibility across child,
    delegated and provider paths. Resolve actual key/custody readiness and
    current management/metadata policy. The catalog-managed release path now
-   checks exact local family bindings and approved authority; legacy activation
-   requires a verified credential-free artifact.
+   checks exact local family bindings and approved authority; uncatalogued
+   activation requires a verified credential-free artifact.
 3. Add credential ingress verification and mandatory propagated identity and
    immutable ceiling checks to the dispatcher. Add bounded metadata readers,
    recipient-specific security shell and protected HTTP response sink.
