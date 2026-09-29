@@ -37,6 +37,9 @@ pub(crate) struct Session {
     pub hash: String,
     pub actor: String,
     pub expires: i64,
+    /// Present only after this request's IAP assertion was verified. A cookie
+    /// alone never supplies origin evidence for a delegated call.
+    pub origin: Option<crate::iap::Verified>,
 }
 pub(crate) fn session(
     runtime: &Runtime,
@@ -75,6 +78,7 @@ pub(crate) fn session_for_token(runtime: &Runtime, token: &str, now: i64) -> Res
                     hash: hash.clone(),
                     actor: row.get(0)?,
                     expires: row.get(1)?,
+                    origin: None,
                 })
             },
         )

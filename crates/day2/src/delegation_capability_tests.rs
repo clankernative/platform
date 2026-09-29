@@ -852,6 +852,7 @@ fn impersonation_cannot_be_introduced_by_a_schedule_child_or_later_hop() -> Resu
                     actor: "customer",
                     caller,
                     authenticated: "alice",
+                    origin: None,
                 },
             ),
             id,

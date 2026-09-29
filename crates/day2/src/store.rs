@@ -239,6 +239,12 @@ pub(crate) struct Cause<'a> {
     /// Who the host verified, when that is not the principal the work is for.
     /// Empty means they are the same, which is the ordinary case.
     authenticated: &'a str,
+    origin: Option<&'a crate::iap::Verified>,
+}
+
+pub(crate) struct RequestIdentity<'a> {
+    pub actor: &'a str,
+    pub origin: Option<&'a crate::iap::Verified>,
 }
 
 /// One principal making a request on behalf of another, at an edge.
@@ -262,6 +268,7 @@ impl<'a> Cause<'a> {
             actor,
             caller,
             authenticated,
+            origin: None,
         }
     }
 }
@@ -568,6 +575,7 @@ impl Runtime {
             crate::authority_state::initialize_new(&tx, self, &desired)?;
         }
         crate::audit::upgrade(&tx)?;
+        crate::delegation::upgrade_origin(&tx)?;
         crate::invocations::upgrade(&tx)?;
         crate::resources::upgrade(&tx)?;
         crate::budget::upgrade(&tx)?;
@@ -679,6 +687,18 @@ impl Runtime {
         input: &Value,
         now: i64,
     ) -> Result<()> {
+        self.accept_on_behalf_of_verified(operation, acting, id, input, now, None)
+    }
+
+    pub(crate) fn accept_on_behalf_of_verified(
+        &self,
+        operation: &str,
+        acting: ActingAs<'_>,
+        id: &str,
+        input: &Value,
+        now: i64,
+        origin: Option<&crate::iap::Verified>,
+    ) -> Result<()> {
         let ActingAs {
             authenticated,
             actor,
@@ -713,6 +733,7 @@ impl Runtime {
                 } else {
                     authenticated
                 },
+                origin,
             },
         )
     }
@@ -752,6 +773,7 @@ impl Runtime {
                 actor,
                 caller: "",
                 authenticated: "",
+                origin: None,
             },
         )
     }
@@ -770,6 +792,7 @@ impl Runtime {
             actor: _,
             caller,
             authenticated,
+            origin,
         } = cause;
         let initiator = if authenticated.is_empty() {
             actor
@@ -828,6 +851,12 @@ impl Runtime {
             // job that legitimately acts as many people wants one top-level
             // invocation each, which is the better audit shape anyway.
             let impersonating = !authenticated.is_empty() && authenticated != actor;
+            if origin.is_some() {
+                ensure!(
+                    trigger == crate::audit::Trigger::Request && caller.is_empty(),
+                    "invocation_origin_requires_request"
+                );
+            }
             let rule = match trigger {
                 crate::audit::Trigger::Request | crate::audit::Trigger::Ingress
                     if impersonating =>
@@ -924,6 +953,7 @@ impl Runtime {
                     }
                 }
             }
+            crate::delegation::record_root_origin(&tx, id, initiator, origin, !reused)?;
             reason = AttemptReason::StorageRejected;
             crate::audit::record_attempt(
                 &tx,
@@ -963,6 +993,30 @@ impl Runtime {
         fault: Fault,
     ) -> Result<Outcome> {
         self.accept(operation, actor, id, input, now)?;
+        self.execute(id, fault)
+    }
+
+    pub(crate) fn invoke_verified(
+        &self,
+        operation: &str,
+        identity: RequestIdentity<'_>,
+        id: &str,
+        input: &Value,
+        now: i64,
+        fault: Fault,
+    ) -> Result<Outcome> {
+        self.accept_on_behalf_of_verified(
+            operation,
+            ActingAs {
+                authenticated: identity.actor,
+                actor: identity.actor,
+                trigger: crate::audit::Trigger::Request,
+            },
+            id,
+            input,
+            now,
+            identity.origin,
+        )?;
         self.execute(id, fault)
     }
     pub fn execute(&self, id: &str, fault: Fault) -> Result<Outcome> {

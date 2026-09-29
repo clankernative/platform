@@ -406,6 +406,20 @@ fn signed_query_crosses_separate_host_databases_and_fences_serving_generation() 
         &serde_json::from_str(&call.input)?,
         100,
     )?;
+    assert!(
+        delegation::read(&caller, &call).is_err(),
+        "a durable actor without verified root evidence cannot be signed"
+    );
+    // The loopback fixture stands in for the IAP edge, which writes these
+    // private bindings atomically with root admission in a served app.
+    Connection::open(caller.db())?.execute(
+        "INSERT INTO day2_principals VALUES('alice','fixture-iap-subject',100)",
+        [],
+    )?;
+    Connection::open(caller.db())?.execute(
+        "INSERT INTO day2_invocation_origins VALUES('root-invocation','alice','fixture-iap-subject','iap')",
+        [],
+    )?;
     let answer: Value = serde_json::from_str(&delegation::read(&caller, &call)?)?;
     assert!(answer.is_object() || answer.is_array());
     assert!(
@@ -519,6 +533,18 @@ fn signed_query_crosses_separate_host_databases_and_fences_serving_generation() 
         delegation::read(&caller, &changed_actor).is_err(),
         "the source host cannot sign an actor absent from its durable invocation"
     );
+    Connection::open(caller.db())?.execute(
+        "UPDATE day2_principals SET subject='reassigned-subject' WHERE email='alice'",
+        [],
+    )?;
+    assert!(
+        delegation::read(&caller, &call).is_err(),
+        "a reassigned root account cannot receive a new transport proof"
+    );
+    Connection::open(caller.db())?.execute(
+        "UPDATE day2_principals SET subject='fixture-iap-subject' WHERE email='alice'",
+        [],
+    )?;
     probe.0.lock().unwrap().incarnation.generation =
         "replacement-generation".to_owned().try_into()?;
     assert!(delegation::read(&caller, &call).is_err());
