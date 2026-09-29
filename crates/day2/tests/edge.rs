@@ -293,6 +293,20 @@ fn a_person_is_whoever_their_verified_assertion_says() -> Result<()> {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
     assert_eq!((actor.as_str(), initiator.as_str()), (READER, READER));
+    let origin: (String, String, String) = rusqlite::Connection::open(server.runtime.db())?
+        .query_row(
+            "SELECT principal,subject,kind FROM day2_invocation_origins WHERE invocation=?1",
+            [&id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+    assert_eq!(
+        origin,
+        (
+            READER.to_owned(),
+            format!("accounts.google.com:{READER}"),
+            "iap".to_owned()
+        )
+    );
 
     // A session that already matches is reused, not reissued.
     let before = server.sessions()?;

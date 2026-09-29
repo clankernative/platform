@@ -736,11 +736,13 @@ impl Host {
         );
         // A cookie left by someone else — a shared browser, a changed Google
         // sign-in — is not this person's session, whatever it says.
-        if let Some(session) = cookie().filter(|session| session.actor == verified.email) {
+        if let Some(mut session) = cookie().filter(|session| session.actor == verified.email) {
+            session.origin = Some(verified);
             return Ok((Some(session), None));
         }
         let token = security::create_session(&self.runtime, &verified.email, at)?;
-        let session = security::session_for_token(&self.runtime, &token, at)?;
+        let mut session = security::session_for_token(&self.runtime, &token, at)?;
+        session.origin = Some(verified);
         Ok((Some(session), Some(token)))
     }
 
@@ -1217,9 +1219,12 @@ impl Host {
             None => {}
         }
         let id = format!("redirect-{}", security::random()?);
-        let outcome = self.runtime.invoke(
+        let outcome = self.runtime.invoke_verified(
             &route.operation,
-            &session.actor,
+            crate::store::RequestIdentity {
+                actor: &session.actor,
+                origin: session.origin.as_ref(),
+            },
             &id,
             &input,
             at,
@@ -1595,9 +1600,12 @@ impl Host {
                 "Check the values and try again.",
             )
         } else {
-            let outcome = self.runtime.invoke(
+            let outcome = self.runtime.invoke_verified(
                 &ticket.operation,
-                &session.actor,
+                crate::store::RequestIdentity {
+                    actor: &session.actor,
+                    origin: session.origin.as_ref(),
+                },
                 &id,
                 &input,
                 at,

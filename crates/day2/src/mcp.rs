@@ -407,9 +407,12 @@ fn call(context: &RequestContext<'_>, endpoint: &Endpoint, arguments: &Value) ->
             );
         }
     };
-    let outcome = context.runtime.invoke(
+    let outcome = context.runtime.invoke_verified(
         &operation.name,
-        &context.session.actor,
+        crate::store::RequestIdentity {
+            actor: &context.session.actor,
+            origin: context.session.origin.as_ref(),
+        },
         &invocation,
         input,
         context.at,

@@ -17,6 +17,64 @@ use anyhow::{Result, ensure};
 use rusqlite::{OptionalExtension, params};
 use serde_json::Value;
 
+/// Host-private root evidence. The assertion itself stays at the edge; only
+/// the verified account binding is retained for later issuer admission.
+pub(crate) fn upgrade_origin(connection: &rusqlite::Connection) -> Result<()> {
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS day2_invocation_origins(
+            invocation TEXT PRIMARY KEY REFERENCES day2_invocations(id),
+            principal TEXT NOT NULL, subject TEXT NOT NULL,
+            kind TEXT NOT NULL CHECK(kind='iap')) STRICT;",
+    )?;
+    Ok(())
+}
+
+pub(crate) fn record_root_origin(
+    connection: &rusqlite::Connection,
+    invocation: &str,
+    initiator: &str,
+    verified: Option<&crate::iap::Verified>,
+    new_invocation: bool,
+) -> Result<()> {
+    let recorded: Option<(String, String)> = connection
+        .query_row(
+            "SELECT principal,subject FROM day2_invocation_origins WHERE invocation=?1",
+            [invocation],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    match (verified, recorded) {
+        (Some(identity), None) if new_invocation => {
+            ensure!(
+                identity.email == initiator,
+                "invocation_origin_principal_changed"
+            );
+            let bound: String = connection.query_row(
+                "SELECT subject FROM day2_principals WHERE email=?1",
+                [initiator],
+                |row| row.get(0),
+            )?;
+            ensure!(
+                bound == identity.subject,
+                "invocation_origin_subject_changed"
+            );
+            connection.execute(
+                "INSERT INTO day2_invocation_origins VALUES(?1,?2,?3,'iap')",
+                params![invocation, initiator, identity.subject],
+            )?;
+        }
+        (Some(identity), Some((principal, subject))) => ensure!(
+            identity.email == initiator
+                && identity.email == principal
+                && identity.subject == subject,
+            "invocation_origin_changed"
+        ),
+        (None, None) => {}
+        _ => anyhow::bail!("invocation_origin_changed"),
+    }
+    Ok(())
+}
+
 /// Host-owned dispatch for a query whose grant and durable invocation context
 /// have already been checked. Implementations must authenticate the receiver
 /// and preserve the call's actor, causal identity, and target contract.
@@ -64,6 +122,40 @@ pub fn verify_origin(runtime: &Runtime, call: &Call) -> Result<()> {
         &operation,
         &call.actor,
     )?;
+    let root = crate::resources::root_in(&tx, &call.origin)?;
+    let root_identity: Option<(String, String, String, String, String, String)> = tx
+        .query_row(
+            "SELECT i.actor,i.trigger,i.authenticated,i.caller,o.principal,o.subject
+             FROM day2_invocations i JOIN day2_invocation_origins o ON o.invocation=i.id
+             WHERE i.id=?1 AND o.kind='iap'",
+            [&root],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .optional()?;
+    let (root_actor, trigger, authenticated, root_caller, principal, subject) =
+        root_identity.ok_or_else(|| anyhow::anyhow!("delegated_origin_evidence_missing"))?;
+    ensure!(
+        trigger == "request"
+            && root_caller.is_empty()
+            && root_actor == call.actor
+            && (authenticated.is_empty() && principal == root_actor || authenticated == principal),
+        "delegated_origin_evidence_changed"
+    );
+    let bound: String = tx.query_row(
+        "SELECT subject FROM day2_principals WHERE email=?1",
+        [&principal],
+        |row| row.get(0),
+    )?;
+    ensure!(bound == subject, "delegated_origin_subject_changed");
     tx.commit()?;
     Ok(())
 }

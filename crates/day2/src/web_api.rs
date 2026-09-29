@@ -267,7 +267,7 @@ impl RequestContext<'_> {
             let invocation = command_invocation(self.runtime, &self.session.actor, key)?;
             (input, invocation)
         };
-        self.runtime.accept_on_behalf_of(
+        self.runtime.accept_on_behalf_of_verified(
             &operation.name,
             ActingAs {
                 authenticated: &self.session.actor,
@@ -277,6 +277,7 @@ impl RequestContext<'_> {
             &invocation,
             &input,
             self.at,
+            self.session.origin.as_ref(),
         )?;
         let outcome = if method == Method::POST
             && single_header(headers, "prefer") == Some("respond-async")
