@@ -1,9 +1,9 @@
-//! Loopback qualification adapter for authenticated separate-host queries.
+//! Authenticated separate-host query adapter.
 //!
-//! The fixture exercises issuer and target IAP checks with signed assertions.
-//! Production exposure still requires independently deployed gates, per-request
-//! workload tokens, managed keys and a provider-backed serving probe. No
-//! app-selected endpoint or unsigned identity reaches this port.
+//! The HTTP path obtains a fresh service-account credential for each IAP gate;
+//! the loopback fixture can still inject assertions to test the receiver. Actual
+//! deployment still requires independent IAP backends, managed signing keys and
+//! a provider-backed serving probe. No app-selected endpoint reaches this port.
 
 use crate::{
     journal::Journal,
@@ -11,6 +11,7 @@ use crate::{
     release_execution::{ObservedServingBinding, ServingProbe},
 };
 use anyhow::{Result, ensure};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use day2::{
     delegation::{self, AppCallPort, Call},
     delegation_wire::{
@@ -20,6 +21,7 @@ use day2::{
     store::Runtime,
 };
 use reqwest::{blocking::Client, redirect::Policy};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     io::Read,
@@ -30,6 +32,10 @@ use std::{
 use url::Url;
 
 const MAX_RESULT_BYTES: u64 = 65_536;
+const MAX_ISSUER_REQUEST_BYTES: usize = 300_000;
+const MAX_ISSUER_PROOF_BYTES: u64 = 32_768;
+
+use crate::iap_service_jwt::{Gate, IapServiceJwt};
 
 fn scope(target: &ReleaseTarget) -> Scope {
     Scope {
@@ -45,16 +51,44 @@ fn now() -> Result<i64> {
     )?)
 }
 
-/// A fixed, loopback-only transport fixture. The endpoint is selected by the
-/// host, never by the app, and redirects are always refused.
+/// Endpoints are selected by the host, never by the app. Redirects are refused.
 pub struct RemoteQueryPort {
     journal: PathBuf,
     probe: Arc<dyn ServingProbe + Send + Sync>,
     source: ReleaseTarget,
     target: ReleaseTarget,
     endpoint: Url,
-    auth: RemoteQueryAuth,
+    auth: Authentication,
     client: Client,
+}
+
+enum Authentication {
+    Fixture(RemoteQueryAuth),
+    Iap {
+        workload_signer: Signer,
+        credentials: Arc<IapServiceJwt>,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IssueRequest {
+    call: Call,
+    query: Query,
+    workload: String,
+}
+
+fn issue_request(call: &Call, query: &Query, workload: &[u8]) -> Result<Vec<u8>> {
+    let wire = serde_json::to_vec(&IssueRequest {
+        call: call.clone(),
+        query: query.clone(),
+        workload: URL_SAFE_NO_PAD.encode(workload),
+    })?;
+    ensure!(
+        wire.len() <= MAX_ISSUER_REQUEST_BYTES,
+        "app_issuer_request_too_large"
+    );
+    Ok(wire)
 }
 
 /// Fixture credentials stand in for the two IAP deliveries. Production tokens
@@ -160,6 +194,31 @@ impl RemoteQueryIssuer {
             expires_at: query.expires_at,
         })
     }
+
+    /// HTTP issuer entrypoint. The caller runtime belongs to this source host,
+    /// not to the request body; `issue` reopens its durable origin evidence.
+    pub fn handle(
+        &self,
+        caller: &Runtime,
+        wire: &[u8],
+        assertion: &str,
+        at: i64,
+    ) -> Result<Vec<u8>> {
+        ensure!(
+            wire.len() <= MAX_ISSUER_REQUEST_BYTES,
+            "app_issuer_request_too_large"
+        );
+        let request: IssueRequest = day2::json::decode(wire)?;
+        let workload = URL_SAFE_NO_PAD.decode(&request.workload)?;
+        self.issue(
+            caller,
+            &request.call,
+            &request.query,
+            &workload,
+            assertion,
+            at,
+        )
+    }
 }
 
 impl RemoteQueryPort {
@@ -183,6 +242,7 @@ impl RemoteQueryPort {
             "invalid_app_call_fixture_endpoint"
         );
         let client = Client::builder()
+            .no_proxy()
             .redirect(Policy::none())
             .timeout(Duration::from_secs(15))
             .build()?;
@@ -192,7 +252,43 @@ impl RemoteQueryPort {
             source,
             target,
             endpoint,
-            auth,
+            auth: Authentication::Fixture(auth),
+            client,
+        })
+    }
+
+    /// HTTP transport to two separately IAP-protected, host-bound URLs. The
+    /// credential signer pins both URLs and does not accept an app destination.
+    pub fn iap_http(
+        journal: PathBuf,
+        probe: Arc<dyn ServingProbe + Send + Sync>,
+        source: ReleaseTarget,
+        target: ReleaseTarget,
+        workload_signer: Signer,
+        credentials: Arc<IapServiceJwt>,
+    ) -> Result<Self> {
+        ensure!(
+            source.company == target.company
+                && source.environment == target.environment
+                && source.app != target.app,
+            "invalid_app_call_scope"
+        );
+        let client = Client::builder()
+            .no_proxy()
+            .redirect(Policy::none())
+            .timeout(Duration::from_secs(15))
+            .connect_timeout(Duration::from_secs(3))
+            .build()?;
+        Ok(Self {
+            journal,
+            probe,
+            source,
+            target,
+            endpoint: credentials.url(Gate::Receiver).clone(),
+            auth: Authentication::Iap {
+                workload_signer,
+                credentials,
+            },
             client,
         })
     }
@@ -231,23 +327,59 @@ impl AppCallPort for RemoteQueryPort {
                 generation: selection.generation,
                 serving: serde_json::to_value(&selection.binding)?,
             };
-            let workload = self.auth.workload_signer.sign(&request)?;
-            let issuer = self.auth.issuer.issue(
-                caller,
-                call,
-                &request,
-                &workload,
-                &self.auth.issuer_assertion,
-                issued_at,
-            )?;
+            let signer = match &self.auth {
+                Authentication::Fixture(auth) => &auth.workload_signer,
+                Authentication::Iap {
+                    workload_signer, ..
+                } => workload_signer,
+            };
+            let workload = signer.sign(&request)?;
+            let issuer = match &self.auth {
+                Authentication::Fixture(auth) => auth.issuer.issue(
+                    caller,
+                    call,
+                    &request,
+                    &workload,
+                    &auth.issuer_assertion,
+                    issued_at,
+                )?,
+                Authentication::Iap { credentials, .. } => {
+                    let token = credentials.sign_for(Gate::Issuer)?;
+                    let response = self
+                        .client
+                        .post(credentials.url(Gate::Issuer).clone())
+                        .bearer_auth(token.as_str())
+                        .header("Content-Type", "application/vnd.day2.app-issue+json")
+                        .body(issue_request(call, &request, &workload)?)
+                        .send()?;
+                    ensure!(response.status().is_success(), "remote_app_issuer_refused");
+                    let mut body = Vec::new();
+                    response
+                        .take(MAX_ISSUER_PROOF_BYTES + 1)
+                        .read_to_end(&mut body)?;
+                    ensure!(
+                        body.len() as u64 <= MAX_ISSUER_PROOF_BYTES,
+                        "app_issuer_proof_too_large"
+                    );
+                    body
+                }
+            };
             let wire = issued_query(&workload, &issuer)?;
-            let response = self
+            let mut request = self
                 .client
                 .post(self.endpoint.clone())
                 .header("Content-Type", "application/vnd.day2.app-query+json")
-                .header(iap::ASSERTION_HEADER, &self.auth.target_assertion)
-                .body(wire)
-                .send()?;
+                .body(wire);
+            request = match &self.auth {
+                Authentication::Fixture(auth) => {
+                    request.header(iap::ASSERTION_HEADER, &auth.target_assertion)
+                }
+                Authentication::Iap { credentials, .. } => {
+                    let token = credentials.sign_for(Gate::Receiver)?;
+                    request.bearer_auth(token.as_str())
+                }
+            };
+            let response = request.send()?;
             ensure!(response.status().is_success(), "remote_app_query_refused");
             let mut body = Vec::new();
             response.take(MAX_RESULT_BYTES + 1).read_to_end(&mut body)?;

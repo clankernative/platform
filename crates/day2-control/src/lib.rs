@@ -5,6 +5,7 @@ pub mod ci;
 pub mod contracts;
 pub mod engine;
 pub mod gcp_secret_conformance;
+pub mod iap_service_jwt;
 pub mod journal;
 pub mod kernel;
 pub mod kubernetes_conformance;
