@@ -548,6 +548,9 @@ mod tests {
     use super::*;
     use crate::managed_credentials::crypto::KeyLease;
     use crate::oauth::account::{MappedHumanEvidence, ProviderAccount};
+    use crate::oauth::approval_registry::{
+        ApprovalAuthority, ApprovalTerms, StoredApprovalRegistry,
+    };
     use crate::oauth::connect::{
         self, CallbackBinding, CallbackBindingSpec, ConnectIntent, ConnectState,
     };
@@ -555,8 +558,7 @@ mod tests {
     use crate::oauth::external::{self, FreshExternalApproval, ShellApprovalKeyLease};
     use crate::oauth::outbound::{CallbackIngress, CallbackOutcome};
     use crate::oauth::security_shell::{
-        ApprovalContext, ApprovalRegistry, FreshAuthenticator, FreshHuman, ReauthStart,
-        SecurityShell,
+        ApprovalRegistry, FreshAuthenticator, FreshHuman, ReauthStart, SecurityShell,
     };
     use axum::http::{HeaderMap, Method, StatusCode, header};
     use day2_capabilities::Name;
@@ -877,11 +879,16 @@ mod tests {
             .unwrap()
     }
 
-    struct TestApprovalRegistry(QualificationFixture);
+    struct TestApprovalAuthority(QualificationFixture);
 
-    impl ApprovalRegistry for TestApprovalRegistry {
-        fn resolve(&self, attempt: &str) -> Result<Option<ApprovalContext>> {
-            if attempt != self.0.intent.attempt {
+    impl ApprovalAuthority for TestApprovalAuthority {
+        fn current(
+            &self,
+            intent: &ConnectIntent,
+            binding: &CallbackBinding,
+            _: i64,
+        ) -> Result<Option<ApprovalTerms>> {
+            if intent != &self.0.intent || binding != &self.0.binding {
                 return Ok(None);
             }
             let fixture = self.0.clone();
@@ -896,9 +903,7 @@ mod tests {
                 fixture.instance.shell.origin.clone(),
                 approval.clone(),
             )?;
-            Ok(Some(ApprovalContext {
-                intent: fixture.intent,
-                binding: fixture.binding,
+            Ok(Some(ApprovalTerms {
                 requirement: fixture.requirement,
                 permission: fixture.permission,
                 reviewed: fixture.reviewed,
@@ -907,6 +912,41 @@ mod tests {
                 shell_key,
             }))
         }
+    }
+
+    #[test]
+    fn stored_approval_registry_uses_only_current_durable_pending_state() {
+        let fixture = external_fixture();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("approval-registry.sqlite");
+        let mut db = rusqlite::Connection::open(&path).unwrap();
+        quarantine_external_fixture(&mut db, &fixture, &exchange_key());
+        let registry = StoredApprovalRegistry::new(
+            path,
+            std::sync::Arc::new(TestApprovalAuthority(fixture.clone())),
+        );
+        assert!(registry.resolve("other", 5).unwrap().is_none());
+        assert!(registry.resolve("attempt_1", 100).unwrap().is_none());
+        assert!(registry.resolve("attempt_1", 5).unwrap().is_some());
+
+        db.execute(
+            "UPDATE oauth_callback_bindings SET binding = '{}' WHERE attempt = 'attempt_1'",
+            [],
+        )
+        .unwrap();
+        assert!(registry.resolve("attempt_1", 5).is_err());
+        db.execute(
+            "UPDATE oauth_callback_bindings SET binding = ?1 WHERE attempt = 'attempt_1'",
+            [serde_json::to_string(&fixture.binding).unwrap()],
+        )
+        .unwrap();
+        db.execute(
+            "UPDATE oauth_connect_attempts SET state = 'denied',
+                    account = NULL, scope_evidence = NULL WHERE attempt = 'attempt_1'",
+            [],
+        )
+        .unwrap();
+        assert!(registry.resolve("attempt_1", 5).unwrap().is_none());
     }
 
     struct TestFreshAuth {
@@ -987,8 +1027,11 @@ mod tests {
             .unwrap();
         let shell = SecurityShell::new(
             fixture.instance.shell.origin_url.clone(),
-            path,
-            std::sync::Arc::new(TestApprovalRegistry(fixture)),
+            path.clone(),
+            std::sync::Arc::new(StoredApprovalRegistry::new(
+                path,
+                std::sync::Arc::new(TestApprovalAuthority(fixture)),
+            )),
             std::sync::Arc::new(TestCallbackAuth(pending.challenge().clone())),
         )
         .unwrap();
@@ -1069,8 +1112,11 @@ mod tests {
             .unwrap();
         let shell = SecurityShell::new(
             fixture.instance.shell.origin_url.clone(),
-            path,
-            std::sync::Arc::new(TestApprovalRegistry(fixture.clone())),
+            path.clone(),
+            std::sync::Arc::new(StoredApprovalRegistry::new(
+                path,
+                std::sync::Arc::new(TestApprovalAuthority(fixture.clone())),
+            )),
             std::sync::Arc::new(TestFreshAuth {
                 human: "human_1",
                 authenticated_at: 5,
@@ -1204,7 +1250,10 @@ mod tests {
             let shell = SecurityShell::new(
                 fixture.instance.shell.origin_url.clone(),
                 path.clone(),
-                std::sync::Arc::new(TestApprovalRegistry(fixture.clone())),
+                std::sync::Arc::new(StoredApprovalRegistry::new(
+                    path.clone(),
+                    std::sync::Arc::new(TestApprovalAuthority(fixture.clone())),
+                )),
                 std::sync::Arc::new(TestFreshAuth {
                     human,
                     authenticated_at,

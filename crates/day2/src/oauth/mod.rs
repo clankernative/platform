@@ -1,5 +1,6 @@
 //! Private OAuth protocol state. These primitives are not app capabilities.
 pub mod account;
+pub(crate) mod approval_registry;
 pub mod connect;
 pub mod custody;
 pub mod exchange;
