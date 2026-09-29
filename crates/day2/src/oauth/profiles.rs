@@ -549,7 +549,9 @@ mod tests {
     use crate::managed_credentials::crypto::KeyLease;
     use crate::oauth::account::{MappedHumanEvidence, ProviderAccount};
     use crate::oauth::approval_registry::{
-        ApprovalAuthority, ApprovalTerms, StoredApprovalRegistry,
+        AdmittedApproval, ApprovalAuthority, ApprovalKeyMaterial, ApprovalKeyProvider,
+        ApprovalKeyPurpose, ApprovalKeyRef, ApprovalTerms, SelectedApprovalAuthority,
+        StoredApprovalRegistry,
     };
     use crate::oauth::connect::{
         self, CallbackBinding, CallbackBindingSpec, ConnectIntent, ConnectState,
@@ -933,6 +935,133 @@ mod tests {
             )
             .unwrap(),
         )
+    }
+
+    struct TestApprovalKeys(std::sync::atomic::AtomicU8);
+
+    impl ApprovalKeyProvider for TestApprovalKeys {
+        fn load(
+            &self,
+            reference: &ApprovalKeyRef,
+            purpose: ApprovalKeyPurpose,
+        ) -> Result<ApprovalKeyMaterial> {
+            use std::sync::atomic::Ordering;
+            let mode = self.0.load(Ordering::SeqCst);
+            ensure!(mode != 2, "selected key unavailable");
+            Ok(ApprovalKeyMaterial {
+                binding: reference.binding.clone(),
+                version: if mode == 1 {
+                    "substituted_version".into()
+                } else {
+                    reference.version.clone()
+                },
+                purpose,
+                bytes: match purpose {
+                    ApprovalKeyPurpose::CustodyVerifier => [7; 32],
+                    ApprovalKeyPurpose::CustodyEncryption => [9; 32],
+                    ApprovalKeyPurpose::ShellAttestation => [12; 32],
+                },
+            })
+        }
+    }
+
+    fn selected_approval(fixture: &QualificationFixture) -> AdmittedApproval {
+        let AccountBindingEvidence::ExplicitExternal { approval, .. } = &fixture.instance.account
+        else {
+            unreachable!()
+        };
+        AdmittedApproval {
+            requirement: fixture.requirement.clone(),
+            permission: fixture.permission.clone(),
+            reviewed: fixture.reviewed.clone(),
+            instance: fixture.instance.clone(),
+            custody_verifier: ApprovalKeyRef {
+                binding: fixture.instance.custody.clone(),
+                version: "verify_v1".into(),
+            },
+            custody_encryption: ApprovalKeyRef {
+                binding: fixture.instance.custody.clone(),
+                version: "encrypt_v1".into(),
+            },
+            shell_attestation: ApprovalKeyRef {
+                binding: approval.clone(),
+                version: "shell_v1".into(),
+            },
+        }
+    }
+
+    fn selected_instance() -> crate::artifact::Instance {
+        crate::artifact::Instance::from_bytes(
+            br#"{
+                "installation":"installation","environment":"production",
+                "identity":{"scheme":"google_iap","hosted_domain":"example.com"},
+                "security_shell":{"origin":"https://security.example",
+                    "iap_audience":"/projects/1/global/backendServices/1"},
+                "apps":{"app":{"artifact":"sha256:fixture","readers":[],"writers":[],
+                    "edge":{"origin":"https://app.example",
+                        "iap_audience":"/projects/1/global/backendServices/2"}}}
+            }"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn selected_approval_rechecks_admission_and_exact_keys_on_each_lookup() {
+        use std::sync::{Arc, atomic::Ordering};
+        let fixture = external_fixture();
+        let keys = Arc::new(TestApprovalKeys(std::sync::atomic::AtomicU8::new(0)));
+        let selected = selected_approval(&fixture);
+        let entries = BTreeMap::from([(("app".into(), fixture.intent.slot.clone()), selected)]);
+        let authority =
+            SelectedApprovalAuthority::new(&selected_instance(), entries.clone(), keys.clone())
+                .unwrap();
+        assert!(
+            authority
+                .current("app", &fixture.intent, &fixture.binding, 5)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            authority
+                .current("other", &fixture.intent, &fixture.binding, 5)
+                .unwrap()
+                .is_none()
+        );
+        keys.0.store(1, Ordering::SeqCst);
+        assert!(
+            authority
+                .current("app", &fixture.intent, &fixture.binding, 5)
+                .is_err()
+        );
+        keys.0.store(2, Ordering::SeqCst);
+        assert!(
+            authority
+                .current("app", &fixture.intent, &fixture.binding, 5)
+                .is_err()
+        );
+        keys.0.store(0, Ordering::SeqCst);
+        authority.replace(BTreeMap::new()).unwrap();
+        assert!(
+            authority
+                .current("app", &fixture.intent, &fixture.binding, 5)
+                .unwrap()
+                .is_none()
+        );
+        let mut wrong_origin = entries;
+        wrong_origin
+            .values_mut()
+            .next()
+            .unwrap()
+            .instance
+            .shell
+            .origin_url = "https://app.example/".into();
+        assert!(authority.replace(wrong_origin).is_err());
+        assert!(
+            authority
+                .current("app", &fixture.intent, &fixture.binding, 5)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
