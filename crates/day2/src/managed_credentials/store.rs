@@ -203,15 +203,11 @@ pub(crate) fn prepare_issue(
             "fixed credential grant cannot narrow a declared root"
         );
     }
-    for id in [
-        &intent.family,
-        &intent.invocation,
-        &intent.principal,
-        &intent.creator,
-        &intent.recipient,
-        &intent.session,
-    ] {
+    for id in [&intent.family, &intent.invocation, &intent.session] {
         validate_id(id)?;
+    }
+    for actor in [&intent.principal, &intent.creator, &intent.recipient] {
+        crate::authority::valid_actor(actor)?;
     }
     ensure!(
         !intent.label.trim().is_empty()
@@ -659,7 +655,7 @@ struct MetadataCursor {
 fn metadata_read_key(read: &MetadataRead<'_>) -> Result<(String, Digest, Digest)> {
     read.namespace.validate()?;
     read.family.verify()?;
-    validate_id(read.requester)?;
+    crate::authority::valid_actor(read.requester)?;
     ensure!(
         matches!(
             read.family.profile,
@@ -1095,9 +1091,10 @@ pub(crate) fn authorize_reveal(
     db: &mut Connection,
     post: VerifiedHumanPost,
 ) -> Result<Option<HumanRevealPermit>> {
-    for id in [&post.version, &post.recipient, &post.session, &post.attempt] {
+    for id in [&post.version, &post.session, &post.attempt] {
         validate_id(id)?;
     }
+    crate::authority::valid_actor(&post.recipient)?;
     let expected_namespace_key = namespace_key(&post.namespace)?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     struct RevealRow {
@@ -1462,6 +1459,45 @@ mod tests {
             now,
             operation,
         }
+    }
+
+    #[test]
+    fn email_session_principal_can_read_only_its_own_metadata() -> Result<()> {
+        let (_dir, mut db) = database()?;
+        let mut intent = issue("email-invocation");
+        intent.creator = "alice@example.com".into();
+        intent.recipient = "alice@example.com".into();
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        stage_issue(&tx, prepare_issue(&lease(), &family(), intent)?)?;
+        tx.commit()?;
+        let family = family();
+        let namespace = namespace();
+        let policy = creator_policy();
+        let request = ListRequest {
+            after: FamilyCursor {
+                family: family.id.clone(),
+                opaque: String::new(),
+            },
+            limit: 10,
+        };
+        let read = MetadataRead {
+            namespace: &namespace,
+            family: &family,
+            policy: &policy,
+            requester: "alice@example.com",
+        };
+        assert_eq!(list_metadata(&db, &read, &request)?.unwrap().items.len(), 1);
+        let invisible = MetadataRead {
+            requester: "bob@example.com",
+            ..read
+        };
+        assert!(
+            list_metadata(&db, &invisible, &request)?
+                .unwrap()
+                .items
+                .is_empty()
+        );
+        Ok(())
     }
 
     #[test]

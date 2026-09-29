@@ -99,9 +99,10 @@ pub(crate) struct MaterialIdentity {
 impl MaterialIdentity {
     fn validate(&self) -> Result<()> {
         self.namespace.validate()?;
-        for id in [&self.family, &self.lineage, &self.version, &self.recipient] {
+        for id in [&self.family, &self.lineage, &self.version] {
             validate_id(id)?;
         }
+        crate::authority::valid_actor(&self.recipient)?;
         ensure!(
             self.security_epoch > 0 && self.material_revision > 0,
             "invalid material identity revision"

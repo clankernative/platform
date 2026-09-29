@@ -123,7 +123,11 @@ before a page limit; cursors bind the namespace, family contract, requester and
 management policy revision, and each call rechecks its supplied policy. These
 readers return only safe summary and rotation data. The host must still verify
 the activated family selection, current policy and authenticated requester
-before calling them.
+before calling them. A host-only runtime adapter now performs those checks for
+a live browser session in one app database snapshot before list or inspect. It
+refuses an inactive family, artifact mismatch or changed app scope. It is not
+connected to a generated Roc method or HTTP route, and only creator visibility
+for client and personal families is supported.
 Group and resource visibility, generated Roc methods and HTTP routes are not
 connected yet.
 
