@@ -572,3 +572,30 @@ run "refuses_a_credential_no_connection_declares" {
   }
   expect_failures = [kubernetes_config_map_v1.credentials]
 }
+
+run "renders_journal_trace_retention_only_when_set" {
+  command = plan
+  variables {
+    journal_trace_hours = 2
+  }
+  assert {
+    condition     = jsondecode(kubernetes_config_map_v1.instance.data["instance.json"]).apps.example_app.journal == { trace_hours = 2 }
+    error_message = "journal_trace_hours must render as the app's journal policy."
+  }
+}
+
+run "omits_journal_policy_by_default" {
+  command = plan
+  assert {
+    condition     = !can(jsondecode(kubernetes_config_map_v1.instance.data["instance.json"]).apps.example_app.journal)
+    error_message = "Without journal_trace_hours the app keeps day2's default retention."
+  }
+}
+
+run "refuses_fractional_trace_retention" {
+  command = plan
+  variables {
+    journal_trace_hours = 1.5
+  }
+  expect_failures = [var.journal_trace_hours]
+}

@@ -51,3 +51,13 @@ variable "ingress" {
     error_message = "Signed ingress needs a resource catalog and explicit actor/connection bindings."
   }
 }
+
+variable "journal_trace_hours" {
+  description = "Hours a completed invocation keeps its full trace before compaction to a receipt (instance journal.trace_hours). Null keeps day2's default (72). Apps with frequent scheduled work should keep this short: each trace carries its admitted authority."
+  type        = number
+  default     = null
+  validation {
+    condition     = var.journal_trace_hours == null ? true : (var.journal_trace_hours == floor(var.journal_trace_hours) && var.journal_trace_hours >= 1 && var.journal_trace_hours <= 8784)
+    error_message = "journal_trace_hours must be a whole number of hours between 1 and 8784."
+  }
+}
