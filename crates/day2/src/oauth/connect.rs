@@ -915,6 +915,57 @@ pub fn state(db: &Connection, attempt: &str) -> Result<Option<ConnectState>> {
     .transpose()
 }
 
+/// Read the durable attempt and callback evidence for a pending external
+/// approval. A request path supplies only the opaque attempt identifier; the
+/// provider, registration, account and original session come from SQLite.
+pub(super) fn pending_approval(
+    db: &Connection,
+    attempt: &str,
+    now: i64,
+) -> Result<Option<(ConnectIntent, CallbackBinding)>> {
+    identifier(attempt)?;
+    let row: Option<(ConnectIntent, Option<String>)> = db
+        .query_row(
+            "SELECT a.slot, a.expected_generation, a.expected_epoch,
+                    a.proposed_generation, a.owner, a.profile,
+                    a.registration, a.callback, a.consent, a.expires_at,
+                    b.binding
+             FROM oauth_connect_attempts AS a
+             LEFT JOIN oauth_callback_bindings AS b ON b.attempt = a.attempt
+             WHERE a.attempt = ?1 AND a.state = 'awaiting_account_approval'
+                   AND a.expires_at > ?2",
+            params![attempt, now],
+            |row| {
+                Ok((
+                    ConnectIntent {
+                        attempt: attempt.to_owned(),
+                        slot: row.get(0)?,
+                        expected_generation: row.get(1)?,
+                        expected_epoch: row.get(2)?,
+                        proposed_generation: row.get(3)?,
+                        owner: row.get(4)?,
+                        profile: row.get(5)?,
+                        registration: row.get(6)?,
+                        callback: row.get(7)?,
+                        consent: row.get(8)?,
+                        expires_at: row.get(9)?,
+                    },
+                    row.get(10)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((intent, binding)) = row else {
+        return Ok(None);
+    };
+    validate(&intent)?;
+    let binding: CallbackBinding = serde_json::from_str(
+        &binding.ok_or_else(|| anyhow::anyhow!("pending approval missing callback binding"))?,
+    )?;
+    binding.verify(&intent)?;
+    Ok(Some((intent, binding)))
+}
+
 pub(super) fn slot_matches(tx: &Transaction<'_>, intent: &ConnectIntent) -> Result<bool> {
     let row: Option<(i64, i64, String)> = tx
         .query_row(

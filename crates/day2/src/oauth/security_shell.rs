@@ -1,7 +1,7 @@
 //! Isolated browser approval for an external provider account. The shell has
 //! its own origin and short-lived cookie; app sessions never authorize it.
 
-use super::{connect, external, profiles, shell_oidc};
+use super::{approval_registry, connect, external, profiles, shell_oidc};
 use crate::{artifact::Instance, iap};
 use crate::{managed_credentials::crypto::KeyLease, store::open, web_security};
 use anyhow::{Context, Result, ensure};
@@ -57,7 +57,7 @@ impl ApprovalContext {
 }
 
 pub(crate) trait ApprovalRegistry: Send + Sync {
-    fn resolve(&self, attempt: &str) -> Result<Option<ApprovalContext>>;
+    fn resolve(&self, attempt: &str, now: i64) -> Result<Option<ApprovalContext>>;
 }
 
 /// The caller must verify an interactive reauthentication event at the shell
@@ -122,7 +122,7 @@ impl SecurityShell {
     pub(crate) fn from_instance(
         instance: &Instance,
         db: PathBuf,
-        registry: Arc<dyn ApprovalRegistry>,
+        authority: Arc<dyn approval_registry::ApprovalAuthority>,
         client_id: String,
         client_secret: String,
     ) -> Result<Arc<Self>> {
@@ -135,6 +135,10 @@ impl SecurityShell {
             client_id,
             client_secret,
         )?);
+        let registry = Arc::new(approval_registry::StoredApprovalRegistry::new(
+            db.clone(),
+            authority,
+        ));
         Self::new(origin, db, registry, authenticator)
     }
 
@@ -275,7 +279,7 @@ impl SecurityShell {
         identity: &iap::Verified,
         at: i64,
     ) -> Result<Option<(ApprovalContext, external::PendingExternalApproval)>> {
-        let Some(context) = self.registry.resolve(attempt)? else {
+        let Some(context) = self.registry.resolve(attempt, at)? else {
             return Ok(None);
         };
         ensure!(
