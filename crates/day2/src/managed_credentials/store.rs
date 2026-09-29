@@ -9,11 +9,16 @@ use super::crypto::{
 use anyhow::{Context, Result, ensure};
 use day2_capabilities::{
     Digest,
-    credentials::{GrantMode, ManagedProfile, ManagementSnapshot, ManifestFamily, Namespace},
+    credentials::{
+        CollectionPage, FamilyCursor, GrantMode, Inspection, LineageRef, ListFailure, ListRequest,
+        ManagedProfile, ManagementPolicy, ManagementPredicate, ManagementSnapshot, ManagementState,
+        ManifestFamily, Namespace, Summary, VersionRef,
+    },
     oauth::{GrantCeiling, OperationAuthorityContract},
 };
 use getrandom::fill;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use serde::{Deserialize, Serialize};
 
 pub(crate) fn install_schema(db: &Connection) -> Result<()> {
     db.execute_batch(
@@ -629,6 +634,274 @@ pub(crate) fn stage_revoke(
     Ok(changed == 1)
 }
 
+/// The caller must resolve this policy from the currently selected instance
+/// and establish the requester's authenticated identity. Only creator
+/// visibility is supported until group-membership evidence has a host verifier.
+#[derive(Clone, Copy)]
+pub(crate) struct MetadataRead<'a> {
+    pub namespace: &'a Namespace,
+    pub family: &'a ManifestFamily,
+    pub policy: &'a ManagementPolicy,
+    pub requester: &'a str,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MetadataCursor {
+    format: u8,
+    namespace: Digest,
+    family_contract: Digest,
+    policy: Digest,
+    requester: Digest,
+    after: String,
+}
+
+fn metadata_read_key(read: &MetadataRead<'_>) -> Result<(String, Digest, Digest)> {
+    read.namespace.validate()?;
+    read.family.verify()?;
+    validate_id(read.requester)?;
+    ensure!(
+        matches!(
+            read.family.profile,
+            ManagedProfile::Client | ManagedProfile::Personal
+        ),
+        "resource and impersonation metadata need their qualified target reader"
+    );
+    Ok((
+        namespace_key(read.namespace)?,
+        Digest::of(read.policy)?,
+        Digest::of(&("credential-metadata-requester-v1", read.requester))?,
+    ))
+}
+
+fn decode_metadata_cursor(
+    cursor: &FamilyCursor,
+    read: &MetadataRead<'_>,
+    namespace: &str,
+    policy: &Digest,
+    requester: &Digest,
+) -> Option<String> {
+    if cursor.family != read.family.id || cursor.opaque.len() > 2048 {
+        return None;
+    }
+    if cursor.opaque.is_empty() {
+        return Some(String::new());
+    }
+    let raw = base64::Engine::decode(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+        &cursor.opaque,
+    )
+    .ok()?;
+    let decoded: MetadataCursor = serde_json::from_slice(&raw).ok()?;
+    (decoded.format == 1
+        && decoded.namespace.as_str() == namespace
+        && decoded.family_contract == read.family.contract
+        && decoded.policy == *policy
+        && decoded.requester == *requester
+        && validate_id(&decoded.after).is_ok())
+    .then_some(decoded.after)
+}
+
+fn encode_metadata_cursor(
+    read: &MetadataRead<'_>,
+    namespace: &str,
+    policy: &Digest,
+    requester: &Digest,
+    after: String,
+) -> Result<FamilyCursor> {
+    let value = MetadataCursor {
+        format: 1,
+        namespace: Digest::try_from(namespace.to_owned())?,
+        family_contract: read.family.contract.clone(),
+        policy: policy.clone(),
+        requester: requester.clone(),
+        after,
+    };
+    Ok(FamilyCursor {
+        family: read.family.id.clone(),
+        opaque: base64::Engine::encode(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+            serde_json::to_vec(&value)?,
+        ),
+    })
+}
+
+struct MetadataRow {
+    lineage: String,
+    namespace_json: String,
+    principal: String,
+    label: String,
+    grant_json: String,
+    grant_digest: String,
+    state: String,
+    head: String,
+    revision: i64,
+    expires_at: i64,
+}
+
+fn metadata_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MetadataRow> {
+    Ok(MetadataRow {
+        lineage: row.get(0)?,
+        namespace_json: row.get(1)?,
+        principal: row.get(2)?,
+        label: row.get(3)?,
+        grant_json: row.get(4)?,
+        grant_digest: row.get(5)?,
+        state: row.get(6)?,
+        head: row.get(7)?,
+        revision: row.get(8)?,
+        expires_at: row.get(9)?,
+    })
+}
+
+fn project_metadata(row: MetadataRow, read: &MetadataRead<'_>) -> Result<Inspection> {
+    ensure!(
+        serde_json::from_str::<Namespace>(&row.namespace_json)? == *read.namespace,
+        "stored credential namespace mismatch"
+    );
+    let ceiling: GrantCeiling = serde_json::from_str(&row.grant_json)?;
+    ceiling.verify()?;
+    ensure!(
+        ceiling.digest.as_str() == row.grant_digest && ceiling.subject == row.principal,
+        "stored credential grant mismatch"
+    );
+    let state = match row.state.as_str() {
+        "active" => ManagementState::Active,
+        "revoked" => ManagementState::Revoked,
+        _ => anyhow::bail!("invalid stored credential state"),
+    };
+    let lineage = LineageRef {
+        namespace: read.namespace.clone(),
+        family: read.family.id.clone(),
+        id: row.lineage,
+    };
+    let current_version = VersionRef {
+        lineage: lineage.clone(),
+        id: row.head,
+    };
+    let summary = Summary {
+        lineage: lineage.clone(),
+        current_version: current_version.clone(),
+        label: Some(row.label),
+        principal: row.principal,
+        resource: None,
+        state: state.clone(),
+        grant: Digest::try_from(row.grant_digest)?,
+        expires_at: row.expires_at,
+    };
+    let rotation = read
+        .family
+        .profile
+        .can_rotate()
+        .then_some(ManagementSnapshot {
+            lineage,
+            head: current_version,
+            revision: u64::try_from(row.revision)?,
+            state,
+        });
+    Ok(Inspection { summary, rotation })
+}
+
+/// Bounded keyset selection applies visibility in SQL before limiting rows.
+/// A cursor only locates the next row; every request rechecks current policy.
+pub(crate) fn list_metadata(
+    db: &Connection,
+    read: &MetadataRead<'_>,
+    request: &ListRequest,
+) -> Result<std::result::Result<CollectionPage<Summary>, ListFailure>> {
+    let (namespace, policy, requester) = metadata_read_key(read)?;
+    if !matches!(read.policy.read_metadata, ManagementPredicate::Creator) {
+        return Ok(Err(ListFailure::Denied));
+    }
+    if !(1..=100).contains(&request.limit) {
+        return Ok(Err(ListFailure::InvalidCursor));
+    }
+    let Some(after) = decode_metadata_cursor(&request.after, read, &namespace, &policy, &requester)
+    else {
+        return Ok(Err(ListFailure::InvalidCursor));
+    };
+    let mut query = db.prepare(
+        "SELECT l.id, l.namespace_json, l.principal, l.label, l.grant_json,
+                l.grant_digest, l.state, l.head, l.revision, v.expires_at
+         FROM day2_credential_lineages l
+         JOIN day2_credential_versions v ON v.id = l.head AND v.lineage = l.id
+         WHERE l.namespace = ?1 AND l.family = ?2 AND l.family_contract = ?3
+           AND l.creator = ?4 AND l.id > ?5
+         ORDER BY l.id LIMIT ?6",
+    )?;
+    let rows = query
+        .query_map(
+            params![
+                namespace,
+                read.family.id.as_str(),
+                read.family.contract.as_str(),
+                read.requester,
+                after,
+                i64::from(request.limit) + 1,
+            ],
+            metadata_row,
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let has_more = rows.len() > usize::from(request.limit);
+    let items = rows
+        .into_iter()
+        .take(usize::from(request.limit))
+        .map(|row| project_metadata(row, read).map(|item| item.summary))
+        .collect::<Result<Vec<_>>>()?;
+    let next = if has_more {
+        Some(encode_metadata_cursor(
+            read,
+            &namespace,
+            &policy,
+            &requester,
+            items
+                .last()
+                .context("nonempty credential metadata page")?
+                .lineage
+                .id
+                .clone(),
+        )?)
+    } else {
+        None
+    };
+    Ok(Ok(CollectionPage { items, next }))
+}
+
+/// Unknown and invisible lineages share the same absent result.
+pub(crate) fn inspect_metadata(
+    db: &Connection,
+    read: &MetadataRead<'_>,
+    lineage: &LineageRef,
+) -> Result<Option<Inspection>> {
+    let (namespace, _, _) = metadata_read_key(read)?;
+    if !matches!(read.policy.read_metadata, ManagementPredicate::Creator)
+        || lineage.namespace != *read.namespace
+        || lineage.family != read.family.id
+        || validate_id(&lineage.id).is_err()
+    {
+        return Ok(None);
+    }
+    let row = db
+        .query_row(
+            "SELECT l.id, l.namespace_json, l.principal, l.label, l.grant_json,
+                    l.grant_digest, l.state, l.head, l.revision, v.expires_at
+             FROM day2_credential_lineages l
+             JOIN day2_credential_versions v ON v.id = l.head AND v.lineage = l.id
+             WHERE l.id = ?1 AND l.namespace = ?2 AND l.family = ?3
+               AND l.family_contract = ?4 AND l.creator = ?5",
+            params![
+                lineage.id,
+                namespace,
+                read.family.id.as_str(),
+                read.family.contract.as_str(),
+                read.requester,
+            ],
+            metadata_row,
+        )
+        .optional()?;
+    row.map(|row| project_metadata(row, read)).transpose()
+}
+
 /// Current host evidence, established before a managed token reaches the app
 /// dispatcher. The caller must also check the selected instance binding, the
 /// principal's current policy, audience and resource authorization.
@@ -1135,6 +1408,16 @@ mod tests {
         Ok(receipt)
     }
 
+    fn creator_policy() -> ManagementPolicy {
+        ManagementPolicy {
+            identity_authority: BindingRef::pin(name("people"), &"people-v1").unwrap(),
+            issue: ManagementPredicate::Creator,
+            read_metadata: ManagementPredicate::Creator,
+            rotate: ManagementPredicate::Creator,
+            revoke: ManagementPredicate::Creator,
+        }
+    }
+
     fn post(version: &str, attempt: &str) -> VerifiedHumanPost {
         VerifiedHumanPost {
             namespace: namespace(),
@@ -1179,6 +1462,166 @@ mod tests {
             now,
             operation,
         }
+    }
+
+    #[test]
+    fn metadata_pages_are_bounded_to_current_family_namespace_creator_and_policy() -> Result<()> {
+        let (_dir, mut db) = database()?;
+        let first = committed_issue(&mut db)?;
+        let mut second_intent = issue("invocation-2");
+        second_intent.label = "Second key".into();
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let second = stage_issue(&tx, prepare_issue(&lease(), &family(), second_intent)?)?
+            .public_identity()
+            .clone();
+        tx.commit()?;
+        let mut other_intent = issue("invocation-3");
+        other_intent.creator = "issuer/other".into();
+        other_intent.recipient = "issuer/other".into();
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let other = stage_issue(&tx, prepare_issue(&lease(), &family(), other_intent)?)?
+            .public_identity()
+            .clone();
+        tx.commit()?;
+
+        let family = family();
+        let policy = creator_policy();
+        let namespace = namespace();
+        let read = MetadataRead {
+            namespace: &namespace,
+            family: &family,
+            policy: &policy,
+            requester: "issuer/human-1",
+        };
+        let start = FamilyCursor {
+            family: family.id.clone(),
+            opaque: String::new(),
+        };
+        let first_page = list_metadata(
+            &db,
+            &read,
+            &ListRequest {
+                after: start,
+                limit: 1,
+            },
+        )?
+        .map_err(|_| anyhow::anyhow!("first page refused"))?;
+        assert_eq!(first_page.items.len(), 1);
+        let cursor = first_page.next.context("expected second page")?;
+        let second_page = list_metadata(
+            &db,
+            &read,
+            &ListRequest {
+                after: cursor.clone(),
+                limit: 1,
+            },
+        )?
+        .map_err(|_| anyhow::anyhow!("second page refused"))?;
+        assert_eq!(second_page.items.len(), 1);
+        assert!(second_page.next.is_none());
+        let found = [
+            first_page.items[0].lineage.id.clone(),
+            second_page.items[0].lineage.id.clone(),
+        ];
+        assert!(found.contains(&first.lineage));
+        assert!(found.contains(&second.lineage));
+        assert!(!found.contains(&other.lineage));
+        let visible = inspect_metadata(&db, &read, &snapshot(&first).lineage)?
+            .context("creator cannot inspect own credential")?;
+        assert_eq!(
+            visible.summary.current_version.id.as_str(),
+            first.version.as_deref().unwrap()
+        );
+        assert_eq!(visible.rotation.unwrap().revision, 1);
+        assert!(inspect_metadata(&db, &read, &snapshot(&other).lineage)?.is_none());
+
+        let changed_policy = ManagementPolicy {
+            identity_authority: BindingRef::pin(name("people"), &"people-v2")?,
+            ..policy.clone()
+        };
+        let changed = MetadataRead {
+            policy: &changed_policy,
+            ..read
+        };
+        assert!(matches!(
+            list_metadata(
+                &db,
+                &changed,
+                &ListRequest {
+                    after: cursor.clone(),
+                    limit: 1
+                }
+            )?,
+            Err(ListFailure::InvalidCursor)
+        ));
+        let other_requester = MetadataRead {
+            requester: "issuer/other",
+            ..read
+        };
+        assert!(matches!(
+            list_metadata(
+                &db,
+                &other_requester,
+                &ListRequest {
+                    after: cursor,
+                    limit: 1
+                }
+            )?,
+            Err(ListFailure::InvalidCursor)
+        ));
+        assert!(matches!(
+            list_metadata(
+                &db,
+                &other_requester,
+                &ListRequest {
+                    after: FamilyCursor {
+                        family: family.id.clone(),
+                        opaque: "malformed!".into(),
+                    },
+                    limit: 1,
+                }
+            )?,
+            Err(ListFailure::InvalidCursor)
+        ));
+        let group_policy = ManagementPolicy {
+            read_metadata: ManagementPredicate::MemberOf {
+                group: name("admins"),
+            },
+            ..policy.clone()
+        };
+        assert!(matches!(
+            list_metadata(
+                &db,
+                &MetadataRead {
+                    policy: &group_policy,
+                    ..read
+                },
+                &ListRequest {
+                    after: FamilyCursor {
+                        family: family.id.clone(),
+                        opaque: String::new(),
+                    },
+                    limit: 1,
+                }
+            )?,
+            Err(ListFailure::Denied)
+        ));
+        let mut foreign = snapshot(&second).lineage;
+        foreign.namespace.app = name("another-app");
+        assert!(inspect_metadata(&db, &read, &foreign)?.is_none());
+
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        assert!(stage_revoke(&tx, &namespace, &first.lineage)?);
+        tx.commit()?;
+        let revoked = inspect_metadata(&db, &read, &snapshot(&first).lineage)?
+            .context("revoked lineage must remain visible for management")?;
+        assert_eq!(revoked.summary.state, ManagementState::Revoked);
+        db.execute(
+            "UPDATE day2_credential_lineages SET grant_digest = ?1 WHERE id = ?2",
+            params![Digest::new(b"substituted").as_str(), first.lineage],
+        )?;
+        assert!(inspect_metadata(&db, &read, &snapshot(&first).lineage).is_err());
+        Ok(())
     }
 
     #[test]
