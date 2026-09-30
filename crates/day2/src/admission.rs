@@ -43,6 +43,21 @@ const FACTORIES: &[(&str, &str)] = &[
 
 const SEALED: &[(&str, &str, &str)] = &[
     (
+        "ConnectionAccess.roc",
+        "define",
+        "3afad645a9729ae965fbb91acc17ee529e5f940464418b9a5eaa010c8a8838bb",
+    ),
+    (
+        "ConnectionRequirement.roc",
+        "",
+        "3f684824313f32d39576c860022a12724fa148e7836403dec08148ddfeb1ac90",
+    ),
+    (
+        "GoogleCalendar.roc",
+        "",
+        "4c3316dd010c2c67cd4331fb2b7cd397dd054cdd7cec2abd776e97cbf66adfe4",
+    ),
+    (
         "Credential.roc",
         "",
         "0b99cb213636576d77e5804149f3cd64ce9b6e0a6db61d7098f0ca211c4eea07",
@@ -228,6 +243,7 @@ const SEALED: &[(&str, &str, &str)] = &[
 /// compile — which is why `a_module_the_admission_stage_copies_verbatim_cannot_
 /// use_a_restricted_name` reads this same table rather than a second copy of it.
 const RESTRICTED_CALLS: &[(&str, &str)] = &[
+    ("ConnectionAccess", "define"),
     ("CredentialMetadataAccess", "define"),
     ("Tx", "host_reject"),
     ("Tx", "from_host"),
@@ -530,7 +546,13 @@ mod tests {
                 fs::read_to_string(crate::sdk::source_path(&sdk, module).unwrap()).unwrap();
             let restricted = restrict_sealed(module, &source).unwrap();
             assert_eq!(restricted.replace("admission_", ""), source);
-            assert!(restrict_sealed(module, &restricted).is_err());
+            if *module == "ConnectionRequirement.roc" {
+                // Public pure intent constructors have no host factory to
+                // rename. Their complete reviewed bytes are still pinned.
+                assert_eq!(restricted, source);
+            } else {
+                assert!(restrict_sealed(module, &restricted).is_err());
+            }
             assert!(restrict_sealed(module, &format!("{source}\n# changed\n")).is_err());
         }
         for name in crate::sdk::module_files() {

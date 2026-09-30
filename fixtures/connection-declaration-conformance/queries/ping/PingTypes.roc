@@ -1,0 +1,3 @@
+PingTypes :: [].{
+	Input : {}
+}

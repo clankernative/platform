@@ -50,6 +50,7 @@ mod release_binding;
 // Protocol kernels are staged behind host-only verification and custody wiring.
 #[allow(dead_code)]
 mod oauth;
+pub use oauth::declaration as connection_declaration;
 pub mod openapi;
 pub mod operation_catalog;
 pub mod operation_contract;

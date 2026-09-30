@@ -374,6 +374,13 @@ fn publish(root: &Path, prepared: &mut Prepared, bound: &Bound) -> Result<PathBu
         artifact["credential_manifest"] =
             serde_json::to_value(day2::credential_authority::manifest(&with_declarations)?)?;
     }
+    if !declarations.connections.is_empty() {
+        artifact["connection_declarations"] =
+            serde_json::to_value(day2::connection_declaration::decode(
+                &worker.exchange(b"connection-contract")?,
+                &checked,
+            )?)?;
+    }
     artifact["export_manifest"] = serde_json::to_value(
         day2::operation_contract::Manifest::from_checked_artifact(&checked)?,
     )?;

@@ -224,6 +224,8 @@ pub struct Artifact {
     pub credential_declarations: Vec<day2_capabilities::credentials::FamilyDeclaration>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub credential_manifest: Vec<day2_capabilities::credentials::ManifestFamily>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connection_declarations: Vec<day2_capabilities::oauth::ConnectionDeclaration>,
     #[serde(default)]
     pub checked_types_digest: String,
     pub roc_version: String,
@@ -565,6 +567,11 @@ impl LoadedArtifact {
         if contract.format >= 10 {
             contract.declarations.validate_artifact(&contract)?;
             crate::credential_declaration::validate(&contract.credential_declarations, &contract)?;
+            crate::oauth::declaration::validate(&contract.connection_declarations, &contract)?;
+            ensure!(
+                contract.format >= 14 || contract.connection_declarations.is_empty(),
+                "legacy artifact has connection declarations"
+            );
             if !contract.credential_declarations.is_empty()
                 || !contract.credential_manifest.is_empty()
             {
@@ -787,6 +794,16 @@ impl LoadedArtifact {
                 ensure!(
                     compiled == loaded.contract.credential_declarations,
                     "credential declarations differ from compiled App.definition"
+                );
+            }
+            if !loaded.contract.connection_declarations.is_empty() {
+                let compiled = crate::oauth::declaration::decode(
+                    &worker.exchange(b"connection-contract")?,
+                    &loaded.contract,
+                )?;
+                ensure!(
+                    compiled == loaded.contract.connection_declarations,
+                    "connection declarations differ from compiled App.definition"
                 );
             }
             let mut manifest: serde_json::Value =

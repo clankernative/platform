@@ -75,6 +75,15 @@ pub struct ConnectionRequirement {
     pub usage: String,
 }
 
+/// Derived from one checked App.definition.connections registration. Instance
+/// configuration selects this requirement; it never authors another copy.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectionDeclaration {
+    pub registration: Name,
+    pub requirement: ConnectionRequirement,
+}
+
 impl ConnectionRequirement {
     pub fn validate(&self) -> Result<()> {
         identifier(&self.logical_id)?;

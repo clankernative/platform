@@ -231,6 +231,10 @@ pub fn declares_credentials(source: &str) -> Result<bool> {
     declares_category(source, "credentials")
 }
 
+pub fn declares_connections(source: &str) -> Result<bool> {
+    declares_category(source, "connections")
+}
+
 pub fn identity_module(namespace: &str) -> Result<String> {
     crate::schema::identifier(namespace)?;
     Ok(format!(

@@ -16,6 +16,7 @@ commands/analyze/AnalyzeReportTypes.roc # captured nominal request
 commands/notify/NotifyReady.roc        # preparation, decision, external effects, completion
 domain/Title.roc                     # nominal value and executable constraints
 domain/Document.roc
+connections/CalendarConnection.roc   # app-owned semantic connection requirement
 storage/Models.roc                   # nominal persistent records; each is a table
 shared/ReportView.roc                # shared result shapes and field meaning
 verification/ReportInvariants.roc    # checks spanning application state
@@ -209,3 +210,17 @@ Scaffolding belongs in the platform's Roc operational workflow and must invoke
 the same ordinary build and required verification. A placeholder description or
 unfinished check must not gain a bypass. There is no app-creation workflow yet; this
 is its required output convention, not an additional runtime manifest.
+
+## Connection intent
+
+Declare outbound connection intent in a module under `connections/`, and
+register it once in `App.definition.connections`. `pf.ConnectionRequirement`
+requires an explicit stable logical ID, revision, owner category, account policy,
+usage and a closed semantic access value such as `pf.GoogleCalendar.read_events`.
+The build derives `connection_declarations` from the checked native registration;
+admission compares those bytes with the compiled app. Scope strings, deployment
+URLs, registrations and credentials belong to the private host and instance.
+
+Declaration support does not supply the generated nominal `Use`, Calendar event
+execution, or live registration qualification. See the connection declaration
+conformance fixture for the currently supported declaration API.

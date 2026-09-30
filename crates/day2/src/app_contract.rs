@@ -829,6 +829,13 @@ pub fn modules(
     source.push_str(&verification);
     source.push_str(&format!("    definition : AppContract.Product -> Try(Api.Definition, Str)\n    definition = |product| Ok({{ operations: [{}], presentation: product.presentation, identities: SchemaSource.identities }})\n", metadata.join(", ")));
     source.push_str(&format!("    {prefix}step : AppContract.Product, Str -> Str\n    {prefix}step = |product, raw| {{\n        if raw == \"app-contract\" {{\n            result = definition(product)\n            empty : Api.Definition\n            empty = {{ operations: [], presentation: product.presentation, identities: SchemaSource.identities }}\n            return match result {{\n                Ok(value) => Json.to_str({{ definition: value, error: \"\" }})\n                Err(error) => Json.to_str({{ definition: empty, error }})\n            }}\n        }}\n        if raw == \"examples\" {{ return Example.encode(product.examples) }}\n        Product.{prefix}step({{ namespace: product.namespace, commands: [{}], queries: [{}], pages: product.pages, properties: product.properties }}, raw)\n    }}\n}}\n", bindings["command"], bindings["query"]));
+    if !catalog.connections.is_empty() {
+        let declarations = catalog.connections.keys().map(|name| format!(
+            "{{ registration: \"{name}\", requirement: product.connections.{name}.metadata() }}"
+        )).collect::<Vec<_>>().join(", ");
+        source = source.replacen("        if raw == \"examples\"",
+            &format!("        if raw == \"connection-contract\" {{ return Json.to_str([{declarations}]) }}\n        if raw == \"examples\""), 1);
+    }
     if !catalog.credentials.is_empty() {
         let families = catalog
             .credentials
@@ -1034,6 +1041,34 @@ pub fn modules(
         "{imports}import pf.Api\nimport pf.PageBinding\nimport pf.Property\nimport pf.Example\n{schedule_import}{ingress_import}{redirect_import}AppContract :: [].{{\n    Product : {{ namespace : Str, operations : {{ {} }}, pages : List(PageBinding), properties : List(Property), examples : List(Example), presentation : Api.Presentation{schedule_field}{ingress_field}{redirect_field} }}\n}}\n",
         operation_types.join(", ")
     );
+    let contract = if catalog.connections.is_empty() {
+        contract
+    } else {
+        let connections = catalog
+            .connections
+            .iter()
+            .map(|(name, owner)| {
+                let nominal = match owner.as_str() {
+                    "current_human" => "CurrentHuman",
+                    "installation" => "Installation",
+                    _ => unreachable!("checked connection owner"),
+                };
+                format!("{name} : ConnectionRequirement.{nominal}")
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        contract
+            .replacen(
+                "import pf.Api\n",
+                "import pf.Api\nimport pf.ConnectionRequirement\n",
+                1,
+            )
+            .replacen(
+                "presentation : Api.Presentation",
+                &format!("presentation : Api.Presentation, connections : {{ {connections} }}"),
+                1,
+            )
+    };
     let credential_type = format!(
         "{{ {} }}",
         catalog
