@@ -124,6 +124,21 @@ variable "iap_audience_override" {
   }
 }
 
+variable "security_shell_contract" {
+  description = "Optional reference to the installation's security-shell-edge contract. The hostname and IAP audience are read from this contract, not copied into per-app values."
+  type = object({
+    namespace = string
+    name      = string
+  })
+  default = null
+  validation {
+    condition = var.security_shell_contract == null ? true : alltrue([
+      for value in values(var.security_shell_contract) : can(regex("^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$", value))
+    ])
+    error_message = "security_shell_contract must identify a Kubernetes namespace and ConfigMap by DNS label."
+  }
+}
+
 variable "runtime_resources" {
   description = "Day2 linux_sqlite_single_v1 resources. The pod's CPU and memory limits are rendered from these; day2-serve compares the container cgroup against them at start. process_limit is held by the node pool's podPidsLimit (see pod_pids_limit), so it is rendered with process_limit_enforced_by = \"pod\"."
   type = object({

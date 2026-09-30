@@ -3,6 +3,18 @@
 mock_provider "kubernetes" {}
 
 override_data {
+  target = data.kubernetes_config_map_v1.security_shell_contract
+  values = {
+    data = {
+      EDGE_ROLE             = "security_shell"
+      SECURITY_SHELL_ORIGIN = "https://security.tools.example.com"
+      IAP_JWT_AUDIENCE      = "/projects/123456789012/global/backendServices/987654322"
+      REAUTH_CALLBACK_URL   = "https://security.tools.example.com/_day2/reauth/callback"
+    }
+  }
+}
+
+override_data {
   target = data.kubernetes_config_map_v1.platform_contract
   values = {
     data = {
@@ -119,6 +131,96 @@ run "renders_instance_from_platform_contract" {
     )
     error_message = "non-root 10001, read-only root, no privilege escalation, no capabilities, RuntimeDefault seccomp"
   }
+}
+
+run "renders_the_installation_shell_from_its_contract" {
+  command = plan
+  variables {
+    security_shell_contract = { namespace = "day2-security", name = "security-shell-contract" }
+  }
+  assert {
+    condition = jsondecode(kubernetes_config_map_v1.instance.data["instance.json"]).security_shell == {
+      origin       = "https://security.tools.example.com"
+      iap_audience = "/projects/123456789012/global/backendServices/987654322"
+    }
+    error_message = "The per-app runtime instance must carry the origin and audience read from the installation shell contract."
+  }
+}
+
+run "refuses_an_unresolved_shell_contract" {
+  command = plan
+  variables {
+    security_shell_contract = { namespace = "day2-security", name = "security-shell-contract" }
+  }
+  override_data {
+    target = data.kubernetes_config_map_v1.security_shell_contract
+    values = {
+      data = {
+        EDGE_ROLE             = "security_shell"
+        SECURITY_SHELL_ORIGIN = "https://security.tools.example.com"
+        IAP_JWT_AUDIENCE      = ""
+        REAUTH_CALLBACK_URL   = "https://security.tools.example.com/_day2/reauth/callback"
+      }
+    }
+  }
+  expect_failures = [kubernetes_config_map_v1.instance]
+}
+
+run "refuses_an_app_contract_as_the_shell" {
+  command = plan
+  variables {
+    security_shell_contract = { namespace = "app-example", name = "platform-contract" }
+  }
+  override_data {
+    target = data.kubernetes_config_map_v1.security_shell_contract
+    values = {
+      data = {
+        EDGE_ROLE             = "app"
+        SECURITY_SHELL_ORIGIN = "https://security.tools.example.com"
+        IAP_JWT_AUDIENCE      = "/projects/123456789012/global/backendServices/987654322"
+        REAUTH_CALLBACK_URL   = "https://security.tools.example.com/_day2/reauth/callback"
+      }
+    }
+  }
+  expect_failures = [kubernetes_config_map_v1.instance]
+}
+
+run "refuses_the_app_origin_as_the_shell" {
+  command = plan
+  variables {
+    security_shell_contract = { namespace = "day2-security", name = "security-shell-contract" }
+  }
+  override_data {
+    target = data.kubernetes_config_map_v1.security_shell_contract
+    values = {
+      data = {
+        EDGE_ROLE             = "security_shell"
+        SECURITY_SHELL_ORIGIN = "https://example.test.example.com"
+        IAP_JWT_AUDIENCE      = "/projects/123456789012/global/backendServices/987654322"
+        REAUTH_CALLBACK_URL   = "https://example.test.example.com/_day2/reauth/callback"
+      }
+    }
+  }
+  expect_failures = [kubernetes_config_map_v1.instance]
+}
+
+run "refuses_the_app_audience_as_the_shell" {
+  command = plan
+  variables {
+    security_shell_contract = { namespace = "day2-security", name = "security-shell-contract" }
+  }
+  override_data {
+    target = data.kubernetes_config_map_v1.security_shell_contract
+    values = {
+      data = {
+        EDGE_ROLE             = "security_shell"
+        SECURITY_SHELL_ORIGIN = "https://security.tools.example.com"
+        IAP_JWT_AUDIENCE      = "/projects/123456789012/global/backendServices/987654321"
+        REAUTH_CALLBACK_URL   = "https://security.tools.example.com/_day2/reauth/callback"
+      }
+    }
+  }
+  expect_failures = [kubernetes_config_map_v1.instance]
 }
 
 run "accepts_a_pod_bound_tighter_than_the_profile" {
