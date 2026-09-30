@@ -1,0 +1,1221 @@
+//! Selected-instance OAuth composition. Requirements come from admitted app
+//! artifacts; provider semantics come from reviewed host code. Qualification
+//! does not establish external readiness or grant invocation authority.
+
+use super::{
+    approval_keys::{AccessTokenSource, GcpApprovalKeys, GcpSecretVersion},
+    approval_registry::{
+        AdmittedApproval, ApprovalAuthority, ApprovalKeyProvider, ApprovalKeyPurpose,
+        ApprovalKeyRef, ApprovalTerms, SelectedApprovalAuthority,
+    },
+    connect, profiles,
+};
+use crate::artifact::{Instance, LoadedArtifact};
+use anyhow::{Context, Result, ensure};
+use day2_capabilities::{
+    BindingRef, Digest, Name, SecretProvider,
+    oauth::{
+        AccountBindingPolicy, ConnectionRequirement, ConnectionSlotKey, OutboundConnectionBinding,
+        ProviderPermissionContract, SlotOwner,
+    },
+};
+use std::{
+    collections::BTreeMap,
+    path::Path,
+    sync::{Arc, RwLock},
+};
+
+/// Only the reviewed host catalog constructs this value. It is deliberately not
+/// deserializable from an instance document or an app's worker output.
+pub(crate) struct ReviewedAccess {
+    pub profile: profiles::ReviewedBrowserCodeProfile,
+    pub capability: String,
+    pub action_scopes: BTreeMap<String, std::collections::BTreeSet<String>>,
+}
+
+pub(crate) struct ReviewedCatalog {
+    entries: BTreeMap<String, ReviewedAccess>,
+}
+
+impl ReviewedCatalog {
+    pub(crate) fn new(entries: Vec<ReviewedAccess>) -> Result<Self> {
+        ensure!(entries.len() <= 64, "OAuth reviewed catalog budget");
+        let mut selected = BTreeMap::new();
+        for entry in entries {
+            crate::schema::identifier(&entry.capability)?;
+            ensure!(
+                !entry.action_scopes.is_empty() && entry.action_scopes.len() <= 32,
+                "OAuth reviewed action budget"
+            );
+            for (action, scopes) in &entry.action_scopes {
+                crate::schema::identifier(action)?;
+                ensure!(
+                    !scopes.is_empty() && scopes.len() <= 32,
+                    "OAuth reviewed scope budget"
+                );
+                for scope in scopes {
+                    ensure!(
+                        !scope.is_empty()
+                            && scope.len() <= 256
+                            && !scope.chars().any(char::is_whitespace)
+                            && !scope.chars().any(char::is_control),
+                        "invalid OAuth reviewed scope"
+                    );
+                }
+            }
+            let identity = entry.profile.protocol.identity();
+            ensure!(
+                identity.binding.revision == entry.profile.review_revision()?
+                    && identity.scope_interpretation
+                        == Digest::of(&(
+                            "oauth-semantic-scope-map-v1",
+                            &entry.capability,
+                            &entry.action_scopes
+                        ))?,
+                "OAuth reviewed semantic scope mapping mismatch"
+            );
+            ensure!(
+                selected
+                    .insert(identity.binding.id.as_str().to_owned(), entry)
+                    .is_none(),
+                "duplicate OAuth reviewed profile"
+            );
+        }
+        Ok(Self { entries: selected })
+    }
+
+    fn resolve(
+        &self,
+        requirement: &ConnectionRequirement,
+        profile: &BindingRef,
+    ) -> Result<(
+        profiles::ReviewedBrowserCodeProfile,
+        ProviderPermissionContract,
+    )> {
+        let entry = self
+            .entries
+            .get(profile.id.as_str())
+            .context("OAuth profile is not reviewed")?;
+        ensure!(
+            entry.profile.protocol.identity().binding == *profile
+                && entry.capability == requirement.capability,
+            "OAuth selected profile revision or capability mismatch"
+        );
+        ensure!(
+            matches!(
+                (&requirement.account_policy, entry.profile.account_evidence),
+                (
+                    AccountBindingPolicy::MappedHuman,
+                    profiles::AccountEvidenceContract::MappedHuman
+                ) | (
+                    AccountBindingPolicy::ExplicitExternalAccount,
+                    profiles::AccountEvidenceContract::ExternalAccount
+                ) | (
+                    AccountBindingPolicy::InstallationAccount,
+                    profiles::AccountEvidenceContract::Installation
+                )
+            ),
+            "OAuth selected profile cannot establish the required account policy"
+        );
+        let action_scopes = requirement
+            .actions
+            .iter()
+            .map(|action| {
+                Ok((
+                    action.clone(),
+                    entry
+                        .action_scopes
+                        .get(action)
+                        .context("OAuth semantic action is not reviewed")?
+                        .clone(),
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>>>()?;
+        let permission = ProviderPermissionContract {
+            requirement: requirement.nominal_identity()?,
+            profile: profile.clone(),
+            action_scopes,
+            interpretation: entry
+                .profile
+                .protocol
+                .identity()
+                .scope_interpretation
+                .clone(),
+        };
+        permission.validate(requirement)?;
+        Ok((entry.profile.clone(), permission))
+    }
+}
+
+struct SelectedConnection {
+    requirement: ConnectionRequirement,
+    permission: ProviderPermissionContract,
+    reviewed: profiles::ReviewedBrowserCodeProfile,
+    binding: OutboundConnectionBinding,
+    custody_verifier: ApprovalKeyRef,
+    custody_encryption: ApprovalKeyRef,
+    shell_attestation: ApprovalKeyRef,
+}
+
+type GcpBinding = (BindingRef, ApprovalKeyPurpose, GcpSecretVersion);
+
+pub(crate) struct QualifiedConnections {
+    instance: Instance,
+    entries: BTreeMap<(String, String), SelectedConnection>,
+    key_bindings: Vec<GcpBinding>,
+}
+
+impl QualifiedConnections {
+    pub(crate) fn instance(&self) -> &Instance {
+        &self.instance
+    }
+
+    pub(crate) fn from_instance_file(path: &Path, catalog: &ReviewedCatalog) -> Result<Self> {
+        let path = path.canonicalize()?;
+        let instance = Instance::load(&path)?;
+        let parent = path.parent().context("OAuth instance directory missing")?;
+        let mut artifacts = BTreeMap::new();
+        for (app, selected) in &instance.apps {
+            if selected.oauth_connections.is_empty() {
+                continue;
+            }
+            artifacts.insert(
+                app.clone(),
+                LoadedArtifact::load(&parent.join(&selected.artifact))?,
+            );
+        }
+        Self::qualify(&instance, &artifacts, catalog)
+    }
+
+    fn qualify(
+        instance: &Instance,
+        artifacts: &BTreeMap<String, LoadedArtifact>,
+        catalog: &ReviewedCatalog,
+    ) -> Result<Self> {
+        let instance = Instance::from_bytes(&serde_json::to_vec(instance)?)?;
+        let mut entries = BTreeMap::new();
+        let mut keys = BTreeMap::new();
+        for (app, selected) in &instance.apps {
+            if selected.oauth_connections.is_empty() {
+                continue;
+            }
+            ensure!(selected.edge.is_some(), "OAuth selected app edge missing");
+            let artifact = artifacts
+                .get(app)
+                .context("OAuth selected artifact missing")?;
+            artifact.require_current_api()?;
+            ensure!(
+                artifact.contract().namespace == *app,
+                "OAuth selected artifact namespace mismatch"
+            );
+            super::declaration::validate(
+                &artifact.contract().connection_declarations,
+                artifact.contract(),
+            )?;
+            let declarations = &artifact.contract().connection_declarations;
+            for (name, binding) in &selected.oauth_connections {
+                let requirement = declarations
+                    .iter()
+                    .find(|entry| entry.registration.as_str() == name)
+                    .context("OAuth selected requirement is not declared")?
+                    .requirement
+                    .clone();
+                ensure!(
+                    requirement.nominal_identity()? == binding.requirement,
+                    "OAuth selected requirement contract changed"
+                );
+                let (reviewed, permission) = catalog.resolve(&requirement, &binding.profile)?;
+                let control = instance
+                    .control
+                    .as_ref()
+                    .context("OAuth secret provider catalog missing")?;
+                let verifier = &control.secrets[&binding.custody_verifier_secret];
+                let encryption = &control.secrets[&binding.custody_encryption_secret];
+                let attestation = &control.secrets[&binding.shell_attestation_secret];
+                ensure!(
+                    verifier != encryption && verifier != attestation && encryption != attestation,
+                    "OAuth key roles must use distinct secret versions"
+                );
+                ensure!(
+                    binding.custody.revision == custody_revision(&instance, verifier, encryption)?,
+                    "OAuth custody secret selection changed"
+                );
+                ensure!(
+                    binding.shell_attestation.revision
+                        == shell_key_revision(&instance, &binding.security_shell, attestation)?,
+                    "OAuth shell attestation secret selection changed"
+                );
+                if requirement.account_policy == AccountBindingPolicy::ExplicitExternalAccount {
+                    ensure!(
+                        binding.account_binding == binding.shell_attestation,
+                        "OAuth external approval must use the selected shell attestation binding"
+                    );
+                }
+                let custody_verifier = key_ref(&binding.custody, verifier);
+                let custody_encryption = key_ref(&binding.custody, encryption);
+                let shell_attestation = key_ref(&binding.shell_attestation, attestation);
+                for (reference, purpose, secret) in [
+                    (
+                        &custody_verifier,
+                        ApprovalKeyPurpose::CustodyVerifier,
+                        verifier,
+                    ),
+                    (
+                        &custody_encryption,
+                        ApprovalKeyPurpose::CustodyEncryption,
+                        encryption,
+                    ),
+                    (
+                        &shell_attestation,
+                        ApprovalKeyPurpose::ShellAttestation,
+                        attestation,
+                    ),
+                ] {
+                    let key = (reference.binding.id.as_str().to_owned(), purpose);
+                    let value = (reference.binding.clone(), gcp_version(secret));
+                    if let Some(previous) = keys.insert(key, value.clone()) {
+                        ensure!(previous == value, "ambiguous OAuth key binding");
+                    }
+                }
+                entries.insert(
+                    (app.clone(), name.clone()),
+                    SelectedConnection {
+                        requirement,
+                        permission,
+                        reviewed,
+                        binding: binding.clone(),
+                        custody_verifier,
+                        custody_encryption,
+                        shell_attestation,
+                    },
+                );
+                ensure!(entries.len() <= 128, "OAuth selected connection budget");
+            }
+        }
+        ensure!(keys.len() <= 128, "OAuth selected key budget");
+        let mut resources = std::collections::BTreeSet::new();
+        let key_bindings = keys
+            .into_iter()
+            .map(|((_, purpose), (binding, secret))| {
+                ensure!(
+                    resources.insert((
+                        secret.project_number,
+                        secret.secret.clone(),
+                        secret.version
+                    )),
+                    "ambiguous OAuth physical key binding"
+                );
+                Ok((binding, purpose, secret))
+            })
+            .collect::<Result<_>>()?;
+        Ok(Self {
+            instance,
+            entries,
+            key_bindings,
+        })
+    }
+}
+
+pub(crate) fn instance_identity(instance: &Instance) -> Result<BindingRef> {
+    BindingRef::pin(
+        Name::try_from("oauth_instance".to_owned())?,
+        &(
+            "oauth-instance-v1",
+            &instance.installation,
+            &instance.environment,
+        ),
+    )
+}
+
+pub(crate) fn custody_revision(
+    instance: &Instance,
+    verifier: &SecretProvider,
+    encryption: &SecretProvider,
+) -> Result<Digest> {
+    Digest::of(&(
+        "oauth-custody-secret-selection-v1",
+        instance_identity(instance)?,
+        verifier,
+        encryption,
+    ))
+}
+
+pub(crate) fn shell_key_revision(
+    instance: &Instance,
+    origin: &day2_capabilities::oauth::SecurityOriginRef,
+    secret: &SecretProvider,
+) -> Result<Digest> {
+    Digest::of(&(
+        "oauth-shell-secret-selection-v1",
+        instance_identity(instance)?,
+        origin,
+        secret,
+    ))
+}
+
+fn gcp_version(secret: &SecretProvider) -> GcpSecretVersion {
+    let SecretProvider::GcpVersion {
+        project_number,
+        secret,
+        version,
+    } = secret;
+    GcpSecretVersion {
+        project_number: project_number.get(),
+        secret: secret.as_str().into(),
+        version: version.get(),
+    }
+}
+
+fn key_ref(binding: &BindingRef, secret: &SecretProvider) -> ApprovalKeyRef {
+    ApprovalKeyRef {
+        binding: binding.clone(),
+        version: gcp_version(secret).version.to_string(),
+    }
+}
+
+pub(crate) fn binding_namespace(binding: &OutboundConnectionBinding) -> Result<String> {
+    // The registered redirect belongs to the instance binding, not one human's
+    // slot. The private attempt still pins its exact owner and unique slot.
+    let digest = Digest::of(&(
+        "oauth-selected-binding-namespace-v1",
+        &binding.namespace,
+        &binding.requirement,
+        &binding.profile,
+        &binding.registration.id,
+        &binding.custody,
+        &binding.security_shell,
+        &binding.account_binding,
+        &binding.shell_attestation,
+        &binding.product_return,
+    ))?;
+    Ok(format!(
+        "oauth_binding_{}",
+        crate::assets::hash_part(digest.as_str())?
+    ))
+}
+
+/// Readiness is resolved privately at request time, separately from desired
+/// instance configuration. Its implementation must check current external
+/// qualification; an operator-authored digest alone is not readiness.
+pub(crate) trait OutboundReadiness: Send + Sync {
+    fn current(
+        &self,
+        binding: &OutboundConnectionBinding,
+        slot: &ConnectionSlotKey,
+        now: i64,
+    ) -> Result<Option<profiles::OutboundInstanceEvidence>>;
+}
+
+struct AuthorityState {
+    selected: QualifiedConnections,
+    keys: Option<Arc<dyn ApprovalKeyProvider>>,
+}
+
+pub(crate) struct ArtifactApprovalAuthority {
+    state: RwLock<AuthorityState>,
+    readiness: Arc<dyn OutboundReadiness>,
+}
+
+impl ArtifactApprovalAuthority {
+    pub(crate) fn with_gcp(
+        selected: QualifiedConnections,
+        readiness: Arc<dyn OutboundReadiness>,
+        tokens: Arc<dyn AccessTokenSource>,
+    ) -> Result<Self> {
+        let keys = Self::gcp_keys(&selected, tokens)?;
+        Ok(Self {
+            state: RwLock::new(AuthorityState { selected, keys }),
+            readiness,
+        })
+    }
+
+    #[cfg(test)]
+    fn with_keys(
+        selected: QualifiedConnections,
+        readiness: Arc<dyn OutboundReadiness>,
+        keys: Arc<dyn ApprovalKeyProvider>,
+    ) -> Self {
+        Self {
+            state: RwLock::new(AuthorityState {
+                selected,
+                keys: Some(keys),
+            }),
+            readiness,
+        }
+    }
+
+    fn gcp_keys(
+        selected: &QualifiedConnections,
+        tokens: Arc<dyn AccessTokenSource>,
+    ) -> Result<Option<Arc<dyn ApprovalKeyProvider>>> {
+        if selected.key_bindings.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(Arc::new(GcpApprovalKeys::new(
+            selected.key_bindings.clone(),
+            tokens,
+        )?)))
+    }
+
+    pub(crate) fn replace_with_gcp(
+        &self,
+        selected: QualifiedConnections,
+        tokens: Arc<dyn AccessTokenSource>,
+    ) -> Result<()> {
+        let keys = Self::gcp_keys(&selected, tokens)?;
+        *self
+            .state
+            .write()
+            .map_err(|_| anyhow::anyhow!("OAuth selection lock poisoned"))? =
+            AuthorityState { selected, keys };
+        Ok(())
+    }
+}
+
+impl ApprovalAuthority for ArtifactApprovalAuthority {
+    fn current(
+        &self,
+        app: &str,
+        intent: &connect::ConnectIntent,
+        callback: &connect::CallbackBinding,
+        now: i64,
+    ) -> Result<Option<ApprovalTerms>> {
+        // Hold this selection through readiness and exact-key acquisition.
+        // Replacing it therefore cannot publish a mixture of old and new facts.
+        let state = self
+            .state
+            .read()
+            .map_err(|_| anyhow::anyhow!("OAuth selection lock poisoned"))?;
+        let selected = &state.selected;
+        let mut found = None;
+        for ((candidate_app, _), candidate) in &selected.entries {
+            if candidate_app != app {
+                continue;
+            }
+            let slot = ConnectionSlotKey {
+                installation: candidate.binding.namespace.installation.clone(),
+                environment: candidate.binding.namespace.environment.clone(),
+                app: candidate.binding.namespace.app.clone(),
+                requirement: candidate.requirement.logical_id.clone(),
+                owner: match candidate.requirement.owner {
+                    day2_capabilities::oauth::ConnectionOwner::CurrentHuman => SlotOwner::Human {
+                        subject: intent.owner.clone(),
+                    },
+                    day2_capabilities::oauth::ConnectionOwner::Installation => {
+                        SlotOwner::Installation
+                    }
+                },
+            };
+            let slot_id = slot.id(&candidate.requirement)?;
+            if slot_id.as_str() != intent.slot {
+                continue;
+            }
+            ensure!(found.is_none(), "ambiguous OAuth selected requirement");
+            found = Some((candidate, slot));
+        }
+        let Some((candidate, slot)) = found else {
+            return Ok(None);
+        };
+        // Mapped-human and installation connections do not enter the external
+        // account approval shell. Their bindings still qualify above.
+        if candidate.requirement.account_policy != AccountBindingPolicy::ExplicitExternalAccount {
+            return Ok(None);
+        }
+        let expected_namespace = binding_namespace(&candidate.binding)?;
+        ensure!(
+            callback.binding_namespace() == expected_namespace,
+            "OAuth selected binding generation changed"
+        );
+        let Some(evidence) = self.readiness.current(&candidate.binding, &slot, now)? else {
+            return Ok(None);
+        };
+        let (account, policy) = match &evidence.account {
+            profiles::AccountBindingEvidence::MappedHuman { mapping, .. } => {
+                (mapping, AccountBindingPolicy::MappedHuman)
+            }
+            profiles::AccountBindingEvidence::ExplicitExternal { approval, .. } => {
+                (approval, AccountBindingPolicy::ExplicitExternalAccount)
+            }
+            profiles::AccountBindingEvidence::Installation { organization, .. } => {
+                (organization, AccountBindingPolicy::InstallationAccount)
+            }
+        };
+        ensure!(
+            evidence.instance == instance_identity(&selected.instance)?
+                && evidence.binding_namespace == expected_namespace
+                && evidence.registration.registration == candidate.binding.registration
+                && evidence.shell.origin == candidate.binding.security_shell
+                && evidence.custody == candidate.binding.custody
+                && evidence.product_return == candidate.binding.product_return
+                && *account == candidate.binding.account_binding
+                && policy == candidate.requirement.account_policy,
+            "OAuth readiness does not match selected instance binding"
+        );
+        let entry = AdmittedApproval {
+            requirement: candidate.requirement.clone(),
+            permission: candidate.permission.clone(),
+            reviewed: candidate.reviewed.clone(),
+            instance: evidence,
+            custody_verifier: candidate.custody_verifier.clone(),
+            custody_encryption: candidate.custody_encryption.clone(),
+            shell_attestation: candidate.shell_attestation.clone(),
+        };
+        let authority = SelectedApprovalAuthority::new(
+            &selected.instance,
+            BTreeMap::from([((app.to_owned(), intent.slot.clone()), entry)]),
+            state
+                .keys
+                .clone()
+                .context("OAuth selected key provider missing")?,
+        )?;
+        authority.current(app, intent, callback, now)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{approval_registry::ApprovalKeyMaterial, connect::CallbackBindingSpec};
+    use super::*;
+    use crate::artifact::Artifact;
+    use day2_capabilities::{
+        credentials::Namespace,
+        oauth::{
+            ConnectionDeclaration, ConnectionOwner, ProductReturnRef, ProviderCallbackRef,
+            ProviderIssuerRef, SecurityOriginRef,
+        },
+    };
+    use serde_json::json;
+    use std::{
+        collections::BTreeSet,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    fn name(raw: &str) -> Name {
+        Name::try_from(raw.to_owned()).unwrap()
+    }
+    fn pin(raw: &str) -> BindingRef {
+        BindingRef::pin(name(raw), &raw).unwrap()
+    }
+
+    struct Fixture {
+        instance: Instance,
+        artifacts: BTreeMap<String, LoadedArtifact>,
+        catalog: ReviewedCatalog,
+        evidence: profiles::OutboundInstanceEvidence,
+        intent: connect::ConnectIntent,
+        callback: connect::CallbackBinding,
+    }
+
+    impl Fixture {
+        fn qualify(&self) -> Result<QualifiedConnections> {
+            QualifiedConnections::qualify(&self.instance, &self.artifacts, &self.catalog)
+        }
+    }
+
+    // Synthetic evidence exercises composition only. It is not a provider
+    // sandbox, real registration or production readiness receipt.
+    fn fixture(policy: AccountBindingPolicy) -> Result<Fixture> {
+        let mut instance = Instance::from_bytes(&serde_json::to_vec(&json!({
+            "installation":"company","environment":"production",
+            "identity":{"scheme":"google_iap","hosted_domain":"example.com"},
+            "security_shell":{"origin":"https://security.example.com",
+                "iap_audience":"/projects/12345/global/backendServices/2"},
+            "apps":{"workspace":{"artifact":"artifacts/selected","readers":[],"writers":[],
+                "edge":{"origin":"https://app.example.com",
+                    "iap_audience":"/projects/12345/global/backendServices/1"}}},
+            "control":{"version":1,"state_directory":"/srv/control","operators":["operator@example.com"],
+                "sources":{"workspace_source":{"kind":"local_git","repository":"/srv/workspace"}},
+                "apps":{"workspace":{"source":"workspace_source"}},
+                "secrets":{
+                    "verifier":{"kind":"gcp_version","project_number":12345,"secret":"oauth_verifier","version":7},
+                    "encryption":{"kind":"gcp_version","project_number":12345,"secret":"oauth_encryption","version":9},
+                    "attestation":{"kind":"gcp_version","project_number":12345,"secret":"oauth_attestation","version":11}
+                }}
+        }))?)?;
+        let requirement = ConnectionRequirement {
+            logical_id: "work_calendar".into(),
+            revision: 1,
+            capability: "google_calendar_events".into(),
+            actions: BTreeSet::from(["list_events".into()]),
+            owner: ConnectionOwner::CurrentHuman,
+            account_policy: policy.clone(),
+            usage: "Read availability.".into(),
+        };
+        let action_scopes = BTreeMap::from([
+            (
+                "list_events".into(),
+                BTreeSet::from(["calendar.read".into()]),
+            ),
+            (
+                "create_event".into(),
+                BTreeSet::from(["calendar.write".into()]),
+            ),
+        ]);
+        let mut reviewed = profiles::ReviewedBrowserCodeProfile {
+            protocol: profiles::ConfidentialPkceProfile::NoRefresh(profiles::BrowserCodeIdentity {
+                binding: pin("calendar_profile"),
+                scope_interpretation: Digest::of(&(
+                    "oauth-semantic-scope-map-v1",
+                    &requirement.capability,
+                    &action_scopes,
+                ))?,
+            }),
+            issuer: ProviderIssuerRef(pin("calendar_issuer")),
+            issuer_url: "https://issuer.example/tenant".into(),
+            authorization_endpoint: "https://issuer.example/authorize".into(),
+            token_endpoint: "https://tokens.example/token".into(),
+            adapter: pin("calendar_adapter"),
+            simulator: pin("calendar_simulator"),
+            conformance: pin("calendar_conformance"),
+            account_evidence: match policy {
+                AccountBindingPolicy::MappedHuman => profiles::AccountEvidenceContract::MappedHuman,
+                AccountBindingPolicy::ExplicitExternalAccount => {
+                    profiles::AccountEvidenceContract::ExternalAccount
+                }
+                AccountBindingPolicy::InstallationAccount => unreachable!(),
+            },
+        };
+        let revision = reviewed.review_revision()?;
+        let profiles::ConfidentialPkceProfile::NoRefresh(identity) = &mut reviewed.protocol else {
+            unreachable!()
+        };
+        identity.binding.revision = revision;
+        let catalog = ReviewedCatalog::new(vec![ReviewedAccess {
+            profile: reviewed.clone(),
+            capability: requirement.capability.clone(),
+            action_scopes,
+        }])?;
+        let profile = reviewed.protocol.identity().binding.clone();
+        let (_, permission) = catalog.resolve(&requirement, &profile)?;
+        let instance_ref = instance_identity(&instance)?;
+        let shell_url = "https://security.example.com/".to_owned();
+        let qualification = Digest::of(&"synthetic-shell-readiness")?;
+        let security_shell = SecurityOriginRef(BindingRef {
+            id: name("security_origin"),
+            revision: Digest::of(&(
+                "oauth-security-shell-evidence-v1",
+                &instance_ref,
+                &shell_url,
+                &qualification,
+            ))?,
+        });
+        let secrets = &instance.control.as_ref().unwrap().secrets;
+        let custody = BindingRef {
+            id: name("oauth_custody"),
+            revision: custody_revision(
+                &instance,
+                &secrets[&name("verifier")],
+                &secrets[&name("encryption")],
+            )?,
+        };
+        let shell_attestation = BindingRef {
+            id: name("shell_attestation"),
+            revision: shell_key_revision(
+                &instance,
+                &security_shell,
+                &secrets[&name("attestation")],
+            )?,
+        };
+        let mut selection = OutboundConnectionBinding {
+            namespace: Namespace {
+                installation: name("company"),
+                environment: name("production"),
+                app: name("workspace"),
+                binding_generation: 1,
+            },
+            requirement: requirement.nominal_identity()?,
+            profile: profile.clone(),
+            registration: pin("calendar_registration"),
+            custody: custody.clone(),
+            security_shell: security_shell.clone(),
+            account_binding: match policy {
+                AccountBindingPolicy::ExplicitExternalAccount => shell_attestation.clone(),
+                _ => pin("human_subject_map"),
+            },
+            shell_attestation,
+            product_return: ProductReturnRef(pin("calendar_return")),
+            custody_verifier_secret: name("verifier"),
+            custody_encryption_secret: name("encryption"),
+            shell_attestation_secret: name("attestation"),
+        };
+        let slot = ConnectionSlotKey {
+            installation: name("company"),
+            environment: name("production"),
+            app: name("workspace"),
+            requirement: requirement.logical_id.clone(),
+            owner: SlotOwner::Human {
+                subject: "human_1".into(),
+            },
+        };
+        let namespace = binding_namespace(&selection)?;
+        let callback_ref = ProviderCallbackRef::derive(&security_shell, &profile, &namespace)?;
+        let callback_url = profiles::derived_callback_url(&shell_url, &callback_ref)?;
+        let confirmation = Digest::of(&"synthetic-provider-confirmation")?;
+        let client_credential = pin("client_credential");
+        let class = profiles::ClientRegistrationClass::ConfidentialPkceS256;
+        selection.registration.revision = Digest::of(&(
+            "oauth-provider-registration-evidence-v1",
+            &instance_ref,
+            &profile,
+            &reviewed.issuer,
+            &security_shell,
+            &callback_ref,
+            &callback_url,
+            &confirmation,
+            &client_credential,
+            class,
+        ))?;
+        let intent = connect::ConnectIntent {
+            attempt: "attempt_1".into(),
+            slot: slot.id(&requirement)?.as_str().into(),
+            expected_generation: None,
+            expected_epoch: 1,
+            proposed_generation: 1,
+            owner: "human_1".into(),
+            profile: profile.id.as_str().into(),
+            registration: Digest::of(&selection.registration)?.as_str().into(),
+            callback: Digest::of(&callback_ref)?.as_str().into(),
+            consent: permission.consent_digest(&requirement)?.as_str().into(),
+            expires_at: 100,
+        };
+        let callback = connect::CallbackBinding::from_secret_state(
+            b"0123456789abcdefghijklmnopqrstuvwxyzABCDEF",
+            CallbackBindingSpec {
+                issuer: reviewed.issuer.clone(),
+                issuer_url: reviewed.issuer_url.clone(),
+                security_origin: security_shell.clone(),
+                profile: profile.clone(),
+                callback: callback_ref.clone(),
+                binding_namespace: namespace.clone(),
+                session: Digest::of(&"private-session")?,
+                product_return: selection.product_return.clone(),
+            },
+        )?;
+        let mut constraints = profiles::ExternalAccountConstraints {
+            binding: pin("account_constraints"),
+            issuer_url: reviewed.issuer_url.clone(),
+            allowed_tenants: BTreeSet::from(["company".into()]),
+            allowed_subjects: None,
+        };
+        constraints.binding.revision = Digest::of(&(
+            "oauth-external-account-constraints-v1",
+            &constraints.binding.id,
+            &constraints.issuer_url,
+            &constraints.allowed_tenants,
+            &constraints.allowed_subjects,
+        ))?;
+        let evidence = profiles::OutboundInstanceEvidence {
+            instance: instance_ref.clone(),
+            binding_namespace: namespace,
+            app_origin_url: "https://app.example.com/".into(),
+            shell: profiles::SecurityShellEvidence {
+                instance: instance_ref.clone(),
+                origin: security_shell.clone(),
+                origin_url: shell_url,
+                qualification,
+            },
+            registration: profiles::ProviderRegistrationEvidence {
+                instance: instance_ref.clone(),
+                registration: selection.registration.clone(),
+                profile,
+                issuer: reviewed.issuer,
+                security_origin: security_shell,
+                callback: callback_ref,
+                callback_url,
+                provider_confirmation: confirmation,
+                client_credential,
+                class,
+            },
+            custody,
+            account: match policy {
+                AccountBindingPolicy::ExplicitExternalAccount => {
+                    profiles::AccountBindingEvidence::ExplicitExternal {
+                        instance: instance_ref,
+                        approval: selection.account_binding.clone(),
+                        constraints,
+                        owner: "human_1".into(),
+                    }
+                }
+                _ => profiles::AccountBindingEvidence::MappedHuman {
+                    instance: instance_ref,
+                    mapping: selection.account_binding.clone(),
+                    owner: "human_1".into(),
+                },
+            },
+            product_return: selection.product_return.clone(),
+        };
+        instance
+            .apps
+            .get_mut("workspace")
+            .unwrap()
+            .oauth_connections
+            .insert("calendar".into(), selection);
+        let mut artifact: Artifact = serde_json::from_value(json!({
+            "format":14,"namespace":"workspace","roc_version":"test","worker_digest":"test","schema_digest":"test",
+            "sources":{},"admission":"local-spike-only","schema":{"models":{},"inputs":{},"foreign_keys":[]},
+            "operations":[],"declarations":{"commands":{},"queries":{},"connections":{"calendar":"current_human"}}
+        }))?;
+        artifact.connection_declarations = vec![ConnectionDeclaration {
+            registration: name("calendar"),
+            requirement,
+        }];
+        let artifacts = BTreeMap::from([(
+            "workspace".into(),
+            LoadedArtifact::from_contract_for_tests(
+                "synthetic-artifact".into(),
+                "/fixture/artifact".into(),
+                artifact,
+            ),
+        )]);
+        Ok(Fixture {
+            instance,
+            artifacts,
+            catalog,
+            evidence,
+            intent,
+            callback,
+        })
+    }
+
+    #[test]
+    fn selection_derives_requirement_and_only_declared_action_scopes() -> Result<()> {
+        let fixture = fixture(AccountBindingPolicy::ExplicitExternalAccount)?;
+        let qualified = fixture.qualify()?;
+        let selected = &qualified.entries[&("workspace".into(), "calendar".into())];
+        assert_eq!(
+            selected.permission.action_scopes,
+            BTreeMap::from([(
+                "list_events".into(),
+                BTreeSet::from(["calendar.read".into()])
+            )])
+        );
+        assert_eq!(qualified.key_bindings.len(), 3);
+        let roundtrip = Instance::from_bytes(&serde_json::to_vec(&fixture.instance)?)?;
+        assert_eq!(
+            roundtrip.apps["workspace"].oauth_connections,
+            fixture.instance.apps["workspace"].oauth_connections
+        );
+        let mut raw = serde_json::to_value(&fixture.instance)?;
+        raw["apps"]["workspace"]["oauth_connections"]["calendar"]["provider_scopes"] =
+            json!(["calendar.write"]);
+        assert!(Instance::from_bytes(&serde_json::to_vec(&raw)?).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn selection_rejects_cross_instance_stale_and_unbound_contracts() -> Result<()> {
+        for mutation in 0..17 {
+            let mut fixture = fixture(AccountBindingPolicy::ExplicitExternalAccount)?;
+            let binding = fixture
+                .instance
+                .apps
+                .get_mut("workspace")
+                .unwrap()
+                .oauth_connections
+                .get_mut("calendar")
+                .unwrap();
+            match mutation {
+                0 => binding.namespace.installation = name("other"),
+                1 => binding.namespace.environment = name("other"),
+                2 => binding.namespace.app = name("other"),
+                3 => binding.namespace.binding_generation = 0,
+                4 => binding.requirement = Digest::of(&"stale-requirement")?,
+                5 => binding.profile.revision = Digest::of(&"stale-profile")?,
+                6 => binding.custody_verifier_secret = name("missing"),
+                7 => binding.custody_encryption_secret = name("verifier"),
+                8 => binding.account_binding = pin("different_approval"),
+                9 => fixture.instance.apps.get_mut("workspace").unwrap().edge = None,
+                10 => fixture.artifacts.clear(),
+                11 => {
+                    let selection = fixture
+                        .instance
+                        .apps
+                        .get_mut("workspace")
+                        .unwrap()
+                        .oauth_connections
+                        .remove("calendar")
+                        .unwrap();
+                    fixture
+                        .instance
+                        .apps
+                        .get_mut("workspace")
+                        .unwrap()
+                        .oauth_connections
+                        .insert("undeclared".into(), selection);
+                }
+                12 => fixture.instance.control = None,
+                13 => fixture.instance.security_shell = None,
+                14..=16 => {
+                    let mut contract = fixture.artifacts["workspace"].contract().clone();
+                    match mutation {
+                        14 => contract.namespace = "other_app".into(),
+                        15 => contract.format = 13,
+                        _ => contract.connection_declarations.clear(),
+                    }
+                    fixture.artifacts.insert(
+                        "workspace".into(),
+                        LoadedArtifact::from_contract_for_tests(
+                            "synthetic-artifact".into(),
+                            "/fixture/artifact".into(),
+                            contract,
+                        ),
+                    );
+                }
+                _ => unreachable!(),
+            }
+            assert!(fixture.qualify().is_err(), "mutation {mutation}");
+        }
+        let mut fixture = fixture(AccountBindingPolicy::ExplicitExternalAccount)?;
+        let SecretProvider::GcpVersion { version, .. } = fixture
+            .instance
+            .control
+            .as_mut()
+            .unwrap()
+            .secrets
+            .get_mut(&name("encryption"))
+            .unwrap();
+        *version = 10.try_into()?;
+        assert!(fixture.qualify().is_err());
+        let mut raw = serde_json::to_value(&fixture.instance)?;
+        raw["control"]["secrets"]["encryption"]["version"] = json!(0);
+        assert!(Instance::from_bytes(&serde_json::to_vec(&raw)?).is_err());
+        raw["control"]["secrets"]["encryption"]["version"] = json!("latest");
+        assert!(Instance::from_bytes(&serde_json::to_vec(&raw)?).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn catalog_rejects_unreviewed_scope_interpretation_and_policy() -> Result<()> {
+        let external = fixture(AccountBindingPolicy::ExplicitExternalAccount)?;
+        let entry = external.catalog.entries.into_values().next().unwrap();
+        let mut scopes = entry.action_scopes.clone();
+        scopes
+            .get_mut("list_events")
+            .unwrap()
+            .insert("calendar.write".into());
+        assert!(
+            ReviewedCatalog::new(vec![ReviewedAccess {
+                profile: entry.profile,
+                capability: entry.capability,
+                action_scopes: scopes
+            }])
+            .is_err()
+        );
+        let mut mapped = fixture(AccountBindingPolicy::MappedHuman)?;
+        mapped.catalog = fixture(AccountBindingPolicy::ExplicitExternalAccount)?.catalog;
+        assert!(mapped.qualify().is_err());
+        Ok(())
+    }
+
+    struct Readiness {
+        current: RwLock<Option<profiles::OutboundInstanceEvidence>>,
+        calls: AtomicUsize,
+    }
+    impl OutboundReadiness for Readiness {
+        fn current(
+            &self,
+            _: &OutboundConnectionBinding,
+            _: &ConnectionSlotKey,
+            _: i64,
+        ) -> Result<Option<profiles::OutboundInstanceEvidence>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.current.read().unwrap().clone())
+        }
+    }
+
+    #[derive(Default)]
+    struct Keys {
+        calls: AtomicUsize,
+    }
+    impl ApprovalKeyProvider for Keys {
+        fn load(
+            &self,
+            reference: &ApprovalKeyRef,
+            purpose: ApprovalKeyPurpose,
+        ) -> Result<ApprovalKeyMaterial> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let (version, byte) = match purpose {
+                ApprovalKeyPurpose::CustodyVerifier => ("7", 7),
+                ApprovalKeyPurpose::CustodyEncryption => ("9", 9),
+                ApprovalKeyPurpose::ShellAttestation => ("11", 11),
+            };
+            ensure!(
+                reference.version == version,
+                "unexpected selected key version"
+            );
+            Ok(ApprovalKeyMaterial {
+                binding: reference.binding.clone(),
+                version: version.into(),
+                purpose,
+                bytes: [byte; 32],
+            })
+        }
+    }
+
+    struct NoTokens;
+    impl AccessTokenSource for NoTokens {
+        fn access_token(&self) -> Result<String> {
+            panic!("removed selection must not acquire a token")
+        }
+    }
+
+    #[test]
+    fn authority_rechecks_readiness_and_exact_keys_then_revokes_removed_selection() -> Result<()> {
+        let mut fixture = fixture(AccountBindingPolicy::ExplicitExternalAccount)?;
+        let readiness = Arc::new(Readiness {
+            current: RwLock::new(Some(fixture.evidence.clone())),
+            calls: AtomicUsize::new(0),
+        });
+        let keys = Arc::new(Keys::default());
+        let authority = ArtifactApprovalAuthority::with_keys(
+            fixture.qualify()?,
+            readiness.clone(),
+            keys.clone(),
+        );
+        for _ in 0..2 {
+            assert!(
+                authority
+                    .current("workspace", &fixture.intent, &fixture.callback, 5)?
+                    .is_some()
+            );
+        }
+        assert_eq!(readiness.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(keys.calls.load(Ordering::SeqCst), 6);
+        *readiness.current.write().unwrap() = None;
+        assert!(
+            authority
+                .current("workspace", &fixture.intent, &fixture.callback, 5)?
+                .is_none()
+        );
+        assert_eq!(keys.calls.load(Ordering::SeqCst), 6);
+        *readiness.current.write().unwrap() = Some(fixture.evidence.clone());
+        fixture
+            .instance
+            .apps
+            .get_mut("workspace")
+            .unwrap()
+            .oauth_connections
+            .clear();
+        authority.replace_with_gcp(fixture.qualify()?, Arc::new(NoTokens))?;
+        assert!(
+            authority
+                .current("workspace", &fixture.intent, &fixture.callback, 5)?
+                .is_none()
+        );
+        assert_eq!(readiness.calls.load(Ordering::SeqCst), 3);
+        assert_eq!(keys.calls.load(Ordering::SeqCst), 6);
+        Ok(())
+    }
+
+    #[test]
+    fn authority_rejects_other_owner_stale_generation_and_substituted_readiness_before_keys()
+    -> Result<()> {
+        let mut fixture = fixture(AccountBindingPolicy::ExplicitExternalAccount)?;
+        let readiness = Arc::new(Readiness {
+            current: RwLock::new(Some(fixture.evidence.clone())),
+            calls: AtomicUsize::new(0),
+        });
+        let keys = Arc::new(Keys::default());
+        let authority = ArtifactApprovalAuthority::with_keys(
+            fixture.qualify()?,
+            readiness.clone(),
+            keys.clone(),
+        );
+        let mut other_owner = fixture.intent.clone();
+        other_owner.owner = "human_2".into();
+        assert!(
+            authority
+                .current("workspace", &other_owner, &fixture.callback, 5)?
+                .is_none()
+        );
+        assert!(
+            authority
+                .current("other", &fixture.intent, &fixture.callback, 5)?
+                .is_none()
+        );
+        for mutation in 0..10 {
+            let mut evidence = fixture.evidence.clone();
+            match mutation {
+                0 => evidence.instance = pin("other_instance"),
+                1 => evidence.binding_namespace = "other_namespace".into(),
+                2 => evidence.registration.registration = pin("other_registration"),
+                3 => evidence.custody = pin("other_custody"),
+                4 => evidence.product_return = ProductReturnRef(pin("other_return")),
+                5 => evidence.app_origin_url = "https://other.example/".into(),
+                6 => {
+                    evidence.registration.provider_confirmation = Digest::of(&"other_confirmation")?
+                }
+                7 => {
+                    evidence.account = profiles::AccountBindingEvidence::MappedHuman {
+                        instance: evidence.instance.clone(),
+                        mapping: pin("human_subject_map"),
+                        owner: "human_1".into(),
+                    }
+                }
+                8 => evidence.shell.origin_url = "https://other.example/".into(),
+                9 => evidence.registration.callback_url = "https://app.example.com/callback".into(),
+                _ => unreachable!(),
+            }
+            *readiness.current.write().unwrap() = Some(evidence);
+            assert!(
+                authority
+                    .current("workspace", &fixture.intent, &fixture.callback, 5)
+                    .is_err(),
+                "mutation {mutation}"
+            );
+        }
+        fixture
+            .instance
+            .apps
+            .get_mut("workspace")
+            .unwrap()
+            .oauth_connections
+            .get_mut("calendar")
+            .unwrap()
+            .namespace
+            .binding_generation += 1;
+        let next = fixture.qualify()?;
+        authority.replace_with_gcp(next, Arc::new(NoTokens))?;
+        assert!(
+            authority
+                .current("workspace", &fixture.intent, &fixture.callback, 5)
+                .is_err()
+        );
+        assert_eq!(keys.calls.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn mapped_human_selection_does_not_enter_external_account_approval() -> Result<()> {
+        let fixture = fixture(AccountBindingPolicy::MappedHuman)?;
+        let readiness = Arc::new(Readiness {
+            current: RwLock::new(Some(fixture.evidence.clone())),
+            calls: AtomicUsize::new(0),
+        });
+        let keys = Arc::new(Keys::default());
+        let authority = ArtifactApprovalAuthority::with_keys(
+            fixture.qualify()?,
+            readiness.clone(),
+            keys.clone(),
+        );
+        assert!(
+            authority
+                .current("workspace", &fixture.intent, &fixture.callback, 5)?
+                .is_none()
+        );
+        assert_eq!(readiness.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(keys.calls.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn file_selection_loads_the_instance_selected_artifact_path() -> Result<()> {
+        let fixture = fixture(AccountBindingPolicy::ExplicitExternalAccount)?;
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("instance.json");
+        std::fs::write(&path, serde_json::to_vec(&fixture.instance)?)?;
+        // No caller-supplied artifact map can substitute for the missing path.
+        assert!(QualifiedConnections::from_instance_file(&path, &fixture.catalog).is_err());
+        Ok(())
+    }
+}

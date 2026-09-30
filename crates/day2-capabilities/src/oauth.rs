@@ -84,6 +84,26 @@ pub struct ConnectionDeclaration {
     pub requirement: ConnectionRequirement,
 }
 
+/// Company selection over one app-owned registration. This contains references,
+/// never a second requirement declaration, provider scopes or secret bytes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OutboundConnectionBinding {
+    pub namespace: crate::credentials::Namespace,
+    pub requirement: Digest,
+    pub profile: BindingRef,
+    pub registration: BindingRef,
+    pub custody: BindingRef,
+    pub security_shell: SecurityOriginRef,
+    pub account_binding: BindingRef,
+    pub shell_attestation: BindingRef,
+    pub product_return: ProductReturnRef,
+    /// Names in InstallationControl.secrets, each with a numeric version.
+    pub custody_verifier_secret: Name,
+    pub custody_encryption_secret: Name,
+    pub shell_attestation_secret: Name,
+}
+
 impl ConnectionRequirement {
     pub fn validate(&self) -> Result<()> {
         identifier(&self.logical_id)?;

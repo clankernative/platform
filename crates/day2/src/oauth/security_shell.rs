@@ -1,7 +1,7 @@
 //! Isolated browser approval for an external provider account. The shell has
 //! its own origin and short-lived cookie; app sessions never authorize it.
 
-use super::{approval_registry, connect, external, profiles, shell_oidc};
+use super::{admission, approval_keys, approval_registry, connect, external, profiles, shell_oidc};
 use crate::{artifact::Instance, iap};
 use crate::{managed_credentials::crypto::KeyLease, store::open, web_security};
 use anyhow::{Context, Result, ensure};
@@ -19,7 +19,7 @@ use day2_capabilities::{
 use maud::{DOCTYPE, html};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -117,6 +117,34 @@ pub(crate) struct SecurityShell {
 }
 
 impl SecurityShell {
+    /// Compose the shell from the exact instance-selected artifacts and keys.
+    /// This is an explicit GKE host entry point, not an application route or a
+    /// readiness assertion. Storage paths remain selected by the private host.
+    pub(crate) fn from_gke_instance(
+        instance_path: &Path,
+        app_databases: BTreeMap<String, PathBuf>,
+        catalog: &admission::ReviewedCatalog,
+        readiness: Arc<dyn admission::OutboundReadiness>,
+        client_id: String,
+        client_secret: String,
+    ) -> Result<(Arc<Self>, Arc<admission::ArtifactApprovalAuthority>)> {
+        let selected = admission::QualifiedConnections::from_instance_file(instance_path, catalog)?;
+        let instance = selected.instance().clone();
+        let authority = Arc::new(admission::ArtifactApprovalAuthority::with_gcp(
+            selected,
+            readiness,
+            Arc::new(approval_keys::GkeMetadataAccessTokens::new()?),
+        )?);
+        let shell = Self::from_instance(
+            &instance,
+            app_databases,
+            authority.clone(),
+            client_id,
+            client_secret,
+        )?;
+        Ok((shell, authority))
+    }
+
     /// Resolve both the browser origin and IAP verifier from the selected
     /// installation, so a caller cannot mount the shell on an app edge.
     pub(crate) fn from_instance(

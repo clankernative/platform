@@ -1439,6 +1439,7 @@ fn create_for_with_imports(
                 authority: Some(policy.unwrap_or(local_policy_for(&artifact, actor)?)),
                 resource_policies: Vec::new(),
                 credential_families: Default::default(),
+                oauth_connections: Default::default(),
                 // Nothing is ever removed from a development instance either.
                 // A retention policy is an operator's decision about real
                 // records, and a default here would teach the opposite.

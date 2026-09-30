@@ -1057,6 +1057,8 @@ pub struct AppBinding {
     pub credential_families:
         BTreeMap<String, day2_capabilities::credentials::CredentialFamilyBinding>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub oauth_connections: BTreeMap<String, day2_capabilities::oauth::OutboundConnectionBinding>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub schedules: BTreeMap<String, ScheduleBinding>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub ingress: BTreeMap<String, EndpointBinding>,
@@ -1106,6 +1108,8 @@ struct StoredBinding {
     #[serde(default)]
     credential_families: BTreeMap<String, day2_capabilities::credentials::CredentialFamilyBinding>,
     #[serde(default)]
+    oauth_connections: BTreeMap<String, day2_capabilities::oauth::OutboundConnectionBinding>,
+    #[serde(default)]
     schedules: BTreeMap<String, ScheduleBinding>,
     #[serde(default)]
     ingress: BTreeMap<String, EndpointBinding>,
@@ -1128,6 +1132,7 @@ impl From<StoredBinding> for AppBinding {
             authority: stored.authority,
             resource_policies: stored.resource_policies,
             credential_families: stored.credential_families,
+            oauth_connections: stored.oauth_connections,
             schedules: stored.schedules,
             ingress: stored.ingress,
             retention: stored.retention,
@@ -1308,6 +1313,35 @@ impl Instance {
             );
         }
         for (app, selected) in &instance.apps {
+            ensure!(
+                selected.oauth_connections.len() <= 64,
+                "OAuth connection binding budget"
+            );
+            for (registration, binding) in &selected.oauth_connections {
+                crate::schema::identifier(registration)?;
+                binding.namespace.validate()?;
+                ensure!(
+                    binding.namespace.installation.as_str() == instance.installation
+                        && binding.namespace.environment.as_str() == instance.environment
+                        && binding.namespace.app.as_str() == app,
+                    "OAuth connection binding namespace mismatch: {app}/{registration}"
+                );
+                instance.security_edge()?;
+                let control = instance
+                    .control
+                    .as_ref()
+                    .context("OAuth secret provider catalog missing")?;
+                for secret in [
+                    &binding.custody_verifier_secret,
+                    &binding.custody_encryption_secret,
+                    &binding.shell_attestation_secret,
+                ] {
+                    ensure!(
+                        control.secrets.contains_key(secret),
+                        "OAuth secret provider missing: {secret:?}"
+                    );
+                }
+            }
             ensure!(
                 selected.credential_families.len() <= 64,
                 "credential family binding budget"
