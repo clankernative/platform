@@ -21,6 +21,7 @@ pub mod credential_authority;
 pub mod credential_codegen;
 pub mod credential_declaration;
 pub mod delegation;
+pub mod delegation_commands;
 pub mod delegation_wire;
 pub mod deployment;
 pub mod development;

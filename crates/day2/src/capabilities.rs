@@ -154,6 +154,7 @@ impl Authorized {
         // before admitting a second attempt after an unknown outcome.
         matches!(self.action, Action::Send(_))
             || matches!(&self.action, Action::People(action) if action.is_write())
+            || matches!(&self.action, Action::Delegate(call) if call.purpose == crate::delegation::Purpose::Send)
     }
 }
 
@@ -390,7 +391,7 @@ pub(crate) fn authorized(
                 _ => Action::Grant { url, key },
             }
         }
-        "app.query.v1" => {
+        "app.query.v1" | "app.send.v1" | "app.status.v1" => {
             let read: crate::resources::ImportedQuery =
                 crate::json::decode(instruction.data.as_bytes())?;
             let input = read.input;
@@ -407,6 +408,12 @@ pub(crate) fn authorized(
             // dispatching or supplying a step. The dispatch boundary requires
             // that identity before it can call either a real or simulated peer.
             Action::Delegate(Box::new(crate::delegation::Call {
+                purpose: match instruction.model.as_str() {
+                    "app.send.v1" => crate::delegation::Purpose::Send,
+                    "app.status.v1" => crate::delegation::Purpose::Status,
+                    _ => crate::delegation::Purpose::Query,
+                },
+                source_epoch: resource.authority.epoch.clone(),
                 app: app.clone(),
                 operation: operation.clone(),
                 schema_digest: schema_digest.clone(),
@@ -461,6 +468,7 @@ pub(crate) struct ProviderResult {
     pub result: Result<String>,
     pub usage: crate::resources::ProviderUsage,
     pub correlation: Vec<crate::integrations::ExchangeCorrelation>,
+    pub pending: bool,
 }
 
 impl ProviderResult {
@@ -477,6 +485,7 @@ impl ProviderResult {
             result,
             usage,
             correlation: Vec::new(),
+            pending: false,
         }
     }
 
@@ -485,6 +494,7 @@ impl ProviderResult {
         Self {
             result: outcome.result.map_err(Into::into),
             correlation: outcome.correlation,
+            pending: false,
             usage: crate::resources::ProviderUsage {
                 calls: outcome.calls,
                 request_bytes: outcome.request_bytes,
@@ -577,7 +587,11 @@ pub(crate) fn observe(runtime: &Runtime, capability: Authorized, attempt: &str) 
         // both paths: downloading authorizes a read, uploading authorizes a write,
         // and neither reaches the network.
         Action::Grant { url, key } => Ok(grant_result(&url, &key)),
-        Action::Delegate(call) => crate::delegation::read(runtime, &call),
+        Action::Delegate(call) => match call.purpose {
+            crate::delegation::Purpose::Query => crate::delegation::read(runtime, &call),
+            crate::delegation::Purpose::Status => crate::delegation::status(runtime, &call),
+            _ => Err(anyhow::anyhow!("command_requires_effect_phase")),
+        },
         _ => Err(anyhow::anyhow!("unknown_observation_capability")),
     };
     ProviderResult::local(result, request_bytes)
@@ -598,6 +612,16 @@ pub(crate) fn execute(
         // and neither reaches the network.
         Action::Grant { url, key } => Ok(grant_result(&url, &key)),
         Action::People(action) => crate::people_providers::execute(runtime, action, effect_id),
+        Action::Delegate(call) => {
+            let mut result =
+                ProviderResult::local(crate::delegation::send(runtime, &call), request_bytes);
+            result.pending = result.result.is_err();
+            // A local app send has no provider fee. Consume the complete planned
+            // request allowance even if delivery is uncertain; do not confuse
+            // that known consumption with knowledge of receiver acceptance.
+            result.usage.known = true;
+            return result;
+        }
         _ => Err(anyhow::anyhow!("unknown_effect_capability")),
     };
     ProviderResult::local(result, request_bytes)

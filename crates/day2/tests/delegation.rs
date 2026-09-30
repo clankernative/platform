@@ -81,6 +81,8 @@ impl Pair {
 
     fn call(&self, operation: &str, digest: &str) -> delegation::Call {
         delegation::Call {
+            purpose: delegation::Purpose::Query,
+            source_epoch: String::new(),
             app: "callee".into(),
             operation: operation.into(),
             schema_digest: digest.into(),

@@ -287,7 +287,9 @@ fn build_fixture(
             let catalog = day2::instance_catalog::CandidateCatalog::from_instance_file(&instance)?;
             fs::write(
                 &lock,
-                serde_json::to_vec(&catalog.pin(&["peer_identity.who".into()])?)?,
+                serde_json::to_vec(
+                    &catalog.pin(&["peer_identity.who".into(), "peer_identity.record".into()])?,
+                )?,
             )?;
             build_recipe(
                 root,

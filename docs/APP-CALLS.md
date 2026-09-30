@@ -1,4 +1,4 @@
-# Typed app queries on normal hosts
+# Typed app calls on normal hosts
 
 Apps call their generated `ImportedContracts` functions. Input/result types and
 operation digests come from the caller's exact build imports. There is no app API
@@ -24,10 +24,40 @@ grant, verifies the root IAP account binding and only then signs the request.
 The receiver checks IAP, both signatures, the current selected serving generation,
 its loaded artifact and its own current operation/row policy.
 
-The first query flow supports human-rooted calls in one installation/environment.
+The first release supports human-rooted calls in one installation/environment.
 Other origin families require their admitted ingress. App reentry and chains
-deeper than four hops are refused. Durable remote command sends are the next
-implementation batch; query admission never accepts a command as a read.
+deeper than four hops are refused. Query admission never accepts a command as a
+read. Human root evidence is durably inherited by each receiver; background
+command execution never manufactures a service origin.
+
+## Commands and receipts
+
+Each imported command generates `<operation>_send : Input -> Effects(Receipt)`
+and `<operation>_status : Receipt -> Observe(Status)`. Receipts are nominal per
+operation. Sends return durable acceptance, not a completed business result.
+Statuses are pending, success, refused, blocked or unknown. Unknown never means
+that an earlier mutation did not occur; status exposes no receiver result payload.
+
+The source persists its original delivery fence before dispatch. A stable identity
+binds source scope/security epoch, invocation, effect step and receiver scope.
+The receiver inserts the inbox and ordinary invocation atomically, binding the
+payload, actor, operation, contract and human origin. Duplicate delivery returns
+the same receipt; conflicting reuse is rejected. A replacement receiver with no
+original inbox cannot accept an old uncertain call as a new mutation.
+
+Uncertain sends leave the effect pending. The ordinary effect scheduler releases
+workers and transactions, retries the same identity at bounded intervals and
+parks work after four attempts or one hour. Each attempt consumes its grant's
+request allowance. An exhausted grant can refuse earlier. Revocation blocks new
+dispatch and completion; an already issued proof has a maximum 30-second in-flight
+window. Settlement records evidence without authorizing further writes.
+
+Inbox and outgoing records each have a hard 10,000-record bound. Compact receipts
+remain available after invocation-result compaction. Capacity exhaustion refuses
+new acceptance; the host never forgets an old identity into a new mutation.
+Supported restore disables authority and changes its epoch. Historical inbox
+receipts may be inspected after fresh authority activation; old pending work is
+not automatically resumed. A missing original receiver fence remains unresolved.
 
 ## GKE deployment
 

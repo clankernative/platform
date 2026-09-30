@@ -423,6 +423,8 @@ pub struct SimulatedFixture {
 pub struct DelegationWorld {
     #[serde(default)]
     pub reads: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub accepted: std::collections::BTreeMap<String, String>,
 }
 
 impl DelegationWorld {
@@ -627,6 +629,62 @@ pub fn delegated_read(
                 .get(&key)
                 .cloned()
                 .with_context(|| format!("delegated_read_not_recorded: {app} {operation}"))
+        },
+    )
+}
+
+/// Disposable effect model only: acceptance is not receiver business success.
+pub fn delegated_send(
+    database: &Path,
+    scope: &str,
+    call: &crate::delegation::Call,
+) -> Result<String> {
+    with_world(
+        &database.with_file_name(DELEGATION_WORLD),
+        scope,
+        |world: &mut World<DelegationWorld>| {
+            let id = format!(
+                "rcp_{}",
+                &crate::digest(&serde_json::to_vec(&(
+                    scope,
+                    &call.source_epoch,
+                    &call.origin,
+                    &call.step,
+                    &call.app
+                ))?)[7..]
+            );
+            let fingerprint = crate::digest(&serde_json::to_vec(call)?);
+            if let Some(recorded) = world.world.accepted.get(&id) {
+                ensure!(recorded == &fingerprint, "simulated_app_identity_conflict")
+            } else {
+                world.world.accepted.insert(id.clone(), fingerprint);
+            }
+            world.calls.push(id.clone());
+            Ok(serde_json::json!({"id":id,"status":"accepted"}).to_string())
+        },
+    )
+}
+
+pub fn delegated_status(
+    database: &Path,
+    scope: &str,
+    call: &crate::delegation::Call,
+) -> Result<String> {
+    with_world(
+        &database.with_file_name(DELEGATION_WORLD),
+        scope,
+        |world: &mut World<DelegationWorld>| {
+            let input: serde_json::Value = crate::json::decode(call.input.as_bytes())?;
+            let id = input["id"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("invalid_app_receipt"))?;
+            let status = if world.world.accepted.contains_key(id) {
+                "pending"
+            } else {
+                "unknown"
+            };
+            world.calls.push(id.to_owned());
+            Ok(serde_json::json!({"id":id,"status":status}).to_string())
         },
     )
 }

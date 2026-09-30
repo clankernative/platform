@@ -49,6 +49,9 @@ impl Scope {
 #[serde(deny_unknown_fields)]
 pub struct Query {
     pub version: u32,
+    pub purpose: crate::delegation::Purpose,
+    pub source_epoch: String,
+    pub delivery: Option<crate::delegation_commands::Delivery>,
     pub source: Scope,
     pub target: Scope,
     pub operation: String,
@@ -124,11 +127,17 @@ pub struct Verifier {
     keys: BTreeMap<String, TrustedKey>,
 }
 
-pub struct VerifiedQuery(Query);
+pub struct VerifiedQuery(Query, Option<IssuerClaims>);
 
 impl VerifiedQuery {
     pub fn query(&self) -> &Query {
         &self.0
+    }
+
+    pub(crate) fn origin(&self) -> Result<&IssuerClaims> {
+        self.1
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("delegated_origin_evidence_missing"))
     }
 }
 
@@ -322,7 +331,7 @@ impl IssuerVerifier {
                 && crate::digest(gate.subject().as_bytes()) == claims.workload_subject_digest,
             "invalid_app_issuer_proof"
         );
-        Ok(verified)
+        Ok(VerifiedQuery(verified.0, Some(claims)))
     }
 }
 
@@ -384,7 +393,7 @@ impl Verifier {
         );
         crate::authority::valid_actor(&query.actor)?;
         crate::delegation::extend(&query.chain, &query.source.app, &query.target.app)?;
-        Ok(VerifiedQuery(query))
+        Ok(VerifiedQuery(query, None))
     }
 }
 

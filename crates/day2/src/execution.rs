@@ -28,7 +28,10 @@ pub(crate) fn upgrade(connection: &Connection) -> Result<()> {
         authority_revision INTEGER NOT NULL CHECK(authority_revision > 0),
         observation TEXT,
         UNIQUE(effect,ordinal)
-    ) STRICT;",
+    ) STRICT;
+    CREATE TABLE IF NOT EXISTS day2_external_retries(
+        effect TEXT PRIMARY KEY REFERENCES day2_external_effects(identity),
+        first_ms INTEGER NOT NULL, due_ms INTEGER NOT NULL) STRICT;",
     )?;
     Ok(())
 }
@@ -163,12 +166,25 @@ pub(crate) fn advance(runtime: &Runtime, id: &str, fault: Fault) -> Result<bool>
         let Some(work) = claim_with_worker(runtime, id, &mut worker)? else {
             return Ok(true);
         };
-        let permit = admit_dispatch(runtime, &work)?;
+        let permit = match admit_dispatch(runtime, &work) {
+            Ok(permit) => permit,
+            Err(error)
+                if crate::error::classify(&error)
+                    == crate::error::Failure::EffectReconciliationPending =>
+            {
+                return Ok(true);
+            }
+            Err(error) => return Err(error),
+        };
         let result = perform(runtime, permit)?;
         if result.called_provider && fault == Fault::AfterExternal(work.ordinal as usize + 1) {
             return Err(fault.interruption("simulated_loss_after_provider_acceptance"));
         }
+        let pending = result.pending;
         settle(runtime, &work, result)?;
+        if pending {
+            return Ok(true);
+        }
     }
     bail!("external_step_budget")
 }
@@ -209,6 +225,7 @@ pub(crate) struct Performed {
     reservation: Option<crate::budget::Reservation>,
     usage: crate::resources::ProviderUsage,
     correlation: Vec<crate::integrations::ExchangeCorrelation>,
+    pending: bool,
 }
 
 /// A single admitted provider attempt, deliberately not Clone. Its commit is
@@ -459,6 +476,37 @@ pub(crate) fn admit_dispatch(runtime: &Runtime, work: &Work) -> Result<DispatchP
     }
     let mut reservation = None;
     let attempt = if recorded.is_none() {
+        if work.instruction.model == "app.send.v1" {
+            let at = runtime.host().now_ms()?;
+            let retry: Option<(i64, i64)> = tx
+                .query_row(
+                    "SELECT first_ms,due_ms FROM day2_external_retries WHERE effect=?1",
+                    [&work.identity],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            if let Some((first, due)) = retry {
+                ensure!(
+                    at >= first
+                        && at
+                            < first
+                                .checked_add(
+                                    crate::delegation_commands::RETRY_HORIZON_SECONDS * 1000
+                                )
+                                .context("retry_clock")?,
+                    crate::error::Failure::EffectHorizonExceeded
+                );
+                ensure!(
+                    at >= due,
+                    crate::error::Failure::EffectReconciliationPending
+                );
+            } else {
+                tx.execute(
+                    "INSERT INTO day2_external_retries VALUES(?1,?2,?2)",
+                    params![work.identity, at],
+                )?;
+            }
+        }
         let prior: i64 = tx.query_row(
             "SELECT coalesce(max(ordinal),0) FROM day2_external_attempts WHERE effect=?1",
             [&work.identity],
@@ -469,6 +517,25 @@ pub(crate) fn admit_dispatch(runtime: &Runtime, work: &Work) -> Result<DispatchP
             "external_outcome_requires_reconciliation"
         );
         let ordinal = prior.checked_add(1).context("external_attempt_overflow")?;
+        if work.instruction.model == "app.send.v1" {
+            ensure!(ordinal <= 4, crate::error::Failure::EffectHorizonExceeded);
+            let delay = match ordinal {
+                1 => 5_000,
+                2 => 30_000,
+                _ => 120_000,
+            };
+            tx.execute(
+                "UPDATE day2_external_retries SET due_ms=?1 WHERE effect=?2",
+                params![
+                    runtime
+                        .host()
+                        .now_ms()?
+                        .checked_add(delay)
+                        .context("retry_clock")?,
+                    work.identity
+                ],
+            )?;
+        }
         let attempt = format!("{}_attempt_{ordinal}", work.identity);
         crate::resources::record_use(&tx, &attempt, capability.resource())?;
         reservation = Some(crate::resources::reserve_in(
@@ -525,6 +592,7 @@ pub(crate) fn perform(runtime: &Runtime, permit: DispatchPermit) -> Result<Perfo
             effect: permit.effect,
             reservation: None,
             correlation: Vec::new(),
+            pending: false,
             usage: crate::resources::ProviderUsage {
                 known: true,
                 ..Default::default()
@@ -567,6 +635,7 @@ pub(crate) fn perform(runtime: &Runtime, permit: DispatchPermit) -> Result<Perfo
         reservation: permit.reservation,
         usage: completed.usage,
         correlation: completed.correlation,
+        pending: completed.pending,
     })
 }
 
@@ -599,6 +668,12 @@ pub(crate) fn settle(runtime: &Runtime, work: &Work, result: Performed) -> Resul
             |row| row.get(0),
         )?;
         ensure!(settled == encoded, "external_attempt_result_mismatch");
+    }
+    if result.pending {
+        // The attempt evidence settles, while the effect remains unresolved.
+        // Workers and transactions are released until the bounded retry is due.
+        tx.commit()?;
+        return Ok(());
     }
     tx.execute("UPDATE day2_external_effects SET observation=?1 WHERE invocation=?2 AND ordinal=?3 AND observation IS NULL",
         params![encoded, id, work.ordinal])?;

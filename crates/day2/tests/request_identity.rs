@@ -56,6 +56,8 @@ impl World {
         let binding = json!({"artifact":artifact,"readers":actors,"writers":actors,
         "authority":{"version":1,"admins":["boss"],"operations":{
             "delegation.who":read,"delegation.forward":forward,
+            "delegation.send":{"actors":actors,"mode":{"kind":"current_state"},"models":{},"effects":["app.send.v1"]},
+            "delegation.status":{"actors":actors,"mode":{"kind":"read"},"models":{},"observations":["app.status.v1"]},
             "delegation.history":{"actors":actors,"mode":{"kind":"read"},"models":{},"observations":["audit.history.v1"]},
             "delegation.record":{"actors":actors,"mode":{"kind":"current_state"},
                 "models":{"entries":{"read":true,"create":true,"rows":{"kind":"owner_or_admin","field":"actor"}}}}
@@ -72,7 +74,12 @@ impl World {
             .unwrap();
         *operations = operations
             .iter()
-            .filter(|(name, _)| name.as_str() != "delegation.forward")
+            .filter(|(name, _)| {
+                matches!(
+                    name.as_str(),
+                    "delegation.who" | "delegation.record" | "delegation.history"
+                )
+            })
             .map(|(name, policy)| {
                 (
                     name.replace("delegation.", "peer_identity."),

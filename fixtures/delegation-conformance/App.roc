@@ -3,6 +3,8 @@ import Forward
 import RecordEntry
 import History
 import IdentityInvariants
+import SendEntry
+import ReceiptStatus
 
 App :: [].{
 	definition = {
@@ -11,6 +13,8 @@ App :: [].{
 			who: Who.definition,
 			forward: Forward.definition,
 			record: RecordEntry.definition,
+			send: SendEntry.definition,
+			status: ReceiptStatus.definition,
 			history: History.definition,
 		},
 		pages: {},

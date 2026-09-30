@@ -240,6 +240,8 @@ pub(crate) struct Cause<'a> {
     /// Empty means they are the same, which is the ordinary case.
     authenticated: &'a str,
     origin: Option<&'a crate::iap::Verified>,
+    remote: Option<&'a crate::delegation_commands::Admission>,
+    remote_fence: bool,
 }
 
 pub(crate) struct RequestIdentity<'a> {
@@ -269,7 +271,14 @@ impl<'a> Cause<'a> {
             caller,
             authenticated,
             origin: None,
+            remote: None,
+            remote_fence: true,
         }
+    }
+
+    pub(crate) fn remote(mut self, admission: &'a crate::delegation_commands::Admission) -> Self {
+        self.remote = Some(admission);
+        self
     }
 }
 
@@ -609,6 +618,7 @@ impl Runtime {
         }
         crate::audit::upgrade(&tx)?;
         crate::delegation::upgrade_origin(&tx)?;
+        crate::delegation_commands::upgrade(&tx)?;
         crate::invocations::upgrade(&tx)?;
         crate::resources::upgrade(&tx)?;
         crate::budget::upgrade(&tx)?;
@@ -768,6 +778,8 @@ impl Runtime {
                     authenticated
                 },
                 origin,
+                remote: None,
+                remote_fence: true,
             },
         )
     }
@@ -784,6 +796,19 @@ impl Runtime {
         // principal the work is for is unchanged by the hop.
         cause: Cause<'_>,
     ) -> Result<()> {
+        self.accept_with_caller(operation, cause.actor, id, input, now, cause)
+    }
+
+    pub(crate) fn accept_remote(
+        &self,
+        operation: &str,
+        id: &str,
+        input: &Value,
+        now: i64,
+        mut cause: Cause<'_>,
+        original_fence: bool,
+    ) -> Result<()> {
+        cause.remote_fence = original_fence;
         self.accept_with_caller(operation, cause.actor, id, input, now, cause)
     }
 
@@ -808,6 +833,8 @@ impl Runtime {
                 caller: "",
                 authenticated: "",
                 origin: None,
+                remote: None,
+                remote_fence: true,
             },
         )
     }
@@ -827,6 +854,8 @@ impl Runtime {
             caller,
             authenticated,
             origin,
+            remote,
+            remote_fence,
         } = cause;
         let initiator = if authenticated.is_empty() {
             actor
@@ -878,6 +907,29 @@ impl Runtime {
                 crate::managed_credentials::issuance::require_confirmation(
                     &tx, self, operation, actor, id, input, now,
                 )?;
+            }
+            if let Some(admission) = remote {
+                ensure!(admission.origin.actor == actor, "delegated_origin_changed");
+                if crate::delegation_commands::reused_in(&tx, admission)? {
+                    crate::audit::record_attempt(
+                        &tx,
+                        self,
+                        Attempt {
+                            kind: AttemptKind::Admission,
+                            trigger,
+                            identity: id,
+                            actor,
+                            initiator,
+                            operation,
+                            outcome: AttemptOutcome::Reused,
+                            reason: None,
+                            at_ms: now.checked_mul(1000).context("audit_clock")?,
+                        },
+                    )?;
+                    tx.commit()?;
+                    return Ok(());
+                }
+                ensure!(remote_fence, "app_send_original_receiver_missing");
             }
             // *Whom* the work is for is chosen once, at the outermost
             // invocation, and is immutable for the whole call tree.
@@ -999,6 +1051,9 @@ impl Runtime {
                 }
             }
             crate::delegation::record_root_origin(&tx, id, initiator, origin, !reused)?;
+            if let Some(admission) = remote {
+                crate::delegation_commands::record_in(&tx, id, admission)?;
+            }
             reason = AttemptReason::StorageRejected;
             crate::audit::record_attempt(
                 &tx,
@@ -1082,6 +1137,7 @@ impl Runtime {
                     | crate::error::Failure::EffectAuthorityChanged
                     | crate::error::Failure::ContinuationAuthorityChanged
                     | crate::error::Failure::ResourceAuthorityExpired
+                    | crate::error::Failure::EffectHorizonExceeded
             )
         {
             let mut connection = open(&self.db)?;

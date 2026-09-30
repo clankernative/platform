@@ -80,6 +80,8 @@ failures! {
     AuthorityPolicyChanged => ("authority_policy_changed", Conflict),
     PreparationAuthorityChanged => ("preparation_authority_changed", Forbidden),
     EffectAuthorityChanged => ("effect_authority_changed", Forbidden),
+    EffectReconciliationPending => ("effect_reconciliation_pending", Conflict),
+    EffectHorizonExceeded => ("effect_horizon_exceeded", Forbidden),
     ContinuationAuthorityChanged => ("continuation_authority_changed", Forbidden),
     InstallationChanged => ("installation_changed", Conflict),
     BrandingBindingChanged => ("branding_binding_changed", Conflict),

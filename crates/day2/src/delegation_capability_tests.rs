@@ -863,6 +863,8 @@ fn impersonation_cannot_be_introduced_by_a_schedule_child_or_later_hop() -> Resu
                     caller,
                     authenticated: "alice",
                     origin: None,
+                    remote: None,
+                    remote_fence: true,
                 },
             ),
             id,

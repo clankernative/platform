@@ -41,15 +41,18 @@ fn render(imports: &ImportedContracts, admission: bool) -> Result<String> {
     imports.verify()?;
     let mut names = BTreeSet::new();
     let mut functions = BTreeSet::new();
-    let mut source = if imports
-        .operations
-        .values()
-        .any(|package| package.operation.kind == crate::operation_contract::Kind::Query)
-    {
+    let mut source = if !imports.operations.is_empty() {
         String::from("import pf.Observe\n\n")
     } else {
         String::new()
     };
+    if imports
+        .operations
+        .values()
+        .any(|package| package.operation.kind == crate::operation_contract::Kind::Command)
+    {
+        source.push_str("import pf.Effects\n\n");
+    }
     source
         .push_str("# Generated from exact checked import contracts.\nImportedContracts :: [].{\n");
     let mut types = BTreeMap::new();
@@ -104,8 +107,8 @@ fn render(imports: &ImportedContracts, admission: bool) -> Result<String> {
             "\t{prefix}Input : {input_type}\n\n\t{prefix}Output : {}\n\n",
             output_type
         ));
+        let function = package.operation.id.replace(['.', '-'], "_");
         if package.operation.kind == crate::operation_contract::Kind::Query {
-            let function = package.operation.id.replace(['.', '-'], "_");
             crate::schema::identifier(&function)?;
             ensure!(
                 functions.insert(function.clone()),
@@ -149,6 +152,42 @@ fn render(imports: &ImportedContracts, admission: bool) -> Result<String> {
             let argument = if input == "{  }" { "_input" } else { "input" };
             source.push_str(&format!(
                 "\t{function} : {prefix}Input -> Observe({prefix}Output)\n\t{function} = |{argument}|\n\t\tObserve.{capability}(\n\t\t\t\"app.query.v1\",\n\t\t\tJson.to_str({{ contract: {{ operation: {operation}, digest: {digest} }}, input: Json.to_str({input}) }}),\n\t\t).and_then(|raw| {{\n\t\t\tparsed : Try({wire_output}, _)\n\t\t\tparsed = Json.parse(raw)\n\t\t\tresult : Try({prefix}Output, Str)\n\t\t\tresult = match parsed {{\n\t\t\t\tOk(dto) => Ok({output})\n\t\t\t\tErr(_) => Err(\"invalid_imported_response\")\n\t\t\t}}\n\t\t\tObserve.{from_host}(result)\n\t\t}})\n\n"
+            ));
+        } else {
+            let send = format!("{function}_send");
+            let status = format!("{function}_status");
+            crate::schema::identifier(&send)?;
+            crate::schema::identifier(&status)?;
+            ensure!(
+                functions.insert(send.clone()) && functions.insert(status.clone()),
+                "imported function name collision"
+            );
+            let capability = if admission {
+                "admission_capability"
+            } else {
+                "capability"
+            };
+            let from_host = if admission {
+                "admission_from_host"
+            } else {
+                "from_host"
+            };
+            let operation = serde_json::to_string(&package.operation.id)?;
+            let digest = serde_json::to_string(&package.digest)?;
+            let input = match &shapes[&package.operation.input] {
+                crate::output_schema::Type::Record(fields) => format!(
+                    "{{ {} }}",
+                    fields
+                        .keys()
+                        .map(|field| format!("{field}: input.{field}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                _ => "input".into(),
+            };
+            let argument = if input == "{  }" { "_input" } else { "input" };
+            source.push_str(&format!(
+                "\t{prefix}Receipt := {{ id : Str }}\n\n\t{prefix}Status : [Pending, Success, Refused, Blocked, Unknown]\n\n\t{send} : {prefix}Input -> Effects({prefix}Receipt)\n\t{send} = |{argument}|\n\t\tEffects.{capability}(\n\t\t\t\"app.send.v1\",\n\t\t\tJson.to_str({{ contract: {{ operation: {operation}, digest: {digest} }}, input: Json.to_str({input}) }}),\n\t\t).and_then(|raw| {{\n\t\t\tparsed : Try({{ id : Str, status : Str }}, _)\n\t\t\tparsed = Json.parse(raw)\n\t\t\tresult : Try({prefix}Receipt, Str)\n\t\t\tresult = match parsed {{\n\t\t\t\tOk(dto) if dto.status == \"accepted\" => Ok({{ id: dto.id }})\n\t\t\t\t_ => Err(\"invalid_imported_receipt\")\n\t\t\t}}\n\t\t\tEffects.{from_host}(result)\n\t\t}})\n\n\t{status} : {prefix}Receipt -> Observe({prefix}Status)\n\t{status} = |receipt|\n\t\tObserve.{capability}(\n\t\t\t\"app.status.v1\",\n\t\t\tJson.to_str({{ contract: {{ operation: {operation}, digest: {digest} }}, input: Json.to_str({{ id: receipt.id }}) }}),\n\t\t).and_then(|raw| {{\n\t\t\tparsed : Try({{ id : Str, status : Str }}, _)\n\t\t\tparsed = Json.parse(raw)\n\t\t\tresult : Try({prefix}Status, Str)\n\t\t\tresult = match parsed {{\n\t\t\t\tOk(dto) if dto.id == receipt.id => match dto.status {{\n\t\t\t\t\t\"pending\" => Ok(Pending)\n\t\t\t\t\t\"success\" => Ok(Success)\n\t\t\t\t\t\"refused\" => Ok(Refused)\n\t\t\t\t\t\"blocked\" => Ok(Blocked)\n\t\t\t\t\t\"unknown\" => Ok(Unknown)\n\t\t\t\t\t_ => Err(\"invalid_imported_status\")\n\t\t\t\t}}\n\t\t\t\t_ => Err(\"invalid_imported_status\")\n\t\t\t}}\n\t\t\tObserve.{from_host}(result)\n\t\t}})\n\n"
             ));
         }
     }
@@ -243,7 +282,7 @@ mod tests {
     }
 
     #[test]
-    fn commands_have_contract_types_without_a_read_function() {
+    fn commands_generate_effects_and_scoped_status_reads() {
         let mut imports = imported();
         let package = imports.operations.get_mut("directory.lookup").unwrap();
         let objects = package
@@ -255,7 +294,18 @@ mod tests {
         operation.kind = Kind::Command;
         *package = Package::derive(operation, &objects).unwrap();
         let source = module(&imports).unwrap();
-        assert!(!source.contains("import pf.Observe"));
+        assert!(source.contains("import pf.Observe"));
+        assert!(source.contains(
+            "directory_lookup_send : DirectoryLookupInput -> Effects(DirectoryLookupReceipt)"
+        ));
+        assert!(source.contains(
+            "directory_lookup_status : DirectoryLookupReceipt -> Observe(DirectoryLookupStatus)"
+        ));
+        assert!(
+            admission_module(&imports)
+                .unwrap()
+                .contains("Effects.admission_capability(")
+        );
         assert!(!source.contains("directory_lookup ="));
     }
 

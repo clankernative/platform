@@ -25,6 +25,7 @@ const MAX_STEPS: usize = 128;
 /// The target and schema pin also authorize the caller's simulated read.
 #[derive(Clone, Debug)]
 pub struct ImportedQueryFixture {
+    pub kind: crate::operation_contract::Kind,
     pub app: String,
     pub operation: String,
     pub schema_digest: String,
@@ -41,9 +42,6 @@ pub fn imported_query_fixtures(
     let parent = instance_path.parent().context("instance directory")?;
     let mut fixtures = Vec::new();
     for (operation, package) in &imports.operations {
-        if package.operation.kind != crate::operation_contract::Kind::Query {
-            continue;
-        }
         let app = instance
             .apps
             .keys()
@@ -71,6 +69,7 @@ pub fn imported_query_fixtures(
             .get(operation)
             .context("imported query definition missing")?;
         fixtures.push(ImportedQueryFixture {
+            kind: package.operation.kind.clone(),
             app: app.clone(),
             operation: operation.clone(),
             schema_digest: crate::delegation::schema_digest_for_artifact(&artifact, operation)?,
@@ -1227,7 +1226,18 @@ fn resource_fixture_for_artifact_with_imports(
             );
         }
         for (operation_name, operation) in &policy.operations {
-            if operation.actors.is_empty() || !operation.observations.contains("app.query.v1") {
+            let actions: BTreeSet<_> = [
+                Action::DelegateQuery,
+                Action::DelegateSend,
+                Action::DelegateStatus,
+            ]
+            .into_iter()
+            .filter(|action| {
+                operation.observations.contains(action.capability())
+                    || operation.effects.contains(action.capability())
+            })
+            .collect();
+            if operation.actors.is_empty() || actions.is_empty() {
                 continue;
             }
             let bindings: BTreeMap<_, _> = imported_resources
@@ -1250,7 +1260,7 @@ fn resource_fixture_for_artifact_with_imports(
                         PolicySlot {
                             kind: ResourceKind::AppOperation,
                             allowed_resources: BTreeSet::from([resource.clone()]),
-                            actions: BTreeSet::from([Action::DelegateQuery]),
+                            actions: actions.clone(),
                             limits: Limits {
                                 max_request_bytes: 16_384,
                                 max_response_bytes: 65_536,
@@ -1483,6 +1493,9 @@ fn create_for_with_imports(
     let scope = runtime.scope().to_owned();
     let mut worlds = disposable_provider_worlds();
     for import in imports {
+        if import.kind != crate::operation_contract::Kind::Query {
+            continue;
+        }
         let key = crate::integrations::simulated::DelegationWorld::key(
             &import.app,
             &import.operation,
@@ -1608,6 +1621,7 @@ fn disposable_provider_worlds() -> crate::integrations::simulated::SimulatedFixt
         slack_webhook: crate::integrations::simulated::slack_webhook_fixture(),
         delegation: DelegationWorld {
             reads: BTreeMap::new(),
+            accepted: BTreeMap::new(),
         },
         // One finished job and one still running, so a watcher has both the
         // case it closes and the case it leaves open.
