@@ -399,8 +399,9 @@ impl Runtime {
         self
     }
 
-    pub(crate) fn app_call_port(&self) -> Option<&dyn crate::delegation::AppCallPort> {
-        self.app_calls.as_deref()
+    /// Host-owned adapter; never exposed through the application SDK.
+    pub fn app_call_port(&self) -> Option<&Arc<dyn crate::delegation::AppCallPort>> {
+        self.app_calls.as_ref()
     }
 
     pub(crate) fn integrations(&self) -> &crate::integration_host::Host {

@@ -236,7 +236,7 @@ impl Manifest {
                 TypeObject {
                     id: input_id.clone(),
                     codec: Codec::RocJsonV1,
-                    schema: serde_json::to_value(input)?,
+                    schema: serde_json::to_value(input_contract(input)?)?,
                     dependencies: BTreeSet::new(),
                 },
             )?;
@@ -385,6 +385,36 @@ fn supported_input(kind: &crate::schema::Kind) -> bool {
         K::InputShape { shape, .. } => supported_output(shape),
         _ => false,
     }
+}
+
+pub(crate) fn input_contract(
+    input: &crate::schema::Record,
+) -> Result<crate::output_schema::Contract> {
+    use crate::{output_schema::Type as T, schema::Kind as K};
+    let fields = input
+        .fields
+        .iter()
+        .map(|(field, kind)| {
+            let shape = match kind {
+                K::Integer => T::Integer,
+                K::Unsigned(width) => T::Unsigned(*width),
+                K::Text => T::String,
+                K::Boolean => T::Boolean,
+                K::OptionalText => T::OptionalText,
+                K::InputShape { shape, .. } => shape.clone(),
+                _ => anyhow::bail!("unsupported exported input codec"),
+            };
+            Ok((field.clone(), shape))
+        })
+        .collect::<Result<BTreeMap<_, _>>>()?;
+    let shape = T::Record(fields);
+    Ok(crate::output_schema::Contract {
+        roc_type: input
+            .roc_type
+            .clone()
+            .unwrap_or_else(|| shape.wire_annotation()),
+        shape,
+    })
 }
 
 fn supported_output(shape: &crate::output_schema::Type) -> bool {

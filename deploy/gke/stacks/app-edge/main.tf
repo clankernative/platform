@@ -114,9 +114,10 @@ resource "kubernetes_namespace_v1" "app" {
 # namespaces). day2-app does not mount its token.
 resource "kubernetes_service_account_v1" "runtime" {
   metadata {
-    name      = local.runtime_service_account
-    namespace = kubernetes_namespace_v1.app.metadata[0].name
-    labels    = local.platform_labels
+    name        = local.runtime_service_account
+    namespace   = kubernetes_namespace_v1.app.metadata[0].name
+    labels      = local.platform_labels
+    annotations = var.app_calls == null ? {} : { "iam.gke.io/gcp-service-account" = google_service_account.app_calls[0].email }
   }
 }
 
@@ -699,6 +700,19 @@ resource "kubernetes_ingress_v1" "app" {
 
       http {
         dynamic "path" {
+          for_each = local.app_call_gates
+          content {
+            path      = path.key == "issuer" ? "/_platform/app-issue" : "/_platform/app-query"
+            path_type = "Exact"
+            backend {
+              service {
+                name = kubernetes_service_v1.app_calls[path.key].metadata[0].name
+                port { name = "http" }
+              }
+            }
+          }
+        }
+        dynamic "path" {
           for_each = var.signed_webhook_paths
           content {
             path      = path.value
@@ -782,7 +796,7 @@ resource "kubernetes_config_map_v1" "platform_contract" {
     labels    = local.platform_labels
   }
 
-  data = local.contract_data
+  data = merge(local.contract_data, local.app_call_contract)
 
   depends_on = [google_iap_web_backend_service_iam_binding.app_access]
 }

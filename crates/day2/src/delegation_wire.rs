@@ -167,6 +167,19 @@ struct IssuedQuery {
     issuer: String,
 }
 
+/// Untrusted routing hint only. The selected receiver must still verify the
+/// exact raw envelope, IAP identity and both signatures before admission.
+pub fn claimed_source(wire: &[u8]) -> Result<Scope> {
+    ensure!(
+        wire.len() <= MAX_ISSUED_WIRE_BYTES,
+        "app_call_wire_too_large"
+    );
+    let issued: IssuedQuery = crate::json::decode(wire)?;
+    let signed: Signed = crate::json::decode(&URL_SAFE_NO_PAD.decode(issued.workload)?)?;
+    let query: Query = crate::json::decode(&URL_SAFE_NO_PAD.decode(signed.payload)?)?;
+    Ok(query.source)
+}
+
 pub struct IssuerSigner {
     issuer: String,
     key_id: String,

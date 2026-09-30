@@ -6,9 +6,9 @@
 //! a provider-backed serving probe. No app-selected endpoint reaches this port.
 
 use crate::{
-    journal::Journal,
     release::ReleaseTarget,
     release_execution::{ObservedServingBinding, ServingProbe},
+    serving_snapshot::ServingSnapshot,
 };
 use anyhow::{Result, ensure};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -114,6 +114,19 @@ pub struct RemoteQueryIssuer {
 }
 
 impl RemoteQueryIssuer {
+    pub fn authenticates(&self, assertion: &str, at: i64) -> bool {
+        self.iap.verify_workload(assertion, at).is_ok()
+    }
+
+    pub(crate) fn request_target(wire: &[u8]) -> Result<Scope> {
+        ensure!(
+            wire.len() <= MAX_ISSUER_REQUEST_BYTES,
+            "app_issuer_request_too_large"
+        );
+        let request: IssueRequest = day2::json::decode(wire)?;
+        Ok(request.query.target)
+    }
+
     pub fn new(
         source: ReleaseTarget,
         target: ReleaseTarget,
@@ -305,91 +318,95 @@ impl AppCallPort for RemoteQueryPort {
             "app_call_scope_changed"
         );
         let input: Value = serde_json::from_str(&call.input)?;
-        let journal = Journal::open(&self.journal)?;
-        journal.with_serving_selection(&self.target, self.probe.as_ref(), |selection| {
-            let issued_at = now()?;
-            let request = Query {
-                version: 1,
-                source: scope(&self.source),
-                target: scope(&self.target),
-                operation: call.operation.clone(),
-                schema_digest: call.schema_digest.clone(),
-                contract_digest: call.contract_digest.clone(),
-                input,
-                actor: call.actor.clone(),
-                origin: call.origin.clone(),
-                step: call.step.clone(),
-                chain: call.chain.clone(),
-                now: call.now,
-                issued_at,
-                expires_at: issued_at + 30,
-                activation: selection.activation.clone(),
-                generation: selection.generation,
-                serving: serde_json::to_value(&selection.binding)?,
-            };
-            let signer = match &self.auth {
-                Authentication::Fixture(auth) => &auth.workload_signer,
-                Authentication::Iap {
-                    workload_signer, ..
-                } => workload_signer,
-            };
-            let workload = signer.sign(&request)?;
-            let issuer = match &self.auth {
-                Authentication::Fixture(auth) => auth.issuer.issue(
-                    caller,
-                    call,
-                    &request,
-                    &workload,
-                    &auth.issuer_assertion,
+        ServingSnapshot::with_selection(
+            &self.journal,
+            &self.target,
+            self.probe.as_ref(),
+            |selection| {
+                let issued_at = now()?;
+                let request = Query {
+                    version: 1,
+                    source: scope(&self.source),
+                    target: scope(&self.target),
+                    operation: call.operation.clone(),
+                    schema_digest: call.schema_digest.clone(),
+                    contract_digest: call.contract_digest.clone(),
+                    input,
+                    actor: call.actor.clone(),
+                    origin: call.origin.clone(),
+                    step: call.step.clone(),
+                    chain: call.chain.clone(),
+                    now: call.now,
                     issued_at,
-                )?,
-                Authentication::Iap { credentials, .. } => {
-                    let token = credentials.sign_for(Gate::Issuer)?;
-                    let response = self
-                        .client
-                        .post(credentials.url(Gate::Issuer).clone())
-                        .bearer_auth(token.as_str())
-                        .header("Content-Type", "application/vnd.day2.app-issue+json")
-                        .body(issue_request(call, &request, &workload)?)
-                        .send()?;
-                    ensure!(response.status().is_success(), "remote_app_issuer_refused");
-                    let mut body = Vec::new();
-                    response
-                        .take(MAX_ISSUER_PROOF_BYTES + 1)
-                        .read_to_end(&mut body)?;
-                    ensure!(
-                        body.len() as u64 <= MAX_ISSUER_PROOF_BYTES,
-                        "app_issuer_proof_too_large"
-                    );
-                    body
-                }
-            };
-            let wire = issued_query(&workload, &issuer)?;
-            let mut request = self
-                .client
-                .post(self.endpoint.clone())
-                .header("Content-Type", "application/vnd.day2.app-query+json")
-                .body(wire);
-            request = match &self.auth {
-                Authentication::Fixture(auth) => {
-                    request.header(iap::ASSERTION_HEADER, &auth.target_assertion)
-                }
-                Authentication::Iap { credentials, .. } => {
-                    let token = credentials.sign_for(Gate::Receiver)?;
-                    request.bearer_auth(token.as_str())
-                }
-            };
-            let response = request.send()?;
-            ensure!(response.status().is_success(), "remote_app_query_refused");
-            let mut body = Vec::new();
-            response.take(MAX_RESULT_BYTES + 1).read_to_end(&mut body)?;
-            ensure!(
-                body.len() as u64 <= MAX_RESULT_BYTES,
-                "app_call_result_too_large"
-            );
-            let result: Value = serde_json::from_slice(&body)?;
-            Ok(serde_json::to_string(&result)?)
-        })
+                    expires_at: issued_at + 30,
+                    activation: selection.activation.clone(),
+                    generation: selection.generation,
+                    serving: serde_json::to_value(&selection.binding)?,
+                };
+                let signer = match &self.auth {
+                    Authentication::Fixture(auth) => &auth.workload_signer,
+                    Authentication::Iap {
+                        workload_signer, ..
+                    } => workload_signer,
+                };
+                let workload = signer.sign(&request)?;
+                let issuer = match &self.auth {
+                    Authentication::Fixture(auth) => auth.issuer.issue(
+                        caller,
+                        call,
+                        &request,
+                        &workload,
+                        &auth.issuer_assertion,
+                        issued_at,
+                    )?,
+                    Authentication::Iap { credentials, .. } => {
+                        let token = credentials.sign_for(Gate::Issuer)?;
+                        let response = self
+                            .client
+                            .post(credentials.url(Gate::Issuer).clone())
+                            .bearer_auth(token.as_str())
+                            .header("Content-Type", "application/vnd.day2.app-issue+json")
+                            .body(issue_request(call, &request, &workload)?)
+                            .send()?;
+                        ensure!(response.status().is_success(), "remote_app_issuer_refused");
+                        let mut body = Vec::new();
+                        response
+                            .take(MAX_ISSUER_PROOF_BYTES + 1)
+                            .read_to_end(&mut body)?;
+                        ensure!(
+                            body.len() as u64 <= MAX_ISSUER_PROOF_BYTES,
+                            "app_issuer_proof_too_large"
+                        );
+                        body
+                    }
+                };
+                let wire = issued_query(&workload, &issuer)?;
+                let mut request = self
+                    .client
+                    .post(self.endpoint.clone())
+                    .header("Content-Type", "application/vnd.day2.app-query+json")
+                    .body(wire);
+                request = match &self.auth {
+                    Authentication::Fixture(auth) => {
+                        request.header(iap::ASSERTION_HEADER, &auth.target_assertion)
+                    }
+                    Authentication::Iap { credentials, .. } => {
+                        let token = credentials.sign_for(Gate::Receiver)?;
+                        request.bearer_auth(token.as_str())
+                    }
+                };
+                let response = request.send()?;
+                ensure!(response.status().is_success(), "remote_app_query_refused");
+                let mut body = Vec::new();
+                response.take(MAX_RESULT_BYTES + 1).read_to_end(&mut body)?;
+                ensure!(
+                    body.len() as u64 <= MAX_RESULT_BYTES,
+                    "app_call_result_too_large"
+                );
+                let result: Value = serde_json::from_slice(&body)?;
+                Ok(serde_json::to_string(&result)?)
+            },
+        )
     }
 }
 
@@ -406,6 +423,10 @@ pub struct RemoteQueryReceiver {
 }
 
 impl RemoteQueryReceiver {
+    pub fn authenticates(&self, assertion: &str, at: i64) -> bool {
+        self.target_iap.verify_workload(assertion, at).is_ok()
+    }
+
     pub fn new(
         journal: PathBuf,
         probe: Arc<dyn ServingProbe + Send + Sync>,
@@ -431,6 +452,21 @@ impl RemoteQueryReceiver {
     }
 
     pub fn handle(&self, wire: &[u8], assertion: &str, at: i64) -> Result<String> {
+        self.handle_for(&self.runtime, wire, assertion, at)
+    }
+
+    pub fn handle_for(
+        &self,
+        runtime: &Runtime,
+        wire: &[u8],
+        assertion: &str,
+        at: i64,
+    ) -> Result<String> {
+        ensure!(
+            Scope::from_runtime(runtime)? == scope(&self.target)
+                && runtime.artifact().id() == self.runtime.artifact().id(),
+            "app_call_receiver_scope_changed"
+        );
         let workload = self.target_iap.verify_workload(assertion, at)?;
         let verified = self
             .issuer_verifier
@@ -441,19 +477,23 @@ impl RemoteQueryReceiver {
         );
         let claimed: ObservedServingBinding =
             serde_json::from_value(verified.query().serving.clone())?;
-        let journal = Journal::open(&self.journal)?;
-        journal.with_serving_selection(&self.target, self.probe.as_ref(), |selection| {
-            ensure!(
-                claimed == selection.binding
-                    && verified.query().activation == selection.activation
-                    && verified.query().generation == selection.generation,
-                "app_call_serving_binding_changed"
-            );
-            ensure!(
-                selection.binding.artifact.as_str() == self.runtime.artifact().id(),
-                "app_call_receiver_artifact_changed"
-            );
-            day2::delegation::receive_verified(&self.runtime, &verified)
-        })
+        ServingSnapshot::with_selection(
+            &self.journal,
+            &self.target,
+            self.probe.as_ref(),
+            |selection| {
+                ensure!(
+                    claimed == selection.binding
+                        && verified.query().activation == selection.activation
+                        && verified.query().generation == selection.generation,
+                    "app_call_serving_binding_changed"
+                );
+                ensure!(
+                    selection.binding.artifact.as_str() == runtime.artifact().id(),
+                    "app_call_receiver_artifact_changed"
+                );
+                day2::delegation::receive_verified(runtime, &verified)
+            },
+        )
     }
 }

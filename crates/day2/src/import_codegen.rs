@@ -4,7 +4,7 @@
 //! whose contract and resource authority are verified by the host.
 
 use anyhow::{Context, Result, ensure};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::instance_catalog::ImportedContracts;
 
@@ -52,61 +52,57 @@ fn render(imports: &ImportedContracts, admission: bool) -> Result<String> {
     };
     source
         .push_str("# Generated from exact checked import contracts.\nImportedContracts :: [].{\n");
+    let mut types = BTreeMap::new();
+    let mut shapes = BTreeMap::new();
+    for package in imports.operations.values() {
+        for id in [&package.operation.input, &package.operation.output] {
+            if types.contains_key(id) {
+                continue;
+            }
+            let object = &package
+                .types
+                .get(id)
+                .context("imported type missing")?
+                .object;
+            let contract: crate::output_schema::Contract = if object.schema.get("fields").is_some()
+            {
+                crate::operation_contract::input_contract(&serde_json::from_value(
+                    object.schema.clone(),
+                )?)?
+            } else {
+                serde_json::from_value(object.schema.clone())?
+            };
+            ensure!(
+                object.dependencies.is_empty(),
+                "unsupported imported codec dependencies"
+            );
+            let nominal = crate::schema::roc_type_name(&contract.roc_type).is_ok()
+                && matches!(contract.shape, crate::output_schema::Type::Record(_));
+            let wire = if matches!(&contract.shape, crate::output_schema::Type::Record(fields) if fields.is_empty())
+            {
+                "{}".into()
+            } else {
+                contract.shape.wire_annotation()
+            };
+            let annotation = if nominal {
+                let name = format!("Contract{}", &crate::digest(id.as_bytes())[7..23]);
+                source.push_str(&format!("\t{name} := {}\n\n", wire));
+                name
+            } else {
+                wire
+            };
+            types.insert(id.clone(), annotation);
+            shapes.insert(id.clone(), contract.shape);
+        }
+    }
     for package in imports.operations.values() {
         let prefix = type_name(&package.operation.id)?;
         ensure!(names.insert(prefix.clone()), "imported type name collision");
-        let input = &package
-            .types
-            .get(&package.operation.input)
-            .context("imported input type missing")?
-            .object;
-        let output = &package
-            .types
-            .get(&package.operation.output)
-            .context("imported output type missing")?
-            .object;
-        ensure!(
-            input.dependencies.is_empty() && output.dependencies.is_empty(),
-            "generated import needs self-contained structural types"
-        );
-        let input: crate::schema::Record = serde_json::from_value(input.schema.clone())?;
-        ensure!(
-            input.identity.is_none() && input.roc_type.is_none(),
-            "generated import does not yet support nominal input types"
-        );
-        let output: crate::output_schema::Contract = serde_json::from_value(output.schema.clone())?;
-        ensure!(
-            package.operation.output.contains(".operation."),
-            "generated import does not yet support nominal output types"
-        );
-        let input_fields = input
-            .fields
-            .iter()
-            .map(|(field, kind)| {
-                ensure!(
-                    crate::schema::identifier(field).is_ok(),
-                    "unsupported imported input field"
-                );
-                let shape = match kind {
-                    crate::schema::Kind::Integer
-                    | crate::schema::Kind::Unsigned(_)
-                    | crate::schema::Kind::Text
-                    | crate::schema::Kind::Boolean
-                    | crate::schema::Kind::OptionalText => kind.wire_type(true).to_owned(),
-                    crate::schema::Kind::InputShape { shape, .. } => shape.wire_annotation(),
-                    _ => anyhow::bail!("unsupported generated import input shape"),
-                };
-                Ok(format!("{field} : {shape}"))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let input_type = if input_fields.is_empty() {
-            "{}".to_owned()
-        } else {
-            format!("{{ {} }}", input_fields.join(", "))
-        };
+        let input_type = &types[&package.operation.input];
+        let output_type = &types[&package.operation.output];
         source.push_str(&format!(
             "\t{prefix}Input : {input_type}\n\n\t{prefix}Output : {}\n\n",
-            output.shape.wire_annotation()
+            output_type
         ));
         if package.operation.kind == crate::operation_contract::Kind::Query {
             let function = package.operation.id.replace(['.', '-'], "_");
@@ -127,8 +123,32 @@ fn render(imports: &ImportedContracts, admission: bool) -> Result<String> {
             };
             let operation = serde_json::to_string(&package.operation.id)?;
             let digest = serde_json::to_string(&package.digest)?;
+            let input = match &shapes[&package.operation.input] {
+                crate::output_schema::Type::Record(fields) => format!(
+                    "{{ {} }}",
+                    fields
+                        .keys()
+                        .map(|field| format!("{field}: input.{field}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                _ => "input".into(),
+            };
+            let output = match &shapes[&package.operation.output] {
+                crate::output_schema::Type::Record(fields) => format!(
+                    "{{ {} }}",
+                    fields
+                        .keys()
+                        .map(|field| format!("{field}: dto.{field}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                _ => "dto".into(),
+            };
+            let wire_output = shapes[&package.operation.output].wire_annotation();
+            let argument = if input == "{  }" { "_input" } else { "input" };
             source.push_str(&format!(
-                "\t{function} : {prefix}Input -> Observe({prefix}Output)\n\t{function} = |input|\n\t\tObserve.{capability}(\n\t\t\t\"app.query.v1\",\n\t\t\tJson.to_str({{ contract: {{ operation: {operation}, digest: {digest} }}, input: Json.to_str(input) }}),\n\t\t).and_then(|raw| {{\n\t\t\tparsed : Try({prefix}Output, _)\n\t\t\tparsed = Json.parse(raw)\n\t\t\tObserve.{from_host}(parsed.map_err(|_| \"invalid_imported_response\"))\n\t\t}})\n\n"
+                "\t{function} : {prefix}Input -> Observe({prefix}Output)\n\t{function} = |{argument}|\n\t\tObserve.{capability}(\n\t\t\t\"app.query.v1\",\n\t\t\tJson.to_str({{ contract: {{ operation: {operation}, digest: {digest} }}, input: Json.to_str({input}) }}),\n\t\t).and_then(|raw| {{\n\t\t\tparsed : Try({wire_output}, _)\n\t\t\tparsed = Json.parse(raw)\n\t\t\tresult : Try({prefix}Output, Str)\n\t\t\tresult = match parsed {{\n\t\t\t\tOk(dto) => Ok({output})\n\t\t\t\tErr(_) => Err(\"invalid_imported_response\")\n\t\t\t}}\n\t\t\tObserve.{from_host}(result)\n\t\t}})\n\n"
             ));
         }
     }
@@ -240,7 +260,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_nominal_input_until_identity_preserving_codegen_exists() {
+    fn emits_a_stable_nominal_input_type() {
         let mut imports = imported();
         let package = imports.operations.get_mut("directory.lookup").unwrap();
         let input = package
@@ -255,6 +275,8 @@ mod tests {
             .collect();
         *package = Package::derive(package.operation.clone(), &objects).unwrap();
         imports.types = package.types.clone();
-        assert!(module(&imports).is_err());
+        let source = module(&imports).unwrap();
+        assert!(source.contains(" := {}"));
+        assert!(source.contains("DirectoryLookupInput : Contract"));
     }
 }

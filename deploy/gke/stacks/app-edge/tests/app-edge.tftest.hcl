@@ -4,6 +4,65 @@ mock_provider "google" {}
 mock_provider "kubernetes" {}
 mock_provider "cloudflare" {}
 
+run "app_call_gates_and_serving_reads_are_exactly_scoped" {
+  command = plan
+  variables {
+    app_calls = {
+      service_account_id = "example-call"
+      issuer_backend     = "issuer-backend"
+      receiver_backend   = "receiver-backend"
+      incoming_workloads = ["caller@example-tools.iam.gserviceaccount.com"]
+      serving_readers    = ["caller@example-tools.iam.gserviceaccount.com"]
+      workload_name      = "day2-example"
+      serving_api_cidr   = "10.1.0.2/32"
+    }
+  }
+  override_data {
+    target = data.google_compute_backend_service.app
+    values = {
+      generated_id = 1
+      description  = "{\"kubernetes.io/service-name\":\"app-example/app\"}"
+      iap          = [{ enabled = true, oauth2_client_id = "", oauth2_client_secret = "", oauth2_client_secret_sha256 = "" }]
+    }
+  }
+  override_data {
+    target = data.google_compute_backend_service.app_call_issuer
+    values = {
+      generated_id = 2
+      description  = "{\"kubernetes.io/service-name\":\"app-example/app-issuer\"}"
+      iap          = [{ enabled = true, oauth2_client_id = "", oauth2_client_secret = "", oauth2_client_secret_sha256 = "" }]
+    }
+  }
+  override_data {
+    target = data.google_compute_backend_service.app_call_receiver
+    values = {
+      generated_id = 3
+      description  = "{\"kubernetes.io/service-name\":\"app-example/app-receiver\"}"
+      iap          = [{ enabled = true, oauth2_client_id = "", oauth2_client_secret = "", oauth2_client_secret_sha256 = "" }]
+    }
+  }
+  override_resource {
+    target = google_service_account.app_calls
+    values = { email = "example-call@example-tools.iam.gserviceaccount.com", name = "projects/example-tools/serviceAccounts/example-call@example-tools.iam.gserviceaccount.com" }
+  }
+  assert {
+    condition     = toset(google_iap_web_backend_service_iam_binding.app_calls["issuer"].members) == toset(["serviceAccount:example-call@example-tools.iam.gserviceaccount.com"]) && toset(google_iap_web_backend_service_iam_binding.app_calls["receiver"].members) == toset(["serviceAccount:caller@example-tools.iam.gserviceaccount.com"])
+    error_message = "Only the source workload can issue; only selected incoming workloads can enter the receiver gate."
+  }
+  assert {
+    condition     = toset(google_project_iam_custom_role.app_call_signer[0].permissions) == toset(["iam.serviceAccounts.signJwt"]) && toset(google_project_iam_custom_role.app_call_discovery[0].permissions) == toset(["container.clusters.get"])
+    error_message = "No broad token-creator or cluster-reader IAM authority is needed."
+  }
+  assert {
+    condition     = alltrue([for rule in kubernetes_role_v1.app_call_serving[0].rule : toset(rule.verbs) == toset(["get"]) && length(rule.resource_names) == 1]) && kubernetes_service_account_v1.runtime.metadata[0].annotations["iam.gke.io/gcp-service-account"] == "example-call@example-tools.iam.gserviceaccount.com"
+    error_message = "Provider evidence must be readable only for the exact host, pod and workload identity."
+  }
+  assert {
+    condition     = kubernetes_config_map_v1.platform_contract.data["APP_CALL_ISSUER_AUDIENCE"] == "/projects/123456789012/global/backendServices/2" && kubernetes_config_map_v1.platform_contract.data["APP_CALL_RECEIVER_AUDIENCE"] == "/projects/123456789012/global/backendServices/3"
+    error_message = "The host must receive independently resolved IAP audiences."
+  }
+}
+
 variables {
   project_id           = "example-tools"
   project_number       = "123456789012"

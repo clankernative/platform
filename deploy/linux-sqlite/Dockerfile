@@ -8,7 +8,7 @@ ENV CARGO_BUILD_JOBS=2
 # avoiding multi-gigabyte debug symbols and incremental caches in image layers.
 ENV CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0
 COPY . .
-RUN ["cargo", "build", "--locked", "-p", "day2", "-p", "day2-sandbox", "-p", "xtask", "-p", "day2-ops", "--bins"]
+RUN ["cargo", "build", "--locked", "-p", "day2", "-p", "day2-control", "-p", "day2-sandbox", "-p", "xtask", "-p", "day2-ops", "--bins"]
 RUN ["target/debug/xtask", "bootstrap"]
 RUN ["target/debug/xtask", "cli"]
 # One-shot operator tooling uses the same non-root state-volume ownership as
@@ -16,7 +16,7 @@ RUN ["target/debug/xtask", "cli"]
 RUN ["install", "-d", "-o", "10001", "-g", "10001", "-m", "0700", "/srv/day2/.state"]
 
 FROM tooling AS runtime-build
-RUN ["cargo", "build", "--locked", "--release", "-p", "day2", "--bin", "day2-serve", "--bin", "day2-health", "--bin", "day2-inspect", "-p", "day2-sandbox", "--bin", "day2-sandbox", "--bin", "day2-sandbox-probe", "-p", "day2-ops", "--bin", "day2-backup", "--bin", "day2-provision-credentials"]
+RUN ["cargo", "build", "--locked", "--release", "-p", "day2", "--bin", "day2-health", "--bin", "day2-inspect", "-p", "day2-control", "--bin", "day2-serve", "-p", "day2-sandbox", "--bin", "day2-sandbox", "--bin", "day2-sandbox-probe", "-p", "day2-ops", "--bin", "day2-backup", "--bin", "day2-provision-credentials"]
 RUN ["install", "-d", "-o", "10001", "-g", "10001", "-m", "0700", "/runtime-state"]
 
 # Distroless Debian 13: the same glibc release family as the tooling image (a

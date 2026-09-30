@@ -2,6 +2,55 @@
 # override, so this never contacts a cluster.
 mock_provider "kubernetes" {}
 
+run "wires_private_app_calls_into_the_normal_host" {
+  command = plan
+  override_data {
+    target = data.kubernetes_config_map_v1.platform_contract
+    values = { data = {
+      APP_DOMAIN                   = "example.test.example.com"
+      IAP_JWT_AUDIENCE             = "/projects/123/global/backendServices/1"
+      APP_CALL_ISSUER_AUDIENCE     = "/projects/123/global/backendServices/2"
+      APP_CALL_RECEIVER_AUDIENCE   = "/projects/123/global/backendServices/3"
+      APP_CALL_WORKLOAD_EMAIL      = "example-call@example-tools.iam.gserviceaccount.com"
+      PVC_NAME                     = "data"
+      SERVICE_NAME                 = "app"
+      REQUIRED_SERVICE_LABEL_KEY   = "platform.example.com/service"
+      REQUIRED_SERVICE_LABEL_VALUE = "app"
+    } }
+  }
+  variables {
+    app_calls = {
+      workload_key                = { id = "workload-1", secret_version = "projects/123/secrets/workload/versions/1" }
+      issuer_key                  = { issuer = "example-issuer", id = "issuer-1", secret_version = "projects/123/secrets/issuer/versions/1" }
+      serving_snapshot_config_map = "active-app-serving"
+      serving = { example_app = {
+        target         = { company = "exampleco", environment = "production", app = "example_app" }
+        project_number = 123
+        location       = "us-central1-a"
+        cluster        = "day2"
+        namespace      = "app-example"
+        workload       = "day2-example-app"
+        workload_email = "example-call@example-tools.iam.gserviceaccount.com"
+        deployment     = { id = "deployment", revision = "sha256:0000000000000000000000000000000000000000000000000000000000000000" }
+      } }
+      outgoing = {}
+      incoming = {}
+    }
+  }
+  assert {
+    condition     = contains(kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[0].args, "--app-calls") && jsondecode(kubernetes_config_map_v1.app_calls[0].data["host.json"]).workload_email == "example-call@example-tools.iam.gserviceaccount.com"
+    error_message = "The real day2-serve entrypoint must receive its fixed private host bindings."
+  }
+  assert {
+    condition     = kubernetes_stateful_set_v1.day2.metadata[0].annotations["day2.dev/artifact"] == "sha256:9ef287e05cb53f593b35c140140e83306e8c487cca417ff9f23f58568340b6bb" && length(kubernetes_manifest.app_call_keys) == 1
+    error_message = "Serving evidence must expose the exact artifact and keys must use the managed CSI mount."
+  }
+  assert {
+    condition     = length([for volume in kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].volume : volume if volume.name == "app-call-selection" && volume.config_map[0].optional]) == 1
+    error_message = "The host can become ready before activation publishes the selector; calls still fail closed until it exists."
+  }
+}
+
 override_data {
   target = data.kubernetes_config_map_v1.security_shell_contract
   values = {

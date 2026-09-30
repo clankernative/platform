@@ -3,8 +3,7 @@ import pf.Handler
 import pf.Context
 import pf.Query
 import pf.Observe
-import pf.Resource
-import pf.Delegate
+import ImportedContracts
 import ForwardTypes
 import IdentityView
 
@@ -19,7 +18,15 @@ Forward :: [].{
 		})
 
 	prepare : Context, ForwardTypes.Input -> Observe(Str)
-	prepare = |context, _input| Resource.bind(context, "delegation").and_then(|resource| Delegate.query(resource, "{}"))
+	prepare = |_context, _input| ImportedContracts.peer_identity_who({}).map(
+		|answer| Json.to_str({
+			actor: answer.actor,
+			authenticated: answer.authenticated,
+			rule: answer.rule,
+			caller: answer.caller,
+			authentication: answer.authentication,
+		}),
+	)
 
 	handle : Context, ForwardTypes.Input, Str -> Query(Output)
 	handle = |context, _input, answer| Query.from_try(Ok({ identity: IdentityView.from_context(context), answer }))

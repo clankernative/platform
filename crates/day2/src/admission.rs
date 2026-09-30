@@ -123,11 +123,6 @@ const SEALED: &[(&str, &str, &str)] = &[
         "755e423d88a45f0d282412100df605e18b53e8cc8d1df3c609e37a62fe73bcce",
     ),
     (
-        "Delegate.roc",
-        "",
-        "972fa2eac8b2fa9aa62ab4ad54f96d35c8865be4a53e10323115b5d8a5c6d79c",
-    ),
-    (
         "Audit.roc",
         "",
         "f404132bf8e805004716d8cccc4ecf2a48ec34d188b814a457b52620749a4fff",

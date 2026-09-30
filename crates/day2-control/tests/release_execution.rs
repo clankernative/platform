@@ -7,7 +7,7 @@ use axum::{
     body::Bytes,
     extract::State,
     http::{HeaderMap, Method, StatusCode, Uri},
-    routing::{any, post},
+    routing::any,
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use day2::{
@@ -18,6 +18,7 @@ use day2::{
     iap::{self, KeySource},
     store::Runtime,
 };
+use day2_control::app_host::HostAppCalls;
 use day2_control::iap_service_jwt::{Gate, GkeMetadataAccessTokens, IapServiceJwt};
 use day2_control::journal::{Journal, RecoveryMode};
 use day2_control::provider_evidence::{ReadBarrier, RevisionToken, StateEvidence};
@@ -250,6 +251,53 @@ fn serving_fence_requires_an_active_release_and_fresh_matching_workload() {
 }
 
 #[test]
+fn published_serving_snapshot_is_scoped_and_rechecked_after_the_call() -> Result<()> {
+    use day2_control::serving_snapshot::ServingSnapshot;
+    let fixture = Fixture::new(true);
+    fixture.until(ReleasePhase::Active, &mut 0);
+    let probe = fixture.serving_probe();
+    let target = &fixture.provider.approval.target;
+    let path = fixture._directory.path().join("serving.json");
+    let snapshot = Journal::open(&fixture.path)?.serving_snapshot(std::slice::from_ref(target))?;
+    let bytes = serde_json::to_vec(&snapshot)?;
+    fs::write(&path, &bytes)?;
+    let selected = ServingSnapshot::with_selection(&path, target, &probe, |entry| {
+        Ok(entry.activation.clone())
+    })?;
+    assert_eq!(
+        Some(selected),
+        Journal::open(&fixture.path)?
+            .release_state(target)?
+            .active
+            .map(|entry| entry.id)
+    );
+    assert!(
+        ServingSnapshot::with_selection(&path, target, &probe, |_| {
+            let mut changed: Value = serde_json::from_slice(&bytes)?;
+            changed["selections"][0]["generation"] = json!(2);
+            fs::write(&path, changed.to_string())?;
+            Ok("do not disclose this result")
+        })
+        .is_err()
+    );
+    let mut value: Value = serde_json::from_slice(&bytes)?;
+    let entry = value["selections"][0].clone();
+    value["selections"].as_array_mut().unwrap().push(entry);
+    fs::write(&path, value.to_string())?;
+    assert!(
+        ServingSnapshot::read(&path).is_err(),
+        "duplicate target selections are refused"
+    );
+    value["selections"][1]["binding"]["target"]["company"] = json!("another_company");
+    fs::write(&path, value.to_string())?;
+    assert!(
+        ServingSnapshot::read(&path).is_err(),
+        "a host publication cannot combine companies"
+    );
+    Ok(())
+}
+
+#[test]
 fn serving_fence_rechecks_the_selected_release_after_the_call() {
     let fixture = Fixture::new(true);
     fixture.until(ReleasePhase::Active, &mut 0);
@@ -310,7 +358,7 @@ impl FixtureIap {
             URL_SAFE_NO_PAD.encode(
                 json!({
                     "iss":iap::ISSUER,"aud":audience,"exp":at+600,
-                    "sub":"service-account-fixture","email":email
+                    "sub":"service-account-fixture","email":email,"hd":"example.com"
                 })
                 .to_string()
             )
@@ -331,7 +379,13 @@ impl FixtureIap {
 }
 
 impl QueryServer {
-    fn start(receiver: Arc<RemoteQueryReceiver>) -> Result<Self> {
+    fn start(
+        runtime: Runtime,
+        own: ReleaseTarget,
+        incoming: BTreeMap<String, Arc<RemoteQueryReceiver>>,
+        issuers: BTreeMap<String, Arc<RemoteQueryIssuer>>,
+        iap: Arc<FixtureIap>,
+    ) -> Result<Self> {
         let (send, receive) = mpsc::channel();
         let (stop, done) = tokio::sync::oneshot::channel();
         let thread = thread::spawn(move || {
@@ -342,42 +396,25 @@ impl QueryServer {
                 .block_on(async move {
                     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
                     send.send(format!("http://{}", listener.local_addr()?))?;
-                    let router = Router::new()
-                        .route(
-                            "/_platform/app-query",
-                            post(
-                                |State(receiver): State<Arc<RemoteQueryReceiver>>,
-                                 headers: HeaderMap,
-                                 body: Bytes| async move {
-                                    let mut assertions =
-                                        headers.get_all(iap::ASSERTION_HEADER).iter();
-                                    let assertion = match (assertions.next(), assertions.next()) {
-                                        (Some(value), None) => {
-                                            value.to_str().ok().map(str::to_owned)
-                                        }
-                                        _ => None,
-                                    };
-                                    let answer = tokio::task::spawn_blocking(move || {
-                                        let at = i64::try_from(
-                                            SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
-                                        )?;
-                                        receiver.handle(
-                                            &body,
-                                            assertion.as_deref().unwrap_or(""),
-                                            at,
-                                        )
-                                    })
-                                    .await;
-                                    match answer {
-                                        Ok(Ok(result)) => (StatusCode::OK, result),
-                                        _ => (StatusCode::FORBIDDEN, "refused".to_owned()),
-                                    }
-                                },
-                            ),
-                        )
-                        .with_state(receiver);
-                    axum::serve(listener, router)
-                        .with_graceful_shutdown(async {
+                    let outbound = runtime.app_call_port().cloned();
+                    let runtime = runtime.with_app_call_port(Arc::new(FixtureHostCalls {
+                        ingress: HostAppCalls::new(own, BTreeMap::new(), issuers, incoming)?,
+                        outbound,
+                    }));
+                    let edge = day2::artifact::Edge {
+                        origin: "https://app.fixture.example".into(),
+                        iap_audience: "/projects/123/global/backendServices/browser".into(),
+                    };
+                    let verifier = iap::Verifier::new(
+                        &edge.iap_audience,
+                        "example.com",
+                        Box::new(FixtureKeys(iap.keys.clone())),
+                    )?;
+                    let server = day2::web::LocalServer::bind_edge_listener(
+                        runtime, listener, &edge, verifier, 1,
+                    )?;
+                    server
+                        .serve(async {
                             let _ = done.await;
                         })
                         .await?;
@@ -392,6 +429,31 @@ impl QueryServer {
     }
 }
 
+struct FixtureHostCalls {
+    ingress: HostAppCalls,
+    outbound: Option<Arc<dyn day2::delegation::AppCallPort>>,
+}
+
+impl day2::delegation::AppCallPort for FixtureHostCalls {
+    fn query(&self, runtime: &Runtime, call: &Call) -> Result<String> {
+        self.outbound
+            .as_ref()
+            .context("fixture outbound port")?
+            .query(runtime, call)
+    }
+
+    fn receive(
+        &self,
+        runtime: &Runtime,
+        path: &str,
+        wire: &[u8],
+        assertion: &str,
+        at: i64,
+    ) -> Result<Vec<u8>> {
+        day2::delegation::AppCallPort::receive(&self.ingress, runtime, path, wire, assertion, at)
+    }
+}
+
 struct GatedServer {
     origin: String,
     stop: Option<tokio::sync::oneshot::Sender<()>>,
@@ -400,9 +462,8 @@ struct GatedServer {
 
 struct GatedState {
     origin: String,
-    caller: Runtime,
-    issuer: Arc<RemoteQueryIssuer>,
-    receiver: Arc<RemoteQueryReceiver>,
+    issuer_endpoint: String,
+    receiver_endpoint: String,
     iap: Arc<FixtureIap>,
     workload_email: String,
     issuer_audience: String,
@@ -516,11 +577,22 @@ async fn gated_request(
         Err(_) => return (StatusCode::FORBIDDEN, Vec::new()),
     };
     let result = tokio::task::spawn_blocking(move || {
-        if uri.path() == "/_platform/app-issue" {
-            state.issuer.handle(&state.caller, &body, &assertion, at)
+        let endpoint = if uri.path() == "/_platform/app-issue" {
+            &state.issuer_endpoint
         } else {
-            Ok(state.receiver.handle(&body, &assertion, at)?.into_bytes())
-        }
+            &state.receiver_endpoint
+        };
+        let response = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(10))
+            .build()?
+            .post(endpoint)
+            .header(iap::ASSERTION_HEADER, assertion)
+            .body(body.to_vec())
+            .send()?;
+        ensure!(response.status().is_success(), "fixture app host refused");
+        Ok::<_, anyhow::Error>(response.bytes()?.to_vec())
     })
     .await;
     match result {
@@ -531,9 +603,8 @@ async fn gated_request(
 
 impl GatedServer {
     fn start(
-        caller: Runtime,
-        issuer: Arc<RemoteQueryIssuer>,
-        receiver: Arc<RemoteQueryReceiver>,
+        issuer_endpoint: String,
+        receiver_endpoint: String,
         iap: Arc<FixtureIap>,
         workload_email: &str,
         issuer_audience: &str,
@@ -554,9 +625,8 @@ impl GatedServer {
                     let origin = format!("http://{}", listener.local_addr()?);
                     let state = Arc::new(GatedState {
                         origin: origin.clone(),
-                        caller,
-                        issuer,
-                        receiver,
+                        issuer_endpoint,
+                        receiver_endpoint,
                         iap,
                         workload_email,
                         issuer_audience,
@@ -606,36 +676,74 @@ impl Drop for QueryServer {
 
 #[test]
 fn signed_query_crosses_separate_host_databases_and_fences_serving_generation() -> Result<()> {
-    let artifact = std::env::var_os("DAY2_TEST_REPORTS_ARTIFACT")
+    let artifact = std::env::var_os("DAY2_TEST_DELEGATION_ARTIFACT")
         .map(PathBuf::from)
         .context("run xtask verify with compiled fixtures")?;
-    let policy: Value = serde_json::from_str(include_str!(
-        "../../../fixtures/authority-policies/reports.json"
-    ))?;
+    let peer = std::env::var_os("DAY2_TEST_DELEGATION_PEER_ARTIFACT")
+        .map(PathBuf::from)
+        .context("run xtask build-delegation")?;
+    let peer_artifact = day2::artifact::LoadedArtifact::load(&peer)?;
+    let schema_digest =
+        delegation::schema_digest_for_artifact(&peer_artifact, "peer_identity.who")?;
     let host = |app: &str| -> Result<(tempfile::TempDir, Runtime)> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("instance.json");
+        let mut policy = if app == "caller" {
+            json!({"version":1,"admins":[],"operations":{
+                "delegation.who":{"actors":["alice"],"mode":{"kind":"read"},"models":{}},
+                "delegation.forward":{"actors":["alice"],"mode":{"kind":"read"},"models":{},"observations":["app.query.v1"]},
+                "delegation.history":{"actors":["alice"],"mode":{"kind":"read"},"models":{},"observations":["audit.history.v1"]},
+                "delegation.record":{"actors":["alice"],"mode":{"kind":"current_state"},"models":{"entries":{"read":true,"create":true,"rows":{"kind":"all"}}}}
+            }})
+        } else {
+            json!({"version":1,"admins":[],"operations":{
+                "peer_identity.who":{"actors":["alice"],"mode":{"kind":"read"},"models":{}},
+                "peer_identity.history":{"actors":["alice"],"mode":{"kind":"read"},"models":{},"observations":["audit.history.v1"]},
+                "peer_identity.record":{"actors":["alice"],"mode":{"kind":"current_state"},"models":{"entries":{"read":true,"create":true,"rows":{"kind":"all"}}}}
+            }})
+        };
+        for operation in policy["operations"].as_object_mut().unwrap().values_mut() {
+            operation["actors"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!("alice@example.com"));
+        }
+        let resource_policies = if app == "caller" {
+            json!([{"policy":{"id":"peer_read","revision":1},"operation":"delegation.forward","bindings":{"delegation":{"id":"peer","revision":1}}}])
+        } else {
+            json!([])
+        };
         fs::write(
             &path,
             serde_json::to_vec(&json!({
                 "installation":"alpha","environment":"production",
                 "apps":{app:{
-                    "artifact":artifact,"readers":["alice"],"writers":["alice"],
-                    "authority":policy
-                }}
+                    "artifact":if app == "caller" { &artifact } else { &peer },"readers":["alice","alice@example.com"],"writers":["alice","alice@example.com"],
+                    "authority":policy,"resource_policies":resource_policies
+                }},
+                "resources":{"version":1,"connections":{"peer":{"revision":1,"provider":"local_delegation"}},
+                    "resources":{"peer":{"revision":1,"connection":{"id":"peer","revision":1},"target":{"kind":"app_operation","app":"peer_identity","operation":"peer_identity.who","schema_digest":schema_digest}}},
+                    "policies":{"peer_read":{"revision":1,"owner":"alice","actors":["alice","alice@example.com"],"allowed_apps":["caller"],"slots":{"delegation":{"kind":"app_operation","allowed_resources":[{"id":"peer","revision":1}],"actions":["delegate_query"],"limits":{"max_request_bytes":16384,"max_response_bytes":65536,"max_calls_per_invocation":4},"budgets":[]}}}},"budgets":{}}
             }))?,
         )?;
         let runtime = Runtime::load(&path, app)?;
         runtime.initialize()?;
         Ok((directory, runtime))
     };
-    let (callee_directory, callee) = host("reports")?;
+    let (callee_directory, callee) = host("peer_identity")?;
     let (caller_directory, caller) = host("caller")?;
     let artifact_id: Digest = callee.artifact().id().to_owned().try_into()?;
-    let fixture = Fixture::new_with_artifact(true, Some(&artifact_id));
+    let fixture = Fixture::new_for_app(true, Some(&artifact_id), "peer_identity");
     fixture.until(ReleasePhase::Active, &mut 0);
     let probe = Arc::new(fixture.serving_probe());
     let target = fixture.provider.approval.target.clone();
+    let snapshot_path = fixture._directory.path().join("serving.json");
+    fs::write(
+        &snapshot_path,
+        serde_json::to_vec(
+            &Journal::open(&fixture.path)?.serving_snapshot(std::slice::from_ref(&target))?,
+        )?,
+    )?;
     let source = ReleaseTarget {
         app: name("caller"),
         ..target.clone()
@@ -684,7 +792,7 @@ fn signed_query_crosses_separate_host_databases_and_fences_serving_generation() 
         issuer_signer,
     )?);
     let receiver = Arc::new(RemoteQueryReceiver::new(
-        fixture.path.clone(),
+        snapshot_path.clone(),
         probe.clone(),
         target.clone(),
         callee.clone(),
@@ -692,9 +800,22 @@ fn signed_query_crosses_separate_host_databases_and_fences_serving_generation() 
         issuer_verifier,
         iap.verifier(target_audience, workload_email)?,
     )?);
-    let server = QueryServer::start(receiver.clone())?;
+    let server = QueryServer::start(
+        callee.clone(),
+        target.clone(),
+        BTreeMap::from([("caller".into(), receiver.clone())]),
+        BTreeMap::new(),
+        iap.clone(),
+    )?;
+    let issuer_server = QueryServer::start(
+        caller.clone(),
+        source.clone(),
+        BTreeMap::new(),
+        BTreeMap::from([("peer_identity".into(), issuer.clone())]),
+        iap.clone(),
+    )?;
     let port = RemoteQueryPort::loopback_fixture(
-        fixture.path.clone(),
+        snapshot_path.clone(),
         probe.clone(),
         source.clone(),
         target.clone(),
@@ -708,11 +829,20 @@ fn signed_query_crosses_separate_host_databases_and_fences_serving_generation() 
     )?;
     let caller = caller.with_app_call_port(Arc::new(port));
     let call = Call {
-        app: "reports".into(),
-        operation: "reports.list".into(),
-        schema_digest: delegation::schema_digest(&callee, "reports.list")?,
-        contract_digest: None,
-        input: json!({"after":"","limit":20}).to_string(),
+        app: "peer_identity".into(),
+        operation: "peer_identity.who".into(),
+        schema_digest: schema_digest.clone(),
+        contract_digest: Some(
+            peer_artifact
+                .contract()
+                .export_manifest
+                .as_ref()
+                .unwrap()
+                .exports["peer_identity.who"]
+                .digest
+                .clone(),
+        ),
+        input: "{}".into(),
         actor: "alice".into(),
         origin: "root-invocation".into(),
         step: "ob_root-invocation_0".into(),
@@ -721,7 +851,7 @@ fn signed_query_crosses_separate_host_databases_and_fences_serving_generation() 
         now: 100,
     };
     caller.accept(
-        "reports.list",
+        "delegation.forward",
         "alice",
         "root-invocation",
         &serde_json::from_str(&call.input)?,
@@ -744,10 +874,9 @@ fn signed_query_crosses_separate_host_databases_and_fences_serving_generation() 
     let answer: Value = serde_json::from_str(&delegation::read(&caller, &call)?)?;
     assert!(answer.is_object() || answer.is_array());
     let gated = GatedServer::start(
-        caller.clone(),
-        issuer.clone(),
-        receiver,
-        iap,
+        format!("{}/_platform/app-issue", issuer_server.origin),
+        format!("{}/_platform/app-query", server.origin),
+        iap.clone(),
         workload_email,
         issuer_audience,
         target_audience,
@@ -764,9 +893,9 @@ fn signed_query_crosses_separate_host_databases_and_fences_serving_generation() 
         tokens,
     )?);
     let http_port = RemoteQueryPort::iap_http(
-        fixture.path.clone(),
+        snapshot_path.clone(),
         probe.clone(),
-        source,
+        source.clone(),
         target.clone(),
         Signer::from_pkcs8("caller-key-1", pkcs8.as_ref())?,
         credentials.clone(),
@@ -780,7 +909,7 @@ fn signed_query_crosses_separate_host_databases_and_fences_serving_generation() 
     assert!(
         !caller_directory
             .path()
-            .join(".state/reports.sqlite")
+            .join(".state/peer_identity.sqlite")
             .exists()
     );
     assert!(
@@ -803,7 +932,7 @@ fn signed_query_crosses_separate_host_databases_and_fences_serving_generation() 
     let client = reqwest::blocking::Client::new();
     assert_eq!(
         client.post(&endpoint).body("{}").send()?.status(),
-        StatusCode::FORBIDDEN
+        StatusCode::UNAUTHORIZED
     );
     let signer = Signer::from_pkcs8("caller-key-1", pkcs8.as_ref())?;
     let active = Journal::open(&fixture.path)?
@@ -816,7 +945,7 @@ fn signed_query_crosses_separate_host_databases_and_fences_serving_generation() 
         target: Scope::from_runtime(&callee)?,
         operation: call.operation.clone(),
         schema_digest: call.schema_digest.clone(),
-        contract_digest: None,
+        contract_digest: call.contract_digest.clone(),
         input: serde_json::from_str(&call.input)?,
         actor: "mallory".into(),
         origin: "forged-origin".into(),
@@ -865,6 +994,17 @@ fn signed_query_crosses_separate_host_databases_and_fences_serving_generation() 
         &issuer_assertion,
         at,
     )?;
+    assert_eq!(
+        client
+            .post(&endpoint)
+            .header(iap::ASSERTION_HEADER, &target_assertion)
+            .header(iap::ASSERTION_HEADER, &target_assertion)
+            .body(issued_query(&valid_workload, &valid_proof)?)
+            .send()?
+            .status(),
+        StatusCode::UNAUTHORIZED,
+        "duplicate assertions fail before ingress admission"
+    );
     let gated_client = reqwest::blocking::Client::new();
     let issued = issued_query(&valid_workload, &valid_proof)?;
     assert_eq!(
@@ -906,7 +1046,7 @@ fn signed_query_crosses_separate_host_databases_and_fences_serving_generation() 
             .body(issued_query(&valid_workload, &valid_proof)?)
             .send()?
             .status(),
-        StatusCode::FORBIDDEN,
+        StatusCode::UNAUTHORIZED,
         "the receiver requires its own IAP assertion"
     );
     assert_eq!(
@@ -1014,6 +1154,53 @@ fn signed_query_crosses_separate_host_databases_and_fences_serving_generation() 
     probe.0.lock().unwrap().incarnation.generation =
         "replacement-generation".to_owned().try_into()?;
     assert!(delegation::read(&caller, &call).is_err());
+    probe.0.lock().unwrap().incarnation.generation = incarnation(
+        fixture
+            .provider
+            .preparations
+            .lock()
+            .unwrap()
+            .values()
+            .next()
+            .unwrap(),
+    )
+    .generation;
+    // Enter through the actual human edge. The native generated client creates
+    // the observation and the host records verified root evidence itself.
+    let browser_server = QueryServer::start(
+        http_caller,
+        source.clone(),
+        BTreeMap::new(),
+        BTreeMap::from([("peer_identity".into(), issuer)]),
+        iap.clone(),
+    )?;
+    let response = client
+        .get(format!("{}/api/delegation.forward", browser_server.origin))
+        .header("Host", "app.fixture.example")
+        .header(
+            iap::ASSERTION_HEADER,
+            iap.assertion(
+                "/projects/123/global/backendServices/browser",
+                "alice@example.com",
+                at,
+            )?,
+        )
+        .send()?;
+    let status = response.status();
+    let body = response.text()?;
+    assert_eq!(status, StatusCode::OK, "native typed call: {body}");
+    let attribution: (String, String, String) = Connection::open(callee.db())?.query_row(
+        "SELECT actor,authenticated,caller FROM day2_invocations WHERE actor='alice@example.com' AND id LIKE 'dlg_%'",
+        [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    assert_eq!(
+        attribution,
+        (
+            "alice@example.com".into(),
+            "app:caller".into(),
+            "caller".into()
+        )
+    );
     Ok(())
 }
 
@@ -1023,11 +1210,26 @@ impl Fixture {
     }
 
     fn new_with_artifact(secret_ready: bool, artifact: Option<&Digest>) -> Self {
+        Self::new_for_app(secret_ready, artifact, "reports")
+    }
+
+    fn new_for_app(secret_ready: bool, artifact: Option<&Digest>, app: &str) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("release.sqlite");
         let mut journal = Journal::open(&path).unwrap();
-        configure(&mut journal, &target("alpha"), &plan("alpha", 1));
-        let approval = approval_with_artifact(&mut journal, "alpha", 1, 0, artifact);
+        let mut target = target("alpha");
+        target.app = name(app);
+        let mut build = plan("alpha", 1);
+        build.app = name(app);
+        configure(&mut journal, &target, &build);
+        let approval = approval_for(
+            &mut journal,
+            &target,
+            &build,
+            0,
+            day2_control::kernel::CredentialPresence::Absent,
+            artifact,
+        );
         let approved = journal.approve_release(&approval).unwrap();
         let recipe = Arc::new(CompiledReleaseRecipe::installed().unwrap());
         let plan = ReleaseExecutionPlan {

@@ -595,7 +595,8 @@ pub struct ObservedServingBinding {
     pub incarnation: DeploymentIncarnation,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SelectedServing {
     pub activation: Digest,
     pub generation: u64,
@@ -609,6 +610,30 @@ pub trait ServingProbe {
 }
 
 impl Journal {
+    /// Publish only checked active selectors. App hosts need no access to the
+    /// control-plane journal or its company-private operational evidence.
+    pub fn serving_snapshot(
+        &self,
+        targets: &[ReleaseTarget],
+    ) -> Result<crate::serving_snapshot::ServingSnapshot> {
+        ensure!(
+            !targets.is_empty() && targets.len() <= 32,
+            "serving_snapshot_target_budget"
+        );
+        let tx = self.connection.unchecked_transaction()?;
+        let mut selections = Vec::new();
+        for target in targets {
+            let (activation, generation, binding) = selected_active_serving_in(&tx, target)?;
+            selections.push(SelectedServing {
+                activation,
+                generation,
+                binding,
+            });
+        }
+        tx.commit()?;
+        crate::serving_snapshot::ServingSnapshot::new(selections)
+    }
+
     /// Bracket one host-side call with fresh serving-provider observations and
     /// active-release checks. A result is never returned after either binding
     /// changes. The probe and transport must authenticate the remote workload;
@@ -672,7 +697,16 @@ fn selected_active_serving(
     target: &ReleaseTarget,
 ) -> Result<(Digest, u64, ObservedServingBinding)> {
     let tx = connection.unchecked_transaction()?;
-    let state = release::read_state(&tx, target)?;
+    let result = selected_active_serving_in(&tx, target)?;
+    tx.commit()?;
+    Ok(result)
+}
+
+fn selected_active_serving_in(
+    tx: &Connection,
+    target: &ReleaseTarget,
+) -> Result<(Digest, u64, ObservedServingBinding)> {
+    let state = release::read_state(tx, target)?;
     let active = state
         .active
         .ok_or_else(|| anyhow::anyhow!("serving release is not active"))?;
@@ -699,14 +733,14 @@ fn selected_active_serving(
         immutable == active,
         "active serving release differs from immutable activation"
     );
-    let approved = release::read_approval(&tx, &active.release)?;
+    let approved = release::read_approval(tx, &active.release)?;
     ensure!(
         approved.generation == active.generation
             && approved.approval.target == *target
             && approved.approval.artifact == active.artifact,
         "active serving release differs from approval"
     );
-    let binding = validated_execution_binding(&tx, &active.release, true)?;
+    let binding = validated_execution_binding(tx, &active.release, true)?;
     ensure!(
         binding.target == *target && binding.artifact == active.artifact,
         "active serving workflow differs from selection"
@@ -717,7 +751,6 @@ fn selected_active_serving(
         deployment: binding.deployment,
         incarnation: binding.incarnation,
     };
-    tx.commit()?;
     Ok((active.id, active.generation, observed))
 }
 

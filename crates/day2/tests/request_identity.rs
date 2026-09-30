@@ -34,6 +34,9 @@ impl World {
         let artifact = std::env::var_os("DAY2_TEST_DELEGATION_ARTIFACT")
             .map(PathBuf::from)
             .context("run xtask verify or set DAY2_TEST_DELEGATION_ARTIFACT")?;
+        let peer_artifact = std::env::var_os("DAY2_TEST_DELEGATION_PEER_ARTIFACT")
+            .map(PathBuf::from)
+            .context("run xtask build-delegation or verify")?;
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("instance.json");
         // Support can authenticate but has no direct business-operation grant.
@@ -62,7 +65,21 @@ impl World {
         }}});
         let mut instance = json!({"installation":"identityco","environment":"test",
             "control":{"version":1,"state_directory":directory.path().join("control"),"operators":["it"],"sources":{},"apps":{}},
-            "apps":{"caller":binding,"callee":binding}});
+            "apps":{"caller":binding,"peer_identity":binding}});
+        instance["apps"]["peer_identity"]["artifact"] = json!(peer_artifact);
+        let operations = instance["apps"]["peer_identity"]["authority"]["operations"]
+            .as_object_mut()
+            .unwrap();
+        *operations = operations
+            .iter()
+            .filter(|(name, _)| name.as_str() != "delegation.forward")
+            .map(|(name, policy)| {
+                (
+                    name.replace("delegation.", "peer_identity."),
+                    policy.clone(),
+                )
+            })
+            .collect();
         // Permit gateway an identity read so it can sign in, then test that its
         // ingress-only delegation still cannot select a target on requests.
         instance["apps"]["caller"]["readers"]
@@ -74,13 +91,13 @@ impl World {
             .unwrap()
             .push(json!("gateway"));
         fs::write(&path, serde_json::to_vec(&instance)?)?;
-        let callee = Runtime::load(&path, "callee")?;
+        let callee = Runtime::load(&path, "peer_identity")?;
         callee.initialize()?;
-        let digest = day2::delegation::schema_digest(&callee, "delegation.who")?;
+        let digest = day2::delegation::schema_digest(&callee, "peer_identity.who")?;
         instance["resources"] = json!({"version":1,
             "connections":{"peer":{"revision":1,"provider":"local_delegation"}},
             "resources":{"peer":{"revision":1,"connection":{"id":"peer","revision":1},
-                "target":{"kind":"app_operation","app":"callee","operation":"delegation.who","schema_digest":digest}}},
+                "target":{"kind":"app_operation","app":"peer_identity","operation":"peer_identity.who","schema_digest":digest}}},
             "policies":{"peer_read":{"revision":1,"owner":"it","actors":actors,"allowed_apps":["caller"],
                 "slots":{"delegation":{"kind":"app_operation","allowed_resources":[{"id":"peer","revision":1}],
                     "actions":["delegate_query"],"limits":{"max_request_bytes":16384,"max_response_bytes":65536,"max_calls_per_invocation":4},"budgets":[]}}}},
@@ -91,6 +108,41 @@ impl World {
         fs::write(&path, serde_json::to_vec(&instance)?)?;
         let caller = Runtime::load(&path, "caller")?;
         caller.initialize()?;
+        fs::create_dir_all(directory.path().join("control"))?;
+        let release =
+            rusqlite::Connection::open(directory.path().join("control/build-journal.sqlite"))?;
+        release.execute_batch("CREATE TABLE release_slots(target TEXT PRIMARY KEY,generation INTEGER,active TEXT); CREATE TABLE release_activations(release TEXT PRIMARY KEY,body TEXT); CREATE TABLE release_approvals(id TEXT PRIMARY KEY,body TEXT);")?;
+        for (app, runtime) in [("caller", &caller), ("peer_identity", &callee)] {
+            #[derive(serde::Serialize)]
+            struct Target<'a> {
+                company: &'a str,
+                environment: &'a str,
+                app: &'a str,
+            }
+            let key = serde_json::to_string(&Target {
+                company: "identityco",
+                environment: "test",
+                app,
+            })?;
+            let target = json!({"company":"identityco","environment":"test","app":app});
+            let release_id = day2_capabilities::Digest::of(&(app, runtime.artifact().id()))?;
+            let readiness = day2_capabilities::Digest::new(app.as_bytes());
+            let activation = day2_capabilities::Digest::of(&(
+                "day2-release-activation-v1",
+                &release_id,
+                &readiness,
+            ))?;
+            let receipt = json!({"id":activation,"target":target,"release":release_id,"generation":1,"artifact":runtime.artifact().id(),"readiness":readiness}).to_string();
+            release.execute(
+                "INSERT INTO release_slots VALUES(?1,1,?2)",
+                (&key, &receipt),
+            )?;
+            release.execute(
+                "INSERT INTO release_activations VALUES(?1,?2)",
+                (release_id.as_str(), &receipt),
+            )?;
+            release.execute("INSERT INTO release_approvals VALUES(?1,?2)", (release_id.as_str(), json!({"approval":{"target":target,"artifact":runtime.artifact().id()},"generation":1}).to_string()))?;
+        }
         Ok(Self {
             _directory: directory,
             path,
@@ -101,7 +153,13 @@ impl World {
 
     fn change(&self, app: &str, update: impl FnOnce(&mut Value)) -> Result<()> {
         let mut instance: Value = serde_json::from_slice(&fs::read(&self.path)?)?;
-        update(&mut instance["apps"][app]);
+        update(
+            &mut instance["apps"][if app == "callee" {
+                "peer_identity"
+            } else {
+                app
+            }],
+        );
         fs::write(&self.path, serde_json::to_vec(&instance)?)?;
         let runtime = if app == "caller" {
             &self.caller
@@ -315,7 +373,7 @@ fn session_identity_reaches_roc_and_a_real_callee_without_changing_actor() -> Re
         "support"
     );
     world.change("callee", |binding| {
-        binding["authority"]["operations"]["delegation.who"]["actors"] = json!(["another"])
+        binding["authority"]["operations"]["peer_identity.who"]["actors"] = json!(["another"])
     })?;
     assert_eq!(
         server
@@ -494,7 +552,7 @@ fn app_history_is_granted_independently_redacted_scoped_and_cursor_paged() -> Re
         callee
             .client
             .get(format!(
-                "{}/api/delegation.history?after=&limit=2",
+                "{}/api/peer_identity.history?after=&limit=2",
                 callee.origin
             ))
             .send()?,
@@ -504,7 +562,11 @@ fn app_history_is_granted_independently_redacted_scoped_and_cursor_paged() -> Re
     assert_eq!(
         callee
             .client
-            .get(format!("{}{next}", callee.origin))
+            .get(format!(
+                "{}{}",
+                callee.origin,
+                next.replace("/api/delegation.history", "/api/peer_identity.history")
+            ))
             .send()?
             .status(),
         StatusCode::BAD_REQUEST

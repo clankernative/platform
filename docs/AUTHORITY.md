@@ -183,7 +183,7 @@ cannot be exercised by that request path.
 Admission checks the active delegation policy in the same writer transaction
 that captures the invocation's authority revision. The pair, rule, cause and
 caller chain are immutable retry identity. A request may choose its target only
-at the outermost boundary. A subsequent `Delegate.query` carries that effective
+at the outermost boundary. A subsequent generated imported query carries that effective
 actor across the app boundary, is constrained by its resource grant and pinned
 callee schema, and requires the callee's own operation authority. The callee
 records `app:CALLER` as initiator and the application chain as provenance; it
