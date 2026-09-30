@@ -255,6 +255,9 @@ fn build_fixture(root: &Path, fixture: &str) -> Result<PathBuf> {
         "relational" => build(root, &root.join("fixtures/relational-conformance")),
         "collection" => build(root, &root.join("fixtures/collection-conformance")),
         "delegation" => build(root, &root.join("fixtures/delegation-conformance")),
+        "credential-metadata" => {
+            build(root, &root.join("fixtures/credential-metadata-conformance"))
+        }
         "redirect" => build(root, &root.join("fixtures/redirect-conformance")),
         "relational-next" => build_migration_fixture(root),
         "owned" => build(root, &root.join("fixtures/row-authority-web-conformance")),
@@ -659,6 +662,10 @@ fn tests(
         ("relational", "DAY2_TEST_RELATIONAL_ARTIFACT"),
         ("collection", "DAY2_TEST_COLLECTION_ARTIFACT"),
         ("delegation", "DAY2_TEST_DELEGATION_ARTIFACT"),
+        (
+            "credential-metadata",
+            "DAY2_TEST_CREDENTIAL_METADATA_ARTIFACT",
+        ),
         ("redirect", "DAY2_TEST_REDIRECT_ARTIFACT"),
         ("relational-next", "DAY2_TEST_RELATIONAL_NEXT_ARTIFACT"),
         ("http", "DAY2_TEST_HTTP_ARTIFACT"),
@@ -756,6 +763,7 @@ fn receipt(
     if scope == "all" {
         let web = artifact("http")?;
         let redirect = artifact("redirect")?;
+        let credential_metadata = artifact("credential-metadata")?;
         let baseline = artifact("relational")?;
         let collection = artifact("collection")?;
         let next = artifact("relational-next")?;
@@ -770,6 +778,7 @@ fn receipt(
             "status":"passed", "scope":"all", "workflow":day2::automation::source_digest(),
             "relational":artifact_id(&baseline), "relational_next":artifact_id(&next), "http":artifact_id(&web),
             "redirect":artifact_id(&redirect),
+            "credential_metadata":artifact_id(&credential_metadata),
             "collection":artifact_id(&collection),
             "owned":artifact_id(&owned), "owned_probe":artifact_id(&owned_probe),
             "reports":artifact_id(&reports), "reports_probe":artifact_id(&reports_probe),
@@ -886,6 +895,7 @@ fn required_steps(scope: &str) -> Result<&'static [&'static str]> {
             "build-repeated-field",
             "build-http",
             "build-delegation",
+            "build-credential-metadata",
             "build-redirect",
             "build-relational",
             "build-collection",
@@ -983,6 +993,7 @@ mod tests {
         let required = required_steps("all")?;
         for obligation in [
             "build-delegation",
+            "build-credential-metadata",
             "build-redirect",
             "build-relational",
             "build-collection",

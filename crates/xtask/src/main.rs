@@ -140,6 +140,7 @@ fn snapshot(
                         "Reads.roc",
                         "AppContract.roc",
                         "ImportedContracts.roc",
+                        "Credentials.roc",
                         "Registry.roc",
                     ]
                     .contains(&name.as_str()))

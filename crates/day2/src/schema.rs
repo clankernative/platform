@@ -1472,6 +1472,7 @@ impl Kind {
                 raw.is_empty()
                     || crate::identity::parse(raw).is_ok()
                     || crate::protocol::valid_selection_cursor(raw)
+                    || crate::credential_codegen::cursor_shape(raw)
             }),
             Self::ModelReference { prefix, .. } => value
                 .as_str()

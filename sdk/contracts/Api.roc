@@ -10,6 +10,7 @@ import RowVersion
 import Input
 import Failure
 import Handler
+import CredentialMetadataAccess
 
 # Required definitions. Generated AppContract checks exact description records.
 Api :: [].{
@@ -52,7 +53,7 @@ Api :: [].{
 
 	ExecutionMetadata : { internal : Bool, model : Str, id_field : Str, version_field : Str, effects : List(Effect) }
 
-	CredentialAccess : { enabled : Bool, local_reads : List(Str) }
+	CredentialAccess : { enabled : Bool, local_reads : List(Str), metadata_reads : List(Str) }
 
 	Metadata : {
 		intent : Entry,
@@ -227,11 +228,23 @@ Api :: [].{
 				{
 					..definition,
 					credential_access: {
+						..definition.credential_access,
 						enabled: Bool.True,
 						local_reads: definition.credential_access.local_reads.append(model.name()),
 					},
 
 				}
+
+		credentials :
+			CommandDef(input, output, input_fields, output_fields),
+			CredentialMetadataAccess -> CommandDef(input, output, input_fields, output_fields)
+		credentials = |definition, access| {
+			..definition,
+			credential_access: {
+				..definition.credential_access,
+				metadata_reads: definition.credential_access.metadata_reads.append(access.family()),
+			},
+		}
 
 		export_version : CommandDef(input, output, input_fields, output_fields) -> U64
 		export_version = |definition| definition.export_version
@@ -299,11 +312,23 @@ Api :: [].{
 				{
 					..definition,
 					credential_access: {
+						..definition.credential_access,
 						enabled: Bool.True,
 						local_reads: definition.credential_access.local_reads.append(model.name()),
 					},
 
 				}
+
+		credentials :
+			QueryDef(input, output, input_fields, output_fields),
+			CredentialMetadataAccess -> QueryDef(input, output, input_fields, output_fields)
+		credentials = |definition, access| {
+			..definition,
+			credential_access: {
+				..definition.credential_access,
+				metadata_reads: definition.credential_access.metadata_reads.append(access.family()),
+			},
+		}
 
 		export_version : QueryDef(input, output, input_fields, output_fields) -> U64
 		export_version = |definition| definition.export_version
@@ -350,7 +375,7 @@ Api :: [].{
 			handler: |context, input| Handler.program(handler, context, input, |body| body),
 			contract: definition.contract,
 			execution: definition.execution,
-			credential_access: { enabled: Bool.False, local_reads: [] },
+			credential_access: { enabled: Bool.False, local_reads: [], metadata_reads: [] },
 			verification: definition.verification,
 			required_all_rows: [],
 			export_version: 0,
@@ -372,7 +397,7 @@ Api :: [].{
 			handler: |context, input| Handler.program(handler, context, input, |body| body.as_transaction()),
 			contract: definition.contract,
 			verification: definition.verification,
-			credential_access: { enabled: Bool.False, local_reads: [] },
+			credential_access: { enabled: Bool.False, local_reads: [], metadata_reads: [] },
 			required_all_rows: [],
 			export_version: 0,
 		}

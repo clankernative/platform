@@ -1,4 +1,5 @@
 import Api
+import CredentialMetadataAccess
 
 # Family declarations are pure product intent. They never contain a token,
 # verifier, key reference or permission to issue a credential.
@@ -51,6 +52,9 @@ Credential :: [].{
 			lifetime_seconds: options.lifetime_seconds,
 		},
 	}
+
+	# Declaration only: the host still applies current policy to the inherited principal.
+	metadata_access = |family| CredentialMetadataAccess.define(family.metadata().id)
 
 	Label :: { value : Str }.{
 		from_str : Str -> Try(Label, [InvalidLabel])

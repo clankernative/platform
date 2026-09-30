@@ -1,0 +1,3 @@
+InspectKeyTypes :: [].{
+	Input := { lineage : Str }
+}

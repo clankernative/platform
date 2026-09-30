@@ -945,6 +945,13 @@ impl Catalog {
                 .clone())
         };
         let mut modules = BTreeMap::new();
+        modules.insert(
+            crate::credential_codegen::MODULE.into(),
+            crate::credential_codegen::module(
+                self.credentials.keys().map(String::as_str),
+                admission,
+            )?,
+        );
         let mut imports = "import pf.Write\nimport pf.Read\nimport pf.Model\nimport pf.Input\nimport pf.Output\nimport pf.Context\nimport pf.Tx\nimport pf.Query\nimport pf.CollectionPage\nimport pf.Cursor\nimport pf.PageSize\nimport AppIdentity\nimport Data\nimport Inputs\nimport Outputs\n".to_string();
         if outputs
             .values()

@@ -803,6 +803,57 @@ pub fn provisional_modules(sources: &[String]) -> Result<BTreeMap<String, String
     }
     failures.push_str("}\n");
     modules.insert("Errors.roc".into(), failures);
+    let mut credential_names = BTreeSet::new();
+    for source in sources {
+        let source_tokens = tokens(source)?;
+        let mut aliases = BTreeSet::from(["Credentials"]);
+        for at in 0..source_tokens.len().saturating_sub(1) {
+            if source_tokens[at..at + 2] != [Token::Word("import"), Token::Word("Credentials")] {
+                continue;
+            }
+            let mut member_at = at + 2;
+            if source_tokens.get(member_at) == Some(&Token::Word("as")) {
+                member_at += 2;
+            }
+            if source_tokens.get(member_at..member_at + 2)
+                == Some(&[Token::Word("exposing"), Token::Punct(b'[')])
+            {
+                for token in source_tokens[member_at + 2..]
+                    .iter()
+                    .take_while(|token| **token != Token::Punct(b']'))
+                {
+                    if let Token::Word(name) = token
+                        && crate::schema::identifier(name).is_ok()
+                    {
+                        credential_names.insert(*name);
+                    }
+                }
+            }
+        }
+        for window in source_tokens.windows(4) {
+            if let [
+                Token::Word("import"),
+                Token::Word("Credentials"),
+                Token::Word("as"),
+                Token::Word(alias),
+            ] = window
+            {
+                aliases.insert(*alias);
+            }
+        }
+        for window in source_tokens.windows(3) {
+            if let [Token::Word(module), Token::Punct(b'.'), Token::Word(member)] = window
+                && aliases.contains(module)
+                && member.as_bytes()[0].is_ascii_lowercase()
+            {
+                credential_names.insert(*member);
+            }
+        }
+    }
+    modules.insert(
+        crate::credential_codegen::MODULE.into(),
+        crate::credential_codegen::provisional_module(credential_names)?,
+    );
     Ok(modules)
 }
 
@@ -871,11 +922,13 @@ mod tests {
 
     #[test]
     fn provisional_handles_support_aliases_without_declaring_operations() -> Result<()> {
-        let sources = vec!["import Commands as Work\nimport Reads exposing [detail]\nWork.analyze\nCommands.submit\n# Commands.fake\n\"Commands.fake\"".into()];
+        let sources = vec!["import Commands as Work\nimport Reads exposing [detail]\nimport Credentials as Keys exposing [clients]\nKeys.personal\nWork.analyze\nCommands.submit\n# Commands.fake\n\"Commands.fake\"".into()];
         let modules = provisional_modules(&sources)?;
         assert!(modules["Commands.roc"].contains("analyze : Write(input, output)"));
         assert!(modules["Reads.roc"].contains("detail : Read(input, output)"));
         assert!(!modules["Commands.roc"].contains("fake"));
+        assert!(modules["Credentials.roc"].contains("clients : { list : ListRequest_clients"));
+        assert!(modules["Credentials.roc"].contains("personal : { list : ListRequest_personal"));
         Ok(())
     }
 
