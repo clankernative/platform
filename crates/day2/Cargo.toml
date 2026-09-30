@@ -21,6 +21,7 @@ maud = "0.27"
 url = "2.5"
 percent-encoding = "2.3"
 base64 = "0.22"
+crc32c = "0.6"
 hmac = "0.12"
 # Already in the lock through rustls. Named directly to verify identity
 # assertions at the edge, rather than adding a second signature library.
