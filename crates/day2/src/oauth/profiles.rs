@@ -48,7 +48,7 @@ pub enum RotatingRecovery {
 }
 
 impl ConfidentialPkceProfile {
-    fn identity(&self) -> &BrowserCodeIdentity {
+    pub(super) fn identity(&self) -> &BrowserCodeIdentity {
         match self {
             Self::NoRefresh(identity)
             | Self::Reusable { identity, .. }
@@ -169,6 +169,7 @@ pub enum AccountEvidenceContract {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OutboundInstanceEvidence {
     pub instance: BindingRef,
+    pub binding_namespace: String,
     pub app_origin_url: String,
     pub shell: SecurityShellEvidence,
     pub registration: ProviderRegistrationEvidence,
@@ -372,10 +373,13 @@ pub(super) fn qualify_outbound_connect(
         Digest::of(&instance.registration.registration)?.as_str() == intent.registration,
         "connect attempt uses another registration revision"
     );
-    let derived =
-        ProviderCallbackRef::derive(&instance.shell.origin, &permission.profile, &intent.slot)?;
+    let derived = ProviderCallbackRef::derive(
+        &instance.shell.origin,
+        &permission.profile,
+        &instance.binding_namespace,
+    )?;
     ensure!(
-        binding.binding_namespace() == intent.slot
+        binding.binding_namespace() == instance.binding_namespace
             && *binding.callback() == derived
             && instance.registration.callback == derived
             && instance.registration.callback_url
@@ -745,6 +749,7 @@ mod tests {
         .unwrap();
         let instance = OutboundInstanceEvidence {
             instance: instance_ref.clone(),
+            binding_namespace: slot.into(),
             app_origin_url: "https://app.example/".into(),
             shell: SecurityShellEvidence {
                 instance: instance_ref.clone(),

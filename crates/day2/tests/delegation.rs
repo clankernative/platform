@@ -42,6 +42,7 @@ impl Pair {
             journal: None,
             resource_policies: Vec::new(),
             credential_families: Default::default(),
+            oauth_connections: Default::default(),
             schedules: Default::default(),
             ingress: Default::default(),
             authority: Some(serde_json::from_value(policy.clone()).expect("policy")),

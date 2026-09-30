@@ -22,9 +22,107 @@ use std::{
 use url::{Host, Url};
 
 const MAX_RESPONSE_BYTES: usize = 4096;
+const METADATA_URL: &str =
+    "http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/token";
+const MAX_METADATA_BYTES: usize = 12 * 1024;
 
 pub(crate) trait AccessTokenSource: Send + Sync {
     fn access_token(&self) -> Result<String>;
+}
+
+/// Opt in only in a host running under the selected GKE workload identity.
+/// Each key read requests a current token; no ADC, process environment,
+/// application credential, proxy or redirect can choose another source.
+pub(crate) struct GkeMetadataAccessTokens {
+    client: Client,
+    endpoint: Url,
+}
+
+impl GkeMetadataAccessTokens {
+    pub(crate) fn new() -> Result<Self> {
+        Self::at(Url::parse(METADATA_URL)?)
+    }
+
+    fn at(endpoint: Url) -> Result<Self> {
+        Ok(Self {
+            client: Client::builder()
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
+                .connect_timeout(Duration::from_secs(2))
+                .timeout(Duration::from_secs(5))
+                .build()?,
+            endpoint,
+        })
+    }
+
+    #[cfg(test)]
+    fn fixture(endpoint: &str) -> Result<Self> {
+        let endpoint = Url::parse(endpoint)?;
+        ensure!(
+            endpoint.scheme() == "http"
+                && matches!(endpoint.host(), Some(Host::Ipv4(ip)) if ip.is_loopback())
+                && endpoint.username().is_empty()
+                && endpoint.password().is_none()
+                && endpoint.query().is_none()
+                && endpoint.fragment().is_none(),
+            "invalid metadata fixture"
+        );
+        Self::at(endpoint.join("/computeMetadata/v1/instance/service-accounts/default/token")?)
+    }
+}
+
+impl AccessTokenSource for GkeMetadataAccessTokens {
+    fn access_token(&self) -> Result<String> {
+        let response = self
+            .client
+            .get(self.endpoint.clone())
+            .header("Metadata-Flavor", "Google")
+            .send()?;
+        ensure!(
+            response.status().is_success()
+                && response
+                    .headers()
+                    .get("Metadata-Flavor")
+                    .is_some_and(|value| value == "Google"),
+            "GKE metadata token unavailable"
+        );
+        ensure!(
+            response
+                .content_length()
+                .is_none_or(|length| length <= MAX_METADATA_BYTES as u64),
+            "GKE metadata response too large"
+        );
+        let mut body = Vec::new();
+        response
+            .take(MAX_METADATA_BYTES as u64 + 1)
+            .read_to_end(&mut body)?;
+        ensure!(
+            body.len() <= MAX_METADATA_BYTES,
+            "GKE metadata response too large"
+        );
+        let token: MetadataToken = serde_json::from_slice(&body)
+            .map_err(|_| anyhow::anyhow!("invalid GKE metadata token"))?;
+        ensure!(
+            token.token_type == "Bearer"
+                && (30..=3600).contains(&token.expires_in)
+                && !token.access_token.is_empty()
+                && token.access_token.len() <= 8192
+                && token
+                    .access_token
+                    .bytes()
+                    .all(|byte| byte.is_ascii_graphic()),
+            "invalid GKE metadata token"
+        );
+        Ok(token.access_token)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MetadataToken {
+    access_token: String,
+    token_type: String,
+    expires_in: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -168,8 +266,11 @@ impl ApprovalKeyProvider for GcpApprovalKeys {
             .get(url)
             .header(AUTHORIZATION, authorization)
             .header("accept", "application/json")
-            .send()?
-            .error_for_status()?;
+            .send()?;
+        ensure!(
+            response.status().is_success(),
+            "OAuth key version unavailable"
+        );
         ensure!(
             response
                 .content_length()
@@ -263,8 +364,17 @@ mod tests {
     }
 
     fn server(status: u16, body: serde_json::Value) -> (String, thread::JoinHandle<String>) {
+        server_with_flavor(status, body, "Google")
+    }
+
+    fn server_with_flavor(
+        status: u16,
+        body: serde_json::Value,
+        flavor: &str,
+    ) -> (String, thread::JoinHandle<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let endpoint = format!("http://{}/", listener.local_addr().unwrap());
+        let flavor = flavor.to_owned();
         let worker = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             stream
@@ -280,7 +390,7 @@ mod tests {
             let body = serde_json::to_vec(&body).unwrap();
             write!(
                 stream,
-                "HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 {status} Fixture\r\nMetadata-Flavor: {flavor}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 body.len()
             )
             .unwrap();
@@ -288,6 +398,95 @@ mod tests {
             String::from_utf8(request).unwrap()
         });
         (endpoint, worker)
+    }
+
+    #[test]
+    fn metadata_tokens_use_the_fixed_path_and_flavor_on_every_read() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let endpoint = format!("http://{}/", listener.local_addr()?);
+        let worker = thread::spawn(move || {
+            for sequence in 1..=2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0];
+                    stream.read_exact(&mut byte).unwrap();
+                    request.push(byte[0]);
+                    assert!(request.len() < 8192);
+                }
+                let request = String::from_utf8(request).unwrap().to_ascii_lowercase();
+                assert!(request.starts_with(
+                    "get /computemetadata/v1/instance/service-accounts/default/token http/1.1\r\n"
+                ));
+                assert!(request.contains("metadata-flavor: google\r\n"));
+                assert!(!request.contains("authorization:"));
+                let body = json!({"access_token":format!("workload-token-{sequence}"),"token_type":"Bearer","expires_in":3599}).to_string();
+                write!(stream, "HTTP/1.1 200 Fixture\r\nMetadata-Flavor: Google\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+        });
+        let source = GkeMetadataAccessTokens::fixture(&endpoint)?;
+        assert_eq!(source.access_token()?, "workload-token-1");
+        assert_eq!(source.access_token()?, "workload-token-2");
+        worker.join().unwrap();
+        assert_eq!(
+            GkeMetadataAccessTokens::new()?.endpoint.as_str(),
+            METADATA_URL
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn metadata_rejects_unusable_tokens_errors_redirects_and_oversized_responses() -> Result<()> {
+        let valid =
+            json!({"access_token":"workload-token","token_type":"Bearer","expires_in":3599});
+        let (endpoint, worker) = server_with_flavor(200, valid.clone(), "");
+        assert!(
+            GkeMetadataAccessTokens::fixture(&endpoint)?
+                .access_token()
+                .is_err()
+        );
+        worker.join().unwrap();
+        for (status, body) in [
+            (302, valid.clone()),
+            (403, valid.clone()),
+            (
+                200,
+                json!({"access_token":"","token_type":"Bearer","expires_in":3599}),
+            ),
+            (
+                200,
+                json!({"access_token":"unsafe\r\nvalue","token_type":"Bearer","expires_in":3599}),
+            ),
+            (
+                200,
+                json!({"access_token":"token","token_type":"Basic","expires_in":3599}),
+            ),
+            (
+                200,
+                json!({"access_token":"token","token_type":"Bearer","expires_in":0}),
+            ),
+            (
+                200,
+                json!({"access_token":"token","token_type":"Bearer","expires_in":7200}),
+            ),
+            (200, json!({"access_token":"token","token_type":"Bearer"})),
+            (
+                200,
+                json!({"access_token":"x".repeat(MAX_METADATA_BYTES),"token_type":"Bearer","expires_in":3599}),
+            ),
+        ] {
+            let (endpoint, worker) = server(status, body);
+            assert!(
+                GkeMetadataAccessTokens::fixture(&endpoint)?
+                    .access_token()
+                    .is_err()
+            );
+            worker.join().unwrap();
+        }
+        Ok(())
     }
 
     fn response(name: &str, checksum: u32) -> serde_json::Value {
@@ -346,6 +545,7 @@ mod tests {
 
         for (status, body) in [
             (200, response(&name, 0)),
+            (302, response(&name, crc32c::crc32c(&[9; 32]))),
             (
                 200,
                 response(

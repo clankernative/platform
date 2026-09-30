@@ -140,6 +140,12 @@ root's `reauth_callback_url` output with that client. Changing the hostname also
 requires a new registration qualification before admitting the replacement
 instance; successful DNS/TLS provisioning alone does not qualify OAuth.
 
+The shared `apps[app].oauth_connections` contract selects app-owned requirements,
+reviewed profiles and version-pinned key providers. See
+[selected outbound OAuth connections](../../docs/OAUTH-INSTANCE.md) for the
+instance fields, callback namespace and current readiness checks. This contract
+does not yet add OAuth selection variables or a shell workload to `day2-app`.
+
 ## Build, qualify and deploy
 
 Follow [native Linux qualification](../linux-sqlite/README.md) on a real engine of

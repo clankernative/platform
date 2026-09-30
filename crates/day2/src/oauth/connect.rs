@@ -92,10 +92,6 @@ impl CallbackBinding {
             &self.profile,
             &self.binding_namespace,
         )?;
-        ensure!(
-            self.binding_namespace == intent.slot,
-            "callback namespace does not match connect slot"
-        );
         identifier(&self.binding_namespace)?;
         Ok(())
     }
