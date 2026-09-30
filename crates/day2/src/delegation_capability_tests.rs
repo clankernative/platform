@@ -131,6 +131,7 @@ impl Granted {
         let caller = Runtime {
             integrations: Arc::new(integration_host::Host::local(&path)?),
             app_calls: None,
+            credentials: None,
             instance_path: path,
             app: "caller".into(),
             db: state.join("caller.sqlite"),
@@ -416,6 +417,7 @@ impl Impersonating {
         let runtime = Runtime {
             integrations: Arc::new(integration_host::Host::local(&path)?),
             app_calls: None,
+            credentials: None,
             instance_path: path,
             app: "support".into(),
             db: state.join("support.sqlite"),

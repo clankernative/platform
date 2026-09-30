@@ -194,6 +194,7 @@ impl Fixture {
         let runtime = Runtime {
             integrations: Arc::new(integration_host::Host::local(&path)?),
             app_calls: None,
+            credentials: None,
             instance_path: path,
             app: "app".into(),
             db: state.join("app.sqlite"),

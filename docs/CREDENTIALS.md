@@ -2,8 +2,9 @@
 
 This document records the implemented foundation for
 `proposals/app-identity/03-CREDENTIALS.md`. The implementation is staged. No
-managed credential can currently be issued through an app, verified at API
-ingress or revealed through a browser route.
+managed credential can currently be issued from an ordinary app session,
+verified at API ingress or revealed through a browser route. Fixed-grant
+client/personal issuance can now run through a host-confirmed interactive command.
 
 ## Portable contracts
 
@@ -12,9 +13,9 @@ Unified apps can now register `credentials` in `App.definition`. The sealed
 or selectable grants over canonical `Api.write(Commands.<name>)` and
 `Api.read(Reads.<name>)` targets. The family constructor fixes the profile in
 the checked compiler type. The app supplies a stable ID and a bounded lifetime
-in seconds; registration names remain separate from IDs. This is declaration
-intent only. Generated metadata methods are available; lifecycle methods are
-still absent.
+in seconds; registration names remain separate from IDs. Generated metadata reads
+and fixed client/personal `issue` are available. Rotation/revocation methods and
+selectable lifecycle inputs remain absent.
 
 The normal build reflects registered families into the artifact and recompares
 them with the native worker at artifact load. It rejects duplicate IDs,
@@ -39,8 +40,9 @@ qualifies every selected artifact's families against those definitions and
 records composition-bound receipts. Activation refuses a credential-bearing
 candidate without those receipts. Missing bindings, changed policies, enlarged
 child authority and provider/resource authority fail qualification. This is
-static release evidence; credential-specific host admission still must be
-implemented before a declared family can issue or receive a key. Imported
+static release evidence; the interactive issuance adapter also requires current
+confirmation and a ready host authority before a declared family can issue.
+Credential-authenticated ingress remains absent. Imported
 operation credential paths remain unsupported until they have selected
 permission contracts and step-level enforcement.
 
@@ -129,6 +131,48 @@ before calling them. A host-only runtime adapter now performs those checks for
 a live browser session in one app database snapshot before list or inspect. It
 refuses an inactive family, artifact mismatch or changed app scope.
 
+### Interactive issuance through the ordinary command runtime
+
+`Handler.interactive` specializes a local command's handler to the nominal
+`pf.InteractiveContext`; an ordinary `Context` cannot be passed to generated
+`Credentials.<registration>.issue`. Context construction and raw issue instructions
+are sealed through both compiler admission profiles. The reflected operation is
+interactive-only and requires exactly one fixed client/personal issue declaration:
+
+```roc
+.credentials(Credential.issue_access(KeyFamilies.clients))
+.credential_label(Selectors.create_client_input_label)
+```
+
+The label selector is a generated `Path(Input, Str)` from the canonical input
+codec. Admission requires a supported top-level text field; the host checks the
+instruction's label against both that exact input value and the frozen confirmation.
+Computed substitutions, another family, subject overrides and a second issuance
+are refused. This first profile permits only local product writes, with no child
+commands, external effects or preparation capability reads.
+
+All acceptance channels require a host-only confirmation bound to the normalized
+input, operation, actor, authenticated subject, recipient session, artifact,
+activated authority revision, family binding, security epoch and fresh-authentication
+time. Direct request provenance is rechecked at issuance. App sessions and actor
+strings cannot create confirmation evidence. Browser confirmation is the next slice;
+there is no raw family issue route.
+
+The selected host authority obtains purpose-bound exact-version keys before the
+product writer lock and rechecks its current local readiness and issuer permission
+at issuance and final commit. No authority adapter is installed by default.
+Generated issuance is a sealed local `Tx` instruction: private material, delivery,
+receipt and ordinary product writes commit together, and failures roll them back.
+Client subjects remain distinct from their human creators; personal subjects come
+from confirmed identity evidence. App observations and results contain only nominal
+public references, label and expiry. Lost-response retry returns the committed
+public receipt without restoring a secret-delivery permission.
+
+The disposable verification campaign explicitly installs random in-memory test keys
+and simulated interaction evidence for app-owned properties. Ordinary runtime/web
+loading does not install this adapter. These campaigns test composition and atomicity;
+they do not qualify a real key provider, browser session or non-rollback epoch store.
+
 Normal builds now generate `Credentials.<registration>.list` and `inspect`
 for client and personal families. These return `Observe(Try(...))`, accept no
 actor/context override, and require the containing operation to declare
@@ -197,7 +241,8 @@ Before end-to-end credential use, complete the following gates from the proposal
    security actions; bind the derived authority manifest at admission, and add
    selected provider/resource/import contracts. Prove the interactive context and
    negative compiler fixtures with the pinned compiler. Client/personal
-   declarations and generated metadata reads are present.
+   declarations, generated metadata reads and fixed-grant interactive issuance
+   are present. Browser confirmation/reveal is the next slice.
 2. Complete selected-instance principal/context compatibility across child,
    delegated and provider paths. Resolve actual key/custody readiness and
    current management/metadata policy. The catalog-managed release path now

@@ -931,8 +931,10 @@ mod tests {
         assert!(modules["Commands.roc"].contains("analyze : Write(input, output)"));
         assert!(modules["Reads.roc"].contains("detail : Read(input, output)"));
         assert!(!modules["Commands.roc"].contains("fake"));
-        assert!(modules["Credentials.roc"].contains("clients : { list : ListRequest_clients"));
-        assert!(modules["Credentials.roc"].contains("personal : { list : ListRequest_personal"));
+        assert!(modules["Credentials.roc"].contains("clients : { issue : InteractiveContext"));
+        assert!(modules["Credentials.roc"].contains("personal : { issue : InteractiveContext"));
+        assert!(modules["Credentials.roc"].contains("list : ListRequest_clients"));
+        assert!(modules["Credentials.roc"].contains("list : ListRequest_personal"));
         Ok(())
     }
 

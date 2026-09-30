@@ -200,6 +200,11 @@ const MODULES: &[Module] = &[
         app_export: true,
     },
     Module {
+        file: "InteractiveContext.roc",
+        source: "contracts/InteractiveContext.roc",
+        app_export: true,
+    },
+    Module {
         file: "Credential.roc",
         source: "contracts/Credential.roc",
         app_export: true,

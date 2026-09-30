@@ -333,6 +333,7 @@ impl Fault {
 pub struct Runtime {
     integrations: Arc<crate::integration_host::Host>,
     app_calls: Option<Arc<dyn crate::delegation::AppCallPort>>,
+    pub(crate) credentials: Option<Arc<dyn crate::managed_credentials::issuance::Authority>>,
     instance_path: PathBuf,
     app: String,
     db: PathBuf,
@@ -361,6 +362,13 @@ pub(crate) fn open(path: &Path) -> Result<Connection> {
 }
 
 impl Runtime {
+    pub(crate) fn credential_authority(
+        &self,
+    ) -> Result<&dyn crate::managed_credentials::issuance::Authority> {
+        self.credentials
+            .as_deref()
+            .context("credential key and epoch authority unavailable")
+    }
     /// Install a host-owned app-call adapter. Application code cannot select an
     /// endpoint or supply an identity proof; the host constructs both.
     pub fn with_app_call_port(mut self, port: Arc<dyn crate::delegation::AppCallPort>) -> Self {
@@ -526,6 +534,7 @@ impl Runtime {
         let runtime = Self {
             integrations: Arc::new(crate::integration_host::Host::local(&instance_path)?),
             app_calls: None,
+            credentials: None,
             scope: instance.scope(app)?,
             hosted_domain: instance.hosted_domain().map(str::to_owned),
             instance_path,
@@ -584,6 +593,7 @@ impl Runtime {
         upgrade_selection_cursors(&tx)?;
         crate::authority_state::upgrade(&tx)?;
         crate::managed_credentials::store::install_schema(&tx)?;
+        crate::managed_credentials::issuance::install(&tx)?;
         tx.commit()?;
         Ok(())
     }
@@ -834,6 +844,17 @@ impl Runtime {
             self.check_binding(&tx)?;
             reason = AttemptReason::AuthorizationRejected;
             let active = crate::authority_state::authorize_in(&tx, self, operation, actor)?;
+            if crate::managed_credentials::issuance::access(self, operation)?.interactive {
+                ensure!(
+                    trigger == crate::audit::Trigger::Request
+                        && caller.is_empty()
+                        && authenticated.is_empty(),
+                    "interactive commands require a direct security confirmation"
+                );
+                crate::managed_credentials::issuance::require_confirmation(
+                    &tx, self, operation, actor, id, input, now,
+                )?;
+            }
             // *Whom* the work is for is chosen once, at the outermost
             // invocation, and is immutable for the whole call tree.
             //
@@ -1063,6 +1084,7 @@ impl Runtime {
         result
     }
     fn execute_inner(&self, id: &str, fault: Fault) -> Result<Outcome> {
+        let credential_keys = self.prepare_credential_keys(id)?;
         let continuing = crate::execution::advance(self, id, fault)?;
         let prepared = if continuing {
             Vec::new()
@@ -1192,6 +1214,7 @@ impl Runtime {
                 &registered_operation,
                 &kind,
                 fault,
+                credential_keys.as_ref(),
             )?
         };
         let trace = Trace {
@@ -1234,6 +1257,12 @@ impl Runtime {
             tx.commit()?;
         } else {
             crate::invocations::validate_requests(self, &tx, &trace.request)?;
+            crate::managed_credentials::issuance::validate_commit(
+                &tx,
+                self,
+                &trace.request,
+                credential_keys.as_ref(),
+            )?;
             if fault == Fault::BeforeCommit {
                 return Err(fault.interruption("simulated_process_loss"));
             }
@@ -1255,6 +1284,7 @@ impl Runtime {
         operation: &str,
         kind: &str,
         fault: Fault,
+        credential_keys: Option<&crate::managed_credentials::issuance::ReadyKeys>,
     ) -> Result<Outcome> {
         let mut writes = 0;
         let mut effect_failed = request
@@ -1373,8 +1403,10 @@ impl Runtime {
                                 &serde_json::from_str(&instruction.data)?,
                             )?;
                         }
-                        if mutation
-                            && kind == "command"
+                        if matches!(
+                            step,
+                            Step::Database(Database::Write { .. }) | Step::Request { .. }
+                        ) && kind == "command"
                             && let Some(execution) =
                                 app_execution(self.artifact.contract(), operation)
                         {
@@ -1387,7 +1419,15 @@ impl Runtime {
                                 &request.context.invocation_id,
                             )?;
                         }
-                        if step == Step::Boundary(Boundary::Commit) {
+                        if step == Step::CredentialIssue {
+                            crate::managed_credentials::issuance::stage(
+                                connection,
+                                self,
+                                request,
+                                &instruction,
+                                credential_keys.context("credential issuance readiness missing")?,
+                            )
+                        } else if step == Step::Boundary(Boundary::Commit) {
                             crate::invocations::validate_requests(self, connection, request)?;
                             Ok("{}".into())
                         } else if matches!(step, Step::Request { .. }) {

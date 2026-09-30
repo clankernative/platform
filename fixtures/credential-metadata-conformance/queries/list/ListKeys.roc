@@ -9,6 +9,7 @@ import pf.CollectionPage
 import Credentials
 import KeyFamilies
 import ListKeysTypes
+import Data
 
 ListKeys :: [].{
 	Item : { lineage : Str, version : Str, principal : Str, label : Str, state : Str, grant : Str, expires_at : I64 }
@@ -61,11 +62,22 @@ ListKeys :: [].{
 		},
 		verification: {
 			input: |_snapshot, _seed| Ok({ after: "", limit: 2 }),
-			check: |
-				before,
-				output,
-				after,
-			| Ok(before == after and output.status == "ok" and output.page.items().is_empty()),
+			check: |before, output, after| {
+				state = Data.snapshot(before)?
+				clients = state.entries.keep_if(|row| row.value.note.starts_with("cr1_clients_"))
+				items = output.page.items()
+				Ok(
+					before == after and output.status == "ok"
+						and items.len() == U64.min(clients.len(), 2)
+							and output.page.has_more() == (clients.len() > 2)
+								and items
+									.all(
+										|
+											item,
+										| clients.any(|row| row.value.note == item.lineage) and item.state == "active",
+									),
+				)
+			},
 		},
 	}).credentials(Credential.metadata_access(KeyFamilies.clients))
 

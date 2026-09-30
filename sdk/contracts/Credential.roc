@@ -56,6 +56,8 @@ Credential :: [].{
 	# Declaration only: the host still applies current policy to the inherited principal.
 	metadata_access = |family| CredentialMetadataAccess.define(family.metadata().id)
 
+	issue_access = |family| CredentialMetadataAccess.define_issue(family.metadata().id)
+
 	Label :: { value : Str }.{
 		from_str : Str -> Try(Label, [InvalidLabel])
 		from_str = |value| {

@@ -1,21 +1,38 @@
 import Context
+import InteractiveContext
 import Observe
 import Tx
 import Effects
 
 # One handler specification for commands and queries. Preparation cannot contain
 # writes; the transactional body cannot execute preparation or external effects.
-Handler(input, body) :: { prepare : Context, input -> Observe(body) }.{
+Handler(input, body) :: { prepare : Context, input -> Observe(body), interactive : Bool }.{
 
 	local : (Context, input -> body) -> Handler(input, body)
-	local = |handle| { prepare: |context, input| Observe.value(handle(context, input)) }
+	local = |handle| { prepare: |context, input| Observe.value(handle(context, input)), interactive: Bool.False }
+
+	# The same local command runtime, with a distinct native context requirement.
+	interactive : (InteractiveContext, input -> body) -> Handler(input, body)
+	interactive = |handle| {
+		prepare: |context, input| Observe.value(handle(InteractiveContext.from_context(context), input)),
+		interactive: Bool.True,
+	}
+
+	requires_interaction : Handler(input, body) -> Bool
+	requires_interaction = |handler| handler.interactive
 
 	prepared : (Context, input -> Observe(facts)), (Context, input, facts -> body) -> Handler(input, body)
 	prepared =
 		|
 			prepare,
 			handle,
-		| { prepare: |context, input| prepare(context, input).map(|facts| handle(context, input, facts)) }
+		|
+			{
+				prepare: |context, input| prepare(context, input).map(|facts| handle(context, input, facts)),
+				interactive: Bool.False,
+
+				# Generated operation bindings alone lower the two phases to the host protocol.
+			}
 
 	# Generated operation bindings alone lower the two phases to the host protocol.
 	effects :

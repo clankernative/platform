@@ -659,6 +659,20 @@ fn tests(
             "tests::reports_discovery_accepts_current_contract_and_hides_internal_commands",
         ]);
     }
+    // Native issuance cases require the credential fixture. They run in the
+    // full workspace campaign with its artifact, while metadata-free fast and
+    // Reports campaigns do not claim that coverage. Exact names preserve the
+    // full gate and make new/renamed cases fail rather than silently disappear.
+    if !fixtures.contains_key("credential-metadata") {
+        for test in [
+            "managed_credentials::issuance::tests::native_issuance_rolls_back_and_recovers_the_same_public_receipt",
+            "managed_credentials::issuance::tests::personal_issuance_uses_the_confirmed_subject_and_missing_readiness_denies",
+            "managed_credentials::issuance::tests::hostile_issue_rejects_changed_label_family_principal_and_second_mutation",
+            "managed_credentials::issuance::tests::expired_confirmation_prevents_issuance_but_completed_receipt_is_recoverable",
+        ] {
+            command.args(["--skip", test]);
+        }
+    }
     for (fixture, variable) in [
         ("reports", "DAY2_TEST_REPORTS_ARTIFACT"),
         ("reports", "DAY2_TEST_REPORTS_API_ARTIFACT"),

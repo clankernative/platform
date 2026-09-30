@@ -75,6 +75,7 @@ impl<'a> Database<'a> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Step<'a> {
+    CredentialIssue,
     Database(Database<'a>),
     Request {
         model: &'a str,
@@ -97,7 +98,7 @@ impl Step<'_> {
     pub(crate) fn mutation(self) -> bool {
         matches!(
             self,
-            Self::Database(Database::Write { .. }) | Self::Request { .. }
+            Self::Database(Database::Write { .. }) | Self::Request { .. } | Self::CredentialIssue
         )
     }
 }
@@ -140,7 +141,10 @@ impl Phase {
             (Self::Prepare, Step::Boundary(Decide)) => Self::Decide,
             (
                 Self::Decide | Self::Complete,
-                Step::Database(_) | Step::Request { .. } | Step::Boundary(Commit),
+                Step::Database(_)
+                | Step::Request { .. }
+                | Step::CredentialIssue
+                | Step::Boundary(Commit),
             ) => self,
             (Self::Decide, Step::Boundary(Effects)) => Self::Effects,
             (Self::Effects, Step::External { .. }) => self,
@@ -333,6 +337,16 @@ impl Instruction {
         let named = !self.model.is_empty();
         let payload = !self.data.is_empty() && self.data.len() <= 65_536;
         Ok(match self.kind.as_str() {
+            "credential_issue" => {
+                ensure!(
+                    self.model == crate::credential_codegen::ISSUE
+                        && empty_row
+                        && empty_page
+                        && payload,
+                    "invalid_credential_issue_instruction"
+                );
+                Step::CredentialIssue
+            }
             "decide" | "effects" | "complete" | "commit" => {
                 ensure!(self.only_kind(&self.kind), "invalid_boundary_instruction");
                 Step::Boundary(match self.kind.as_str() {

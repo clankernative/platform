@@ -1775,6 +1775,7 @@ impl Campaign {
         // setup never runs in ordinary Runtime loading or local web serving.
         crate::carta::seed_verification_if_unconfigured(&runtime)?;
         crate::people_providers::seed_verification_if_unconfigured(&runtime)?;
+        let runtime = crate::managed_credentials::verification::install(runtime)?;
         Ok(Self {
             evidence: Evidence {
                 format: 1,
@@ -1984,8 +1985,25 @@ impl Campaign {
                 }
                 let index = self.evidence.traces.len();
                 let id = format!("example-{index}");
-                let now = 1_700_000_000 + index as i64;
+                let interactive =
+                    crate::managed_credentials::issuance::access(&self.runtime, &step.operation)?
+                        .interactive;
+                let now = if interactive {
+                    self.runtime.host().now_ms()?.div_euclid(1000)
+                } else {
+                    1_700_000_000 + index as i64
+                };
                 let input: Value = serde_json::from_str(&step.input)?;
+                if interactive {
+                    crate::managed_credentials::verification::confirm(
+                        &self.runtime,
+                        &step.operation,
+                        &self.actor,
+                        &id,
+                        &input,
+                        now,
+                    )?;
+                }
                 let initial = self.runtime.inspect()?;
                 self.prepared = false;
                 // Internal definitions also have mandatory app-owned verification.

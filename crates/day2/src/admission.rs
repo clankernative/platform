@@ -17,7 +17,7 @@ use std::{fs, path::Path};
 const FACTORIES: &[(&str, &str)] = &[
     (
         "CredentialMetadataAccess.roc",
-        "\tdefine : Str -> CredentialMetadataAccess\n\tdefine = |family| { family: family }\n",
+        "\tdefine : Str -> CredentialMetadataAccess\n\tdefine = |family| { family: family, action: \"metadata\" }\n\n\tdefine_issue : Str -> CredentialMetadataAccess\n\tdefine_issue = |family| { family: family, action: \"issue\" }\n",
     ),
     (
         "Model.roc",
@@ -58,9 +58,14 @@ const SEALED: &[(&str, &str, &str)] = &[
         "4c3316dd010c2c67cd4331fb2b7cd397dd054cdd7cec2abd776e97cbf66adfe4",
     ),
     (
+        "InteractiveContext.roc",
+        "from_context",
+        "23e122f711e131180ba8191996772c41993fffc1e345ff25295e1d6449886527",
+    ),
+    (
         "Credential.roc",
         "",
-        "0b99cb213636576d77e5804149f3cd64ce9b6e0a6db61d7098f0ca211c4eea07",
+        "13f5a09c28a41e44844fc0530c494b8bb1a654eb1975e3db19682e65337722a4",
     ),
     (
         "SlackWebhook.roc",
@@ -155,7 +160,7 @@ const SEALED: &[(&str, &str, &str)] = &[
     (
         "Api.roc",
         "",
-        "0aa6a73d79a53ca361758693fadf3e9b650717eeaf53306b284bea86b3b2ff44",
+        "4b28b83d11c13d9002583b7bd047e70081f44a9b0e46a29f773707e46b1fa245",
     ),
     (
         "Effects.roc",
@@ -170,7 +175,7 @@ const SEALED: &[(&str, &str, &str)] = &[
     (
         "Handler.roc",
         "program",
-        "f4fde4bd638de22e662b0c9fad6a86777db28946cd2e04ecc064b1f948bd431f",
+        "bba8c429f8d793398dbdf267d6ce5ea889c9507477a13d311fa9e589a341f6e9",
     ),
     (
         "Observe.roc",
@@ -245,6 +250,8 @@ const SEALED: &[(&str, &str, &str)] = &[
 const RESTRICTED_CALLS: &[(&str, &str)] = &[
     ("ConnectionAccess", "define"),
     ("CredentialMetadataAccess", "define"),
+    ("CredentialMetadataAccess", "define_issue"),
+    ("InteractiveContext", "from_context"),
     ("Tx", "host_reject"),
     ("Tx", "from_host"),
     ("Tx", "begin_decision"),
@@ -380,7 +387,7 @@ fn restrict_sealed(module: &str, source: &str) -> Result<String> {
 fn restrict_sdk(module: &str, source: &str) -> Result<String> {
     let reviewed_digest = match module {
         "CredentialMetadataAccess.roc" => {
-            "546b562d91b26482fa9b3f5b648632d9aa833d5d5653cefff24103b2d6475b2a"
+            "9e1289bef4eb4493b05a32b3baac82b5382b06be2eeadc0e18c5fa6ed2253124"
         }
         "Model.roc" => "260a6b7f24ec648fe54d8488b102f155485be3ec192ea032902a2da643b482bb",
         "Input.roc" => "983d57859994106787ef3dd02b642c8770ddd12987fc7973a32c3500e6238715",
@@ -403,6 +410,7 @@ fn restrict_sdk(module: &str, source: &str) -> Result<String> {
     );
     let renamed = block
         .replace("\tdefine ", "\tadmission_define ")
+        .replace("\tdefine_issue ", "\tadmission_define_issue ")
         .replace("\tall ", "\tadmission_all ")
         .replace("\tindexed ", "\tadmission_indexed ");
     Ok(source.replacen(block, &renamed, 1))
