@@ -16,6 +16,10 @@ use std::{fs, path::Path};
 // the restricted interface. Every other SDK byte is retained.
 const FACTORIES: &[(&str, &str)] = &[
     (
+        "CredentialMetadataAccess.roc",
+        "\tdefine : Str -> CredentialMetadataAccess\n\tdefine = |family| { family: family }\n",
+    ),
+    (
         "Model.roc",
         "\tdefine : Str, Str, (Str -> Try(a, Str)), (a -> Str) -> Model(a)\n\tdefine = |name, prefix, decode, encode| { name, prefix, decode, encode }\n",
     ),
@@ -38,6 +42,11 @@ const FACTORIES: &[(&str, &str)] = &[
 ];
 
 const SEALED: &[(&str, &str, &str)] = &[
+    (
+        "Credential.roc",
+        "",
+        "0b99cb213636576d77e5804149f3cd64ce9b6e0a6db61d7098f0ca211c4eea07",
+    ),
     (
         "SlackWebhook.roc",
         "",
@@ -131,7 +140,7 @@ const SEALED: &[(&str, &str, &str)] = &[
     (
         "Api.roc",
         "",
-        "c220f5373e8b423e2ee76406ba6644a5cab1850d9713b4d5216f7b7ad7961fb0",
+        "0aa6a73d79a53ca361758693fadf3e9b650717eeaf53306b284bea86b3b2ff44",
     ),
     (
         "Effects.roc",
@@ -219,6 +228,7 @@ const SEALED: &[(&str, &str, &str)] = &[
 /// compile — which is why `a_module_the_admission_stage_copies_verbatim_cannot_
 /// use_a_restricted_name` reads this same table rather than a second copy of it.
 const RESTRICTED_CALLS: &[(&str, &str)] = &[
+    ("CredentialMetadataAccess", "define"),
     ("Tx", "host_reject"),
     ("Tx", "from_host"),
     ("Tx", "begin_decision"),
@@ -353,6 +363,9 @@ fn restrict_sealed(module: &str, source: &str) -> Result<String> {
 
 fn restrict_sdk(module: &str, source: &str) -> Result<String> {
     let reviewed_digest = match module {
+        "CredentialMetadataAccess.roc" => {
+            "546b562d91b26482fa9b3f5b648632d9aa833d5d5653cefff24103b2d6475b2a"
+        }
         "Model.roc" => "260a6b7f24ec648fe54d8488b102f155485be3ec192ea032902a2da643b482bb",
         "Input.roc" => "983d57859994106787ef3dd02b642c8770ddd12987fc7973a32c3500e6238715",
         "Output.roc" => "d8e95f12bdb90baf693fe3de58094c9dda1afb23e5a49a15c92e077eb6cac42b",

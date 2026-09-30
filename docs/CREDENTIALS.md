@@ -13,7 +13,8 @@ or selectable grants over canonical `Api.write(Commands.<name>)` and
 `Api.read(Reads.<name>)` targets. The family constructor fixes the profile in
 the checked compiler type. The app supplies a stable ID and a bounded lifetime
 in seconds; registration names remain separate from IDs. This is declaration
-intent only. No family-specific lifecycle methods are generated yet.
+intent only. Generated metadata methods are available; lifecycle methods are
+still absent.
 
 The normal build reflects registered families into the artifact and recompares
 them with the native worker at artifact load. It rejects duplicate IDs,
@@ -26,7 +27,7 @@ An operation can opt into a bounded credential authority contract with
 normal build derives a credential manifest from checked operation definitions,
 including local write effects and recursive child command requests. Artifact
 load rederives it from the worker-checked app contract. Runtime execution of an
-opted-in operation rejects undeclared local reads and all provider/resource
+opted-in operation rejects undeclared local reads and provider/resource
 observations or external effects. Cycles, unmarked children and provider write
 effects fail the build. These declarations are an enforced upper bound; a
 handler need not exercise every declared action.
@@ -80,7 +81,8 @@ issue or use a credential. The key, vault, security shell, epoch store, current
 identity, policy and consumer still require readiness and live checks. The
 portable public `Issued`, `Summary`, `Inspection`, cursor, management snapshot
 and outcome schemas have no secret field. Their Rust types are contract sketches
-until the generated Roc API and codecs use them.
+until their generated Roc API and codecs use them. Metadata now has its own
+native-checked family-specific API over these private readers.
 
 ## Private per-app state
 
@@ -125,11 +127,41 @@ readers return only safe summary and rotation data. The host must still verify
 the activated family selection, current policy and authenticated requester
 before calling them. A host-only runtime adapter now performs those checks for
 a live browser session in one app database snapshot before list or inspect. It
-refuses an inactive family, artifact mismatch or changed app scope. It is not
-connected to a generated Roc method or HTTP route, and only creator visibility
-for client and personal families is supported.
-Group and resource visibility, generated Roc methods and HTTP routes are not
-connected yet.
+refuses an inactive family, artifact mismatch or changed app scope.
+
+Normal builds now generate `Credentials.<registration>.list` and `inspect`
+for client and personal families. These return `Observe(Try(...))`, accept no
+actor/context override, and require the containing operation to declare
+`.credentials(Credential.metadata_access(family))`. The declaration witness
+and raw observation constructors are sealed through both compiler admission
+profiles. The host checks the exact registered family and access declaration,
+the accepted invocation principal, and current activated authority under the
+ordinary preparation lock. Recorded observations recheck authority before use.
+Policy changes fence old invocations; metadata and rotation revisions remain
+stale-able data, never mutation authority.
+
+For example, a prepared query can call:
+
+```roc
+(Credentials.clients.list)({ after: Credentials.clients.start, limit: PageSize.default })
+```
+
+Each family has concrete nominal types such as `Credentials.Ref_clients`,
+`Cursor_clients`, `VersionRef_clients`, `ManagementSnapshot_clients`, and
+`Page_clients`; another family's cursor or reference fails native type checking.
+The family record supplies `start`,
+`cursor_from_str` and `ref_from_str`. Safe projections use `to_str`, page
+`items`/`has_more`/`next_after`, and snapshot accessors. A page wraps the existing
+bounded `CollectionPage`; `map` projects it into an ordinary serializable app
+result. Public `cm1_` cursors and `cr1_` references are bounded shape codecs;
+the host rechecks provenance, namespace, principal and current policy on use.
+Apps currently decode these helpers from text inputs and project their safe
+values into supported operation output shapes.
+
+The credential metadata conformance app exercises the generated readers through
+ordinary native dispatch, replay, and session-authenticated HTTP queries.
+Group and resource visibility are still unsupported. There is no anonymous or
+separate management endpoint; apps register their own ordinary queries.
 
 The private `verify_ingress` selector checks the current head, lineage and
 version state, namespace, family contract, security epoch, expiry, authenticated
@@ -159,28 +191,29 @@ terminal revocation, reveal closure ordering, reopen and an independent 32-case
 SQLite transition model. The model checks state outcomes, not cryptographic
 strength or browser isolation.
 
-Before activation, complete the following gates from the proposal:
+Before end-to-end credential use, complete the following gates from the proposal:
 
 1. Generate and native-typecheck the complete family-specific Roc API and
    security actions; bind the derived authority manifest at admission, and add
    selected provider/resource/import contracts. Prove the interactive context and
-   negative compiler fixtures with the pinned compiler. The declaration-only
-   client/personal build path is present.
+   negative compiler fixtures with the pinned compiler. Client/personal
+   declarations and generated metadata reads are present.
 2. Complete selected-instance principal/context compatibility across child,
    delegated and provider paths. Resolve actual key/custody readiness and
    current management/metadata policy. The catalog-managed release path now
    checks exact local family bindings and approved authority; uncatalogued
    activation requires a verified credential-free artifact.
 3. Add credential ingress verification and mandatory propagated identity and
-   immutable ceiling checks to the dispatcher. Add bounded metadata readers,
-   recipient-specific security shell and protected HTTP response sink.
+   immutable ceiling checks to the dispatcher. Complete group/resource metadata
+   visibility, recipient-specific security shell and protected HTTP response sink.
 4. Share the role-specific vault commit boundary with OAuth; add callback,
    provider and worker sinks without a generic token getter. Add external
    non-rollback security epoch readiness, clock high-water and exact-key restore
    fencing.
 5. Run concurrency, process-kill/reopen, browser, consumer and secret-canary
-   campaigns. Migrate Beastly Transcriber first, then the remaining cohorts;
+   campaigns. Integrate the first real app, then qualify later consumers;
    record unsupported adapters as blockers until their real consumers qualify.
+   There are no live apps to migrate today.
 
 The current private crypto and state code is an implementation foundation, not
 evidence of production readiness. In particular, it must not be activated by

@@ -256,6 +256,12 @@ impl Simulation {
             "model":capability,"id":"","expected_version":0,"data":data.to_string(),
             "filter_field":"","filter_value":"","after":"","limit":0,
         }))?;
+        if crate::credential_codegen::observation(capability) {
+            let result =
+                crate::managed_credentials::observe(&tx, &self.runtime, &request, &instruction)?;
+            tx.commit()?;
+            return Ok(serde_json::from_str(&result)?);
+        }
         let result =
             match crate::resources::host_operation(&tx, &self.runtime, &request, &instruction)? {
                 Some(result) => serde_json::from_str(&result)?,

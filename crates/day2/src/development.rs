@@ -1479,6 +1479,9 @@ fn create_for_with_imports(
         imports,
     )?;
     instance.resources = Some(resources);
+    // Static disposable pins for metadata verification, with no key provider
+    // or lifecycle readiness. These never qualify production credential use.
+    credential_metadata_fixture(&mut instance, &artifact)?;
     instance
         .apps
         .get_mut("app")
@@ -1522,6 +1525,65 @@ fn create_for_with_imports(
     }
     crate::integrations::simulated::seed(&database, &scope, &worlds)?;
     Ok(runtime.with_integrations(crate::integration_host::Host::simulated(&database, &scope)))
+}
+
+fn credential_metadata_fixture(instance: &mut Instance, artifact: &LoadedArtifact) -> Result<()> {
+    use day2_capabilities::{
+        BindingRef, Digest, Name,
+        credentials::*,
+        oauth::{ResourceAudienceRef, SecurityOriginRef},
+    };
+    let name = |value: &str| Name::try_from(value.to_owned());
+    let pin = |value: &str| BindingRef::pin(name(value)?, &"disposable-metadata-only");
+    for family in &artifact.contract().credential_manifest {
+        let policy = ManagementPolicy {
+            identity_authority: pin("disposable-identity")?,
+            issue: ManagementPredicate::Creator,
+            read_metadata: ManagementPredicate::Creator,
+            rotate: ManagementPredicate::Creator,
+            revoke: ManagementPredicate::Creator,
+        };
+        let binding = CredentialFamilyBinding {
+            namespace: Namespace {
+                installation: name(&instance.installation)?,
+                environment: name(&instance.environment)?,
+                app: name("app")?,
+                binding_generation: 1,
+            },
+            family: family.id.clone(),
+            approved_authority: BindingRef {
+                id: family.id.clone(),
+                revision: Digest::of(&("credential-approved-authority-v1", &family.roots))?,
+            },
+            management: BindingRef::pin(family.id.clone(), &policy)?,
+            rotation: RotationProfile::AtomicReplace,
+            delivery: DeliveryProfile::AuthenticatedCreatorReveal,
+            verifier: pin("disposable-verifier")?,
+            custody: pin("disposable-custody")?,
+            security_shell: SecurityOriginRef(pin("disposable-security")?),
+            audience: ResourceAudienceRef(pin("disposable-audience")?),
+            epoch_store: pin("disposable-epoch")?,
+            max_lifetime_seconds: family.lifetime_seconds,
+            reveal_window_seconds: 300,
+            quota: pin("disposable-quota")?,
+        };
+        let catalog = &mut instance
+            .resources
+            .as_mut()
+            .context("disposable resource catalog")?
+            .credentials;
+        catalog.management.insert(family.id.as_str().into(), policy);
+        catalog
+            .approved_authority
+            .insert(family.id.as_str().into(), family.roots.clone());
+        instance
+            .apps
+            .get_mut("app")
+            .context("disposable app")?
+            .credential_families
+            .insert(family.id.as_str().into(), binding);
+    }
+    Ok(())
 }
 
 /// The offline provider worlds a disposable instance starts with.

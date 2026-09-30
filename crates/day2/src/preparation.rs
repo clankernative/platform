@@ -184,6 +184,12 @@ pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
                 .context("resource_host_operation")?;
             tx.commit()?;
             Ok(result)
+        } else if matches!(step, Step::Observe { .. })
+            && crate::credential_codegen::observation(&instruction.model)
+        {
+            let result = crate::managed_credentials::observe(&tx, runtime, &request, &instruction);
+            tx.commit()?;
+            result
         } else if matches!(step, Step::Observe { .. }) && instruction.model == crate::audit::HISTORY
         {
             // The application's own history: host data under the same write

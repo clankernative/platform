@@ -35,6 +35,8 @@ pub struct Execution {
 pub struct CredentialAccess {
     pub enabled: bool,
     pub local_reads: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub metadata_reads: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -441,6 +443,21 @@ impl Definition {
 
 impl CredentialAccess {
     fn validate(&self, artifact: &Artifact, operation: &str) -> Result<()> {
+        ensure!(
+            self.metadata_reads.len() <= 64,
+            "credential metadata access budget"
+        );
+        let mut families = BTreeSet::new();
+        for family in &self.metadata_reads {
+            ensure!(
+                families.insert(family)
+                    && artifact
+                        .credential_declarations
+                        .iter()
+                        .any(|declared| declared.id.as_str() == family),
+                "unknown or duplicate credential metadata family: {operation}/{family}"
+            );
+        }
         ensure!(
             self.enabled || self.local_reads.is_empty(),
             "credential reads require an enabled authority contract: {operation}"

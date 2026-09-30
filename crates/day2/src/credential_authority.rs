@@ -61,6 +61,7 @@ fn check_access(access: &CredentialAccess, operation: &str, step: Step<'_>) -> R
             access.local_reads.iter().any(|declared| declared == model),
             "undeclared credential local read: {operation}/{model}"
         ),
+        Step::Observe { capability, .. } if crate::credential_codegen::observation(capability) => {}
         Step::Observe { .. } | Step::External { .. } => {
             anyhow::bail!("unsupported credential provider or resource path: {operation}")
         }
@@ -102,6 +103,10 @@ fn derive_inner(
     ensure!(
         definition.credential_access.enabled,
         "credential operation requires explicit bounded authority: {name}"
+    );
+    ensure!(
+        definition.credential_access.metadata_reads.is_empty(),
+        "credential metadata cannot be a credential ingress root: {name}"
     );
     ensure!(
         definition
@@ -198,6 +203,7 @@ mod tests {
         let access = CredentialAccess {
             enabled: true,
             local_reads: vec!["reports".into()],
+            metadata_reads: Vec::new(),
         };
         fn read(model: &str) -> Step<'_> {
             Step::Database(Database::Select {

@@ -159,6 +159,7 @@ fn native_required_all_rows_builders_preserve_typed_definitions() -> Result<()> 
 import pf.Api
 import pf.Context
 import pf.Handler
+import pf.Credential
 import pf.Model
 import pf.Query
 import pf.Tx
@@ -202,7 +203,8 @@ expect (command.verification().check)("{}", {accepted: Bool.True}, "{}") == Ok(B
 expect command.execution().effects.map(|effect| effect.kind) == ["create"] and command.require_all_rows(rows).required_all_rows() == ["rows", "logs", "rows"]
 expect !command_base.credential_access().enabled and !query_base.credential_access().enabled
 expect command_base.credential_read(rows).credential_read(logs).credential_access().local_reads == ["rows", "logs"]
-expect query_base.credential_ready().credential_read(rows).credential_access() == { enabled: Bool.True, local_reads: ["rows"] }
+expect query_base.credential_ready().credential_read(rows).credential_access() == { enabled: Bool.True, local_reads: ["rows"], metadata_reads: [] }
+expect query_base.credentials(Credential.metadata_access(Credential.client_family({id: "client", grant: Credential.fixed([]), lifetime_seconds: 10}))).credential_access().metadata_reads == ["client"] and query_base.credentials(Credential.metadata_access(Credential.personal_family({id: "personal", grant: Credential.fixed([]), lifetime_seconds: 10}))).credential_access().metadata_reads == ["personal"]
 "#,
     )?;
     let output = day2::sandbox::compiler(
@@ -219,7 +221,7 @@ expect query_base.credential_ready().credential_read(rows).credential_access() =
         String::from_utf8_lossy(&output.stderr)
     );
     ensure!(
-        output.status.success() && diagnostics.contains("All (9) tests passed"),
+        output.status.success() && diagnostics.contains("All (10) tests passed"),
         "native read requirements: {diagnostics}"
     );
     Ok(())
