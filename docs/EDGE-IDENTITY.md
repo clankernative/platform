@@ -58,6 +58,12 @@ address, while the installation may separately declare a security shell edge:
   prove that custody keys, the approval registry, or Google OIDC registration
   are ready.
 
+For GKE, the company hostname is an input to `security-shell-edge` in the private
+instance repository. This root publishes a shell contract, and `day2-app` reads
+it through `security_shell_contract` when generating the instance document.
+The same hostname drives DNS, TLS, routing and the Google reauthentication
+redirect. See [installation security origin](../deploy/gke/README.md#installation-security-origin).
+
 The container is started as `day2-serve INSTANCE APP --edge`. Which form a
 container may use is set by its instance, not by its arguments:
 

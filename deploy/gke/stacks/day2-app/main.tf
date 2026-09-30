@@ -7,8 +7,20 @@ data "kubernetes_config_map_v1" "platform_contract" {
   }
 }
 
+data "kubernetes_config_map_v1" "security_shell_contract" {
+  count = var.security_shell_contract == null ? 0 : 1
+  metadata {
+    name      = var.security_shell_contract.name
+    namespace = var.security_shell_contract.namespace
+  }
+}
+
 locals {
   contract = data.kubernetes_config_map_v1.platform_contract.data
+
+  shell_contract = var.security_shell_contract == null ? {} : data.kubernetes_config_map_v1.security_shell_contract[0].data
+  shell_origin   = trimspace(lookup(local.shell_contract, "SECURITY_SHELL_ORIGIN", ""))
+  shell_audience = trimspace(lookup(local.shell_contract, "IAP_JWT_AUDIENCE", ""))
 
   contract_iap_audience = trimspace(lookup(local.contract, "IAP_JWT_AUDIENCE", ""))
   iap_audience          = var.iap_audience_override != "" ? var.iap_audience_override : local.contract_iap_audience
@@ -75,7 +87,12 @@ locals {
         length(var.ingress) == 0 ? {} : { ingress = var.ingress },
       var.journal_trace_hours == null ? {} : { journal = { trace_hours = var.journal_trace_hours } })
     }
-  }, var.resource_catalog == null ? {} : { resources = var.resource_catalog })
+    }, var.resource_catalog == null ? {} : { resources = var.resource_catalog }, var.security_shell_contract == null ? {} : {
+    security_shell = {
+      origin       = local.shell_origin
+      iap_audience = local.shell_audience
+    }
+  })
   instance_json = jsonencode(local.instance)
 
   selector_labels = {
@@ -113,6 +130,17 @@ resource "kubernetes_config_map_v1" "instance" {
   }
 
   lifecycle {
+    precondition {
+      condition = var.security_shell_contract == null ? true : (
+        lookup(local.shell_contract, "EDGE_ROLE", "") == "security_shell" &&
+        can(regex("^https://([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$", local.shell_origin)) &&
+        can(regex("^/projects/[0-9]{1,24}/global/backendServices/[0-9]{1,24}$", local.shell_audience)) &&
+        local.shell_origin != var.edge_origin && local.shell_audience != local.iap_audience &&
+        lookup(local.shell_contract, "REAUTH_CALLBACK_URL", "") == "${local.shell_origin}/_day2/reauth/callback"
+      )
+      error_message = "The selected security shell contract must publish a dedicated HTTPS origin, resolved IAP audience and derived reauthentication callback; an app edge or bootstrap contract cannot be used."
+    }
+
     precondition {
       condition     = can(regex("^/projects/[0-9]{1,24}/global/backendServices/[0-9]{1,24}$", local.iap_audience))
       error_message = "IAP_JWT_AUDIENCE in ${var.namespace}/${var.platform_contract_config_map} is missing or malformed. Apply the platform's app stack first (it resolves the IAP backend service after the Ingress exists)."

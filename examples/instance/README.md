@@ -9,9 +9,11 @@ Suggested private layout:
 ```text
 my-instance/
   backend/cluster.hcl
+  backend/security-shell.hcl
   backend/apps/reports-edge.hcl
   backend/apps/reports-workload.hcl
   cluster.tfvars
+  security-shell.tfvars
   reports-edge.tfvars
   reports-workload.tfvars
   backups/                 # ignored, protected storage elsewhere
@@ -21,6 +23,10 @@ Rename the `.example` configuration files after copying them. Each OpenTofu root
 has its own backend prefix. Backends, tfvars and kubeconfig belong privately;
 use application-default credentials or workload identity, never committed keys.
 The [deployment runbook](../../deploy/gke/README.md) explains apply order and IAM.
+
+The optional `security-shell.tfvars.example` selects one security hostname for
+the installation. OAuth-enabled workload values refer to the resulting contract
+by namespace and ConfigMap name, as the runbook describes.
 
 For a runnable local instance, from the platform root use:
 

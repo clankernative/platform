@@ -13,6 +13,7 @@ come from a separate private instance repository; start with the
 | [cluster](stacks/cluster/main.tf) | Dedicated VPC, zonal Standard cluster with Workload Identity and Calico network policy, one Ubuntu node pool with a pod PID limit, node identity |
 | [tenancy](stacks/tenancy/main.tf) | Retained SQLite storage and snapshot classes, admission policies for app namespaces (including the backup Job service account exception) |
 | [app-edge](stacks/app-edge/main.tf) | Per app: namespace, runtime service account, retained disk, quotas, Service, IAP BackendConfig, HTTPS redirect, managed certificate, static IP, Cloudflare DNS, Ingress, network policy, image repository, workload state bucket, GKE backup plan, off-cluster backup bucket with its object-create-only Workload Identity uploader, and the platform contract |
+| [security-shell-edge](stacks/security-shell-edge/main.tf) | Per installation: dedicated security namespace, shell service account, named secret access, IAP Service/backend, certificate, DNS, routing, network policy and a shell contract consumed by app deployments |
 | [day2-app](stacks/day2-app/main.tf) | Instance ConfigMap, one-replica StatefulSet and the hourly off-cluster backup CronJob |
 | [qualification-runner](stacks/qualification-runner/main.tf) | Optional x86_64 native Docker VM, off by default, private IP and IAP SSH |
 | [gitea-instance-ci](stacks/gitea-instance-ci/main.tf) | Optional plan-on-PR / apply-on-main CI for an instance repository on Gitea |
@@ -97,6 +98,47 @@ public IPv4 egress (including IAP's public signing keys); cluster ranges are
 excluded. Kubernetes NetworkPolicy cannot express an FQDN allowlist;
 companies needing narrower external egress must supply a controlled proxy. No
 pod service account token or cloud IAM role is granted to the runtime.
+
+## Installation security origin
+
+The private instance repo selects the shell hostname once, in values for
+`security-shell-edge` (for example `config/security-shell.tfvars`). Its required
+`domain` input drives DNS, the dedicated GKE certificate, the Ingress host,
+`SECURITY_SHELL_ORIGIN` and the reauthentication callback URL. There is no
+platform hostname default. A company can use `security.tools.example.com` or
+another dedicated hostname under its own domain. DNS stays unproxied so TLS uses
+the certificate for that exact hostname.
+
+Initialize and plan this root with its own backend prefix and instance values.
+Bootstrap `backend_service_name` empty, then select the backend of
+`<security namespace>/security-shell` from the `security-shell` Ingress. A second
+apply verifies the Service identity and enabled IAP before publishing its
+numeric audience. Until then, the contract's audience is empty and app
+deployments refuse to consume it.
+
+After the backend is resolved, an OAuth-enabled app's workload values refer to
+the published ConfigMap:
+
+```hcl
+security_shell_contract = {
+  namespace = "day2-security"
+  name      = "security-shell-contract"
+}
+```
+
+`day2-app` reads this reference during planning and generates the installation's
+`security_shell.origin` and `security_shell.iap_audience` in `instance.json`.
+It rejects an app contract, a malformed or unresolved edge, and reuse of the
+app's origin or IAP audience. The hostname is never copied into app source or
+per-app tfvars. Use a qualified runtime that supports the `security_shell`
+instance field before enabling this reference on an existing workload.
+
+The root supplies edge infrastructure and named-secret IAM only. A separately
+qualified shell workload, selected approval authority, pinned key provider and
+Google web OAuth client are still required to serve approvals. Register the
+root's `reauth_callback_url` output with that client. Changing the hostname also
+requires a new registration qualification before admitting the replacement
+instance; successful DNS/TLS provisioning alone does not qualify OAuth.
 
 ## Build, qualify and deploy
 

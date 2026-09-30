@@ -1,0 +1,13 @@
+# security-shell-edge; keep company values in the private instance repository.
+project_id         = "example-tools"
+project_number     = "123456789012"
+namespace          = "day2-security"
+domain             = "security.tools.example.com"
+cloudflare_zone_id = "0123456789abcdef0123456789abcdef"
+iap_members        = ["domain:example.com"]
+
+# Empty for bootstrap, then the backend of day2-security/security-shell.
+backend_service_name = ""
+runtime_secret_ids   = ["oauth-custody-verifier", "oauth-custody-encryption", "oauth-shell-attestation"]
+kube_dns_service_ip  = "10.30.0.10"
+cluster_cidrs        = ["10.20.0.0/16", "10.30.0.0/20", "10.10.0.0/20"]
