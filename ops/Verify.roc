@@ -47,6 +47,7 @@ Verify :: [].{
 			"http",
 			"delegation",
 			"credential-metadata",
+			"connection-declaration",
 			"redirect",
 			"relational",
 			"relational-next",

@@ -20,6 +20,21 @@ struct Module {
 // admitted merely because their basename happens to match an existing module.
 const MODULES: &[Module] = &[
     Module {
+        file: "ConnectionAccess.roc",
+        source: "contracts/ConnectionAccess.roc",
+        app_export: false,
+    },
+    Module {
+        file: "ConnectionRequirement.roc",
+        source: "contracts/ConnectionRequirement.roc",
+        app_export: true,
+    },
+    Module {
+        file: "GoogleCalendar.roc",
+        source: "contracts/GoogleCalendar.roc",
+        app_export: true,
+    },
+    Module {
         file: "SlackWebhook.roc",
         source: "contracts/SlackWebhook.roc",
         app_export: true,

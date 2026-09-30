@@ -4,6 +4,7 @@ pub(crate) mod approval_keys;
 pub(crate) mod approval_registry;
 pub mod connect;
 pub mod custody;
+pub mod declaration;
 pub mod exchange;
 pub mod external;
 pub mod inbound;

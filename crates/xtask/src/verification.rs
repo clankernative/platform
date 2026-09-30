@@ -258,6 +258,10 @@ fn build_fixture(root: &Path, fixture: &str) -> Result<PathBuf> {
         "credential-metadata" => {
             build(root, &root.join("fixtures/credential-metadata-conformance"))
         }
+        "connection-declaration" => build(
+            root,
+            &root.join("fixtures/connection-declaration-conformance"),
+        ),
         "redirect" => build(root, &root.join("fixtures/redirect-conformance")),
         "relational-next" => build_migration_fixture(root),
         "owned" => build(root, &root.join("fixtures/row-authority-web-conformance")),
@@ -667,6 +671,10 @@ fn tests(
             "DAY2_TEST_CREDENTIAL_METADATA_ARTIFACT",
         ),
         ("redirect", "DAY2_TEST_REDIRECT_ARTIFACT"),
+        (
+            "connection-declaration",
+            "DAY2_TEST_CONNECTION_DECLARATION_ARTIFACT",
+        ),
         ("relational-next", "DAY2_TEST_RELATIONAL_NEXT_ARTIFACT"),
         ("http", "DAY2_TEST_HTTP_ARTIFACT"),
         ("owned", "DAY2_TEST_OWNED_ARTIFACT"),
@@ -764,6 +772,7 @@ fn receipt(
         let web = artifact("http")?;
         let redirect = artifact("redirect")?;
         let credential_metadata = artifact("credential-metadata")?;
+        let connection_declaration = artifact("connection-declaration")?;
         let baseline = artifact("relational")?;
         let collection = artifact("collection")?;
         let next = artifact("relational-next")?;
@@ -779,6 +788,7 @@ fn receipt(
             "relational":artifact_id(&baseline), "relational_next":artifact_id(&next), "http":artifact_id(&web),
             "redirect":artifact_id(&redirect),
             "credential_metadata":artifact_id(&credential_metadata),
+            "connection_declaration":artifact_id(&connection_declaration),
             "collection":artifact_id(&collection),
             "owned":artifact_id(&owned), "owned_probe":artifact_id(&owned_probe),
             "reports":artifact_id(&reports), "reports_probe":artifact_id(&reports_probe),
@@ -896,6 +906,7 @@ fn required_steps(scope: &str) -> Result<&'static [&'static str]> {
             "build-http",
             "build-delegation",
             "build-credential-metadata",
+            "build-connection-declaration",
             "build-redirect",
             "build-relational",
             "build-collection",
@@ -994,6 +1005,7 @@ mod tests {
         for obligation in [
             "build-delegation",
             "build-credential-metadata",
+            "build-connection-declaration",
             "build-redirect",
             "build-relational",
             "build-collection",

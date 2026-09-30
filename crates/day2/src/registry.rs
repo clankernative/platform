@@ -22,6 +22,8 @@ pub struct Catalog {
     pub redirects: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub credentials: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub connections: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -564,6 +566,7 @@ pub struct AppShape {
     pub ingress: Vec<String>,
     pub redirects: Vec<String>,
     pub credentials: BTreeMap<String, String>,
+    pub connections: BTreeMap<String, String>,
 }
 
 fn app_table(tables: &[Table]) -> Result<&Table> {
@@ -611,7 +614,13 @@ impl AppShape {
         // `schedules` is optional: an application that declares none omits the
         // field entirely, so existing applications keep their exact shape.
         let optional = if unified {
-            BTreeSet::from(["schedules", "ingress", "redirects", "credentials"])
+            BTreeSet::from([
+                "schedules",
+                "ingress",
+                "redirects",
+                "credentials",
+                "connections",
+            ])
         } else {
             BTreeSet::new()
         };
@@ -713,6 +722,38 @@ impl AppShape {
         } else {
             BTreeMap::new()
         };
+        let connections = if unified && declared.contains("connections") {
+            category("connections")?;
+            let registration = product
+                .fields
+                .iter()
+                .find(|field| field.name == "connections")
+                .context("connection registrations missing")?;
+            let mut owners = BTreeMap::new();
+            for field in &table.node(registration.type_id)?.fields {
+                let requirement = table.node(field.type_id)?;
+                ensure!(
+                    requirement.kind == "record",
+                    "connection requirement must be nominal"
+                );
+                let owner = match requirement.name.as_str() {
+                    "ConnectionRequirement.CurrentHuman" => "current_human",
+                    "ConnectionRequirement.Installation" => "installation",
+                    _ => anyhow::bail!(
+                        "App.definition.connections.{} requires a supported ConnectionRequirement",
+                        field.name
+                    ),
+                };
+                owners.insert(field.name.clone(), owner.to_owned());
+            }
+            ensure!(
+                owners.len() <= 64,
+                "connection requirement registration budget"
+            );
+            owners
+        } else {
+            BTreeMap::new()
+        };
         let shape = Self {
             unified,
             commands,
@@ -748,6 +789,7 @@ impl AppShape {
                 Vec::new()
             },
             credentials,
+            connections,
         };
         ensure!(
             !shape.commands.is_empty() || !shape.queries.is_empty(),
@@ -808,6 +850,7 @@ pub struct Projection {
     pub ingress: bool,
     pub redirects: bool,
     pub credentials: bool,
+    pub connections: bool,
 }
 
 impl Projection {
@@ -818,6 +861,7 @@ impl Projection {
             ingress: crate::app_inference::declares_ingress(app_source)?,
             redirects: crate::app_inference::declares_redirects(app_source)?,
             credentials: crate::app_inference::declares_credentials(app_source)?,
+            connections: crate::app_inference::declares_connections(app_source)?,
         })
     }
 }
@@ -829,6 +873,7 @@ pub fn app_platform_for(shape: Option<&AppShape>, projection: Projection) -> Str
         (projection.ingress, "ingress"),
         (projection.redirects, "redirects"),
         (projection.credentials, "credentials"),
+        (projection.connections, "connections"),
     ] {
         if declared {
             source = source.replacen(
@@ -899,6 +944,7 @@ fn inferred_catalog(table: &Table) -> Result<Catalog> {
         ingress: shape.ingress.clone(),
         redirects: shape.redirects.clone(),
         credentials: shape.credentials.clone(),
+        connections: shape.connections.clone(),
         errors: shape.errors.clone(),
         ..Catalog::default()
     };
