@@ -84,7 +84,7 @@ impl ReviewedCatalog {
         Ok(Self { entries: selected })
     }
 
-    fn resolve(
+    pub(super) fn resolve(
         &self,
         requirement: &ConnectionRequirement,
         profile: &BindingRef,

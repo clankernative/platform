@@ -166,8 +166,10 @@ with the host's bounded concurrency, body deadline and shutdown admission guard.
 The shell workload is never issued an app human session. The OAuth route prefix
 is reserved even when no receiver is selected.
 
-The ordinary `day2-serve` entry point refuses nonempty OAuth selections until a
-reviewed provider host is published. Missing provider code or readiness cannot
+The ordinary `day2-serve` entry point still refuses nonempty OAuth selections.
+The native Google composition is available, but its live fact source, canary
+callback and renewal path still need to be wired into the qualified launcher.
+Missing provider code or readiness cannot
 be enabled through an instance boolean, a CLI flag or merely configuring keys.
 Static startup qualification still does not establish external readiness;
 every approval lookup and settlement retains its current readiness checks.
@@ -179,17 +181,107 @@ redirects and sends confirmation once. Response loss is ambiguous; it does not
 trigger an automatic retry. A subsequent lookup observes durable settlement,
 and replay cannot activate the same attempt twice.
 
+## Reviewed Google Calendar registration
+
+The native `oauth/google.rs` catalog publishes `google_calendar_mapped_v1` and
+`google_calendar_external_v1`: confidential S256 browser-code profiles with
+reusable refresh and no automatic retry. Installation-owned access is not reviewed.
+The catalog derives identity scopes and Calendar `events.readonly`/`events`
+scopes from the admitted declaration's `list_events`/`create_event` actions.
+Only Google's `email` identity-scope alias is normalized; missing, duplicate or
+broader scopes fail. Publishing this protocol profile does not publish Calendar
+business operations or generated Roc functions. The Calendar write scope also
+permits provider operations beyond creation; native dispatch must still enforce
+the selected semantic action. See [Google's scope definitions](https://developers.google.com/workspace/calendar/api/auth).
+
+`registration::Target` derives the exact callback from the qualified instance
+security origin, reviewed profile and complete binding namespace. Its setup
+description contains only the client ID, callback, exact scopes and credential
+reference. That credential reference binds the installation, client ID and exact
+numeric Secret Manager project/secret/version. Client secrets reuse the bounded,
+checksum-checked approval-key transport without being interpreted as custody
+keys. No ADC, proxy, redirect, secret alias or app token chooses the source.
+
+The private `ops/OAuthRegistration.roc` campaign orders these native operations:
+
+1. Read the exact selected client-secret version.
+2. Require Google to reject one code with the wrong S256 verifier, then accept
+   that same code with the correct verifier. A generic invalid-code rejection
+   alone is insufficient. Require rejection of a separate code sent without
+   the required client credential.
+3. Exchange a third code using the selected client, exact callback and verifier.
+4. Fetch UserInfo with that access token; require the explicitly selected stable
+   Google `sub`, verified email and hosted-domain `hd`. Email is presentation.
+5. Refresh once, require exact scopes and reusable-token behavior, then verify
+   the same subject and tenant again using the refreshed access token.
+6. Re-read the exact secret version before sealing the native readiness receipt.
+
+Each code comes from a distinct one-use `Authorization`, with cryptographic
+state/verifier, an S256 challenge, fixed provider URL, exact callback and a native
+shell-session binding. Callback parsing rejects duplicate parameters, wrong
+state/issuer/session and expiry. Recipe arguments cannot choose any credential,
+code, endpoint or callback. Acceptance of a negative probe, an unrelated failure,
+response loss or a transport error cannot qualify the registration. Every step
+is fenced before I/O; failure closes the session and requires a new canary. The
+S256 correction is an explicit conformance obligation, never an automatic
+product exchange retry. A provider that invalidates codes on verifier rejection
+cannot pass this conservative campaign.
+
+Receipts are not serializable and expire after five minutes using wall and
+monotonic clocks. The registration revision remains stable across identical
+renewed probes. Tokens, codes, verifiers, secrets and provider error descriptions
+never enter recipe responses or receipts. Every host starts with an empty
+receipt registry. Desired JSON, restored state, simulator output and an
+operator-authored digest cannot create a live receipt.
+
+`GoogleReadiness` checks the selected registration, profile, requirement,
+generation and security shell before consulting the independent live
+`OutboundReadiness` source. That source must still establish shell, custody and
+account-mapping/approval readiness for the exact owner. `Providers::google`
+combines this gate with the reviewed catalog. A Google probe does not qualify
+those other services. The host must arrange renewal before expiry; this slice
+introduces neither a background renewal loop nor an app refresh job.
+
+Canary credentials must be isolated from active product grants. Google remote
+revocation can invalidate an account/client grant; the campaign performs no
+automatic revocation or successor cleanup. See [Google's OAuth lifecycle](https://developers.google.com/identity/protocols/oauth2/web-server)
+and [stable identity claims](https://developers.google.com/identity/openid-connect/reference).
+
+### Creating a company web client
+
+Create a Google Auth Platform **Web application** client in the installation's
+GCP project, with the appropriate consent-screen audience and an explicitly
+permitted canary account. This is the Google API/OIDC client, not an IAM workforce
+OAuth client or an IAP backend client. Save the client ID and exact Secret Manager
+reference in the instance repo; store the raw secret in Secret Manager without
+a trailing newline. Never put secret bytes in a PR, CLI argument, environment
+variable or app table. See [Google's client setup instructions](https://developers.google.com/workspace/guides/create-credentials).
+
+The independently selected reauthentication client needs
+`<security_shell.origin>/_day2/reauth/callback`. The Calendar registration needs
+the exact `Target::description().callback_url`, under
+`<security_shell.origin>/_day2/oauth/callback/<derived digest>`. These are separate
+protocol roles. Register the derived provider URL only after selecting the app
+requirement and complete binding; do not invent the digest or use the product
+origin, reauthentication callback or a wildcard. Google requires exact matching.
+
+The native shell launcher must mount the canary callback, verify its own shell
+session, collect the three distinct authorizations, run the pinned recipe and
+publish its native receipt into that host's registry. Callback mounting and
+renewal integration remain runtime work. The real HTTP fixtures exercise the
+same native campaign and Roc recipe but cannot qualify a Google client.
+
 ## Remaining runtime work
 
-The next runtime slice must publish the reviewed provider host and live
-registration readiness, wire connect attempt creation, and add the separately
-qualified shell launcher and workload. The shell's Google web client and
-exact-version client-secret loading also remain required. The edge contract now
+The next runtime slice must wire the published provider/registration campaign
+into connect attempt creation and the separately qualified shell launcher and
+workload. The real Google web clients and their exact secret versions remain
+required; the native exact-version loader is available. The edge contract now
 publishes a dedicated keyless signer and supports backend access; these plans
 must still be applied and their live workload/secret policies qualified.
 App-host IAM separately needs its custody and verification keys.
 
-This layer does not start a shell workload, publish a reviewed Google Calendar
-provider, establish live readiness, create a Google web client, or enable OAuth
-on an installation. Provider/registration readiness and the live
-connect/use/refresh canary remain separate qualification work.
+This layer does not start a shell workload, create a Google web client, establish
+live installation readiness or enable OAuth on an installation. Live registration
+qualification requires the real client and mounted canary callback. Calendar
+business dispatch and the connect/use/refresh canary remain follow-up work.

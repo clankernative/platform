@@ -11,6 +11,17 @@ pub(crate) struct Providers {
     pub readiness: Arc<dyn admission::OutboundReadiness>,
 }
 
+impl Providers {
+    /// Publishing reviewed code does not populate registration readiness. A
+    /// native qualification session must supply fresh non-serializable receipts.
+    pub(crate) fn google(readiness: Arc<super::registration::GoogleReadiness>) -> Result<Self> {
+        Ok(Self {
+            catalog: super::google::catalog()?,
+            readiness,
+        })
+    }
+}
+
 pub(crate) fn require_providers(
     instance: &Instance,
     app: &str,

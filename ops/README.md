@@ -18,6 +18,7 @@ Roc recipes; the recipes select steps, their order, examples, and checks.
 | [Verify.roc](Verify.roc) | Platform fixture selection, regression suites, CLI compilation and verification receipts |
 | [Simulation.roc](Simulation.roc) | Run and replay the shared control-world corpus, then generated schedules, before issuing mandatory campaign evidence |
 | [Release.roc](Release.roc) | Select the next secret-dependent release step from persisted state; the native host enforces authority and executes it |
+| [OAuthRegistration.roc](OAuthRegistration.roc) | Exact secret read → prove S256 rejection/correction and required client credential → code exchange → stable account → refresh → same account → secret re-read and native registration receipt |
 
 Build the distribution inside `platform/` so rustup selects its pinned toolchain:
 

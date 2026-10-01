@@ -10,6 +10,7 @@ package
 		Provision,
 		Simulation,
 		ProviderConformance,
+		OAuthRegistration,
 		Release,
 		SecretRetirement,
 	]

@@ -134,7 +134,7 @@ pub(crate) struct GcpSecretVersion {
 }
 
 impl GcpSecretVersion {
-    fn validate(&self) -> Result<()> {
+    pub(super) fn validate(&self) -> Result<()> {
         ensure!(
             self.project_number > 0
                 && self.version > 0
@@ -149,7 +149,7 @@ impl GcpSecretVersion {
         Ok(())
     }
 
-    fn resource_name(&self) -> String {
+    pub(super) fn resource_name(&self) -> String {
         format!(
             "projects/{}/secrets/{}/versions/{}",
             self.project_number, self.secret, self.version
@@ -162,6 +162,116 @@ pub(crate) struct GcpApprovalKeys {
     endpoint: Url,
     bindings: BTreeMap<(String, ApprovalKeyPurpose), (BindingRef, GcpSecretVersion)>,
     tokens: Arc<dyn AccessTokenSource>,
+}
+
+/// Exact-version client secrets share the same bounded Secret Manager transport
+/// as approval keys, without treating a client secret as a 32-byte custody key.
+pub(super) struct GcpSecretReader {
+    client: Client,
+    endpoint: Url,
+    tokens: Arc<dyn AccessTokenSource>,
+}
+
+impl GcpSecretReader {
+    pub(super) fn new(tokens: Arc<dyn AccessTokenSource>) -> Result<Self> {
+        Self::at(Url::parse("https://secretmanager.googleapis.com/")?, tokens)
+    }
+
+    fn at(endpoint: Url, tokens: Arc<dyn AccessTokenSource>) -> Result<Self> {
+        let client = Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(Duration::from_secs(3))
+            .timeout(Duration::from_secs(10))
+            .build()?;
+        Ok(Self {
+            client,
+            endpoint,
+            tokens,
+        })
+    }
+
+    pub(super) fn load(&self, version: &GcpSecretVersion) -> Result<Vec<u8>> {
+        version.validate()?;
+        read_secret(&self.client, &self.endpoint, self.tokens.as_ref(), version)
+    }
+
+    #[cfg(test)]
+    pub(super) fn fixture(endpoint: &str, tokens: Arc<dyn AccessTokenSource>) -> Result<Self> {
+        let endpoint = Url::parse(endpoint)?;
+        ensure!(
+            endpoint.scheme() == "http"
+                && matches!(endpoint.host(), Some(Host::Ipv4(ip)) if ip.is_loopback())
+                && endpoint.path() == "/"
+                && endpoint.username().is_empty()
+                && endpoint.password().is_none()
+                && endpoint.query().is_none()
+                && endpoint.fragment().is_none(),
+            "invalid Secret Manager fixture"
+        );
+        Self::at(endpoint, tokens)
+    }
+}
+
+fn read_secret(
+    client: &Client,
+    endpoint: &Url,
+    tokens: &dyn AccessTokenSource,
+    version: &GcpSecretVersion,
+) -> Result<Vec<u8>> {
+    let token = tokens.access_token()?;
+    ensure!(
+        !token.is_empty()
+            && token.len() <= 8192
+            && token.bytes().all(|byte| byte.is_ascii_graphic()),
+        "invalid Secret Manager access token"
+    );
+    let mut authorization = HeaderValue::from_str(&format!("Bearer {token}"))?;
+    authorization.set_sensitive(true);
+    let name = version.resource_name();
+    let response = client
+        .get(endpoint.join(&format!("v1/{name}:access"))?)
+        .header(AUTHORIZATION, authorization)
+        .header("accept", "application/json")
+        .send()?;
+    ensure!(
+        response.status().is_success(),
+        "OAuth secret version unavailable"
+    );
+    ensure!(
+        response
+            .content_length()
+            .is_none_or(|length| length <= MAX_RESPONSE_BYTES as u64),
+        "OAuth secret response too large"
+    );
+    let mut body = Vec::new();
+    response
+        .take(MAX_RESPONSE_BYTES as u64 + 1)
+        .read_to_end(&mut body)?;
+    ensure!(
+        body.len() <= MAX_RESPONSE_BYTES,
+        "OAuth secret response too large"
+    );
+    let response: AccessResponse =
+        crate::json::decode(&body).map_err(|_| anyhow::anyhow!("invalid OAuth secret response"))?;
+    ensure!(response.name == name, "OAuth secret version changed");
+    let decoded = STANDARD
+        .decode(response.payload.data)
+        .map_err(|_| anyhow::anyhow!("invalid OAuth secret encoding"))?;
+    ensure!(
+        !decoded.is_empty() && decoded.len() <= 2048,
+        "invalid OAuth secret length"
+    );
+    let checksum: u32 = response
+        .payload
+        .data_crc32c
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid OAuth secret checksum"))?;
+    ensure!(
+        crc32c::crc32c(&decoded) == checksum,
+        "OAuth secret checksum mismatch"
+    );
+    Ok(decoded)
 }
 
 impl GcpApprovalKeys {
@@ -250,57 +360,8 @@ impl ApprovalKeyProvider for GcpApprovalKeys {
             binding == &reference.binding && reference.version == version.version.to_string(),
             "OAuth key version does not match selected binding"
         );
-        let token = self.tokens.access_token()?;
-        ensure!(
-            !token.is_empty()
-                && token.len() <= 8192
-                && token.bytes().all(|byte| byte.is_ascii_graphic()),
-            "invalid Secret Manager access token"
-        );
-        let mut authorization = HeaderValue::from_str(&format!("Bearer {token}"))?;
-        authorization.set_sensitive(true);
-        let name = version.resource_name();
-        let url = self.endpoint.join(&format!("v1/{name}:access"))?;
-        let response = self
-            .client
-            .get(url)
-            .header(AUTHORIZATION, authorization)
-            .header("accept", "application/json")
-            .send()?;
-        ensure!(
-            response.status().is_success(),
-            "OAuth key version unavailable"
-        );
-        ensure!(
-            response
-                .content_length()
-                .is_none_or(|length| length <= MAX_RESPONSE_BYTES as u64),
-            "OAuth key response too large"
-        );
-        let mut body = Vec::new();
-        response
-            .take(MAX_RESPONSE_BYTES as u64 + 1)
-            .read_to_end(&mut body)?;
-        ensure!(
-            body.len() <= MAX_RESPONSE_BYTES,
-            "OAuth key response too large"
-        );
-        let response: AccessResponse = serde_json::from_slice(&body)
-            .map_err(|_| anyhow::anyhow!("invalid OAuth key response"))?;
-        ensure!(response.name == name, "OAuth key version changed");
-        let decoded = STANDARD
-            .decode(response.payload.data)
-            .map_err(|_| anyhow::anyhow!("invalid OAuth key encoding"))?;
+        let decoded = read_secret(&self.client, &self.endpoint, self.tokens.as_ref(), version)?;
         ensure!(decoded.len() == 32, "invalid OAuth key length");
-        let checksum: u32 = response
-            .payload
-            .data_crc32c
-            .parse()
-            .map_err(|_| anyhow::anyhow!("invalid OAuth key checksum"))?;
-        ensure!(
-            crc32c::crc32c(&decoded) == checksum,
-            "OAuth key checksum mismatch"
-        );
         let mut bytes = [0; 32];
         bytes.copy_from_slice(&decoded);
         Ok(ApprovalKeyMaterial {
