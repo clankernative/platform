@@ -166,7 +166,7 @@ pub enum AccountEvidenceContract {
 
 /// Instance evidence is supplied by the private admission registry. These
 /// values alone do not prove that a provider accepted the registration.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct OutboundInstanceEvidence {
     pub instance: BindingRef,
     pub binding_namespace: String,
@@ -178,7 +178,7 @@ pub struct OutboundInstanceEvidence {
     pub product_return: ProductReturnRef,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct SecurityShellEvidence {
     pub instance: BindingRef,
     pub origin: SecurityOriginRef,
@@ -186,7 +186,7 @@ pub struct SecurityShellEvidence {
     pub qualification: Digest,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ProviderRegistrationEvidence {
     pub instance: BindingRef,
     pub registration: BindingRef,
@@ -548,7 +548,7 @@ fn parse_scopes(raw: &str) -> Result<BTreeSet<String>> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::managed_credentials::crypto::KeyLease;
     use crate::oauth::account::{MappedHumanEvidence, ProviderAccount};
@@ -576,17 +576,17 @@ mod tests {
     }
 
     #[derive(Clone)]
-    struct QualificationFixture {
-        intent: ConnectIntent,
-        binding: CallbackBinding,
-        requirement: ConnectionRequirement,
-        permission: ProviderPermissionContract,
-        reviewed: ReviewedBrowserCodeProfile,
-        instance: OutboundInstanceEvidence,
+    pub(in crate::oauth) struct QualificationFixture {
+        pub(in crate::oauth) intent: ConnectIntent,
+        pub(in crate::oauth) binding: CallbackBinding,
+        pub(in crate::oauth) requirement: ConnectionRequirement,
+        pub(in crate::oauth) permission: ProviderPermissionContract,
+        pub(in crate::oauth) reviewed: ReviewedBrowserCodeProfile,
+        pub(in crate::oauth) instance: OutboundInstanceEvidence,
     }
 
     impl QualificationFixture {
-        fn input(&self) -> OutboundQualification<'_> {
+        pub(in crate::oauth) fn input(&self) -> OutboundQualification<'_> {
             OutboundQualification {
                 intent: &self.intent,
                 binding: &self.binding,
@@ -628,7 +628,7 @@ mod tests {
         qualification_fixture_for(AccountBindingPolicy::MappedHuman)
     }
 
-    fn external_fixture() -> QualificationFixture {
+    pub(in crate::oauth) fn external_fixture() -> QualificationFixture {
         qualification_fixture_for(AccountBindingPolicy::ExplicitExternalAccount)
     }
 
@@ -798,7 +798,7 @@ mod tests {
         }
     }
 
-    fn exchange_key() -> KeyLease {
+    pub(in crate::oauth) fn exchange_key() -> KeyLease {
         KeyLease::new(&[7; 32], &[9; 32], "verify_v1".into(), "encrypt_v1".into()).unwrap()
     }
 
@@ -827,7 +827,7 @@ mod tests {
         assert!(matches!(outcome, CallbackOutcome::CodeAccepted { .. }));
     }
 
-    fn quarantine_external_fixture(
+    pub(in crate::oauth) fn quarantine_external_fixture(
         db: &mut rusqlite::Connection,
         fixture: &QualificationFixture,
         key: &KeyLease,
@@ -892,6 +892,20 @@ mod tests {
     }
 
     impl ApprovalAuthority for TestApprovalAuthority {
+        fn with_current(
+            &self,
+            app: &str,
+            intent: &ConnectIntent,
+            binding: &CallbackBinding,
+            now: i64,
+            commit: &mut dyn FnMut(ApprovalTerms) -> Result<bool>,
+        ) -> Result<bool> {
+            let Some(terms) = self.current(app, intent, binding, now)? else {
+                return Ok(false);
+            };
+            commit(terms)
+        }
+
         fn current(
             &self,
             app: &str,
@@ -942,7 +956,7 @@ mod tests {
         )
     }
 
-    struct TestApprovalKeys(std::sync::atomic::AtomicU8);
+    pub(in crate::oauth) struct TestApprovalKeys(pub(in crate::oauth) std::sync::atomic::AtomicU8);
 
     impl ApprovalKeyProvider for TestApprovalKeys {
         fn load(
@@ -970,7 +984,7 @@ mod tests {
         }
     }
 
-    fn selected_approval(fixture: &QualificationFixture) -> AdmittedApproval {
+    pub(in crate::oauth) fn selected_approval(fixture: &QualificationFixture) -> AdmittedApproval {
         let AccountBindingEvidence::ExplicitExternal { approval, .. } = &fixture.instance.account
         else {
             unreachable!()
@@ -995,7 +1009,7 @@ mod tests {
         }
     }
 
-    fn selected_instance() -> crate::artifact::Instance {
+    pub(in crate::oauth) fn selected_instance() -> crate::artifact::Instance {
         crate::artifact::Instance::from_bytes(
             br#"{
                 "installation":"installation","environment":"production",

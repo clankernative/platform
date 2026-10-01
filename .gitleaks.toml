@@ -8,7 +8,17 @@ description = "Public schema identity keys, not authentication credentials"
 condition = "AND"
 paths = ['''(^|/)(fixtures/[^/]+|examples/reports)/model-identities\.json$''']
 regexTarget = "line"
-regexes = ['''^\s*"key": "[a-f0-9]{32}",?$''']
+regexes = [
+  '''^\s*"key": "[a-f0-9]{32}",?$''',
+  '''^\s*"identity": \{\s*"key": "[a-f0-9]{32}", "prefix": "[a-z]+"\s*\},?$''',
+]
+
+[[allowlists]]
+description = "Public schema identity keys embedded in admission fixtures"
+condition = "AND"
+paths = ['''(^|/)crates/day2/src/app_inference\.rs$''']
+regexTarget = "line"
+regexes = ['''^\s*\{"identity": \{"key": "[a-f0-9]{32}", "prefix": "[a-z]+"\},$''']
 
 [[allowlists]]
 description = "Documentation generator references an environment variable, never a credential"

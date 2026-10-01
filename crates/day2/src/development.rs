@@ -1425,6 +1425,7 @@ fn create_for_with_imports(
         // declaration would refuse.
         identity: None,
         security_shell: None,
+        oauth_shell_transport: None,
         apps: BTreeMap::from([(
             "app".into(),
             AppBinding {

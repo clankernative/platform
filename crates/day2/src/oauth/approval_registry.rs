@@ -1,9 +1,9 @@
 //! Durable approval lookup. The browser supplies only an attempt identifier;
 //! current contracts and keys come from a host-owned admission authority.
 
-use super::{connect, external, profiles, security_shell};
+use super::{connect, external, profiles, security_shell, shell_transport};
 use crate::{artifact::Instance, managed_credentials::crypto::KeyLease};
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use day2_capabilities::{
     BindingRef,
     oauth::{ConnectionRequirement, ProviderPermissionContract},
@@ -38,6 +38,19 @@ pub(crate) trait ApprovalAuthority: Send + Sync {
         binding: &connect::CallbackBinding,
         now: i64,
     ) -> Result<Option<ApprovalTerms>>;
+
+    /// Hold current selection through the local settlement transaction. A
+    /// resolver that cannot provide this lease cannot authorize a commit.
+    fn with_current(
+        &self,
+        _app: &str,
+        _intent: &connect::ConnectIntent,
+        _binding: &connect::CallbackBinding,
+        _now: i64,
+        _commit: &mut dyn FnMut(ApprovalTerms) -> Result<bool>,
+    ) -> Result<bool> {
+        anyhow::bail!("OAuth authority cannot lease settlement")
+    }
 }
 
 /// Key material is fetched on every approval request. The provider must use a
@@ -175,23 +188,13 @@ impl SelectedApprovalAuthority {
     }
 }
 
-impl ApprovalAuthority for SelectedApprovalAuthority {
-    fn current(
+impl SelectedApprovalAuthority {
+    fn terms(
         &self,
-        app: &str,
+        entry: &AdmittedApproval,
         intent: &connect::ConnectIntent,
         binding: &connect::CallbackBinding,
-        _now: i64,
-    ) -> Result<Option<ApprovalTerms>> {
-        // Keep the read lease through key acquisition. Once replace returns,
-        // no request can finish using the retired admission snapshot.
-        let entries = self
-            .entries
-            .read()
-            .map_err(|_| anyhow::anyhow!("OAuth admission lock poisoned"))?;
-        let Some(entry) = entries.get(&(app.to_owned(), intent.slot.clone())) else {
-            return Ok(None);
-        };
+    ) -> Result<ApprovalTerms> {
         profiles::qualify_outbound_connect(
             intent,
             binding,
@@ -226,14 +229,52 @@ impl ApprovalAuthority for SelectedApprovalAuthority {
             entry.instance.shell.origin.clone(),
             approval.clone(),
         )?;
-        Ok(Some(ApprovalTerms {
+        Ok(ApprovalTerms {
             requirement: entry.requirement.clone(),
             permission: entry.permission.clone(),
             reviewed: entry.reviewed.clone(),
             instance: entry.instance.clone(),
             custody_key,
             shell_key,
-        }))
+        })
+    }
+}
+
+impl ApprovalAuthority for SelectedApprovalAuthority {
+    fn current(
+        &self,
+        app: &str,
+        intent: &connect::ConnectIntent,
+        binding: &connect::CallbackBinding,
+        _: i64,
+    ) -> Result<Option<ApprovalTerms>> {
+        let entries = self
+            .entries
+            .read()
+            .map_err(|_| anyhow::anyhow!("OAuth admission lock poisoned"))?;
+        let Some(entry) = entries.get(&(app.to_owned(), intent.slot.clone())) else {
+            return Ok(None);
+        };
+        Ok(Some(self.terms(entry, intent, binding)?))
+    }
+
+    fn with_current(
+        &self,
+        app: &str,
+        intent: &connect::ConnectIntent,
+        binding: &connect::CallbackBinding,
+        _: i64,
+        commit: &mut dyn FnMut(ApprovalTerms) -> Result<bool>,
+    ) -> Result<bool> {
+        let entries = self
+            .entries
+            .read()
+            .map_err(|_| anyhow::anyhow!("OAuth admission lock poisoned"))?;
+        let Some(entry) = entries.get(&(app.to_owned(), intent.slot.clone())) else {
+            return Ok(false);
+        };
+        // Replacement waits until the SQLite commit (or rollback) finishes.
+        commit(self.terms(entry, intent, binding)?)
     }
 }
 
@@ -245,6 +286,136 @@ pub(crate) struct StoredApprovalRegistry {
 }
 
 impl StoredApprovalRegistry {
+    fn owner(&self, attempt: &str) -> Result<Option<String>> {
+        let mut owner = None;
+        for (app, path) in &self.app_databases {
+            let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            db.busy_timeout(Duration::from_secs(2))?;
+            db.pragma_update(None, "trusted_schema", false)?;
+            if connect::state(&db, attempt)?.is_some() {
+                ensure!(owner.is_none(), "ambiguous OAuth approval attempt");
+                owner = Some(app.clone());
+            }
+        }
+        Ok(owner)
+    }
+
+    fn view(
+        &self,
+        attempt: &str,
+        identity: &crate::iap::Verified,
+        now: i64,
+    ) -> Result<shell_transport::HostLookup> {
+        use security_shell::ApprovalRegistry;
+        let Some(app) = self.owner(attempt)? else {
+            return Ok(shell_transport::HostLookup {
+                owned: false,
+                view: None,
+            });
+        };
+        let Some(context) = self.resolve(attempt, now)? else {
+            return Ok(shell_transport::HostLookup {
+                owned: true,
+                view: None,
+            });
+        };
+        ensure!(
+            context.intent.owner == identity.email,
+            "OAuth approval human mismatch"
+        );
+        let db = crate::store::open(&context.db)?;
+        crate::iap::bind_subject(&db, identity, now)?;
+        let pending = external::load_pending_external(
+            &db,
+            context.qualification(),
+            &context.custody_key,
+            now,
+        )?;
+        let view = pending
+            .map(|pending| {
+                shell_transport::ApprovalView::from_pending(&app, &context, &pending, identity)
+            })
+            .transpose()?;
+        Ok(shell_transport::HostLookup { owned: true, view })
+    }
+
+    fn confirm(
+        &self,
+        attempt: &str,
+        expected: &day2_capabilities::Digest,
+        identity: &crate::iap::Verified,
+        evidence: external::FreshExternalApproval,
+        now: i64,
+        clock: &dyn Fn() -> Result<i64>,
+    ) -> Result<bool> {
+        ensure!(
+            evidence.preview.as_ref() == Some(expected),
+            "OAuth confirmation does not bind its preview"
+        );
+        let Some(app) = self.owner(attempt)? else {
+            return Ok(false);
+        };
+        let path = &self.app_databases[&app];
+        let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        db.busy_timeout(Duration::from_secs(2))?;
+        db.pragma_update(None, "trusted_schema", false)?;
+        let Some((intent, binding)) = connect::pending_approval(&db, attempt, now)? else {
+            return Ok(false);
+        };
+        ensure!(
+            intent.owner == identity.email && evidence.human == identity.email,
+            "OAuth confirmation human mismatch"
+        );
+        drop(db);
+        let mut evidence = Some(evidence);
+        self.authority
+            .with_current(&app, &intent, &binding, now, &mut |terms| {
+                // Re-read the clock after key acquisition and the pending state
+                // after obtaining the selection lease. No network call occurs in
+                // the SQLite settlement transaction.
+                let at = clock()?;
+                ensure!(at >= now, "OAuth host clock moved backwards");
+                let context = security_shell::ApprovalContext {
+                    db: path.clone(),
+                    intent: intent.clone(),
+                    binding: binding.clone(),
+                    requirement: terms.requirement,
+                    permission: terms.permission,
+                    reviewed: terms.reviewed,
+                    instance: terms.instance,
+                    custody_key: terms.custody_key,
+                    shell_key: terms.shell_key,
+                };
+                let mut db = crate::store::open(path)?;
+                crate::iap::bind_subject(&db, identity, at)?;
+                let Some(pending) = external::load_pending_external(
+                    &db,
+                    context.qualification(),
+                    &context.custody_key,
+                    at,
+                )?
+                else {
+                    return Ok(false);
+                };
+                let view = shell_transport::ApprovalView::from_pending(
+                    &app, &context, &pending, identity,
+                )?;
+                if view.digest()? != *expected {
+                    return Ok(false);
+                }
+                external::approve_external(
+                    &mut db,
+                    context.qualification(),
+                    &context.custody_key,
+                    &context.shell_key,
+                    evidence
+                        .take()
+                        .context("OAuth confirmation already consumed")?,
+                    at,
+                )
+            })
+    }
+
     pub(crate) fn new(
         app_databases: BTreeMap<String, PathBuf>,
         authority: Arc<dyn ApprovalAuthority>,
@@ -270,6 +441,131 @@ impl StoredApprovalRegistry {
             app_databases: selected,
             authority,
         })
+    }
+}
+
+/// A private receiver holds exactly one app's database and credential authority.
+/// The shell cannot ask this backend to select another app or filesystem path.
+pub(crate) struct StoredAppApprovals {
+    app: String,
+    registry: StoredApprovalRegistry,
+    clock: Arc<dyn Fn() -> Result<i64> + Send + Sync>,
+}
+
+impl StoredAppApprovals {
+    pub(crate) fn new(
+        app: String,
+        path: PathBuf,
+        authority: Arc<dyn ApprovalAuthority>,
+    ) -> Result<Self> {
+        Ok(Self {
+            registry: StoredApprovalRegistry::new(
+                BTreeMap::from([(app.clone(), path)]),
+                authority,
+            )?,
+            app,
+            clock: Arc::new(|| {
+                Ok(std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_secs()
+                    .try_into()?)
+            }),
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_clock(&mut self, clock: Arc<dyn Fn() -> Result<i64> + Send + Sync>) {
+        self.clock = clock;
+    }
+}
+
+impl shell_transport::AppApprovals for StoredAppApprovals {
+    fn app(&self) -> &str {
+        &self.app
+    }
+
+    fn lookup(
+        &self,
+        attempt: &str,
+        identity: &crate::iap::Verified,
+        now: i64,
+    ) -> Result<shell_transport::HostLookup> {
+        self.registry.view(attempt, identity, now)
+    }
+
+    fn confirm(
+        &self,
+        attempt: &str,
+        expected: &day2_capabilities::Digest,
+        identity: &crate::iap::Verified,
+        evidence: external::FreshExternalApproval,
+        now: i64,
+    ) -> Result<bool> {
+        self.registry.confirm(
+            attempt,
+            expected,
+            identity,
+            evidence,
+            now,
+            self.clock.as_ref(),
+        )
+    }
+}
+
+/// Local adapters exist only for the existing browser fixture campaigns. The
+/// production shell constructor uses authenticated RemoteApprovals and has no
+/// database registry or custody keys.
+#[cfg(test)]
+pub(super) struct LocalShellApprovals(pub Arc<StoredApprovalRegistry>);
+
+#[cfg(test)]
+impl shell_transport::ShellApprovals for LocalShellApprovals {
+    fn pending(
+        &self,
+        attempt: &str,
+        identity: &crate::iap::Verified,
+        _: &axum::http::HeaderMap,
+        now: i64,
+    ) -> Result<Option<shell_transport::ApprovalView>> {
+        Ok(self.0.view(attempt, identity, now)?.view)
+    }
+
+    fn confirm(
+        &self,
+        view: &shell_transport::ApprovalView,
+        identity: &crate::iap::Verified,
+        _: &axum::http::HeaderMap,
+        evidence: external::FreshExternalApproval,
+        now: i64,
+    ) -> Result<bool> {
+        self.0.confirm(
+            view.attempt(),
+            &view.digest()?,
+            identity,
+            evidence,
+            now,
+            &|| Ok(now),
+        )
+    }
+}
+
+#[cfg(test)]
+impl shell_transport::ApprovalSigner for LocalShellApprovals {
+    fn attest(
+        &self,
+        view: &shell_transport::ApprovalView,
+        session: day2_capabilities::Digest,
+        authenticated_at: i64,
+        now: i64,
+    ) -> Result<external::FreshExternalApproval> {
+        use security_shell::ApprovalRegistry;
+        let context = self
+            .0
+            .resolve(view.attempt(), now)?
+            .context("OAuth test approval disappeared")?;
+        context
+            .shell_key
+            .attest_view(&view.claim, view.digest()?, session, authenticated_at, now)
     }
 }
 

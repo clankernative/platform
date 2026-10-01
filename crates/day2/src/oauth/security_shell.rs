@@ -1,9 +1,11 @@
 //! Isolated browser approval for an external provider account. The shell has
 //! its own origin and short-lived cookie; app sessions never authorize it.
 
-use super::{admission, approval_keys, approval_registry, connect, external, profiles, shell_oidc};
-use crate::{artifact::Instance, iap};
-use crate::{managed_credentials::crypto::KeyLease, store::open, web_security};
+#[cfg(test)]
+use super::approval_registry;
+use super::{admission, approval_keys, connect, external, profiles, shell_oidc, shell_transport};
+use crate::iap;
+use crate::{managed_credentials::crypto::KeyLease, web_security};
 use anyhow::{Context, Result, ensure};
 use axum::{
     Router,
@@ -18,7 +20,7 @@ use day2_capabilities::{
 };
 use maud::{DOCTYPE, html};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
@@ -45,7 +47,7 @@ pub(crate) struct ApprovalContext {
 }
 
 impl ApprovalContext {
-    fn qualification(&self) -> profiles::OutboundQualification<'_> {
+    pub(super) fn qualification(&self) -> profiles::OutboundQualification<'_> {
         profiles::OutboundQualification {
             intent: &self.intent,
             binding: &self.binding,
@@ -101,6 +103,7 @@ struct ShellSession {
     human: String,
     subject: String,
     challenge: Digest,
+    preview: Digest,
     authenticated_at: i64,
     expires_at: i64,
     csrf: String,
@@ -111,7 +114,8 @@ struct ShellSession {
 pub(crate) struct SecurityShell {
     origin: String,
     authority: String,
-    registry: Arc<dyn ApprovalRegistry>,
+    approvals: Arc<dyn shell_transport::ShellApprovals>,
+    signer: Arc<dyn shell_transport::ApprovalSigner>,
     authenticator: Arc<dyn FreshAuthenticator>,
     sessions: Mutex<HashMap<String, ShellSession>>,
 }
@@ -119,48 +123,21 @@ pub(crate) struct SecurityShell {
 impl SecurityShell {
     /// Compose the shell from the exact instance-selected artifacts and keys.
     /// This is an explicit GKE host entry point, not an application route or a
-    /// readiness assertion. Storage paths remain selected by the private host.
+    /// readiness assertion. The shell has no app storage paths or custody keys.
     pub(crate) fn from_gke_instance(
         instance_path: &Path,
-        app_databases: BTreeMap<String, PathBuf>,
         catalog: &admission::ReviewedCatalog,
-        readiness: Arc<dyn admission::OutboundReadiness>,
+        bearers: Arc<dyn shell_transport::PrivateBearerSource>,
         client_id: String,
         client_secret: String,
-    ) -> Result<(Arc<Self>, Arc<admission::ArtifactApprovalAuthority>)> {
+    ) -> Result<(Arc<Self>, Arc<admission::ArtifactShellSigner>)> {
         let selected = admission::QualifiedConnections::from_instance_file(instance_path, catalog)?;
         let instance = selected.instance().clone();
-        let authority = Arc::new(admission::ArtifactApprovalAuthority::with_gcp(
+        let signer = Arc::new(admission::ArtifactShellSigner::with_gcp(
             selected,
-            readiness,
             Arc::new(approval_keys::GkeMetadataAccessTokens::new()?),
         )?);
-        let shell = Self::from_instance(
-            &instance,
-            app_databases,
-            authority.clone(),
-            client_id,
-            client_secret,
-        )?;
-        Ok((shell, authority))
-    }
-
-    /// Resolve both the browser origin and IAP verifier from the selected
-    /// installation, so a caller cannot mount the shell on an app edge.
-    pub(crate) fn from_instance(
-        instance: &Instance,
-        app_databases: BTreeMap<String, PathBuf>,
-        authority: Arc<dyn approval_registry::ApprovalAuthority>,
-        client_id: String,
-        client_secret: String,
-    ) -> Result<Arc<Self>> {
         let (identity, edge) = instance.security_edge()?;
-        ensure!(
-            app_databases
-                .keys()
-                .all(|app| instance.apps.contains_key(app)),
-            "OAuth shell database does not belong to selected installation"
-        );
         let origin = format!("{}/", edge.origin);
         let authenticator = Arc::new(shell_oidc::GoogleFreshAuthenticator::new(
             &edge.iap_audience,
@@ -169,16 +146,29 @@ impl SecurityShell {
             client_id,
             client_secret,
         )?);
-        let registry = Arc::new(approval_registry::StoredApprovalRegistry::new(
-            app_databases,
-            authority,
+        let approvals = Arc::new(shell_transport::RemoteApprovals::from_instance(
+            &instance, bearers,
         )?);
-        Self::new(origin, registry, authenticator)
+        Ok((
+            Self::with_transport(origin, approvals, signer.clone(), authenticator)?,
+            signer,
+        ))
     }
 
+    #[cfg(test)]
     pub(crate) fn new(
         origin: String,
-        registry: Arc<dyn ApprovalRegistry>,
+        registry: Arc<approval_registry::StoredApprovalRegistry>,
+        authenticator: Arc<dyn FreshAuthenticator>,
+    ) -> Result<Arc<Self>> {
+        let local = Arc::new(approval_registry::LocalShellApprovals(registry));
+        Self::with_transport(origin, local.clone(), local, authenticator)
+    }
+
+    pub(crate) fn with_transport(
+        origin: String,
+        approvals: Arc<dyn shell_transport::ShellApprovals>,
+        signer: Arc<dyn shell_transport::ApprovalSigner>,
         authenticator: Arc<dyn FreshAuthenticator>,
     ) -> Result<Arc<Self>> {
         let url = url::Url::parse(&origin)?;
@@ -197,7 +187,8 @@ impl SecurityShell {
         Ok(Arc::new(Self {
             origin: url.origin().ascii_serialization(),
             authority,
-            registry,
+            approvals,
+            signer,
             authenticator,
             sessions: Mutex::new(HashMap::new()),
         }))
@@ -263,6 +254,7 @@ impl SecurityShell {
             );
             return self.reauth_callback(
                 query.context("missing reauthentication callback")?,
+                headers,
                 &identity,
                 at,
             );
@@ -309,26 +301,20 @@ impl SecurityShell {
         &self,
         attempt: &str,
         identity: &iap::Verified,
+        headers: &HeaderMap,
         at: i64,
-    ) -> Result<Option<(ApprovalContext, external::PendingExternalApproval)>> {
-        let Some(context) = self.registry.resolve(attempt, at)? else {
+    ) -> Result<Option<shell_transport::ApprovalView>> {
+        let Some(view) = self.approvals.pending(attempt, identity, headers, at)? else {
             return Ok(None);
         };
         ensure!(
-            context.intent.attempt == attempt
-                && context.instance.shell.origin_url == format!("{}/", self.origin)
-                && context.instance.app_origin_url != format!("{}/", self.origin),
+            view.attempt() == attempt
+                && view.shell_origin == format!("{}/", self.origin)
+                && view.app_origin != format!("{}/", self.origin),
             "security shell registry origin mismatch"
         );
-        let db = open(&context.db)?;
-        iap::bind_subject(&db, identity, at)?;
-        let pending = external::load_pending_external(
-            &db,
-            context.qualification(),
-            &context.custody_key,
-            at,
-        )?;
-        Ok(pending.map(|pending| (context, pending)))
+        view.validate(identity)?;
+        Ok(Some(view))
     }
 
     fn page(
@@ -338,7 +324,7 @@ impl SecurityShell {
         identity: &iap::Verified,
         at: i64,
     ) -> Result<Response> {
-        let Some((context, pending)) = self.pending(attempt, identity, at)? else {
+        let Some(pending) = self.pending(attempt, identity, headers, at)? else {
             return Ok(StatusCode::NOT_FOUND.into_response());
         };
         ensure!(
@@ -367,13 +353,8 @@ impl SecurityShell {
                 }
             }
         };
-        let account = pending.observed_account();
-        let scopes: BTreeSet<&str> = context
-            .permission
-            .action_scopes
-            .values()
-            .flat_map(|scopes| scopes.iter().map(String::as_str))
-            .collect();
+        let account = &pending.observed;
+        let scopes = &pending.scopes;
         let markup = html! {
             (DOCTYPE)
             html lang="en" {
@@ -383,8 +364,8 @@ impl SecurityShell {
                         h1 { "Approve external account" }
                         p { "Confirm the provider identity for this connection." }
                         dl {
-                            dt { "Connection" } dd { (context.requirement.logical_id) }
-                            dt { "Purpose" } dd { (context.requirement.usage) }
+                            dt { "Connection" } dd { (pending.logical_id) }
+                            dt { "Purpose" } dd { (pending.usage) }
                             dt { "Issuer" } dd { (account.issuer) }
                             dt { "Subject" } dd { (account.subject) }
                             dt { "Tenant" } dd { (account.tenant) }
@@ -416,7 +397,7 @@ impl SecurityShell {
 
     fn issue_session(
         &self,
-        pending: &external::PendingExternalApproval,
+        pending: &shell_transport::ApprovalView,
         identity: &iap::Verified,
         human: FreshHuman,
         at: i64,
@@ -436,6 +417,7 @@ impl SecurityShell {
             human: human.human,
             subject: human.subject,
             challenge: pending.challenge().clone(),
+            preview: pending.digest()?,
             authenticated_at: human.authenticated_at,
             expires_at: human.authenticated_at + SESSION_SECONDS,
             csrf: web_security::random()?,
@@ -456,9 +438,15 @@ impl SecurityShell {
         Ok((session, token))
     }
 
-    fn reauth_callback(&self, query: &str, identity: &iap::Verified, at: i64) -> Result<Response> {
+    fn reauth_callback(
+        &self,
+        query: &str,
+        headers: &HeaderMap,
+        identity: &iap::Verified,
+        at: i64,
+    ) -> Result<Response> {
         let proof = self.authenticator.complete(query, identity, at)?;
-        let Some((_, pending)) = self.pending(&proof.attempt, identity, at)? else {
+        let Some(pending) = self.pending(&proof.attempt, identity, headers, at)? else {
             return Ok(StatusCode::NOT_FOUND.into_response());
         };
         ensure!(
@@ -494,7 +482,7 @@ impl SecurityShell {
         identity: &iap::Verified,
         at: i64,
     ) -> Result<Response> {
-        let Some((context, pending)) = self.pending(attempt, identity, at)? else {
+        let Some(pending) = self.pending(attempt, identity, headers, at)? else {
             return Ok(StatusCode::NOT_FOUND.into_response());
         };
         let Some(token) = cookie_token(headers)? else {
@@ -523,21 +511,15 @@ impl SecurityShell {
             );
             sessions.remove(&key).expect("checked shell session")
         };
-        let evidence = context.shell_key.attest(
+        let evidence = self.signer.attest(
             &pending,
             Digest::new(token.as_bytes()),
             session.authenticated_at,
             at,
         )?;
-        let mut db = open(&context.db)?;
-        let approved = external::approve_external(
-            &mut db,
-            context.qualification(),
-            &context.custody_key,
-            &context.shell_key,
-            evidence,
-            at,
-        )?;
+        let approved = self
+            .approvals
+            .confirm(&pending, identity, headers, evidence, at)?;
         let mut response = if approved {
             (StatusCode::OK, "External account approved.").into_response()
         } else {
@@ -568,7 +550,7 @@ impl SecurityShell {
 
 fn valid_session(
     session: &ShellSession,
-    pending: &external::PendingExternalApproval,
+    pending: &shell_transport::ApprovalView,
     identity: &iap::Verified,
     at: i64,
 ) -> bool {
@@ -577,6 +559,9 @@ fn valid_session(
         && session.human == identity.email
         && session.subject == identity.subject
         && session.challenge == *pending.challenge()
+        && pending
+            .digest()
+            .is_ok_and(|digest| digest == session.preview)
         && session.authenticated_at > pending.quarantined_at()
         && at >= session.authenticated_at
         && at < session.expires_at
@@ -658,5 +643,73 @@ mod tests {
                 .unwrap()
                 .contains("frame-ancestors 'none'")
         );
+    }
+
+    #[test]
+    fn confirmation_session_is_bound_to_every_displayed_preview_field() {
+        use crate::oauth::profiles::tests as fixtures;
+        let facts = fixtures::external_fixture();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("app.sqlite");
+        let mut db = rusqlite::Connection::open(&path).unwrap();
+        let key = fixtures::exchange_key();
+        fixtures::quarantine_external_fixture(&mut db, &facts, &key);
+        let pending = crate::oauth::external::load_pending_external(&db, facts.input(), &key, 5)
+            .unwrap()
+            .unwrap();
+        let shell_key = crate::oauth::external::ShellApprovalKeyLease::new(
+            &[12; 32],
+            "shell_v1".into(),
+            pending.security_origin().clone(),
+            pending.approval_binding().clone(),
+        )
+        .unwrap();
+        let identity = iap::Verified {
+            email: facts.intent.owner.clone(),
+            subject: "accounts.google.com:12345".into(),
+        };
+        let context = ApprovalContext {
+            db: path,
+            intent: facts.intent,
+            binding: facts.binding,
+            requirement: facts.requirement,
+            permission: facts.permission,
+            reviewed: facts.reviewed,
+            instance: facts.instance,
+            custody_key: key,
+            shell_key,
+        };
+        let view =
+            shell_transport::ApprovalView::from_pending("app", &context, &pending, &identity)
+                .unwrap();
+        let session = ShellSession {
+            attempt: view.attempt().into(),
+            human: identity.email.clone(),
+            subject: identity.subject.clone(),
+            challenge: view.challenge().clone(),
+            preview: view.digest().unwrap(),
+            authenticated_at: 5,
+            expires_at: 305,
+            csrf: "fixture".into(),
+        };
+        assert!(valid_session(&session, &view, &identity, 6));
+        for mutation in 0..6 {
+            let mut changed = view.clone();
+            match mutation {
+                0 => changed.usage = "A different purpose".into(),
+                1 => {
+                    changed.scopes.insert("calendar.write".into());
+                }
+                2 => changed.observed.display_email = "other@example.com".into(),
+                3 => changed.terms = Digest::of(&"retired terms").unwrap(),
+                4 => changed.binding_namespace = "retired_binding".into(),
+                5 => changed.app_origin = "https://other.example/".into(),
+                _ => unreachable!(),
+            }
+            assert!(
+                !valid_session(&session, &changed, &identity, 6),
+                "mutation {mutation}"
+            );
+        }
     }
 }

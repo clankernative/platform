@@ -56,7 +56,12 @@ impl ConnectionSlotKey {
             "connection slot owner category mismatch"
         );
         if let SlotOwner::Human { subject } = &self.owner {
-            identifier(subject)?;
+            ensure!(
+                !subject.is_empty()
+                    && subject.len() <= 256
+                    && !subject.chars().any(|c| c.is_whitespace() || c.is_control()),
+                "invalid OAuth human owner"
+            );
         }
         Digest::of(&("oauth-connection-slot-v1", self))
     }
@@ -102,6 +107,53 @@ pub struct OutboundConnectionBinding {
     pub custody_verifier_secret: Name,
     pub custody_encryption_secret: Name,
     pub shell_attestation_secret: Name,
+}
+
+/// One authenticated security-shell workload for private app-host RPC. Target
+/// locations and numeric IAP audiences reuse the ordinary selected app edges.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShellTransport {
+    pub service_account: String,
+}
+
+impl ShellTransport {
+    pub fn validate(&self) -> Result<()> {
+        let (local, domain) = self
+            .service_account
+            .split_once('@')
+            .ok_or_else(|| anyhow::anyhow!("invalid OAuth shell workload"))?;
+        let project = domain
+            .strip_suffix(".iam.gserviceaccount.com")
+            .ok_or_else(|| anyhow::anyhow!("invalid OAuth shell workload domain"))?;
+        ensure!(
+            !local.is_empty()
+                && self.service_account.len() <= 254
+                && self
+                    .service_account
+                    .bytes()
+                    .filter(|byte| *byte == b'@')
+                    .count()
+                    == 1
+                && (6..=30).contains(&project.len())
+                && project.as_bytes()[0].is_ascii_lowercase()
+                && project
+                    .as_bytes()
+                    .last()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+                && project
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+                && self
+                    .service_account
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || b"@._-".contains(&byte)),
+            "invalid OAuth shell workload"
+        );
+        Ok(())
+    }
 }
 
 impl ConnectionRequirement {
@@ -777,6 +829,34 @@ mod tests {
         };
         slot.requirement = "workspace.other".into();
         assert!(slot.id(&requirement()).is_err());
+    }
+
+    #[test]
+    fn human_slot_owner_accepts_opaque_iap_principals_and_rejects_empty_or_ambiguous_text() {
+        let mut slot = ConnectionSlotKey {
+            installation: Name::try_from("company".to_owned()).unwrap(),
+            environment: Name::try_from("production".to_owned()).unwrap(),
+            app: Name::try_from("workspace".to_owned()).unwrap(),
+            requirement: "workspace.calendar".into(),
+            owner: SlotOwner::Installation,
+        };
+        for subject in ["ada@example.com", "accounts.google.com:1234567890"] {
+            slot.owner = SlotOwner::Human {
+                subject: subject.into(),
+            };
+            slot.id(&requirement()).unwrap();
+        }
+        for subject in [
+            "",
+            " ada@example.com",
+            "ada\n@example.com",
+            &"x".repeat(257),
+        ] {
+            slot.owner = SlotOwner::Human {
+                subject: subject.into(),
+            };
+            assert!(slot.id(&requirement()).is_err());
+        }
     }
 
     #[test]

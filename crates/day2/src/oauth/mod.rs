@@ -14,4 +14,5 @@ pub mod profiles;
 pub mod protocol;
 pub(crate) mod security_shell;
 pub(crate) mod shell_oidc;
+pub(crate) mod shell_transport;
 pub mod store;
