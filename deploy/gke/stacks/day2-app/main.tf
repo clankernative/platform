@@ -18,9 +18,10 @@ data "kubernetes_config_map_v1" "security_shell_contract" {
 locals {
   contract = data.kubernetes_config_map_v1.platform_contract.data
 
-  shell_contract = var.security_shell_contract == null ? {} : data.kubernetes_config_map_v1.security_shell_contract[0].data
-  shell_origin   = trimspace(lookup(local.shell_contract, "SECURITY_SHELL_ORIGIN", ""))
-  shell_audience = trimspace(lookup(local.shell_contract, "IAP_JWT_AUDIENCE", ""))
+  shell_contract        = var.security_shell_contract == null ? {} : data.kubernetes_config_map_v1.security_shell_contract[0].data
+  shell_origin          = trimspace(lookup(local.shell_contract, "SECURITY_SHELL_ORIGIN", ""))
+  shell_audience        = trimspace(lookup(local.shell_contract, "IAP_JWT_AUDIENCE", ""))
+  shell_service_account = trimspace(lookup(local.shell_contract, "OAUTH_SHELL_SERVICE_ACCOUNT", ""))
 
   contract_iap_audience = trimspace(lookup(local.contract, "IAP_JWT_AUDIENCE", ""))
   iap_audience          = var.iap_audience_override != "" ? var.iap_audience_override : local.contract_iap_audience
@@ -92,6 +93,7 @@ locals {
       origin       = local.shell_origin
       iap_audience = local.shell_audience
     }
+    oauth_shell_transport = { service_account = local.shell_service_account }
   })
   instance_json = jsonencode(local.instance)
 
@@ -133,6 +135,7 @@ resource "kubernetes_config_map_v1" "instance" {
     precondition {
       condition = var.security_shell_contract == null ? true : (
         lookup(local.shell_contract, "EDGE_ROLE", "") == "security_shell" &&
+        can(regex("^[a-z0-9_-]+@[a-z][a-z0-9-]{4,28}[a-z0-9]\\.iam\\.gserviceaccount\\.com$", local.shell_service_account)) &&
         can(regex("^https://([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$", local.shell_origin)) &&
         can(regex("^/projects/[0-9]{1,24}/global/backendServices/[0-9]{1,24}$", local.shell_audience)) &&
         local.shell_origin != var.edge_origin && local.shell_audience != local.iap_audience &&

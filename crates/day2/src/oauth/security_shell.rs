@@ -127,12 +127,12 @@ impl SecurityShell {
     pub(crate) fn from_gke_instance(
         instance_path: &Path,
         catalog: &admission::ReviewedCatalog,
-        bearers: Arc<dyn shell_transport::PrivateBearerSource>,
         client_id: String,
         client_secret: String,
     ) -> Result<(Arc<Self>, Arc<admission::ArtifactShellSigner>)> {
         let selected = admission::QualifiedConnections::from_instance_file(instance_path, catalog)?;
         let instance = selected.instance().clone();
+        let bearers = Arc::new(super::workload::IapWorkload::from_gke_instance(&instance)?);
         let signer = Arc::new(admission::ArtifactShellSigner::with_gcp(
             selected,
             Arc::new(approval_keys::GkeMetadataAccessTokens::new()?),

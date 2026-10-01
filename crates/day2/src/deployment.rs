@@ -306,10 +306,27 @@ pub enum Access<'a> {
 }
 
 pub async fn serve(instance_path: &Path, app: &str, access: Access<'_>) -> Result<()> {
+    serve_with_oauth(instance_path, app, access, None).await
+}
+
+/// Reviewed provider adapters supply this capability at native host startup.
+/// The ordinary binary refuses selected connections until those are published.
+pub(crate) async fn serve_with_oauth(
+    instance_path: &Path,
+    app: &str,
+    access: Access<'_>,
+    providers: Option<crate::oauth::host::Providers>,
+) -> Result<()> {
     // Decided from the instance before anything else. An installation that
     // declares an identity provider has no development mode: if it did, the
     // provider would be one flag away from optional.
     let declared = Instance::load(instance_path)?;
+    let oauth = crate::oauth::host::require_providers(
+        &declared,
+        app,
+        matches!(access, Access::Edge),
+        providers.as_ref(),
+    )?;
     match access {
         Access::Development { .. } => ensure!(
             declared.identity.is_none(),
@@ -345,6 +362,19 @@ pub async fn serve(instance_path: &Path, app: &str, access: Access<'_>) -> Resul
         requirements.require_runtime()?;
     }
     let concurrency = usize::from(profile.resources().http_concurrency());
+    let receiver = if oauth {
+        let runtime = runtime.clone();
+        let providers = providers.context("OAuth provider host missing")?;
+        Some(
+            tokio::task::spawn_blocking(move || {
+                crate::oauth::host::app_receiver(&runtime, &providers)
+            })
+            .await
+            .context("OAuth host startup failed")??,
+        )
+    } else {
+        None
+    };
     let server = match access {
         Access::Development {
             actor,
@@ -363,7 +393,10 @@ pub async fn serve(instance_path: &Path, app: &str, access: Access<'_>) -> Resul
         }
         Access::Edge => {
             let (identity, edge) = declared.edge(app)?;
-            let server = LocalServer::bind_edge(runtime, identity, edge, concurrency).await?;
+            let mut server = LocalServer::bind_edge(runtime, identity, edge, concurrency).await?;
+            if let Some(receiver) = receiver {
+                server.mount_oauth(receiver)?;
+            }
             println!(
                 "{}",
                 serde_json::json!({

@@ -127,13 +127,22 @@ security_shell_contract = {
 ```
 
 `day2-app` reads this reference during planning and generates the installation's
-`security_shell.origin` and `security_shell.iap_audience` in `instance.json`.
+`security_shell.origin`, `security_shell.iap_audience` and
+`oauth_shell_transport.service_account` in `instance.json`.
 It rejects an app contract, a malformed or unresolved edge, and reuse of the
 app's origin or IAP audience. The hostname is never copied into app source or
-per-app tfvars. Use a qualified runtime that supports the `security_shell`
-instance field before enabling this reference on an existing workload.
+per-app tfvars. Use a qualified runtime that supports these instance fields
+before enabling this reference on an existing workload.
 
-The root supplies edge infrastructure and named-secret IAM only. A separately
+The root supplies edge infrastructure, a dedicated Google service account,
+Kubernetes workload identity binding, and named-secret IAM. Its custom signing
+role contains only `iam.serviceAccounts.signJwt` and is bound on that service
+account to itself. No service-account key or project-wide signing grant is
+created. The Kubernetes service account has token automount disabled and uses
+the explicit GKE metadata interface. Egress includes the documented metadata
+ports for both standard networking and Dataplane V2; see [Google's network
+policy requirements](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/network-policy#network_policy_and_workload_identity_federation_for_gke).
+A separately
 qualified shell workload, selected approval authority, pinned key provider and
 Google web OAuth client are still required to serve approvals. Register the
 root's `reauth_callback_url` output with that client. Changing the hostname also
@@ -147,12 +156,20 @@ instance fields, callback namespace and current readiness checks. This contract
 does not yet add OAuth selection variables or a shell workload to `day2-app`.
 
 Private approval transport also selects `oauth_shell_transport.service_account`
-in the instance document. Its locations and numeric audiences reuse ordinary
-selected app edges. The shell must have IAP access to those backends and
-attestation-only secret access; app hosts separately own custody and attestation
-verification. The current edge bootstrap does not qualify that workload identity
-or mount the receiver. Host startup, the IAP credential source and runtime IAM
-composition remain required before enabling this transport.
+from the published shell contract. Pass the same `security_shell_contract`
+reference to each selected `app-edge` root to add precisely that service account
+to its app backend's IAP access binding. The shell contract must have a resolved
+IAP audience distinct from the app's audience. Its locations reuse ordinary
+selected app edges; no receiver hostname list is authored separately.
+
+`security-shell-edge.runtime_secret_ids` must include only selected attestation
+and reauthentication client-secret containers. App custody verifier and encryption
+containers belong in each selected `app-edge.runtime_secret_ids`, together with
+its attestation verification container. The shell secret IAM member changes from
+the direct Kubernetes federation principal to its dedicated Google service
+account when applying this update; review that policy migration before rollout.
+No secret value is read by OpenTofu. Applying these plans still does not qualify
+live workload identity, secret custody, provider readiness or OAuth registration.
 
 ## Build, qualify and deploy
 

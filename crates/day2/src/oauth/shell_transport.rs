@@ -264,6 +264,13 @@ pub(crate) struct AppApprovalReceiver {
 }
 
 impl AppApprovalReceiver {
+    pub(crate) fn require_host(&self, app: &str, authority: &str) -> Result<()> {
+        ensure!(
+            self.backend.app() == app && self.authority == authority,
+            "OAuth receiver host mismatch"
+        );
+        Ok(())
+    }
     pub(crate) fn from_instance(
         instance: &Instance,
         backend: Arc<dyn AppApprovals>,
@@ -301,12 +308,25 @@ impl AppApprovalReceiver {
     /// cannot be implemented as an app command/query or an authenticated human
     /// API. Workload authorization remains mandatory on every request.
     pub(crate) async fn handle(self: Arc<Self>, request: Request) -> Response {
+        self.handle_admitted(request, None).await
+    }
+
+    pub(crate) async fn handle_admitted(
+        self: Arc<Self>,
+        request: Request,
+        permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    ) -> Response {
         let (parts, body) = request.into_parts();
-        let body = match to_bytes(body, MAX_REQUEST).await {
-            Ok(body) => body,
-            Err(_) => return protected(StatusCode::PAYLOAD_TOO_LARGE.into_response()),
-        };
+        let body =
+            match tokio::time::timeout(Duration::from_secs(3), to_bytes(body, MAX_REQUEST)).await {
+                Ok(Ok(body)) => body,
+                Ok(Err(_)) => return protected(StatusCode::PAYLOAD_TOO_LARGE.into_response()),
+                Err(_) => return protected(StatusCode::REQUEST_TIMEOUT.into_response()),
+            };
         let result = tokio::task::spawn_blocking(move || {
+            // Keep host capacity until authentication and local settlement
+            // finish, including when the HTTP caller disconnects.
+            let _permit = permit;
             self.dispatch(
                 &parts.method,
                 parts.uri.path(),
@@ -410,7 +430,7 @@ impl AppApprovalReceiver {
 }
 
 /// The private host supplies a credential for exactly the selected receiver
-/// origin. It must use its qualified IAP workload signer, never browser/app ADC.
+/// URL. It must use its qualified IAP workload signer, never browser/app ADC.
 pub(crate) trait PrivateBearerSource: Send + Sync {
     fn bearer(&self, app: &str, receiver: &Url) -> Result<String>;
 }
@@ -483,7 +503,8 @@ impl RemoteApprovals {
             .targets
             .get(app)
             .context("OAuth receiver is not selected")?;
-        let token = self.bearers.bearer(app, &Url::parse(&target.origin)?)?;
+        let audience = Url::parse(&target.origin)?.join(PATH)?;
+        let token = self.bearers.bearer(app, &audience)?;
         ensure!(
             !token.is_empty()
                 && token.len() <= 8192

@@ -63,8 +63,12 @@ impl Assertions {
     }
 
     fn assertion(&self, audience: &str, email: &str, subject: &str) -> String {
+        self.assertion_at(audience, email, subject, 0)
+    }
+
+    fn assertion_at(&self, audience: &str, email: &str, subject: &str, at: i64) -> String {
         let mut claims = json!({"iss":"https://cloud.google.com/iap","aud":audience,"email":email,
-            "sub":subject,"iat":0,"exp":600});
+            "sub":subject,"iat":at,"exp":at + 600});
         if email == HUMAN {
             claims["hd"] = json!("example.com");
         }
@@ -831,7 +835,7 @@ fn private_http_round_trip_activates_own_sqlite_once_without_forwarding_browser_
                 .lock()
                 .unwrap()
                 .iter()
-                .all(|(app, url)| app == "app" && url == "https://app.example/"),
+                .all(|(app, url)| app == "app" && url == "https://app.example/_day2/oauth/approval"),
             "no fanout to the unavailable app"
         );
     }
@@ -909,4 +913,156 @@ fn instance_transport_is_optional_and_selects_exact_app_and_shell_audiences() {
     let mut unknown = serde_json::to_value(&roundtrip).unwrap();
     unknown["oauth_shell_transport"]["extra"] = json!(true);
     assert!(Instance::from_bytes(&serde_json::to_vec(&unknown).unwrap()).is_err());
+}
+
+#[test]
+fn app_host_mounts_reserved_receiver_before_human_dispatch_and_drains_admission() -> Result<()> {
+    // The HTTP edge verifies real-time assertions; the durable kernel fixture
+    // retains its independently controlled clock and synthetic readiness facts.
+    struct AtSix(Arc<StoredAppApprovals>);
+    impl AppApprovals for AtSix {
+        fn app(&self) -> &str {
+            self.0.app()
+        }
+        fn lookup(&self, attempt: &str, identity: &iap::Verified, _: i64) -> Result<HostLookup> {
+            self.0.lookup(attempt, identity, 6)
+        }
+        fn confirm(
+            &self,
+            attempt: &str,
+            view: &Digest,
+            identity: &iap::Verified,
+            proof: external::FreshExternalApproval,
+            _: i64,
+        ) -> Result<bool> {
+            self.0.confirm(attempt, view, identity, proof, 6)
+        }
+    }
+    let fixture = Fixture::new();
+    let assertions = Assertions::new();
+    let instance = fixtures::selected_instance();
+    let instance_path = fixture._directory.path().join("instance.json");
+    std::fs::write(&instance_path, serde_json::to_vec(&instance)?)?;
+    let mut contract: crate::artifact::Artifact = serde_json::from_value(json!({
+        "format":crate::artifact::CURRENT_FORMAT,"namespace":"app","roc_version":"fixture",
+        "worker_digest":"fixture","schema_digest":"fixture","sources":{},"admission":"local-spike-only",
+        "schema":{"models":{"items":{"fields":{"value":"text"},"roc_type":"Item"}},"inputs":{"input":{"fields":{}}},"foreign_keys":[]},
+        "properties":["items"],
+        "outputs":{"output":{"shape":{"record":{}},"roc_type":"{}"}},
+        "operations":[{"name":"app.preview","kind":"query","input_type":"input","output_type":"output"}],
+        "app_contract":{"operations":{"app.preview":{
+            "intent":{"target":{"operation":"app.preview","input_type":"input","output_type":"output"},
+                "title":"Preview","usage":{"purpose":"Host routing conformance","use_when":["Inspect the host fixture"],"avoid_when":["Serving live business data"],"preconditions":["Admitted host fixture"],"effects":[],"result":"Checked result"},"input_sources":[],"follow_ups":[]},
+            "request_example":"{}","response_example":"{}","deprecated":false,
+            "execution":{"model":"","id_field":"","version_field":"","effects":[]},"errors":[]
+        }},"presentation":{"stylesheet":"","script":""},"identities":crate::identity::REGISTRY_FILE,"invariants":{"items":"Host route fixture state"},"domains":{},"errors":{}}
+    }))?;
+    contract.identities.synchronize(&contract.schema.models)?;
+    contract.schema.bind_identities(&contract.identities)?;
+    contract.api_docs = contract.app_contract.as_ref().unwrap().documentation();
+    contract.operation_metadata = contract.app_contract.as_ref().unwrap().intents();
+    let artifact = crate::artifact::LoadedArtifact::from_contract_for_tests(
+        crate::digest(b"host-route-fixture"),
+        fixture._directory.path().into(),
+        contract,
+    );
+    let runtime = crate::store::Runtime::from_artifact_for_tests(
+        instance_path,
+        "app".into(),
+        fixture.path.clone(),
+        artifact,
+    )?;
+    let receiver = Arc::new(assertions.receiver(Arc::new(AtSix(fixture.backend.clone()))));
+    let verifier = iap::Verifier::new(
+        APP_AUDIENCE,
+        "example.com",
+        Box::new(Keys(assertions.keys.clone())),
+    )?;
+    let edge = instance.apps["app"].edge.as_ref().unwrap().clone();
+    let (origin_tx, origin_rx) = mpsc::sync_channel(1);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let task = thread::spawn(move || -> Result<()> {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()?
+            .block_on(async {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+                let origin = format!("http://{}", listener.local_addr()?);
+                let mut server = crate::web::LocalServer::bind_edge_listener(
+                    runtime, listener, &edge, verifier, 1,
+                )?;
+                server.mount_oauth(receiver)?;
+                origin_tx.send((origin, server.admission())).unwrap();
+                server
+                    .serve(async {
+                        let _ = shutdown_rx.await;
+                    })
+                    .await
+            })
+    });
+    let (origin, admission) = match origin_rx.recv() {
+        Ok(bound) => bound,
+        Err(error) => {
+            task.join().expect("app host fixture panicked")?;
+            return Err(error.into());
+        }
+    };
+    let client = Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(5))
+        .build()?;
+    let at = now()?;
+    let workload = assertions.assertion_at(APP_AUDIENCE, MACHINE, "service-123", at);
+    let human = assertions.assertion_at(SHELL_AUDIENCE, HUMAN, SUBJECT, at);
+    let body = serde_json::to_vec(&RequestBody::Lookup {
+        version: VERSION,
+        attempt: fixture.facts.intent.attempt.clone(),
+        human_assertion: human,
+    })?;
+    let request = || {
+        client
+            .post(format!("{origin}{PATH}"))
+            .header(header::HOST, "app.example")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(body.clone())
+    };
+    assert_eq!(request().send()?.status(), StatusCode::FORBIDDEN);
+    let response = request().header(iap::ASSERTION_HEADER, &workload).send()?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(!response.headers().contains_key(header::SET_COOKIE));
+    let result: ResponseBody = crate::json::decode(&response.bytes()?)?;
+    assert!(matches!(
+        result,
+        ResponseBody::Lookup {
+            owned: true,
+            view: Some(_),
+            ..
+        }
+    ));
+    let response = client
+        .get(format!("{origin}/"))
+        .header(header::HOST, "app.example")
+        .header(iap::ASSERTION_HEADER, &workload)
+        .send()?;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    admission.stop();
+    assert_eq!(
+        request()
+            .header(iap::ASSERTION_HEADER, workload)
+            .send()?
+            .status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(
+        client
+            .get(format!("{origin}/health/ready"))
+            .send()?
+            .status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    let _ = shutdown_tx.send(());
+    task.join().expect("app host fixture panicked")?;
+    Ok(())
 }

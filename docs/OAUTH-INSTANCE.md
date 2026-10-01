@@ -139,13 +139,38 @@ reads its clock again after key acquisition. No network operation runs inside
 the SQLite settlement transaction.
 
 `SecurityShell::from_gke_instance` composes `RemoteApprovals`, the selected shell
-edge and Google reauthentication adapter. `ArtifactShellSigner` obtains only the
+edge, keyless IAP workload signer and Google reauthentication adapter. `ArtifactShellSigner` obtains only the
 selected attestation key; its GCP key provider excludes custody key roles. The
 constructor returns the signer handle for later selection replacement. The
 shell has no app database registry or filesystem mounts. App hosts retain their
 own `ArtifactApprovalAuthority`, custody keys and attestation verification key.
-The host supplies a qualified `PrivateBearerSource` for each selected IAP
-receiver; ambient app credentials or a browser token are insufficient.
+The native `IapWorkload` selects the dedicated `oauth_shell_transport` service
+account and the exact `/_day2/oauth/approval` URLs of selected apps. It acquires
+an explicit GKE metadata access token for each IAM Credentials `signJwt` call.
+The returned JWT must preserve the selected issuer, subject, exact protected URL
+audience and five-minute lifetime. Unknown apps, origins or paths are refused
+before acquiring credentials. No service-account key, ADC, proxy, redirect or
+browser token participates. The control plane's app-query gates reuse this same
+native signing adapter with their separate URL allowlist. See [Google's IAP
+service-account authentication](https://docs.cloud.google.com/iap/docs/authentication-howto).
+
+## App host startup
+
+The native provider host supplies a `ReviewedCatalog` and live
+`OutboundReadiness` to `deployment::serve_with_oauth`. Startup admits the actual
+active app artifact, initializes the app's ordinary principal and OAuth tables,
+and composes its `ArtifactApprovalAuthority`, `StoredAppApprovals` and receiver
+on that app's database. It does not load sibling artifacts or custody keys.
+The receiver mounts before ordinary human admission and business dispatch,
+with the host's bounded concurrency, body deadline and shutdown admission guard.
+The shell workload is never issued an app human session. The OAuth route prefix
+is reserved even when no receiver is selected.
+
+The ordinary `day2-serve` entry point refuses nonempty OAuth selections until a
+reviewed provider host is published. Missing provider code or readiness cannot
+be enabled through an instance boolean, a CLI flag or merely configuring keys.
+Static startup qualification still does not establish external readiness;
+every approval lookup and settlement retains its current readiness checks.
 
 Requests and responses have fixed versioned JSON schemas, bounded bodies and
 deadlines. Receivers reject unknown or duplicate fields, wrong paths, methods,
@@ -156,11 +181,13 @@ and replay cannot activate the same attempt twice.
 
 ## Remaining runtime work
 
-The next runtime slice must wire host startup and connect attempt creation,
-implement the qualified IAP workload credential source, and deploy the shell
-with its dedicated service account, backend access and attestation-only secret
-IAM. App-host IAM separately needs its custody and verification keys. The
-existing edge bootstrap does not establish these runtime policies.
+The next runtime slice must publish the reviewed provider host and live
+registration readiness, wire connect attempt creation, and add the separately
+qualified shell launcher and workload. The shell's Google web client and
+exact-version client-secret loading also remain required. The edge contract now
+publishes a dedicated keyless signer and supports backend access; these plans
+must still be applied and their live workload/secret policies qualified.
+App-host IAM separately needs its custody and verification keys.
 
 This layer does not start a shell workload, publish a reviewed Google Calendar
 provider, establish live readiness, create a Google web client, or enable OAuth
