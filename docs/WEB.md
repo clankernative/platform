@@ -446,7 +446,7 @@ redirects: { prefixed: Redirects.prefixed.register(), bare: Redirects.bare.regis
 ```
 
 A redirect is its own declaration rather than a kind of page because it binds a
-command, has no template and no live region, and answers only the paths nothing
+command, has no template or live region of its own, and answers only the paths nothing
 else claims; page routes keep their query-only, non-overlapping catalog. The
 declaration mirrors a schedule or webhook: a platform-owned trigger for an
 existing command, adding no handler of its own.
@@ -461,6 +461,7 @@ Admission checks each declaration against the bound command's compiled contract:
 | `location` | A top-level text field of the command's typed result. It is the only source of `Location`. |
 | `schemes` | `Web` (http and https only) or `AnyScheme` (any absolute URI, for app deep links such as `slack://` or `zoommtg:`). |
 | `not_found` | Application failures the command declares that mean "nothing is at this address"; they answer 404. |
+| `on_not_found(page)` | Optional registered, non-live `Page` with the same nominal input type as the command. Requires at least one `not_found` failure. Its query and template render the 404 with the original decoded input. |
 
 The location field is named as text, like a page path placeholder names an input
 field, because the host must read it from the typed result and a Roc selector
@@ -475,6 +476,36 @@ at `/`, validates every segment and percent-encodes each exactly once. A literal
 `%2F` becomes `%252F` and reaches the command as `%2F`, so commands must not
 percent-decode their input again. Helpers preserve the usual route precedence;
 use the prefixed helper for names such as `docs` that a platform endpoint owns.
+
+### App-owned missing-link pages
+
+A go-link app can offer creation instead of the generic platform error page:
+
+```roc
+missing_link : Page(VisitLinkTypes.Input)
+missing_link = Page.route(
+    { title: "Go Link Not Found", path: "/new", template: Templates.missing_link },
+    Reads.missing_link,
+).with_defaults({ path: "" })
+
+bare = Redirect.route(
+    { path: "/{path..}", location: "url", schemes: AnyScheme, not_found: [Errors.missing_link] },
+    Commands.visit,
+).on_not_found(Routes.missing_link)
+```
+
+Register the page under `App.definition.pages` as well as the redirect under
+`redirects`. The typed combinator binds the page by its registered path; admission
+refuses an absent page, mismatched input, live page or empty failure list. The
+fallback query receives the command's complete decoded input, not the request's
+query string, and runs under its own ordinary grant. It adds no authority.
+
+The response stays HTTP 404, includes the visit's `X-Day2-Invocation`, uses the
+app's admitted presentation resources and binds command forms with the usual
+signed tickets and CSRF checks. A fallback-query failure answers its ordinary
+platform status instead. Creation remains a separate POST command; neither the
+failed visit nor rendering creates a link. Direct API calls to the visit command
+still return its original failure. Without the combinator, behavior is unchanged.
 
 ### Matching and precedence
 
@@ -514,7 +545,7 @@ replay.
 | Outcome | Response |
 | --- | --- |
 | Success with an allowed destination | `302 Found`, `Location` from the result, empty body, `Cache-Control: no-store` |
-| A declared `not_found` failure | 404 platform error page with the failure's declared description |
+| A declared `not_found` failure | 404 app-owned page if bound with `on_not_found`; otherwise the platform error page with the failure's declared description |
 | Any other application failure | 422 platform error page with its description and recovery |
 | Authority, conflict and host failures | The platform's usual status and error page, such as 403 |
 | Accepted but still running | 202 page; nothing is redirected |

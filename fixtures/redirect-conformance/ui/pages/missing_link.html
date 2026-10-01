@@ -1,0 +1,8 @@
+<h1>Go Link Not Found</h1>
+<p>go/{{ missing_link.name }} doesn't exist. Want to create it?</p>
+<form id="create-missing-link" data-command="go.create">
+  <label>Name <input type="text" name="name" value="{{ missing_link.name }}" readonly required></label>
+  <label>Destination URL <input type="url" name="url" required autofocus></label>
+  <button type="submit">Create Go Link</button>
+</form>
+<a href="{{ routes.links() }}">Back to Dashboard</a>

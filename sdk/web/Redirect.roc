@@ -1,6 +1,8 @@
 import Write
 import Failure
 import RedirectBinding
+import Page
+import PageBinding
 
 # A GET route that runs one existing command and redirects to a URL the command
 # returned. The mirror of Page for commands: a page renders a query's result; a
@@ -53,6 +55,21 @@ Redirect(a) :: { binding : RedirectBinding }.{
 					AnyScheme => "any"
 				},
 				not_found: config.not_found.map(Failure.code),
+				not_found_page: "",
+			}),
+		}
+	}
+
+	# Render an app-owned page with the same decoded input on declared not-found
+	# failures. The page must also be registered in App.definition.pages. The host
+	# keeps HTTP 404 and checks the query's ordinary authority; no command reruns.
+	on_not_found : Redirect(a), Page(a) -> Redirect(a)
+	on_not_found = |redirect, page| {
+		metadata = redirect.binding.metadata()
+		{
+			binding: RedirectBinding.define({
+				..metadata,
+				not_found_page: PageBinding.metadata(page.register()).path,
 			}),
 		}
 	}

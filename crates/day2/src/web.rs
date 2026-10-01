@@ -1260,12 +1260,19 @@ impl Host {
         } else {
             let (status, _, message) =
                 crate::web_api::outcome_failure(&self.runtime, &outcome.error);
-            let status = if route.not_found(&outcome.error) {
-                StatusCode::NOT_FOUND
+            if route.not_found(&outcome.error) {
+                if let Some(page) = &route.not_found_page {
+                    self.page(page, &input, session, at, None, None)
+                        .and_then(|content| {
+                            self.app_response(StatusCode::NOT_FOUND, page, &input, session, content)
+                        })
+                        .unwrap_or_else(|error| failure(&error))
+                } else {
+                    error_page(StatusCode::NOT_FOUND, &message)
+                }
             } else {
-                status
-            };
-            error_page(status, &message)
+                error_page(status, &message)
+            }
         };
         response
             .headers_mut()

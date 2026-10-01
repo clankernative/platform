@@ -67,6 +67,7 @@ pub struct Route {
     location: String,
     schemes: Schemes,
     not_found: BTreeSet<String>,
+    pub(crate) not_found_page: Option<String>,
 }
 
 /// The outcome of matching a request path against the declared routes.
@@ -263,6 +264,25 @@ impl Route {
                 "duplicate not-found failure"
             );
         }
+        let not_found_page = if declared.not_found_page.is_empty() {
+            None
+        } else {
+            ensure!(
+                !not_found.is_empty(),
+                "not-found page requires declared failures"
+            );
+            let page = artifact
+                .pages
+                .iter()
+                .find(|page| page.path == declared.not_found_page)
+                .context("redirect not-found page must be registered")?;
+            ensure!(
+                page.input_type == command.input_type,
+                "redirect not-found page input differs from the bound command"
+            );
+            ensure!(!page.live, "redirect not-found page must not be live");
+            Some(page.name.clone())
+        };
         Ok(Self {
             name: declared.name.clone(),
             operation: command.name.clone(),
@@ -272,6 +292,7 @@ impl Route {
             location: declared.location.clone(),
             schemes,
             not_found,
+            not_found_page,
         })
     }
 
@@ -457,6 +478,7 @@ mod tests {
             location: "url".into(),
             schemes: Schemes::Any,
             not_found: BTreeSet::from(["app:go.missing".to_owned()]),
+            not_found_page: None,
         }
     }
 

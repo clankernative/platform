@@ -41,6 +41,8 @@ const AUDIENCE: &str = "/projects/1234/global/backendServices/5678";
 const VISITOR: &str = "ada@exampleco.test";
 /// May browse the directory, but holds no grant for the visit command.
 const BROWSER: &str = "grace@exampleco.test";
+/// May visit, but has no grant for the fallback query.
+const VISIT_ONLY: &str = "linus@exampleco.test";
 
 struct Keys(String);
 
@@ -93,13 +95,14 @@ fn now() -> i64 {
 }
 
 fn instance(artifact: &str) -> Value {
-    let everyone = json!([VISITOR, BROWSER]);
+    let everyone = json!([VISITOR, BROWSER, VISIT_ONLY]);
     let links = |grant: Value| json!({"links": grant});
     json!({"installation":"goco","environment":"test",
     "identity":{"scheme":"google_iap","hosted_domain":"exampleco.test"},
     "apps":{"go":{"artifact":artifact,"readers":everyone,"writers":everyone,
         "edge":{"origin":ORIGIN,"iap_audience":AUDIENCE},
         "authority":{"version":1,"admins":[],"operations":{
+            "go.missing_link":{"actors":[VISITOR],"mode":{"kind":"read"},"models":{}},
             "go.list":{"actors":everyone,"mode":{"kind":"read"},
                 "models":links(json!({"read":true,"rows":{"kind":"all"}}))},
             "go.create":{"actors":[VISITOR],"mode":{"kind":"current_state"},
@@ -107,7 +110,7 @@ fn instance(artifact: &str) -> Value {
             "go.delete":{"actors":[VISITOR],"mode":{"kind":"current_state"},
                 "models":links(json!({"read":true,"update_fields":["deleted"],"rows":{"kind":"all"}}))},
             // Following a link is an ordinary grant on an ordinary command.
-            "go.visit":{"actors":[VISITOR],"mode":{"kind":"current_state"},
+            "go.visit":{"actors":[VISITOR,VISIT_ONLY],"mode":{"kind":"current_state"},
                 "models":links(json!({"read":true,"update_fields":["visits"],"rows":{"kind":"all"}}))}
         }}}}})
 }
@@ -445,6 +448,111 @@ fn unknown_deleted_and_unsafe_links_answer_the_platform_error_page() -> Result<(
 }
 
 #[test]
+fn missing_links_render_the_app_page_and_can_be_created_without_javascript() -> Result<()> {
+    let server = Server::start()?;
+    for (path, name) in [
+        ("/go/whatever?path=ignored", "whatever"),
+        ("/go/team/new-link", "team/new-link"),
+        ("/go/literal%252F", "literal%2F"),
+        ("/go/%3Cscript%3E", "<script>"),
+        (
+            "/go/%22%3E%3Cimg%20src%3Dx%20onerror%3Dalert(1)%3E",
+            "\"><img src=x onerror=alert(1)>",
+        ),
+        ("/go/old", "old"),
+    ] {
+        let response = server.follow(path, VISITOR)?;
+        assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
+        let body = refused(response, StatusCode::NOT_FOUND, true)?;
+        let document = scraper::Html::parse_document(&body);
+        let field = document
+            .select(&scraper::Selector::parse("#create-missing-link input[name=name]").unwrap())
+            .next()
+            .context("prefilled name")?;
+        assert_eq!(field.value().attr("value"), Some(name));
+        assert!(body.contains("Create Go Link"));
+        assert!(!body.contains("go/<script>"), "{body}");
+        assert_eq!(
+            document
+                .select(&scraper::Selector::parse("img").unwrap())
+                .count(),
+            0
+        );
+        assert!(
+            document
+                .select(&scraper::Selector::parse("script").unwrap())
+                .all(|script| script.value().attr("src").is_some())
+        );
+    }
+    // Rendering a fallback never counts a visit or revives a deleted link.
+    assert_eq!(server.visits("old")?, 0);
+    assert_eq!(server.visits("hello")?, 0);
+
+    let response = server.follow("/go/team/new-link", VISITOR)?;
+    let cookie = response.headers()[reqwest::header::SET_COOKIE]
+        .to_str()?
+        .split(';')
+        .next()
+        .context("session cookie")?
+        .to_owned();
+    let document = scraper::Html::parse_document(&response.text()?);
+    let form = document
+        .select(&scraper::Selector::parse("#create-missing-link").unwrap())
+        .next()
+        .context("create form")?;
+    let mut fields = form
+        .select(&scraper::Selector::parse("input[name]").unwrap())
+        .map(|field| {
+            (
+                field.value().attr("name").unwrap().to_owned(),
+                field.value().attr("value").unwrap_or("").to_owned(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    fields.insert("url".into(), "https://example.com/new".into());
+    let response = server
+        .client
+        .post(format!("{}/actions", server.origin))
+        .header(HOST, AUTHORITY)
+        .header("origin", ORIGIN)
+        .header("cookie", cookie)
+        .header("x-goog-iap-jwt-assertion", server.signer.person(VISITOR))
+        .form(&fields)
+        .send()?;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert!(response.headers()[LOCATION].to_str()?.starts_with("/new?"));
+    assert_eq!(server.visits("team/new-link")?, 0);
+    redirected(
+        server.follow("/go/team/new-link", VISITOR)?,
+        "https://example.com/new",
+    )?;
+    assert_eq!(server.visits("team/new-link")?, 1);
+    Ok(())
+}
+
+#[test]
+fn fallback_queries_keep_their_own_authority_and_visit_api_still_fails() -> Result<()> {
+    let server = Server::start()?;
+    let body = refused(
+        server.follow("/go/unknown", VISIT_ONLY)?,
+        StatusCode::FORBIDDEN,
+        true,
+    )?;
+    assert!(!body.contains("Create Go Link"));
+    let outcome = server.runtime.invoke(
+        "go.visit",
+        VISITOR,
+        "api-missing",
+        &json!({"path":"unknown"}),
+        now(),
+        Fault::None,
+    )?;
+    assert_ne!(outcome.status, "success");
+    assert_eq!(outcome.error, "app:go.missing_link");
+    Ok(())
+}
+
+#[test]
 fn platform_paths_and_page_routes_keep_precedence() -> Result<()> {
     let server = Server::start()?;
     let before = server.audited_visits()?.len();
@@ -661,10 +769,33 @@ fn declarations_are_admitted_only_against_the_bound_command_contract() -> Result
             Box::new(|route| route.not_found = vec!["app:go.invalid_link".into()]),
         ),
         (
+            "an unregistered fallback page",
+            Box::new(|route| route.not_found_page = "/absent".into()),
+        ),
+        (
+            "a fallback with a different input",
+            Box::new(|route| route.not_found_page = "/about".into()),
+        ),
+        (
             "an invalid name",
             Box::new(|route| route.name = "Bare".into()),
         ),
     ];
+    for live in [false, true] {
+        let mut contract = admitted.clone();
+        contract.redirects[bare].not_found_page = "/new".into();
+        if live {
+            contract
+                .pages
+                .iter_mut()
+                .find(|page| page.path == "/new")
+                .unwrap()
+                .live = true;
+        } else {
+            contract.redirects[bare].not_found.clear();
+        }
+        assert!(day2::redirects::Catalog::from_artifact(&contract).is_err());
+    }
     for (case, change) in cases {
         let mut contract = admitted.clone();
         change(&mut contract.redirects[bare]);
