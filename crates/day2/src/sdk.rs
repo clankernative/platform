@@ -35,6 +35,16 @@ const MODULES: &[Module] = &[
         app_export: true,
     },
     Module {
+        file: "SecurityAction.roc",
+        source: "contracts/SecurityAction.roc",
+        app_export: true,
+    },
+    Module {
+        file: "ProductReturnRef.roc",
+        source: "contracts/ProductReturnRef.roc",
+        app_export: true,
+    },
+    Module {
         file: "SlackWebhook.roc",
         source: "contracts/SlackWebhook.roc",
         app_export: true,

@@ -1035,6 +1035,19 @@ impl Catalog {
             modules.insert(format!("{name}.roc"), source);
         }
         if self.unified {
+            let mut actions =
+                format!("{imports}import pf.SecurityAction\nSecurityActions :: [].{{\n");
+            for (name, operation) in &self.commands {
+                actions.push_str(&format!("    {name} : SecurityAction({})\n    {name} = SecurityAction.{prefix}define(AppIdentity.namespace.concat(\".{name}\"), Inputs.{})\n\n", input_type(&operation.input)?, operation.input));
+            }
+            actions.push_str("}\n");
+            modules.insert("SecurityActions.roc".into(), actions);
+            let mut returns = String::from("import pf.ProductReturnRef\nProductReturns :: [].{\n");
+            for name in &self.pages {
+                returns.push_str(&format!("    {name} : ProductReturnRef\n    {name} = ProductReturnRef.{prefix}define(\"{name}\")\n\n"));
+            }
+            returns.push_str("}\n");
+            modules.insert("ProductReturns.roc".into(), returns);
             modules.extend(crate::app_contract::modules(
                 self, schema, outputs, &imports, admission,
             )?);

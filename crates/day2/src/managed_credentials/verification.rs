@@ -48,6 +48,7 @@ impl Authority for DisposableAuthority {
             binding: Digest::of(binding)?,
             security_epoch: 1,
             valid_until: now + 31_536_001,
+            max_active_lineages: 1000,
         })
     }
 

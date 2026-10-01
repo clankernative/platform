@@ -659,5 +659,152 @@ step = |raw| raw
         !success && diagnostics.contains("from_context"),
         "sealed interactive constructor: {diagnostics}"
     );
+    // The navigation descriptor retains each command's nominal input type and
+    // its generated codec. Neither descriptor nor return reference is authored.
+    let mut navigation_schema = schema.clone();
+    for (key, ty) in [
+        ("client_input", "CreateClientTypes.Input"),
+        ("personal_input", "CreatePersonalTypes.Input"),
+    ] {
+        navigation_schema.inputs.insert(
+            key.into(),
+            Record {
+                fields: BTreeMap::from([("label".into(), Kind::Text)]),
+                roc_type: Some(ty.into()),
+                identity: None,
+            },
+        );
+    }
+    let navigation_outputs = BTreeMap::from([(
+        "unit".into(),
+        output_schema::Contract {
+            roc_type: "{ ready : Bool }".into(),
+            shape: output_schema::Type::Record(BTreeMap::from([(
+                "ready".into(),
+                output_schema::Type::Boolean,
+            )])),
+        },
+    )]);
+    let navigation_catalog = day2::registry::Catalog {
+        unified: true,
+        commands: BTreeMap::from([
+            (
+                "create_client".into(),
+                day2::registry::Operation {
+                    input: "client_input".into(),
+                    output: "unit".into(),
+                },
+            ),
+            (
+                "create_personal".into(),
+                day2::registry::Operation {
+                    input: "personal_input".into(),
+                    output: "unit".into(),
+                },
+            ),
+        ]),
+        pages: vec!["keys".into()],
+        ..Default::default()
+    };
+    {
+        let directory = &stage;
+        for (name, source) in [
+            ("Models.roc", "Models :: [].{ Entry := { note : Str } }"),
+            (
+                "CreateClientTypes.roc",
+                "CreateClientTypes :: [].{ Input := { label : Str } }",
+            ),
+            (
+                "CreatePersonalTypes.roc",
+                "CreatePersonalTypes :: [].{ Input := { label : Str } }",
+            ),
+            (
+                "AppIdentity.roc",
+                "AppIdentity :: [].{ namespace = \"credential_metadata\" }",
+            ),
+        ] {
+            fs::write(directory.join("app").join(name), source)?;
+        }
+        fs::write(
+            directory.join("app/Data.roc"),
+            navigation_schema.data_module()?,
+        )?;
+        fs::write(
+            directory.join("app/Inputs.roc"),
+            navigation_schema.inputs_module()?,
+        )?;
+        fs::write(
+            directory.join("app/Outputs.roc"),
+            output_schema::roc_module(&navigation_outputs)?,
+        )?;
+        let modules = navigation_catalog.modules(&navigation_schema, &navigation_outputs, false)?;
+        for module in ["SecurityActions.roc", "ProductReturns.roc"] {
+            fs::write(directory.join("app").join(module), &modules[module])?;
+        }
+    }
+    fs::write(
+        stage.join("registry.json"),
+        serde_json::to_vec(&navigation_catalog)?,
+    )?;
+    let restricted = temporary.path().join("navigation-restricted");
+    day2::admission::prepare(
+        &stage,
+        &restricted,
+        &navigation_schema,
+        &navigation_outputs,
+        &BTreeMap::new(),
+        None,
+    )?;
+    let navigation_base = "app [step] { pf: platform \"../sdk/main.roc\" }\nimport pf.SecurityAction\nimport pf.ProductReturnRef\nimport pf.Input\nimport CreateClientTypes\nimport CreatePersonalTypes\nimport SecurityActions\nimport ProductReturns\nstep : Str -> Str\nstep = |raw| raw\n";
+    let positive = format!(
+        "{navigation_base}\nprobe : CreateClientTypes.Input -> {{operation : Str, payload : Str, product_return : Str}}\nprobe = |input| SecurityAction.bind(SecurityActions.create_client, input, ProductReturns.keys)\n"
+    );
+    for directory in [&stage, &restricted] {
+        fs::write(directory.join("app/main.roc"), &positive)?;
+        let (success, diagnostics) = run(directory, "check")?;
+        ensure!(success, "typed security navigation: {diagnostics}");
+        fs::write(
+            directory.join("app/main.roc"),
+            format!(
+                "{navigation_base}\nprobe : CreatePersonalTypes.Input -> {{operation : Str, payload : Str, product_return : Str}}\nprobe = |input| SecurityAction.bind(SecurityActions.create_client, input, ProductReturns.keys)\n"
+            ),
+        )?;
+        let (success, diagnostics) = run(directory, "check")?;
+        ensure!(
+            !success && diagnostics.contains("Input"),
+            "wrong command navigation input: {diagnostics}"
+        );
+    }
+    for probe in [
+        "probe = ProductReturnRef.define(\"keys\")",
+        "probe : SecurityAction(CreateClientTypes.Input)\nprobe = SecurityAction.define(\"credential_metadata.create_client\", Input.define(\"client\", |_raw| Err(\"no\"), |_input| \"{}\"))",
+    ] {
+        fs::write(
+            stage.join("app/main.roc"),
+            format!("{navigation_base}\n{probe}\n"),
+        )?;
+        fs::write(
+            restricted.join("app/main.roc"),
+            format!("{navigation_base}\n{probe}\n"),
+        )?;
+        let (success, diagnostics) = run(&stage, "check")?;
+        ensure!(success, "normal navigation factory: {diagnostics}");
+        let (success, diagnostics) = run(&restricted, "check")?;
+        ensure!(
+            !success && diagnostics.contains("define"),
+            "sealed navigation factory: {diagnostics}"
+        );
+    }
+    for directory in [&stage, &restricted] {
+        fs::write(
+            directory.join("app/main.roc"),
+            format!("{navigation_base}\nprobe : ProductReturnRef\nprobe = {{ page: \"keys\" }}\n"),
+        )?;
+        let (success, diagnostics) = run(directory, "check")?;
+        ensure!(
+            !success && diagnostics.contains("ProductReturnRef"),
+            "forged return reference: {diagnostics}"
+        );
+    }
     Ok(())
 }

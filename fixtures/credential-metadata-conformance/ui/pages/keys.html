@@ -1,0 +1,7 @@
+<main>
+  <h1>Credential keys</h1>
+  <p>Creating a key requires confirmation on the security page.</p>
+  <button type="button" data-security-action data-operation="{{ keys.client.operation }}" data-payload="{{ keys.client.payload }}" data-product-return="{{ keys.client.product_return }}">Create client key</button>
+  <button type="button" data-security-action data-operation="{{ keys.personal.operation }}" data-payload="{{ keys.personal.payload }}" data-product-return="{{ keys.personal.product_return }}">Create personal key</button>
+  <p id="credential-message" role="status"></p>
+</main>
