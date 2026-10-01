@@ -1,0 +1,57 @@
+//! Startup composition owned by the native provider host. Static instance
+//! parsing cannot supply either reviewed code or independently live readiness.
+
+use super::{admission, approval_keys, approval_registry, connect, shell_transport};
+use crate::{artifact::Instance, store::Runtime};
+use anyhow::{Context, Result, ensure};
+use std::sync::Arc;
+
+pub(crate) struct Providers {
+    pub catalog: admission::ReviewedCatalog,
+    pub readiness: Arc<dyn admission::OutboundReadiness>,
+}
+
+pub(crate) fn require_providers(
+    instance: &Instance,
+    app: &str,
+    edge: bool,
+    providers: Option<&Providers>,
+) -> Result<bool> {
+    let binding = instance
+        .apps
+        .get(app)
+        .context("OAuth app binding missing")?;
+    if binding.oauth_connections.is_empty() {
+        return Ok(false);
+    }
+    ensure!(edge, "OAuth requires the qualified edge host");
+    ensure!(providers.is_some(), "OAuth provider host is not published");
+    instance.security_edge()?;
+    instance
+        .oauth_shell_transport
+        .as_ref()
+        .context("OAuth shell transport missing")?
+        .validate()?;
+    Ok(true)
+}
+
+pub(crate) fn app_receiver(
+    runtime: &Runtime,
+    providers: &Providers,
+) -> Result<Arc<shell_transport::AppApprovalReceiver>> {
+    let selected = admission::QualifiedConnections::from_runtime(runtime, &providers.catalog)?;
+    let instance = selected.instance().clone();
+    let authority = Arc::new(admission::ArtifactApprovalAuthority::with_gcp(
+        selected,
+        providers.readiness.clone(),
+        Arc::new(approval_keys::GkeMetadataAccessTokens::new()?),
+    )?);
+    runtime.initialize()?;
+    connect::install_schema(&crate::store::open(runtime.db())?)?;
+    let backend = Arc::new(approval_registry::StoredAppApprovals::new(
+        runtime.app().into(),
+        runtime.db().to_path_buf(),
+        authority,
+    )?);
+    shell_transport::AppApprovalReceiver::from_instance(&instance, backend)
+}

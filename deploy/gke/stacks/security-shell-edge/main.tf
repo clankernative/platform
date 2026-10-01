@@ -9,6 +9,33 @@ locals {
   origin       = "https://${var.domain}"
   resolved     = var.backend_service_name != ""
   audience     = local.resolved ? "/projects/${var.project_number}/global/backendServices/${data.google_compute_backend_service.shell[0].generated_id}" : ""
+  identity_id  = "day2-security-shell-${substr(sha256(var.namespace), 0, 8)}"
+}
+
+resource "google_service_account" "shell" {
+  project      = var.project_id
+  account_id   = local.identity_id
+  display_name = "Day2 dedicated security shell (${var.namespace})"
+}
+
+resource "google_service_account_iam_member" "workload" {
+  service_account_id = google_service_account.shell.name
+  role               = "roles/iam.workloadIdentityUser"
+  member             = "serviceAccount:${var.project_id}.svc.id.goog[${var.namespace}/security-shell]"
+}
+
+# Only JWT signing, scoped to this service account. No private key is created.
+resource "google_project_iam_custom_role" "sign_jwt" {
+  project     = var.project_id
+  role_id     = "day2SecurityShellSignJwt_${substr(sha256(var.namespace), 0, 8)}"
+  title       = "Day2 security shell JWT signing"
+  permissions = ["iam.serviceAccounts.signJwt"]
+}
+
+resource "google_service_account_iam_member" "sign_jwt" {
+  service_account_id = google_service_account.shell.name
+  role               = google_project_iam_custom_role.sign_jwt.name
+  member             = "serviceAccount:${google_service_account.shell.email}"
 }
 
 resource "kubernetes_namespace_v1" "shell" {
@@ -26,6 +53,9 @@ resource "kubernetes_service_account_v1" "shell" {
     name      = "security-shell"
     namespace = kubernetes_namespace_v1.shell.metadata[0].name
     labels    = local.labels
+    annotations = {
+      "iam.gke.io/gcp-service-account" = google_service_account.shell.email
+    }
   }
   automount_service_account_token = false
 }
@@ -35,7 +65,7 @@ resource "google_secret_manager_secret_iam_member" "shell" {
   project   = var.project_id
   secret_id = each.value
   role      = "roles/secretmanager.secretAccessor"
-  member    = "principal://iam.googleapis.com/projects/${var.project_number}/locations/global/workloadIdentityPools/${var.project_id}.svc.id.goog/subject/ns/${var.namespace}/sa/security-shell"
+  member    = "serviceAccount:${google_service_account.shell.email}"
 }
 
 resource "kubernetes_service_v1" "shell" {
@@ -195,8 +225,9 @@ resource "kubernetes_config_map_v1" "contract" {
     REAUTH_CALLBACK_URL          = "${local.origin}/_day2/reauth/callback"
     SERVICE_NAME                 = local.service_name
     SERVICE_ACCOUNT_NAME         = kubernetes_service_account_v1.shell.metadata[0].name
+    OAUTH_SHELL_SERVICE_ACCOUNT  = google_service_account.shell.email
     REQUIRED_SERVICE_LABEL_KEY   = "day2.dev/service"
     REQUIRED_SERVICE_LABEL_VALUE = "security-shell"
   }
-  depends_on = [google_iap_web_backend_service_iam_binding.shell]
+  depends_on = [google_iap_web_backend_service_iam_binding.shell, google_service_account_iam_member.workload, google_service_account_iam_member.sign_jwt]
 }

@@ -314,6 +314,19 @@ impl QualifiedConnections {
         &self.instance
     }
 
+    /// A serving app admits its actual active artifact, which may differ from
+    /// the instance's initial artifact after an authority transition. No sibling
+    /// app artifact or database needs to be mounted in this pod.
+    pub(crate) fn from_runtime(
+        runtime: &crate::store::Runtime,
+        catalog: &ReviewedCatalog,
+    ) -> Result<Self> {
+        let mut instance = Instance::load(runtime.instance_path())?;
+        instance.apps.retain(|app, _| app == runtime.app());
+        let artifacts = BTreeMap::from([(runtime.app().into(), runtime.artifact().clone())]);
+        Self::qualify(&instance, &artifacts, catalog)
+    }
+
     pub(crate) fn from_instance_file(path: &Path, catalog: &ReviewedCatalog) -> Result<Self> {
         let path = path.canonicalize()?;
         let instance = Instance::load(&path)?;
@@ -1072,6 +1085,85 @@ mod tests {
         raw["apps"]["workspace"]["oauth_connections"]["calendar"]["provider_scopes"] =
             json!(["calendar.write"]);
         assert!(Instance::from_bytes(&serde_json::to_vec(&raw)?).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn startup_requires_a_reviewed_provider_host_and_dedicated_edge() -> Result<()> {
+        let mut facts = fixture(AccountBindingPolicy::ExplicitExternalAccount)?;
+        assert!(
+            super::super::host::require_providers(&facts.instance, "workspace", true, None)
+                .is_err()
+        );
+        let providers = super::super::host::Providers {
+            catalog: ReviewedCatalog::new(Vec::new())?,
+            readiness: Arc::new(Readiness {
+                current: RwLock::new(None),
+                calls: AtomicUsize::new(0),
+            }),
+        };
+        assert!(
+            super::super::host::require_providers(
+                &facts.instance,
+                "workspace",
+                false,
+                Some(&providers)
+            )
+            .is_err()
+        );
+        assert!(
+            super::super::host::require_providers(
+                &facts.instance,
+                "workspace",
+                true,
+                Some(&providers)
+            )
+            .is_err()
+        );
+        facts.instance.oauth_shell_transport = Some(day2_capabilities::oauth::ShellTransport {
+            service_account: "security@company.iam.gserviceaccount.com".into(),
+        });
+        let workload = super::super::workload::IapWorkload::from_gke_instance(&facts.instance)?;
+        for (app, url) in [
+            ("workspace", "https://app.example.com/"),
+            ("other", "https://app.example.com/_day2/oauth/approval"),
+            (
+                "workspace",
+                "https://other.example.com/_day2/oauth/approval",
+            ),
+        ] {
+            assert!(
+                super::super::shell_transport::PrivateBearerSource::bearer(
+                    &workload,
+                    app,
+                    &url::Url::parse(url)?
+                )
+                .is_err()
+            );
+        }
+        assert!(super::super::host::require_providers(
+            &facts.instance,
+            "workspace",
+            true,
+            Some(&providers)
+        )?);
+        assert!(
+            QualifiedConnections::qualify(&facts.instance, &facts.artifacts, &providers.catalog)
+                .is_err()
+        );
+        facts
+            .instance
+            .apps
+            .get_mut("workspace")
+            .unwrap()
+            .oauth_connections
+            .clear();
+        assert!(!super::super::host::require_providers(
+            &facts.instance,
+            "workspace",
+            true,
+            None
+        )?);
         Ok(())
     }
 

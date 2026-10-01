@@ -369,6 +369,29 @@ impl Runtime {
             .as_deref()
             .context("credential key and epoch authority unavailable")
     }
+
+    #[cfg(test)]
+    pub(crate) fn from_artifact_for_tests(
+        instance_path: PathBuf,
+        app: String,
+        db: PathBuf,
+        artifact: LoadedArtifact,
+    ) -> Result<Self> {
+        let instance = Instance::load(&instance_path)?;
+        Ok(Self {
+            integrations: Arc::new(crate::integration_host::Host::local(&instance_path)?),
+            app_calls: None,
+            credentials: None,
+            scope: instance.scope(&app)?,
+            hosted_domain: instance.identity.map(|identity| identity.hosted_domain),
+            instance_path,
+            app,
+            db,
+            artifact: Arc::new(artifact),
+            host: Arc::new(crate::host::System),
+        })
+    }
+
     /// Install a host-owned app-call adapter. Application code cannot select an
     /// endpoint or supply an identity proof; the host constructs both.
     pub fn with_app_call_port(mut self, port: Arc<dyn crate::delegation::AppCallPort>) -> Self {

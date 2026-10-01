@@ -10,7 +10,7 @@ variables {
   cloudflare_zone_id   = "0123456789abcdef0123456789abcdef"
   backend_service_name = "shell-backend"
   iap_members          = ["domain:example.com"]
-  runtime_secret_ids   = ["oauth-custody", "oauth-encryption", "oauth-shell"]
+  runtime_secret_ids   = ["oauth-shell-attestation", "oauth-reauth-client"]
   kube_dns_service_ip  = "10.30.0.10"
   cluster_cidrs        = ["10.20.0.0/16", "10.30.0.0/20", "10.10.0.0/20"]
 }
@@ -21,6 +21,14 @@ override_data {
     generated_id = 5486495053471409653
     description  = "{\"kubernetes.io/service-name\":\"day2-security/security-shell\"}"
     iap          = [{ enabled = true, oauth2_client_id = "", oauth2_client_secret = "", oauth2_client_secret_sha256 = "" }]
+  }
+}
+
+override_resource {
+  target = google_service_account.shell
+  values = {
+    email = "security-shell@example-tools.iam.gserviceaccount.com"
+    name  = "projects/example-tools/serviceAccounts/security-shell@example-tools.iam.gserviceaccount.com"
   }
 }
 
@@ -48,7 +56,7 @@ run "one_hostname_drives_the_edge_and_contract" {
       toset(keys(google_secret_manager_secret_iam_member.shell)) == toset(var.runtime_secret_ids) &&
       alltrue([for grant in google_secret_manager_secret_iam_member.shell :
         grant.role == "roles/secretmanager.secretAccessor" &&
-        grant.member == "principal://iam.googleapis.com/projects/123456789012/locations/global/workloadIdentityPools/example-tools.svc.id.goog/subject/ns/day2-security/sa/security-shell"
+        grant.member == "serviceAccount:security-shell@example-tools.iam.gserviceaccount.com"
       ]) &&
       kubernetes_service_account_v1.shell.automount_service_account_token == false &&
       kubernetes_network_policy_v1.deny.spec[0].policy_types == tolist(["Ingress", "Egress"]) &&
@@ -57,6 +65,20 @@ run "one_hostname_drives_the_edge_and_contract" {
       kubernetes_network_policy_v1.https.spec[0].egress[0].ports[0].port == "443"
     )
     error_message = "The dedicated shell principal alone receives named secrets; only the load balancer reaches the listener and provider egress uses HTTPS."
+  }
+  assert {
+    condition = (
+      google_project_iam_custom_role.sign_jwt.permissions == toset(["iam.serviceAccounts.signJwt"]) &&
+      google_service_account_iam_member.sign_jwt.member == "serviceAccount:security-shell@example-tools.iam.gserviceaccount.com" &&
+      google_service_account_iam_member.sign_jwt.service_account_id == google_service_account.shell.name &&
+      google_service_account_iam_member.workload.role == "roles/iam.workloadIdentityUser" &&
+      google_service_account_iam_member.workload.member == "serviceAccount:example-tools.svc.id.goog[day2-security/security-shell]" &&
+      kubernetes_service_account_v1.shell.metadata[0].annotations["iam.gke.io/gcp-service-account"] == google_service_account.shell.email &&
+      kubernetes_config_map_v1.contract.data["OAUTH_SHELL_SERVICE_ACCOUNT"] == google_service_account.shell.email &&
+      kubernetes_network_policy_v1.workload_identity.spec[0].egress[1].to[0].ip_block[0].cidr == "169.254.169.254/32" &&
+      toset([for port in kubernetes_network_policy_v1.workload_identity.spec[0].egress[1].ports : port.port]) == toset(["80", "8080"])
+    )
+    error_message = "The shell must use its own keyless signer, publish that identity and reach metadata on Dataplane V2."
   }
 }
 

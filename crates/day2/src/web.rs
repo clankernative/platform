@@ -51,6 +51,7 @@ struct Notice<'a> {
     operation: &'a str,
 }
 struct Host {
+    oauth: Option<Arc<crate::oauth::shell_transport::AppApprovalReceiver>>,
     runtime: Runtime,
     routes: Option<crate::routing::Catalog>,
     redirects: crate::redirects::Catalog,
@@ -343,6 +344,7 @@ impl LocalServer {
             ""
         };
         let host = Arc::new(Host {
+            oauth: None,
             api,
             routes: (runtime.artifact().contract().format >= 7)
                 .then(|| crate::routing::Catalog::from_artifact(runtime.artifact().contract()))
@@ -375,6 +377,21 @@ impl LocalServer {
 
     pub(crate) fn admission(&self) -> Admission {
         Admission(self.host.admitting.clone())
+    }
+
+    pub(crate) fn mount_oauth(
+        &mut self,
+        receiver: Arc<crate::oauth::shell_transport::AppApprovalReceiver>,
+    ) -> Result<()> {
+        ensure!(
+            matches!(self.host.sign_in, SignIn::Edge(_)),
+            "OAuth receiver requires the edge host"
+        );
+        receiver.require_host(self.host.runtime.app(), &self.host.authority)?;
+        let host = Arc::get_mut(&mut self.host).context("OAuth must be mounted before serving")?;
+        ensure!(host.oauth.is_none(), "OAuth receiver already mounted");
+        host.oauth = Some(receiver);
+        Ok(())
     }
     pub async fn serve(self, shutdown: impl Future<Output = ()> + Send + 'static) -> Result<()> {
         let runtime = self.host.runtime.clone();
@@ -597,6 +614,17 @@ async fn handle(State(host): State<Arc<Host>>, request: Request) -> Response {
             }
         },
     };
+    if request.uri().path().starts_with("/_day2/oauth/") {
+        return match &host.oauth {
+            Some(receiver) => {
+                receiver
+                    .clone()
+                    .handle_admitted(request, Some(permit))
+                    .await
+            }
+            None => secure(StatusCode::NOT_FOUND.into_response()),
+        };
+    }
     let (parts, body) = request.into_parts();
     let maximum_body = if parts.uri.path().starts_with(crate::ingress::ROUTE_PREFIX) {
         1_048_576

@@ -2,6 +2,11 @@ output "origin" {
   value = local.origin
 }
 
+output "service_account" {
+  description = "Dedicated IAM signer; consuming app edges grant only this workload IAP access."
+  value       = google_service_account.shell.email
+}
+
 output "reauth_callback_url" {
   value = "${local.origin}/_day2/reauth/callback"
 }

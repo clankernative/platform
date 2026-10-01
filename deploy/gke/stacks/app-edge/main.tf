@@ -748,12 +748,22 @@ resource "google_iap_web_backend_service_iam_binding" "app_access" {
   project             = var.project_id
   web_backend_service = var.backend_service_name
   role                = "roles/iap.httpsResourceAccessor"
-  members             = sort(var.iap_members)
+  members             = local.app_iap_members
 
   lifecycle {
     precondition {
       condition     = try(jsondecode(data.google_compute_backend_service.app[0].description)["kubernetes.io/service-name"], "") == "${local.namespace_name}/${local.service_name}"
       error_message = "backend_service_name ${var.backend_service_name} is not the backend of Service ${local.namespace_name}/${local.service_name}; take it from the Ingress's ingress.kubernetes.io/backends annotation."
+    }
+
+    precondition {
+      condition = var.security_shell_contract == null ? true : (
+        lookup(local.oauth_shell_contract, "EDGE_ROLE", "") == "security_shell" &&
+        can(regex("^[a-z0-9_-]+@[a-z][a-z0-9-]{4,28}[a-z0-9]\\.iam\\.gserviceaccount\\.com$", local.oauth_shell_account)) &&
+        can(regex("^/projects/[0-9]{1,24}/global/backendServices/[0-9]{1,24}$", lookup(local.oauth_shell_contract, "IAP_JWT_AUDIENCE", ""))) &&
+        lookup(local.oauth_shell_contract, "IAP_JWT_AUDIENCE", "") != "/projects/${var.project_number}/global/backendServices/${data.google_compute_backend_service.app[0].generated_id}"
+      )
+      error_message = "The OAuth shell contract must publish a dedicated service account and a distinct, resolved shell IAP backend."
     }
 
     precondition {

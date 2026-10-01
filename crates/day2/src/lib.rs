@@ -29,6 +29,7 @@ mod error;
 mod execution;
 mod host;
 pub mod iap;
+pub mod iap_workload;
 pub mod identity;
 pub mod import;
 pub mod import_codegen;

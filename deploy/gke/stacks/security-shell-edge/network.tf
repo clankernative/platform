@@ -116,6 +116,25 @@ resource "kubernetes_network_policy_v1" "workload_identity" {
         protocol = "TCP"
         port     = "988"
       }
+      ports {
+        protocol = "TCP"
+        port     = "987"
+      }
+    }
+    # Dataplane V2 intercepts metadata at this address; retain both documented
+    # ports so a GKE upgrade does not break token acquisition.
+    egress {
+      to {
+        ip_block { cidr = "169.254.169.254/32" }
+      }
+      ports {
+        protocol = "TCP"
+        port     = "80"
+      }
+      ports {
+        protocol = "TCP"
+        port     = "8080"
+      }
     }
   }
   depends_on = [kubernetes_namespace_v1.shell]

@@ -6,10 +6,11 @@ override_data {
   target = data.kubernetes_config_map_v1.security_shell_contract
   values = {
     data = {
-      EDGE_ROLE             = "security_shell"
-      SECURITY_SHELL_ORIGIN = "https://security.tools.example.com"
-      IAP_JWT_AUDIENCE      = "/projects/123456789012/global/backendServices/987654322"
-      REAUTH_CALLBACK_URL   = "https://security.tools.example.com/_day2/reauth/callback"
+      EDGE_ROLE                   = "security_shell"
+      SECURITY_SHELL_ORIGIN       = "https://security.tools.example.com"
+      IAP_JWT_AUDIENCE            = "/projects/123456789012/global/backendServices/987654322"
+      REAUTH_CALLBACK_URL         = "https://security.tools.example.com/_day2/reauth/callback"
+      OAUTH_SHELL_SERVICE_ACCOUNT = "security-shell@example-tools.iam.gserviceaccount.com"
     }
   }
 }
@@ -137,6 +138,10 @@ run "renders_the_installation_shell_from_its_contract" {
   command = plan
   variables {
     security_shell_contract = { namespace = "day2-security", name = "security-shell-contract" }
+  }
+  assert {
+    condition     = jsondecode(kubernetes_config_map_v1.instance.data["instance.json"]).oauth_shell_transport.service_account == "security-shell@example-tools.iam.gserviceaccount.com"
+    error_message = "The runtime must receive the dedicated shell workload identity from the same installation contract."
   }
   assert {
     condition = jsondecode(kubernetes_config_map_v1.instance.data["instance.json"]).security_shell == {
