@@ -8,7 +8,10 @@ description = "Public schema identity keys, not authentication credentials"
 condition = "AND"
 paths = ['''(^|/)(fixtures/[^/]+|examples/reports)/model-identities\.json$''']
 regexTarget = "line"
-regexes = ['''^\s*"key": "[a-f0-9]{32}",?$''']
+regexes = [
+  '''^\s*"key": "[a-f0-9]{32}",?$''',
+  '''^\s*"identity": \{\s*"key": "[a-f0-9]{32}", "prefix": "[a-z]+"\s*\},?$''',
+]
 
 [[allowlists]]
 description = "Public schema identity keys embedded in admission fixtures"
