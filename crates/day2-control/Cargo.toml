@@ -16,6 +16,7 @@ rusqlite = { version = "=0.40.2", features = ["bundled"] }
 tempfile = "3.27"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 base64 = "0.22"
+ring = "=0.17.14"
 url = "2.5"
 day2 = { path = "../day2" }
 day2-capabilities = { path = "../day2-capabilities" }
@@ -25,4 +26,3 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"
 [dev-dependencies]
 proptest = "=1.11.0"
 axum = "0.8.9"
-ring = "=0.17.14"

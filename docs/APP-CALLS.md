@@ -10,8 +10,9 @@ codec dependencies fail the build rather than being erased to structural types.
 The container entrypoint accepts `day2-serve INSTANCE APP --edge --app-calls HOST_JSON`.
 Private POST endpoints `/_platform/app-issue` and `/_platform/app-query` require
 exactly one IAP workload assertion. Human/browser capacity is separate from the
-bounded eight-call private pool, so a query can obtain its issuer proof from its
-own host without taking its own browser permit. Bodies, proof lifetimes, response
+private admission pools. Issuance has four permits, query/send execution six and
+status reconciliation two, behind sixteen bounded body readers. A call never
+queues while holding a business transaction or browser permit. Bodies, proof lifetimes, response
 bytes, deadlines and peer/key counts are bounded. Unsupported paths, redirecting
 transports, unknown fields and unauthenticated claims are refused.
 
@@ -29,6 +30,12 @@ Other origin families require their admitted ingress. App reentry and chains
 deeper than four hops are refused. Query admission never accepts a command as a
 read. Human root evidence is durably inherited by each receiver; background
 command execution never manufactures a service origin.
+
+Each human root starts with 256 call credits. The source reserves disjoint child
+subtrees under its SQLite writer lock; the receiver inherits only that child's
+allowance. Every first dispatch consumes one credit and reserves its descendants,
+and retries reuse the same reservation. Diamonds cannot duplicate an ancestor's
+budget. Existing operation grants can impose smaller call limits.
 
 ## Commands and receipts
 
@@ -48,16 +55,32 @@ original inbox cannot accept an old uncertain call as a new mutation.
 Uncertain sends leave the effect pending. The ordinary effect scheduler releases
 workers and transactions, retries the same identity at bounded intervals and
 parks work after four attempts or one hour. Each attempt consumes its grant's
-request allowance. An exhausted grant can refuse earlier. Revocation blocks new
+request allowance. An exhausted grant or budget durably blocks an uncertain send
+earlier. Revocation blocks new
 dispatch and completion; an already issued proof has a maximum 30-second in-flight
 window. Settlement records evidence without authorizing further writes.
 
-Inbox and outgoing records each have a hard 10,000-record bound. Compact receipts
+Inbox, outgoing and call-allocation ledgers each have a hard 10,000-record bound. Compact receipts
 remain available after invocation-result compaction. Capacity exhaustion refuses
-new acceptance; the host never forgets an old identity into a new mutation.
+new acceptance; the host never forgets a live uncertain identity into a new mutation.
+Terminal or permanently blocked source records may compact after the one-hour
+retry horizon plus the maximum 60-second proof lifetime. Terminal or permanently
+blocked receiver mappings may compact after 24 hours. Live runnable acceptances
+remain pinned. A compacted status returns unknown, which never authorizes another
+business mutation. Normal admission reclaims expired mappings before enforcing
+the bound; sustained live or retained work applies backpressure.
 Supported restore disables authority and changes its epoch. Historical inbox
 receipts may be inspected after fresh authority activation; old pending work is
-not automatically resumed. A missing original receiver fence remains unresolved.
+not automatically resumed. Restore also records a receiver cutoff in the same
+transaction: a missing inbox cannot accept a send first issued at or before
+that cutoff, even if the StatefulSet identity did not change. Sends begun in the
+same clock second as restore are conservatively refused. A missing original
+receiver fence remains unresolved.
+
+Accepted invocations stay pinned to their original artifact. Artifact activation
+requires runnable work to drain; explicit authority changes durably block old
+pending work. Keep the addressed artifact and database together for inspection
+and backups. A new artifact never silently executes an old accepted invocation.
 
 ## GKE deployment
 
@@ -76,6 +99,12 @@ copies keys into a memory volume as UID 10001, mode 0400. The serving container
 mounts it read-only. Include these secret IDs in `app-edge.runtime_secret_ids`.
 Private key bytes never enter OpenTofu state. Independent issuer/workload keys
 and public trust sets permit explicit rotation; a missing key fails startup.
+Publish the new public key to each verifier first, restart the source on its exact
+new managed secret version, then remove the old trust key after the maximum
+60-second proof lifetime. Removing a key immediately rejects its outstanding
+proofs. Rotate issuer and workload keys independently; each is scoped to the
+configured source and audience. This release has explicit operator rotation,
+without automatic hot reload or issuer-key recovery from application state.
 
 Both the StatefulSet and pod declare installation/environment/app/artifact.
 `DAY2_EXPECTED_ARTIFACT` fences actual host loading. The authenticated GKE probe

@@ -78,6 +78,9 @@ fn required_steps() -> BTreeSet<String> {
         "linux-build-check",
         "linux-build-probe",
         "linux-build-owned",
+        "linux-build-delegation",
+        "linux-build-delegation-business",
+        "linux-test-delegation",
         "test-sandbox",
         "test-worker",
         "test-http",
@@ -176,6 +179,7 @@ struct Session {
     source: Option<PinnedTree>,
     owned_source: Option<PinnedTree>,
     owned: Option<Value>,
+    delegation: BTreeMap<String, Value>,
     tooling_image: Option<String>,
     runtime_image: Option<String>,
     container: String,
@@ -291,6 +295,7 @@ impl Session {
             source: None,
             owned_source: None,
             owned: None,
+            delegation: BTreeMap::new(),
             tooling_image: None,
             runtime_image: None,
             container: format!("day2-linux-qualification-{}", &identity[7..27]),
@@ -692,6 +697,127 @@ impl Session {
                     Some(json!({"artifact":exported["artifact"],"worker":exported["worker"]}));
                 json!({"artifact":exported["artifact"],"seed":42,"cases_per_generator":8})
             }
+            "linux-build-delegation" | "linux-build-delegation-business" => {
+                ensure!(self.owned.is_some(), "native baseline fixtures required");
+                let command = if action == "linux-build-delegation" {
+                    "build-delegation"
+                } else {
+                    "build-delegation-business"
+                };
+                logged(
+                    &self.output,
+                    &key,
+                    Command::new("docker").args([
+                        "exec",
+                        &self.container,
+                        "target/debug/xtask",
+                        command,
+                    ]),
+                    1800,
+                )?;
+                json!({"built":command})
+            }
+            "linux-test-delegation" => {
+                ensure!(
+                    self.checks.contains("linux-build-delegation")
+                        && self.checks.contains("linux-build-delegation-business"),
+                    "both delegation fixture recipes required"
+                );
+                let mut paths = BTreeMap::new();
+                for file in [
+                    "delegation-fixtures.json",
+                    "delegation-business-fixtures.json",
+                ] {
+                    logged(
+                        &self.output,
+                        &format!("copy-{file}"),
+                        Command::new("docker")
+                            .args(["exec", &self.container, "cp"])
+                            .arg(format!("/workspace/platform/artifacts/{file}"))
+                            .arg(format!("/qualification-export/{file}")),
+                        60,
+                    )?;
+                    self.hand_over(format!("/qualification-export/{file}"))?;
+                    let pointer = read_json(&self.output.join("artifacts").join(file))?;
+                    paths.extend(serde_json::from_value::<BTreeMap<String, String>>(pointer)?);
+                }
+                ensure!(
+                    paths.keys().map(String::as_str).collect::<BTreeSet<_>>()
+                        == BTreeSet::from([
+                            "delegation",
+                            "delegation-peer",
+                            "request-desk",
+                            "stock-ledger"
+                        ]),
+                    "exact delegation fixtures required"
+                );
+                let mut command = Command::new("docker");
+                command.args(["exec", &self.container, "env"]);
+                for (fixture, variable) in [
+                    ("delegation", "DAY2_TEST_DELEGATION_ARTIFACT"),
+                    ("delegation-peer", "DAY2_TEST_DELEGATION_PEER_ARTIFACT"),
+                    ("request-desk", "DAY2_TEST_REQUEST_DESK_ARTIFACT"),
+                    ("stock-ledger", "DAY2_TEST_STOCK_LEDGER_ARTIFACT"),
+                ] {
+                    let path = Path::new(&paths[fixture]);
+                    let hash = path
+                        .file_name()
+                        .and_then(|value| value.to_str())
+                        .context("native delegation address")?;
+                    day2::assets::hash_part(&format!("sha256:{hash}"))?;
+                    ensure!(
+                        path == Path::new("/workspace/platform/artifacts").join(hash),
+                        "native delegation artifact path changed"
+                    );
+                    command.arg(format!("{variable}={}", path.display()));
+                }
+                command.args([
+                    "cargo",
+                    "test",
+                    "--locked",
+                    "-p",
+                    "day2-control",
+                    "--test",
+                    "release_execution",
+                    "--",
+                    "--nocapture",
+                ]);
+                logged(&self.output, &key, &mut command, 1800)?;
+                for (fixture, path) in paths {
+                    let hash = Path::new(&path)
+                        .file_name()
+                        .and_then(|value| value.to_str())
+                        .context("delegation address")?;
+                    logged(
+                        &self.output,
+                        &format!("export-{fixture}"),
+                        Command::new("docker")
+                            .args(["exec", &self.container, "cp", "-a", &path])
+                            .arg(format!("/qualification-export/{hash}")),
+                        120,
+                    )?;
+                    self.hand_over(format!("/qualification-export/{hash}"))?;
+                    self.delegation.insert(
+                        fixture,
+                        inspect_artifact(&self.output.join("artifacts").join(hash))?,
+                    );
+                }
+                logged(
+                    &self.output,
+                    "export-delegation-business-evidence",
+                    Command::new("docker").args([
+                        "exec",
+                        &self.container,
+                        "cp",
+                        "-a",
+                        "/workspace/platform/artifacts/delegation-business-evidence",
+                        "/qualification-export/delegation-business-evidence",
+                    ]),
+                    60,
+                )?;
+                self.hand_over("/qualification-export/delegation-business-evidence".into())?;
+                json!({"applications":self.delegation,"passed":true})
+            }
             "linux-test-suite" => {
                 let artifact = self
                     .artifact
@@ -851,10 +977,15 @@ impl Session {
                 .as_str()
                 .context("worker identity")?
                 .to_owned(),
-            applications: BTreeMap::from([(
-                "owned".to_owned(),
-                self.owned.clone().context("row-authority fixture build")?,
-            )]),
+            applications: self
+                .delegation
+                .clone()
+                .into_iter()
+                .chain([(
+                    "owned".to_owned(),
+                    self.owned.clone().context("row-authority fixture build")?,
+                )])
+                .collect(),
             tooling_image: self.tooling_image.clone().context("tooling image")?,
             runtime_image: self.runtime_image.clone().context("runtime image")?,
             runtime_supervisor: self.results["linux-runtime-start"]["runtime_supervisor"]
@@ -996,7 +1127,7 @@ mod tests {
         preflight(&runner)?;
         super::super::linux_runtime_qualification::strict_preflight(&runner)?;
         super::super::linux_runtime_qualification::provision_preflight(&runner)?;
-        assert_eq!(required_steps().len(), 21);
+        assert_eq!(required_steps().len(), 24);
         assert!(request_key("linux-test-suite", &json!("sandbox")).is_err());
         assert!(request_key("linux-test-suite", &json!({"suite":"other"})).is_err());
         assert!(request_key("linux-runtime-start", &json!({"image":"override"})).is_err());

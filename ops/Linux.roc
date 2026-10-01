@@ -12,6 +12,9 @@ Linux :: [].{
 		_ = Capability.call!("linux-build-check", "{}", host!)?
 		_ = Capability.call!("linux-build-probe", "{}", host!)?
 		_ = Capability.call!("linux-build-owned", "{}", host!)?
+		_ = Capability.call!("linux-build-delegation", "{}", host!)?
+		_ = Capability.call!("linux-build-delegation-business", "{}", host!)?
+		_ = Capability.call!("linux-test-delegation", "{}", host!)?
 		for suite in ["sandbox", "worker", "http", "backup"] {
 			_ = Capability.call!(
 				"linux-test-suite",

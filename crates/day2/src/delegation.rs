@@ -105,7 +105,11 @@ pub struct OriginEvidence {
 pub fn verify_origin(runtime: &Runtime, call: &Call) -> Result<OriginEvidence> {
     ensure!(call.caller == runtime.app(), "delegated_caller_changed");
     let mut connection = crate::store::open(runtime.db())?;
-    let tx = connection.transaction()?;
+    // Exact grant resolution may record host-owned resource handles. Reserve
+    // the writer before reading authority so concurrent scheduling cannot turn
+    // this snapshot into a failed deferred-to-writer upgrade. No provider call
+    // or business mutation runs inside this transaction.
+    let tx = crate::write_queue::immediate(&mut connection)?;
     runtime.check_binding(&tx)?;
     let origin: Option<(String, String, String, String, i64, String, String)> = tx
         .query_row(
@@ -151,6 +155,20 @@ pub fn verify_origin(runtime: &Runtime, call: &Call) -> Result<OriginEvidence> {
         observations: Vec::new(),
     };
     let active = crate::authority_state::current(&tx)?;
+    if call.purpose == Purpose::Send {
+        let intent: String = tx.query_row("SELECT instruction FROM day2_external_effects WHERE identity=?1 AND invocation=?2 AND observation IS NULL", params![call.step,call.origin], |row| row.get(0))?;
+        let intent: crate::protocol::Instruction = crate::json::decode(intent.as_bytes())?;
+        let input: crate::resources::ImportedQuery = crate::json::decode(intent.data.as_bytes())?;
+        ensure!(
+            intent.kind == "external"
+                && intent.model == "app.send.v1"
+                && input.contract.operation == call.operation
+                && Some(input.contract.digest) == call.contract_digest
+                && serde_json::from_str::<Value>(&input.input)?
+                    == serde_json::from_str::<Value>(&call.input)?,
+            "delegated_effect_intent_changed"
+        );
+    }
     let contract = call
         .contract_digest
         .as_ref()
@@ -429,7 +447,13 @@ fn execute_callee(
     // one, and a replay of the caller reuses the receipt the first run left.
     let id = format!(
         "dlg_{}",
-        &crate::digest(&serde_json::to_vec(&(&call.origin, &call.step))?)["sha256:".len()..][..32]
+        &crate::digest(&serde_json::to_vec(&(
+            &call.caller,
+            &call.source_epoch,
+            &call.origin,
+            &call.step,
+            callee.scope()
+        ))?)["sha256:".len()..][..32]
     );
     let input: Value = serde_json::from_str(&call.input)?;
     // The calling application is who authenticated to the callee; the principal

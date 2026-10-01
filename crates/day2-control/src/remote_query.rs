@@ -191,6 +191,7 @@ impl RemoteQueryIssuer {
             "app_issuer_query_changed"
         );
         let origin = delegation::verify_origin(caller, call)?;
+        day2::delegation_commands::require_budget(caller, call, query.budget)?;
         if call.purpose == delegation::Purpose::Send {
             day2::delegation_commands::require_delivery(
                 caller,
@@ -368,6 +369,7 @@ impl RemoteQueryPort {
                     version: 1,
                     purpose: call.purpose,
                     source_epoch: call.source_epoch.clone(),
+                    budget: day2::delegation_commands::prepare_budget(caller, call)?,
                     delivery: if call.purpose == delegation::Purpose::Send {
                         Some(day2::delegation_commands::prepare_delivery(
                             caller,

@@ -51,6 +51,7 @@ pub struct Query {
     pub version: u32,
     pub purpose: crate::delegation::Purpose,
     pub source_epoch: String,
+    pub budget: u32,
     pub delivery: Option<crate::delegation_commands::Delivery>,
     pub source: Scope,
     pub target: Scope,
@@ -179,6 +180,16 @@ struct IssuedQuery {
 /// Untrusted routing hint only. The selected receiver must still verify the
 /// exact raw envelope, IAP identity and both signatures before admission.
 pub fn claimed_source(wire: &[u8]) -> Result<Scope> {
+    Ok(claimed_query(wire)?.source)
+}
+
+/// Scheduling hint only. Verification uses these same exact signed bytes;
+/// selecting the reserved read pool never grants authority or changes purpose.
+pub(crate) fn claimed_purpose(wire: &[u8]) -> Result<crate::delegation::Purpose> {
+    Ok(claimed_query(wire)?.purpose)
+}
+
+fn claimed_query(wire: &[u8]) -> Result<Query> {
     ensure!(
         wire.len() <= MAX_ISSUED_WIRE_BYTES,
         "app_call_wire_too_large"
@@ -186,7 +197,7 @@ pub fn claimed_source(wire: &[u8]) -> Result<Scope> {
     let issued: IssuedQuery = crate::json::decode(wire)?;
     let signed: Signed = crate::json::decode(&URL_SAFE_NO_PAD.decode(issued.workload)?)?;
     let query: Query = crate::json::decode(&URL_SAFE_NO_PAD.decode(signed.payload)?)?;
-    Ok(query.source)
+    Ok(query)
 }
 
 pub struct IssuerSigner {
@@ -406,4 +417,83 @@ fn valid_key_id(value: &str) -> Result<()> {
         "invalid_app_call_key_id"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workload_key_overlap_retires_old_proofs_without_widening_scope() -> Result<()> {
+        let source = Scope {
+            installation: "alpha".into(),
+            environment: "test".into(),
+            app: "middle".into(),
+        };
+        let target = Scope {
+            app: "stock".into(),
+            ..source.clone()
+        };
+        let query = Query {
+            version: 1,
+            purpose: crate::delegation::Purpose::Query,
+            source_epoch: crate::digest(b"epoch"),
+            budget: 14,
+            delivery: None,
+            source: source.clone(),
+            target,
+            operation: "stock.available".into(),
+            schema_digest: crate::digest(b"schema"),
+            contract_digest: Some(crate::digest(b"contract")),
+            input: serde_json::json!({}),
+            actor: "alice@example.com".into(),
+            origin: "middle-root".into(),
+            step: "ob_middle_0".into(),
+            chain: "entry".into(),
+            now: 100,
+            issued_at: 100,
+            expires_at: 130,
+            activation: Digest::new(b"active"),
+            generation: 1,
+            serving: Value::Null,
+        };
+        let old = signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
+            .map_err(|_| anyhow::anyhow!("test key"))?;
+        let new = signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
+            .map_err(|_| anyhow::anyhow!("test key"))?;
+        let old = Signer::from_pkcs8("old", old.as_ref())?;
+        let new = Signer::from_pkcs8("new", new.as_ref())?;
+        let verifier = |include_old: bool| -> Result<Verifier> {
+            let mut keys = BTreeMap::from([(
+                "new".into(),
+                TrustedKey {
+                    source: source.clone(),
+                    public_key: new.public_key(),
+                },
+            )]);
+            if include_old {
+                keys.insert(
+                    "old".into(),
+                    TrustedKey {
+                        source: source.clone(),
+                        public_key: old.public_key(),
+                    },
+                );
+            }
+            Verifier::new(keys)
+        };
+        let old_wire = old.sign(&query)?;
+        let new_wire = new.sign(&query)?;
+        let overlap = verifier(true)?;
+        assert!(overlap.verify(&old_wire, 101).is_ok());
+        assert!(overlap.verify(&new_wire, 101).is_ok());
+        let retired = verifier(false)?;
+        assert!(retired.verify(&old_wire, 101).is_err());
+        assert!(retired.verify(&new_wire, 101).is_ok());
+        assert!(retired.verify(&new_wire, 130).is_err());
+        let mut substituted = query;
+        substituted.source.app = "entry".into();
+        assert!(retired.verify(&new.sign(&substituted)?, 101).is_err());
+        Ok(())
+    }
 }
