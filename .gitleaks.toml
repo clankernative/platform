@@ -11,6 +11,13 @@ regexTarget = "line"
 regexes = ['''^\s*"key": "[a-f0-9]{32}",?$''']
 
 [[allowlists]]
+description = "Public schema identity keys embedded in admission fixtures"
+condition = "AND"
+paths = ['''(^|/)crates/day2/src/app_inference\.rs$''']
+regexTarget = "line"
+regexes = ['''^\s*\{"identity": \{"key": "[a-f0-9]{32}", "prefix": "[a-z]+"\},$''']
+
+[[allowlists]]
 description = "Documentation generator references an environment variable, never a credential"
 condition = "AND"
 paths = ['''(^|/)crates/day2/src/api_examples\.rs$''']
