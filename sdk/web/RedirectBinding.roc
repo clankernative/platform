@@ -19,6 +19,9 @@ RedirectBinding :: { metadata : Metadata }.{
 		# Application failures that mean "nothing is at this address", answered
 		# 404. Every one must be declared by the bound command.
 		not_found : List(Str),
+		# Optional registered page path, with the same input type as the command.
+		# Empty retains the platform error page.
+		not_found_page : Str,
 	}
 
 	define : Metadata -> RedirectBinding

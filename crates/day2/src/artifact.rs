@@ -187,6 +187,9 @@ pub struct Redirect {
     pub schemes: String,
     /// Application failure codes answered 404.
     pub not_found: Vec<String>,
+    /// Optional registered page path rendered with the command input on 404.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub not_found_page: String,
 }
 
 impl Page {
@@ -839,6 +842,16 @@ impl LoadedArtifact {
                 );
             }
             if manifest.get("redirects").is_some() {
+                // Empty fallback metadata and its absence mean the same thing.
+                // Normalize through the closed declaration schema, preserving
+                // the exact comparison of every nonempty app-owned fallback.
+                for route in manifest["redirects"]
+                    .as_array_mut()
+                    .context("compiled manifest redirects must be an array")?
+                {
+                    *route =
+                        serde_json::to_value(serde_json::from_value::<Redirect>(route.clone())?)?;
+                }
                 expected["redirects"] = serde_json::to_value(&loaded.contract.redirects)?;
             } else {
                 ensure!(

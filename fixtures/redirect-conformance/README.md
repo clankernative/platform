@@ -8,7 +8,9 @@ small model of GoLinks' exact-then-wildcard resolution.
 
 - `pages/Redirects.roc` declares `/go/{path..}` and `/{path..}`, both bound to
   `go.visit`, with `url` as the location field, `AnyScheme` destinations and
-  `missing_link` as the not-found failure.
+  `missing_link` as the not-found failure. The prefixed route uses
+  `on_not_found` to render the registered `/new` page with a prefilled create
+  form; the bare route retains the platform error page as a compatibility check.
 - `pages/Routes.roc` declares page routes at `/` and `/about`, which keep
   precedence over the redirect routes even when a link named `about` exists.
 - `commands/visit/VisitLink.roc` resolves an active exact name, otherwise the
@@ -22,7 +24,9 @@ small model of GoLinks' exact-then-wildcard resolution.
 checks redirects, wildcard decoding and re-encoding, unknown and deleted links,
 refused destinations, page and platform precedence, the command's own authority
 grant, the mandatory audit, prefetch and non-navigation refusal, and admission
-of malformed declarations. Full verification builds the fixture and passes it as
+of malformed declarations. It also checks fallback-query authority, decoded
+and escaped form values, unchanged API failures and creation via a signed POST
+without JavaScript. Full verification builds the fixture and passes it as
 `DAY2_TEST_REDIRECT_ARTIFACT`; to run it alone:
 
 ```text

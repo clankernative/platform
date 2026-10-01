@@ -2,6 +2,7 @@ import pf.Redirect
 import Commands
 import Errors
 import VisitLinkTypes
+import Routes
 
 # The GoLinks shape: `go/<name>` and bare `/<name>` both resolve through the visit
 # command, including multi-segment wildcard paths such as `docs/<page>`. The
@@ -11,7 +12,7 @@ Redirects :: [].{
 	prefixed = Redirect.route(
 		{ path: "/go/{path..}", location: "url", schemes: AnyScheme, not_found: [Errors.missing_link] },
 		Commands.visit,
-	)
+	).on_not_found(Routes.missing_link)
 
 	bare : Redirect(VisitLinkTypes.Input)
 	bare = Redirect.route(
