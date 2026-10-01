@@ -67,16 +67,13 @@ Missing readiness, a mismatched owner, substituted evidence or a retired
 selection cannot obtain keys. Mapped-human and installation connections do not
 enter the external-account approval shell.
 
-`SecurityShell::from_gke_instance` composes that authority with the selected
-shell edge, GKE key provider and Google reauthentication adapter. It returns the
-authority handle for subsequent selection replacement. This private constructor
-does not mount a listener or choose an app storage transport.
-
 Replacing the selection and its key provider happens under one write lock.
-In-flight lookups hold the read lock through readiness and key acquisition; once
-replacement returns, no lookup can finish using the retired snapshot. An empty
-selection revokes approval without acquiring a GCP token or constructing a key
-provider.
+In-flight confirmation holds the read lock through readiness, key acquisition
+and the final SQLite commit or rollback. If replacement wins, a retired proof
+cannot commit. If confirmation wins, replacement waits until its local settlement
+finishes. An empty selection revokes subsequent approval without acquiring a
+GCP token or constructing a key provider. This is a local host ordering guarantee;
+external readiness still needs its independently qualified freshness bound.
 
 The explicit GKE token source uses the fixed metadata service token endpoint,
 `Metadata-Flavor: Google`, bounded responses and timeouts, and a usable Bearer
@@ -85,12 +82,87 @@ redirects. This follows [Google's GKE workload identity interface](https://docs.
 The selected Kubernetes service account and named-secret IAM policy must be
 qualified separately; parsing a metadata token is not evidence of that policy.
 
+## Private shell-to-app transport
+
+Each app host owns its SQLite database, custody keys and current approval
+authority. `StoredAppApprovals` pins one app and one host-selected database path;
+`AppApprovalReceiver` handles only `POST /_day2/oauth/approval`. The host must
+initialize the ordinary principal and OAuth tables and mount this reserved
+handler before ordinary app dispatch. Apps cannot register this protocol as a
+command or query.
+
+The existing instance document adds one optional field:
+
+```json
+"oauth_shell_transport": {
+  "service_account": "security-shell@company-tools.iam.gserviceaccount.com"
+}
+```
+
+The instance repo selects this dedicated Google service account. Receiver
+origins and IAP backend audiences reuse `apps[app].edge`; the human assertion
+uses the independently selected `security_shell.iap_audience` and company hosted
+domain. No platform hostname default or second transport endpoint catalog is
+introduced. Installations without this field cannot compose private OAuth RPC.
+
+Every request carries two independently verified assertions:
+
+- IAP supplies a workload assertion at the receiver's app backend audience;
+  its email must equal the selected shell service account.
+- The shell forwards the original signed human assertion from its own IAP
+  backend in the bounded private request body. The app host verifies that shell
+  audience and hosted domain, checks the stored attempt owner, and binds the
+  human email to the immutable IAP subject in its ordinary principal table.
+
+The workload never becomes the app's effective human. A human assertion cannot
+authenticate the workload endpoint. Shell cookies, reauthentication codes,
+provider tokens, PKCE verifiers, database paths and custody key material never
+cross this transport.
+
+The connect host creates identifiers with `shell_transport::scoped_attempt`:
+a digest of the installation/environment/app namespace plus a fresh 256-bit
+random suffix. The browser carries only this opaque identifier. The shell
+contacts exactly its selected owning app; an unrelated app outage cannot block
+that lookup. Namespace routing does not confer authority: the receiver checks
+its own namespace, durable ownership, verified human and current contracts.
+Unrouted kernel test identifiers are not accepted by the private RPC receiver.
+
+The app returns a bounded preview of the verified provider identity, exact
+scopes, consent text, challenge and current contract digests. A one-use shell
+session binds that complete preview and the human's IAP subject. Changed
+presentation requires a new session; the shell cannot silently sign a newer
+preview when submitting the old form. The fresh attestation signs the preview
+digest as well as the pending identity and authentication time. The app
+reconstructs that digest under current authority and rechecks attempt state,
+custody, expiry, generation and epoch before its final local activation. It
+reads its clock again after key acquisition. No network operation runs inside
+the SQLite settlement transaction.
+
+`SecurityShell::from_gke_instance` composes `RemoteApprovals`, the selected shell
+edge and Google reauthentication adapter. `ArtifactShellSigner` obtains only the
+selected attestation key; its GCP key provider excludes custody key roles. The
+constructor returns the signer handle for later selection replacement. The
+shell has no app database registry or filesystem mounts. App hosts retain their
+own `ArtifactApprovalAuthority`, custody keys and attestation verification key.
+The host supplies a qualified `PrivateBearerSource` for each selected IAP
+receiver; ambient app credentials or a browser token are insufficient.
+
+Requests and responses have fixed versioned JSON schemas, bounded bodies and
+deadlines. Receivers reject unknown or duplicate fields, wrong paths, methods,
+Host headers, audiences and namespaces. The client disables proxies and
+redirects and sends confirmation once. Response loss is ambiguous; it does not
+trigger an automatic retry. A subsequent lookup observes durable settlement,
+and replay cannot activate the same attempt twice.
+
 ## Remaining runtime work
 
-This layer supplies private composition and revocation checks. It does not start
-a shell workload, publish a reviewed Google Calendar provider, establish live
-readiness, create a Google web client, or enable OAuth on an installation.
-The shell transport must preserve app-owned SQLite storage and failure domains;
-the dedicated browser shell must not require mounting every app's database in a
-central pod. Runtime transport, provider/registration readiness and the live
+The next runtime slice must wire host startup and connect attempt creation,
+implement the qualified IAP workload credential source, and deploy the shell
+with its dedicated service account, backend access and attestation-only secret
+IAM. App-host IAM separately needs its custody and verification keys. The
+existing edge bootstrap does not establish these runtime policies.
+
+This layer does not start a shell workload, publish a reviewed Google Calendar
+provider, establish live readiness, create a Google web client, or enable OAuth
+on an installation. Provider/registration readiness and the live
 connect/use/refresh canary remain separate qualification work.

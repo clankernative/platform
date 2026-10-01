@@ -146,6 +146,14 @@ reviewed profiles and version-pinned key providers. See
 instance fields, callback namespace and current readiness checks. This contract
 does not yet add OAuth selection variables or a shell workload to `day2-app`.
 
+Private approval transport also selects `oauth_shell_transport.service_account`
+in the instance document. Its locations and numeric audiences reuse ordinary
+selected app edges. The shell must have IAP access to those backends and
+attestation-only secret access; app hosts separately own custody and attestation
+verification. The current edge bootstrap does not qualify that workload identity
+or mount the receiver. Host startup, the IAP credential source and runtime IAM
+composition remain required before enabling this transport.
+
 ## Build, qualify and deploy
 
 Follow [native Linux qualification](../linux-sqlite/README.md) on a real engine of

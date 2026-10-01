@@ -225,6 +225,7 @@ pub fn take(instance_path: &Path, app: &str, output: &Path) -> Result<Manifest> 
             // that edge is verified against.
             identity: instance.identity,
             security_shell: None,
+            oauth_shell_transport: None,
             apps: BTreeMap::from([(app.into(), binding)]),
         },
     };

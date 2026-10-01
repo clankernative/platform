@@ -1275,6 +1275,8 @@ pub struct Instance {
     /// and may never share an app origin or audience.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub security_shell: Option<Edge>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth_shell_transport: Option<day2_capabilities::oauth::ShellTransport>,
     pub apps: BTreeMap<String, AppBinding>,
 }
 
@@ -1291,6 +1293,10 @@ impl Instance {
         let raw: serde_json::Value = crate::json::decode(bytes)?;
         refuse_retired_auditors(&raw)?;
         let instance: Self = serde_json::from_value(raw)?;
+        if let Some(transport) = &instance.oauth_shell_transport {
+            transport.validate()?;
+            instance.security_edge()?;
+        }
         crate::schema::identifier(&instance.installation)?;
         crate::schema::identifier(&instance.environment)?;
         ensure!(!instance.apps.is_empty(), "instance has no apps");

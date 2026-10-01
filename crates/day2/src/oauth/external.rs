@@ -15,6 +15,24 @@ use day2_capabilities::oauth::SecurityOriginRef;
 use day2_capabilities::{BindingRef, Digest};
 use ring::hmac;
 use rusqlite::{Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
+
+/// Public-to-the-private-shell identity fields. This contains no token, code,
+/// verifier, custody reference, database path or original session credential.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ApprovalClaim {
+    pub attempt: String,
+    pub slot: String,
+    pub generation: i64,
+    pub human: String,
+    pub account: String,
+    pub scope_evidence: String,
+    pub challenge: Digest,
+    pub security_origin: SecurityOriginRef,
+    pub approval: BindingRef,
+    pub quarantined_at: i64,
+}
 
 pub struct VerifiedExternalExchange {
     verified: VerifiedExternalAccount,
@@ -129,7 +147,7 @@ pub fn quarantine_external(
 }
 
 /// Host-only presentation. The app receives the redacted connect state. The
-/// security shell may show these fields after loading and decrypting custody.
+/// owning app host decrypts custody and sends a bounded preview to the shell.
 pub struct PendingExternalApproval {
     intent: ConnectIntent,
     binding: ExchangeBinding,
@@ -144,6 +162,21 @@ pub struct PendingExternalApproval {
 }
 
 impl PendingExternalApproval {
+    pub(crate) fn claim(&self) -> ApprovalClaim {
+        ApprovalClaim {
+            attempt: self.intent.attempt.clone(),
+            slot: self.intent.slot.clone(),
+            generation: self.intent.proposed_generation,
+            human: self.intent.owner.clone(),
+            account: self.account.clone(),
+            scope_evidence: self.scope_evidence.clone(),
+            challenge: self.challenge.clone(),
+            security_origin: self.security_origin.clone(),
+            approval: self.approval.clone(),
+            quarantined_at: self.quarantined_at,
+        }
+    }
+
     pub fn attempt(&self) -> &str {
         &self.intent.attempt
     }
@@ -291,6 +324,8 @@ pub(crate) fn load_pending_external(
 /// Evidence supplied by the trusted security shell after it authenticates the
 /// human again and records an explicit confirmation of the pending challenge.
 /// Raw session credentials do not enter this kernel or SQLite.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FreshExternalApproval {
     pub attempt: String,
     pub slot: String,
@@ -304,6 +339,8 @@ pub struct FreshExternalApproval {
     pub session: Digest,
     pub authenticated_at: i64,
     pub confirmed_at: i64,
+    #[serde(default)]
+    pub(super) preview: Option<Digest>,
     key_version: String,
     signature: [u8; 32],
 }
@@ -311,7 +348,7 @@ pub struct FreshExternalApproval {
 impl FreshExternalApproval {
     fn signing_bytes(&self) -> Result<Vec<u8>> {
         Ok(serde_json::to_vec(&(
-            "oauth-external-security-shell-approval-v1",
+            "oauth-external-security-shell-approval-v2",
             &self.key_version,
             &self.attempt,
             &self.slot,
@@ -325,6 +362,7 @@ impl FreshExternalApproval {
             &self.session,
             self.authenticated_at,
             self.confirmed_at,
+            &self.preview,
         ))?)
     }
 
@@ -403,15 +441,53 @@ impl ShellApprovalKeyLease {
         authenticated_at: i64,
         confirmed_at: i64,
     ) -> Result<FreshExternalApproval> {
+        self.attest_claim(&pending.claim(), session, authenticated_at, confirmed_at)
+    }
+
+    pub(crate) fn attest_claim(
+        &self,
+        pending: &ApprovalClaim,
+        session: Digest,
+        authenticated_at: i64,
+        confirmed_at: i64,
+    ) -> Result<FreshExternalApproval> {
+        self.attest_inner(pending, None, session, authenticated_at, confirmed_at)
+    }
+
+    pub(crate) fn attest_view(
+        &self,
+        pending: &ApprovalClaim,
+        preview: Digest,
+        session: Digest,
+        authenticated_at: i64,
+        confirmed_at: i64,
+    ) -> Result<FreshExternalApproval> {
+        self.attest_inner(
+            pending,
+            Some(preview),
+            session,
+            authenticated_at,
+            confirmed_at,
+        )
+    }
+
+    fn attest_inner(
+        &self,
+        pending: &ApprovalClaim,
+        preview: Option<Digest>,
+        session: Digest,
+        authenticated_at: i64,
+        confirmed_at: i64,
+    ) -> Result<FreshExternalApproval> {
         ensure!(
             pending.security_origin == self.origin && pending.approval == self.approval,
             "security-shell approval key binding mismatch"
         );
         let mut evidence = FreshExternalApproval {
-            attempt: pending.intent.attempt.clone(),
-            slot: pending.intent.slot.clone(),
-            generation: pending.intent.proposed_generation,
-            human: pending.intent.owner.clone(),
+            attempt: pending.attempt.clone(),
+            slot: pending.slot.clone(),
+            generation: pending.generation,
+            human: pending.human.clone(),
             account: pending.account.clone(),
             scope_evidence: pending.scope_evidence.clone(),
             challenge: pending.challenge.clone(),
@@ -420,6 +496,7 @@ impl ShellApprovalKeyLease {
             session,
             authenticated_at,
             confirmed_at,
+            preview,
             key_version: self.version.clone(),
             signature: [0; 32],
         };

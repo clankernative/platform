@@ -986,7 +986,6 @@ fn validate(intent: &ConnectIntent) -> Result<()> {
     for field in [
         &intent.attempt,
         &intent.slot,
-        &intent.owner,
         &intent.profile,
         &intent.registration,
         &intent.callback,
@@ -994,6 +993,15 @@ fn validate(intent: &ConnectIntent) -> Result<()> {
     ] {
         identifier(field)?;
     }
+    ensure!(
+        !intent.owner.is_empty()
+            && intent.owner.len() <= 256
+            && !intent
+                .owner
+                .chars()
+                .any(|c| c.is_whitespace() || c.is_control()),
+        "invalid OAuth human owner"
+    );
     ensure!(
         intent.expected_epoch > 0
             && intent.proposed_generation > 0
