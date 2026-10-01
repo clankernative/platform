@@ -799,6 +799,20 @@ pub fn provisional_modules(sources: &[String]) -> Result<BTreeMap<String, String
     }
     paths.push_str("}\n");
     modules.insert("Selectors.roc".into(), paths);
+    let mut actions = String::from(
+        "import pf.SecurityAction\nimport pf.Input\nimport AppIdentity\nSecurityActions :: [].{\n",
+    );
+    let mut returns = String::from("import pf.ProductReturnRef\nProductReturns :: [].{\n");
+    for name in &names {
+        actions.push_str(&format!("    {name} : SecurityAction(input)\n    {name} = SecurityAction.define(AppIdentity.namespace.concat(\".{name}\"), Input.define(\"inference_only\", |_raw| Err(\"inference_only\"), |_value| \"\"))\n\n"));
+        returns.push_str(&format!(
+            "    {name} : ProductReturnRef\n    {name} = ProductReturnRef.define(\"{name}\")\n\n"
+        ));
+    }
+    actions.push_str("}\n");
+    returns.push_str("}\n");
+    modules.insert("SecurityActions.roc".into(), actions);
+    modules.insert("ProductReturns.roc".into(), returns);
     let mut failures = String::from("import pf.Failure\nimport AppIdentity\nErrors :: [].{\n");
     for name in &names {
         failures.push_str(&format!(

@@ -21,6 +21,13 @@ regexTarget = "line"
 regexes = ['''^\s*\{"identity": \{"key": "[a-f0-9]{32}", "prefix": "[a-z]+"\},$''']
 
 [[allowlists]]
+description = "Public schema identity keys in the compiler inference test ledger"
+condition = "AND"
+paths = ['''(^|/)crates/day2/src/app_inference\.rs$''']
+regexTarget = "line"
+regexes = ['''^\s*\{"identity": \{"key": "(b41c7d2e8a95f60312ad4e7b9c06f158|f70a1b6c93de5827401c8fa3b6e29d5f|0123456789abcdef0123456789abcdef)", "prefix": "(cmp|add|old)"\},$''']
+
+[[allowlists]]
 description = "Documentation generator references an environment variable, never a credential"
 condition = "AND"
 paths = ['''(^|/)crates/day2/src/api_examples\.rs$''']

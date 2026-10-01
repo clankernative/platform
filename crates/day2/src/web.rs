@@ -1594,6 +1594,21 @@ impl Host {
             record.validate_input(&input)
         })();
         let id = format!("web-{}", ticket.nonce);
+        if validation.is_ok()
+            && crate::managed_credentials::issuance::access(&self.runtime, &ticket.operation)?
+                .interactive
+        {
+            let location = crate::managed_credentials::browser::start(
+                &self.runtime,
+                &ticket.operation,
+                &session.actor,
+                &id,
+                &input,
+                Some(&ticket.page),
+                at,
+            )?;
+            return Ok((StatusCode::SEE_OTHER, [(header::LOCATION, location)]).into_response());
+        }
         let (status, message) = if validation.is_err() {
             (
                 StatusCode::UNPROCESSABLE_ENTITY,

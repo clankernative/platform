@@ -5,6 +5,8 @@ import InspectKey
 import MetadataInvariants
 import CreateClient
 import CreatePersonal
+import ManageKeys
+import Routes
 
 App :: [].{
 	definition = {
@@ -16,11 +18,12 @@ App :: [].{
 			inspect: InspectKey.definition,
 			create_client: CreateClient.definition,
 			create_personal: CreatePersonal.definition,
+			manage: ManageKeys.definition,
 		},
-		pages: {},
+		pages: { keys: Routes.keys.register() },
 		properties: { entries: MetadataInvariants.entries },
 		errors: {},
 		examples: [],
-		presentation: { stylesheet: "", script: "" },
+		presentation: { stylesheet: "", script: "app.js" },
 	}
 }

@@ -180,6 +180,62 @@ impl RequestContext<'_> {
         body: &[u8],
     ) -> Result<Response> {
         let actor = self.actor(headers)?;
+        if uri.path() == "/api/security-actions" {
+            ensure!(
+                *method == Method::POST
+                    && uri.query().is_none()
+                    && !headers.contains_key(ACT_AS_HEADER),
+                crate::error::Failure::InvalidInput
+            );
+            ensure!(
+                single_header(headers, "origin") == Some(self.origin)
+                    && headers
+                        .get("sec-fetch-site")
+                        .is_none_or(|v| v == "same-origin"),
+                crate::error::Failure::InvalidOrigin
+            );
+            ensure!(
+                single_header(headers, "content-type").is_some_and(|value| value
+                    .split(';')
+                    .next()
+                    .is_some_and(|kind| kind.trim().eq_ignore_ascii_case("application/json"))),
+                crate::error::Failure::UnsupportedContentType
+            );
+            security::verify_csrf(
+                self.secret,
+                self.session,
+                single_header(headers, "x-csrf-token")
+                    .context(crate::error::Failure::InvalidCsrf)?,
+            )?;
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Navigation {
+                operation: String,
+                payload: String,
+                product_return: String,
+            }
+            let navigation: Navigation = crate::json::decode(body)?;
+            let input: Value = crate::json::decode(navigation.payload.as_bytes())?;
+            let invocation = command_invocation(
+                self.runtime,
+                actor,
+                single_header(headers, "idempotency-key")
+                    .context(crate::error::Failure::InvalidIdempotencyKey)?,
+            )?;
+            let confirmation_url = crate::managed_credentials::browser::start(
+                self.runtime,
+                &navigation.operation,
+                actor,
+                &invocation,
+                &input,
+                Some(&navigation.product_return),
+                self.at,
+            )?;
+            return Ok(json_response(
+                StatusCode::ACCEPTED,
+                json!({"invocation_id":invocation,"status":"awaiting_confirmation","confirmation_url":confirmation_url}),
+            ));
+        }
         if let Some(id) = uri.path().strip_prefix("/api/invocations/") {
             ensure!(
                 *method == Method::GET,
@@ -267,6 +323,28 @@ impl RequestContext<'_> {
             let invocation = command_invocation(self.runtime, &self.session.actor, key)?;
             (input, invocation)
         };
+        if crate::managed_credentials::issuance::access(self.runtime, &operation.name)?.interactive
+        {
+            ensure!(
+                method == Method::POST
+                    && actor == self.session.actor
+                    && !headers.contains_key(ACT_AS_HEADER),
+                crate::error::Failure::Forbidden
+            );
+            let confirmation_url = crate::managed_credentials::browser::start(
+                self.runtime,
+                &operation.name,
+                actor,
+                &invocation,
+                &input,
+                None,
+                self.at,
+            )?;
+            return Ok(json_response(
+                StatusCode::ACCEPTED,
+                json!({"invocation_id":invocation,"status":"awaiting_confirmation","confirmation_url":confirmation_url}),
+            ));
+        }
         self.runtime.accept_on_behalf_of_verified(
             &operation.name,
             ActingAs {

@@ -58,6 +58,16 @@ const SEALED: &[(&str, &str, &str)] = &[
         "4c3316dd010c2c67cd4331fb2b7cd397dd054cdd7cec2abd776e97cbf66adfe4",
     ),
     (
+        "SecurityAction.roc",
+        "define",
+        "141a28a1825246247d4ef2ccfd7d3a17054c555a723cf3fc0dbb0b17600a1856",
+    ),
+    (
+        "ProductReturnRef.roc",
+        "define",
+        "b778eb0fb0685f433cb932abc3f97c2e7848402278f64e9b623f0856ae3e82fe",
+    ),
+    (
         "InteractiveContext.roc",
         "from_context",
         "23e122f711e131180ba8191996772c41993fffc1e345ff25295e1d6449886527",
@@ -249,6 +259,8 @@ const SEALED: &[(&str, &str, &str)] = &[
 /// use_a_restricted_name` reads this same table rather than a second copy of it.
 const RESTRICTED_CALLS: &[(&str, &str)] = &[
     ("ConnectionAccess", "define"),
+    ("SecurityAction", "define"),
+    ("ProductReturnRef", "define"),
     ("CredentialMetadataAccess", "define"),
     ("CredentialMetadataAccess", "define_issue"),
     ("InteractiveContext", "from_context"),

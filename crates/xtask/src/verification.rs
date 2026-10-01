@@ -669,6 +669,9 @@ fn tests(
             "managed_credentials::issuance::tests::personal_issuance_uses_the_confirmed_subject_and_missing_readiness_denies",
             "managed_credentials::issuance::tests::hostile_issue_rejects_changed_label_family_principal_and_second_mutation",
             "managed_credentials::issuance::tests::expired_confirmation_prevents_issuance_but_completed_receipt_is_recoverable",
+            "oauth::security_shell::tests::credential_browser_issues_native_product_commands_and_protects_delivery",
+            "oauth::security_shell::tests::credential_browser_requires_fresh_auth_and_current_readiness",
+            "oauth::security_shell::tests::credential_app_navigation_only_freezes_canonical_intent",
         ] {
             command.args(["--skip", test]);
         }

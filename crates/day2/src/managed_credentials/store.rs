@@ -17,7 +17,7 @@ use day2_capabilities::{
     oauth::{GrantCeiling, OperationAuthorityContract},
 };
 use getrandom::fill;
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 
 pub(crate) fn install_schema(db: &Connection) -> Result<()> {
@@ -1071,6 +1071,12 @@ pub(crate) struct HumanRevealPermit {
 }
 
 impl HumanRevealPermit {
+    pub(crate) fn encryption_version(&self) -> &str {
+        &self.encryption_version
+    }
+    pub(crate) fn security_epoch(&self) -> u64 {
+        self.identity.security_epoch
+    }
     pub fn into_response_body(self, lease: &KeyLease) -> Result<String> {
         decrypt_for_human(
             lease,
@@ -1091,12 +1097,36 @@ pub(crate) fn authorize_reveal(
     db: &mut Connection,
     post: VerifiedHumanPost,
 ) -> Result<Option<HumanRevealPermit>> {
+    let tx = crate::write_queue::immediate(db)?;
+    let Some(pending) = authorize_reveal_in(&tx, post)? else {
+        return Ok(None);
+    };
+    Ok(Some(pending.commit(tx)?))
+}
+
+/// Cannot decrypt or be recovered from a receipt. Only a known successful
+/// authorization commit converts this into a response permit.
+pub(crate) struct PendingReveal(HumanRevealPermit);
+
+impl PendingReveal {
+    pub(crate) fn commit(
+        self,
+        tx: crate::write_queue::WriteTransaction<'_>,
+    ) -> Result<HumanRevealPermit> {
+        tx.commit()?;
+        Ok(self.0)
+    }
+}
+
+pub(crate) fn authorize_reveal_in(
+    tx: &Transaction<'_>,
+    post: VerifiedHumanPost,
+) -> Result<Option<PendingReveal>> {
     for id in [&post.version, &post.session, &post.attempt] {
         validate_id(id)?;
     }
     crate::authority::valid_actor(&post.recipient)?;
     let expected_namespace_key = namespace_key(&post.namespace)?;
-    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     struct RevealRow {
         identity_json: String,
         namespace_json: String,
@@ -1199,14 +1229,48 @@ pub(crate) fn authorize_reveal(
             post.now
         ],
     )?;
-    tx.commit()?;
-    Ok(Some(HumanRevealPermit {
+    Ok(Some(PendingReveal(HumanRevealPermit {
         identity: expected_identity,
         envelope_revision: u64::try_from(row.envelope_revision)?,
         encryption_version: row.encryption_version,
         nonce,
         ciphertext: row.ciphertext,
-    }))
+    })))
+}
+
+/// Resolve delivery only from the successful product invocation's private
+/// receipt. Browser fields never supply a version or lineage selector.
+pub(crate) fn issued_version(
+    tx: &Transaction<'_>,
+    namespace: &Namespace,
+    invocation: &str,
+    family: &str,
+    family_contract: &Digest,
+) -> Result<String> {
+    let mut statement = tx.prepare(
+        "SELECT r.version FROM day2_credential_receipts r
+        JOIN day2_invocations i ON i.id=r.invocation
+        JOIN day2_credential_versions v ON v.id=r.version AND v.lineage=r.lineage
+        JOIN day2_credential_lineages l ON l.id=v.lineage AND l.namespace=r.namespace
+        WHERE r.namespace=?1 AND r.invocation=?2 AND r.action='issue' AND i.status='success'
+          AND l.family=?3 AND r.family_contract=?4 AND l.family_contract=r.family_contract LIMIT 2",
+    )?;
+    let versions = statement
+        .query_map(
+            params![
+                namespace_key(namespace)?,
+                invocation,
+                family,
+                family_contract.as_str()
+            ],
+            |row| row.get::<_, String>(0),
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    ensure!(
+        versions.len() == 1,
+        "successful credential issue receipt required"
+    );
+    Ok(versions.into_iter().next().expect("checked receipt"))
 }
 
 pub(crate) fn close_delivery(tx: &Transaction<'_>, version: &str, reason: &str) -> Result<bool> {
@@ -1291,6 +1355,7 @@ mod tests {
         },
     };
     use proptest::prelude::*;
+    use rusqlite::TransactionBehavior;
     use std::collections::{BTreeMap, BTreeSet};
     use tempfile::TempDir;
 

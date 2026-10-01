@@ -20,6 +20,30 @@ use serde_json::Value;
 /// exists. prepare may call a provider; validate must use current local evidence
 /// and must not perform external I/O inside the product transaction.
 pub(crate) trait Authority: Send + Sync {
+    fn check_shell(&self, _binding: &CredentialFamilyBinding, _origin: &str) -> Result<()> {
+        anyhow::bail!("credential security shell selection unavailable")
+    }
+    fn reveal_epoch(
+        &self,
+        _binding: &CredentialFamilyBinding,
+        _management: &ManagementPolicy,
+        _actor: &str,
+        _subject: &str,
+        _now: i64,
+    ) -> Result<u64> {
+        anyhow::bail!("credential delivery readiness unavailable")
+    }
+    fn human_keys(
+        &self,
+        _binding: &CredentialFamilyBinding,
+        _management: &ManagementPolicy,
+        _actor: &str,
+        _subject: &str,
+        _permit: &store::HumanRevealPermit,
+        _now: i64,
+    ) -> Result<KeyLease> {
+        anyhow::bail!("credential delivery key provider unavailable")
+    }
     fn prepare(
         &self,
         binding: &CredentialFamilyBinding,
@@ -44,6 +68,7 @@ pub(crate) struct ReadyKeys {
     pub binding: Digest,
     pub security_epoch: u64,
     pub valid_until: i64,
+    pub max_active_lineages: u32,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -67,6 +92,7 @@ pub(super) struct Confirmation {
 }
 
 pub(crate) fn install(db: &Connection) -> Result<()> {
+    super::browser::install(db)?;
     db.execute_batch(
         "CREATE TABLE IF NOT EXISTS day2_credential_confirmations (
         invocation TEXT PRIMARY KEY, confirmation TEXT NOT NULL
@@ -306,6 +332,28 @@ pub(crate) fn stage(
         ready,
         now,
     )?;
+    ensure!(
+        (1..=10_000).contains(&ready.max_active_lineages),
+        "credential issuance quota unavailable"
+    );
+    let namespace = Digest::of(&("credential-namespace-v1", &binding.namespace))?;
+    let active_count: u32 = tx.query_row(
+        "SELECT count(*) FROM (SELECT 1 FROM day2_credential_lineages l
+        JOIN day2_credential_versions v ON v.id=l.head AND v.lineage=l.id
+        WHERE l.namespace=?1 AND l.family=?2 AND l.state='active' AND v.state='active'
+          AND l.grant_valid_until>?4 AND v.expires_at>?4 LIMIT ?3)",
+        rusqlite::params![
+            namespace.as_str(),
+            family.id.as_str(),
+            ready.max_active_lineages,
+            now
+        ],
+        |row| row.get(0),
+    )?;
+    ensure!(
+        active_count < ready.max_active_lineages,
+        "credential issuance quota exhausted"
+    );
     let principal = match family.profile {
         ManagedProfile::Personal => proof.subject.clone(),
         _ => format!(

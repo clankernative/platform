@@ -2,9 +2,10 @@
 
 This document records the implemented foundation for
 `proposals/app-identity/03-CREDENTIALS.md`. The implementation is staged. No
-managed credential can currently be issued from an ordinary app session,
-verified at API ingress or revealed through a browser route. Fixed-grant
-client/personal issuance can now run through a host-confirmed interactive command.
+managed credential can currently be verified at API ingress. Fixed-grant
+client/personal issuance runs through a host-confirmed interactive command.
+The isolated security shell supplies fresh confirmation, protected POST reveal
+and acknowledgement. An ordinary app session starts navigation only.
 
 ## Portable contracts
 
@@ -100,8 +101,9 @@ uses a domain-separated HMAC-SHA256 bound to the full material identity. The
 private envelope uses AES-256-GCM with authenticated namespace, family, lineage,
 version, recipient, security epoch, material revision, envelope revision and
 encryption-key version. Exact key versions come from a caller-supplied private
-lease. The current adapter does not resolve that lease from a qualified instance
-key provider.
+lease. The selected readiness adapter resolves exact verifier/encryption versions
+through the same purpose-bound key-provider port used by OAuth, including its
+GCP Secret Manager adapter. Missing, expired or changed selected evidence denies.
 
 `stage_issue` accepts the existing app SQLite transaction. It stages the
 lineage/version, verifier, encrypted material, delivery and deduplication receipt
@@ -155,7 +157,8 @@ All acceptance channels require a host-only confirmation bound to the normalized
 input, operation, actor, authenticated subject, recipient session, artifact,
 activated authority revision, family binding, security epoch and fresh-authentication
 time. Direct request provenance is rechecked at issuance. App sessions and actor
-strings cannot create confirmation evidence. Browser confirmation is the next slice;
+strings cannot create confirmation evidence. The protected browser shell creates
+this evidence only after fresh reauthentication and exact form confirmation;
 there is no raw family issue route.
 
 The selected host authority obtains purpose-bound exact-version keys before the
@@ -221,10 +224,70 @@ consuming permit. A closure committed first denies; an authorization committed
 first may complete its exact response afterward. A historical receipt cannot
 produce a permit. The selected lineage independently supplies the expected
 namespace, owner, version, recipient, epoch and material revision. The security
-origin, session/CSRF/intent verification and no-store HTTP sink are still absent;
-the current `VerifiedHumanPost` is an internal staging input, not proof of those
-checks. Reveal authorization also checks issue, version expiry, grant expiry and
-delivery expiry times.
+origin now supplies session/CSRF/intent verification and a no-store HTTP sink.
+The current `VerifiedHumanPost` remains an internal input constructed only after
+those checks. Reveal authorization also checks issue, version expiry, grant expiry
+and delivery expiry times.
+
+### Protected browser actions
+
+The build generates typed `SecurityActions.<command>` descriptors from the
+registered command codecs and `ProductReturns.<page>` from admitted app pages.
+Both constructors are sealed in normal/restricted admission. The descriptors are
+navigation data; the protected navigation adapter accepts only the registered
+interactive fixed-family issuance profile. A descriptor for another ordinary
+command grants no authority and is refused by that adapter.
+
+```roc
+SecurityAction.bind(SecurityActions.create_client, client_input, ProductReturns.keys)
+```
+
+This produces `{ operation, payload, product_return }`, suitable for an ordinary
+app view. A live app session submits it to `POST /api/security-actions` with the
+normal Origin, CSRF and idempotency headers. The host validates the exact command
+input codec and admitted static return page, then stores one bounded pending
+intent in that app's existing database. Its response contains only an opaque
+confirmation URL and invocation identity. Ordinary JSON commands and signed
+native forms also start this flow for interactive commands. There is no issuance
+acceptance or key-provider call at navigation time. Same-invocation retries retain
+the intent; changed input or return page is refused.
+
+The existing OAuth security shell mounts `/credentials/actions/<attempt>` on its
+dedicated HTTPS edge and shares its IAP identity verifier and fresh Google OIDC
+reauthentication adapter. App cookies and IAP identity alone cannot substitute
+fresh authentication. The shell cookie, current canonical subject, challenge,
+Origin and CSRF bind each POST to the exact pending command. Confirmation invokes
+that ordinary command, including its product writes, through the normal runtime.
+Selected issuer readiness, exact keys and epoch are checked before issuance and
+again under the product writer lock. The bounded active-lineage quota is checked
+under that same lock.
+
+GET renders confirmation/delivery controls and never returns key material. A
+reveal POST resolves the version from the successful invocation's private receipt,
+rechecks current app/family authority and recipient/session/epoch, and commits a
+fresh authorization under the SQLite writer lock. Only then does the selected
+provider load keys and decrypt into the protected response. The consuming permit
+cannot be replayed from a receipt. Acknowledgement closes delivery and clears the
+shell session, returning only to an admitted app page. Every shell response uses
+no-store, restrictive CSP, no-referrer and frame isolation headers.
+
+The host explicitly attaches an installation-selected local credential registry with
+`SecurityShell::with_credentials` before serving. It shares the isolated edge and
+fresh-authentication state with the separately configured private OAuth transport.
+Credential transport across separate shell/app hosts and live installation
+qualification remain later steps. App runtime loading does not install
+a credential authority or simulated browser proof. Readiness snapshots must be
+supplied by admitted installation adapters, expire within five minutes, and bind
+the exact family, management policy, security origin, key versions, issuer subjects,
+quota and current security epoch. This slice does not qualify an external
+non-rollback epoch/clock adapter or deploy a live installation.
+
+The conformance app's management query binds client and personal creation to its
+generated return page; its browser script only starts ordinary navigation. Native
+tests cover fresh authentication, atomic product issuance, public receipt retry,
+POST-only secret delivery, wrong origin/subject/cookie/CSRF/challenge/query rejection,
+acknowledgement closure, readiness removal, epoch change and quota denial. Rejected
+reveal requests assert zero additional provider loads.
 
 ## Verification and remaining gates
 
@@ -242,7 +305,8 @@ Before end-to-end credential use, complete the following gates from the proposal
    selected provider/resource/import contracts. Prove the interactive context and
    negative compiler fixtures with the pinned compiler. Client/personal
    declarations, generated metadata reads and fixed-grant interactive issuance
-   are present. Browser confirmation/reveal is the next slice.
+   and protected browser confirmation/reveal are present. Resource, selectable and
+   impersonation issuance plus generated lifecycle management remain incomplete.
 2. Complete selected-instance principal/context compatibility across child,
    delegated and provider paths. Resolve actual key/custody readiness and
    current management/metadata policy. The catalog-managed release path now
@@ -250,7 +314,8 @@ Before end-to-end credential use, complete the following gates from the proposal
    activation requires a verified credential-free artifact.
 3. Add credential ingress verification and mandatory propagated identity and
    immutable ceiling checks to the dispatcher. Complete group/resource metadata
-   visibility, recipient-specific security shell and protected HTTP response sink.
+   visibility. The recipient-specific fixed client/personal security shell and
+   protected HTTP response sink are present.
 4. Share the role-specific vault commit boundary with OAuth; add callback,
    provider and worker sinks without a generic token getter. Add external
    non-rollback security epoch readiness, clock high-water and exact-key restore
