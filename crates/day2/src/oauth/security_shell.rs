@@ -703,14 +703,49 @@ impl SecurityShell {
                     .optional()?
                     .unwrap_or(false)
             };
+            let contract = runtime.artifact().contract();
+            let app = contract
+                .app_contract
+                .as_ref()
+                .context("credential command contract missing")?;
+            let intent = &app
+                .operations
+                .get(&pending.operation)
+                .context("credential command missing")?
+                .intent;
+            let family = contract
+                .credential_manifest
+                .iter()
+                .find(|family| family.id.as_str() == pending.family)
+                .context("credential family declaration missing")?;
+            let principal = match family.profile {
+                day2_capabilities::credentials::ManagedProfile::Client => "Named client",
+                day2_capabilities::credentials::ManagedProfile::Personal => {
+                    "Your personal identity"
+                }
+                _ => anyhow::bail!("unsupported interactive credential profile"),
+            };
             let markup = html! { (DOCTYPE) html lang="en" {
                 head { meta charset="utf-8"; title { "Credential action" } }
                 body { main {
                     h1 { @if confirmed { "Credential delivery" } @else { "Create credential" } }
+                    p { (intent.title) }
+                    p { (intent.usage.purpose) }
                     dl { dt { "Application" } dd { (runtime.app()) } dt { "Command" } dd { (pending.operation) }
                         dt { "Family" } dd { (pending.family) } dt { "Label" } dd { (pending.label) }
-                        dt { "Recipient" } dd { (identity.email) } }
-                    @if !confirmed { p { "Confirm this product command. It creates the credential and its product records together." } }
+                        dt { "Principal" } dd { (principal) }
+                        dt { "Recipient" } dd { (identity.email) }
+                        dt { "Lifetime" } dd { (family.lifetime_seconds) " seconds" } }
+                    h2 { "Fixed permissions" }
+                    ul { @for operation in family.roots.keys() {
+                        li { @if let Some(operation) = app.operations.get(operation) { (operation.intent.title) " — " }
+                            code { (operation) } }
+                    } }
+                    @if !confirmed {
+                        p { "Confirm this product command. It creates the credential and its product records together." }
+                        h2 { "Command input" }
+                        pre { (pending.input.to_string()) }
+                    }
                     form method="post" action=(pending.path()) {
                         input type="hidden" name="csrf" value=(session.csrf);
                         input type="hidden" name="challenge" value=(challenge.as_str());
@@ -1204,10 +1239,9 @@ mod tests {
             assert!(!outcome.result.to_string().contains("d2c1."));
             assert!(!serde_json::to_string(&world.runtime.trace(id)?)?.contains("d2c1."));
             let get = shell.dispatch(&Method::GET, &path, None, &headers, &[], world.now)?;
-            assert!(
-                !String::from_utf8(to_bytes(get.into_body(), 8192).await?.to_vec())?
-                    .contains("d2c1.")
-            );
+            let page = String::from_utf8(to_bytes(get.into_body(), 8192).await?.to_vec())?;
+            assert!(!page.contains("d2c1."));
+            assert!(page.contains("credential_metadata.ping") && page.contains("3600 seconds"));
             let reveal = credential_body(&session, "reveal");
             let before = world.keys.0.load(Ordering::SeqCst);
             let mut wrong = headers.clone();
