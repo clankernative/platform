@@ -1,0 +1,3 @@
+CreateClientTypes :: [].{
+	Input := { label : Str }
+}

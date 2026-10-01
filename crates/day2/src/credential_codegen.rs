@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 pub const MODULE: &str = "Credentials.roc";
 pub const LIST: &str = "credential.metadata.list.v1";
 pub const INSPECT: &str = "credential.metadata.inspect.v1";
+pub const ISSUE: &str = "credential.issue.v1";
 
 pub fn observation(name: &str) -> bool {
     [LIST, INSPECT].contains(&name)
@@ -39,7 +40,7 @@ fn render<'a>(
 ) -> Result<String> {
     let prefix = if admission { "admission_" } else { "" };
     let mut source = String::from(
-        "import pf.Observe\nimport pf.Cursor as PlatformCursor\nimport pf.PageSize\nimport pf.CollectionPage\n\nCredentials :: [].{\n",
+        "import pf.Observe\nimport pf.Tx\nimport pf.InteractiveContext\nimport pf.Credential\nimport pf.Cursor as PlatformCursor\nimport pf.PageSize\nimport pf.CollectionPage\n\nCredentials :: [].{\n",
     );
     let mut seen = BTreeSet::new();
     for name in names {
@@ -62,6 +63,7 @@ fn render<'a>(
             "Cursor",
             "Page",
             "Ref",
+            "Issued",
         ] {
             body = body.replace(&format!("{ty}(family)"), &format!("{ty}_{name}"));
         }
@@ -84,6 +86,7 @@ fn render<'a>(
             "decode_summary",
             "read_list",
             "read_inspect",
+            "issue_fixed",
         ] {
             body = body.replace(function, &format!("day2_{function}_{name}"));
         }
@@ -98,8 +101,15 @@ fn render<'a>(
         } else {
             format!("|request| {prefix}day2_read_inspect_{name}(\"{name}\", request.lineage)")
         };
+        let issue = if provisional {
+            "|_context, _request| Tx.host_reject(\"credential_issuance_unavailable\")".into()
+        } else {
+            format!(
+                "|context, request| {prefix}day2_issue_fixed_{name}(\"{name}\", context, request.label)"
+            )
+        };
         source.push_str(&format!(
-            "    {name} : {{ list : ListRequest_{name} -> Observe(Try(Page_{name}, ListFailure_{name})), inspect : {{ lineage : Ref_{name} }} -> Observe(Try(Inspection_{name}, InspectionFailure_{name})), start : Cursor_{name}, cursor_from_str : Str -> Try(Cursor_{name}, [InvalidCursor]), ref_from_str : Str -> Try(Ref_{name}, [InvalidRef]) }}\n    {name} = {{\n        list: {list},\n        inspect: {inspect},\n        start: {{ value: PlatformCursor.start }},\n        cursor_from_str: |raw| day2_cursor_from_str_{name}(\"{name}\", raw),\n        ref_from_str: |raw| day2_ref_from_str_{name}(\"{name}\", raw),\n    }}\n\n"
+            "    {name} : {{ issue : InteractiveContext, {{ label : Credential.Label }} -> Tx(Issued_{name}), list : ListRequest_{name} -> Observe(Try(Page_{name}, ListFailure_{name})), inspect : {{ lineage : Ref_{name} }} -> Observe(Try(Inspection_{name}, InspectionFailure_{name})), start : Cursor_{name}, cursor_from_str : Str -> Try(Cursor_{name}, [InvalidCursor]), ref_from_str : Str -> Try(Ref_{name}, [InvalidRef]) }}\n    {name} = {{\n        issue: {issue},\n        list: {list},\n        inspect: {inspect},\n        start: {{ value: PlatformCursor.start }},\n        cursor_from_str: |raw| day2_cursor_from_str_{name}(\"{name}\", raw),\n        ref_from_str: |raw| day2_ref_from_str_{name}(\"{name}\", raw),\n    }}\n\n"
         ));
     }
     source.push_str("}\n");
@@ -113,6 +123,35 @@ import pf.CollectionPage
 
 # Generated safe metadata. Decoding proves shape, never visibility or authority.
 Credentials :: [].{
+    Issued(family) :: { lineage : Ref(family), version : VersionRef(family), label : Str, expires_at : I64 }.{
+        lineage : Issued(family) -> Ref(family)
+        lineage = |issued| issued.lineage
+
+        version : Issued(family) -> VersionRef(family)
+        version = |issued| issued.version
+
+        label : Issued(family) -> Str
+        label = |issued| issued.label
+
+        expires_at : Issued(family) -> I64
+        expires_at = |issued| issued.expires_at
+    }
+
+    $PREFIX$issue_fixed : Str, InteractiveContext, Credential.Label -> Tx(Issued(family))
+    $PREFIX$issue_fixed = |registration, context, label| Tx.$PREFIX$capability(
+        "credential_issue", "credential.issue.v1",
+        Json.to_str({ registration, invocation: context.invocation_id(), label: label.to_str() }),
+    ).and_then(|raw| {
+        parsed : Try({ lineage : Str, version : Str, label : Str, expires_at : I64 }, _)
+        parsed = Json.parse(raw)
+        Tx.$PREFIX$from_host(parsed.map_err(|_| "invalid_credential_issuance")).and_then(|wire| {
+            decoded = ref_from_str(registration, wire.lineage).map_err(|_| "invalid_credential_issuance")
+            Tx.$PREFIX$from_host(decoded).map(|lineage| {
+                { lineage, version: { lineage, id: wire.version }, label: wire.label, expires_at: wire.expires_at }
+            })
+        })
+    })
+
     Ref(family) :: { value : Str, witness : List(family) }.{
         to_str : Ref(family) -> Str
         to_str = |reference| reference.value

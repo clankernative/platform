@@ -1,0 +1,3 @@
+CreatePersonalTypes :: [].{
+	Input := { label : Str }
+}

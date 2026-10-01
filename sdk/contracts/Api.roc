@@ -53,7 +53,14 @@ Api :: [].{
 
 	ExecutionMetadata : { internal : Bool, model : Str, id_field : Str, version_field : Str, effects : List(Effect) }
 
-	CredentialAccess : { enabled : Bool, local_reads : List(Str), metadata_reads : List(Str) }
+	CredentialAccess : {
+		enabled : Bool,
+		local_reads : List(Str),
+		metadata_reads : List(Str),
+		issues : List(Str),
+		issue_label : Str,
+		interactive : Bool,
+	}
 
 	Metadata : {
 		intent : Entry,
@@ -240,10 +247,24 @@ Api :: [].{
 			CredentialMetadataAccess -> CommandDef(input, output, input_fields, output_fields)
 		credentials = |definition, access| {
 			..definition,
-			credential_access: {
-				..definition.credential_access,
-				metadata_reads: definition.credential_access.metadata_reads.append(access.family()),
+			credential_access: if access.action() == "issue" {
+				{ ..definition.credential_access, issues: definition.credential_access.issues.append(access.family()) }
+			} else {
+				{
+					..definition.credential_access,
+					metadata_reads: definition.credential_access.metadata_reads.append(access.family()),
+				}
 			},
+		}
+
+		# Explicit canonical input binding for the label displayed by the shell.
+		# Computed or mutable substitutes are refused at credential commit.
+		credential_label :
+			CommandDef(input, output, input_fields, output_fields),
+			Path(input, Str) -> CommandDef(input, output, input_fields, output_fields)
+		credential_label = |definition, path| {
+			..definition,
+			credential_access: { ..definition.credential_access, issue_label: path.name() },
 		}
 
 		export_version : CommandDef(input, output, input_fields, output_fields) -> U64
@@ -324,9 +345,13 @@ Api :: [].{
 			CredentialMetadataAccess -> QueryDef(input, output, input_fields, output_fields)
 		credentials = |definition, access| {
 			..definition,
-			credential_access: {
-				..definition.credential_access,
-				metadata_reads: definition.credential_access.metadata_reads.append(access.family()),
+			credential_access: if access.action() == "issue" {
+				{ ..definition.credential_access, issues: definition.credential_access.issues.append(access.family()) }
+			} else {
+				{
+					..definition.credential_access,
+					metadata_reads: definition.credential_access.metadata_reads.append(access.family()),
+				}
 			},
 		}
 
@@ -375,7 +400,14 @@ Api :: [].{
 			handler: |context, input| Handler.program(handler, context, input, |body| body),
 			contract: definition.contract,
 			execution: definition.execution,
-			credential_access: { enabled: Bool.False, local_reads: [], metadata_reads: [] },
+			credential_access: {
+				enabled: Bool.False,
+				local_reads: [],
+				metadata_reads: [],
+				issues: [],
+				issue_label: "",
+				interactive: handler.requires_interaction(),
+			},
 			verification: definition.verification,
 			required_all_rows: [],
 			export_version: 0,
@@ -397,7 +429,14 @@ Api :: [].{
 			handler: |context, input| Handler.program(handler, context, input, |body| body.as_transaction()),
 			contract: definition.contract,
 			verification: definition.verification,
-			credential_access: { enabled: Bool.False, local_reads: [], metadata_reads: [] },
+			credential_access: {
+				enabled: Bool.False,
+				local_reads: [],
+				metadata_reads: [],
+				issues: [],
+				issue_label: "",
+				interactive: handler.requires_interaction(),
+			},
 			required_all_rows: [],
 			export_version: 0,
 		}

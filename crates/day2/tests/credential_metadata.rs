@@ -602,5 +602,62 @@ expect (Credentials.clients.ref_from_str)("cr1_personal_abc") == Err(InvalidRef)
         !success && diagnostics.contains("define"),
         "restricted access factory probe: {diagnostics}"
     );
+    let issuance_base = r#"app [step] { pf: platform "../sdk/main.roc" }
+import pf.InteractiveContext
+import pf.Context
+import pf.Credential
+import pf.Tx
+import pf.Handler
+import Credentials
+step : Str -> Str
+step = |raw| raw
+"#;
+    let positive = format!(
+        "{issuance_base}\nprobe : InteractiveContext, Credential.Label -> Tx(Credentials.Issued_clients)\nprobe = |context, label| (Credentials.clients.issue)(context, {{ label: label }})\nhandler = Handler.interactive(|context, label| probe(context, label))\n"
+    );
+    for directory in [&stage, &restricted] {
+        fs::write(directory.join("app/main.roc"), &positive)?;
+        let (success, diagnostics) = run(directory, "check")?;
+        ensure!(success, "native interactive issuance: {diagnostics}");
+    }
+    for (probe, expected) in [
+        (
+            "probe : Context, Credential.Label -> Tx(Credentials.Issued_clients)\nprobe = |context, label| (Credentials.clients.issue)(context, { label: label })",
+            "Context",
+        ),
+        (
+            "probe = |context, label| (Credentials.personal.issue)(context, { label, subject: \"someone-else\" })",
+            "subject",
+        ),
+        (
+            "probe : Credentials.Issued_clients -> Str\nprobe = |issued| issued.token",
+            "token",
+        ),
+        (
+            "probe : Credentials.Issued_clients -> Credentials.Ref_personal\nprobe = |issued| issued.lineage()",
+            "Ref_personal",
+        ),
+    ] {
+        fs::write(
+            stage.join("app/main.roc"),
+            format!("{issuance_base}\n{probe}\n"),
+        )?;
+        let (success, diagnostics) = run(&stage, "check")?;
+        ensure!(
+            !success && diagnostics.contains(expected),
+            "negative issuance fixture: {diagnostics}"
+        );
+    }
+    let constructor =
+        format!("{issuance_base}\nprobe = |context| InteractiveContext.from_context(context)\n");
+    fs::write(stage.join("app/main.roc"), &constructor)?;
+    fs::write(restricted.join("app/main.roc"), &constructor)?;
+    let (success, diagnostics) = run(&stage, "check")?;
+    ensure!(success, "normal interactive constructor: {diagnostics}");
+    let (success, diagnostics) = run(&restricted, "check")?;
+    ensure!(
+        !success && diagnostics.contains("from_context"),
+        "sealed interactive constructor: {diagnostics}"
+    );
     Ok(())
 }

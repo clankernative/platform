@@ -37,6 +37,12 @@ pub struct CredentialAccess {
     pub local_reads: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub metadata_reads: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub issues: Vec<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub issue_label: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub interactive: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -443,6 +449,75 @@ impl Definition {
 
 impl CredentialAccess {
     fn validate(&self, artifact: &Artifact, operation: &str) -> Result<()> {
+        ensure!(
+            self.issues.len() <= 1,
+            "one credential issuance per management command"
+        );
+        let registered = artifact
+            .operations
+            .iter()
+            .find(|op| op.name == operation)
+            .context("credential operation missing")?;
+        if self.interactive {
+            ensure!(
+                registered.kind == "command",
+                "interactive queries are unsupported"
+            );
+            ensure!(
+                self.issues.len() == 1,
+                "interactive v1 requires one declared credential issue action"
+            );
+        }
+        if let Some(id) = self.issues.first() {
+            ensure!(
+                self.interactive,
+                "credential issuance requires an interactive handler"
+            );
+            let family = artifact
+                .credential_declarations
+                .iter()
+                .find(|family| family.id.as_str() == id)
+                .context("undeclared credential issue family")?;
+            ensure!(
+                matches!(
+                    family.profile,
+                    day2_capabilities::credentials::ManagedProfile::Client
+                        | day2_capabilities::credentials::ManagedProfile::Personal
+                ) && matches!(
+                    family.grant,
+                    day2_capabilities::credentials::GrantMode::Fixed
+                ),
+                "only fixed client and personal issuance is supported"
+            );
+            ensure!(
+                matches!(
+                    artifact.schema.inputs[&registered.input_type]
+                        .fields
+                        .get(&self.issue_label),
+                    Some(Kind::Text)
+                ),
+                "credential label requires a canonical text input path"
+            );
+            let effects = &artifact
+                .app_contract
+                .as_ref()
+                .context("credential operation contract missing")?
+                .operations[operation]
+                .execution
+                .effects;
+            ensure!(
+                effects.iter().all(|effect| matches!(
+                    effect.kind.as_str(),
+                    "create" | "update" | "update_created" | "soft_delete"
+                )),
+                "interactive issuance permits only local product writes"
+            );
+        } else {
+            ensure!(
+                self.issue_label.is_empty(),
+                "credential label requires issue access"
+            );
+        }
         ensure!(
             self.metadata_reads.len() <= 64,
             "credential metadata access budget"

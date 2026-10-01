@@ -45,6 +45,19 @@ pub(crate) fn check_step(artifact: &Artifact, operation: &str, step: Step<'_>) -
     else {
         return Ok(());
     };
+    if access.interactive {
+        ensure!(
+            matches!(
+                step,
+                Step::Database(_)
+                    | Step::CredentialIssue
+                    | Step::Boundary(
+                        crate::protocol::Boundary::Decide | crate::protocol::Boundary::Commit
+                    )
+            ),
+            "interactive credential commands permit only local transactions"
+        );
+    }
     if !access.enabled {
         return Ok(());
     }
@@ -105,7 +118,9 @@ fn derive_inner(
         "credential operation requires explicit bounded authority: {name}"
     );
     ensure!(
-        definition.credential_access.metadata_reads.is_empty(),
+        definition.credential_access.metadata_reads.is_empty()
+            && definition.credential_access.issues.is_empty()
+            && !definition.credential_access.interactive,
         "credential metadata cannot be a credential ingress root: {name}"
     );
     ensure!(
@@ -204,6 +219,7 @@ mod tests {
             enabled: true,
             local_reads: vec!["reports".into()],
             metadata_reads: Vec::new(),
+            ..Default::default()
         };
         fn read(model: &str) -> Step<'_> {
             Step::Database(Database::Select {

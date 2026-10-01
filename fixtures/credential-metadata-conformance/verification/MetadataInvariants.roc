@@ -5,8 +5,15 @@ MetadataInvariants :: [].{
 	entries =
 		Api.invariant(
 			Data.entries,
-			"Metadata queries never write application rows.",
+			"Product registrations contain only public credential references.",
 			Data.snapshot,
-			|state| state.entries.is_empty(),
+			|
+				state,
+			|
+				state
+					.entries
+					.all(
+						|row| row.value.note.starts_with("cr1_clients_") or row.value.note.starts_with("cr1_personal_"),
+					),
 		)
 }

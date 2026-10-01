@@ -53,6 +53,7 @@ fn runtime(directory: &Path) -> Result<Runtime> {
             "supplyco/test/app",
         )),
         app_calls: None,
+        credentials: None,
         instance_path: directory.join("instance.json"),
         app: "app".into(),
         db,
