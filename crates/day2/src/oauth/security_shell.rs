@@ -196,8 +196,9 @@ impl SecurityShell {
         }))
     }
 
-    /// Attach the same installation's host-selected credential runtimes before
-    /// serving. Both flows share this isolated edge and fresh OIDC verifier.
+    /// Attach the same installation's selected local credential adapter before
+    /// serving. OAuth retains its separately configured private transport; both
+    /// flows share this isolated edge and fresh OIDC verifier.
     pub(crate) fn with_credentials(
         mut self: Arc<Self>,
         registry: Arc<credentials::Registry>,
@@ -965,21 +966,43 @@ mod tests {
     use crate::oauth::approval_registry::{
         ApprovalKeyMaterial, ApprovalKeyProvider, ApprovalKeyPurpose, ApprovalKeyRef,
     };
-    use std::{collections::BTreeMap, sync::atomic::{AtomicUsize, Ordering}};
+    use std::{
+        collections::BTreeMap,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
 
     struct NoOAuth;
     impl shell_transport::ShellApprovals for NoOAuth {
-        fn pending(&self, _: &str, _: &iap::Verified, _: &HeaderMap, _: i64) -> Result<Option<shell_transport::ApprovalView>> {
+        fn pending(
+            &self,
+            _: &str,
+            _: &iap::Verified,
+            _: &HeaderMap,
+            _: i64,
+        ) -> Result<Option<shell_transport::ApprovalView>> {
             Ok(None)
         }
 
-        fn confirm(&self, _: &shell_transport::ApprovalView, _: &iap::Verified, _: &HeaderMap, _: external::FreshExternalApproval, _: i64) -> Result<bool> {
+        fn confirm(
+            &self,
+            _: &shell_transport::ApprovalView,
+            _: &iap::Verified,
+            _: &HeaderMap,
+            _: external::FreshExternalApproval,
+            _: i64,
+        ) -> Result<bool> {
             anyhow::bail!("OAuth confirmation unavailable in credential fixture")
         }
     }
 
     impl shell_transport::ApprovalSigner for NoOAuth {
-        fn attest(&self, _: &shell_transport::ApprovalView, _: Digest, _: i64, _: i64) -> Result<external::FreshExternalApproval> {
+        fn attest(
+            &self,
+            _: &shell_transport::ApprovalView,
+            _: Digest,
+            _: i64,
+            _: i64,
+        ) -> Result<external::FreshExternalApproval> {
             anyhow::bail!("OAuth signer unavailable in credential fixture")
         }
     }
@@ -1213,6 +1236,28 @@ mod tests {
             );
             let before = world.keys.0.load(Ordering::SeqCst);
             let confirm = credential_body(&session, "confirm");
+            let token = cookie_token(&headers)?.context("credential cookie missing")?;
+            let session_key = Digest::new(token.as_bytes());
+            shell
+                .sessions
+                .lock()
+                .unwrap()
+                .get_mut(session_key.as_str())
+                .unwrap()
+                .preview = Digest::of(&"changed-credential-preview")?;
+            assert!(
+                shell
+                    .dispatch(&Method::POST, &path, None, &headers, &confirm, world.now)
+                    .is_err()
+            );
+            assert_eq!(world.keys.0.load(Ordering::SeqCst), before);
+            shell
+                .sessions
+                .lock()
+                .unwrap()
+                .get_mut(session_key.as_str())
+                .unwrap()
+                .preview = session.preview.clone();
             let mut wrong = headers.clone();
             wrong.insert(header::ORIGIN, "https://app.example.com".parse()?);
             assert!(

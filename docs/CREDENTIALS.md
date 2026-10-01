@@ -271,8 +271,11 @@ cannot be replayed from a receipt. Acknowledgement closes delivery and clears th
 shell session, returning only to an admitted app page. Every shell response uses
 no-store, restrictive CSP, no-referrer and frame isolation headers.
 
-The host explicitly attaches an installation-selected credential registry to
-`SecurityShell::from_instance` before serving. App runtime loading does not install
+The host explicitly attaches an installation-selected local credential registry with
+`SecurityShell::with_credentials` before serving. It shares the isolated edge and
+fresh-authentication state with the separately configured private OAuth transport.
+Credential transport across separate shell/app hosts and live installation
+qualification remain later steps. App runtime loading does not install
 a credential authority or simulated browser proof. Readiness snapshots must be
 supplied by admitted installation adapters, expire within five minutes, and bind
 the exact family, management policy, security origin, key versions, issuer subjects,
