@@ -16,6 +16,7 @@ import ops.Linux
 import ops.Provision
 import ops.Simulation
 import ops.ProviderConformance
+import ops.OAuthRegistration
 import ops.Release
 import ops.SecretRetirement
 
@@ -57,6 +58,7 @@ run! = |args| match args {
 	)
 	["replay-control", trace] => Simulation.replay!(trace, call!)
 	["provider-conformance"] => ProviderConformance.run!(call!)
+	["oauth-registration"] => OAuthRegistration.run!(call!)
 	["release-step", snapshot] => Release.run(snapshot)
 	["secret-retirement-step", snapshot] => SecretRetirement.run(snapshot)
 	["cli"] => Verify.cli!(call!)
