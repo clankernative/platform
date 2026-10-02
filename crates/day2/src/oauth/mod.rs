@@ -3,6 +3,7 @@ pub mod account;
 pub(crate) mod admission;
 pub(crate) mod approval_keys;
 pub(crate) mod approval_registry;
+pub(crate) mod clients;
 pub mod connect;
 pub mod custody;
 pub mod declaration;

@@ -226,6 +226,7 @@ pub fn take(instance_path: &Path, app: &str, output: &Path) -> Result<Manifest> 
             identity: instance.identity,
             security_shell: None,
             oauth_shell_transport: None,
+            oauth_clients: None,
             apps: BTreeMap::from([(app.into(), binding)]),
         },
     };

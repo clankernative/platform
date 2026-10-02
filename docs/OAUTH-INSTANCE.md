@@ -47,6 +47,46 @@ select the hostname, and the published edge contract supplies
 `security_shell.origin` and `security_shell.iap_audience`. The platform has no
 company hostname default. See [the GKE installation security origin](../deploy/gke/README.md#installation-security-origin).
 
+### OAuth clients
+
+The optional `oauth_clients` field uses the shared
+`day2-capabilities::oauth::ClientCatalog` contract. Client IDs are public metadata;
+`credential` names an existing exact-version entry in `control.secrets`:
+
+```json
+"oauth_clients": {
+  "version": 1,
+  "reauthentication": {
+    "client_id": "123-reauth.apps.googleusercontent.com",
+    "credential": "google_reauth_client"
+  },
+  "registrations": {
+    "calendar_registration": {
+      "client": {
+        "client_id": "123-calendar.apps.googleusercontent.com",
+        "credential": "google_calendar_client"
+      },
+      "canary_subject": "112233445566",
+      "canary_tenant": "example.com"
+    }
+  }
+}
+```
+
+These are example identifiers, not created clients. Registration keys equal the
+selected `OutboundConnectionBinding.registration.id`; app declarations remain
+in admitted artifacts. The reauthentication and Calendar roles require distinct
+clients and physical secret versions. Neither client credential may reuse a
+custody or attestation key version. Missing providers, unknown fields, inline
+secrets and aliases such as `latest` are refused. An absent client catalog remains
+compatible with installations without this runtime composition; it cannot start
+the GKE OAuth shell.
+
+No URL or scope is stored in this client catalog. The shell's selected edge
+derives the reauthentication callback. Admitted app requirements, reviewed
+profiles, full binding namespaces and independent shell evidence derive provider
+callbacks. Company domains stay in the instance's edge configuration.
+
 ## Callback and current approval lookup
 
 The host derives the callback namespace from the complete selected namespace,
@@ -139,7 +179,12 @@ reads its clock again after key acquisition. No network operation runs inside
 the SQLite settlement transaction.
 
 `SecurityShell::from_gke_instance` composes `RemoteApprovals`, the selected shell
-edge, keyless IAP workload signer and Google reauthentication adapter. `ArtifactShellSigner` obtains only the
+edge, keyless IAP workload signer and Google reauthentication adapter. Its client
+comes from `oauth_clients.reauthentication`; every code exchange reads that
+exact Secret Manager version through the explicit GKE token source. No raw
+client secret is supplied as a constructor argument or retained between
+exchanges. Token exchange disables proxies, redirects and automatic retries,
+bounds the response and refuses duplicate JSON fields. `ArtifactShellSigner` obtains only the
 selected attestation key; its GCP key provider excludes custody key roles. The
 constructor returns the signer handle for later selection replacement. The
 shell has no app database registry or filesystem mounts. App hosts retain their
@@ -168,7 +213,7 @@ is reserved even when no receiver is selected.
 
 The ordinary `day2-serve` entry point still refuses nonempty OAuth selections.
 The native Google composition is available, but its live fact source, canary
-callback and renewal path still need to be wired into the qualified launcher.
+workload and renewal path still need to be wired into the qualified launcher.
 Missing provider code or readiness cannot
 be enabled through an instance boolean, a CLI flag or merely configuring keys.
 Static startup qualification still does not establish external readiness;
@@ -267,21 +312,44 @@ origin, reauthentication callback or a wildcard. Google requires exact matching.
 
 The native shell launcher must mount the canary callback, verify its own shell
 session, collect the three distinct authorizations, run the pinned recipe and
-publish its native receipt into that host's registry. Callback mounting and
-renewal integration remain runtime work. The real HTTP fixtures exercise the
+publish its native receipt into that host's registry. The native
+`SecurityShell::from_gke_with_registration` constructor now composes those routes
+from one admitted instance snapshot, live shell evidence, the pinned recipe
+runner and a native `GoogleReadiness` registry. The launcher supplies that live
+evidence; desired JSON cannot provide it.
+
+Only the explicitly selected canary IAP subject may open
+`/_day2/oauth/qualification/<registration ID>`. Its tenant must equal the shell's
+verified installation tenant. The page shows the exact callback, scopes, client
+and secret-version reference and the desired registration pin; those setup
+values do not assert readiness. A same-origin CSRF-protected POST starts three
+distinct Google authorizations. The digest-derived provider callback accepts
+only the selected route, one-use state, selected human and five-minute shell
+cookie. Query data and forms cannot choose a client, credential, verifier or
+target. Raw codes and tokens never appear in the page or response.
+
+The final callback runs `ops/OAuthRegistration.roc` once outside the routing
+lock. A failed or lost exchange requires a new campaign. Selection replacement
+clears browser state and retires the local receipts; a campaign finishing after
+retirement cannot publish. Successful completion publishes only to the supplied
+native host registry and clears the cookie. A shell process's receipt is not
+automatically evidence for a separate app-host process; trusted live readiness
+distribution still needs composition. Renewal and workload deployment remain
+runtime work. The real HTTP fixtures exercise the
 same native campaign and Roc recipe but cannot qualify a Google client.
 
 ## Remaining runtime work
 
-The next runtime slice must wire the published provider/registration campaign
-into connect attempt creation and the separately qualified shell launcher and
-workload. The real Google web clients and their exact secret versions remain
-required; the native exact-version loader is available. The edge contract now
+The next runtime slice must supply independently live shell/custody/account facts,
+start the separately qualified shell workload, distribute registration readiness
+to app hosts and wire connect attempt creation. The real Google web clients and
+their exact secret versions remain required; their instance contract and native
+exact-version loader are available. The edge contract now
 publishes a dedicated keyless signer and supports backend access; these plans
 must still be applied and their live workload/secret policies qualified.
 App-host IAM separately needs its custody and verification keys.
 
 This layer does not start a shell workload, create a Google web client, establish
 live installation readiness or enable OAuth on an installation. Live registration
-qualification requires the real client and mounted canary callback. Calendar
+qualification requires the real client and deployed canary callback. Calendar
 business dispatch and the connect/use/refresh canary remain follow-up work.

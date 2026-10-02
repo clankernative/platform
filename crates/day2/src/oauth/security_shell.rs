@@ -3,7 +3,10 @@
 
 #[cfg(test)]
 use super::approval_registry;
-use super::{admission, approval_keys, connect, external, profiles, shell_oidc, shell_transport};
+use super::{
+    admission, approval_keys, connect, external, profiles, registration, shell_oidc,
+    shell_transport,
+};
 use crate::{artifact::Instance, iap, managed_credentials::browser as credentials};
 use crate::{managed_credentials::crypto::KeyLease, store::open, web_security};
 use anyhow::{Context, Result, ensure};
@@ -119,6 +122,13 @@ pub(crate) struct SecurityShell {
     authenticator: Arc<dyn FreshAuthenticator>,
     sessions: Mutex<HashMap<String, ShellSession>>,
     credentials: Option<Arc<credentials::Registry>>,
+    canaries: Option<Arc<registration::shell::Canaries>>,
+}
+
+pub(crate) struct RegistrationShell {
+    pub shell: Arc<SecurityShell>,
+    pub signer: Arc<admission::ArtifactShellSigner>,
+    pub canaries: Arc<registration::shell::Canaries>,
 }
 
 impl SecurityShell {
@@ -128,10 +138,44 @@ impl SecurityShell {
     pub(crate) fn from_gke_instance(
         instance_path: &Path,
         catalog: &admission::ReviewedCatalog,
-        client_id: String,
-        client_secret: String,
     ) -> Result<(Arc<Self>, Arc<admission::ArtifactShellSigner>)> {
         let selected = admission::QualifiedConnections::from_instance_file(instance_path, catalog)?;
+        Self::from_selected(selected)
+    }
+
+    /// One admitted snapshot supplies both the ordinary approval shell and its
+    /// Google qualification routes. The launcher still supplies independently
+    /// qualified shell evidence and its native registration receipt registry.
+    pub(crate) fn from_gke_with_registration(
+        instance_path: &Path,
+        shell: &profiles::SecurityShellEvidence,
+        runner: &Path,
+        readiness: Arc<registration::GoogleReadiness>,
+    ) -> Result<RegistrationShell> {
+        let selected = admission::QualifiedConnections::from_instance_file(
+            instance_path,
+            &super::google::catalog()?,
+        )?;
+        let targets = selected.google_targets(shell)?;
+        let origin = selected.instance().security_edge()?.1.origin.clone();
+        let canaries = Arc::new(registration::shell::Canaries::new(
+            &origin,
+            targets,
+            runner,
+            Arc::new(approval_keys::GkeMetadataAccessTokens::new()?),
+            readiness,
+        )?);
+        let (shell, signer) = Self::from_selected(selected)?;
+        Ok(RegistrationShell {
+            shell: shell.with_registration(canaries.clone())?,
+            signer,
+            canaries,
+        })
+    }
+
+    fn from_selected(
+        selected: admission::QualifiedConnections,
+    ) -> Result<(Arc<Self>, Arc<admission::ArtifactShellSigner>)> {
         let instance = selected.instance().clone();
         let bearers = Arc::new(super::workload::IapWorkload::from_gke_instance(&instance)?);
         let signer = Arc::new(admission::ArtifactShellSigner::with_gcp(
@@ -140,12 +184,16 @@ impl SecurityShell {
         )?);
         let (identity, edge) = instance.security_edge()?;
         let origin = format!("{}/", edge.origin);
+        let (client_id, exchange) = super::clients::reauthentication(
+            &instance,
+            Arc::new(approval_keys::GkeMetadataAccessTokens::new()?),
+        )?;
         let authenticator = Arc::new(shell_oidc::GoogleFreshAuthenticator::new(
             &edge.iap_audience,
             &identity.hosted_domain,
             &origin,
             client_id,
-            client_secret,
+            exchange,
         )?);
         let approvals = Arc::new(shell_transport::RemoteApprovals::from_instance(
             &instance, bearers,
@@ -193,6 +241,7 @@ impl SecurityShell {
             authenticator,
             sessions: Mutex::new(HashMap::new()),
             credentials: None,
+            canaries: None,
         }))
     }
 
@@ -220,6 +269,22 @@ impl SecurityShell {
         });
         axum::serve(listener, router).await?;
         Ok(())
+    }
+
+    /// The native launcher supplies live shell-qualified targets and a private
+    /// receipt registry. Instance metadata alone cannot construct those proofs.
+    pub(crate) fn with_registration(
+        mut self: Arc<Self>,
+        canaries: Arc<registration::shell::Canaries>,
+    ) -> Result<Arc<Self>> {
+        ensure!(
+            canaries.origin() == self.origin,
+            "registration shell origin mismatch"
+        );
+        Arc::get_mut(&mut self)
+            .context("security shell already shared")?
+            .canaries = Some(canaries);
+        Ok(self)
     }
 
     async fn handle(self: Arc<Self>, request: Request) -> Response {
@@ -266,6 +331,13 @@ impl SecurityShell {
             "invalid security shell request"
         );
         let identity = self.authenticator.identify(headers, at)?;
+        if registration::shell::reserved(path) {
+            return self
+                .canaries
+                .as_ref()
+                .context("registration campaign unavailable")?
+                .dispatch(method, path, query, headers, body, &identity, at);
+        }
         if path == shell_oidc::GoogleOidc::callback_path() {
             ensure!(
                 *method == Method::GET && body.is_empty(),
