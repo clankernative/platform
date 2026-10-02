@@ -28,7 +28,15 @@ ui/pages/                           # HTML templates
 ui/app.css                          # presentation resources
 assets/                             # admitted images
 model-identities.json                # committed identity history
+.clanker/                            # optional design-tool data; never captured
 ```
+
+The build captures only app sources. Version-control metadata (`.git`,
+`.gitignore`, `.gitattributes`), Markdown outside `ui/` and `assets/`, and a
+root-level `.clanker/` directory are skipped. `.clanker/` holds design-tool data,
+such as Clanker Studio fake-data scenes and canvas layout, that is committed with
+the app but never compiled, served or admitted. Any other unrecognized file,
+including a `.clanker/` below the app root, fails the build.
 
 Each operation has its own folder. The main module keeps its handler, contract,
 typed example and verification together; an adjacent `SubmitReportTypes.roc`
