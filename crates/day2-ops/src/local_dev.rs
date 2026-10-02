@@ -150,7 +150,19 @@ fn private(path: &Path) -> Result<()> {
 
 fn atomic(path: &Path, value: &impl Serialize) -> Result<()> {
     let mut file = tempfile::NamedTempFile::new_in(path.parent().context("local file parent")?)?;
+    file.as_file()
+        .set_permissions(fs::Permissions::from_mode(0o600))?;
     file.write_all(&serde_json::to_vec_pretty(value)?)?;
+    file.as_file().sync_all()?;
+    file.persist(path)?;
+    Ok(())
+}
+
+fn atomic_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
+    let mut file = tempfile::NamedTempFile::new_in(path.parent().context("local file parent")?)?;
+    file.as_file()
+        .set_permissions(fs::Permissions::from_mode(0o600))?;
+    file.write_all(bytes)?;
     file.as_file().sync_all()?;
     file.persist(path)?;
     Ok(())
@@ -725,6 +737,29 @@ impl Session {
         Ok(info)
     }
 
+    fn contracts(&self, artifact_directory: &Path, artifact_id: &str) -> Value {
+        let path = self.directory.join("app-contracts.json");
+        let result = (|| -> Result<Value> {
+            if path.exists() || fs::symlink_metadata(&path).is_ok() {
+                fs::remove_file(&path).context("remove stale app contracts")?;
+            }
+            let bytes = day2::app_contracts::export_bytes(artifact_directory)?;
+            let document: Value = serde_json::from_slice(&bytes)?;
+            ensure!(
+                document["artifact"].as_str() == Some(artifact_id),
+                "exported app contract artifact differs from served artifact"
+            );
+            atomic_bytes(&path, &bytes).context("write app contracts")?;
+            let digest = day2::digest(&bytes);
+            Ok(json!({
+                "path":path,
+                "artifact":artifact_id,
+                "sha256":digest.strip_prefix("sha256:").unwrap_or(&digest),
+            }))
+        })();
+        result.unwrap_or_else(|error| json!({"error":format!("{error:#}"),"artifact":artifact_id}))
+    }
+
     fn ready(&self, info: Value) -> Result<()> {
         self.event("ready", json!({"origin":info["origin"],"artifact":info["artifact"],"instance":info["instance"]}))?;
         *self.status.lock().expect("status lock") = info.clone();
@@ -744,7 +779,7 @@ impl Session {
             .as_ref()
             .context("checked candidate required")?
             .clone();
-        let info = self.start(candidate.clone())?;
+        let mut info = self.start(candidate.clone())?;
         let current = Current {
             format: 1,
             source: self.options.source.clone().into(),
@@ -759,6 +794,8 @@ impl Session {
         self.active = self.candidate.take();
         self.checkpoint = None;
         self.campaign = None;
+        info["contracts"] =
+            self.contracts(candidate.artifact().directory(), candidate.artifact().id());
         self.ready(info)?;
         Ok(json!({}))
     }
@@ -985,12 +1022,14 @@ impl Session {
                 self.checked = false;
                 self.checkpoint = None;
                 if self.live.is_none() && !self.stopped.load(Ordering::SeqCst) {
-                    let info = self.start(
-                        self.active
-                            .as_ref()
-                            .context("previous local instance required")?
-                            .clone(),
-                    )?;
+                    let active = self
+                        .active
+                        .as_ref()
+                        .context("previous local instance required")?
+                        .clone();
+                    let mut info = self.start(active.clone())?;
+                    info["contracts"] =
+                        self.contracts(active.artifact().directory(), active.artifact().id());
                     self.ready(info)?;
                 }
                 Ok(json!({}))

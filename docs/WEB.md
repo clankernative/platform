@@ -435,7 +435,9 @@ and `viewTypes` is empty.
 
 Build the app through the normal workflow first. The build prints the selected
 artifact directory (`artifacts/<artifact-digest>`); pass that exact directory to
-the exporter. For example:
+the exporter. Native local-dev sessions also generate this same export as
+`app-contracts.json` in the session directory after every successfully served
+build; `--status` reports the file path, artifact digest and SHA-256. For example:
 
 ```console
 cargo run --locked -p xtask -- build /path/to/clanker-ui-gallery

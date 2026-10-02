@@ -4,6 +4,7 @@ pub mod admission;
 pub mod api_docs;
 mod api_examples;
 pub mod app_contract;
+pub mod app_contracts;
 pub mod app_inference;
 pub mod app_sources;
 pub mod artifact;
