@@ -124,6 +124,9 @@ pub struct ShellTransport {
 pub struct RuntimeCatalog {
     pub version: u32,
     pub shell: GcpShellSelection,
+    /// Bounds for the separate stateless, single-replica Linux shell launcher.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell_resources: Option<crate::runtime::Resources>,
     pub apps: BTreeMap<Name, RuntimeApp>,
 }
 
@@ -163,6 +166,9 @@ impl RuntimeCatalog {
             self.version == 1,
             "unsupported OAuth runtime catalog version"
         );
+        if let Some(resources) = &self.shell_resources {
+            resources.validate()?;
+        }
         ensure!(
             !self.apps.is_empty() && self.apps.len() <= 128,
             "OAuth runtime app budget"
@@ -262,6 +268,19 @@ mod runtime_tests {
         let value = json!({"version":1,"shell":{"project":"company-tools","backend_service":"shell-backend","url_map":"shell-map","https_proxy":"shell-proxy","forwarding_rule":"shell-https","kubernetes_service":"tools/security-shell"},
             "apps":{"workspace":{"service_account":"app@company-tools.iam.gserviceaccount.com","accounts":{"calendar":{"kind":"external_accounts","allowed_tenants":["example.com"],"allowed_subjects":["immutable-google-subject"]}}}}});
         serde_json::from_value::<RuntimeCatalog>(value.clone())?.validate()?;
+        let mut bounded = value.clone();
+        bounded["shell_resources"] = json!({"memory_mib":512,"cpu_millis":500,"process_limit":1024,
+            "process_limit_enforced_by":"pod","http_concurrency":4,"shutdown_seconds":30});
+        let selected: RuntimeCatalog = serde_json::from_value(bounded.clone())?;
+        selected.validate()?;
+        assert_eq!(serde_json::to_value(selected)?, bounded);
+        for field in ["ready", "replicas", "database", "command"] {
+            let mut wrong = bounded.clone();
+            wrong["shell_resources"][field] = json!(true);
+            assert!(serde_json::from_value::<RuntimeCatalog>(wrong).is_err());
+        }
+        bounded["shell_resources"]["http_concurrency"] = json!(33);
+        assert!(serde_json::from_value::<RuntimeCatalog>(bounded).is_err());
         for field in ["ready", "origin", "qualification", "receipt", "secret"] {
             let mut wrong = value.clone();
             wrong[field] = json!(true);

@@ -14,6 +14,7 @@ come from a separate private instance repository; start with the
 | [tenancy](stacks/tenancy/main.tf) | Retained SQLite storage and snapshot classes, admission policies for app namespaces (including the backup Job service account exception) |
 | [app-edge](stacks/app-edge/main.tf) | Per app: namespace, runtime service account, retained disk, quotas, Service, IAP BackendConfig, HTTPS redirect, managed certificate, static IP, Cloudflare DNS, Ingress, network policy, image repository, workload state bucket, GKE backup plan, off-cluster backup bucket with its object-create-only Workload Identity uploader, and the platform contract |
 | [security-shell-edge](stacks/security-shell-edge/main.tf) | Per installation: dedicated security namespace, shell service account, named secret access, IAP Service/backend, certificate, DNS, routing, network policy and a shell contract consumed by app deployments |
+| [security-shell](stacks/security-shell/main.tf) | Separate stateless shell Deployment and read-only instance ConfigMap, consuming the resolved installation edge and exact selected secret-container contract |
 | [day2-app](stacks/day2-app/main.tf) | Instance ConfigMap, one-replica StatefulSet and the hourly off-cluster backup CronJob |
 | [qualification-runner](stacks/qualification-runner/main.tf) | Optional x86_64 native Docker VM, off by default, private IP and IAP SSH |
 | [gitea-instance-ci](stacks/gitea-instance-ci/main.tf) | Optional plan-on-PR / apply-on-main CI for an instance repository on Gitea |
@@ -201,6 +202,45 @@ pool's actual PID bound; a declared value is not a substitute for checking it.
 Initialize, plan and apply `day2-app` with its separate backend. Confirm rollout,
 readiness, authenticated access, denial for an unauthorized account, app operation
 authority and rejection of unsigned direct requests. Retain this evidence privately.
+
+## Deploy the dedicated OAuth shell
+
+After resolving `security-shell-edge`, create the separate Google Web clients
+and store their credentials in exact Secret Manager versions. Keep the selected
+client IDs, provider references, company origin, resource selectors and
+`oauth_runtime.shell_resources` in the private instance repository; see
+[OAuth instance setup](../../docs/OAUTH-INSTANCE.md#dedicated-shell-launcher).
+Use `day2 oauth-setup INSTANCE` to derive the dependent bindings and exact Google
+callback URLs. Desired setup metadata cannot enable provider readiness.
+
+The shell edge's `runtime_secret_ids` must contain exactly the selected
+reauthentication and registration client-secret containers and shell attestation
+containers. It must exclude all app custody containers, even if selecting another
+version. Apply the updated edge contract before planning the workload; the new
+workload refuses an unresolved contract or a different declared secret set.
+
+Build `images/security-shell/Dockerfile` using the reviewed digest-pinned
+platform runtime image and a context containing only the selected admitted Linux
+`artifacts/` tree. Preserve its reviewed read-only file modes. The platform runtime
+now includes `day2-security-shell` and its pinned Roc workflow distribution.
+It has no shell script, package installation or application build hook.
+
+Initialize and plan `stacks/security-shell` with its own private GCS backend
+prefix, the dedicated edge namespace, digest-pinned shell image and
+`instance_json = file(...)` input from that same instance repository. The root
+consumes the existing edge's service account and selector; it creates no app PVC,
+credential mount, identity or alternative URL catalog. Use the actual qualified
+metadata-enabled node pool. The selected pod PID limit is a declaration until
+verified against that pool; native startup separately checks memory/CPU bounds.
+
+Before claiming live readiness, retain evidence for the exact deployed image,
+instance digest, admitted artifact set, node/cgroup bounds, service-account
+mapping, effective IAM and namespace/network isolation. Confirm readiness/drain,
+unsigned direct-request denial and authenticated routing. Process probes alone
+do not qualify a Google client; perform the signed live registration campaign
+from the selected canary account and observe the owning app's acknowledgement.
+No live shell deployment or Google qualification has been performed by these
+source and mocked-plan tests.
 
 ## Instance CI on Gitea
 

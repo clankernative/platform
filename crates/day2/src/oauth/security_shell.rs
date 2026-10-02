@@ -24,16 +24,40 @@ use day2_capabilities::{
 use maud::{DOCTYPE, html};
 use std::{
     collections::HashMap,
+    future::Future,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
-    time::{SystemTime, UNIX_EPOCH},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tokio::net::TcpListener;
+use tokio::{
+    net::TcpListener,
+    sync::{OwnedSemaphorePermit, Semaphore},
+};
 
 const COOKIE: &str = "__Host-day2_security_shell";
 const PREFIX: &str = "/oauth/approvals/";
 const SESSION_SECONDS: i64 = 300;
 const MAX_SESSIONS: usize = 1024;
+
+pub(crate) trait ShellGuard: Send + Sync {
+    fn check(&self, now: i64) -> Result<()>;
+}
+
+struct NoAppFacts;
+
+impl admission::OutboundReadiness for NoAppFacts {
+    fn current(
+        &self,
+        _: &day2_capabilities::oauth::OutboundConnectionBinding,
+        _: &day2_capabilities::oauth::ConnectionSlotKey,
+        _: i64,
+    ) -> Result<Option<profiles::OutboundInstanceEvidence>> {
+        Ok(None)
+    }
+}
 
 /// The host registry resolves these current, admitted values on each request.
 /// Request fields never select a requirement, key, registration or account.
@@ -123,6 +147,7 @@ pub(crate) struct SecurityShell {
     sessions: Mutex<HashMap<String, ShellSession>>,
     credentials: Option<Arc<credentials::Registry>>,
     canaries: Option<Arc<registration::shell::Canaries>>,
+    guard: Option<Arc<dyn ShellGuard>>,
 }
 
 pub(crate) struct RegistrationShell {
@@ -134,17 +159,96 @@ pub(crate) struct RegistrationShell {
 struct RegistrationPublication {
     signer: Arc<admission::ArtifactShellSigner>,
     approvals: Arc<shell_transport::RemoteApprovals>,
+    guard: Option<Arc<dyn ShellGuard>>,
 }
 
 impl registration::shell::ReceiptPublisher for RegistrationPublication {
     fn publish(&self, receipt: &registration::Receipt, headers: &HeaderMap, _: i64) -> Result<()> {
         let now = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())?;
+        if let Some(guard) = &self.guard {
+            guard.check(now)?;
+        }
         self.signer
             .publish_registration(receipt, self.approvals.as_ref(), headers, now)
     }
 }
 
 impl SecurityShell {
+    /// The ordinary GKE launcher uses one immutable admitted selection, empty
+    /// receipts and the dedicated shell identity. Target pins are desired
+    /// metadata; native edge guards run before authenticated dispatch and again
+    /// after provider probes, before publication.
+    pub(crate) fn from_gke_runtime(
+        instance_path: &Path,
+        runner: &Path,
+    ) -> Result<RegistrationShell> {
+        let selected = admission::QualifiedConnections::from_instance_file(
+            instance_path,
+            &super::google::catalog()?,
+        )?;
+        let instance = selected.instance();
+        super::clients::shell_secret_containers(instance)?;
+        instance
+            .oauth_runtime
+            .as_ref()
+            .context("OAuth runtime missing")?
+            .shell_resources
+            .as_ref()
+            .context("security shell resources missing")?;
+        let account = &instance
+            .oauth_shell_transport
+            .as_ref()
+            .context("OAuth shell transport missing")?
+            .service_account;
+        let tokens = Arc::new(approval_keys::GkeMetadataAccessTokens::selected(account)?);
+        let facts = Arc::new(admission::live::ShellFacts::from_gke(
+            instance,
+            tokens.clone(),
+        )?);
+        let targets = selected.google_targets(facts.selection())?;
+        ensure!(
+            !targets.is_empty(),
+            "security shell has no selected registrations"
+        );
+        for target in &targets {
+            let expected = target.registration_evidence()?;
+            let mut current = false;
+            for binding in instance
+                .apps
+                .values()
+                .flat_map(|app| app.oauth_connections.values())
+            {
+                if target.publication_matches(
+                    &binding.registration.id,
+                    &admission::binding_namespace(binding)?,
+                ) && binding.registration == expected.registration
+                {
+                    current = true;
+                }
+            }
+            ensure!(current, "security shell registration selection changed");
+        }
+        let origin = instance.security_edge()?.1.origin.clone();
+        let (mut shell, signer, approvals) = Self::from_selected(selected)?;
+        Arc::get_mut(&mut shell)
+            .context("security shell already shared")?
+            .guard = Some(facts.clone());
+        let readiness = Arc::new(registration::GoogleReadiness::new(Arc::new(NoAppFacts)));
+        let canaries = Arc::new(
+            registration::shell::Canaries::new(&origin, targets, runner, tokens, readiness)?
+                .with_publication(Arc::new(RegistrationPublication {
+                    signer: signer.clone(),
+                    approvals,
+                    guard: Some(facts),
+                })),
+        );
+        Ok(RegistrationShell {
+            shell: shell.with_registration(canaries.clone())?,
+            signer,
+            canaries,
+        })
+    }
+
     /// Compose the shell from the exact instance-selected artifacts and keys.
     /// This is an explicit GKE host entry point, not an application route or a
     /// readiness assertion. The shell has no app storage paths or custody keys.
@@ -172,19 +276,22 @@ impl SecurityShell {
         )?;
         let targets = selected.google_targets(shell)?;
         let origin = selected.instance().security_edge()?.1.origin.clone();
+        let tokens = Arc::new(approval_keys::GkeMetadataAccessTokens::selected(
+            &selected
+                .instance()
+                .oauth_shell_transport
+                .as_ref()
+                .context("OAuth shell transport missing")?
+                .service_account,
+        )?);
         let (shell, signer, approvals) = Self::from_selected(selected)?;
         let canaries = Arc::new(
-            registration::shell::Canaries::new(
-                &origin,
-                targets,
-                runner,
-                Arc::new(approval_keys::GkeMetadataAccessTokens::new()?),
-                readiness,
-            )?
-            .with_publication(Arc::new(RegistrationPublication {
-                signer: signer.clone(),
-                approvals,
-            })),
+            registration::shell::Canaries::new(&origin, targets, runner, tokens, readiness)?
+                .with_publication(Arc::new(RegistrationPublication {
+                    signer: signer.clone(),
+                    approvals,
+                    guard: None,
+                })),
         );
         Ok(RegistrationShell {
             shell: shell.with_registration(canaries.clone())?,
@@ -201,17 +308,21 @@ impl SecurityShell {
         Arc<shell_transport::RemoteApprovals>,
     )> {
         let instance = selected.instance().clone();
+        let tokens = Arc::new(approval_keys::GkeMetadataAccessTokens::selected(
+            &instance
+                .oauth_shell_transport
+                .as_ref()
+                .context("OAuth shell transport missing")?
+                .service_account,
+        )?);
         let bearers = Arc::new(super::workload::IapWorkload::from_gke_instance(&instance)?);
         let signer = Arc::new(admission::ArtifactShellSigner::with_gcp(
             selected,
-            Arc::new(approval_keys::GkeMetadataAccessTokens::new()?),
+            tokens.clone(),
         )?);
         let (identity, edge) = instance.security_edge()?;
         let origin = format!("{}/", edge.origin);
-        let (client_id, exchange) = super::clients::reauthentication(
-            &instance,
-            Arc::new(approval_keys::GkeMetadataAccessTokens::new()?),
-        )?;
+        let (client_id, exchange) = super::clients::reauthentication(&instance, tokens)?;
         let authenticator = Arc::new(shell_oidc::GoogleFreshAuthenticator::new(
             &edge.iap_audience,
             &identity.hosted_domain,
@@ -267,6 +378,7 @@ impl SecurityShell {
             sessions: Mutex::new(HashMap::new()),
             credentials: None,
             canaries: None,
+            guard: None,
         }))
     }
 
@@ -288,11 +400,60 @@ impl SecurityShell {
     }
 
     pub(crate) async fn serve(self: Arc<Self>, listener: TcpListener) -> Result<()> {
+        self.serve_bounded(
+            listener,
+            32,
+            Arc::new(AtomicBool::new(true)),
+            std::future::pending(),
+        )
+        .await
+    }
+
+    pub(crate) async fn serve_bounded(
+        self: Arc<Self>,
+        listener: TcpListener,
+        concurrency: usize,
+        admission: Arc<AtomicBool>,
+        shutdown: impl Future<Output = ()> + Send + 'static,
+    ) -> Result<()> {
+        ensure!(
+            (1..=32).contains(&concurrency),
+            "invalid security shell concurrency"
+        );
+        let capacity = Arc::new(Semaphore::new(concurrency));
+        let router_capacity = capacity.clone();
         let router = Router::new().fallback(move |request: Request| {
             let shell = self.clone();
-            async move { shell.handle(request).await }
+            let admission = admission.clone();
+            let capacity = router_capacity.clone();
+            async move {
+                let path = request.uri().path();
+                if matches!(path, "/health/live" | "/health/ready") {
+                    let status =
+                        if request.method() != Method::GET || request.uri().query().is_some() {
+                            StatusCode::BAD_REQUEST
+                        } else if path == "/health/ready" && !admission.load(Ordering::Acquire) {
+                            StatusCode::SERVICE_UNAVAILABLE
+                        } else {
+                            StatusCode::OK
+                        };
+                    return protected(status.into_response());
+                }
+                if !admission.load(Ordering::Acquire) {
+                    return protected(StatusCode::SERVICE_UNAVAILABLE.into_response());
+                }
+                let Ok(permit) = capacity.try_acquire_owned() else {
+                    return protected(StatusCode::SERVICE_UNAVAILABLE.into_response());
+                };
+                shell.handle(request, permit, admission).await
+            }
         });
-        axum::serve(listener, router).await?;
+        axum::serve(listener, router)
+            .with_graceful_shutdown(shutdown)
+            .await?;
+        // Detached HTTP requests may have an unabortable native operation. Its
+        // permit remains held through completion, including browser disconnect.
+        let _drained = capacity.acquire_many(concurrency.try_into()?).await?;
         Ok(())
     }
 
@@ -312,11 +473,17 @@ impl SecurityShell {
         Ok(self)
     }
 
-    async fn handle(self: Arc<Self>, request: Request) -> Response {
+    async fn handle(
+        self: Arc<Self>,
+        request: Request,
+        permit: OwnedSemaphorePermit,
+        admission: Arc<AtomicBool>,
+    ) -> Response {
         let (parts, body) = request.into_parts();
-        let body = match to_bytes(body, 4096).await {
-            Ok(body) => body,
-            Err(_) => return protected(StatusCode::PAYLOAD_TOO_LARGE.into_response()),
+        let body = match tokio::time::timeout(Duration::from_secs(3), to_bytes(body, 4096)).await {
+            Ok(Ok(body)) => body,
+            Ok(Err(_)) => return protected(StatusCode::PAYLOAD_TOO_LARGE.into_response()),
+            Err(_) => return protected(StatusCode::REQUEST_TIMEOUT.into_response()),
         };
         let at = match SystemTime::now().duration_since(UNIX_EPOCH) {
             Ok(time) => time.as_secs() as i64,
@@ -327,6 +494,13 @@ impl SecurityShell {
         let query = parts.uri.query().map(str::to_owned);
         let headers = parts.headers;
         let response = tokio::task::spawn_blocking(move || {
+            // A disconnected browser cannot release capacity while its native
+            // provider operation is still running and cannot be cancelled.
+            let _permit = permit;
+            ensure!(
+                admission.load(Ordering::Acquire),
+                "security shell is draining"
+            );
             self.dispatch(&method, &path, query.as_deref(), &headers, &body, at)
         })
         .await;
@@ -356,6 +530,9 @@ impl SecurityShell {
             "invalid security shell request"
         );
         let identity = self.authenticator.identify(headers, at)?;
+        if let Some(guard) = &self.guard {
+            guard.check(at)?;
+        }
         if registration::shell::reserved(path) {
             return self
                 .canaries
@@ -1145,6 +1322,168 @@ mod tests {
     }
 
     struct BrowserKeys(AtomicUsize);
+    struct HoldingGuard {
+        calls: AtomicUsize,
+        entered: tokio::sync::Notify,
+        released: Mutex<bool>,
+        release: std::sync::Condvar,
+    }
+
+    impl ShellGuard for HoldingGuard {
+        fn check(&self, _: i64) -> Result<()> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.entered.notify_one();
+            let mut released = self.released.lock().unwrap();
+            while !*released {
+                let (next, timeout) = self
+                    .release
+                    .wait_timeout(released, Duration::from_secs(10))
+                    .unwrap();
+                ensure!(!timeout.timed_out(), "fixture native dispatch deadline");
+                released = next;
+            }
+            Ok(())
+        }
+    }
+
+    fn isolated_shell() -> Result<Arc<SecurityShell>> {
+        let approvals = Arc::new(NoOAuth);
+        SecurityShell::with_transport(
+            "https://security.example.com/".into(),
+            approvals.clone(),
+            approvals,
+            Arc::new(BrowserIdentity { fresh: false }),
+        )
+    }
+
+    #[tokio::test]
+    async fn guarded_http_keeps_capacity_through_disconnect_and_drains_native_dispatch()
+    -> Result<()> {
+        let guard = Arc::new(HoldingGuard {
+            calls: AtomicUsize::new(0),
+            entered: tokio::sync::Notify::new(),
+            released: Mutex::new(false),
+            release: std::sync::Condvar::new(),
+        });
+        let mut shell = isolated_shell()?;
+        Arc::get_mut(&mut shell).unwrap().guard = Some(guard.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let endpoint = format!("http://{}", listener.local_addr()?);
+        let admission = Arc::new(AtomicBool::new(true));
+        let (stop, shutdown) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(shell.serve_bounded(listener, 1, admission.clone(), async {
+            let _ = shutdown.await;
+        }));
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
+        assert_eq!(
+            client
+                .get(format!("{endpoint}/oauth/approvals/attempt"))
+                .header(header::HOST, "other.example.com")
+                .send()
+                .await?
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(guard.calls.load(Ordering::SeqCst), 0);
+        let browser = tokio::spawn({
+            let client = client.clone();
+            let endpoint = endpoint.clone();
+            async move {
+                client
+                    .get(format!("{endpoint}/oauth/approvals/attempt"))
+                    .header(header::HOST, "security.example.com")
+                    .send()
+                    .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(3), guard.entered.notified()).await?;
+        browser.abort();
+        assert_eq!(
+            client
+                .get(format!("{endpoint}/oauth/approvals/attempt"))
+                .header(header::HOST, "security.example.com")
+                .send()
+                .await?
+                .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        let health = client
+            .get(format!("{endpoint}/health/ready"))
+            .send()
+            .await?;
+        assert_eq!(health.status(), StatusCode::OK);
+        assert_eq!(health.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(guard.calls.load(Ordering::SeqCst), 1);
+        admission.store(false, Ordering::Release);
+        assert_eq!(
+            client
+                .get(format!("{endpoint}/health/ready"))
+                .send()
+                .await?
+                .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            client
+                .get(format!("{endpoint}/oauth/approvals/attempt"))
+                .header(header::HOST, "security.example.com")
+                .send()
+                .await?
+                .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        let _ = stop.send(());
+        tokio::task::yield_now().await;
+        assert!(!server.is_finished());
+        *guard.released.lock().unwrap() = true;
+        guard.release.notify_all();
+        tokio::time::timeout(Duration::from_secs(3), server).await???;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn shell_http_bounds_body_size_and_body_wait_before_native_dispatch() -> Result<()> {
+        let shell = isolated_shell()?;
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let (stop, shutdown) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(shell.serve_bounded(
+            listener,
+            1,
+            Arc::new(AtomicBool::new(true)),
+            async {
+                let _ = shutdown.await;
+            },
+        ));
+        let client = reqwest::Client::builder().no_proxy().build()?;
+        assert_eq!(
+            client
+                .post(format!("http://{address}/oauth/approvals/attempt"))
+                .header(header::HOST, "security.example.com")
+                .body(vec![b'x'; 4097])
+                .send()
+                .await?
+                .status(),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+        let response = tokio::task::spawn_blocking(move || -> Result<String> {
+            use std::io::{Read, Write};
+            let mut socket = std::net::TcpStream::connect(address)?;
+            socket.set_read_timeout(Some(Duration::from_secs(5)))?;
+            socket.write_all(b"POST /oauth/approvals/attempt HTTP/1.1\r\nHost: security.example.com\r\nContent-Length: 10\r\nConnection: close\r\n\r\n")?;
+            let mut response = String::new();
+            socket.read_to_string(&mut response)?;
+            Ok(response)
+        }).await??;
+        assert!(response.starts_with("HTTP/1.1 408"), "{response}");
+        let _ = stop.send(());
+        tokio::time::timeout(Duration::from_secs(3), server).await???;
+        Ok(())
+    }
+
     impl ApprovalKeyProvider for BrowserKeys {
         fn load(
             &self,

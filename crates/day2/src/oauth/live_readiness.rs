@@ -201,6 +201,57 @@ impl Lease {
     }
 }
 
+/// The shell has no app database or custody capability. Desired target pins are
+/// assembled at startup; authenticated routes and publication require this
+/// independent native edge lease before using them.
+pub(crate) struct ShellFacts {
+    selection: profiles::SecurityShellEvidence,
+    edge: GcpEdge,
+    lease: Mutex<Option<Lease>>,
+}
+
+impl ShellFacts {
+    pub(crate) fn from_gke(
+        instance: &Instance,
+        tokens: Arc<dyn AccessTokenSource>,
+    ) -> Result<Self> {
+        Ok(Self {
+            selection: shell_selection(instance)?,
+            edge: GcpEdge::new(instance, tokens)?,
+            lease: Mutex::new(None),
+        })
+    }
+
+    pub(crate) fn selection(&self) -> &profiles::SecurityShellEvidence {
+        &self.selection
+    }
+}
+
+impl crate::oauth::security_shell::ShellGuard for ShellFacts {
+    fn check(&self, now: i64) -> Result<()> {
+        let mut lease = self
+            .lease
+            .lock()
+            .map_err(|_| anyhow::anyhow!("OAuth shell facts unavailable"))?;
+        if lease
+            .as_ref()
+            .is_some_and(|lease| lease.fresh(now, LEASE_SECONDS))
+        {
+            return Ok(());
+        }
+        *lease = None;
+        let start = Instant::now();
+        self.edge.check()?;
+        let current = Lease::new(now, start, LEASE_SECONDS)?;
+        ensure!(
+            current.fresh(now, LEASE_SECONDS),
+            "OAuth shell facts expired during acquisition"
+        );
+        *lease = Some(current);
+        Ok(())
+    }
+}
+
 struct Human {
     subject: String,
     lease: Lease,
@@ -812,7 +863,7 @@ fn object_keys(value: &Value, allowed: &[&str]) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::oauth::approval_registry::{ApprovalKeyMaterial, ApprovalKeyRef};
     use serde_json::json;
@@ -865,7 +916,7 @@ mod tests {
         }
     }
 
-    fn selected() -> Result<QualifiedConnections> {
+    pub(crate) fn selected() -> Result<QualifiedConnections> {
         let (mut selected, _) = super::super::tests::publication_fixture()?;
         selected.instance.oauth_shell_transport = Some(day2_capabilities::oauth::ShellTransport {
             service_account: "shell@company-tools.iam.gserviceaccount.com".into(),
@@ -1246,6 +1297,26 @@ mod tests {
         // Removing the native lease cannot be repaired by a durable principal row.
         facts.state.lock().unwrap().humans.clear();
         assert!(facts.current(&binding, &slot, 100)?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn shell_edge_leases_start_empty_expire_and_failed_renewal_cannot_retain_authority()
+    -> Result<()> {
+        use crate::oauth::security_shell::ShellGuard;
+        let selected = selected()?;
+        let mut facts = ShellFacts::from_gke(selected.instance(), Arc::new(Tokens))?;
+        assert!(facts.lease.lock().unwrap().is_none());
+        let wire = successful_wire(&mut facts.edge)?;
+        facts.check(100)?;
+        facts.check(159)?;
+        assert_eq!(wire.worker.join().unwrap().len(), 10);
+        facts.lease.lock().unwrap().as_mut().unwrap().deadline = Instant::now();
+        let unavailable = Wire::new(vec![(403, json!({"error":"retired"}))])?;
+        facts.edge.endpoint = unavailable.endpoint.clone();
+        assert!(facts.check(159).is_err());
+        assert!(facts.lease.lock().unwrap().is_none());
+        unavailable.worker.join().unwrap();
         Ok(())
     }
 

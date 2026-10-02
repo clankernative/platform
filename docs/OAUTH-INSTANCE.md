@@ -325,6 +325,84 @@ The native source supplies expected registration metadata only behind the
 existing `GoogleReadiness` gate: a signed fresh live canary publication remains
 required independently.
 
+### Dedicated shell launcher
+
+`day2-security-shell INSTANCE` starts a separate stateless Linux listener on
+port 8080. Its only argument is the instance path. The selected
+`oauth_runtime.shell_resources` supplies the existing shared resource bounds:
+
+```json
+"shell_resources": {
+  "memory_mib": 512,
+  "cpu_millis": 500,
+  "process_limit": 1024,
+  "process_limit_enforced_by": "pod",
+  "http_concurrency": 4,
+  "shutdown_seconds": 30
+}
+```
+
+These are deployment bounds, not readiness evidence. The optional field keeps
+older app-host catalogs compatible; the dedicated launcher requires it. The
+launcher checks the private cgroup-v2 limits, regular instance and addressed
+artifact paths, read-only installation and workflow mounts, admitted artifacts,
+exact selected registration pins and the pinned native Roc recipe runner before
+binding HTTP. It opens no app database and creates no app runtime or principal
+session. A writable mount anywhere beneath the installation, including an app
+state directory, prevents startup. The GKE pod PID bound is still an operator
+declaration until separately observed on the actual node pool.
+
+The shell selects `oauth_shell_transport.service_account` for every metadata
+token request, including edge reads, keyless IAM signing, client-secret reads
+and attestation-key reads. Each token acquisition first checks the actual
+metadata service-account email. App custody keys are absent from the shell key
+provider. Its client catalog must exactly cover the admitted selected registrations.
+The client/attestation selections must also be disjoint from custody
+**secret containers**, even at different versions: this reviewed edge uses
+unconditional secret-level grants, which cover every version in that container.
+Version-specific IAM conditions are not part of this profile. See [Google's Secret Manager access control](https://docs.cloud.google.com/secret-manager/docs/access-control).
+
+Desired target pins are assembled at startup with an empty native registration
+registry. After IAP human verification, every OAuth dispatch requires the
+independent native edge guard. Its empty-at-start lease checks the same selected
+Compute resources and actual TLS peer as the app source and expires after at
+most 60 seconds by both clocks. Failed renewal discards the old lease. The final
+canary callback checks that guard again after provider probes and before signing
+and publishing the receipt. The shell registry supplies no app readiness facts;
+the destination app independently verifies publication and live facts.
+
+`/health/live` and `/health/ready` are bounded, unauthenticated process probes with
+no-store responses. Readiness reports completed static startup admission and
+whether the listener accepts work; it does not report Google registration,
+secret availability or installation qualification. Keeping probes separate from
+external checks lets an unqualified installation start its listener and run the
+explicit authenticated qualification flow. See [Kubernetes probe semantics](https://kubernetes.io/docs/concepts/workloads/pods/probes/).
+
+HTTP admission rejects excess concurrency, bounds bodies to 4096 bytes and body
+waits to three seconds. Capacity remains held through an unabortable native
+operation even after browser disconnect. SIGTERM stops admission first, makes
+readiness fail, and drains HTTP plus outstanding native dispatch within the
+selected grace. Restart loses shell sessions, canary attempts and local receipts;
+it cannot restore readiness. No automatic campaign retry or renewal is added.
+
+The [security-shell deployment root](../deploy/gke/stacks/security-shell/main.tf)
+consumes the existing installation edge contract. It checks the exact origin,
+numeric IAP audience, dedicated workload identity, namespace/service and declared
+secret-container grants against the instance. The root rejects missing edge
+resolution, extra secret grants, custody-container sharing and floating images.
+It creates one Deployment with Recreate strategy, non-root execution, a read-only
+root, no host privileges, no mounted service-account token and no app PVC or
+secret volume. Only the regular read-only instance and bounded temporary scratch
+are mounted. The image contains the selected admitted Linux artifacts and pinned
+workflow distribution; callbacks and company domains continue to come from the
+instance's existing edges.
+
+The edge root adds a custom role containing only the five Compute read methods
+used by the native guard. This planned grant and the published secret list are
+desired policy, not an audit of all effective inherited IAM grants. Actual
+workload, frontend, namespace isolation and least-privilege policy qualification
+remain necessary before claiming installation readiness.
+
 The same reserved channel also accepts native registration publications. A
 publication is signed with the exact selected shell-attestation key and carries
 the source canary's qualification time and original five-minute expiry. The app
@@ -480,8 +558,9 @@ same native campaign and Roc recipe but cannot qualify a Google client.
 
 ## Remaining runtime work
 
-The next runtime slice must start the separately qualified shell workload,
-qualify its frontend/workload/secret policies and wire connect attempt creation.
+The dedicated shell launcher and deployment root are now available. The next
+runtime slice must qualify the actual deployed frontend/workload/secret policies
+and wire connect attempt creation.
 Independent app facts and registration publication are now composed in the
 ordinary qualified edge launcher. The real Google web clients and
 their exact secret versions remain required; their instance contract and native
@@ -490,7 +569,8 @@ publishes a dedicated keyless signer and supports backend access; these plans
 must still be applied and their live workload/secret policies qualified.
 App-host IAM separately needs its custody and verification keys.
 
-This layer does not start a shell workload, create a Google web client, establish
+This layer provides the guarded shell entrypoint; it does not deploy a live workload,
+create a Google web client, establish
 complete installation readiness or enable OAuth on an installation. Live registration
 qualification requires the real client and deployed canary callback. Calendar
 business dispatch and the connect/use/refresh canary remain follow-up work.
