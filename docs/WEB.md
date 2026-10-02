@@ -414,19 +414,24 @@ recovery of accepted work. Upgrade requires draining accepted invocations and
 pending invocations, then explicit migration and activation. Company authority is
 still required for execution; loading a legacy artifact grants no permission.
 
-## Page Data Contract Export
+## App Contract Export
 
-`xtask page-contracts` projects the admitted route, query and template contracts
-from a built artifact as bounded, deterministic JSON. It reads the artifact only;
-it does not start the worker or access a database, provider or network. The
-export uses schema version 1 and includes each page's route/template/live
-metadata and query operation name, typed input schema and defaults, output schema with explicit
-`kind` tags, field descriptions, and the admitted typed query examples. Ref and
-RowVersion retain their scalar type tags; collection wrappers expose their item
-shape. Artifact JSON is bounded to 16 MiB, the worker to 128 MiB, checked compiler
-types to 16 MiB, and the completed export to 4 MiB. Unknown artifact/schema
-shapes and invalid examples fail the export. Roc enum output shapes are not part
-of the current codec; unsupported unions are rejected during build/admission.
+`xtask app-contracts` projects the admitted query and route contracts from a
+built artifact as bounded, deterministic JSON. Queries are first-class: one
+query appears once even when multiple routes use it, with every route name
+listed. Each route includes its own path, template, live flag, query defaults,
+and exact template `contextKey`; shared platform-supplied template values such
+as `company` are listed separately. Query schemas use explicit `kind` tags,
+field descriptions, and the admitted typed examples. Ref and RowVersion retain
+their scalar type tags; collection wrappers expose their item shape. The export
+reads the artifact only; it does not start the worker or access a database,
+provider or network. Artifact JSON is bounded to 16 MiB, the worker to 128 MiB,
+checked compiler types to 16 MiB, and the completed export to 4 MiB. Unknown
+artifact/schema shapes and invalid examples fail the export. Roc enum output
+shapes are not part of the current codec; unsupported unions are rejected during
+build/admission. View type names are included only when they can be derived
+honestly from the artifact's checked type metadata; otherwise they are `null`
+and `viewTypes` is empty.
 
 Build the app through the normal workflow first. The build prints the selected
 artifact directory (`artifacts/<artifact-digest>`); pass that exact directory to
@@ -434,17 +439,17 @@ the exporter. For example:
 
 ```console
 cargo run --locked -p xtask -- build /path/to/clanker-ui-gallery
-cargo run --locked -p xtask -- page-contracts artifacts/ARTIFACT_DIGEST
-cargo run --locked -p xtask -- page-contracts artifacts/ARTIFACT_DIGEST --output page-contracts.json
+cargo run --locked -p xtask -- app-contracts artifacts/ARTIFACT_DIGEST
+cargo run --locked -p xtask -- app-contracts artifacts/ARTIFACT_DIGEST --output app-contracts.json
 ```
 
 The build runs the pinned Roc compiler and required application verification;
-the export itself only reads the artifact and emits JSON. `outputSchema` and
-`example.output` are the query contract. The export also includes
-`templateContextSchema` and `example.templateContext`, which wrap that
-result under the route name and add `company.name`, matching the template
-context shape. Its company value is the illustrative `Example Company` because
-actual company branding is supplied independently of the app artifact.
+the export itself only reads the artifact and emits JSON. Each query's
+`inputSchema` and `outputSchema` are the read contract consumed by the design
+tool. Route `contextKey` names the template variable under which that
+query result is bound (for example, `home` for `{{ home.title }}`). Shared
+context schemas list platform values such as the independently supplied
+`company` branding.
 
 ## Redirect Routes
 

@@ -17,31 +17,52 @@ const MAX_EXPORT_BYTES: usize = 4 * 1024 * 1024;
 #[serde(rename_all = "camelCase")]
 struct Export<'a> {
     schema_version: u32,
+    kind: &'static str,
     app: &'a str,
-    routes: Vec<RouteExport>,
+    artifact: String,
+    queries: BTreeMap<String, QueryExport>,
+    view_types: BTreeMap<String, ViewTypeExport>,
+    routes: BTreeMap<String, RouteExport>,
+    template_context: TemplateContextExport,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct QueryExport {
+    title: String,
+    purpose: String,
+    input_schema: Value,
+    output_schema: Value,
+    view_type: Option<String>,
+    example: Example,
+    routes: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct ViewTypeExport {
+    queries: Vec<String>,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RouteExport {
-    name: String,
-    operation: String,
     path: String,
     template: String,
+    query: String,
     live: bool,
-    input_schema: Value,
     query_defaults: Map<String, Value>,
-    output_schema: Value,
-    template_context_schema: Value,
-    example: Example,
+    context_key: String,
 }
 
 #[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
+struct TemplateContextExport {
+    shared: BTreeMap<String, Value>,
+}
+
+#[derive(Serialize)]
 struct Example {
     input: Value,
     output: Value,
-    template_context: Value,
 }
 
 pub fn export_file(artifact_directory: &Path, output: Option<&Path>) -> Result<()> {
@@ -64,7 +85,7 @@ pub fn export_file(artifact_directory: &Path, output: Option<&Path>) -> Result<(
         let metadata = fs::symlink_metadata(path)?;
         ensure!(
             metadata.file_type().is_file() && metadata.len() <= maximum,
-            "page contract {label} file type or byte budget invalid"
+            "app contract {label} file type or byte budget invalid"
         );
     }
     if let Some(path) = output {
@@ -77,7 +98,7 @@ pub fn export_file(artifact_directory: &Path, output: Option<&Path>) -> Result<(
             .join(path.file_name().context("output filename required")?);
         ensure!(
             !destination.starts_with(&artifact_directory),
-            "page contract output must not overwrite artifact contents"
+            "app contract output must not overwrite artifact contents"
         );
         if let Ok(metadata) = fs::symlink_metadata(&destination) {
             ensure!(
@@ -87,11 +108,11 @@ pub fn export_file(artifact_directory: &Path, output: Option<&Path>) -> Result<(
         }
     }
     let artifact = LoadedArtifact::load(&artifact_directory)?;
-    let document = export(&artifact.contract())?;
+    let document = export(artifact.id(), artifact.contract())?;
     let bytes = serde_json::to_vec_pretty(&document)?;
     ensure!(
         bytes.len() <= MAX_EXPORT_BYTES,
-        "page contract export byte budget exceeded"
+        "app contract export byte budget exceeded"
     );
     if let Some(path) = output {
         fs::write(path, bytes)?;
@@ -101,35 +122,76 @@ pub fn export_file(artifact_directory: &Path, output: Option<&Path>) -> Result<(
     Ok(())
 }
 
-fn export(artifact: &Artifact) -> Result<Export<'_>> {
+fn export<'a>(artifact_id: &str, artifact: &'a Artifact) -> Result<Export<'a>> {
     ensure!(
         artifact.format >= 7,
-        "page contracts require explicit admitted routes"
+        "app contracts require explicit admitted routes"
     );
     let definition = artifact
         .app_contract
         .as_ref()
-        .context("page contract export requires the admitted app contract")?;
-    let routes = day2::routing::Catalog::from_artifact(artifact)?;
-    let mut pages = artifact.pages.iter().collect::<Vec<_>>();
-    pages.sort_by(|left, right| left.name.cmp(&right.name));
-    let mut exported = Vec::with_capacity(pages.len());
-    for page in pages {
-        exported.push(export_page(artifact, definition, &routes, page)?);
+        .context("app contract export requires the admitted app contract")?;
+    let route_catalog = day2::routing::Catalog::from_artifact(artifact)?;
+    let mut queries = BTreeMap::<String, QueryExport>::new();
+    let mut routes = BTreeMap::new();
+    for page in &artifact.pages {
+        let route = export_route(page, &route_catalog)?;
+        let query = export_query(artifact, definition, page)?;
+        if let Some(existing) = queries.get_mut(&page.operation) {
+            ensure!(
+                existing.input_schema == query.input_schema
+                    && existing.output_schema == query.output_schema
+                    && existing.example.input == query.example.input
+                    && existing.example.output == query.example.output
+                    && existing.title == query.title
+                    && existing.purpose == query.purpose,
+                "routes sharing query {} have inconsistent contracts",
+                page.operation
+            );
+            existing.routes.push(page.name.clone());
+        } else {
+            queries.insert(page.operation.clone(), query);
+        }
+        routes.insert(page.name.clone(), route);
+    }
+    for query in queries.values_mut() {
+        query.routes.sort();
     }
     Ok(Export {
         schema_version: 1,
+        kind: "clanker-app-contracts",
         app: &artifact.namespace,
-        routes: exported,
+        artifact: artifact_id.to_owned(),
+        queries,
+        view_types: BTreeMap::new(),
+        routes,
+        template_context: TemplateContextExport {
+            shared: BTreeMap::from([("company".into(), company_schema())]),
+        },
     })
 }
 
-fn export_page(
+fn export_route(page: &Page, routes: &day2::routing::Catalog) -> Result<RouteExport> {
+    let route = routes.route(&page.name)?;
+    ensure!(
+        route.path == page.path,
+        "compiled route path differs from admitted page"
+    );
+    Ok(RouteExport {
+        path: page.path.clone(),
+        template: format!("ui/{}", page.template),
+        query: page.operation.clone(),
+        live: page.live,
+        query_defaults: route.defaults.clone(),
+        context_key: page.name.clone(),
+    })
+}
+
+fn export_query(
     artifact: &Artifact,
     definition: &day2::app_contract::Definition,
-    routes: &day2::routing::Catalog,
     page: &Page,
-) -> Result<RouteExport> {
+) -> Result<QueryExport> {
     let operation = artifact
         .operations
         .iter()
@@ -139,86 +201,61 @@ fn export_page(
         .schema
         .inputs
         .get(&operation.input_type)
-        .context("page query input schema missing")?;
+        .context("query input schema missing")?;
     let output = artifact
         .outputs
         .get(&operation.output_type)
-        .context("page query output schema missing")?;
+        .context("query output schema missing")?;
     let contract = definition
         .operations
         .get(&operation.name)
-        .with_context(|| format!("page query contract missing: {}", operation.name))?;
+        .with_context(|| format!("query contract missing: {}", operation.name))?;
     ensure!(
         contract.intent.target.input_type == operation.input_type
             && contract.intent.target.output_type == operation.output_type,
-        "page query contract handles differ from admitted operation"
+        "query contract handles differ from admitted operation"
     );
     ensure!(
         !contract.request_example.is_empty() && !contract.response_example.is_empty(),
-        "page query requires typed input and output examples"
+        "query contract requires typed input and output examples"
     );
-    let example_input: Value = serde_json::from_str(&contract.request_example)
-        .context("invalid page query example input")?;
-    let example_output: Value = serde_json::from_str(&contract.response_example)
-        .context("invalid page query example output")?;
+    let example_input: Value =
+        serde_json::from_str(&contract.request_example).context("invalid query example input")?;
+    let example_output: Value =
+        serde_json::from_str(&contract.response_example).context("invalid query example output")?;
     input
         .validate_input(&example_input)
-        .context("page query example input does not match its contract")?;
+        .context("query example input does not match its contract")?;
     output
         .shape
         .validate_value(&example_output)
-        .context("page query example output does not match its contract")?;
+        .context("query example output does not match its contract")?;
     let mut input_schema = record_schema(input)?;
     day2::api_docs::annotate(&mut input_schema, &contract.intent.inputs)?;
     let mut output_schema = day2::operation_catalog::output_schema(&output.shape);
     day2::api_docs::annotate(&mut output_schema, &contract.intent.outputs)?;
     add_output_kinds(&mut output_schema, &output.shape)?;
-    let template_context_schema = template_context_schema(&page.name, output_schema.clone());
-    let mut context_fields = Map::new();
-    context_fields.insert(page.name.clone(), example_output.clone());
-    context_fields.insert("company".into(), json!({"name":"Example Company"}));
-    let route = routes.route(&page.name)?;
-    ensure!(
-        route.path == page.path,
-        "compiled route path differs from admitted page"
-    );
-    Ok(RouteExport {
-        name: page.name.clone(),
-        operation: page.operation.clone(),
-        path: page.path.clone(),
-        template: format!("ui/{}", page.template),
-        live: page.live,
+    Ok(QueryExport {
+        title: contract.intent.title.clone(),
+        purpose: contract.intent.usage.purpose.clone(),
         input_schema,
-        query_defaults: route.defaults.clone(),
         output_schema,
-        template_context_schema,
+        view_type: None,
         example: Example {
             input: example_input,
             output: example_output,
-            template_context: Value::Object(context_fields),
         },
+        routes: vec![page.name.clone()],
     })
 }
 
-fn template_context_schema(page_name: &str, output_schema: Value) -> Value {
-    let mut properties = Map::new();
-    properties.insert(page_name.to_owned(), output_schema);
-    properties.insert(
-        "company".into(),
-        json!({
-            "kind":"record",
-            "type":"object",
-            "required":["name"],
-            "additionalProperties":false,
-            "properties":{"name":{"kind":"string","type":"string","description":"Instance branding; supplied outside the app artifact."}}
-        }),
-    );
+fn company_schema() -> Value {
     json!({
         "kind":"record",
         "type":"object",
-        "required":[page_name,"company"],
+        "required":["name"],
         "additionalProperties":false,
-        "properties":properties
+        "properties":{"name":{"kind":"string","type":"string","description":"Instance branding; supplied outside the app artifact."}}
     })
 }
 
@@ -471,18 +508,32 @@ mod tests {
                 output_type: "Output".into(),
             }],
             properties: Vec::new(),
-            pages: vec![Page {
-                name: "home".into(),
-                title: "Home".into(),
-                operation: "gallery.list".into(),
-                defaults: r#"{"limit":1}"#.into(),
-                path: "/".into(),
-                template: "pages/home.html".into(),
-                input_type: "Input".into(),
-                output_type: "Output".into(),
-                live: true,
-                live_refresh_ms: 0,
-            }],
+            pages: vec![
+                Page {
+                    name: "home".into(),
+                    title: "Home".into(),
+                    operation: "gallery.list".into(),
+                    defaults: r#"{"limit":1}"#.into(),
+                    path: "/".into(),
+                    template: "pages/home.html".into(),
+                    input_type: "Input".into(),
+                    output_type: "Output".into(),
+                    live: true,
+                    live_refresh_ms: 0,
+                },
+                Page {
+                    name: "featured".into(),
+                    title: "Featured".into(),
+                    operation: "gallery.list".into(),
+                    defaults: r#"{"limit":2}"#.into(),
+                    path: "/featured".into(),
+                    template: "pages/featured.html".into(),
+                    input_type: "Input".into(),
+                    output_type: "Output".into(),
+                    live: false,
+                    live_refresh_ms: 0,
+                },
+            ],
             schedules: Vec::new(),
             ingress: Vec::new(),
             redirects: Vec::new(),
@@ -501,32 +552,65 @@ mod tests {
             sources: BTreeMap::new(),
             admission: "local-spike-only".into(),
         };
-        let serialized = serde_json::to_value(export(&artifact)?)?;
-        assert_eq!(serialized["schemaVersion"], 1);
-        assert_eq!(serialized["routes"][0]["operation"], "gallery.list");
-        assert_eq!(serialized["routes"][0]["template"], "ui/pages/home.html");
-        assert_eq!(serialized["routes"][0]["queryDefaults"]["limit"], 1);
+        let serialized = serde_json::to_value(export("sha256:fixture", &artifact)?)?;
         assert_eq!(
-            serialized["routes"][0]["inputSchema"]["properties"]["limit"]["description"],
+            serialized,
+            serde_json::to_value(export("sha256:fixture", &artifact)?)?
+        );
+        assert_eq!(serialized["schemaVersion"], 1);
+        assert_eq!(serialized["kind"], "clanker-app-contracts");
+        assert_eq!(serialized["artifact"], "sha256:fixture");
+        assert_eq!(serialized["queries"].as_object().unwrap().len(), 1);
+        assert_eq!(
+            serialized["queries"]["gallery.list"]["routes"][0],
+            "featured"
+        );
+        assert_eq!(serialized["queries"]["gallery.list"]["routes"][1], "home");
+        assert_eq!(
+            serialized["queries"]["gallery.list"]["inputSchema"]["properties"]["limit"]["description"],
             "Maximum items."
         );
         assert_eq!(
-            serialized["routes"][0]["outputSchema"]["properties"]["title"]["description"],
+            serialized["queries"]["gallery.list"]["outputSchema"]["properties"]["title"]["description"],
             "Display title."
         );
-        assert_eq!(serialized["routes"][0]["example"]["input"]["limit"], 2);
         assert_eq!(
-            serialized["routes"][0]["example"]["output"]["title"],
+            serialized["queries"]["gallery.list"]["example"]["input"]["limit"],
+            2
+        );
+        assert_eq!(
+            serialized["queries"]["gallery.list"]["example"]["output"]["title"],
             "Example"
         );
         assert_eq!(
-            serialized["routes"][0]["example"]["templateContext"]["home"]["title"],
-            "Example"
+            serialized["queries"]["gallery.list"]["viewType"],
+            Value::Null
+        );
+        assert_eq!(serialized["viewTypes"], json!({}));
+        assert_eq!(serialized["routes"]["home"]["query"], "gallery.list");
+        assert_eq!(
+            serialized["routes"]["home"]["template"],
+            "ui/pages/home.html"
+        );
+        assert_eq!(serialized["routes"]["home"]["queryDefaults"]["limit"], 1);
+        assert_eq!(serialized["routes"]["home"]["contextKey"], "home");
+        assert_eq!(
+            serialized["routes"]["featured"]["queryDefaults"]["limit"],
+            2
         );
         assert_eq!(
-            serialized["routes"][0]["templateContextSchema"]["properties"]["company"]["kind"],
+            serialized["templateContext"]["shared"]["company"]["kind"],
             "record"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn unsupported_output_shape_fails_closed() -> Result<()> {
+        let shape = Type::Record(BTreeMap::from([("title".into(), Type::String)]));
+        let mut schema = day2::operation_catalog::output_schema(&shape);
+        schema["properties"] = json!({});
+        assert!(add_output_kinds(&mut schema, &shape).is_err());
         Ok(())
     }
 
