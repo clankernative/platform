@@ -3,6 +3,7 @@ package
 		Workflow,
 		LocalDev,
 		Build,
+		Delegation,
 		Check,
 		Ci,
 		Verify,

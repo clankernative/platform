@@ -136,6 +136,15 @@ impl std::fmt::Display for HostFault {
 impl std::error::Error for HostFault {}
 
 impl Journal {
+    /// App hosts consume release state without control-plane write authority.
+    /// This also accepts an immutable, platform-published SQLite snapshot.
+    pub fn open_readonly(path: &Path) -> Result<Self> {
+        let connection =
+            Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        connection.busy_timeout(Duration::from_secs(5))?;
+        Ok(Self { connection })
+    }
+
     pub fn open(path: &Path) -> Result<Self> {
         let connection = Connection::open(path)?;
         connection.busy_timeout(Duration::from_secs(5))?;

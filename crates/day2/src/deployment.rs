@@ -309,6 +309,18 @@ pub async fn serve(instance_path: &Path, app: &str, access: Access<'_>) -> Resul
     serve_with_oauth(instance_path, app, access, None).await
 }
 
+/// The enforcing container lifecycle with host-owned adapter installation.
+/// Configuration runs after the runtime and its active authority are checked,
+/// before either HTTP admission or background execution starts.
+pub async fn serve_with(
+    instance_path: &Path,
+    app: &str,
+    access: Access<'_>,
+    configure: impl FnOnce(Runtime) -> Result<Runtime> + Send + 'static,
+) -> Result<()> {
+    serve_configured(instance_path, app, access, None, configure).await
+}
+
 /// Reviewed provider adapters supply this capability at native host startup.
 /// The ordinary binary refuses selected connections until those are published.
 pub(crate) async fn serve_with_oauth(
@@ -316,6 +328,16 @@ pub(crate) async fn serve_with_oauth(
     app: &str,
     access: Access<'_>,
     providers: Option<crate::oauth::host::Providers>,
+) -> Result<()> {
+    serve_configured(instance_path, app, access, providers, Ok).await
+}
+
+async fn serve_configured(
+    instance_path: &Path,
+    app: &str,
+    access: Access<'_>,
+    providers: Option<crate::oauth::host::Providers>,
+    configure: impl FnOnce(Runtime) -> Result<Runtime> + Send + 'static,
 ) -> Result<()> {
     // Decided from the instance before anything else. An installation that
     // declares an identity provider has no development mode: if it did, the
@@ -356,11 +378,18 @@ pub(crate) async fn serve_with_oauth(
         "active deployment artifact address mismatch"
     );
     runtime.initialize()?;
+    if let Ok(expected) = std::env::var("DAY2_EXPECTED_ARTIFACT") {
+        ensure!(
+            expected == runtime.artifact().id(),
+            "deployment_artifact_changed"
+        );
+    }
     let authority = crate::authority_state::current(&crate::store::open(runtime.db())?)?;
     if let Some(requirements) = &authority.document.security {
         requirements.validate(runtime.artifact())?;
         requirements.require_runtime()?;
     }
+    let runtime = tokio::task::spawn_blocking(move || configure(runtime)).await??;
     let concurrency = usize::from(profile.resources().http_concurrency());
     let receiver = if oauth {
         let runtime = runtime.clone();

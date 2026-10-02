@@ -105,11 +105,6 @@ const MODULES: &[Module] = &[
         app_export: true,
     },
     Module {
-        file: "Delegate.roc",
-        source: "contracts/Delegate.roc",
-        app_export: true,
-    },
-    Module {
         file: "Audit.roc",
         source: "contracts/Audit.roc",
         app_export: true,

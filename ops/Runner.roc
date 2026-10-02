@@ -9,6 +9,7 @@ import pf.Stdout
 import ops.Workflow
 import ops.LocalDev
 import ops.Build
+import ops.Delegation
 import ops.Check
 import ops.Ci
 import ops.Verify
@@ -45,6 +46,7 @@ run! = |args| match args {
 		LocalDev.session!(options, call!)
 	}
 	["build-recipe"] => Build.recipe!(call!)
+	["build-delegation"] => Delegation.build!(call!)
 	["exercise", example, count] => Check.exercise!(example, U64.from_str(count).map_err(|_| "invalid count")?, call!)
 	["ci-event", event_name, action, deleted] => {
 		should_run = Ci.event(event_name, action, deleted == "true")?

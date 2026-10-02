@@ -2,11 +2,18 @@
 //! not physical process fencing, so this module cannot construct a drain receipt.
 //! See https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/:
 //! force-deleted Pod objects do not establish that their processes terminated.
+use crate::{
+    BindingRef,
+    provider_evidence::DeploymentIncarnation,
+    release::ReleaseTarget,
+    release_execution::{ObservedServingBinding, ServingProbe},
+};
 use crate::{Digest, secrets::AccessTokenProvider};
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use reqwest::{Certificate, blocking::Client, header::AUTHORIZATION};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use std::sync::Arc;
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::Read,
@@ -148,6 +155,68 @@ pub struct GkeKubernetesProbe<'a> {
     tokens: &'a dyn AccessTokenProvider,
 }
 
+/// Host-owned mapping to the single SQLite StatefulSet. Its labels and loaded
+/// artifact are checked against fresh authenticated Kubernetes observations.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GkeServingBinding {
+    pub target: ReleaseTarget,
+    pub project_number: NonZeroU64,
+    pub location: String,
+    pub cluster: String,
+    pub namespace: String,
+    pub workload: String,
+    pub workload_email: String,
+    pub deployment: BindingRef,
+}
+
+pub struct GkeServingProbe {
+    bindings: BTreeMap<String, GkeServingBinding>,
+    tokens: Arc<dyn AccessTokenProvider>,
+}
+
+impl GkeServingProbe {
+    pub fn new(
+        bindings: BTreeMap<String, GkeServingBinding>,
+        tokens: Arc<dyn AccessTokenProvider>,
+    ) -> Result<Self> {
+        ensure!(
+            !bindings.is_empty() && bindings.len() <= 32,
+            "serving_binding_budget"
+        );
+        for (app, binding) in &bindings {
+            ensure!(
+                app == binding.target.app.as_str(),
+                "serving_binding_app_changed"
+            );
+            for name in [
+                &binding.location,
+                &binding.cluster,
+                &binding.namespace,
+                &binding.workload,
+            ] {
+                dns_name(name, 63)?;
+            }
+            ensure!(
+                binding.workload_email.ends_with(".iam.gserviceaccount.com"),
+                "serving_workload_identity_invalid"
+            );
+        }
+        Ok(Self { bindings, tokens })
+    }
+}
+
+impl ServingProbe for GkeServingProbe {
+    fn observe(&self, target: &ReleaseTarget) -> Result<ObservedServingBinding> {
+        let binding = self
+            .bindings
+            .get(target.app.as_str())
+            .ok_or_else(|| anyhow::anyhow!("serving_target_unbound"))?;
+        ensure!(&binding.target == target, "serving_target_scope_changed");
+        GkeKubernetesProbe::new(self.tokens.as_ref())?.inspect_serving(binding)
+    }
+}
+
 impl<'a> GkeKubernetesProbe<'a> {
     pub fn new(tokens: &'a dyn AccessTokenProvider) -> Result<Self> {
         Ok(Self {
@@ -169,6 +238,222 @@ impl<'a> GkeKubernetesProbe<'a> {
             fixture_kubernetes: Some(loopback(kubernetes)?),
             client: client(None)?,
             tokens,
+        })
+    }
+
+    pub fn inspect_serving(&self, target: &GkeServingBinding) -> Result<ObservedServingBinding> {
+        for name in [
+            &target.location,
+            &target.cluster,
+            &target.namespace,
+            &target.workload,
+        ] {
+            dns_name(name, 63)?;
+        }
+        let mut budget = Budget::new();
+        let mut discovery = self.discovery.join(&format!(
+            "v1/projects/{}/locations/{}/clusters/{}",
+            target.project_number, target.location, target.cluster
+        ))?;
+        discovery.query_pairs_mut().append_pair(
+            "fields",
+            "name,id,location,status,currentMasterVersion,endpoint,masterAuth/clusterCaCertificate",
+        );
+        let cluster: Cluster = self
+            .get(&self.client, discovery, &mut budget, false)?
+            .context("gke_cluster_not_found")?;
+        ensure!(
+            cluster.name == target.cluster
+                && cluster.location == target.location
+                && cluster.status == "RUNNING",
+            "gke_cluster_identity_or_state_mismatch"
+        );
+        let ca = STANDARD.decode(&cluster.master_auth.cluster_ca_certificate)?;
+        ensure!(ca.len() <= 32_768, "gke_ca_budget");
+        let (endpoint, kube) = if let Some(endpoint) = &self.fixture_kubernetes {
+            (endpoint.clone(), client(None)?)
+        } else {
+            let ip: IpAddr = cluster.endpoint.parse()?;
+            ensure!(
+                !ip.is_loopback() && !ip.is_unspecified() && !ip.is_multicast(),
+                "invalid_gke_endpoint"
+            );
+            let host = match ip {
+                IpAddr::V4(ip) => ip.to_string(),
+                IpAddr::V6(ip) => format!("[{ip}]"),
+            };
+            (
+                Url::parse(&format!("https://{host}/"))?,
+                client(Some(Certificate::from_pem(&ca)?))?,
+            )
+        };
+        let controller_url = endpoint.join(&format!(
+            "apis/apps/v1/namespaces/{}/statefulsets/{}",
+            target.namespace, target.workload
+        ))?;
+        let controller: serde_json::Value = self
+            .get(&kube, controller_url.clone(), &mut budget, false)?
+            .context("serving_controller_missing")?;
+        let metadata: Metadata = serde_json::from_value(controller["metadata"].clone())?;
+        metadata.validate(Some(&target.namespace))?;
+        ensure!(
+            controller["kind"] == "StatefulSet"
+                && controller["apiVersion"] == "apps/v1"
+                && metadata.name == target.workload
+                && metadata.deletion_timestamp.is_none()
+                && metadata.generation > 0,
+            "serving_controller_changed"
+        );
+        ensure!(
+            controller["spec"]["replicas"] == 1
+                && controller["status"]["observedGeneration"].as_u64() == Some(metadata.generation)
+                && controller["status"]["readyReplicas"] == 1
+                && controller["status"]["updatedReplicas"] == 1
+                && controller["status"]["currentRevision"]
+                    == controller["status"]["updateRevision"]
+                && controller["status"]["updateRevision"]
+                    .as_str()
+                    .is_some_and(|value| !value.is_empty()),
+            "serving_controller_not_ready"
+        );
+        let annotations = &controller["spec"]["template"]["metadata"]["annotations"];
+        for (key, expected) in [
+            ("day2.dev/installation", target.target.company.as_str()),
+            ("day2.dev/environment", target.target.environment.as_str()),
+            ("day2.dev/app", target.target.app.as_str()),
+        ] {
+            ensure!(
+                annotations[key].as_str() == Some(expected),
+                "serving_scope_changed"
+            );
+        }
+        let artifact: Digest = annotations["day2.dev/artifact"]
+            .as_str()
+            .context("serving_artifact_missing")?
+            .to_owned()
+            .try_into()?;
+        let account = controller["spec"]["template"]["spec"]["serviceAccountName"]
+            .as_str()
+            .context("serving_account_missing")?;
+        dns_name(account, 63)?;
+        let service_account: serde_json::Value = self
+            .get(
+                &kube,
+                endpoint.join(&format!(
+                    "api/v1/namespaces/{}/serviceaccounts/{account}",
+                    target.namespace
+                ))?,
+                &mut budget,
+                false,
+            )?
+            .context("serving_account_missing")?;
+        let account_metadata: Metadata =
+            serde_json::from_value(service_account["metadata"].clone())?;
+        account_metadata.validate(Some(&target.namespace))?;
+        ensure!(
+            account_metadata.name == account
+                && account_metadata.deletion_timestamp.is_none()
+                && account_metadata
+                    .annotations
+                    .get("iam.gke.io/gcp-service-account")
+                    == Some(&target.workload_email),
+            "serving_workload_identity_changed"
+        );
+        let pod: serde_json::Value = self
+            .get(
+                &kube,
+                endpoint.join(&format!(
+                    "api/v1/namespaces/{}/pods/{}-0",
+                    target.namespace, target.workload
+                ))?,
+                &mut budget,
+                false,
+            )?
+            .context("serving_pod_missing")?;
+        let pod_metadata: Metadata = serde_json::from_value(pod["metadata"].clone())?;
+        pod_metadata.validate(Some(&target.namespace))?;
+        let owner = pod_metadata
+            .controller()?
+            .context("serving_pod_owner_missing")?;
+        ensure!(
+            owner.kind == "StatefulSet"
+                && owner.uid == metadata.uid
+                && owner.name == metadata.name
+                && pod_metadata.deletion_timestamp.is_none()
+                && pod["metadata"]["labels"]["controller-revision-hash"]
+                    == controller["status"]["updateRevision"]
+                && pod["spec"]["serviceAccountName"].as_str() == Some(account)
+                && pod["status"]["phase"] == "Running",
+            "serving_pod_changed"
+        );
+        for key in [
+            "day2.dev/installation",
+            "day2.dev/environment",
+            "day2.dev/app",
+            "day2.dev/artifact",
+        ] {
+            ensure!(
+                pod["metadata"]["annotations"][key] == annotations[key],
+                "serving_pod_scope_changed"
+            );
+        }
+        let containers = pod["spec"]["containers"]
+            .as_array()
+            .context("serving_container_missing")?;
+        ensure!(containers.len() <= 8, "serving_container_budget");
+        let runtime = containers
+            .iter()
+            .find(|container| container["name"] == "day2")
+            .context("serving_container_missing")?;
+        let image = runtime["image"].as_str().context("serving_image_missing")?;
+        let (_, image_digest) = image
+            .rsplit_once("@sha256:")
+            .context("serving_image_not_immutable")?;
+        ensure!(
+            image_digest.len() == 64 && image_digest.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "serving_image_not_immutable"
+        );
+        ensure!(
+            runtime["env"].as_array().is_some_and(|env| env
+                .iter()
+                .any(|value| value["name"] == "DAY2_EXPECTED_ARTIFACT"
+                    && value["value"].as_str() == Some(artifact.as_str()))),
+            "serving_artifact_not_enforced"
+        );
+        let statuses = pod["status"]["containerStatuses"]
+            .as_array()
+            .context("serving_container_status_missing")?;
+        ensure!(statuses.len() <= 8, "serving_container_budget");
+        let status = statuses
+            .iter()
+            .find(|status| status["name"] == "day2")
+            .context("serving_container_status_missing")?;
+        ensure!(
+            status["ready"] == true
+                && status["started"] == true
+                && status["state"]["running"].is_object()
+                && status["imageID"]
+                    .as_str()
+                    .is_some_and(|id| id.ends_with(&format!("@sha256:{image_digest}"))),
+            "serving_container_not_ready"
+        );
+        let after: serde_json::Value = self
+            .get(&kube, controller_url, &mut budget, false)?
+            .context("serving_controller_missing")?;
+        ensure!(
+            after["metadata"]["uid"] == controller["metadata"]["uid"]
+                && after["metadata"]["generation"] == controller["metadata"]["generation"]
+                && after["status"] == controller["status"],
+            "serving_controller_changed_during_probe"
+        );
+        Ok(ObservedServingBinding {
+            target: target.target.clone(),
+            artifact,
+            deployment: target.deployment.clone(),
+            incarnation: DeploymentIncarnation {
+                controller: metadata.uid.try_into()?,
+                generation: metadata.generation.to_string().try_into()?,
+            },
         })
     }
 

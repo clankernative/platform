@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod app_host;
 pub mod build;
 pub mod ci;
 pub mod contracts;
@@ -24,6 +25,7 @@ pub mod secret_retirement;
 pub mod secret_retirement_recipe;
 pub mod secrets;
 pub mod service;
+pub mod serving_snapshot;
 pub mod simulation;
 pub mod simulation_campaign;
 pub mod source;

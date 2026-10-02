@@ -206,7 +206,7 @@ interpreting it as a direct request. Production SSO/gateway authentication remai
 outside this loopback slice.
 
 Roc reads the effective actor through `context.actor()` and the verified
-requester/rule through `context.acting()`. `Delegate.query` inherits the effective
+requester/rule through `context.acting()`. Generated imported queries inherit the effective
 actor; the callee independently authorizes it and sees the immediate calling
 application through `context.caller()` and `context.acting()`. Admission,
 execution, replay and mandatory audit preserve these identities. The audit event

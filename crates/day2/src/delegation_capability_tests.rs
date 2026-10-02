@@ -274,13 +274,21 @@ fn granted_call_at(
         },
     )?
     .context("resource binding result")?;
-    let token = serde_json::from_str::<serde_json::Value>(&bound)?["token"]
+    let _token = serde_json::from_str::<serde_json::Value>(&bound)?["token"]
         .as_str()
         .context("handle token")?
         .to_owned();
 
     let active = crate::authority_state::current(&tx)?;
-    let mut data = json!({"handle":token,"input":"{}"});
+    let digest = &runtime
+        .artifact()
+        .contract()
+        .imports
+        .as_ref()
+        .context("imported contracts")?
+        .operations["callee.list"]
+        .digest;
+    let mut data = json!({"contract":{"operation":"callee.list","digest":digest},"input":"{}"});
     data.as_object_mut()
         .unwrap()
         .extend(extra.as_object().unwrap().clone());

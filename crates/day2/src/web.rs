@@ -63,6 +63,9 @@ struct Host {
     secret: Vec<u8>,
     sign_in: SignIn,
     capacity: Arc<Semaphore>,
+    /// Issuance must make progress while the originating query holds its own
+    /// request permit. Keep this separately bounded from browser admission.
+    app_capacity: Arc<Semaphore>,
     /// Requests waiting for a permit; bounded by [`MAX_QUEUED`].
     queued: std::sync::atomic::AtomicUsize,
     live_capacity: Arc<Semaphore>,
@@ -362,6 +365,7 @@ impl LocalServer {
             origin: origin.clone(),
             sign_in,
             capacity: Arc::new(Semaphore::new(concurrency)),
+            app_capacity: Arc::new(Semaphore::new(8)),
             queued: std::sync::atomic::AtomicUsize::new(0),
             live_capacity: Arc::new(Semaphore::new(64)),
             admitting: Arc::new(AtomicBool::new(true)),
@@ -576,6 +580,9 @@ async fn handle(State(host): State<Arc<Host>>, request: Request) -> Response {
     if !host.admitting.load(Ordering::Acquire) {
         return secure(StatusCode::SERVICE_UNAVAILABLE.into_response());
     }
+    if request.uri().path().starts_with("/_platform/app-") {
+        return handle_app_call(host, request).await;
+    }
     let json = crate::web_api::is_json(request.uri().path());
     let live_request = request.method() == Method::GET
         && request.uri().path() == "/_live"
@@ -719,6 +726,71 @@ async fn handle(State(host): State<Arc<Host>>, request: Request) -> Response {
     } else {
         response
     })
+}
+
+async fn handle_app_call(host: Arc<Host>, request: Request) -> Response {
+    let path = request.uri().path().to_owned();
+    if !matches!(
+        path.as_str(),
+        "/_platform/app-issue" | "/_platform/app-query"
+    ) {
+        return secure(StatusCode::NOT_FOUND.into_response());
+    }
+    if request.method() != Method::POST || request.uri().query().is_some() {
+        return secure(StatusCode::METHOD_NOT_ALLOWED.into_response());
+    }
+    let Some(port) = host.runtime.app_call_port().cloned() else {
+        return secure(StatusCode::NOT_FOUND.into_response());
+    };
+    let mut assertions = request
+        .headers()
+        .get_all(crate::iap::ASSERTION_HEADER)
+        .iter();
+    let (Some(assertion), None) = (assertions.next(), assertions.next()) else {
+        return secure(StatusCode::UNAUTHORIZED.into_response());
+    };
+    let Some(assertion) = assertion
+        .to_str()
+        .ok()
+        .filter(|assertion| assertion.len() <= 16_384)
+        .map(str::to_owned)
+    else {
+        return secure(StatusCode::UNAUTHORIZED.into_response());
+    };
+    let Ok(permit) = host.app_capacity.clone().try_acquire_owned() else {
+        return secure(StatusCode::SERVICE_UNAVAILABLE.into_response());
+    };
+    let maximum = if path == "/_platform/app-issue" {
+        300_000
+    } else {
+        200_000
+    };
+    let body = match tokio::time::timeout(
+        Duration::from_secs(3),
+        to_bytes(request.into_body(), maximum),
+    )
+    .await
+    {
+        Ok(Ok(body)) => body,
+        Ok(Err(_)) => return secure(StatusCode::PAYLOAD_TOO_LARGE.into_response()),
+        Err(_) => return secure(StatusCode::REQUEST_TIMEOUT.into_response()),
+    };
+    match tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
+        let _permit = permit;
+        let at = now()?;
+        host.runtime.web_event(at, None, "app_call", 102)?;
+        let result = port.receive(&host.runtime, &path, &body, &assertion, at);
+        host.runtime
+            .web_event(at, None, "app_call", if result.is_ok() { 200 } else { 403 })?;
+        result
+    })
+    .await
+    {
+        Ok(Ok(body)) => {
+            secure(([(header::CONTENT_TYPE, "application/json")], body).into_response())
+        }
+        _ => secure((StatusCode::FORBIDDEN, "{\"error\":\"app_call_refused\"}").into_response()),
+    }
 }
 impl Host {
     /// Who a request is from, before anything else looks at it.

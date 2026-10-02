@@ -45,6 +45,7 @@ Verify :: [].{
 		_ = Capability.call!("verify-cli", "{}", host!)?
 		for fixture in [
 			"http",
+			"delegation-peer",
 			"delegation",
 			"credential-metadata",
 			"connection-declaration",

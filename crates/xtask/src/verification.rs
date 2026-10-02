@@ -199,10 +199,10 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
                         println!("Reusing verified {fixture} fixture: {}", artifact.display());
                         artifact
                     }
-                    Ok(None) => build_fixture(root, fixture)?,
+                    Ok(None) => build_fixture(root, fixture, &fixtures)?,
                     Err(error) => {
                         eprintln!("Ignoring invalid cached {fixture} fixture: {error:#}");
-                        build_fixture(root, fixture)?
+                        build_fixture(root, fixture, &fixtures)?
                     }
                 };
                 let loaded = day2::artifact::LoadedArtifact::load(&artifact)?;
@@ -239,7 +239,11 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
     Ok(())
 }
 
-fn build_fixture(root: &Path, fixture: &str) -> Result<PathBuf> {
+fn build_fixture(
+    root: &Path,
+    fixture: &str,
+    fixtures: &BTreeMap<String, PathBuf>,
+) -> Result<PathBuf> {
     match fixture {
         "reports" => build(root, &root.join("examples/reports")),
         "reports-probe" => build_with_overrides(
@@ -254,7 +258,6 @@ fn build_fixture(root: &Path, fixture: &str) -> Result<PathBuf> {
         ),
         "relational" => build(root, &root.join("fixtures/relational-conformance")),
         "collection" => build(root, &root.join("fixtures/collection-conformance")),
-        "delegation" => build(root, &root.join("fixtures/delegation-conformance")),
         "credential-metadata" => {
             build(root, &root.join("fixtures/credential-metadata-conformance"))
         }
@@ -262,6 +265,38 @@ fn build_fixture(root: &Path, fixture: &str) -> Result<PathBuf> {
             root,
             &root.join("fixtures/connection-declaration-conformance"),
         ),
+        "delegation-peer" => build_with_overrides(
+            root,
+            &root.join("fixtures/delegation-conformance"),
+            Some(&root.join("fixtures/delegation-peer")),
+        ),
+        "delegation" => {
+            let peer = fixtures
+                .get("delegation-peer")
+                .context("build delegation peer before caller")?;
+            let inputs = tempfile::tempdir()?;
+            let instance = inputs.path().join("instance.json");
+            let lock = inputs.path().join("imports.json");
+            fs::write(
+                &instance,
+                serde_json::to_vec(&json!({
+                    "installation":"delegation_fixture","environment":"test",
+                    "apps":{"peer_identity":{"artifact":peer,"readers":["alice"],"writers":["alice"]}}
+                }))?,
+            )?;
+            let catalog = day2::instance_catalog::CandidateCatalog::from_instance_file(&instance)?;
+            fs::write(
+                &lock,
+                serde_json::to_vec(&catalog.pin(&["peer_identity.who".into()])?)?,
+            )?;
+            build_recipe(
+                root,
+                &root.join("fixtures/delegation-conformance"),
+                None,
+                None,
+                Some(&BuildImportContext { instance, lock }),
+            )
+        }
         "redirect" => build(root, &root.join("fixtures/redirect-conformance")),
         "relational-next" => build_migration_fixture(root),
         "owned" => build(root, &root.join("fixtures/row-authority-web-conformance")),
@@ -269,6 +304,29 @@ fn build_fixture(root: &Path, fixture: &str) -> Result<PathBuf> {
         "owned-probe" => build_row_authority_adversaries(root),
         _ => bail!("unknown fixture"),
     }
+}
+
+pub fn build_delegation(root: &Path) -> Result<()> {
+    let runner = workflows::build(root)?;
+    let mut fixtures = BTreeMap::new();
+    day2::automation::run(&runner, &["build-delegation"], |request| {
+        ensure!(
+            request.action == "verify-build",
+            "unexpected delegation build action"
+        );
+        let parameters: BTreeMap<String, String> = request.decode()?;
+        ensure!(parameters.len() == 1, "invalid delegation build parameter");
+        let fixture = parameters.get("fixture").context("missing fixture")?;
+        let artifact = build_fixture(root, fixture, &fixtures)?;
+        println!("{fixture} artifact: {}", artifact.display());
+        fixtures.insert(fixture.clone(), artifact.clone());
+        Ok(json!({"artifact":artifact}))
+    })?;
+    fs::write(
+        root.join("artifacts/delegation-fixtures.json"),
+        serde_json::to_vec_pretty(&fixtures)?,
+    )?;
+    Ok(())
 }
 
 fn recipe_scope(recipe: &str) -> Result<&'static str> {
@@ -687,6 +745,7 @@ fn tests(
             "credential-metadata",
             "DAY2_TEST_CREDENTIAL_METADATA_ARTIFACT",
         ),
+        ("delegation-peer", "DAY2_TEST_DELEGATION_PEER_ARTIFACT"),
         ("redirect", "DAY2_TEST_REDIRECT_ARTIFACT"),
         (
             "connection-declaration",
@@ -924,6 +983,7 @@ fn required_steps(scope: &str) -> Result<&'static [&'static str]> {
             "build-delegation",
             "build-credential-metadata",
             "build-connection-declaration",
+            "build-delegation-peer",
             "build-redirect",
             "build-relational",
             "build-collection",

@@ -1289,35 +1289,6 @@ fn resource_fixture_for_artifact_with_imports(
             });
         }
     }
-    // An exact disposable peer for the request-identity conformance query.
-    // The native HTTP suite supplies a real callee and its actual schema pin.
-    // Keep this outside local_resource_fixture: provider helpers also call that
-    // function to initialize empty catalogs, which must remain empty.
-    if artifact.contract().namespace == "delegation"
-        && let Some(operation) = policy.operations.get("delegation.forward")
-        && !operation.actors.is_empty()
-        && operation.observations.contains("app.query.v1")
-    {
-        use serde_json::json;
-        let peer: day2_capabilities::resources::Catalog = serde_json::from_value(json!({
-            "version":1,
-            "connections":{"delegation":{"revision":1,"provider":"local_delegation"}},
-            "resources":{"delegation":{"revision":1,"connection":{"id":"delegation","revision":1},
-                "target":{"kind":"app_operation","app":"fixture_peer","operation":"fixture.query",
-                    "schema_digest":crate::digest(b"disposable-delegation-conformance-peer")}}},
-            "policies":{"conformance_peer":{"revision":1,"owner":"local-fixture-operator",
-                "actors":operation.actors,"allowed_apps":[app],
-                "slots":{"delegation":{"kind":"app_operation","allowed_resources":[{"id":"delegation","revision":1}],
-                    "actions":["delegate_query"],"limits":{"max_request_bytes":16384,"max_response_bytes":65536,"max_calls_per_invocation":4},"budgets":[]}}}},
-            "budgets":{}
-        }))?;
-        catalog.connections.extend(peer.connections);
-        catalog.resources.extend(peer.resources);
-        catalog.policies.extend(peer.policies);
-        attachments.push(serde_json::from_value(json!({
-                    "policy":{"id":"conformance_peer","revision":1},"operation":"delegation.forward",
-                    "bindings":{"delegation":{"id":"delegation","revision":1}}}))?);
-    }
     catalog.validate()?;
     Ok((catalog, attachments))
 }
@@ -1635,13 +1606,8 @@ fn disposable_provider_worlds() -> crate::integrations::simulated::SimulatedFixt
     };
     SimulatedFixture {
         slack_webhook: crate::integrations::simulated::slack_webhook_fixture(),
-        // Exact disposable peer, not a fallback for arbitrary delegated reads.
-        // Native request-identity conformance installs and calls a real callee.
         delegation: DelegationWorld {
-            reads: BTreeMap::from([(
-                DelegationWorld::key("fixture_peer", "fixture.query", "{}"),
-                "{}".into(),
-            )]),
+            reads: BTreeMap::new(),
         },
         // One finished job and one still running, so a watcher has both the
         // case it closes and the case it leaves open.

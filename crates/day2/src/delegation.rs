@@ -81,6 +81,19 @@ pub(crate) fn record_root_origin(
 /// and preserve the call's actor, causal identity, and target contract.
 pub trait AppCallPort: Send + Sync {
     fn query(&self, caller: &Runtime, call: &Call) -> Result<String>;
+
+    /// Private host ingress. Implementations verify the IAP workload assertion
+    /// and signed request before entering the ordinary receiver runtime.
+    fn receive(
+        &self,
+        _runtime: &Runtime,
+        _path: &str,
+        _wire: &[u8],
+        _assertion: &str,
+        _at: i64,
+    ) -> Result<Vec<u8>> {
+        anyhow::bail!("app_call_ingress_unbound")
+    }
 }
 
 /// A remote signer must inherit its actor and chain from the current durable
@@ -96,9 +109,9 @@ pub fn verify_origin(runtime: &Runtime, call: &Call) -> Result<OriginEvidence> {
     let mut connection = crate::store::open(runtime.db())?;
     let tx = connection.transaction()?;
     runtime.check_binding(&tx)?;
-    let origin: Option<(String, String, String, String, i64, String)> = tx
+    let origin: Option<(String, String, String, String, i64, String, String)> = tx
         .query_row(
-            "SELECT operation,actor,caller,artifact,now,status FROM day2_invocations WHERE id=?1",
+            "SELECT operation,actor,caller,artifact,now,status,input FROM day2_invocations WHERE id=?1",
             params![call.origin],
             |row| {
                 Ok((
@@ -108,11 +121,12 @@ pub fn verify_origin(runtime: &Runtime, call: &Call) -> Result<OriginEvidence> {
                     row.get(3)?,
                     row.get(4)?,
                     row.get(5)?,
+                    row.get(6)?,
                 ))
             },
         )
         .optional()?;
-    let (operation, actor, chain, artifact, now, status) =
+    let (operation, actor, chain, artifact, now, status, input) =
         origin.ok_or_else(|| anyhow::anyhow!("delegated_origin_missing"))?;
     ensure!(
         actor == call.actor
@@ -129,6 +143,30 @@ pub fn verify_origin(runtime: &Runtime, call: &Call) -> Result<OriginEvidence> {
         &operation,
         &call.actor,
     )?;
+    // Issuance admits the exact imported operation under the source's current
+    // grant. Possession of a pending human invocation is not itself permission
+    // to ask any peer to execute arbitrary work for that person.
+    let request = crate::protocol::Request {
+        operation,
+        input,
+        context: crate::store::invocation_context(&tx, &call.origin)?,
+        observations: Vec::new(),
+    };
+    let active = crate::authority_state::current(&tx)?;
+    let contract = call
+        .contract_digest
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("delegated_contract_missing"))?;
+    let admitted = crate::capabilities::authorized(&tx, runtime, &request, &crate::protocol::Instruction {
+        kind: "observe".into(),
+        model: "app.query.v1".into(),
+        data: serde_json::json!({"contract":{"operation":call.operation,"digest":contract},"input":call.input}).to_string(),
+        ..Default::default()
+    }, active.policy()?, &call.step)?;
+    ensure!(
+        admitted.delegated_call() == Some(call),
+        "delegated_grant_changed"
+    );
     let root = crate::resources::root_in(&tx, &call.origin)?;
     let root_identity: Option<(String, String, String, String, String, String)> = tx
         .query_row(
@@ -356,7 +394,7 @@ fn execute_callee(callee: &Runtime, call: &Call, chain: &str) -> Result<String> 
 }
 
 /// What the caller is asking for, resolved from its grant and its context.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Call {
     pub app: String,

@@ -133,7 +133,6 @@ enum Action {
 impl Authorized {
     /// The delegated call this authorization resolved to, for tests that need
     /// to see what the grant and the request between them decided.
-    #[cfg(test)]
     pub(crate) fn delegated_call(&self) -> Option<&crate::delegation::Call> {
         match &self.action {
             Action::Delegate(call) => Some(call),
@@ -392,25 +391,10 @@ pub(crate) fn authorized(
             }
         }
         "app.query.v1" => {
-            #[derive(Deserialize)]
-            #[serde(deny_unknown_fields)]
-            struct DelegatedRead {
-                input: String,
-                #[serde(rename = "handle")]
-                _handle: String,
-            }
-            let (input, pinned_contract) =
-                if serde_json::from_str::<serde_json::Value>(&instruction.data)?
-                    .get("contract")
-                    .is_some()
-                {
-                    let read: crate::resources::ImportedQuery =
-                        crate::json::decode(instruction.data.as_bytes())?;
-                    (read.input, Some(read.contract.digest))
-                } else {
-                    let read: DelegatedRead = crate::json::decode(instruction.data.as_bytes())?;
-                    (read.input, None)
-                };
+            let read: crate::resources::ImportedQuery =
+                crate::json::decode(instruction.data.as_bytes())?;
+            let input = read.input;
+            let pinned_contract = Some(read.contract.digest);
             let ResourceTarget::AppOperation {
                 app,
                 operation,

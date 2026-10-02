@@ -425,6 +425,7 @@ fn main() -> Result<()> {
             };
             build_recipe(&root, &app, None, None, context.as_ref())?;
         }
+        "build-delegation" => verification::build_delegation(&root)?,
         "catalog-candidate" => {
             let instance = PathBuf::from(
                 args.next()
