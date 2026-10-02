@@ -423,11 +423,11 @@ impl Analysis<'_> {
                                 && self.expression(value, context)? == Type::String,
                             "template_ui_helper_string_required"
                         );
-                        if let E::Const(literal) = value {
-                            if let Some(literal) = literal.value.as_str() {
-                                crate::web_ui_values::validate_remote_image_source(literal)
-                                    .context("template_cui_image_literal_invalid")?;
-                            }
+                        if let E::Const(literal) = value
+                            && let Some(literal) = literal.value.as_str()
+                        {
+                            crate::web_ui_values::validate_remote_image_source(literal)
+                                .context("template_cui_image_literal_invalid")?;
                         }
                         Ok(Type::String)
                     }
@@ -2532,7 +2532,7 @@ mod tests {
     #[test]
     fn image_output_requires_exact_runtime_img_src_provenance() {
         let markup = "<img src=\"https://cdn.example.test/a.png\">";
-        let token = tokenizer(markup).into_iter().next().unwrap().unwrap();
+        let token = tokenizer(markup).next().unwrap().unwrap();
         let Token::StartTag(tag) = token else {
             panic!("expected img")
         };
@@ -2563,7 +2563,7 @@ mod tests {
         assert!(check_image_emissions(markup, &[]).is_err());
 
         let asset_markup = "<img src=\"/assets/app/logo\">";
-        let token = tokenizer(asset_markup).into_iter().next().unwrap().unwrap();
+        let token = tokenizer(asset_markup).next().unwrap().unwrap();
         let Token::StartTag(tag) = token else {
             panic!("expected img")
         };
