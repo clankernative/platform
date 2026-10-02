@@ -2,6 +2,18 @@
 # override, so this never contacts a cluster.
 mock_provider "kubernetes" {}
 
+run "preserves_explicit_credential_client_membership" {
+  command = plan
+  variables {
+    readers = ["qa@example.com", "credential_client:client_keys"]
+    writers = ["credential_client:client_keys"]
+  }
+  assert {
+    condition     = contains(jsondecode(kubernetes_config_map_v1.instance.data["instance.json"]).apps.example_app.readers, "credential_client:client_keys") && jsondecode(kubernetes_config_map_v1.instance.data["instance.json"]).apps.example_app.writers == ["credential_client:client_keys"]
+    error_message = "Client keys must receive an explicit family selector without being rewritten as human accounts."
+  }
+}
+
 run "wires_private_app_calls_into_the_normal_host" {
   command = plan
   override_data {

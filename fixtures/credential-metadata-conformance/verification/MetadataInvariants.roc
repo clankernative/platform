@@ -2,6 +2,13 @@ import pf.Api
 import Data
 
 MetadataInvariants :: [].{
+	use_receipts = Api.invariant(
+		Data.use_receipts,
+		"Product use receipts carry public labels.",
+		Data.snapshot,
+		|state| state.use_receipts.all(|row| row.value.note.starts_with("use_")),
+	)
+
 	entries =
 		Api.invariant(
 			Data.entries,

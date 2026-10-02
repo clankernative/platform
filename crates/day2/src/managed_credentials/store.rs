@@ -924,7 +924,7 @@ pub(crate) struct VerifiedIngress {
 /// corruption and unavailable exact key versions are errors, not denials.
 pub(crate) fn verify_ingress(
     db: &Connection,
-    lease: &KeyLease,
+    lease: &impl AsRef<super::crypto::VerifierLease>,
     current: IngressVerification<'_>,
     token: &str,
 ) -> Result<Option<VerifiedIngress>> {

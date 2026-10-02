@@ -701,6 +701,19 @@ resource "kubernetes_ingress_v1" "app" {
 
       http {
         dynamic "path" {
+          for_each = var.credential_api ? [true] : []
+          content {
+            path      = "/_day2/credentials/api/*"
+            path_type = "ImplementationSpecific"
+            backend {
+              service {
+                name = kubernetes_service_v1.credential_api[0].metadata[0].name
+                port { name = "http" }
+              }
+            }
+          }
+        }
+        dynamic "path" {
           for_each = local.app_call_gates
           content {
             path      = path.key == "issuer" ? "/_platform/app-issue" : "/_platform/app-query"

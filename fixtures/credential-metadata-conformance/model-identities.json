@@ -2,9 +2,21 @@
   "format": 1,
   "models": [
     {
-      "identity": { "key": "67d9d5c8c28c4d3db46d54e5c4924c12", "prefix": "ent" },
+      "identity": {
+        "key": "67d9d5c8c28c4d3db46d54e5c4924c12",
+        "prefix": "ent"
+      },
       "table": "entries",
       "roc_type": "Models.Entry",
+      "retired": false
+    },
+    {
+      "identity": {
+        "key": "26328e5f04ce22c403f67a9ed354b587",
+        "prefix": "use"
+      },
+      "table": "use_receipts",
+      "roc_type": "Models.UseReceipt",
       "retired": false
     }
   ]

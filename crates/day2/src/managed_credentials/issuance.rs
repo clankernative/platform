@@ -1,6 +1,9 @@
 //! The ordinary command transaction's private credential issuance adapter.
 //! Browser confirmation is separate from app inputs and public result codecs.
-use super::{crypto::KeyLease, store};
+use super::{
+    crypto::{KeyLease, VerifierLease},
+    store,
+};
 use crate::{
     authority_state, protocol,
     store::{Runtime, open},
@@ -20,6 +23,37 @@ use serde_json::Value;
 /// exists. prepare may call a provider; validate must use current local evidence
 /// and must not perform external I/O inside the product transaction.
 pub(crate) trait Authority: Send + Sync {
+    /// Local current evidence only; called under the invocation writer lock.
+    fn verification_epoch(
+        &self,
+        _binding: &CredentialFamilyBinding,
+        _management: &ManagementPolicy,
+        _verifier_version: &str,
+        _now: i64,
+    ) -> Result<Option<u64>> {
+        anyhow::bail!("credential verification readiness unavailable")
+    }
+
+    /// Resolve keys before taking an app writer lock. No token is passed to providers.
+    fn verification_keys(
+        &self,
+        _binding: &CredentialFamilyBinding,
+        _management: &ManagementPolicy,
+        _now: i64,
+    ) -> Result<VerifierLease> {
+        anyhow::bail!("credential verification key provider unavailable")
+    }
+
+    fn personal_actor(
+        &self,
+        _binding: &CredentialFamilyBinding,
+        _management: &ManagementPolicy,
+        _subject: &str,
+        _now: i64,
+    ) -> Result<String> {
+        anyhow::bail!("credential subject mapping unavailable")
+    }
+
     fn check_shell(&self, _binding: &CredentialFamilyBinding, _origin: &str) -> Result<()> {
         anyhow::bail!("credential security shell selection unavailable")
     }
@@ -92,6 +126,7 @@ pub(super) struct Confirmation {
 }
 
 pub(crate) fn install(db: &Connection) -> Result<()> {
+    super::ingress::install(db)?;
     super::browser::install(db)?;
     db.execute_batch(
         "CREATE TABLE IF NOT EXISTS day2_credential_confirmations (
@@ -357,7 +392,8 @@ pub(crate) fn stage(
     let principal = match family.profile {
         ManagedProfile::Personal => proof.subject.clone(),
         _ => format!(
-            "client/{}",
+            "client/{}/{}",
+            family.id.as_str(),
             Digest::of(&(
                 "credential-client-v1",
                 &binding.namespace,

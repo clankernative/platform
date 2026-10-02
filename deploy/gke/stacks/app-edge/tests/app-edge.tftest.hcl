@@ -4,6 +4,37 @@ mock_provider "google" {}
 mock_provider "kubernetes" {}
 mock_provider "cloudflare" {}
 
+run "credential_api_is_disabled_by_default" {
+  command = plan
+  variables { backend_service_name = "" }
+  assert {
+    condition     = length(kubernetes_service_v1.credential_api) == 0 && length(kubernetes_manifest.credential_api) == 0
+    error_message = "An ordinary app must not publish a managed credential backend."
+  }
+}
+
+run "credential_api_keeps_the_human_default_protected" {
+  command = plan
+  variables {
+    credential_api       = true
+    backend_service_name = ""
+  }
+  assert {
+    condition     = kubernetes_manifest.credential_api[0].manifest.spec.iap.enabled == false && kubernetes_manifest.backend_config.manifest.spec.iap.enabled == true
+    error_message = "Credential verification belongs to the host; human authentication remains on IAP."
+  }
+  assert {
+    condition = kubernetes_ingress_v1.app.spec[0].default_backend[0].service[0].name == "app" && length([
+      for path in kubernetes_ingress_v1.app.spec[0].rule[0].http[0].path : path
+      if path.backend[0].service[0].name == "credential-api" && path.path == "/_day2/credentials/api/*" && path.path_type == "ImplementationSpecific"
+    ]) == 1 && length([
+      for path in kubernetes_ingress_v1.app.spec[0].rule[0].http[0].path : path
+      if path.backend[0].service[0].name == "credential-api"
+    ]) == 1
+    error_message = "Only the reserved credential API prefix may reach the credential backend."
+  }
+}
+
 run "app_call_gates_and_serving_reads_are_exactly_scoped" {
   command = plan
   variables {

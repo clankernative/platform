@@ -2,7 +2,7 @@
 //! The snapshot is supplied by the installation's admitted readiness adapters;
 //! browser fields never select a provider, key, issuer or security epoch.
 use super::{
-    crypto::KeyLease,
+    crypto::{KeyLease, VerifierLease},
     issuance::{Authority, ReadyKeys},
     store::HumanRevealPermit,
 };
@@ -109,6 +109,20 @@ impl SelectedAuthority {
         subject: &str,
         now: i64,
     ) -> Result<&'a Selection> {
+        let entry = Self::verification_selection(entries, binding, management, now)?;
+        ensure!(
+            entry.issuers.get(actor).map(String::as_str) == Some(subject),
+            "credential subject unavailable or changed"
+        );
+        Ok(entry)
+    }
+
+    fn verification_selection<'a>(
+        entries: &'a [Selection],
+        binding: &CredentialFamilyBinding,
+        management: &ManagementPolicy,
+        now: i64,
+    ) -> Result<&'a Selection> {
         let entry = entries
             .iter()
             .find(|entry| {
@@ -120,8 +134,7 @@ impl SelectedAuthority {
             &entry.binding == binding
                 && &entry.management == management
                 && entry.observed_at <= now
-                && now < entry.ready_until
-                && entry.issuers.get(actor).map(String::as_str) == Some(subject),
+                && now < entry.ready_until,
             "credential authority unavailable or changed"
         );
         Ok(entry)
@@ -155,6 +168,66 @@ impl SelectedAuthority {
 }
 
 impl Authority for SelectedAuthority {
+    fn verification_epoch(
+        &self,
+        binding: &CredentialFamilyBinding,
+        management: &ManagementPolicy,
+        verifier_version: &str,
+        now: i64,
+    ) -> Result<Option<u64>> {
+        let entries = self
+            .entries
+            .read()
+            .map_err(|_| anyhow::anyhow!("credential admission lock poisoned"))?;
+        let selected = Self::verification_selection(&entries, binding, management, now)?;
+        Ok((selected.verifier.version == verifier_version).then_some(selected.security_epoch))
+    }
+
+    fn verification_keys(
+        &self,
+        binding: &CredentialFamilyBinding,
+        management: &ManagementPolicy,
+        now: i64,
+    ) -> Result<VerifierLease> {
+        let entries = self
+            .entries
+            .read()
+            .map_err(|_| anyhow::anyhow!("credential admission lock poisoned"))?;
+        let selected = Self::verification_selection(&entries, binding, management, now)?;
+        let mut bytes = self.key(&selected.verifier, ApprovalKeyPurpose::CustodyVerifier)?;
+        let result = VerifierLease::new(&bytes, selected.verifier.version.clone());
+        bytes.fill(0);
+        result
+    }
+
+    fn personal_actor(
+        &self,
+        binding: &CredentialFamilyBinding,
+        management: &ManagementPolicy,
+        subject: &str,
+        now: i64,
+    ) -> Result<String> {
+        let entries = self
+            .entries
+            .read()
+            .map_err(|_| anyhow::anyhow!("credential admission lock poisoned"))?;
+        let selected = Self::verification_selection(&entries, binding, management, now)?;
+        let actors = selected
+            .issuers
+            .iter()
+            .filter(|(_, current)| current.as_str() == subject)
+            .map(|(actor, _)| actor);
+        let mut actors = actors;
+        let actor = actors
+            .next()
+            .context("credential subject mapping missing")?;
+        ensure!(
+            actors.next().is_none(),
+            "ambiguous credential subject mapping"
+        );
+        Ok(actor.clone())
+    }
+
     fn check_shell(&self, binding: &CredentialFamilyBinding, origin: &str) -> Result<()> {
         let entries = self
             .entries

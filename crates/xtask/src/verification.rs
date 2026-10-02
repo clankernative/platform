@@ -796,6 +796,7 @@ fn tests(
             "managed_credentials::issuance::tests::hostile_issue_rejects_changed_label_family_principal_and_second_mutation",
             "managed_credentials::issuance::tests::expired_confirmation_prevents_issuance_but_completed_receipt_is_recoverable",
             "oauth::security_shell::tests::credential_browser_issues_native_product_commands_and_protects_delivery",
+            "oauth::security_shell::tests::credential_api_admits_only_current_tokens_and_rechecks_durable_execution",
             "oauth::security_shell::tests::credential_browser_requires_fresh_auth_and_current_readiness",
             "oauth::security_shell::tests::credential_app_navigation_only_freezes_canonical_intent",
         ] {

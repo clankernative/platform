@@ -34,6 +34,10 @@ pub fn manifest(artifact: &Artifact) -> Result<Vec<ManifestFamily>> {
     credentials::build_manifest(artifact.credential_declarations.clone(), &catalog)
 }
 
+pub(crate) fn operation(artifact: &Artifact, name: &str) -> Result<OperationAuthorityContract> {
+    derive(artifact, name, &mut BTreeSet::new())
+}
+
 /// The same declared bound used to build a manifest is enforced for every
 /// invocation of an opted-in operation, regardless of ingress channel.
 pub(crate) fn check_step(artifact: &Artifact, operation: &str, step: Step<'_>) -> Result<()> {

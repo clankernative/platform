@@ -221,6 +221,13 @@ version; native exact-version selection does not narrow that IAM permission.
 
 ## Build, qualify and deploy
 
+For a selected managed-credential verifier, `app-edge.credential_api = true`
+adds a separate backend for `/_day2/credentials/api/*`. The app host verifies
+the bearer token against its current selected authority and frozen grant.
+Human routes and the default backend retain IAP. The flag is off by default;
+it does not install key, epoch, clock or account-mapping adapters. See
+[credential API admission](../../docs/CREDENTIALS.md#managed-api-admission).
+
 Follow [native Linux qualification](../linux-sqlite/README.md) on a real engine of
 the target architecture. `xtask qualify-linux` uses public Reports and row-authority
 fixtures; those receipts qualify those artifacts and the platform, **not a private
@@ -542,6 +549,8 @@ Several fields are fixed or seeded once:
 - Readers, writers and operation actors are lowercase e-mail addresses, or
   `domain:<hosted_domain>` for everyone at the domain IAP verifies. The root
   refuses any other `domain:` entry, as day2 does.
+- Managed client membership is explicit as `credential_client:<family-id>`;
+  these principals do not inherit their creator's human membership.
 - Readers, writers and authority are copied into the app's database
   on the first start only. Later changes need explicit activation (`day2
   activate`).
