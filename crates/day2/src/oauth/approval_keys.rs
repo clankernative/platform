@@ -36,6 +36,7 @@ pub(crate) trait AccessTokenSource: Send + Sync {
 pub(crate) struct GkeMetadataAccessTokens {
     client: Client,
     endpoint: Url,
+    selected_account: Option<String>,
 }
 
 impl GkeMetadataAccessTokens {
@@ -43,15 +44,27 @@ impl GkeMetadataAccessTokens {
         Self::at(Url::parse(METADATA_URL)?)
     }
 
+    pub(crate) fn selected(account: &str) -> Result<Self> {
+        day2_capabilities::oauth::ShellTransport {
+            service_account: account.into(),
+        }
+        .validate()?;
+        let mut source = Self::new()?;
+        source.selected_account = Some(account.into());
+        Ok(source)
+    }
+
     fn at(endpoint: Url) -> Result<Self> {
         Ok(Self {
             client: Client::builder()
                 .no_proxy()
                 .redirect(reqwest::redirect::Policy::none())
+                .retry(reqwest::retry::never())
                 .connect_timeout(Duration::from_secs(2))
                 .timeout(Duration::from_secs(5))
                 .build()?,
             endpoint,
+            selected_account: None,
         })
     }
 
@@ -73,6 +86,28 @@ impl GkeMetadataAccessTokens {
 
 impl AccessTokenSource for GkeMetadataAccessTokens {
     fn access_token(&self) -> Result<String> {
+        if let Some(account) = &self.selected_account {
+            let response = self
+                .client
+                .get(self.endpoint.join("email")?)
+                .header("Metadata-Flavor", "Google")
+                .send()?;
+            ensure!(
+                response.status().is_success()
+                    && response
+                        .headers()
+                        .get("Metadata-Flavor")
+                        .is_some_and(|v| v == "Google")
+                    && response.content_length().is_none_or(|n| n <= 255),
+                "GKE workload identity unavailable"
+            );
+            let mut email = String::new();
+            response.take(256).read_to_string(&mut email)?;
+            ensure!(
+                email.len() <= 255 && email == *account,
+                "GKE workload identity mismatch"
+            );
+        }
         let response = self
             .client
             .get(self.endpoint.clone())
@@ -496,6 +531,55 @@ mod tests {
             GkeMetadataAccessTokens::new()?.endpoint.as_str(),
             METADATA_URL
         );
+        Ok(())
+    }
+
+    #[test]
+    fn selected_metadata_identity_is_checked_before_every_token_request() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let endpoint = format!("http://{}/", listener.local_addr()?);
+        let worker = thread::spawn(move || {
+            let mut requests = Vec::new();
+            for body in [
+                "app@company-tools.iam.gserviceaccount.com",
+                "{\"access_token\":\"native-selected-token\",\"token_type\":\"Bearer\",\"expires_in\":3599}",
+                "another@company-tools.iam.gserviceaccount.com",
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0];
+                    stream.read_exact(&mut byte).unwrap();
+                    request.push(byte[0]);
+                    assert!(request.len() < 8192);
+                }
+                requests.push(String::from_utf8(request).unwrap().to_ascii_lowercase());
+                write!(stream,"HTTP/1.1 200 Fixture\r\nMetadata-Flavor: Google\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+            }
+            requests
+        });
+        let mut source = GkeMetadataAccessTokens::fixture(&endpoint)?;
+        source.selected_account = Some("app@company-tools.iam.gserviceaccount.com".into());
+        assert_eq!(source.access_token()?, "native-selected-token");
+        assert!(source.access_token().is_err());
+        let requests = worker.join().unwrap();
+        assert_eq!(requests.len(), 3);
+        for index in [0, 2] {
+            assert!(requests[index].starts_with(
+                "get /computemetadata/v1/instance/service-accounts/default/email http/1.1"
+            ));
+        }
+        assert!(requests[1].starts_with(
+            "get /computemetadata/v1/instance/service-accounts/default/token http/1.1"
+        ));
+        for request in requests {
+            assert!(request.contains("metadata-flavor: google\r\n"));
+            assert!(!request.contains("authorization:"));
+        }
+        assert!(GkeMetadataAccessTokens::selected("operator@example.com").is_err());
         Ok(())
     }
 

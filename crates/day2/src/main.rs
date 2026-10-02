@@ -19,6 +19,7 @@ fn main() -> Result<()> {
         .collect::<Vec<_>>()
         .as_slice()
     {
+        ["oauth-setup", instance] => day2::deployment::oauth_setup(Path::new(instance))?,
         ["docs-preview", artifact, port] => {
             let artifact = LoadedArtifact::load(Path::new(artifact))?;
             tokio::runtime::Builder::new_multi_thread()

@@ -220,7 +220,7 @@ impl ExternalAccountConstraints {
     pub fn verify(&self, reviewed_issuer: &str) -> Result<()> {
         ensure!(
             self.issuer_url == reviewed_issuer
-                && https_url(&self.issuer_url, true).is_ok()
+                && https_issuer_url(&self.issuer_url).is_ok()
                 && !self.allowed_tenants.is_empty()
                 && self.allowed_tenants.len() <= 64
                 && self
@@ -333,7 +333,7 @@ pub(super) fn qualify_outbound_connect(
             && reviewed.issuer_url == binding.issuer_url(),
         "provider issuer binding mismatch"
     );
-    let issuer_url = https_url(&reviewed.issuer_url, true)?;
+    let issuer_url = https_issuer_url(&reviewed.issuer_url)?;
     let authorization_endpoint = https_url(&reviewed.authorization_endpoint, true)?;
     let token_endpoint = https_url(&reviewed.token_endpoint, true)?;
     let shell_url = https_url(&instance.shell.origin_url, false)?;
@@ -464,6 +464,20 @@ pub fn derived_callback_url(origin_url: &str, callback: &ProviderCallbackRef) ->
         .strip_prefix("sha256:")
         .ok_or_else(|| anyhow::anyhow!("invalid provider callback digest"))?;
     Ok(format!("{origin_url}_day2/oauth/callback/{suffix}"))
+}
+
+/// An issuer is an exact protocol identifier, including whether an origin has
+/// a trailing slash. URL parsing may add that slash, but comparisons and pins
+/// always keep the reviewed original. Endpoint URLs retain strict canonicality.
+pub(super) fn https_issuer_url(raw: &str) -> Result<url::Url> {
+    let parsed = url::Url::parse(raw)?;
+    ensure!(
+        raw.len() <= 512
+            && (parsed.as_str() == raw
+                || (parsed.path() == "/" && parsed.as_str() == format!("{raw}/"))),
+        "invalid OAuth issuer identifier"
+    );
+    https_url(parsed.as_str(), true)
 }
 
 fn https_url(raw: &str, allow_path: bool) -> Result<url::Url> {
@@ -1113,6 +1127,118 @@ pub(super) mod tests {
         )
         .unwrap();
         assert!(registry.resolve("attempt_1", 5).unwrap().is_none());
+    }
+
+    #[test]
+    fn app_lookup_observes_only_the_pending_owner_after_immutable_subject_binding() -> Result<()> {
+        use super::super::{approval_registry::StoredAppApprovals, shell_transport::AppApprovals};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        struct Observer {
+            path: std::path::PathBuf,
+            calls: AtomicUsize,
+        }
+        impl ApprovalAuthority for Observer {
+            fn observe_identity(
+                &self,
+                app: &str,
+                identity: &crate::iap::Verified,
+                _: i64,
+            ) -> Result<()> {
+                assert_eq!(app, "app");
+                let db = rusqlite::Connection::open(&self.path)?;
+                let bound: String = db.query_row(
+                    "SELECT subject FROM day2_principals WHERE email=?1",
+                    [&identity.email],
+                    |r| r.get(0),
+                )?;
+                assert_eq!(bound, identity.subject);
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+            fn current(
+                &self,
+                _: &str,
+                _: &connect::ConnectIntent,
+                _: &connect::CallbackBinding,
+                _: i64,
+            ) -> Result<Option<ApprovalTerms>> {
+                assert!(self.calls.load(Ordering::SeqCst) > 0);
+                Ok(None)
+            }
+        }
+        let fixture = external_fixture();
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("owner.sqlite");
+        let mut db = rusqlite::Connection::open(&path)?;
+        quarantine_external_fixture(&mut db, &fixture, &exchange_key());
+        db.execute_batch(crate::audit::PRINCIPALS_DDL)?;
+        let observer = Arc::new(Observer {
+            path: path.clone(),
+            calls: AtomicUsize::new(0),
+        });
+        let backend = StoredAppApprovals::new("app".into(), path, observer.clone())?;
+        let mut identity = crate::iap::Verified {
+            email: "another-human".into(),
+            subject: "accounts.google.com:immutable-owner".into(),
+        };
+        assert!(backend.lookup("attempt_1", &identity, 5).is_err());
+        assert_eq!(observer.calls.load(Ordering::SeqCst), 0);
+        identity.email = fixture.intent.owner.clone();
+        let lookup = backend.lookup("attempt_1", &identity, 5)?;
+        assert!(lookup.owned && lookup.view.is_none());
+        assert_eq!(observer.calls.load(Ordering::SeqCst), 1);
+        identity.subject = "accounts.google.com:replacement".into();
+        assert!(backend.lookup("attempt_1", &identity, 5).is_err());
+        assert_eq!(observer.calls.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn origin_issuer_identifier_keeps_exact_spelling_and_endpoints_remain_canonical() -> Result<()>
+    {
+        let issuer = super::super::google::ISSUER;
+        https_issuer_url(issuer)?;
+        assert!(https_url(issuer, true).is_err());
+        for wrong in [
+            "http://accounts.google.com",
+            "https://ACCOUNTS.google.com",
+            "https://accounts.google.com:443",
+            "https://user@accounts.google.com",
+            "https://accounts.google.com?query=x",
+            "https://accounts.google.com#fragment",
+        ] {
+            assert!(https_issuer_url(wrong).is_err(), "{wrong}");
+        }
+        let fixture = external_fixture();
+        let mut value = serde_json::to_value(&fixture.binding)?;
+        value["issuer_url"] = serde_json::json!(issuer);
+        let binding: CallbackBinding = serde_json::from_value(value)?;
+        binding.verify(&fixture.intent)?;
+        assert_eq!(binding.issuer_url(), issuer);
+        let id = Name::try_from("google_accounts".to_owned())?;
+        let tenants = BTreeSet::from(["example.com".to_owned()]);
+        let subjects: Option<BTreeSet<String>> = None;
+        let constraints = ExternalAccountConstraints {
+            binding: BindingRef {
+                revision: Digest::of(&(
+                    "oauth-external-account-constraints-v1",
+                    &id,
+                    issuer,
+                    &tenants,
+                    &subjects,
+                ))?,
+                id,
+            },
+            issuer_url: issuer.into(),
+            allowed_tenants: tenants,
+            allowed_subjects: subjects,
+        };
+        constraints.verify(issuer)?;
+        assert!(constraints.verify(&format!("{issuer}/")).is_err());
+        Ok(())
     }
 
     #[test]

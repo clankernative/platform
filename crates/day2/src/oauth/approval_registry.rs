@@ -31,6 +31,15 @@ pub(crate) struct ApprovalTerms {
 }
 
 pub(crate) trait ApprovalAuthority: Send + Sync {
+    fn observe_identity(
+        &self,
+        _app: &str,
+        _identity: &crate::iap::Verified,
+        _now: i64,
+    ) -> Result<()> {
+        Ok(())
+    }
+
     fn current(
         &self,
         app: &str,
@@ -313,6 +322,20 @@ impl StoredApprovalRegistry {
                 view: None,
             });
         };
+        let db = crate::store::open(&self.app_databases[&app])?;
+        let Some((intent, _)) = connect::pending_approval(&db, attempt, now)? else {
+            return Ok(shell_transport::HostLookup {
+                owned: true,
+                view: None,
+            });
+        };
+        ensure!(
+            intent.owner == identity.email,
+            "OAuth approval human mismatch"
+        );
+        crate::iap::bind_subject(&db, identity, now)?;
+        drop(db);
+        self.authority.observe_identity(&app, identity, now)?;
         let Some(context) = self.resolve(attempt, now)? else {
             return Ok(shell_transport::HostLookup {
                 owned: true,
@@ -367,6 +390,10 @@ impl StoredApprovalRegistry {
             "OAuth confirmation human mismatch"
         );
         drop(db);
+        let db = crate::store::open(path)?;
+        crate::iap::bind_subject(&db, identity, now)?;
+        drop(db);
+        self.authority.observe_identity(&app, identity, now)?;
         let mut evidence = Some(evidence);
         self.authority
             .with_current(&app, &intent, &binding, now, &mut |terms| {

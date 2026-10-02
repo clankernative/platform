@@ -13,6 +13,12 @@ use std::{
 
 const PROC_BUDGET: u64 = 1_048_576;
 
+/// Read-only desired metadata for the native OAuth runtime. This emits pins and
+/// callback URLs, never readiness and never client or custody secret bytes.
+pub fn oauth_setup(instance_path: &Path) -> Result<serde_json::Value> {
+    crate::oauth::admission::live::setup(instance_path)
+}
+
 fn bounded_text(path: &Path) -> Result<String> {
     use std::io::Read;
     let mut value = String::new();
@@ -321,8 +327,8 @@ pub async fn serve_with(
     serve_configured(instance_path, app, access, None, configure).await
 }
 
-/// Reviewed provider adapters supply this capability at native host startup.
-/// The ordinary binary refuses selected connections until those are published.
+/// Native adapters are selected from the typed instance contract only after
+/// kernel, artifact and current authority admission. Registration starts empty.
 pub(crate) async fn serve_with_oauth(
     instance_path: &Path,
     app: &str,
@@ -393,9 +399,12 @@ async fn serve_configured(
     let concurrency = usize::from(profile.resources().http_concurrency());
     let receiver = if oauth {
         let runtime = runtime.clone();
-        let providers = providers.context("OAuth provider host missing")?;
         Some(
             tokio::task::spawn_blocking(move || {
+                let providers = match providers {
+                    Some(providers) => providers,
+                    None => crate::oauth::host::Providers::from_gke_runtime(&runtime)?,
+                };
                 crate::oauth::host::app_receiver(&runtime, &providers)
             })
             .await

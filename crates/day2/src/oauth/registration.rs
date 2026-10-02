@@ -157,7 +157,7 @@ impl Target {
             .collect()
     }
 
-    fn registration_evidence(&self) -> Result<profiles::ProviderRegistrationEvidence> {
+    pub(super) fn registration_evidence(&self) -> Result<profiles::ProviderRegistrationEvidence> {
         // Stable across renewed probes; clock and secret/token bytes never
         // participate. A receipt is still issuable only after the live campaign.
         let confirmation = Digest::of(&(
@@ -1013,6 +1013,14 @@ impl GoogleReadiness {
 pub(super) mod publication;
 
 impl admission::OutboundReadiness for GoogleReadiness {
+    fn selected_runtime(&self) -> Result<Option<Digest>> {
+        self.facts.selected_runtime()
+    }
+
+    fn observe_identity(&self, identity: &crate::iap::Verified, now: i64) -> Result<()> {
+        self.facts.observe_identity(identity, now)
+    }
+
     fn current(
         &self,
         binding: &OutboundConnectionBinding,

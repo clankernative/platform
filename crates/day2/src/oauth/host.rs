@@ -13,6 +13,30 @@ pub(crate) struct Providers {
 }
 
 impl Providers {
+    pub(crate) fn from_gke_runtime(runtime: &Runtime) -> Result<Self> {
+        let catalog = super::google::catalog()?;
+        let selected = admission::QualifiedConnections::from_runtime(runtime, &catalog)?;
+        let config = selected
+            .instance()
+            .oauth_runtime
+            .as_ref()
+            .context("OAuth runtime not selected")?;
+        let app = config
+            .apps
+            .iter()
+            .find(|(name, _)| name.as_str() == runtime.app())
+            .context("OAuth runtime app missing")?;
+        let tokens = Arc::new(approval_keys::GkeMetadataAccessTokens::selected(
+            &app.1.service_account,
+        )?);
+        let facts = Arc::new(admission::live::Facts::from_gke(
+            selected,
+            runtime.db().to_path_buf(),
+            tokens,
+        )?);
+        Self::google(Arc::new(super::registration::GoogleReadiness::new(facts)))
+    }
+
     /// Publishing reviewed code does not populate registration readiness. A
     /// native qualification session must supply fresh non-serializable receipts.
     pub(crate) fn google(readiness: Arc<super::registration::GoogleReadiness>) -> Result<Self> {
@@ -56,7 +80,10 @@ pub(crate) fn require_providers(
         return Ok(false);
     }
     ensure!(edge, "OAuth requires the qualified edge host");
-    ensure!(providers.is_some(), "OAuth provider host is not published");
+    ensure!(
+        providers.is_some() || instance.oauth_runtime.is_some(),
+        "OAuth provider host is not published"
+    );
     instance.security_edge()?;
     instance
         .oauth_shell_transport
@@ -72,10 +99,22 @@ pub(crate) fn app_receiver(
 ) -> Result<Arc<shell_transport::AppApprovalReceiver>> {
     let selected = admission::QualifiedConnections::from_runtime(runtime, &providers.catalog)?;
     let instance = selected.instance().clone();
+    let tokens = match &instance.oauth_runtime {
+        Some(config) => approval_keys::GkeMetadataAccessTokens::selected(
+            &config
+                .apps
+                .iter()
+                .find(|(name, _)| name.as_str() == runtime.app())
+                .context("OAuth runtime app missing")?
+                .1
+                .service_account,
+        )?,
+        None => approval_keys::GkeMetadataAccessTokens::new()?,
+    };
     let authority = Arc::new(admission::ArtifactApprovalAuthority::with_gcp(
         selected,
         providers.readiness.clone(),
-        Arc::new(approval_keys::GkeMetadataAccessTokens::new()?),
+        Arc::new(tokens),
     )?);
     runtime.initialize()?;
     connect::install_schema(&crate::store::open(runtime.db())?)?;

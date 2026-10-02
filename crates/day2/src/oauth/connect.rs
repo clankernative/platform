@@ -71,14 +71,13 @@ impl CallbackBinding {
     }
 
     pub(super) fn verify(&self, intent: &ConnectIntent) -> Result<()> {
-        let issuer = url::Url::parse(&self.issuer_url)?;
+        let issuer = super::profiles::https_issuer_url(&self.issuer_url)?;
         ensure!(
             issuer.scheme() == "https"
                 && issuer.username().is_empty()
                 && issuer.password().is_none()
                 && issuer.query().is_none()
                 && issuer.fragment().is_none()
-                && issuer.as_str() == self.issuer_url
                 && self.issuer_url.len() <= 512,
             "invalid reviewed provider issuer"
         );
