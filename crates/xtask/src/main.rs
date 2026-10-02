@@ -16,6 +16,7 @@ mod linux_provisioning_fixture;
 mod linux_qualification;
 mod linux_runtime_qualification;
 mod native_toolchain;
+mod page_contracts;
 mod provider_conformance;
 mod tooling;
 mod verification;
@@ -235,6 +236,7 @@ fn main() -> Result<()> {
         "linux-provision-inspect",
     ]
     .contains(&action.as_str())
+        || action == "page-contracts"
     {
         None
     } else {
@@ -400,6 +402,23 @@ fn main() -> Result<()> {
                 Some(root.parent().context("isolated workspace parent")?),
                 None,
             )?;
+        }
+        "page-contracts" => {
+            let artifact =
+                PathBuf::from(args.next().context(
+                    "usage: xtask page-contracts ARTIFACT_DIRECTORY [--output JSON_FILE]",
+                )?);
+            let output = match args.next() {
+                None => None,
+                Some(flag) if flag == "--output" => Some(PathBuf::from(
+                    args.next().context("missing JSON output path")?,
+                )),
+                Some(_) => {
+                    bail!("usage: xtask page-contracts ARTIFACT_DIRECTORY [--output JSON_FILE]")
+                }
+            };
+            ensure!(args.next().is_none(), "unexpected page-contracts argument");
+            page_contracts::export_file(&artifact, output.as_deref())?;
         }
         "build" => {
             let app = args
