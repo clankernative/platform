@@ -359,6 +359,9 @@ impl QualifiedConnections {
             "OAuth app is not installed"
         );
         instance.apps.retain(|name, _| name == app);
+        if let Some(runtime) = &mut instance.oauth_runtime {
+            runtime.apps.retain(|name, _| name.as_str() == app);
+        }
         if let Some(control) = &mut instance.control {
             control.apps.retain(|name, _| name.as_str() == app);
             control
@@ -735,6 +738,14 @@ pub(crate) fn binding_namespace(binding: &OutboundConnectionBinding) -> Result<S
 /// instance configuration. Its implementation must check current external
 /// qualification; an operator-authored digest alone is not readiness.
 pub(crate) trait OutboundReadiness: Send + Sync {
+    fn selected_runtime(&self) -> Result<Option<Digest>> {
+        Ok(None)
+    }
+
+    fn observe_identity(&self, _identity: &crate::iap::Verified, _now: i64) -> Result<()> {
+        Ok(())
+    }
+
     fn current(
         &self,
         binding: &OutboundConnectionBinding,
@@ -742,6 +753,9 @@ pub(crate) trait OutboundReadiness: Send + Sync {
         now: i64,
     ) -> Result<Option<profiles::OutboundInstanceEvidence>>;
 }
+
+#[path = "live_readiness.rs"]
+pub(crate) mod live;
 
 struct AuthorityState {
     selected: QualifiedConnections,
@@ -846,6 +860,12 @@ impl ArtifactApprovalAuthority {
         now: i64,
     ) -> Result<Option<ApprovalTerms>> {
         let selected = &state.selected;
+        if let Some(runtime) = &selected.instance.oauth_runtime {
+            ensure!(
+                self.readiness.selected_runtime()? == Some(Digest::of(runtime)?),
+                "OAuth live runtime selection changed"
+            );
+        }
         let mut found = None;
         for ((candidate_app, _), candidate) in &selected.entries {
             if candidate_app != app {
@@ -952,6 +972,18 @@ impl ArtifactApprovalAuthority {
 }
 
 impl ApprovalAuthority for ArtifactApprovalAuthority {
+    fn observe_identity(&self, app: &str, identity: &crate::iap::Verified, now: i64) -> Result<()> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| anyhow::anyhow!("OAuth selection lock poisoned"))?;
+        ensure!(
+            state.selected.instance.apps.contains_key(app),
+            "OAuth human observation app mismatch"
+        );
+        self.readiness.observe_identity(identity, now)
+    }
+
     fn current(
         &self,
         app: &str,
@@ -1783,6 +1815,56 @@ pub(super) mod tests {
     #[derive(Default)]
     struct Keys {
         calls: AtomicUsize,
+    }
+
+    #[test]
+    fn changed_runtime_catalog_refuses_old_facts_before_cloud_or_key_acquisition() -> Result<()> {
+        struct PinnedFacts {
+            revision: Digest,
+            calls: AtomicUsize,
+        }
+        impl OutboundReadiness for PinnedFacts {
+            fn selected_runtime(&self) -> Result<Option<Digest>> {
+                Ok(Some(self.revision.clone()))
+            }
+            fn current(
+                &self,
+                _: &OutboundConnectionBinding,
+                _: &ConnectionSlotKey,
+                _: i64,
+            ) -> Result<Option<profiles::OutboundInstanceEvidence>> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                anyhow::bail!("retired source must not run")
+            }
+        }
+        let facts = fixture(AccountBindingPolicy::ExplicitExternalAccount)?;
+        let mut selected = facts.qualify()?;
+        let mut config: day2_capabilities::oauth::RuntimeCatalog = serde_json::from_value(
+            json!({"version":1,"shell":{"project":"company-tools","backend_service":"shell-backend","url_map":"shell-map","https_proxy":"shell-proxy","forwarding_rule":"shell-https","kubernetes_service":"tools/security-shell"},
+            "apps":{"workspace":{"service_account":"app@company-tools.iam.gserviceaccount.com","accounts":{"calendar":{"kind":"external_accounts","allowed_tenants":["example.com"],"allowed_subjects":null}}}}}),
+        )?;
+        config.validate()?;
+        let source = Arc::new(PinnedFacts {
+            revision: Digest::of(&config)?,
+            calls: AtomicUsize::new(0),
+        });
+        config
+            .apps
+            .get_mut(&name("workspace"))
+            .unwrap()
+            .service_account = "replacement@company-tools.iam.gserviceaccount.com".into();
+        selected.instance.oauth_runtime = Some(config);
+        let keys = Arc::new(Keys::default());
+        let authority =
+            ArtifactApprovalAuthority::with_keys(selected, source.clone(), keys.clone());
+        assert!(
+            authority
+                .current("workspace", &facts.intent, &facts.callback, 5)
+                .is_err()
+        );
+        assert_eq!(source.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(keys.calls.load(Ordering::SeqCst), 0);
+        Ok(())
     }
     impl ApprovalKeyProvider for Keys {
         fn load(
