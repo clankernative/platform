@@ -13,3 +13,4 @@ day2 = { path = "../day2" }
 day2-control = { path = "../day2-control" }
 tempfile = "3.27"
 rusqlite = { version = "=0.40.2", features = ["bundled"] }
+unicode-segmentation = "=1.13.3"

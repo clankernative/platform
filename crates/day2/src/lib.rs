@@ -86,6 +86,7 @@ mod web_html;
 pub mod web_resources;
 mod web_security;
 pub mod web_templates;
+pub(crate) mod web_ui_values;
 pub mod worker;
 pub mod write_queue;
 

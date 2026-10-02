@@ -19,6 +19,7 @@ mod native_toolchain;
 mod page_contracts;
 mod provider_conformance;
 mod tooling;
+mod ui_adapter_port;
 mod verification;
 mod workflows;
 

@@ -1,0 +1,8 @@
+{
+  "abiVersion": 1,
+  "origin": "internal-tools/clanker-native-ui/crates/clanker-ui-runtime",
+  "files": {
+    "Cargo.toml": "7606e1ef15d50b9671c1257fd869c1af2412ef24ab4907f3b4e22e0295d076da",
+    "src/lib.rs": "6a3623f6403d92f3c5fb7a9ad24a7cd5912c89e5393c1afc74ec82a30c1d6bd1"
+  }
+}

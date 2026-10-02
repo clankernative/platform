@@ -201,6 +201,11 @@ each binding one public command and one text field of its result; admission
 checks them against that command's contract (see [redirect routes](WEB.md#redirect-routes)). Resources and source overlays are captured before packaging, and
 platform inputs are checked for changes before publication and selection.
 
+The declared app module is a render-blocking bootstrap in supporting browsers.
+Restore browser-local chrome synchronously there, and use admitted literal dynamic
+imports for optional, heavier surfaces. Server-rendered content must remain usable
+when JavaScript is disabled or unavailable.
+
 Format 12 requires a complete contract. The loader rederives types/registrations,
 checks resources and compares the serialized contract and manifest with the
 compiled worker. Rehashing an edited manifest cannot bypass these checks. Older

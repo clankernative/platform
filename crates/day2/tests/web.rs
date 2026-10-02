@@ -1779,6 +1779,10 @@ fn app_authored_layout_and_pinned_browser_resources_are_served_in_scope() -> Res
             .select(&selector("link[rel='stylesheet']"))
             .all(|link| link.value().attr("href") != Some("/assets/platform/web.css"))
     );
+    assert_eq!(
+        attribute(&page, "script[src$='/app.js']", "blocking")?,
+        "render"
+    );
     let script = attribute(&page, "script[src$='/app.js']", "src")?;
     let style = attribute(&page, "link[href$='/app.css']", "href")?;
     let base = script.strip_suffix("app.js").context("UI entrypoint")?;

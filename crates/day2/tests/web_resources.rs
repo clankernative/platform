@@ -3,10 +3,26 @@ use day2::{digest, web_resources};
 use std::{fs, os::unix::fs::symlink, path::Path};
 
 fn write(source: &Path, path: &str, value: &str) -> Result<()> {
+    write_bytes(source, path, value.as_bytes())
+}
+
+fn write_bytes(source: &Path, path: &str, value: &[u8]) -> Result<()> {
     let file = source.join(path);
     fs::create_dir_all(file.parent().unwrap())?;
     fs::write(file, value)?;
     Ok(())
+}
+
+fn test_woff2(length: usize) -> Vec<u8> {
+    assert!(length >= 49);
+    let mut bytes = vec![0u8; length];
+    bytes[..4].copy_from_slice(b"wOF2");
+    bytes[4..8].copy_from_slice(b"\0\x01\0\0");
+    bytes[8..12].copy_from_slice(&(length as u32).to_be_bytes());
+    bytes[12..14].copy_from_slice(&1u16.to_be_bytes());
+    bytes[16..20].copy_from_slice(&1u32.to_be_bytes());
+    bytes[20..24].copy_from_slice(&1u32.to_be_bytes());
+    bytes
 }
 
 #[test]
@@ -47,6 +63,20 @@ fn native_modules_keep_relative_paths_and_are_deterministic() -> Result<()> {
         fs::read(source.join("app.js"))?
     );
     web_resources::validate_blobs(&one, &first)?;
+    Ok(())
+}
+
+#[test]
+fn native_ui_lock_is_not_a_browser_resource() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let ui = directory.path().join("ui");
+    write(&ui, "app.css", "body { color: black; }")?;
+    write(&ui, "clanker-ui.lock.json", "{\"schemaVersion\":1}")?;
+    let catalog = web_resources::package(&ui, &directory.path().join("out"))?;
+    assert_eq!(catalog.len(), 1);
+    assert!(catalog.contains_key("app.css"));
+    write(&ui, "other.json", "{}")?;
+    assert!(web_resources::package(&ui, &directory.path().join("out")).is_err());
     Ok(())
 }
 
@@ -201,5 +231,173 @@ fn resource_sources_reject_symlinks_non_ui_files_and_paths() -> Result<()> {
         let invalid = [(path.to_string(), resource.clone())].into_iter().collect();
         assert!(web_resources::validate(&invalid).is_err(), "{path}");
     }
+    Ok(())
+}
+
+#[test]
+fn reviewed_geist_woff2_resources_are_admitted_and_css_urls_resolve() -> Result<()> {
+    // Reviewed, OFL-licensed bytes are local fixtures: CI needs no sibling checkout.
+    const SANS: &[u8] = include_bytes!("fixtures/fonts/geist-sans-variable.woff2");
+    const MONO: &[u8] = include_bytes!("fixtures/fonts/geist-mono-variable.woff2");
+    let directory = tempfile::tempdir()?;
+    let source = directory.path().join("ui");
+    write_bytes(&source, "fonts/geist-sans-variable.woff2", SANS)?;
+    write_bytes(&source, "fonts/geist-mono-variable.woff2", MONO)?;
+    write(
+        &source,
+        "app.css",
+        "@font-face { font-family: Geist; src: url(\"./fonts/geist-sans-variable.woff2\") format(\"woff2\"); }",
+    )?;
+    let target = directory.path().join("out");
+    let catalog = web_resources::package(&source, &target)?;
+    assert_eq!(
+        catalog["fonts/geist-sans-variable.woff2"].media_type,
+        "font/woff2"
+    );
+    assert_eq!(
+        catalog["fonts/geist-mono-variable.woff2"].media_type,
+        "font/woff2"
+    );
+    assert_eq!(
+        web_resources::read_blob(&target, &catalog["fonts/geist-sans-variable.woff2"])?,
+        SANS
+    );
+    web_resources::validate_blobs(&target, &catalog)?;
+
+    // A replayed stylesheet digest cannot widen its locked font closure.
+    let changed_css = b"@font-face { src: url(\"fonts/not-in-catalog.woff2\"); }";
+    let mut replayed = catalog.clone();
+    let css = replayed.get_mut("app.css").unwrap();
+    css.digest = digest(changed_css);
+    css.bytes = changed_css.len() as u64;
+    fs::write(
+        target
+            .join("web_resources")
+            .join(format!("{}.css", css.digest.trim_start_matches("sha256:"))),
+        changed_css,
+    )?;
+    assert!(web_resources::validate_blobs(&target, &replayed).is_err());
+
+    let second = web_resources::package(&source, &directory.path().join("other"))?;
+    assert_eq!(catalog, second);
+    Ok(())
+}
+
+#[test]
+fn font_urls_are_source_stylesheet_only_and_catalog_closed() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let source = directory.path().join("ui");
+    write_bytes(&source, "fonts/geist-sans-variable.woff2", &test_woff2(64))?;
+    for css in [
+        "@font-face { src: url(\"./fonts/missing.woff2\"); }",
+        "@font-face { src: url(\"https://example.com/font.woff2\"); }",
+        r#"@font-face { src: url("https\3a //example.com/font.woff2"); }"#,
+        "@font-face { src: url(\"//example.com/font.woff2\"); }",
+        "@font-face { src: url(\"/fonts/geist-sans-variable.woff2\"); }",
+        "@font-face { src: url(\"../fonts/geist-sans-variable.woff2\"); }",
+        "@font-face { src: url(\"fonts/geist-sans-variable.woff2?cache=1\"); }",
+        ".page { background-image: url(\"fonts/geist-sans-variable.woff2\"); }",
+        "@font-face { background-image: url(\"fonts/geist-sans-variable.woff2\"); }",
+        "@font-face { src: url(\"fonts/geist-sans-variable.woff2\"), url(\"https://example.com/x.woff2\"); }",
+    ] {
+        write(&source, "app.css", css)?;
+        assert!(
+            web_resources::package(&source, &directory.path().join("out")).is_err(),
+            "unexpectedly admitted CSS {css}"
+        );
+    }
+    write(
+        &source,
+        "app.css",
+        r#"@font-face { src: url("fonts/geist\2d sans-variable.woff2"); }"#,
+    )?;
+    web_resources::package(&source, &directory.path().join("escaped"))?;
+    assert!(
+        web_resources::validate_inline_style(
+            "font-family: Geist; src: url(\"fonts/geist-sans-variable.woff2\")"
+        )
+        .is_err()
+    );
+    Ok(())
+}
+
+#[test]
+fn woff2_header_type_path_and_budget_are_bounded() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let source = directory.path().join("ui");
+    write_bytes(&source, "fonts/good.woff2", &test_woff2(64))?;
+    web_resources::package(&source, &directory.path().join("good"))?;
+
+    for (path, bytes) in [
+        ("fonts/wrong.woff2", b"not a font".to_vec()),
+        ("fonts/short.woff2", b"wOF2".to_vec()),
+    ] {
+        let bad = directory.path().join("bad");
+        fs::create_dir_all(&bad)?;
+        write_bytes(&bad, path, &bytes)?;
+        assert!(web_resources::package(&bad, &directory.path().join("bad-out")).is_err());
+    }
+    let mut mismatch = test_woff2(64);
+    mismatch[8..12].copy_from_slice(&63u32.to_be_bytes());
+    write_bytes(&source, "fonts/mismatch.woff2", &mismatch)?;
+    assert!(web_resources::package(&source, &directory.path().join("mismatch-out")).is_err());
+    fs::remove_file(source.join("fonts/mismatch.woff2"))?;
+    let mut expanded = test_woff2(64);
+    expanded[16..20].copy_from_slice(&((16 * 1024 * 1024 + 1) as u32).to_be_bytes());
+    write_bytes(&source, "fonts/expanded.woff2", &expanded)?;
+    assert!(web_resources::package(&source, &directory.path().join("expanded-out")).is_err());
+    fs::remove_file(source.join("fonts/expanded.woff2"))?;
+
+    write_bytes(&source, "fonts/unsupported.ttf", &test_woff2(64))?;
+    assert!(web_resources::package(&source, &directory.path().join("extension-out")).is_err());
+    fs::remove_file(source.join("fonts/unsupported.ttf"))?;
+
+    let mut catalog = web_resources::package(&source, &directory.path().join("tamper"))?;
+    catalog.get_mut("fonts/good.woff2").unwrap().media_type = "application/octet-stream".into();
+    assert!(web_resources::validate(&catalog).is_err());
+    Ok(())
+}
+
+#[test]
+fn woff2_source_symlinks_and_blob_tampering_are_rejected() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let source = directory.path().join("ui");
+    fs::create_dir_all(source.join("fonts"))?;
+    let external = directory.path().join("external.woff2");
+    fs::write(&external, test_woff2(64))?;
+    symlink(&external, source.join("fonts/link.woff2"))?;
+    assert!(web_resources::package(&source, &directory.path().join("out")).is_err());
+
+    fs::remove_file(source.join("fonts/link.woff2"))?;
+    write_bytes(&source, "fonts/good.woff2", &test_woff2(64))?;
+    let target = directory.path().join("out");
+    let catalog = web_resources::package(&source, &target)?;
+    let resource = &catalog["fonts/good.woff2"];
+    let blob = target.join("web_resources").join(format!(
+        "{}.woff2",
+        resource.digest.trim_start_matches("sha256:")
+    ));
+    let mut changed = fs::read(&blob)?;
+    changed[47] = 1;
+    fs::write(&blob, changed)?;
+    assert!(web_resources::read_blob(&target, resource).is_err());
+    assert!(web_resources::validate_blobs(&target, &catalog).is_err());
+    Ok(())
+}
+
+#[test]
+fn woff2_file_and_pack_budgets_are_preserved() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let source = directory.path().join("ui");
+    let oversized = test_woff2(2 * 1024 * 1024 + 1);
+    write_bytes(&source, "fonts/large.woff2", &oversized)?;
+    assert!(web_resources::package(&source, &directory.path().join("file-budget")).is_err());
+
+    fs::remove_file(source.join("fonts/large.woff2"))?;
+    let one = test_woff2(2 * 1024 * 1024);
+    for index in 0..9 {
+        write_bytes(&source, &format!("fonts/font-{index}.woff2"), &one)?;
+    }
+    assert!(web_resources::package(&source, &directory.path().join("pack-budget")).is_err());
     Ok(())
 }

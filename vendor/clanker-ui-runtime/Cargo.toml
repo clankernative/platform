@@ -1,0 +1,10 @@
+[package]
+name = "clanker-ui-runtime"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0"
+minijinja = { version = "=2.12.0", default-features = false, features = ["debug", "multi_template", "serde", "fuel", "unstable_machinery"] }
+url = "2"
+unicode-segmentation = "=1.13.3"

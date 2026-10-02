@@ -1413,8 +1413,28 @@ impl Host {
         }
         let stylesheet = self.appearance.stylesheet_url(&self.runtime)?;
         let script = self.appearance.script_url(&self.runtime)?;
+        let component_script = self.appearance.component_script_url(&self.runtime)?;
+        let font_policy = if self
+            .runtime
+            .artifact()
+            .contract()
+            .web_resources
+            .values()
+            .any(|resource| resource.media_type == "font/woff2")
+        {
+            format!(
+                " font-src {}{};",
+                self.origin,
+                self.appearance.resource_prefix()
+            )
+        } else {
+            String::new()
+        };
         let theme = self.appearance.theme_url()?;
-        let live = self.live_initializer(name, input)?;
+        let image_origins =
+            crate::web_templates::remote_image_origins(&content.clone().into_string())?;
+        let live = self.live_initializer(name, input, &image_origins)?;
+        let image_sources = image_origins.join(" ");
         let mut response = html_response(
             status,
             html! {
@@ -1427,7 +1447,12 @@ impl Host {
                         @if let Some(stylesheet) = stylesheet { link rel="stylesheet" href=(stylesheet); }
                         script type="module" src="/assets/platform/datastar-1.0.1.js" {}
                         script type="module" src="/assets/platform/forms.js" {}
-                        @if let Some(script) = script { script type="module" src=(script) {} }
+                        // The app entrypoint restores browser-local chrome before first paint.
+                        // Apps should load optional, heavy surfaces lazily from this bootstrap.
+                        @if let Some(script) = script { script type="module" blocking="render" src=(script) {} }
+                        // Optional presentation behavior has its own admitted entry;
+                        // it neither replaces nor render-blocks the app bootstrap.
+                        @if let Some(script) = component_script { script type="module" src=(script) {} }
                     }
                     body { (live) (content) }
                 }
@@ -1438,8 +1463,8 @@ impl Host {
         response.headers_mut().insert(
             header::CONTENT_SECURITY_POLICY,
             format!(
-                "default-src 'none'; script-src 'unsafe-eval' {}/assets/platform/datastar-1.0.1.js {}/assets/platform/forms.js {}{}; script-src-attr 'none'; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'; worker-src 'none'",
-                self.origin, self.origin, self.origin, self.appearance.resource_prefix()
+                "default-src 'none'; script-src 'unsafe-eval' {}/assets/platform/datastar-1.0.1.js {}/assets/platform/forms.js {}{}; script-src-attr 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' {};{} connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'; worker-src 'none'",
+                self.origin, self.origin, self.origin, self.appearance.resource_prefix(), image_sources, font_policy
             ).parse()?,
         );
         Ok(response)
@@ -1589,6 +1614,55 @@ impl Host {
                 }
             }
         }
+        for (name, native) in &ticket.native {
+            ensure!(
+                ticket.editable.iter().any(|editable| editable == name),
+                crate::error::Failure::InvalidTicket
+            );
+            let kind = record
+                .fields
+                .get(name)
+                .context(crate::error::Failure::InvalidTicket)?;
+            let compatible = match native.mode {
+                security::NativeMode::BooleanCheckbox => {
+                    *kind == crate::schema::Kind::Boolean && native.omitted == Value::Bool(false)
+                }
+                security::NativeMode::ListCheckbox => {
+                    crate::web_forms::scalar_list(kind)
+                        && native.omitted == Value::Array(Vec::new())
+                }
+                security::NativeMode::SetCheckbox => {
+                    crate::web_forms::carrier(kind) == crate::web_forms::Carrier::Set
+                        && native.omitted == serde_json::json!({"members": []})
+                }
+                security::NativeMode::Radio => {
+                    matches!(
+                        kind,
+                        crate::schema::Kind::Text | crate::schema::Kind::StandardText { .. }
+                    ) && native.omitted == Value::String(String::new())
+                }
+            };
+            ensure!(
+                compatible
+                    && !native.choices.is_empty()
+                    && native.choices.iter().all(|choice| !choice.is_empty())
+                    && native
+                        .choices
+                        .iter()
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .len()
+                        == native.choices.len(),
+                crate::error::Failure::InvalidTicket
+            );
+            if let Some(values) = fields.get(name) {
+                ensure!(
+                    values.iter().all(|value| native.choices.contains(value)),
+                    crate::error::Failure::UnknownFields
+                );
+            } else {
+                fields.insert(name.clone(), vec![]);
+            }
+        }
         let names: std::collections::BTreeSet<&str> = fields
             .keys()
             .chain(keyed.keys())
@@ -1606,13 +1680,21 @@ impl Host {
         let validation: Result<()> = (|| {
             for (name, value) in &fields {
                 ensure!(input.get(name).is_none(), "bound_field_override");
-                input[name] = security::field_values(
-                    record
-                        .fields
+                if value.is_empty() {
+                    let default = ticket
+                        .native
                         .get(name)
-                        .context(crate::error::Failure::UnknownFields)?,
-                    value,
-                )?;
+                        .context(crate::error::Failure::UnknownFields)?;
+                    input[name] = default.omitted.clone();
+                } else {
+                    input[name] = security::field_values(
+                        record
+                            .fields
+                            .get(name)
+                            .context(crate::error::Failure::UnknownFields)?,
+                        value,
+                    )?;
+                }
             }
             for (name, entries) in &keyed {
                 ensure!(input.get(name).is_none(), "bound_field_override");
