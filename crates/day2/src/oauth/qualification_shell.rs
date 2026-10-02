@@ -30,6 +30,10 @@ trait Campaign: Send + Sync {
     fn run(&self, target: Target, codes: Codes) -> Result<Receipt>;
 }
 
+pub(in crate::oauth) trait ReceiptPublisher: Send + Sync {
+    fn publish(&self, receipt: &Receipt, headers: &HeaderMap, now: i64) -> Result<()>;
+}
+
 struct NativeCampaign {
     runner: PathBuf,
     tokens: Arc<dyn AccessTokenSource>,
@@ -72,6 +76,7 @@ pub(crate) struct Canaries {
     state: Mutex<State>,
     campaign: Arc<dyn Campaign>,
     readiness: Arc<GoogleReadiness>,
+    publisher: Option<Arc<dyn ReceiptPublisher>>,
 }
 
 impl Canaries {
@@ -114,7 +119,16 @@ impl Canaries {
             }),
             campaign,
             readiness,
+            publisher: None,
         })
+    }
+
+    pub(in crate::oauth) fn with_publication(
+        mut self,
+        publisher: Arc<dyn ReceiptPublisher>,
+    ) -> Self {
+        self.publisher = Some(publisher);
+        self
     }
 
     fn targets(origin: &str, targets: Vec<Target>) -> Result<BTreeMap<String, Target>> {
@@ -144,8 +158,8 @@ impl Canaries {
         &self.origin
     }
 
-    /// Selection retirement and receipt publication share this lock. Network
-    /// work holds no lock; an in-flight retired campaign cannot publish.
+    /// Provider probes hold no routing lock. Final bounded publication and
+    /// selection retirement share it; an in-flight retired campaign cannot publish.
     pub(crate) fn replace(&self, targets: Vec<Target>) -> Result<()> {
         let targets = Self::targets(&self.origin, targets)?;
         let mut state = self
@@ -405,6 +419,11 @@ impl Canaries {
                 && pending.started.elapsed() < Duration::from_secs(SECONDS as u64),
             "completed canary selection expired or retired"
         );
+        if let Some(publisher) = &self.publisher {
+            publisher.publish(&receipt, headers, now).map_err(|_| {
+                anyhow::anyhow!("registration publication unavailable; start a new canary")
+            })?;
+        }
         self.readiness.publish(receipt)?;
         let markup = html! { (DOCTYPE) html lang="en" { head { meta charset="utf-8"; title { "Qualification completed" } }
             body { h1 { "Qualification completed" } p { "The native registration receipt is valid for five minutes. Independent shell, custody and account readiness are still required." } }
@@ -484,6 +503,20 @@ mod tests {
             _: i64,
         ) -> Result<Option<super::super::profiles::OutboundInstanceEvidence>> {
             Ok(Some(self.0.clone()))
+        }
+    }
+
+    struct PublicationObserved {
+        calls: AtomicUsize,
+        fail: bool,
+    }
+    impl ReceiptPublisher for PublicationObserved {
+        fn publish(&self, receipt: &Receipt, headers: &HeaderMap, _: i64) -> Result<()> {
+            assert!(receipt.fresh(time_now()));
+            assert!(headers.contains_key(header::COOKIE));
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            ensure!(!self.fail, "fixture publication response lost");
+            Ok(())
         }
     }
 
@@ -750,12 +783,19 @@ mod tests {
             runner: crate::automation::runner()?,
             pause: None,
         });
-        let canaries = Arc::new(Canaries::at(
-            "https://security.example.com",
-            vec![fixture.target],
-            campaign,
-            readiness.clone(),
-        )?);
+        let published = Arc::new(PublicationObserved {
+            calls: AtomicUsize::new(0),
+            fail: false,
+        });
+        let canaries = Arc::new(
+            Canaries::at(
+                "https://security.example.com",
+                vec![fixture.target],
+                campaign,
+                readiness.clone(),
+            )?
+            .with_publication(published.clone()),
+        );
         let now = time_now();
         let (headers, location) = begin(&canaries, now).await?;
         let location = advance(&canaries, &headers, &location, 1, now)?;
@@ -789,6 +829,7 @@ mod tests {
                 .contains("Max-Age=0")
         );
         assert_eq!(server.requests.lock().unwrap().len(), 9);
+        assert_eq!(published.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(
             readiness.current(&fixture.binding, &fixture.slot, time_now())?,
             Some(fixture.evidence)
@@ -805,6 +846,73 @@ mod tests {
                     now
                 )
                 .is_err()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn lost_publication_consumes_the_campaign_without_local_readiness_or_retry() -> Result<()>
+    {
+        let fixture = fixture()?;
+        let server = Server::new(responses())?;
+        let readiness = Arc::new(GoogleReadiness::new(Arc::new(Facts(fixture.evidence))));
+        let published = Arc::new(PublicationObserved {
+            calls: AtomicUsize::new(0),
+            fail: true,
+        });
+        let canaries = Arc::new(
+            Canaries::at(
+                "https://security.example.com",
+                vec![fixture.target],
+                Arc::new(FixtureCampaign {
+                    endpoint: server.endpoint.clone(),
+                    runner: crate::automation::runner()?,
+                    pause: None,
+                }),
+                readiness.clone(),
+            )?
+            .with_publication(published.clone()),
+        );
+        let now = time_now();
+        let (headers, location) = begin(&canaries, now).await?;
+        let location = advance(&canaries, &headers, &location, 1, now)?;
+        let location = advance(&canaries, &headers, &location, 2, now)?;
+        let (path, query) = callback(&location, "private-code-3")?;
+        let worker = canaries.clone();
+        let (request_headers, request_path, request_query) =
+            (headers.clone(), path.clone(), query.clone());
+        assert!(
+            tokio::task::spawn_blocking(move || worker.dispatch(
+                &Method::GET,
+                &request_path,
+                Some(&request_query),
+                &request_headers,
+                &[],
+                &identity(),
+                now
+            ))
+            .await?
+            .is_err()
+        );
+        assert!(
+            canaries
+                .dispatch(
+                    &Method::GET,
+                    &path,
+                    Some(&query),
+                    &headers,
+                    &[],
+                    &identity(),
+                    now
+                )
+                .is_err()
+        );
+        assert_eq!(server.requests.lock().unwrap().len(), 9);
+        assert_eq!(published.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(
+            readiness
+                .current(&fixture.binding, &fixture.slot, time_now())?
+                .is_none()
         );
         Ok(())
     }

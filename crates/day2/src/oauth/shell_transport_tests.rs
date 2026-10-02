@@ -87,6 +87,7 @@ impl Assertions {
     fn receiver(&self, backend: Arc<dyn AppApprovals>) -> AppApprovalReceiver {
         AppApprovalReceiver {
             backend,
+            registrations: None,
             authority: "app.example".into(),
             route: route_prefix("installation", "production", "app").unwrap(),
             workload: iap::Verifier::for_workload(
@@ -732,6 +733,219 @@ fn server(
         }
     });
     (endpoint, task)
+}
+
+struct RegistrationOnly;
+impl AppApprovals for RegistrationOnly {
+    fn app(&self) -> &str {
+        "workspace"
+    }
+    fn lookup(&self, _: &str, _: &iap::Verified, _: i64) -> Result<HostLookup> {
+        anyhow::bail!("registration must not resolve an app attempt")
+    }
+    fn confirm(
+        &self,
+        _: &str,
+        _: &Digest,
+        _: &iap::Verified,
+        _: external::FreshExternalApproval,
+        _: i64,
+    ) -> Result<bool> {
+        anyhow::bail!("registration must not settle an app attempt")
+    }
+}
+
+struct NoLiveFacts;
+impl crate::oauth::admission::OutboundReadiness for NoLiveFacts {
+    fn current(
+        &self,
+        _: &day2_capabilities::oauth::OutboundConnectionBinding,
+        _: &day2_capabilities::oauth::ConnectionSlotKey,
+        _: i64,
+    ) -> Result<Option<crate::oauth::profiles::OutboundInstanceEvidence>> {
+        Ok(None)
+    }
+}
+
+struct NativeRegistrationSink {
+    authority: crate::oauth::admission::ArtifactApprovalAuthority,
+    readiness: Arc<crate::oauth::registration::GoogleReadiness>,
+    calls: Arc<AtomicUsize>,
+}
+impl RegistrationSink for NativeRegistrationSink {
+    fn receive(
+        &self,
+        proof: &crate::oauth::registration::publication::Publication,
+        app: &str,
+        identity: &iap::Verified,
+        now: i64,
+    ) -> Result<()> {
+        self.authority
+            .receive_registration(proof, app, identity, &self.readiness, now)?;
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[test]
+fn native_registration_crosses_authenticated_http_once_even_when_response_is_lost() -> Result<()> {
+    use crate::oauth::{
+        admission,
+        registration::{
+            GoogleReadiness,
+            publication::{self, tests as native},
+        },
+    };
+    for lost in [false, true] {
+        let (selected, receipt) = native::fixture()?;
+        let proof = publication::attest(&receipt, &selected, &native::Keys::default(), now()?)?;
+        let assertions = Assertions::new();
+        let at = now()?;
+        let mut human_headers = HeaderMap::new();
+        human_headers.insert(
+            iap::ASSERTION_HEADER,
+            assertions
+                .assertion_at(SHELL_AUDIENCE, HUMAN, &native::identity().subject, at)
+                .parse()?,
+        );
+        human_headers.insert(header::COOKIE, "private-browser-cookie".parse()?);
+        let readiness = Arc::new(GoogleReadiness::new(Arc::new(NoLiveFacts)));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let authority = admission::ArtifactApprovalAuthority::with_keys(
+            selected,
+            readiness.clone(),
+            Arc::new(native::Keys::default()),
+        );
+        let mut receiver = assertions.receiver(Arc::new(RegistrationOnly));
+        receiver.registrations = Some(Arc::new(NativeRegistrationSink {
+            authority,
+            readiness,
+            calls: calls.clone(),
+        }));
+        let workload_assertion = assertions.assertion_at(APP_AUDIENCE, MACHINE, "service-123", at);
+        let (endpoint, worker) = server(1, move |mut request| {
+            assert_eq!(
+                request.headers[header::AUTHORIZATION],
+                "Bearer fixture-IAP-service-token"
+            );
+            assert!(!request.headers.contains_key(header::COOKIE));
+            let raw = String::from_utf8_lossy(&request.body);
+            assert!(!raw.contains("private-browser-cookie"));
+            for forbidden in [
+                "private-fixture-client-canary",
+                "private-fixture-code-canary",
+                "private-fixture-access-canary",
+                "private-fixture-refresh-canary",
+            ] {
+                assert!(!raw.contains(forbidden));
+            }
+            request
+                .headers
+                .insert(iap::ASSERTION_HEADER, workload_assertion.parse().unwrap());
+            let response = receiver
+                .dispatch(
+                    &request.method,
+                    &request.path,
+                    None,
+                    &request.headers,
+                    &request.body,
+                    now().unwrap(),
+                )
+                .unwrap();
+            if lost {
+                Reply::Lost
+            } else {
+                Reply::Json(response)
+            }
+        });
+        let bearers = Arc::new(Bearers::default());
+        let mut client = remote(endpoint, bearers.clone());
+        let target = client.targets.remove("app").unwrap();
+        client.targets.insert("workspace".into(), target);
+        assert_eq!(
+            client.publish_registration(proof, &human_headers).is_err(),
+            lost
+        );
+        worker.join().unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            bearers.0.lock().unwrap().as_slice(),
+            &[("workspace".into(), format!("https://app.example{PATH}"))]
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn registration_receiver_refuses_human_workload_substitution_and_wrong_app_before_import()
+-> Result<()> {
+    use crate::oauth::registration::publication::{self, tests as native};
+    let (selected, receipt) = native::fixture()?;
+    let proof = publication::attest(&receipt, &selected, &native::Keys::default(), now()?)?;
+    let assertions = Assertions::new();
+    let receiver = assertions.receiver(Arc::new(RegistrationOnly));
+    let at = now()?;
+    let request = RequestBody::Registration {
+        version: VERSION,
+        human_assertion: assertions.assertion_at(
+            SHELL_AUDIENCE,
+            HUMAN,
+            &native::identity().subject,
+            at,
+        ),
+        proof: Box::new(proof),
+    };
+    let bytes = serde_json::to_vec(&request)?;
+    let mut headers = assertions.headers();
+    headers.insert(
+        iap::ASSERTION_HEADER,
+        assertions
+            .assertion_at(APP_AUDIENCE, HUMAN, SUBJECT, at)
+            .parse()?,
+    );
+    assert!(
+        receiver
+            .dispatch(&Method::POST, PATH, None, &headers, &bytes, at)
+            .is_err()
+    );
+    headers.insert(
+        iap::ASSERTION_HEADER,
+        assertions
+            .assertion_at(SHELL_AUDIENCE, MACHINE, "service-123", at)
+            .parse()?,
+    );
+    assert!(
+        receiver
+            .dispatch(&Method::POST, PATH, None, &headers, &bytes, at)
+            .is_err()
+    );
+    headers.insert(
+        iap::ASSERTION_HEADER,
+        assertions
+            .assertion_at(APP_AUDIENCE, MACHINE, "service-123", at)
+            .parse()?,
+    );
+    // A receiver without its native registration composition fails closed.
+    assert!(
+        receiver
+            .dispatch(&Method::POST, PATH, None, &headers, &bytes, at)
+            .is_err()
+    );
+    let mut wrong = serde_json::from_slice::<serde_json::Value>(&bytes)?;
+    wrong["proof"]["claim"]["app"] = json!("other_app");
+    assert!(
+        receiver
+            .dispatch(
+                &Method::POST,
+                PATH,
+                None,
+                &headers,
+                &serde_json::to_vec(&wrong)?,
+                at
+            )
+            .is_err()
+    );
+    Ok(())
 }
 
 #[test]

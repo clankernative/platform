@@ -206,6 +206,32 @@ impl ArtifactShellSigner {
             AuthorityState { selected, keys };
         Ok(())
     }
+
+    /// Current selection is held through the one-shot publication. Replacement
+    /// waits for the bounded request, as it does for local approval settlement.
+    pub(crate) fn publish_registration(
+        &self,
+        receipt: &super::registration::Receipt,
+        publisher: &dyn super::shell_transport::RegistrationPublisher,
+        headers: &axum::http::HeaderMap,
+        now: i64,
+    ) -> Result<()> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| anyhow::anyhow!("OAuth shell selection lock poisoned"))?;
+        let proof = super::registration::publication::attest(
+            receipt,
+            &state.selected,
+            state
+                .keys
+                .as_ref()
+                .context("OAuth shell key provider missing")?
+                .as_ref(),
+            now,
+        )?;
+        publisher.publish_registration(proof, headers)
+    }
 }
 
 impl super::shell_transport::ApprovalSigner for ArtifactShellSigner {
@@ -442,6 +468,40 @@ impl QualifiedConnections {
                 Ok(target)
             })
             .collect()
+    }
+
+    pub(super) fn registration_publication(
+        &self,
+        registration: &BindingRef,
+        namespace: &str,
+        shell: &profiles::SecurityShellEvidence,
+    ) -> Result<(
+        &str,
+        &OutboundConnectionBinding,
+        &ApprovalKeyRef,
+        super::registration::Target,
+    )> {
+        let mut found = None;
+        for ((app, _), candidate) in &self.entries {
+            if candidate.binding.registration == *registration
+                && binding_namespace(&candidate.binding)? == namespace
+            {
+                ensure!(found.is_none(), "ambiguous registration publication");
+                found = Some((app.as_str(), candidate));
+            }
+        }
+        let (app, candidate) = found.context("registration publication selection retired")?;
+        let target = self
+            .google_targets(shell)?
+            .into_iter()
+            .find(|target| target.publication_matches(&registration.id, namespace))
+            .context("registration publication target missing")?;
+        Ok((
+            app,
+            &candidate.binding,
+            &candidate.shell_attestation,
+            target,
+        ))
     }
 
     fn qualify(
@@ -707,7 +767,7 @@ impl ArtifactApprovalAuthority {
     }
 
     #[cfg(test)]
-    fn with_keys(
+    pub(super) fn with_keys(
         selected: QualifiedConnections,
         readiness: Arc<dyn OutboundReadiness>,
         keys: Arc<dyn ApprovalKeyProvider>,
@@ -746,6 +806,33 @@ impl ArtifactApprovalAuthority {
             .map_err(|_| anyhow::anyhow!("OAuth selection lock poisoned"))? =
             AuthorityState { selected, keys };
         Ok(())
+    }
+
+    pub(crate) fn receive_registration(
+        &self,
+        proof: &super::registration::publication::Publication,
+        app: &str,
+        identity: &crate::iap::Verified,
+        readiness: &super::registration::GoogleReadiness,
+        now: i64,
+    ) -> Result<()> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| anyhow::anyhow!("OAuth selection lock poisoned"))?;
+        let receipt = super::registration::publication::verify(
+            proof,
+            app,
+            identity,
+            &state.selected,
+            state
+                .keys
+                .as_ref()
+                .context("OAuth selected key provider missing")?
+                .as_ref(),
+            now,
+        )?;
+        readiness.publish(receipt)
     }
 }
 
@@ -798,6 +885,7 @@ impl ArtifactApprovalAuthority {
             callback.binding_namespace() == expected_namespace,
             "OAuth selected binding generation changed"
         );
+        let started = std::time::Instant::now();
         let Some(evidence) = self.readiness.current(&candidate.binding, &slot, now)? else {
             return Ok(None);
         };
@@ -844,7 +932,22 @@ impl ArtifactApprovalAuthority {
                 .clone()
                 .context("OAuth selected key provider missing")?,
         )?;
-        authority.current(app, intent, callback, now)
+        let Some(terms) = authority.current(app, intent, callback, now)? else {
+            return Ok(None);
+        };
+        // Exact-version key retrieval may consume the readiness lease. Check
+        // the same live facts again before returning authority for settlement.
+        let at = now
+            .checked_add(i64::try_from(started.elapsed().as_secs())?)
+            .context("OAuth readiness clock overflow")?;
+        let Some(current) = self.readiness.current(&candidate.binding, &slot, at)? else {
+            return Ok(None);
+        };
+        ensure!(
+            current == terms.instance,
+            "OAuth readiness changed during key acquisition"
+        );
+        Ok(Some(terms))
     }
 }
 
@@ -883,7 +986,7 @@ impl ApprovalAuthority for ArtifactApprovalAuthority {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::super::{approval_registry::ApprovalKeyMaterial, connect::CallbackBindingSpec};
     use super::*;
     use crate::artifact::Artifact;
@@ -920,6 +1023,99 @@ mod tests {
         fn qualify(&self) -> Result<QualifiedConnections> {
             QualifiedConnections::qualify(&self.instance, &self.artifacts, &self.catalog)
         }
+    }
+
+    pub(in crate::oauth) fn publication_fixture()
+    -> Result<(QualifiedConnections, profiles::SecurityShellEvidence)> {
+        let mut fixture = fixture(AccountBindingPolicy::ExplicitExternalAccount)?;
+        fixture.catalog = super::super::google::catalog()?;
+        let profile =
+            super::super::google::reviewed(&AccountBindingPolicy::ExplicitExternalAccount)?
+                .profile
+                .protocol
+                .identity()
+                .binding
+                .clone();
+        fixture
+            .instance
+            .apps
+            .get_mut("workspace")
+            .unwrap()
+            .oauth_connections
+            .get_mut("calendar")
+            .unwrap()
+            .profile = profile;
+        let control = fixture.instance.control.as_mut().unwrap();
+        control.secrets.insert(name("reauth_client"), serde_json::from_value(json!({"kind":"gcp_version","project_number":12345,"secret":"google_reauth","version":3}))?);
+        control.secrets.insert(name("calendar_client"), serde_json::from_value(json!({"kind":"gcp_version","project_number":12345,"secret":"google_client_secret","version":7}))?);
+        fixture.instance.oauth_clients = Some(serde_json::from_value(json!({
+            "version":1,"reauthentication":{"client_id":"123-reauth.apps.googleusercontent.com","credential":"reauth_client"},
+            "registrations":{"calendar_registration":{"client":{"client_id":"12345-fixture.apps.googleusercontent.com","credential":"calendar_client"},
+                "canary_subject":"google-canary-subject","canary_tenant":"example.com"}}
+        }))?);
+        let target = fixture
+            .qualify()?
+            .google_targets(&fixture.evidence.shell)?
+            .remove(0);
+        fixture
+            .instance
+            .apps
+            .get_mut("workspace")
+            .unwrap()
+            .oauth_connections
+            .get_mut("calendar")
+            .unwrap()
+            .registration =
+            serde_json::from_value(target.setup_description()?["registration_selection"].clone())?;
+        Ok((fixture.qualify()?, fixture.evidence.shell))
+    }
+
+    #[test]
+    fn changed_selection_refuses_registration_publication_before_key_acquisition() -> Result<()> {
+        let (mut selected, receipt) = super::super::registration::publication::tests::fixture()?;
+        let keys = super::super::registration::publication::tests::Keys::default();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs() as i64;
+        let proof =
+            super::super::registration::publication::attest(&receipt, &selected, &keys, now)?;
+        selected
+            .entries
+            .values_mut()
+            .next()
+            .unwrap()
+            .binding
+            .namespace
+            .binding_generation += 1;
+        assert!(
+            super::super::registration::publication::attest(&receipt, &selected, &keys, now)
+                .is_err()
+        );
+        assert!(
+            super::super::registration::publication::verify(
+                &proof,
+                "workspace",
+                &super::super::registration::publication::tests::identity(),
+                &selected,
+                &keys,
+                now
+            )
+            .is_err()
+        );
+        selected.entries.clear();
+        assert!(
+            super::super::registration::publication::verify(
+                &proof,
+                "workspace",
+                &super::super::registration::publication::tests::identity(),
+                &selected,
+                &keys,
+                now
+            )
+            .is_err()
+        );
+        assert_eq!(keys.calls(), 1);
+        Ok(())
     }
 
     #[test]
@@ -1392,6 +1588,7 @@ mod tests {
         );
         let providers = super::super::host::Providers {
             catalog: ReviewedCatalog::new(Vec::new())?,
+            registrations: None,
             readiness: Arc::new(Readiness {
                 current: RwLock::new(None),
                 calls: AtomicUsize::new(0),
@@ -1639,7 +1836,7 @@ mod tests {
                     .is_some()
             );
         }
-        assert_eq!(readiness.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(readiness.calls.load(Ordering::SeqCst), 4);
         assert_eq!(keys.calls.load(Ordering::SeqCst), 6);
         *readiness.current.write().unwrap() = None;
         assert!(
@@ -1662,8 +1859,64 @@ mod tests {
                 .current("workspace", &fixture.intent, &fixture.callback, 5)?
                 .is_none()
         );
-        assert_eq!(readiness.calls.load(Ordering::SeqCst), 3);
+        assert_eq!(readiness.calls.load(Ordering::SeqCst), 5);
         assert_eq!(keys.calls.load(Ordering::SeqCst), 6);
+        Ok(())
+    }
+
+    #[test]
+    fn readiness_retired_during_key_acquisition_cannot_reach_settlement() -> Result<()> {
+        struct RetiringKeys {
+            keys: Keys,
+            readiness: Arc<Readiness>,
+        }
+        impl ApprovalKeyProvider for RetiringKeys {
+            fn load(
+                &self,
+                reference: &ApprovalKeyRef,
+                purpose: ApprovalKeyPurpose,
+            ) -> Result<ApprovalKeyMaterial> {
+                let material = self.keys.load(reference, purpose)?;
+                if purpose == ApprovalKeyPurpose::ShellAttestation {
+                    *self.readiness.current.write().unwrap() = None;
+                }
+                Ok(material)
+            }
+        }
+        let fixture = fixture(AccountBindingPolicy::ExplicitExternalAccount)?;
+        let readiness = Arc::new(Readiness {
+            current: RwLock::new(Some(fixture.evidence.clone())),
+            calls: AtomicUsize::new(0),
+        });
+        let keys = Arc::new(RetiringKeys {
+            keys: Keys::default(),
+            readiness: readiness.clone(),
+        });
+        let authority = ArtifactApprovalAuthority::with_keys(
+            fixture.qualify()?,
+            readiness.clone(),
+            keys.clone(),
+        );
+        assert!(
+            authority
+                .current("workspace", &fixture.intent, &fixture.callback, 5)?
+                .is_none()
+        );
+        *readiness.current.write().unwrap() = Some(fixture.evidence);
+        let mut settlements = 0;
+        assert!(!authority.with_current(
+            "workspace",
+            &fixture.intent,
+            &fixture.callback,
+            5,
+            &mut |_| {
+                settlements += 1;
+                Ok(true)
+            }
+        )?);
+        assert_eq!(settlements, 0);
+        assert_eq!(keys.keys.calls.load(Ordering::SeqCst), 6);
+        assert_eq!(readiness.calls.load(Ordering::SeqCst), 4);
         Ok(())
     }
 

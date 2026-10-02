@@ -131,6 +131,19 @@ pub(crate) struct RegistrationShell {
     pub canaries: Arc<registration::shell::Canaries>,
 }
 
+struct RegistrationPublication {
+    signer: Arc<admission::ArtifactShellSigner>,
+    approvals: Arc<shell_transport::RemoteApprovals>,
+}
+
+impl registration::shell::ReceiptPublisher for RegistrationPublication {
+    fn publish(&self, receipt: &registration::Receipt, headers: &HeaderMap, _: i64) -> Result<()> {
+        let now = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())?;
+        self.signer
+            .publish_registration(receipt, self.approvals.as_ref(), headers, now)
+    }
+}
+
 impl SecurityShell {
     /// Compose the shell from the exact instance-selected artifacts and keys.
     /// This is an explicit GKE host entry point, not an application route or a
@@ -140,7 +153,8 @@ impl SecurityShell {
         catalog: &admission::ReviewedCatalog,
     ) -> Result<(Arc<Self>, Arc<admission::ArtifactShellSigner>)> {
         let selected = admission::QualifiedConnections::from_instance_file(instance_path, catalog)?;
-        Self::from_selected(selected)
+        let (shell, signer, _) = Self::from_selected(selected)?;
+        Ok((shell, signer))
     }
 
     /// One admitted snapshot supplies both the ordinary approval shell and its
@@ -158,14 +172,20 @@ impl SecurityShell {
         )?;
         let targets = selected.google_targets(shell)?;
         let origin = selected.instance().security_edge()?.1.origin.clone();
-        let canaries = Arc::new(registration::shell::Canaries::new(
-            &origin,
-            targets,
-            runner,
-            Arc::new(approval_keys::GkeMetadataAccessTokens::new()?),
-            readiness,
-        )?);
-        let (shell, signer) = Self::from_selected(selected)?;
+        let (shell, signer, approvals) = Self::from_selected(selected)?;
+        let canaries = Arc::new(
+            registration::shell::Canaries::new(
+                &origin,
+                targets,
+                runner,
+                Arc::new(approval_keys::GkeMetadataAccessTokens::new()?),
+                readiness,
+            )?
+            .with_publication(Arc::new(RegistrationPublication {
+                signer: signer.clone(),
+                approvals,
+            })),
+        );
         Ok(RegistrationShell {
             shell: shell.with_registration(canaries.clone())?,
             signer,
@@ -175,7 +195,11 @@ impl SecurityShell {
 
     fn from_selected(
         selected: admission::QualifiedConnections,
-    ) -> Result<(Arc<Self>, Arc<admission::ArtifactShellSigner>)> {
+    ) -> Result<(
+        Arc<Self>,
+        Arc<admission::ArtifactShellSigner>,
+        Arc<shell_transport::RemoteApprovals>,
+    )> {
         let instance = selected.instance().clone();
         let bearers = Arc::new(super::workload::IapWorkload::from_gke_instance(&instance)?);
         let signer = Arc::new(admission::ArtifactShellSigner::with_gcp(
@@ -199,8 +223,9 @@ impl SecurityShell {
             &instance, bearers,
         )?);
         Ok((
-            Self::with_transport(origin, approvals, signer.clone(), authenticator)?,
+            Self::with_transport(origin, approvals.clone(), signer.clone(), authenticator)?,
             signer,
+            approvals,
         ))
     }
 
