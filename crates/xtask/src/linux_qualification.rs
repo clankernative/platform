@@ -771,17 +771,7 @@ impl Session {
                     );
                     command.arg(format!("{variable}={}", path.display()));
                 }
-                command.args([
-                    "cargo",
-                    "test",
-                    "--locked",
-                    "-p",
-                    "day2-control",
-                    "--test",
-                    "release_execution",
-                    "--",
-                    "--nocapture",
-                ]);
+                command.args(["target/debug/xtask", "linux-test-delegation"]);
                 logged(&self.output, &key, &mut command, 1800)?;
                 for (fixture, path) in paths {
                     let hash = Path::new(&path)

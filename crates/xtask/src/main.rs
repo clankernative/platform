@@ -721,6 +721,13 @@ fn main() -> Result<()> {
                 prior_suites.as_deref(),
             )?;
         }
+        "linux-test-delegation" => {
+            ensure!(
+                cfg!(target_os = "linux") && args.next().is_none(),
+                "closed native Linux delegation test required"
+            );
+            verification::linux_delegation_tests(&root)?;
+        }
         "linux-test-suite" => {
             let suite = args
                 .next()

@@ -522,6 +522,28 @@ fn cached_fixture(root: &Path, artifact: &str) -> Result<Option<PathBuf>> {
     Ok(Some(directory))
 }
 
+pub(super) fn linux_delegation_tests(root: &Path) -> Result<()> {
+    ensure!(cfg!(target_os = "linux"), "native Linux test host required");
+    let mut fixtures = BTreeMap::new();
+    for (fixture, variable) in [
+        ("delegation", "DAY2_TEST_DELEGATION_ARTIFACT"),
+        ("delegation-peer", "DAY2_TEST_DELEGATION_PEER_ARTIFACT"),
+        ("request-desk", "DAY2_TEST_REQUEST_DESK_ARTIFACT"),
+        ("stock-ledger", "DAY2_TEST_STOCK_LEDGER_ARTIFACT"),
+    ] {
+        let path = PathBuf::from(std::env::var_os(variable).context(variable)?);
+        let artifact = day2::artifact::LoadedArtifact::load(&path)?;
+        artifact.require_current_api()?;
+        fixtures.insert(fixture.to_owned(), artifact.directory().to_owned());
+    }
+    tests(
+        root,
+        "linux-delegation",
+        &fixtures,
+        std::time::Duration::from_secs(1800),
+    )
+}
+
 pub(super) fn linux_tests(root: &Path, suite: &str, artifact: &Path, probe: &Path) -> Result<()> {
     ensure!(cfg!(target_os = "linux"), "native Linux test host required");
     ensure!(
@@ -556,6 +578,7 @@ fn tests(
         "libraries" | "fast-libraries" => &["--workspace", "--exclude", "day2-roc-worker", "--lib"],
         "linux-sandbox" => &["-p", "day2-sandbox", "--test", "isolation"],
         "linux-worker" => &["-p", "day2", "--test", "linux_worker"],
+        "linux-delegation" => &["-p", "day2-control", "--test", "release_execution"],
         "linux-http" => &[
             "-p",
             "day2",
