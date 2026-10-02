@@ -198,6 +198,11 @@ pub(crate) trait ApprovalSigner: Send + Sync {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 enum RequestBody {
+    Registration {
+        version: u32,
+        human_assertion: String,
+        proof: Box<super::registration::publication::Publication>,
+    },
     Lookup {
         version: u32,
         attempt: String,
@@ -215,6 +220,11 @@ enum RequestBody {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 enum ResponseBody {
+    Registration {
+        version: u32,
+        app: String,
+        publication: Digest,
+    },
     Lookup {
         version: u32,
         app: String,
@@ -253,6 +263,24 @@ pub(crate) trait AppApprovals: Send + Sync {
     ) -> Result<bool>;
 }
 
+pub(crate) trait RegistrationSink: Send + Sync {
+    fn receive(
+        &self,
+        proof: &super::registration::publication::Publication,
+        app: &str,
+        identity: &iap::Verified,
+        now: i64,
+    ) -> Result<()>;
+}
+
+pub(crate) trait RegistrationPublisher: Send + Sync {
+    fn publish_registration(
+        &self,
+        proof: super::registration::publication::Publication,
+        headers: &HeaderMap,
+    ) -> Result<()>;
+}
+
 /// Separate machine and human assertions are verified against separate selected
 /// audiences. A valid human front-door assertion is never a workload credential.
 pub(crate) struct AppApprovalReceiver {
@@ -261,6 +289,7 @@ pub(crate) struct AppApprovalReceiver {
     workload: iap::Verifier,
     human: iap::Verifier,
     route: String,
+    registrations: Option<Arc<dyn RegistrationSink>>,
 }
 
 impl AppApprovalReceiver {
@@ -291,6 +320,7 @@ impl AppApprovalReceiver {
             backend,
             authority: edge.authority().into(),
             route,
+            registrations: None,
             workload: iap::Verifier::for_workload(
                 &edge.iap_audience,
                 &transport.service_account,
@@ -302,6 +332,16 @@ impl AppApprovalReceiver {
                 Box::new(iap::GoogleKeys),
             )?,
         }))
+    }
+
+    pub(crate) fn with_registrations(
+        mut self: Arc<Self>,
+        sink: Arc<dyn RegistrationSink>,
+    ) -> Result<Arc<Self>> {
+        Arc::get_mut(&mut self)
+            .context("OAuth receiver already shared")?
+            .registrations = Some(sink);
+        Ok(self)
     }
 
     /// A host may mount this reserved handler ahead of its app dispatcher. It
@@ -363,6 +403,7 @@ impl AppApprovalReceiver {
         body: &[u8],
         at: i64,
     ) -> Result<Vec<u8>> {
+        let started = Instant::now();
         ensure!(
             *method == Method::POST
                 && path == PATH
@@ -384,6 +425,32 @@ impl AppApprovalReceiver {
         self.workload.verify_workload(one_assertion(headers)?, at)?;
         let request: RequestBody = crate::json::decode(body)?;
         let response = match request {
+            RequestBody::Registration {
+                version,
+                human_assertion,
+                proof,
+            } => {
+                ensure!(
+                    version == VERSION && proof.app() == self.backend.app(),
+                    "invalid registration receiver"
+                );
+                let identity = self.human.verify(&human_assertion, at)?;
+                self.registrations
+                    .as_ref()
+                    .context("registration receiver unavailable")?
+                    .receive(
+                        &proof,
+                        self.backend.app(),
+                        &identity,
+                        at.checked_add(i64::try_from(started.elapsed().as_secs())?)
+                            .context("registration clock overflow")?,
+                    )?;
+                ResponseBody::Registration {
+                    version: VERSION,
+                    app: self.backend.app().into(),
+                    publication: proof.id()?,
+                }
+            }
             RequestBody::Lookup {
                 version,
                 attempt: id,
@@ -492,6 +559,7 @@ impl RemoteApprovals {
             client: Client::builder()
                 .no_proxy()
                 .redirect(reqwest::redirect::Policy::none())
+                .retry(reqwest::retry::never())
                 .connect_timeout(Duration::from_secs(2))
                 .timeout(Duration::from_secs(15))
                 .build()?,
@@ -550,6 +618,39 @@ impl RemoteApprovals {
             .read_to_end(&mut bytes)?;
         ensure!(bytes.len() <= MAX_RESPONSE, "OAuth private response budget");
         crate::json::decode(&bytes)
+    }
+}
+
+impl RegistrationPublisher for RemoteApprovals {
+    fn publish_registration(
+        &self,
+        proof: super::registration::publication::Publication,
+        headers: &HeaderMap,
+    ) -> Result<()> {
+        let app = proof.app().to_owned();
+        ensure!(
+            self.targets.contains_key(&app),
+            "registration receiver is not selected"
+        );
+        let id = proof.id()?;
+        let request = RequestBody::Registration {
+            version: VERSION,
+            human_assertion: one_assertion(headers)?.into(),
+            proof: Box::new(proof),
+        };
+        let ResponseBody::Registration {
+            version,
+            app: observed,
+            publication,
+        } = self.send(&app, &request, Instant::now() + Duration::from_secs(15))?
+        else {
+            anyhow::bail!("invalid registration publication response");
+        };
+        ensure!(
+            version == VERSION && observed == app && publication == id,
+            "registration publication receiver mismatch"
+        );
+        Ok(())
     }
 }
 

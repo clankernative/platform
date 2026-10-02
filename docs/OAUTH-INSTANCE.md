@@ -219,6 +219,34 @@ be enabled through an instance boolean, a CLI flag or merely configuring keys.
 Static startup qualification still does not establish external readiness;
 every approval lookup and settlement retains its current readiness checks.
 
+The same reserved channel also accepts native registration publications. A
+publication is signed with the exact selected shell-attestation key and carries
+the source canary's qualification time and original five-minute expiry. The app
+independently verifies the shell workload and forwarded canary human assertion,
+the selected immutable canary subject, full current binding, admitted requirement,
+client credential revision, shell origin and signature. It loads only the
+attestation key for this import. The native canary receipt itself remains
+non-serializable; parsing publication JSON cannot populate readiness.
+
+`Providers::google` mounts this receiver on the same app authority and native
+`GoogleReadiness` registry used by approval lookup. Selection replacement holds
+the same authority lock as import and settlement. Changed or removed bindings
+refuse old publications before key acquisition. Registration evidence augments
+the independent live shell/custody/account source; a successful import cannot
+turn missing facts into approval authority.
+
+The destination retains only the source's remaining wall/monotonic lease. A
+duplicate or older publication cannot extend an existing receipt, and expiry is
+checked again after key acquisition and independent fact resolution. A restarted
+host starts empty; an authenticated republication must still pass the original
+absolute expiry. These bounds depend on the hosts' trustworthy wall clocks.
+Neither proofs nor receipts are restored from desired configuration or app data.
+Publications carry no provider code, token, verifier, key bytes or browser cookie.
+
+Approval also re-resolves the same live facts after acquiring its three keys.
+Readiness that expires, disappears or changes during those reads cannot reach
+the local settlement callback. External calls finish before the SQLite transaction.
+
 Requests and responses have fixed versioned JSON schemas, bounded bodies and
 deadlines. Receivers reject unknown or duplicate fields, wrong paths, methods,
 Host headers, audiences and namespaces. The client disables proxies and
@@ -331,18 +359,25 @@ target. Raw codes and tokens never appear in the page or response.
 The final callback runs `ops/OAuthRegistration.roc` once outside the routing
 lock. A failed or lost exchange requires a new campaign. Selection replacement
 clears browser state and retires the local receipts; a campaign finishing after
-retirement cannot publish. Successful completion publishes only to the supplied
-native host registry and clears the cookie. A shell process's receipt is not
-automatically evidence for a separate app-host process; trusted live readiness
-distribution still needs composition. Renewal and workload deployment remain
-runtime work. The real HTTP fixtures exercise the
+retirement cannot publish. `SecurityShell::from_gke_with_registration` now signs
+and sends the native publication to exactly the owning selected app using the
+existing keyless IAP transport. Final publication holds the routing and signer
+selection locks through its bounded, one-shot request; replacement waits for
+publication to finish. The acknowledgement pins the exact publication digest.
+Successful acknowledgement publishes the local receipt and clears the cookie.
+Response loss is ambiguous: the app may hold the bounded receipt, but the shell
+reports failure, consumes the campaign and does not retry. A new canary is needed.
+App-side selection retirement independently revokes old readiness immediately;
+shell-only retirement does not retract an app's already accepted five-minute lease.
+Renewal and workload deployment remain runtime work. The real HTTP fixtures exercise the
 same native campaign and Roc recipe but cannot qualify a Google client.
 
 ## Remaining runtime work
 
 The next runtime slice must supply independently live shell/custody/account facts,
-start the separately qualified shell workload, distribute registration readiness
-to app hosts and wire connect attempt creation. The real Google web clients and
+start the separately qualified shell workload and wire connect attempt creation.
+Registration publication to app hosts is now composed, but it cannot start the
+ordinary app launcher without those other live facts. The real Google web clients and
 their exact secret versions remain required; their instance contract and native
 exact-version loader are available. The edge contract now
 publishes a dedicated keyless signer and supports backend access; these plans

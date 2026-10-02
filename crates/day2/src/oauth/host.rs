@@ -9,6 +9,7 @@ use std::sync::Arc;
 pub(crate) struct Providers {
     pub catalog: admission::ReviewedCatalog,
     pub readiness: Arc<dyn admission::OutboundReadiness>,
+    pub registrations: Option<Arc<super::registration::GoogleReadiness>>,
 }
 
 impl Providers {
@@ -17,8 +18,27 @@ impl Providers {
     pub(crate) fn google(readiness: Arc<super::registration::GoogleReadiness>) -> Result<Self> {
         Ok(Self {
             catalog: super::google::catalog()?,
-            readiness,
+            readiness: readiness.clone(),
+            registrations: Some(readiness),
         })
+    }
+}
+
+struct Registrations {
+    authority: Arc<admission::ArtifactApprovalAuthority>,
+    readiness: Arc<super::registration::GoogleReadiness>,
+}
+
+impl shell_transport::RegistrationSink for Registrations {
+    fn receive(
+        &self,
+        proof: &super::registration::publication::Publication,
+        app: &str,
+        identity: &crate::iap::Verified,
+        now: i64,
+    ) -> Result<()> {
+        self.authority
+            .receive_registration(proof, app, identity, &self.readiness, now)
     }
 }
 
@@ -62,7 +82,14 @@ pub(crate) fn app_receiver(
     let backend = Arc::new(approval_registry::StoredAppApprovals::new(
         runtime.app().into(),
         runtime.db().to_path_buf(),
-        authority,
+        authority.clone(),
     )?);
-    shell_transport::AppApprovalReceiver::from_instance(&instance, backend)
+    let receiver = shell_transport::AppApprovalReceiver::from_instance(&instance, backend)?;
+    match &providers.registrations {
+        Some(readiness) => receiver.with_registrations(Arc::new(Registrations {
+            authority,
+            readiness: readiness.clone(),
+        })),
+        None => Ok(receiver),
+    }
 }

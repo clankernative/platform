@@ -274,7 +274,7 @@ impl Drop for Server {
     }
 }
 
-fn session(target: Target, server: &Server) -> Result<Session> {
+pub(super) fn session(target: Target, server: &Server) -> Result<Session> {
     let identity = Digest::of(&target.description())?;
     let code = |raw: &str, purpose| Code {
         code: raw.into(),
@@ -308,7 +308,7 @@ fn request(action: &str) -> crate::automation::Request {
     }
 }
 
-fn campaign(session: &mut Session) -> Result<()> {
+pub(super) fn campaign(session: &mut Session) -> Result<()> {
     for action in ACTIONS {
         let output = session.call(request(action))?;
         assert_eq!(output, json!({}));

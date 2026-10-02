@@ -57,6 +57,10 @@ pub(crate) struct ClientSelection {
 }
 
 impl Target {
+    pub(super) fn publication_matches(&self, registration: &Name, namespace: &str) -> bool {
+        self.registration == *registration && self.namespace == namespace
+    }
+
     pub(super) fn setup_description(&self) -> Result<serde_json::Value> {
         let mut description = self.description();
         description["registration_selection"] =
@@ -981,6 +985,17 @@ impl GoogleReadiness {
             receipts.contains_key(&id) || receipts.len() < 128,
             "Google readiness budget"
         );
+        // Republishing the same wire proof cannot reset its monotonic lease.
+        // A newly completed campaign has a later source qualification time.
+        if let Some(previous) = receipts.get_mut(&id)
+            && previous.registration == receipt.registration
+            && previous.checked_at >= receipt.checked_at
+        {
+            if previous.checked_at == receipt.checked_at {
+                previous.deadline = previous.deadline.min(receipt.deadline);
+            }
+            return Ok(());
+        }
         receipts.insert(id, receipt);
         Ok(())
     }
@@ -993,6 +1008,9 @@ impl GoogleReadiness {
         Ok(())
     }
 }
+
+#[path = "registration_publication.rs"]
+pub(super) mod publication;
 
 impl admission::OutboundReadiness for GoogleReadiness {
     fn current(
@@ -1025,6 +1043,9 @@ impl admission::OutboundReadiness for GoogleReadiness {
         let Some(evidence) = self.facts.current(binding, slot, now)? else {
             return Ok(None);
         };
+        if !receipt.fresh(now) {
+            return Ok(None);
+        }
         ensure!(
             evidence.registration == receipt.registration
                 && evidence.instance == receipt.target.instance
