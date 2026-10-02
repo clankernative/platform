@@ -108,6 +108,8 @@ fn instance(artifact: &str) -> Value {
             "edge":{"origin":ORIGIN,"iap_audience":AUDIENCE},
             "authority":{"version":1,"admins":[],"operations":{
                 "delegation.who":read,"delegation.forward":forward,
+                "delegation.send":{"actors":actors,"mode":{"kind":"current_state"},"models":{},"effects":["app.send.v1"]},
+                "delegation.status":{"actors":actors,"mode":{"kind":"read"},"models":{},"observations":["app.status.v1"]},
                 "delegation.history":{"actors":actors,"mode":{"kind":"read"},"models":{},"observations":["audit.history.v1"]},
                 "delegation.record":{"actors":actors,"mode":{"kind":"current_state"},
                     "models":{"entries":{"read":true,"create":true,

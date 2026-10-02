@@ -1,0 +1,3 @@
+SendEntryTypes :: [].{
+	Input := { note : Str }
+}

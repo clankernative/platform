@@ -178,6 +178,8 @@ impl RemoteQueryIssuer {
                 && call.caller == self.source.app.as_str()
                 && call.app == self.target.app.as_str()
                 && query.operation == call.operation
+                && query.purpose == call.purpose
+                && query.source_epoch == call.source_epoch
                 && query.schema_digest == call.schema_digest
                 && query.contract_digest == call.contract_digest
                 && query.input == serde_json::from_str::<Value>(&call.input)?
@@ -189,6 +191,18 @@ impl RemoteQueryIssuer {
             "app_issuer_query_changed"
         );
         let origin = delegation::verify_origin(caller, call)?;
+        if call.purpose == delegation::Purpose::Send {
+            day2::delegation_commands::require_delivery(
+                caller,
+                call,
+                query
+                    .delivery
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("app_send_delivery_missing"))?,
+            )?;
+        } else {
+            ensure!(query.delivery.is_none(), "app_call_unexpected_delivery");
+        }
         self.signer.sign(&IssuerClaims {
             version: 1,
             issuer: self.signer.issuer().to_owned(),
@@ -197,7 +211,7 @@ impl RemoteQueryIssuer {
             target: query.target.clone(),
             root: origin.root,
             principal: origin.principal,
-            subject_digest: day2::digest(origin.subject.as_bytes()),
+            subject_digest: origin.subject_digest,
             workload_email: workload.email().to_owned(),
             workload_subject_digest: day2::digest(workload.subject().as_bytes()),
             actor: query.actor.clone(),
@@ -310,6 +324,32 @@ impl RemoteQueryPort {
 impl AppCallPort for RemoteQueryPort {
     fn query(&self, caller: &Runtime, call: &Call) -> Result<String> {
         ensure!(
+            call.purpose == delegation::Purpose::Query,
+            "app_query_purpose_changed"
+        );
+        self.dispatch(caller, call)
+    }
+
+    fn send(&self, caller: &Runtime, call: &Call) -> Result<String> {
+        ensure!(
+            call.purpose == delegation::Purpose::Send,
+            "app_send_purpose_changed"
+        );
+        self.dispatch(caller, call)
+    }
+
+    fn status(&self, caller: &Runtime, call: &Call) -> Result<String> {
+        ensure!(
+            call.purpose == delegation::Purpose::Status,
+            "app_status_purpose_changed"
+        );
+        self.dispatch(caller, call)
+    }
+}
+
+impl RemoteQueryPort {
+    fn dispatch(&self, caller: &Runtime, call: &Call) -> Result<String> {
+        ensure!(
             Scope::from_runtime(caller)? == scope(&self.source)
                 && call.caller == self.source.app.as_str()
                 && call.app == self.target.app.as_str()
@@ -326,6 +366,18 @@ impl AppCallPort for RemoteQueryPort {
                 let issued_at = now()?;
                 let request = Query {
                     version: 1,
+                    purpose: call.purpose,
+                    source_epoch: call.source_epoch.clone(),
+                    delivery: if call.purpose == delegation::Purpose::Send {
+                        Some(day2::delegation_commands::prepare_delivery(
+                            caller,
+                            call,
+                            &serde_json::to_string(&selection.binding.incarnation)?,
+                            issued_at,
+                        )?)
+                    } else {
+                        None
+                    },
                     source: scope(&self.source),
                     target: scope(&self.target),
                     operation: call.operation.clone(),
@@ -492,7 +544,20 @@ impl RemoteQueryReceiver {
                     selection.binding.artifact.as_str() == runtime.artifact().id(),
                     "app_call_receiver_artifact_changed"
                 );
-                day2::delegation::receive_verified(runtime, &verified)
+                match verified.query().purpose {
+                    delegation::Purpose::Query => {
+                        day2::delegation::receive_verified(runtime, &verified)
+                    }
+                    delegation::Purpose::Send => day2::delegation_commands::accept(
+                        runtime,
+                        &verified,
+                        &serde_json::to_string(&selection.binding.incarnation)?,
+                        at,
+                    ),
+                    delegation::Purpose::Status => {
+                        day2::delegation_commands::status(runtime, &verified)
+                    }
+                }
             },
         )
     }

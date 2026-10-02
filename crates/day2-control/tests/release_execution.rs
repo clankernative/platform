@@ -435,6 +435,19 @@ struct FixtureHostCalls {
 }
 
 impl day2::delegation::AppCallPort for FixtureHostCalls {
+    fn send(&self, runtime: &Runtime, call: &Call) -> Result<String> {
+        self.outbound
+            .as_ref()
+            .context("fixture outbound port")?
+            .send(runtime, call)
+    }
+
+    fn status(&self, runtime: &Runtime, call: &Call) -> Result<String> {
+        self.outbound
+            .as_ref()
+            .context("fixture outbound port")?
+            .status(runtime, call)
+    }
     fn query(&self, runtime: &Runtime, call: &Call) -> Result<String> {
         self.outbound
             .as_ref()
@@ -685,6 +698,8 @@ fn signed_query_crosses_separate_host_databases_and_fences_serving_generation() 
     let peer_artifact = day2::artifact::LoadedArtifact::load(&peer)?;
     let schema_digest =
         delegation::schema_digest_for_artifact(&peer_artifact, "peer_identity.who")?;
+    let command_schema =
+        delegation::schema_digest_for_artifact(&peer_artifact, "peer_identity.record")?;
     let host = |app: &str| -> Result<(tempfile::TempDir, Runtime)> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("instance.json");
@@ -692,6 +707,8 @@ fn signed_query_crosses_separate_host_databases_and_fences_serving_generation() 
             json!({"version":1,"admins":[],"operations":{
                 "delegation.who":{"actors":["alice"],"mode":{"kind":"read"},"models":{}},
                 "delegation.forward":{"actors":["alice"],"mode":{"kind":"read"},"models":{},"observations":["app.query.v1"]},
+                "delegation.send":{"actors":["alice"],"mode":{"kind":"current_state"},"models":{},"effects":["app.send.v1"]},
+                "delegation.status":{"actors":["alice"],"mode":{"kind":"read"},"models":{},"observations":["app.status.v1"]},
                 "delegation.history":{"actors":["alice"],"mode":{"kind":"read"},"models":{},"observations":["audit.history.v1"]},
                 "delegation.record":{"actors":["alice"],"mode":{"kind":"current_state"},"models":{"entries":{"read":true,"create":true,"rows":{"kind":"all"}}}}
             }})
@@ -713,19 +730,24 @@ fn signed_query_crosses_separate_host_databases_and_fences_serving_generation() 
         } else {
             json!([])
         };
-        fs::write(
-            &path,
-            serde_json::to_vec(&json!({
-                "installation":"alpha","environment":"production",
-                "apps":{app:{
-                    "artifact":if app == "caller" { &artifact } else { &peer },"readers":["alice","alice@example.com"],"writers":["alice","alice@example.com"],
-                    "authority":policy,"resource_policies":resource_policies
-                }},
-                "resources":{"version":1,"connections":{"peer":{"revision":1,"provider":"local_delegation"}},
-                    "resources":{"peer":{"revision":1,"connection":{"id":"peer","revision":1},"target":{"kind":"app_operation","app":"peer_identity","operation":"peer_identity.who","schema_digest":schema_digest}}},
-                    "policies":{"peer_read":{"revision":1,"owner":"alice","actors":["alice","alice@example.com"],"allowed_apps":["caller"],"slots":{"delegation":{"kind":"app_operation","allowed_resources":[{"id":"peer","revision":1}],"actions":["delegate_query"],"limits":{"max_request_bytes":16384,"max_response_bytes":65536,"max_calls_per_invocation":4},"budgets":[]}}}},"budgets":{}}
-            }))?,
-        )?;
+        let mut instance = json!({
+            "installation":"alpha","environment":"production",
+            "apps":{app:{
+                "artifact":if app == "caller" { &artifact } else { &peer },"readers":["alice","alice@example.com"],"writers":["alice","alice@example.com"],
+                "authority":policy,"resource_policies":resource_policies
+            }},
+            "resources":{"version":1,"connections":{"peer":{"revision":1,"provider":"local_delegation"}},
+                "resources":{"peer":{"revision":1,"connection":{"id":"peer","revision":1},"target":{"kind":"app_operation","app":"peer_identity","operation":"peer_identity.who","schema_digest":schema_digest}}},
+                "policies":{"peer_read":{"revision":1,"owner":"alice","actors":["alice","alice@example.com"],"allowed_apps":["caller"],"slots":{"delegation":{"kind":"app_operation","allowed_resources":[{"id":"peer","revision":1}],"actions":["delegate_query"],"limits":{"max_request_bytes":16384,"max_response_bytes":65536,"max_calls_per_invocation":4},"budgets":[]}}}},"budgets":{}}
+        });
+        if app == "caller" {
+            instance["resources"]["resources"]["peer_command"] = json!({"revision":1,"connection":{"id":"peer","revision":1},"target":{"kind":"app_operation","app":"peer_identity","operation":"peer_identity.record","schema_digest":command_schema}});
+            instance["resources"]["policies"]["peer_command"] = json!({"revision":1,"owner":"alice","actors":["alice","alice@example.com"],"allowed_apps":["caller"],"slots":{"command":{"kind":"app_operation","allowed_resources":[{"id":"peer_command","revision":1}],"actions":["delegate_send","delegate_status"],"limits":{"max_request_bytes":16384,"max_response_bytes":65536,"max_calls_per_invocation":4},"budgets":[]}}});
+            for operation in ["delegation.send", "delegation.status"] {
+                instance["apps"][app]["resource_policies"].as_array_mut().unwrap().push(json!({"policy":{"id":"peer_command","revision":1},"operation":operation,"bindings":{"command":{"id":"peer_command","revision":1}}}));
+            }
+        }
+        fs::write(&path, serde_json::to_vec(&instance)?)?;
         let runtime = Runtime::load(&path, app)?;
         runtime.initialize()?;
         Ok((directory, runtime))
@@ -829,6 +851,10 @@ fn signed_query_crosses_separate_host_databases_and_fences_serving_generation() 
     )?;
     let caller = caller.with_app_call_port(Arc::new(port));
     let call = Call {
+        purpose: day2::delegation::Purpose::Query,
+        source_epoch: day2::authority_state::current(&Connection::open(caller.db())?)?
+            .stamp
+            .epoch,
         app: "peer_identity".into(),
         operation: "peer_identity.who".into(),
         schema_digest: schema_digest.clone(),
@@ -941,6 +967,9 @@ fn signed_query_crosses_separate_host_databases_and_fences_serving_generation() 
         .context("active test release")?;
     let forged = Query {
         version: 1,
+        purpose: day2::delegation::Purpose::Query,
+        source_epoch: call.source_epoch.clone(),
+        delivery: None,
         source: source_scope,
         target: Scope::from_runtime(&callee)?,
         operation: call.operation.clone(),
@@ -1201,6 +1230,76 @@ fn signed_query_crosses_separate_host_databases_and_fences_serving_generation() 
             "caller".into()
         )
     );
+    // Both source HTTP hosts run schedulers. Stop them before controlling the
+    // crash boundary; the receiver remains served over the real private port.
+    drop(browser_server);
+    drop(issuer_server);
+    // The native generated effect reaches the same private host port. Crash
+    // after receiver acceptance and before caller settlement, then reopen A.
+    caller.accept(
+        "delegation.send",
+        "alice",
+        "send-lost-ack",
+        &json!({"note":"durable"}),
+        100,
+    )?;
+    Connection::open(caller.db())?.execute("INSERT INTO day2_invocation_origins VALUES('send-lost-ack','alice','fixture-iap-subject','iap')", [])?;
+    assert_eq!(
+        caller
+            .execute("send-lost-ack", day2::store::Fault::None)?
+            .status,
+        "pending"
+    );
+    let interrupted = caller.execute("send-lost-ack", day2::store::Fault::AfterExternal(1));
+    assert!(
+        interrupted.is_err(),
+        "expected interrupted send: {interrupted:?}"
+    );
+    let inbox: (String, String) = Connection::open(callee.db())?.query_row(
+        "SELECT id,invocation FROM day2_app_inbox",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let reopened_peer = Runtime::load(callee.instance_path(), callee.app())?;
+    reopened_peer.initialize()?;
+    assert_eq!(
+        reopened_peer
+            .execute(&inbox.1, day2::store::Fault::None)?
+            .status,
+        "success"
+    );
+    thread::sleep(Duration::from_secs(6));
+    let reopened_caller = Runtime::load(caller.instance_path(), caller.app())?
+        .with_app_call_port(caller.app_call_port().unwrap().clone());
+    reopened_caller.initialize()?;
+    let receipt = reopened_caller.execute("send-lost-ack", day2::store::Fault::None)?;
+    assert_eq!(receipt.status, "success", "{receipt:?}");
+    assert_eq!(receipt.result["receipt"], inbox.0);
+    assert_eq!(
+        Connection::open(callee.db())?.query_row(
+            "SELECT count(*) FROM day2_app_inbox",
+            [],
+            |row| row.get::<_, i64>(0)
+        )?,
+        1
+    );
+    assert_eq!(
+        Connection::open(callee.db())?
+            .query_row("SELECT count(*) FROM entries", [], |row| row
+                .get::<_, i64>(0))?,
+        1
+    );
+    reopened_caller.accept(
+        "delegation.status",
+        "alice",
+        "status-after-reopen",
+        &json!({"receipt":inbox.0}),
+        100,
+    )?;
+    Connection::open(caller.db())?.execute("INSERT INTO day2_invocation_origins VALUES('status-after-reopen','alice','fixture-iap-subject','iap')", [])?;
+    let progress = reopened_caller.execute("status-after-reopen", day2::store::Fault::None)?;
+    assert_eq!(progress.status, "success", "{progress:?}");
+    assert_eq!(progress.result["status"], "success");
     Ok(())
 }
 

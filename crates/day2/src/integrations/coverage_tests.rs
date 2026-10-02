@@ -134,7 +134,7 @@ fn demonstration(action: Action) -> Demonstration {
         // transport this gate can drive: there is no socket to seed two worlds
         // behind. Pending here rather than silently absent, and it shrinks when
         // the delegation harness can stand up a second application.
-        | Action::DelegateQuery => Demonstration::PendingAdapterSeam,
+        | Action::DelegateQuery | Action::DelegateSend | Action::DelegateStatus => Demonstration::PendingAdapterSeam,
     }
 }
 

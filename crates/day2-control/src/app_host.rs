@@ -143,6 +143,28 @@ impl HostAppCalls {
 }
 
 impl AppCallPort for HostAppCalls {
+    fn send(&self, runtime: &Runtime, call: &Call) -> Result<String> {
+        ensure!(
+            Scope::from_runtime(runtime)? == scope(&self.own),
+            "app_host_scope_changed"
+        );
+        self.outgoing
+            .get(&call.app)
+            .context("app_call_target_unbound")?
+            .send(runtime, call)
+    }
+
+    fn status(&self, runtime: &Runtime, call: &Call) -> Result<String> {
+        ensure!(
+            Scope::from_runtime(runtime)? == scope(&self.own),
+            "app_host_scope_changed"
+        );
+        self.outgoing
+            .get(&call.app)
+            .context("app_call_target_unbound")?
+            .status(runtime, call)
+    }
+
     fn query(&self, runtime: &Runtime, call: &Call) -> Result<String> {
         ensure!(
             Scope::from_runtime(runtime)? == scope(&self.own),
