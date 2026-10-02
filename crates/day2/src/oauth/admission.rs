@@ -155,6 +155,7 @@ struct SelectedConnection {
     custody_verifier: ApprovalKeyRef,
     custody_encryption: ApprovalKeyRef,
     shell_attestation: ApprovalKeyRef,
+    client_credential: Option<BindingRef>,
 }
 
 type GcpBinding = (BindingRef, ApprovalKeyPurpose, GcpSecretVersion);
@@ -321,10 +322,48 @@ impl QualifiedConnections {
         runtime: &crate::store::Runtime,
         catalog: &ReviewedCatalog,
     ) -> Result<Self> {
-        let mut instance = Instance::load(runtime.instance_path())?;
-        instance.apps.retain(|app, _| app == runtime.app());
+        let instance = Self::app_instance(Instance::load(runtime.instance_path())?, runtime.app())?;
         let artifacts = BTreeMap::from([(runtime.app().into(), runtime.artifact().clone())]);
         Self::qualify(&instance, &artifacts, catalog)
+    }
+
+    fn app_instance(mut instance: Instance, app: &str) -> Result<Instance> {
+        ensure!(
+            instance.apps.contains_key(app),
+            "OAuth app is not installed"
+        );
+        instance.apps.retain(|name, _| name == app);
+        if let Some(control) = &mut instance.control {
+            control.apps.retain(|name, _| name.as_str() == app);
+            control
+                .sources
+                .retain(|name, _| control.apps.values().any(|binding| binding.source == *name));
+            control.builders.retain(|name, _| {
+                control.apps.values().any(|binding| {
+                    binding
+                        .build
+                        .as_ref()
+                        .is_some_and(|build| build.builder.id == *name)
+                })
+            });
+            control.runtimes.retain(|name, _| {
+                control.apps.values().any(|binding| {
+                    binding
+                        .build
+                        .as_ref()
+                        .is_some_and(|build| build.durability.id == *name)
+                })
+            });
+        }
+        if let Some(clients) = &mut instance.oauth_clients {
+            clients.registrations.retain(|name, _| {
+                instance.apps[app]
+                    .oauth_connections
+                    .values()
+                    .any(|binding| binding.registration.id == *name)
+            });
+        }
+        Instance::from_bytes(&serde_json::to_vec(&instance)?)
     }
 
     pub(crate) fn from_instance_file(path: &Path, catalog: &ReviewedCatalog) -> Result<Self> {
@@ -342,6 +381,67 @@ impl QualifiedConnections {
             );
         }
         Self::qualify(&instance, &artifacts, catalog)
+    }
+
+    /// Requirements come from admitted artifacts, clients from the existing
+    /// instance document, and shell qualification from the native live source.
+    pub(crate) fn google_targets(
+        &self,
+        shell: &profiles::SecurityShellEvidence,
+    ) -> Result<Vec<super::registration::Target>> {
+        super::clients::validate(&self.instance)?;
+        let clients = self
+            .instance
+            .oauth_clients
+            .as_ref()
+            .context("OAuth clients not selected")?;
+        let (identity, edge) = self.instance.security_edge()?;
+        ensure!(
+            shell.instance == instance_identity(&self.instance)?
+                && shell.origin_url == format!("{}/", edge.origin),
+            "OAuth registration shell evidence mismatch"
+        );
+        let control = self
+            .instance
+            .control
+            .as_ref()
+            .context("OAuth client secret catalog missing")?;
+        self.entries
+            .values()
+            .map(|selected| {
+                let client = clients
+                    .registrations
+                    .get(&selected.binding.registration.id)
+                    .context("OAuth registration client missing")?;
+                ensure!(
+                    client.canary_tenant == identity.hosted_domain,
+                    "OAuth canary must use the shell's verified tenant"
+                );
+                let target = super::registration::Target::new(
+                    &selected.requirement,
+                    instance_identity(&self.instance)?,
+                    binding_namespace(&selected.binding)?,
+                    shell.clone(),
+                    super::registration::ClientSelection {
+                        registration: selected.binding.registration.id.clone(),
+                        client_id: client.client.client_id.clone(),
+                        secret: control.secrets[&client.client.credential].clone(),
+                        canary_subject: client.canary_subject.clone(),
+                        canary_tenant: client.canary_tenant.clone(),
+                    },
+                )?;
+                ensure!(
+                    serde_json::to_value(&selected.binding.profile)?
+                        == target.description()["profile"],
+                    "OAuth registration profile mismatch"
+                );
+                ensure!(
+                    selected.binding.security_shell == shell.origin,
+                    "OAuth registration security origin changed"
+                );
+                Ok(target)
+            })
+            .collect()
     }
 
     fn qualify(
@@ -382,6 +482,25 @@ impl QualifiedConnections {
                     "OAuth selected requirement contract changed"
                 );
                 let (reviewed, permission) = catalog.resolve(&requirement, &binding.profile)?;
+                let google =
+                    super::google::reviewed(&requirement.account_policy).is_ok_and(|entry| {
+                        entry.profile.protocol.identity().binding == binding.profile
+                    });
+                ensure!(
+                    !google || instance.oauth_clients.is_some(),
+                    "OAuth Google client selection missing"
+                );
+                let client_credential = instance
+                    .oauth_clients
+                    .as_ref()
+                    .map(|clients| {
+                        let client = clients
+                            .registrations
+                            .get(&binding.registration.id)
+                            .context("OAuth registration client missing")?;
+                        super::clients::selected_credential(&instance, &client.client)
+                    })
+                    .transpose()?;
                 let control = instance
                     .control
                     .as_ref()
@@ -444,6 +563,7 @@ impl QualifiedConnections {
                         custody_verifier,
                         custody_encryption,
                         shell_attestation,
+                        client_credential,
                     },
                 );
                 ensure!(entries.len() <= 128, "OAuth selected connection budget");
@@ -696,6 +816,10 @@ impl ArtifactApprovalAuthority {
             evidence.instance == instance_identity(&selected.instance)?
                 && evidence.binding_namespace == expected_namespace
                 && evidence.registration.registration == candidate.binding.registration
+                && candidate
+                    .client_credential
+                    .as_ref()
+                    .is_none_or(|credential| *credential == evidence.registration.client_credential)
                 && evidence.shell.origin == candidate.binding.security_shell
                 && evidence.custody == candidate.binding.custody
                 && evidence.product_return == candidate.binding.product_return
@@ -796,6 +920,177 @@ mod tests {
         fn qualify(&self) -> Result<QualifiedConnections> {
             QualifiedConnections::qualify(&self.instance, &self.artifacts, &self.catalog)
         }
+    }
+
+    #[test]
+    fn google_target_uses_admitted_requirement_instance_client_and_independent_shell() -> Result<()>
+    {
+        let mut fixture = fixture(AccountBindingPolicy::ExplicitExternalAccount)?;
+        fixture.catalog = super::super::google::catalog()?;
+        let profile =
+            super::super::google::reviewed(&AccountBindingPolicy::ExplicitExternalAccount)?
+                .profile
+                .protocol
+                .identity()
+                .binding
+                .clone();
+        fixture
+            .instance
+            .apps
+            .get_mut("workspace")
+            .unwrap()
+            .oauth_connections
+            .get_mut("calendar")
+            .unwrap()
+            .profile = profile;
+        let control = fixture.instance.control.as_mut().unwrap();
+        for (logical, secret) in [
+            ("reauth_client", "google_reauth"),
+            ("calendar_client", "google_calendar"),
+        ] {
+            control.secrets.insert(name(logical), serde_json::from_value(json!({"kind":"gcp_version","project_number":12345,"secret":secret,"version":3}))?);
+        }
+        let registration = fixture.instance.apps["workspace"].oauth_connections["calendar"]
+            .registration
+            .id
+            .as_str();
+        fixture.instance.oauth_clients = Some(serde_json::from_value(json!({
+            "version":1,"reauthentication":{"client_id":"123-reauth.apps.googleusercontent.com","credential":"reauth_client"},
+            "registrations":{registration:{"client":{"client_id":"123-calendar.apps.googleusercontent.com","credential":"calendar_client"},
+                "canary_subject":"112233","canary_tenant":"example.com"}}
+        }))?);
+        let selected = fixture.qualify()?;
+        let targets = selected.google_targets(&fixture.evidence.shell)?;
+        assert_eq!(targets.len(), 1);
+        let setup = targets[0].setup_description()?;
+        assert_eq!(
+            serde_json::to_value(
+                selected
+                    .entries
+                    .values()
+                    .next()
+                    .unwrap()
+                    .client_credential
+                    .as_ref()
+                    .unwrap()
+            )?,
+            setup["client_credential"]
+        );
+        assert_eq!(
+            setup["client_id"],
+            "123-calendar.apps.googleusercontent.com"
+        );
+        assert_eq!(setup["credential_version"]["version"], 3);
+        assert!(
+            setup["callback_url"]
+                .as_str()
+                .unwrap()
+                .starts_with("https://security.example.com/_day2/oauth/callback/")
+        );
+        assert_ne!(
+            setup["callback_url"],
+            "https://security.example.com/_day2/reauth/callback"
+        );
+        let mut shell = fixture.evidence.shell.clone();
+        shell.origin_url = "https://security.other-company.example/".into();
+        assert!(selected.google_targets(&shell).is_err());
+        let old_credential = setup["client_credential"].clone();
+        fixture.instance.control.as_mut().unwrap().secrets.insert(name("calendar_client"),
+            serde_json::from_value(json!({"kind":"gcp_version","project_number":12345,"secret":"google_calendar","version":4}))?);
+        let changed = fixture.qualify()?.google_targets(&fixture.evidence.shell)?;
+        assert_ne!(
+            changed[0].setup_description()?["client_credential"],
+            old_credential
+        );
+        assert_ne!(
+            changed[0].setup_description()?["registration_selection"],
+            setup["registration_selection"]
+        );
+        assert_eq!(
+            changed[0].setup_description()?["callback_url"],
+            setup["callback_url"]
+        );
+        shell = fixture.evidence.shell.clone();
+        shell.qualification = Digest::of(&"substituted qualification")?;
+        assert!(selected.google_targets(&shell).is_err());
+        let shared =
+            fixture.instance.control.as_ref().unwrap().secrets[&name("attestation")].clone();
+        fixture
+            .instance
+            .control
+            .as_mut()
+            .unwrap()
+            .secrets
+            .insert(name("calendar_client"), shared);
+        assert!(fixture.qualify().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn app_projection_keeps_its_client_and_control_refs_without_sibling_artifacts() -> Result<()> {
+        let mut fixture = fixture(AccountBindingPolicy::ExplicitExternalAccount)?;
+        let sibling = fixture.instance.apps["workspace"].clone();
+        let mut sibling = sibling;
+        sibling.oauth_connections.clear();
+        sibling.artifact = "/unmounted/sibling/artifact".into();
+        sibling.edge.as_mut().unwrap().origin = "https://sibling.example.com".into();
+        sibling.edge.as_mut().unwrap().iap_audience =
+            "/projects/12345/global/backendServices/3".into();
+        fixture.instance.apps.insert("sibling".into(), sibling);
+        let control = fixture.instance.control.as_mut().unwrap();
+        control.sources.insert(
+            name("sibling_source"),
+            day2_capabilities::SourceProvider::LocalGit {
+                repository: "/unmounted/sibling/source".into(),
+            },
+        );
+        control.apps.insert(
+            name("sibling"),
+            serde_json::from_value(json!({"source":"sibling_source"}))?,
+        );
+        for secret in ["reauth_client", "calendar_client", "sibling_client"] {
+            control.secrets.insert(
+                name(secret),
+                serde_json::from_value(json!({
+                    "kind":"gcp_version","project_number":12345,"secret":secret,"version":1
+                }))?,
+            );
+        }
+        fixture.instance.oauth_clients = Some(serde_json::from_value(json!({
+            "version":1,"reauthentication":{"client_id":"123-reauth.apps.googleusercontent.com","credential":"reauth_client"},
+            "registrations":{
+                "calendar_registration":{"client":{"client_id":"123-calendar.apps.googleusercontent.com","credential":"calendar_client"},"canary_subject":"112233","canary_tenant":"example.com"},
+                "sibling_registration":{"client":{"client_id":"123-sibling.apps.googleusercontent.com","credential":"sibling_client"},"canary_subject":"112233","canary_tenant":"example.com"}
+            }
+        }))?);
+        let all = Instance::from_bytes(&serde_json::to_vec(&fixture.instance)?)?;
+        let selected = QualifiedConnections::app_instance(all, "workspace")?;
+        assert_eq!(selected.apps.len(), 1);
+        assert_eq!(selected.control.as_ref().unwrap().apps.len(), 1);
+        assert_eq!(selected.control.as_ref().unwrap().sources.len(), 1);
+        assert_eq!(
+            selected.oauth_clients.as_ref().unwrap().registrations.len(),
+            1
+        );
+        assert!(
+            selected
+                .oauth_clients
+                .as_ref()
+                .unwrap()
+                .registrations
+                .contains_key(&name("calendar_registration"))
+        );
+        assert_eq!(
+            selected.apps["workspace"].oauth_connections,
+            fixture.instance.apps["workspace"].oauth_connections
+        );
+        assert_eq!(
+            QualifiedConnections::qualify(&selected, &fixture.artifacts, &fixture.catalog)?
+                .entries
+                .len(),
+            1
+        );
+        Ok(())
     }
 
     // Synthetic evidence exercises composition only. It is not a provider
@@ -1447,6 +1742,45 @@ mod tests {
                 .is_err()
         );
         assert_eq!(keys.calls.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn changed_client_credential_refuses_old_readiness_before_reading_keys() -> Result<()> {
+        let fixture = fixture(AccountBindingPolicy::ExplicitExternalAccount)?;
+        let readiness = Arc::new(Readiness {
+            current: RwLock::new(Some(fixture.evidence.clone())),
+            calls: AtomicUsize::new(0),
+        });
+        let keys = Arc::new(Keys::default());
+        let mut selected = fixture.qualify()?;
+        selected
+            .entries
+            .values_mut()
+            .next()
+            .unwrap()
+            .client_credential = Some(fixture.evidence.registration.client_credential.clone());
+        let authority = ArtifactApprovalAuthority::with_keys(selected, readiness, keys.clone());
+        assert!(
+            authority
+                .current("workspace", &fixture.intent, &fixture.callback, 5)?
+                .is_some()
+        );
+        let key_reads = keys.calls.load(Ordering::SeqCst);
+        let mut selected = fixture.qualify()?;
+        selected
+            .entries
+            .values_mut()
+            .next()
+            .unwrap()
+            .client_credential = Some(pin("rotated_client_credential"));
+        authority.replace_with_gcp(selected, Arc::new(NoTokens))?;
+        assert!(
+            authority
+                .current("workspace", &fixture.intent, &fixture.callback, 5)
+                .is_err()
+        );
+        assert_eq!(keys.calls.load(Ordering::SeqCst), key_reads);
         Ok(())
     }
 

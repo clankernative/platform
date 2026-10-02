@@ -1290,6 +1290,8 @@ pub struct Instance {
     pub security_shell: Option<Edge>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oauth_shell_transport: Option<day2_capabilities::oauth::ShellTransport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth_clients: Option<day2_capabilities::oauth::ClientCatalog>,
     pub apps: BTreeMap<String, AppBinding>,
 }
 
@@ -1319,6 +1321,7 @@ impl Instance {
         if let Some(control) = &instance.control {
             control.validate(instance.apps.keys().map(String::as_str))?;
         }
+        crate::oauth::clients::validate(&instance)?;
         if let Some(resources) = &instance.resources {
             resources.validate()?;
         } else {

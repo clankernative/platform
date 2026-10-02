@@ -117,6 +117,81 @@ pub struct ShellTransport {
     pub service_account: String,
 }
 
+/// Desired client metadata only. Secret bytes and qualification receipts are
+/// never part of the installation document. Addresses come from selected edges.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClientCatalog {
+    pub version: u32,
+    pub reauthentication: GoogleWebClient,
+    pub registrations: BTreeMap<Name, GoogleRegistrationClient>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GoogleWebClient {
+    pub client_id: String,
+    /// Logical name in InstallationControl.secrets, with an exact numeric version.
+    pub credential: Name,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GoogleRegistrationClient {
+    pub client: GoogleWebClient,
+    /// Immutable Google subject of an isolated, explicitly selected canary user.
+    pub canary_subject: String,
+    pub canary_tenant: String,
+}
+
+impl GoogleWebClient {
+    pub fn validate(&self) -> Result<()> {
+        let local = self.client_id.strip_suffix(".apps.googleusercontent.com");
+        ensure!(
+            self.client_id.len() <= 255
+                && local.is_some_and(|local| !local.is_empty()
+                    && local
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')),
+            "invalid Google web client"
+        );
+        Ok(())
+    }
+}
+
+impl ClientCatalog {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.version == 1,
+            "unsupported OAuth client catalog version"
+        );
+        ensure!(
+            self.registrations.len() <= 128,
+            "OAuth client catalog budget"
+        );
+        self.reauthentication.validate()?;
+        for selected in self.registrations.values() {
+            selected.client.validate()?;
+            ensure!(
+                selected.client.client_id != self.reauthentication.client_id
+                    && selected.client.credential != self.reauthentication.credential,
+                "OAuth reauthentication and provider clients must be distinct"
+            );
+            ensure!(
+                !selected.canary_subject.is_empty()
+                    && selected.canary_subject.len() <= 255
+                    && selected
+                        .canary_subject
+                        .bytes()
+                        .all(|byte| byte.is_ascii_graphic()),
+                "invalid Google canary subject"
+            );
+            crate::host_name(&selected.canary_tenant)?;
+        }
+        Ok(())
+    }
+}
+
 impl ShellTransport {
     pub fn validate(&self) -> Result<()> {
         let (local, domain) = self

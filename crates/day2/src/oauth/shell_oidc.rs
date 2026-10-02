@@ -1,7 +1,10 @@
 //! Google OIDC step-up for the OAuth security shell. IAP identifies every
 //! incoming request; this separate code flow proves a new authentication event.
 
-use super::security_shell::{FreshAuthenticator, ReauthStart};
+use super::{
+    approval_keys::{GcpSecretReader, GcpSecretVersion},
+    security_shell::{FreshAuthenticator, ReauthStart},
+};
 use crate::{iap, web_security};
 use anyhow::{Context, Result, ensure};
 use axum::http::HeaderMap;
@@ -31,13 +34,27 @@ pub(crate) struct GoogleKeys;
 
 impl KeySource for GoogleKeys {
     fn fetch(&self) -> Result<String> {
-        Ok(reqwest::blocking::Client::builder()
+        use std::io::Read;
+        let response = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never())
+            .connect_timeout(Duration::from_secs(3))
             .timeout(Duration::from_secs(5))
             .build()?
             .get(JWK_URL)
             .send()?
-            .error_for_status()?
-            .text()?)
+            .error_for_status()?;
+        ensure!(
+            response
+                .content_length()
+                .is_none_or(|length| length <= 65_536),
+            "OIDC key set too large"
+        );
+        let mut bytes = Vec::new();
+        response.take(65_537).read_to_end(&mut bytes)?;
+        ensure!(bytes.len() <= 65_536, "OIDC key set too large");
+        String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("invalid OIDC key set"))
     }
 }
 
@@ -52,16 +69,79 @@ pub(crate) trait CodeExchange: Send + Sync {
 }
 
 pub(crate) struct GoogleCodeExchange {
-    client_secret: String,
+    reader: GcpSecretReader,
+    version: GcpSecretVersion,
+    client: reqwest::blocking::Client,
+    endpoint: url::Url,
 }
 
 impl GoogleCodeExchange {
-    pub(crate) fn new(client_secret: String) -> Result<Self> {
+    pub(super) fn new(reader: GcpSecretReader, version: GcpSecretVersion) -> Result<Self> {
+        version.validate()?;
+        Ok(Self {
+            reader,
+            version,
+            endpoint: url::Url::parse(TOKEN_URL)?,
+            client: reqwest::blocking::Client::builder()
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
+                .retry(reqwest::retry::never())
+                .connect_timeout(Duration::from_secs(3))
+                .timeout(Duration::from_secs(8))
+                .build()?,
+        })
+    }
+
+    fn send(
+        &self,
+        code: &str,
+        verifier: &str,
+        redirect_uri: &str,
+        client_id: &str,
+    ) -> Result<String> {
+        use std::io::Read;
+        let secret = super::clients::credential(self.reader.load(&self.version)?)?;
+        let response = self
+            .client
+            .post(self.endpoint.clone())
+            .form(&[
+                ("grant_type", "authorization_code"),
+                ("code", code),
+                ("client_id", client_id),
+                ("client_secret", secret.as_str()),
+                ("redirect_uri", redirect_uri),
+                ("code_verifier", verifier),
+            ])
+            .send()?;
+        ensure!(response.status().is_success(), "OIDC exchange rejected");
         ensure!(
-            !client_secret.is_empty() && client_secret.len() <= 4096,
-            "invalid OIDC client secret"
+            response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .is_some_and(|value| value
+                    .to_str()
+                    .is_ok_and(|value| value.split(';').next() == Some("application/json"))),
+            "invalid OIDC token response type"
         );
-        Ok(Self { client_secret })
+        ensure!(
+            response
+                .content_length()
+                .is_none_or(|length| length <= 16_384),
+            "OIDC token response too large"
+        );
+        let mut bytes = Vec::new();
+        response.take(16_385).read_to_end(&mut bytes)?;
+        ensure!(bytes.len() <= 16_384, "OIDC token response too large");
+        let value: serde_json::Value = crate::json::decode(&bytes)?;
+        let token = value
+            .get("id_token")
+            .and_then(serde_json::Value::as_str)
+            .context("OIDC ID token missing")?;
+        ensure!(
+            !token.is_empty() && token.len() <= 16_384,
+            "invalid OIDC ID token"
+        );
+        Ok(token.into())
     }
 }
 
@@ -73,33 +153,10 @@ impl CodeExchange for GoogleCodeExchange {
         redirect_uri: &str,
         client_id: &str,
     ) -> Result<String> {
-        #[derive(Deserialize)]
-        struct TokenResponse {
-            id_token: String,
-        }
-        let response = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(8))
-            .build()?
-            .post(TOKEN_URL)
-            .form(&[
-                ("grant_type", "authorization_code"),
-                ("code", code),
-                ("client_id", client_id),
-                ("client_secret", &self.client_secret),
-                ("redirect_uri", redirect_uri),
-                ("code_verifier", verifier),
-            ])
-            .send()?
-            .error_for_status()?;
-        ensure!(
-            response
-                .content_length()
-                .is_none_or(|length| length <= 16_384),
-            "OIDC token response too large"
-        );
-        let bytes = response.bytes()?;
-        ensure!(bytes.len() <= 16_384, "OIDC token response too large");
-        Ok(serde_json::from_slice::<TokenResponse>(&bytes)?.id_token)
+        self.send(code, verifier, redirect_uri, client_id)
+            .map_err(|_| {
+                anyhow::anyhow!("OIDC code exchange unavailable; start a new authentication")
+            })
     }
 }
 
@@ -159,7 +216,7 @@ impl GoogleFreshAuthenticator {
         hosted_domain: &str,
         shell_origin: &str,
         client_id: String,
-        client_secret: String,
+        exchange: Box<dyn CodeExchange>,
     ) -> Result<Self> {
         Ok(Self {
             iap: iap::Verifier::new(iap_audience, hosted_domain, Box::new(iap::GoogleKeys))?,
@@ -167,7 +224,7 @@ impl GoogleFreshAuthenticator {
                 client_id,
                 hosted_domain.to_owned(),
                 shell_origin,
-                Box::new(GoogleCodeExchange::new(client_secret)?),
+                exchange,
                 Box::new(GoogleKeys),
             )?,
         })
@@ -510,6 +567,68 @@ fn token_shape(value: &str) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn oidc_reads_the_exact_credential_per_exchange_and_redacts_failures() -> Result<()> {
+        use crate::oauth::registration::tests::{Server, TokensSource, secret_response};
+        use std::sync::{Arc, atomic::AtomicUsize};
+        let server = Server::new(vec![
+            (200, secret_response().to_string()),
+            (200, r#"{"id_token":"private-fixture-id-token"}"#.into()),
+            (200, secret_response().to_string()),
+            (
+                400,
+                r#"{"error_description":"private-fixture-client-canary"}"#.into(),
+            ),
+            (
+                200,
+                r#"{"name":"projects/12345/secrets/wrong/versions/7"}"#.into(),
+            ),
+        ])?;
+        let reader = GcpSecretReader::fixture(
+            &server.endpoint,
+            Arc::new(TokensSource(AtomicUsize::new(0))),
+        )?;
+        let mut exchange = GoogleCodeExchange::new(
+            reader,
+            GcpSecretVersion {
+                project_number: 12345,
+                secret: "google_client_secret".into(),
+                version: 7,
+            },
+        )?;
+        exchange.endpoint = url::Url::parse(&server.endpoint)?.join("token")?;
+        let client = "123-reauth.apps.googleusercontent.com";
+        let callback = "https://security.example.com/_day2/reauth/callback";
+        assert_eq!(
+            exchange.exchange("private-code-1", &"v".repeat(43), callback, client)?,
+            "private-fixture-id-token"
+        );
+        for code in ["private-code-2", "private-code-3"] {
+            let error = exchange
+                .exchange(code, &"v".repeat(43), callback, client)
+                .unwrap_err();
+            assert!(!format!("{error:#}").contains("private-fixture"));
+        }
+        let requests = server.requests.lock().unwrap();
+        assert_eq!(requests.len(), 5);
+        for request in [&requests[0], &requests[2], &requests[4]] {
+            assert!(request.starts_with(
+                "GET /v1/projects/12345/secrets/google_client_secret/versions/7:access "
+            ));
+        }
+        for request in [&requests[1], &requests[3]] {
+            let form: BTreeMap<_, _> =
+                url::form_urlencoded::parse(request.split("\r\n\r\n").nth(1).unwrap().as_bytes())
+                    .into_owned()
+                    .collect();
+            assert_eq!(form["client_id"], client);
+            assert_eq!(form["redirect_uri"], callback);
+            assert_eq!(form["client_secret"], "private-fixture-client-canary");
+            assert_eq!(form["code_verifier"], "v".repeat(43));
+        }
+        Ok(())
+    }
+
     const HEADER: &str = "eyJhbGciOiJSUzI1NiIsImtpZCI6InRlc3Qta2V5In0";
     const PAYLOAD: &str = "eyJpc3MiOiJodHRwczovL2FjY291bnRzLmdvb2dsZS5jb20iLCJhdWQiOiIxMjMuYXBwcy5nb29nbGV1c2VyY29udGVudC5jb20iLCJzdWIiOiIxMTIyMzMiLCJlbWFpbCI6InBlcnNvbkBleGFtcGxlLmNvbSIsImVtYWlsX3ZlcmlmaWVkIjp0cnVlLCJoZCI6ImV4YW1wbGUuY29tIiwiZXhwIjoxNzAwMDAzNjAwLCJpYXQiOjE3MDAwMDAwMDAsIm5vbmNlIjoiZml4dHVyZV9ub25jZSIsImF1dGhfdGltZSI6MTcwMDAwMDAwMH0";
     const SIGNATURE: &str = "m6swOxUdd_KfJM5l1uGZsRiiVRfU-ZWSgiOTzs-j6I8zKOMGpv0-fw5Op8lTW0ebM105OtGgAaezlJMZTOMGgjXzAbIdkVaDSH4rw6uakDwaqB5vW0wpPWqGfGYfDE3EY11zzMy974v7F2gCxX6W9DkGIjNCnlddLd0gsvqKtx2fmWx7M9Tsp1pCEIcLB7zF_JSdgEj3l5jpz7CLCJVQERlY9VO8fITrVtehQEhfCMUKSq-tEK4X5BHzJLrqOahh5TwoNUoZbrMJUazpYdlxMq2o2_WZndSLXimgTiSC2HJROYGJb2aDxJLxS4cuVK_rjfflDFbc2ZE2ujrS8P7eCQ";
@@ -554,7 +673,7 @@ mod tests {
             "example.com",
             "https://security.example/",
             "123.apps.googleusercontent.com".into(),
-            "test-only-client-secret".into(),
+            Box::new(NoExchange),
         )
         .unwrap();
         assert!(

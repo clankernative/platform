@@ -39,7 +39,7 @@ fn pin(name: &str) -> BindingRef {
     BindingRef::pin(Name::try_from(name.to_owned()).unwrap(), &name).unwrap()
 }
 
-struct TokensSource(AtomicUsize);
+pub(in crate::oauth) struct TokensSource(pub(in crate::oauth) AtomicUsize);
 
 impl approval_keys::AccessTokenSource for TokensSource {
     fn access_token(&self) -> Result<String> {
@@ -48,14 +48,14 @@ impl approval_keys::AccessTokenSource for TokensSource {
     }
 }
 
-struct Fixture {
-    target: Target,
-    binding: OutboundConnectionBinding,
-    slot: ConnectionSlotKey,
-    evidence: profiles::OutboundInstanceEvidence,
+pub(super) struct Fixture {
+    pub(super) target: Target,
+    pub(super) binding: OutboundConnectionBinding,
+    pub(super) slot: ConnectionSlotKey,
+    pub(super) evidence: profiles::OutboundInstanceEvidence,
 }
 
-fn fixture() -> Result<Fixture> {
+pub(super) fn fixture() -> Result<Fixture> {
     let instance = pin("company_instance");
     let origin_url = "https://security.example.com/".to_owned();
     let qualification = Digest::of(&"fixture-independent-shell-qualification")?;
@@ -160,7 +160,7 @@ fn fixture() -> Result<Fixture> {
     })
 }
 
-fn secret_response() -> Value {
+pub(in crate::oauth) fn secret_response() -> Value {
     json!({"name":"projects/12345/secrets/google_client_secret/versions/7", "payload":{
         "data":STANDARD.encode(SECRET_CANARY), "dataCrc32c":crc32c::crc32c(SECRET_CANARY.as_bytes()).to_string(),
     }})
@@ -179,7 +179,7 @@ fn account_response() -> Value {
     json!({"sub":"google-canary-subject","hd":"example.com","email":"display@example.net","email_verified":true,"name":"Display only"})
 }
 
-fn responses() -> Vec<(u16, String)> {
+pub(super) fn responses() -> Vec<(u16, String)> {
     vec![
         (200, secret_response()),
         (400, json!({"error":"invalid_grant"})),
@@ -196,15 +196,15 @@ fn responses() -> Vec<(u16, String)> {
     .collect()
 }
 
-struct Server {
-    endpoint: String,
-    requests: Arc<Mutex<Vec<String>>>,
+pub(in crate::oauth) struct Server {
+    pub(in crate::oauth) endpoint: String,
+    pub(in crate::oauth) requests: Arc<Mutex<Vec<String>>>,
     stop: Arc<AtomicBool>,
     worker: Option<thread::JoinHandle<()>>,
 }
 
 impl Server {
-    fn new(responses: Vec<(u16, String)>) -> Result<Self> {
+    pub(in crate::oauth) fn new(responses: Vec<(u16, String)>) -> Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         listener.set_nonblocking(true)?;
         let endpoint = format!("http://{}/", listener.local_addr()?);

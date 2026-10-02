@@ -29,6 +29,7 @@ const VALID_SECONDS: i64 = 300;
 
 /// Public metadata for one exact registration canary. It cannot assert that a
 /// redirect is registered or that any key, shell, account mapping or host is ready.
+#[derive(Clone)]
 pub(crate) struct Target {
     instance: BindingRef,
     namespace: String,
@@ -56,6 +57,14 @@ pub(crate) struct ClientSelection {
 }
 
 impl Target {
+    pub(super) fn setup_description(&self) -> Result<serde_json::Value> {
+        let mut description = self.description();
+        description["registration_selection"] =
+            serde_json::to_value(self.registration_evidence()?.registration)?;
+        description["credential_version"] = serde_json::to_value(&self.secret)?;
+        Ok(description)
+    }
+
     pub(crate) fn new(
         requirement: &ConnectionRequirement,
         instance: BindingRef,
@@ -103,15 +112,8 @@ impl Target {
             version: version.get(),
         };
         secret.validate()?;
-        let credential = BindingRef::pin(
-            Name::try_from("google_client_credential".to_owned())?,
-            &(
-                "oauth-google-client-credential-v1",
-                &instance,
-                &selected.client_id,
-                &secret,
-            ),
-        )?;
+        let credential =
+            super::clients::credential_reference(&instance, &selected.client_id, &secret)?;
         Ok(Self {
             instance,
             namespace,
@@ -214,6 +216,9 @@ fn client_id(value: &str) -> Result<()> {
     );
     Ok(())
 }
+
+#[path = "qualification_shell.rs"]
+pub(super) mod shell;
 
 fn subject(value: &str) -> Result<()> {
     ensure!(
@@ -1033,4 +1038,4 @@ impl admission::OutboundReadiness for GoogleReadiness {
 
 #[cfg(test)]
 #[path = "registration_tests.rs"]
-mod tests;
+pub(super) mod tests;
