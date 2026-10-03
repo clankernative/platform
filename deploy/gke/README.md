@@ -153,8 +153,9 @@ instance; successful DNS/TLS provisioning alone does not qualify OAuth.
 The shared `apps[app].oauth_connections` contract selects app-owned requirements,
 reviewed profiles and version-pinned key providers. See
 [selected outbound OAuth connections](../../docs/OAUTH-INSTANCE.md) for the
-instance fields, callback namespace and current readiness checks. This contract
-does not yet add OAuth selection variables or a shell workload to `day2-app`.
+instance fields, callback namespace and current readiness checks. `day2-app`
+accepts the canonical single-app instance selection as `oauth_instance_json`;
+the separate `security-shell` root serves the installation shell.
 
 Private approval transport also selects `oauth_shell_transport.service_account`
 from the published shell contract. Pass the same `security_shell_contract`
@@ -163,14 +164,60 @@ to its app backend's IAP access binding. The shell contract must have a resolved
 IAP audience distinct from the app's audience. Its locations reuse ordinary
 selected app edges; no receiver hostname list is authored separately.
 
-`security-shell-edge.runtime_secret_ids` must include only selected attestation
-and reauthentication client-secret containers. App custody verifier and encryption
-containers belong in each selected `app-edge.runtime_secret_ids`, together with
-its attestation verification container. The shell secret IAM member changes from
+`security-shell-edge.runtime_secret_ids` must include only selected attestation,
+reauthentication and provider client-secret containers. Select app custody
+verifier/encryption containers in `app-edge.oauth_runtime.custody_secret_ids`
+and attestation verification containers in `attestation_secret_ids`. These
+native reads use the linked app Google service account. The separate
+`app-edge.runtime_secret_ids` remains for ordinary provider credentials read by
+the CSI add-on; it must not grant shell client or attestation containers.
+The shell secret IAM member changes from
 the direct Kubernetes federation principal to its dedicated Google service
 account when applying this update; review that policy migration before rollout.
 No secret value is read by OpenTofu. Applying these plans still does not qualify
 live workload identity, secret custody, provider readiness or OAuth registration.
+
+### Native OAuth app deployment
+
+In the private instance's app-edge inputs, opt into `oauth_runtime` with a
+`service_account_id`, `custody_secret_ids` and `attestation_secret_ids`. The
+edge creates one runtime Google service account, links only the app's `runtime`
+Kubernetes service account and grants the named key containers plus exactly the
+five Compute read methods used by native readiness. It grants no OAuth JWT
+signing authority. If `app_calls` already selects an identity, use that same
+`service_account_id`: its existing resource address and permissions are retained,
+and no second Google service account or workload binding is created.
+
+Pass the same resolved `security_shell_contract` to both roots. The published
+app contract binds its project, runtime identity, key containers and shell
+contract reference. `day2-app.oauth_instance_json` takes the complete canonical
+**single-app** native instance JSON from the private company repo, including
+`control.secrets`, `oauth_clients`, `oauth_runtime` and `oauth_connections`.
+This uses the shared native schema rather than a separate Terraform OAuth
+catalog. Use a deployment module's `file(...)` expression or the existing
+instance tooling to supply its bytes as this string input; tfvars files do not
+evaluate `file(...)` expressions. Keep all company URLs and exact numeric secret
+versions in that private selection.
+
+The workload root copies OAuth/control metadata intact and renders the ordinary
+app settings from its existing inputs. It checks installation/environment,
+artifact, binding namespace, account/client coverage, both edges, project,
+selected shell contract, exact key-container grants and the actual KSA's GSA
+annotation. Add `iam.gke.io/gke-metadata-server-enabled = "true"` to the selected
+node labels. Wrong identities, stale selections, extra grants, floating key
+versions and any app-key/client container overlap are refused before rollout.
+The native launcher still performs closed-schema and admitted-artifact/pin
+checks; planned policy cannot create readiness.
+
+OAuth keys are read natively by exact numeric version; there is no new secret
+volume, credential registration init container or secret value in OpenTofu.
+The existing provider-credential provisioning instance is composed before
+OAuth metadata is added, preserving its operator-only control contract. Backup
+jobs retain the configuration references for restore and their separate
+object-create-only identity; they receive no OAuth key grant. Review the actual
+effective IAM policy, including inherited grants and other KSA/GSA bindings,
+before qualifying the live installation. Named container grants apply to every
+version; native exact-version selection does not narrow that IAM permission.
 
 ## Build, qualify and deploy
 

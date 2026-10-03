@@ -50,7 +50,7 @@ locals {
   # Shape: platform/crates/day2/src/artifact.rs (Instance, AppBinding, Edge,
   # IdentityProvider) and day2-capabilities/src/runtime.rs (RuntimeProfile).
   # Every struct denies unknown fields; do not add keys here.
-  instance = merge({
+  base_instance = merge({
     installation = var.installation
     environment  = var.environment
     identity = {
@@ -95,6 +95,11 @@ locals {
     }
     oauth_shell_transport = { service_account = local.shell_service_account }
   })
+  instance = merge(local.base_instance, local.oauth_metadata, {
+    apps = {
+      (var.app_id) = merge(local.base_instance.apps[var.app_id], var.oauth_instance_json == null ? {} : { oauth_connections = local.oauth_connections })
+    }
+  })
   instance_json = jsonencode(local.instance)
 
   selector_labels = {
@@ -118,6 +123,7 @@ locals {
 }
 
 resource "kubernetes_config_map_v1" "instance" {
+  depends_on = [terraform_data.oauth_admission]
   metadata {
     name      = "${local.workload_name}-instance"
     namespace = var.namespace

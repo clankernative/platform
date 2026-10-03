@@ -94,7 +94,7 @@ locals {
   # The serving instance plus an operator-only control section, as packaging
   # writes it (packaging_credentials.rs); provisioning_inputs refuses any other
   # control authority.
-  operator_instance_json = jsonencode(merge(local.instance, {
+  operator_instance_json = jsonencode(merge(local.base_instance, {
     control = {
       version         = 1
       state_directory = "${local.state_dir}/operator-control"
