@@ -222,6 +222,8 @@ mod tests {
             "platform/ops",
             "platform/infra",
             "platform/examples/reports",
+            "platform/examples/app-ownership",
+            "platform/examples/notifications",
         ] {
             fs::create_dir_all(directory.path().join(path))?;
         }
@@ -261,6 +263,8 @@ mod tests {
     fn selects_authored_sources_and_probes_in_stable_order_without_outputs() -> Result<()> {
         let workspace = workspace()?;
         let selected = [
+            "platform/examples/app-ownership/App.roc",
+            "platform/examples/notifications/App.roc",
             "platform/examples/reports/commands/analyze/AnalyzeReport.roc",
             "platform/examples/reports/storage/Models.roc",
             "platform/fixtures/command-target-adversaries/commands/submit/SubmitReport.roc",

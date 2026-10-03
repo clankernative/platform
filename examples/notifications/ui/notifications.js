@@ -39,10 +39,27 @@ document.getElementById("load-configuration").addEventListener("click", () => ru
 
 document.getElementById("preview-notification").addEventListener("click", () => run(async () => {
   preview.textContent = "";
-  const result = await query("preview", {
+  const input = {
     app_id: scope().app_id, fields, template: form.elements.template.value,
     payload: [{ name: "summary", kind: "text", text: form.elements.summary.value, integer: 0, boolean: false }],
+  };
+  const session = await fetch("/api/session").then((response) => response.json());
+  const response = await fetch("/api/notifications.preview", {
+    method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": session.csrf_token, "Idempotency-Key": crypto.randomUUID() },
+    body: JSON.stringify(input),
   });
+  if (!response.ok) throw new Error("Preview could not be authorized or completed. Ownership may have changed.");
+  let command = await response.json();
+  if (response.status === 200) command = { status: "success", result: command };
+  const deadline = Date.now() + 60000;
+  while (command.status === "pending" && Date.now() < deadline) {
+    await pause();
+    const status = await fetch(command.status_url);
+    if (!status.ok) throw new Error("Preview could not be completed. Try again.");
+    command = await status.json();
+  }
+  if (command.status !== "success" || !command.result) throw new Error("Preview could not be completed. Try again.");
+  const result = command.result;
   preview.textContent = result.message;
   output.textContent = result.valid ? "Preview ready. Nothing was sent." : result.findings.items.map((finding) => `${finding.field}: ${finding.code}`).join("; ");
 }));

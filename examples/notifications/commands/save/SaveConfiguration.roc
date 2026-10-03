@@ -131,7 +131,9 @@ SaveConfiguration :: [].{
 			purpose: "Create a contract version or edit its template after checking current app ownership.",
 			use_when: ["An app owner configures event messages."],
 			avoid_when: ["Enabling delivery or changing an existing version's field schema."],
-			preconditions: ["Current direct app ownership and the current configuration revision."],
+			preconditions: [
+				"Current direct app ownership, the current revision and a serialized schema within 16 KiB.",
+			],
 			effects: ["Atomically saves the definition, version and immutable actor-attributed change record."],
 			result: "The committed definition revision and contract version. Delivery stays disabled.",
 		},
@@ -215,8 +217,8 @@ SaveConfiguration :: [].{
 
 	invalid_configuration =
 		Api.error({
-			description: "Configuration is invalid, the version is missing, its schema changed, or the version bound is exhausted.",
-			recovery: "Correct the configuration or create a new contract version without changing an existing schema.",
+			description: "Configuration is invalid, its stored schema exceeds 16 KiB, the version is missing or changed, or its bound is exhausted.",
+			recovery: "Correct or reduce the schema, or create a new contract version without changing an existing schema.",
 			verification: |
 				_,
 			| Api.failed_command(Commands.save, |_snapshot, _seed| Ok({ ..sample(0), template: "{{missing}}" })),

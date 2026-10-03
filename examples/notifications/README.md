@@ -28,12 +28,17 @@ is resolved, including across page reloads.
 Text, integer, boolean and enum fields are supported. The domain preserves the
 source's identifier rules and UTF-16 length limits, including astral Unicode.
 Payload substitution is one pass: inserted text cannot create a placeholder.
+Preview is a POST command with no declared business writes, so complete schemas
+and payloads use the bounded JSON body instead of exceeding GET's URL limit.
 Valid schemas have at most 20 fields and enum choices at most 50. The API returns
 complete collection envelopes for schemas, choices and findings. Oversized field
 and payload sets are rejected; repeated unknown-placeholder findings are
 deduplicated. No result is silently truncated. Field schemas are canonical,
 app-owned JSON content within a nominal contract-version row, with a typed codec
 and invariant checked on every read/build. Relationships use nominal references.
+Stored schemas also obey the host's 16 KiB text bound. Larger admitted schemas
+return `invalid_configuration` before writing; preview can still validate their
+supplied schema and payload within the host's POST body budget.
 
 The UI covers the common `summary` text field; the same typed API supports the
 other field kinds. It renders preview text with `textContent`. Delivery remains

@@ -992,7 +992,7 @@ fn receipt(
                 "artifact_format":day2::artifact::CURRENT_FORMAT,
                 "registry":"compiler-derived exact command/query handler records",
                 "context":"opaque; transport and generated factories sealed by admission",
-                "pagination":{"items_per_page":100,"aggregate_output_items":1000,"bare_list_outputs":"rejected"},
+                "pagination":{"items_per_page":day2::output_schema::MAX_PAGE_ITEMS,"aggregate_output_items":day2::output_schema::MAX_TOTAL_COLLECTION_ITEMS,"bare_list_outputs":"rejected"},
                 "selection":{"find":"zero-or-one visible row; ambiguous matches rejected","predicates":"typed equality, LIKE, AND and OR; SQL before limits","ordering":"declared fields with stable ID tie-breaker"},
                 "uniqueness":{"schema":"single and compound keys","writes":"atomic SQLite enforcement on insert and update","migration":"additive, transactional and duplicate-rejecting"},
                 "backup":"complete copied-state structural validation independent of the bounded app-property snapshot; reviewed local provider stores retained; cross-store coherence requires quiesced managed work",

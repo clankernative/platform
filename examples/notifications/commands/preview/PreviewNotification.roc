@@ -2,9 +2,9 @@ import pf.Api
 import pf.Handler
 import pf.Context
 import pf.Observe
-import pf.Query
+import pf.Tx
 import pf.CollectionPage
-import Reads
+import Commands
 import Errors
 import NotificationAccess
 import NotificationRules
@@ -12,23 +12,24 @@ import PreviewNotificationTypes
 
 PreviewNotification :: [].{
 	definition =
-		Api.query({
+		Api.command({
 			handler: Handler.prepared(prepare, handle),
 			contract,
+			execution: Api.current_state([]),
 			verification: { input: verify_input, check: verify_result },
 		})
 
 	prepare : Context, PreviewNotificationTypes.Input -> Observe(Bool)
 	prepare = |_context, input| NotificationAccess.check(input.app_id)
 
-	handle : Context, PreviewNotificationTypes.Input, Bool -> Query(PreviewNotificationTypes.Output)
+	handle : Context, PreviewNotificationTypes.Input, Bool -> Tx(PreviewNotificationTypes.Output)
 	handle = |_context, input, allowed| if allowed {
 		result = NotificationRules.render(input.fields, input.template, input.payload)
-		Query.succeed(
+		Tx.succeed(
 			{ valid: result.valid, message: result.message, findings: CollectionPage.complete(result.findings) },
 		)
 	} else {
-		Query.from_try(Err(Errors.preview_denied))
+		Tx.reject(Errors.preview_denied)
 	}
 
 	contract = {
@@ -38,7 +39,9 @@ PreviewNotification :: [].{
 			use_when: ["An app owner previews a template before saving it."],
 			avoid_when: ["Sending a message or accepting a publication."],
 			preconditions: ["Current direct app ownership."],
-			effects: [],
+			effects: [
+				"Records the preview result for this request without changing configuration or sending a message.",
+			],
 			result: "A rendered message or field findings. No delivery or business write occurs.",
 		},
 		inputs: {
@@ -104,6 +107,6 @@ PreviewNotification :: [].{
 		Api.error({
 			description: "Current ownership did not authorize this preview.",
 			recovery: "Ask an ownership administrator for access.",
-			verification: |_| Api.failed_query(Reads.preview, |_snapshot, _seed| Ok({ ..sample, app_id: "" })),
+			verification: |_| Api.failed_command(Commands.preview, |_snapshot, _seed| Ok({ ..sample, app_id: "" })),
 		})
 }

@@ -98,7 +98,7 @@ impl Flow {
         let notification_policy = json!({"version":1,"admins":[OPERATOR],"operations":{
             "notifications.home":read,
             "notifications.get":get,
-            "notifications.preview":{"actors":actors,"mode":{"kind":"read"},"models":{},"observations":["app.query.v1"]},
+            "notifications.preview":{"actors":actors,"mode":{"kind":"current_state"},"models":{},"observations":["app.query.v1"]},
             "notifications.save":save
         }});
         let schema = delegation::schema_digest_for_artifact(&loaded, "app_ownership.check")?;
@@ -285,6 +285,21 @@ impl Flow {
         .map_err(Into::into)
     }
 
+    fn preview(&self, actor: &str, input: &Value) -> Result<reqwest::blocking::Response> {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let key = format!(
+            "preview-{}",
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        self.post(
+            &self.caller.origin,
+            "notifications.preview",
+            actor,
+            &key,
+            input,
+        )
+    }
+
     fn post(
         &self,
         origin: &str,
@@ -374,7 +389,7 @@ fn notifications_ownership_configuration_and_preview_cross_native_http_hosts() -
     assert_eq!(flow.counts()?, (0, 0, 0));
     assert!(
         !flow
-            .query("preview", ALICE, &preview("Build: {{summary}}", "passed"))?
+            .preview(ALICE, &preview("Build: {{summary}}", "passed"))?
             .status()
             .is_success()
     );
@@ -426,8 +441,7 @@ fn notifications_ownership_configuration_and_preview_cross_native_http_hosts() -
     assert_eq!(current["enabled"], false);
     assert!(!flow.query("get", BOB, &query)?.status().is_success());
     let rendered: Value = flow
-        .query(
-            "preview",
+        .preview(
             ALICE,
             &preview("Build: {{summary}}", "{{summary}} <script>"),
         )?
@@ -502,8 +516,13 @@ fn notifications_ownership_configuration_and_preview_cross_native_http_hosts() -
         ("get", query.clone()),
         ("preview", preview("{{summary}}", "private")),
     ] {
+        let response = if operation == "preview" {
+            flow.preview(ALICE, &input)?
+        } else {
+            flow.query(operation, ALICE, &input)?
+        };
         assert!(
-            !flow.query(operation, ALICE, &input)?.status().is_success(),
+            !response.status().is_success(),
             "ownership must be fresh for {operation}"
         );
     }
@@ -576,7 +595,7 @@ fn notifications_preview_matches_domain_bounds_and_fails_closed() -> Result<()> 
     wrong["payload"][0]["kind"] = json!("integer");
     cases.push((wrong, "wrong_type"));
     for (input, code) in cases {
-        let response = flow.query("preview", ALICE, &input)?;
+        let response = flow.preview(ALICE, &input)?;
         assert_eq!(response.status(), StatusCode::OK);
         let output: Value = response.json()?;
         assert_eq!(output["valid"], false, "{input}");
@@ -593,17 +612,12 @@ fn notifications_preview_matches_domain_bounds_and_fails_closed() -> Result<()> 
     let mut spoof = preview("{{summary}}", "x");
     spoof["actor"] = json!(OPERATOR);
     assert_eq!(
-        flow.query("preview", ALICE, &spoof)?.status(),
+        flow.preview(ALICE, &spoof)?.status(),
         StatusCode::BAD_REQUEST
     );
     let mut wrong_app = preview("{{summary}}", "x");
     wrong_app["app_id"] = json!("other");
-    assert!(
-        !flow
-            .query("preview", ALICE, &wrong_app)?
-            .status()
-            .is_success()
-    );
+    assert!(!flow.preview(ALICE, &wrong_app)?.status().is_success());
     assert_eq!(flow.counts()?, (0, 0, 0));
     let typed = json!({"app_id":"demo","fields":[
         {"name":"count","kind":"integer","max_length":0,"choices":[]},
@@ -614,23 +628,108 @@ fn notifications_preview_matches_domain_bounds_and_fails_closed() -> Result<()> 
         {"name":"ready","kind":"boolean","text":"","integer":0,"boolean":true},
         {"name":"state","kind":"text","text":"passed","integer":0,"boolean":false}
     ]});
-    let output: Value = flow.query("preview", ALICE, &typed)?.json()?;
+    let output: Value = flow.preview(ALICE, &typed)?.json()?;
     assert_eq!(
         output,
         json!({"valid":true,"message":"-7 true passed","findings":page(json!([]))})
     );
     let mut invalid_enum = typed.clone();
     invalid_enum["payload"][2]["text"] = json!("unknown");
-    let invalid: Value = flow.query("preview", ALICE, &invalid_enum)?.json()?;
+    let invalid: Value = flow.preview(ALICE, &invalid_enum)?.json()?;
     assert_eq!(
         invalid["findings"],
         page(json!([{"field":"state","code":"invalid_enum_choice"}]))
     );
     let boundary: Value = flow
-        .query("preview", ALICE, &preview("{{summary}}", &"😀".repeat(500)))?
+        .preview(ALICE, &preview("{{summary}}", &"😀".repeat(500)))?
         .json()?;
     assert_eq!(boundary["valid"], true);
     assert_eq!(boundary["message"], "😀".repeat(500));
+    Ok(())
+}
+
+#[test]
+fn maximum_notification_schema_returns_every_field_and_choice() -> Result<()> {
+    let flow = Flow::new()?;
+    flow.owner(ALICE, true, "grant")?;
+    let choices: Vec<_> = (0..50).map(|index| format!("choice_{index:02}")).collect();
+    let schema: Vec<_> = (0..20)
+        .map(|index| json!({"name":format!("f{index}"),"kind":"enum","max_length":0,"choices":choices}))
+        .collect();
+    let mut input = save(0, 0, "{{f0}}");
+    input["fields"] = json!(schema);
+    let saved = flow.post(
+        &flow.caller.origin,
+        "notifications.save",
+        ALICE,
+        "maximum",
+        &input,
+    )?;
+    assert_eq!(saved.status(), StatusCode::OK, "{}", saved.text()?);
+    let response = flow.query(
+        "get",
+        ALICE,
+        &json!({"app_id":"demo","event_key":"build.completed","version":1}),
+    )?;
+    assert_eq!(response.status(), StatusCode::OK, "{}", response.text()?);
+    let output: Value = response.json()?;
+    assert_eq!(output["fields"]["has_more"], false);
+    assert_eq!(output["fields"]["next_after"], "");
+    let returned = output["fields"]["items"]
+        .as_array()
+        .context("complete schema")?;
+    assert_eq!(returned.len(), 20);
+    for (index, field) in returned.iter().enumerate() {
+        assert_eq!(field["name"], format!("f{index}"));
+        assert_eq!(field["choices"], page(json!(choices)));
+    }
+    let payload: Vec<_> = (0..20)
+        .map(|index| json!({"name":format!("f{index}"),"kind":"text","text":"choice_00","integer":0,"boolean":false}))
+        .collect();
+    let preview = json!({"app_id":"demo","fields":schema,"template":"{{f0}}","payload":payload});
+    let rendered: Value = flow.preview(ALICE, &preview)?.json()?;
+    assert_eq!(
+        rendered,
+        json!({"valid":true,"message":"choice_00","findings":page(json!([]))})
+    );
+    input["expected_revision"] = json!(1);
+    input["fields"][0]["choices"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("one_too_many"));
+    let refused = flow.post(
+        &flow.caller.origin,
+        "notifications.save",
+        ALICE,
+        "oversized",
+        &input,
+    )?;
+    assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(flow.counts()?, (1, 1, 1));
+    let long_choices: Vec<_> = (0..50)
+        .map(|index| format!("{}_{index:02}", "x".repeat(20)))
+        .collect();
+    let long_schema: Vec<_> = (0..20)
+        .map(|index| json!({"name":format!("f{index}"),"kind":"enum","max_length":0,"choices":long_choices}))
+        .collect();
+    input["fields"] = json!(long_schema);
+    let refused = flow.post(
+        &flow.caller.origin,
+        "notifications.save",
+        ALICE,
+        "schema_bytes",
+        &input,
+    )?;
+    assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let long_payload: Vec<_> = (0..20)
+        .map(|index| json!({"name":format!("f{index}"),"kind":"text","text":long_choices[0],"integer":0,"boolean":false}))
+        .collect();
+    let rendered: Value = flow.preview(ALICE, &json!({"app_id":"demo","fields":long_schema,"template":"{{f0}}","payload":long_payload}))?.json()?;
+    assert_eq!(
+        rendered,
+        json!({"valid":true,"message":long_choices[0],"findings":page(json!([]))})
+    );
+    assert_eq!(flow.counts()?, (1, 1, 1));
     Ok(())
 }
 
@@ -668,7 +767,7 @@ fn unavailable_ownership_never_reads_or_changes_notification_configuration() -> 
     );
     assert!(
         !flow
-            .query("preview", ALICE, &preview("{{summary}}", "private"))?
+            .preview(ALICE, &preview("{{summary}}", "private"))?
             .status()
             .is_success()
     );

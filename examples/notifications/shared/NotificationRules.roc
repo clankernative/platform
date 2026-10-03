@@ -150,7 +150,9 @@ NotificationRules :: [].{
 				[{ field: "description", code: "required" }]
 			else
 				if length(description) > 500 [{ field: "description", code: "too_long" }] else []
-		key.concat(desc).concat(validate_schema(fields)).concat(validate_template(fields, template))
+		encoded =
+			if Json.to_str(fields).to_utf8().len() > 16_384 [{ field: "fields", code: "schema_too_large" }] else []
+		key.concat(desc).concat(validate_schema(fields)).concat(encoded).concat(validate_template(fields, template))
 	}
 
 	validate_payload : List(Field), List(Value) -> List(Finding)

@@ -129,11 +129,22 @@ establish real cluster authentication or production readiness.
 
 ## Recorded qualification profiles
 
-The native Linux recipe builds both business apps and runs their public HTTP
-model and fault campaign, then qualifies containment, restart, authority
+The native Linux recipe builds the typed delegation examples, Stock Ledger,
+Request Desk, App Ownership and Notifications. It runs their native HTTP
+business and fault campaigns, then qualifies containment, restart, authority
 revocation and supported restore. Its scoped receipt records the exact platform,
 toolchain, runtime and app artifacts; it excludes the complete platform gate and
 broader production certification. The complete local gate remains required.
+
+Notifications imports the exact `app_ownership.check` query to authorize its
+configuration reads, previews and saves using the inherited human. Ownership
+administration is a separate, unexported command restricted by instance policy.
+Each operation checks current ownership; revocation and receiver failure refuse
+new work. The business configuration remains local and revision-checked, with
+atomic actor-attributed changes. Delivery is disabled in this slice. See the
+[Ownership source](../examples/app-ownership/README.md) and
+[Notifications source](../examples/notifications/README.md) for the source
+oracles, bounds and the remote-authorization race boundary.
 
 The October 2, 2026 GKE canary used runtime source `f53742d` with separate
 `request_desk` and `stock_ledger` workloads, managed keys and independent IAP
