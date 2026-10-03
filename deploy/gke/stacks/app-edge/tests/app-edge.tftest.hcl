@@ -27,7 +27,7 @@ run "credential_api_keeps_the_human_default_protected" {
     condition = kubernetes_ingress_v1.app.spec[0].default_backend[0].service[0].name == "app" && length([
       for path in kubernetes_ingress_v1.app.spec[0].rule[0].http[0].path : path
       if path.backend[0].service[0].name == "credential-api" && path.path == "/_day2/credentials/api/*" && path.path_type == "ImplementationSpecific"
-    ]) == 1 && length([
+      ]) == 1 && length([
       for path in kubernetes_ingress_v1.app.spec[0].rule[0].http[0].path : path
       if path.backend[0].service[0].name == "credential-api"
     ]) == 1
