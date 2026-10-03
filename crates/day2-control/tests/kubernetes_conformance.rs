@@ -42,7 +42,7 @@ fn serving_probe_authenticates_the_ready_app_artifact_and_workload() -> Result<(
     let image = format!("registry.example/app@sha256:{}", "1".repeat(64));
     let annotations = json!({"day2.dev/installation":"alpha","day2.dev/environment":"production","day2.dev/app":"reports","day2.dev/artifact":artifact});
     let statefulset = json!({"apiVersion":"apps/v1","kind":"StatefulSet","metadata":metadata("day2-reports","controller-uid"),
-        "spec":{"replicas":1,"template":{"metadata":{"annotations":annotations},"spec":{"serviceAccountName":"runtime"}}},
+        "spec":{"replicas":1,"template":{"metadata":{"annotations":annotations},"spec":{"serviceAccountName":"runtime","containers":[{"name":"day2","image":image}]}}},
         "status":{"observedGeneration":1,"readyReplicas":1,"updatedReplicas":1,"currentRevision":"rev-one","updateRevision":"rev-one"}});
     let mut pod_metadata = metadata("day2-reports-0", "pod-uid");
     pod_metadata["ownerReferences"] = json!([{"name":"day2-reports","uid":"controller-uid","kind":"StatefulSet","controller":true}]);
@@ -90,7 +90,7 @@ fn serving_probe_authenticates_the_ready_app_artifact_and_workload() -> Result<(
             .to_ascii_lowercase()
             .contains(&format!("authorization: bearer {TOKEN}"))
     }));
-    for variant in 0..6 {
+    for variant in 0..7 {
         let mut changed = pod.clone();
         match variant {
             0 => {
@@ -101,7 +101,12 @@ fn serving_probe_authenticates_the_ready_app_artifact_and_workload() -> Result<(
             2 => changed["status"]["containerStatuses"][0]["ready"] = json!(false),
             3 => changed["metadata"]["labels"]["controller-revision-hash"] = json!("old-revision"),
             4 => changed["spec"]["containers"][0]["env"] = json!([]),
-            _ => changed["status"]["containerStatuses"][0]["imageID"] = json!("other-image"),
+            5 => changed["status"]["containerStatuses"][0]["imageID"] = json!("other-image"),
+            _ => {
+                let other = format!("registry.example/app@sha256:{}", "2".repeat(64));
+                changed["spec"]["containers"][0]["image"] = json!(other);
+                changed["status"]["containerStatuses"][0]["imageID"] = json!(other);
+            }
         }
         fixture
             .routes

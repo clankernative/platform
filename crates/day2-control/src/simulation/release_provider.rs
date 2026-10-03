@@ -1006,6 +1006,7 @@ mod retirement_tests {
             durability: BindingRef::pin(name("durability")?, &"runtime")?,
             resources: resources_binding(&approval)?,
             deployment: deployment_binding(&approval)?,
+            deployment_input: None,
         };
         let snapshot = ReleaseSnapshot {
             id: plan.execution_id()?,

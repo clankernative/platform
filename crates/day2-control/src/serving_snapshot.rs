@@ -51,9 +51,24 @@ impl ServingSnapshot {
             .take(1_048_577)
             .read_to_end(&mut bytes)?;
         ensure!(bytes.len() <= 1_048_576, "serving_snapshot_byte_budget");
-        let snapshot: Self = day2::json::decode(&bytes)?;
+        Self::from_bytes(&bytes)
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        ensure!(bytes.len() <= 1_048_576, "serving_snapshot_byte_budget");
+        let snapshot: Self = day2::json::decode(bytes)?;
         snapshot.validate()?;
         Ok(snapshot)
+    }
+
+    pub fn require_scope(&self, target: &ReleaseTarget) -> Result<()> {
+        self.validate()?;
+        let scope = &self.selections[0].binding.target;
+        ensure!(
+            scope.company == target.company && scope.environment == target.environment,
+            "serving_snapshot_scope_changed"
+        );
+        Ok(())
     }
 
     fn selected(&self, target: &ReleaseTarget) -> Result<&SelectedServing> {

@@ -406,6 +406,15 @@ impl<'a> GkeKubernetesProbe<'a> {
             .find(|container| container["name"] == "day2")
             .context("serving_container_missing")?;
         let image = runtime["image"].as_str().context("serving_image_missing")?;
+        let intended = controller["spec"]["template"]["spec"]["containers"]
+            .as_array()
+            .context("serving_template_container_missing")?;
+        ensure!(
+            intended.len() <= 8
+                && intended.iter().any(|container| container["name"] == "day2"
+                    && container["image"].as_str() == Some(image)),
+            "serving_image_differs_from_controller"
+        );
         let (_, image_digest) = image
             .rsplit_once("@sha256:")
             .context("serving_image_not_immutable")?;

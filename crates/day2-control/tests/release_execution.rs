@@ -1928,6 +1928,7 @@ impl Fixture {
             durability: plan("alpha", 1).profile.durability,
             resources: approval.secret.binding.clone(),
             deployment: BindingRef::pin(name("deployment"), &"synthetic-runtime-v1").unwrap(),
+            deployment_input: None,
         };
         let provider = Arc::new(Provider {
             plan: plan.clone(),

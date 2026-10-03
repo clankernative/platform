@@ -193,11 +193,12 @@ resource "kubernetes_config_map_v1" "instance" {
 }
 
 resource "kubernetes_stateful_set_v1" "day2" {
+  depends_on = [terraform_data.release_admission]
   metadata {
     name        = local.workload_name
     namespace   = var.namespace
     labels      = local.pod_labels
-    annotations = local.app_call_annotations
+    annotations = merge(local.app_call_annotations, var.release_managed ? { "day2.dev/artifact" = local.release_artifact } : {}, local.release_annotations)
   }
 
   spec {
@@ -228,7 +229,7 @@ resource "kubernetes_stateful_set_v1" "day2" {
           "day2.dev/instance-sha256" = sha256(local.instance_json)
           }, local.has_credentials ? {
           "day2.dev/credentials-sha256" = sha256(local.provisioning_plan_json)
-        } : {}, var.app_calls == null ? {} : { "day2.dev/app-calls-sha256" = sha256(jsonencode(local.app_call_config)) })
+        } : {}, var.app_calls == null ? {} : { "day2.dev/app-calls-sha256" = sha256(jsonencode(local.app_call_config)) }, local.release_template_annotations)
       }
 
       spec {
@@ -477,13 +478,13 @@ resource "kubernetes_stateful_set_v1" "day2" {
 
         container {
           name              = "day2"
-          image             = var.image
+          image             = local.release_image
           image_pull_policy = "IfNotPresent"
           command           = ["/usr/local/bin/day2-serve"]
           args              = concat([local.instance_path, var.app_id, "--edge"], var.app_calls == null ? [] : ["--app-calls", "${local.app_call_dir}/host.json"])
           env {
             name  = "DAY2_EXPECTED_ARTIFACT"
-            value = "sha256:${var.artifact_id}"
+            value = local.release_artifact
           }
           dynamic "volume_mount" {
             for_each = var.app_calls == null ? {} : {
@@ -586,7 +587,7 @@ resource "kubernetes_stateful_set_v1" "day2" {
           name = "instance"
 
           config_map {
-            name         = kubernetes_config_map_v1.instance.metadata[0].name
+            name         = local.release_instance
             default_mode = "0444"
 
             items {
