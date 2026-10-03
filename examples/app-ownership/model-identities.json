@@ -1,0 +1,4 @@
+{
+  "format": 1,
+  "models": [{ "identity": { "key": "d7ae7eefedfa4c6caf6d3ab0067dcab8", "prefix": "own" }, "table": "ownerships", "roc_type": "Models.Ownership", "retired": false }]
+}

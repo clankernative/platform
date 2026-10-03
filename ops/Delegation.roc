@@ -11,6 +11,8 @@ Delegation :: [].{
 	business! : (Str => Try(Str, Str)) => Try(Str, Str)
 	business! = |host!| {
 		_ = Capability.call!("verify-build", Json.to_str({ fixture: "stock-ledger" }), host!)?
-		Capability.call!("verify-build", Json.to_str({ fixture: "request-desk" }), host!)
+		_ = Capability.call!("verify-build", Json.to_str({ fixture: "request-desk" }), host!)?
+		_ = Capability.call!("verify-build", Json.to_str({ fixture: "app-ownership" }), host!)?
+		Capability.call!("verify-build", Json.to_str({ fixture: "notifications" }), host!)
 	}
 }

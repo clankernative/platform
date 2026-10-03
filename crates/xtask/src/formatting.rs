@@ -141,6 +141,8 @@ fn sources(root: &Path) -> Result<Vec<PathBuf>> {
         root.join("ops"),
         root.join("infra"),
         root.join("examples/reports"),
+        root.join("examples/app-ownership"),
+        root.join("examples/notifications"),
     ];
     for source in roots {
         collect(&source, 0, &mut entries, &mut files)

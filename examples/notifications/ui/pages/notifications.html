@@ -1,0 +1,21 @@
+<h1>{{ home.title }}</h1>
+<p>Configure and preview an event message for an app you own.</p>
+<fieldset id="notification-editor">
+  <legend>Event configuration</legend>
+  <label for="app-id">App</label>
+  <input id="app-id" name="app_id" value="demo" required>
+  <label for="event-key">Event</label>
+  <input id="event-key" name="event_key" value="build.completed" required>
+  <button type="button" id="load-configuration">Load configuration</button>
+  <label for="description">Description</label>
+  <input id="description" name="description" value="A build completed." required>
+  <label for="template">Message template</label>
+  <textarea id="template" name="template" required>Build: &#123;&#123;summary&#125;&#125;</textarea>
+  <p>Use the summary field in your message. Saving keeps delivery disabled.</p>
+  <label for="summary">Example summary</label>
+  <input id="summary" name="summary" value="passed" maxlength="1000" required>
+  <button type="button" id="preview-notification">Preview</button>
+  <button type="button" id="save-configuration">Save configuration</button>
+</fieldset>
+<p id="configuration-result" role="status" aria-live="polite">Load the current configuration before editing.</p>
+<pre id="notification-preview"></pre>
