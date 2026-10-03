@@ -259,6 +259,7 @@ fn enroll(
         durability: BindingRef::pin(name("temporal"), &"deployment-queue").unwrap(),
         resources: approval.secret.binding.clone(),
         deployment: BindingRef::pin(name("deployment"), &"test-deployment-binding").unwrap(),
+        deployment_input: None,
     };
     provider.plans.lock().unwrap().insert(
         plan.execution_id().unwrap(),

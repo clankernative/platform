@@ -237,6 +237,7 @@ impl Workflows {
                     durability: plans[index].profile.durability.clone(),
                     resources: release_provider::resources_binding(&approval)?,
                     deployment: release_provider::deployment_binding(&approval)?,
+                    deployment_input: None,
                 };
                 let id = plan.execution_id()?;
                 if self.executions.contains_key(&id) {

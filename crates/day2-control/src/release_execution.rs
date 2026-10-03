@@ -24,6 +24,8 @@ pub struct ReleaseExecutionPlan {
     pub durability: BindingRef,
     pub resources: BindingRef,
     pub deployment: BindingRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deployment_input: Option<Digest>,
 }
 impl ReleaseExecutionPlan {
     pub fn execution_id(&self) -> Result<Digest> {
@@ -106,6 +108,12 @@ pub trait Recipe: Send + Sync + 'static {
 pub trait Capabilities: Send + Sync + 'static {
     fn validate(&self, plan: &ReleaseExecutionPlan, approval: &ReleaseApproval) -> Result<()>;
     fn perform(&self, lease: &ReleaseLease) -> Result<ReleaseEffectResult>;
+
+    /// Fresh native provider checks immediately before the journal's atomic
+    /// activation. This runs outside its write transaction and grants no authority.
+    fn verify_activation(&self, _lease: &ReleaseLease) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -382,6 +390,7 @@ impl ReleaseExecutionHost {
         )?;
         tx.commit()?;
         if lease.step.operation == ReleaseOperation::Activate {
+            self.capabilities.verify_activation(lease)?;
             return Ok(ReleaseEffectResult::Activate {});
         }
         match self.capabilities.perform(lease) {
@@ -610,6 +619,15 @@ pub trait ServingProbe {
 }
 
 impl Journal {
+    /// The original preparation receipt, never reconstructed from a later poll.
+    pub fn prepared_release_deployment(
+        &self,
+        execution: &Digest,
+    ) -> Result<Option<(ReleaseProviderFact, DeploymentIncarnation)>> {
+        let stored = read_execution(&self.connection, execution)?;
+        Ok(stored.deployment.zip(stored.incarnation))
+    }
+
     /// Publish only checked active selectors. App hosts need no access to the
     /// control-plane journal or its company-private operational evidence.
     pub fn serving_snapshot(
@@ -621,16 +639,29 @@ impl Journal {
             "serving_snapshot_target_budget"
         );
         let tx = self.connection.unchecked_transaction()?;
+        let snapshot = self.serving_snapshot_in(&tx, targets)?;
+        tx.commit()?;
+        Ok(snapshot)
+    }
+
+    pub(crate) fn serving_snapshot_in(
+        &self,
+        tx: &Transaction<'_>,
+        targets: &[ReleaseTarget],
+    ) -> Result<crate::serving_snapshot::ServingSnapshot> {
+        ensure!(
+            !targets.is_empty() && targets.len() <= 32,
+            "serving_snapshot_target_budget"
+        );
         let mut selections = Vec::new();
         for target in targets {
-            let (activation, generation, binding) = selected_active_serving_in(&tx, target)?;
+            let (activation, generation, binding) = selected_active_serving_in(tx, target)?;
             selections.push(SelectedServing {
                 activation,
                 generation,
                 binding,
             });
         }
-        tx.commit()?;
         crate::serving_snapshot::ServingSnapshot::new(selections)
     }
 
@@ -850,6 +881,11 @@ impl Journal {
             epoch INTEGER NOT NULL CHECK(epoch>0),owner TEXT NOT NULL,lease_until INTEGER NOT NULL,
             result TEXT, recovery INTEGER NOT NULL CHECK(recovery IN (0,1)),
             started INTEGER NOT NULL CHECK(started IN (0,1)), UNIQUE(execution,ordinal));")?;
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS release_serving_publications(
+            scope TEXT PRIMARY KEY, revision INTEGER NOT NULL CHECK(revision>0),
+            published_revision INTEGER NOT NULL DEFAULT 0, published_digest TEXT);",
+        )?;
         tx.commit()?;
         Ok(())
     }
@@ -1234,6 +1270,7 @@ impl Journal {
                     stored.snapshot.phase = ReleasePhase::Active;
                     stored.snapshot.terminal = Some(ReleaseTerminal::Activated);
                     stored.snapshot.waiting = None;
+                    crate::serving_publication::enqueue_in(&tx, &stored.snapshot.target)?;
                 }
                 complete_step(&tx, &mut stored, lease, &encoded)?;
             }

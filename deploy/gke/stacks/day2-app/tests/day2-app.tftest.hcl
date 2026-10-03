@@ -63,6 +63,62 @@ run "wires_private_app_calls_into_the_normal_host" {
   }
 }
 
+run "infrastructure_preserves_software_after_release_handoff" {
+  command = plan
+  variables {
+    release_managed = true
+    app_calls = {
+      workload_key = { id = "workload-1", secret_version = "projects/123/secrets/workload/versions/1" }
+      issuer_key = { issuer = "example-issuer", id = "issuer-1", secret_version = "projects/123/secrets/issuer/versions/1" }
+      serving_snapshot_config_map = "active-app-serving"
+      serving = {}
+      outgoing = {}
+      incoming = {}
+    }
+  }
+  override_data {
+    target = data.kubernetes_config_map_v1.platform_contract
+    values = { data = {
+      APP_DOMAIN = "example.test.example.com"
+      IAP_JWT_AUDIENCE = "/projects/123/global/backendServices/1"
+      APP_CALL_ISSUER_AUDIENCE = "/projects/123/global/backendServices/2"
+      APP_CALL_RECEIVER_AUDIENCE = "/projects/123/global/backendServices/3"
+      APP_CALL_WORKLOAD_EMAIL = "example-call@example-tools.iam.gserviceaccount.com"
+      PVC_NAME = "data"
+      SERVICE_NAME = "app"
+      REQUIRED_SERVICE_LABEL_KEY = "platform.example.com/service"
+      REQUIRED_SERVICE_LABEL_VALUE = "app"
+    } }
+  }
+  override_data {
+    target = data.kubernetes_resource.release
+    values = { object = {
+      metadata = { name = "day2-example-app", namespace = "app-example", annotations = {
+        "day2.dev/release-effect" = "effect-two", "day2.dev/release-id" = "release-two"
+      } }
+      spec = { template = {
+        metadata = { annotations = {
+          "day2.dev/installation" = "exampleco", "day2.dev/environment" = "production", "day2.dev/app" = "example_app"
+          "day2.dev/artifact" = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          "day2.dev/instance-sha256" = "released-instance", "day2.dev/release-id" = "release-two"
+        } }
+        spec = {
+          containers = [{ name = "day2", image = "registry.example.com/app@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", env = [{ name = "DAY2_EXPECTED_ARTIFACT", value = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }] }]
+          volumes = [{ name = "instance", configMap = { name = "day2-release-two" } }]
+        }
+      } }
+    } }
+  }
+  assert {
+    condition = kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[0].image == "registry.example.com/app@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" && kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[0].env[0].value == "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    error_message = "An infrastructure plan must keep the released image and artifact guard."
+  }
+  assert {
+    condition = kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].volume[0].config_map[0].name == "day2-release-two" && kubernetes_stateful_set_v1.day2.metadata[0].annotations["day2.dev/release-effect"] == "effect-two" && kubernetes_stateful_set_v1.day2.spec[0].template[0].metadata[0].annotations["day2.dev/release-id"] == "release-two"
+    error_message = "Infrastructure must preserve the immutable release instance and reconciliation markers."
+  }
+}
+
 override_data {
   target = data.kubernetes_config_map_v1.security_shell_contract
   values = {

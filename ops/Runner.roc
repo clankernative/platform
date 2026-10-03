@@ -19,6 +19,7 @@ import ops.Simulation
 import ops.ProviderConformance
 import ops.OAuthRegistration
 import ops.Release
+import ops.GkeRelease
 import ops.SecretRetirement
 
 # Only the native supervisor launches this executable. Its stdout is a bounded
@@ -63,6 +64,8 @@ run! = |args| match args {
 	["provider-conformance"] => ProviderConformance.run!(call!)
 	["oauth-registration"] => OAuthRegistration.run!(call!)
 	["release-step", snapshot] => Release.run(snapshot)
+	["gke-release"] => GkeRelease.run!(call!)
+	["gke-release-build"] => GkeRelease.build!(call!)
 	["secret-retirement-step", snapshot] => SecretRetirement.run(snapshot)
 	["cli"] => Verify.cli!(call!)
 	["verify-fast"] => Verify.fast!(call!)

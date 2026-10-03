@@ -13,6 +13,7 @@ package
 		ProviderConformance,
 		OAuthRegistration,
 		Release,
+		GkeRelease,
 		SecretRetirement,
 	]
 	{

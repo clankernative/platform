@@ -239,12 +239,21 @@ impl Journal {
                     .find(|exported| exported.name == *operation)
                     .context("imported serving operation missing")?;
                 ensure!(
-                    package.operation.kind == Kind::Query && exported.kind == "query",
-                    "imported serving operation is not a query: {operation}"
+                    matches!(
+                        (&package.operation.kind, exported.kind.as_str()),
+                        (Kind::Query, "query") | (Kind::Command, "command")
+                    ),
+                    "imported serving operation kind changed: {operation}"
                 );
                 let schema =
                     day2::delegation::schema_digest_for_artifact(callee_artifact, operation)?;
-                let actors = check_import_grant(&document, caller, operation, &schema)?;
+                let actors = check_import_grant(
+                    &document,
+                    caller,
+                    operation,
+                    &schema,
+                    &package.operation.kind,
+                )?;
                 let callee_document =
                     AuthorityDocument::resolve_at(&instance, callee, callee_artifact, now_ms)
                         .with_context(|| format!("callee authority: {callee}"))?;
@@ -301,6 +310,7 @@ fn check_import_grant(
     caller: &str,
     operation: &str,
     schema: &str,
+    kind: &Kind,
 ) -> Result<BTreeSet<String>> {
     let mut actors = BTreeSet::new();
     for grants in document.resources.operations.values() {
@@ -316,7 +326,12 @@ fn check_import_grant(
                 matches!(&grant.target, ResourceTarget::AppOperation { app, schema_digest, .. }
                     if app == operation.split_once('.').map(|(app, _)| app).unwrap_or("") && schema_digest == schema)
                     && grant.provider == Provider::LocalDelegation
-                    && grant.actions.contains(&Action::DelegateQuery),
+                    && match kind {
+                        Kind::Query => grant.actions.contains(&Action::DelegateQuery),
+                        Kind::Command =>
+                            grant.actions.contains(&Action::DelegateSend)
+                                || grant.actions.contains(&Action::DelegateStatus),
+                    },
                 "stale or incompatible imported grant: {caller} -> {operation}"
             );
             actors.extend(grant.actors.iter().cloned());
@@ -690,12 +705,34 @@ mod tests {
     fn imported_query_requires_one_exact_resolved_grant() -> Result<()> {
         let schema = Digest::new(b"directory.lookup schema").as_str().to_owned();
         let mut document = authority_with_import_grant(&schema)?;
-        check_import_grant(&document, "caller", "directory.lookup", &schema)?;
+        check_import_grant(
+            &document,
+            "caller",
+            "directory.lookup",
+            &schema,
+            &Kind::Query,
+        )?;
         assert!(
-            check_import_grant(&document, "caller", "directory.lookup", "sha256:stale").is_err()
+            check_import_grant(
+                &document,
+                "caller",
+                "directory.lookup",
+                "sha256:stale",
+                &Kind::Query
+            )
+            .is_err()
         );
         document.resources.operations.clear();
-        assert!(check_import_grant(&document, "caller", "directory.lookup", &schema).is_err());
+        assert!(
+            check_import_grant(
+                &document,
+                "caller",
+                "directory.lookup",
+                &schema,
+                &Kind::Query
+            )
+            .is_err()
+        );
         let mut document = authority_with_import_grant(&schema)?;
         let grant = document.resources.operations["ask"]["directory"].clone();
         document
@@ -704,7 +741,71 @@ mod tests {
             .get_mut("ask")
             .unwrap()
             .insert("other".into(), grant);
-        assert!(check_import_grant(&document, "caller", "directory.lookup", &schema).is_err());
+        assert!(
+            check_import_grant(
+                &document,
+                "caller",
+                "directory.lookup",
+                &schema,
+                &Kind::Query
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn imported_command_accepts_its_send_or_status_grant_without_accepting_query_authority()
+    -> Result<()> {
+        let schema = Digest::new(b"directory command schema").as_str().to_owned();
+        let mut document = authority_with_import_grant(&schema)?;
+        assert!(
+            check_import_grant(
+                &document,
+                "caller",
+                "directory.lookup",
+                &schema,
+                &Kind::Command
+            )
+            .is_err()
+        );
+        for action in [Action::DelegateSend, Action::DelegateStatus] {
+            document
+                .resources
+                .operations
+                .get_mut("ask")
+                .unwrap()
+                .get_mut("directory")
+                .unwrap()
+                .actions = BTreeSet::from([action]);
+            check_import_grant(
+                &document,
+                "caller",
+                "directory.lookup",
+                &schema,
+                &Kind::Command,
+            )?;
+            assert!(
+                check_import_grant(
+                    &document,
+                    "caller",
+                    "directory.lookup",
+                    &schema,
+                    &Kind::Query
+                )
+                .is_err()
+            );
+            assert!(
+                check_import_grant(
+                    &document,
+                    "caller",
+                    "directory.lookup",
+                    "stale",
+                    &Kind::Command
+                )
+                .is_err()
+            );
+        }
         Ok(())
     }
 

@@ -261,6 +261,7 @@ async fn roc_resource_release_resumes_through_real_temporal_without_reapplying_p
                     support::name("deployment"),
                     &"synthetic-inactive-deployment",
                 )?,
+                deployment_input: None,
             };
             let provider = Arc::new(Provider::create(
                 &directory.path().join("provider.sqlite"),

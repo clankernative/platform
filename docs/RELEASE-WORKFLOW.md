@@ -1,13 +1,17 @@
 # Secret-dependent release workflow
 
-This is a private control-plane workflow, not an application SDK. The bounded
-contract prepares one immutable secret dependency and one inactive deployment
-candidate, then commits the approved active pointer. Provider implementations in
-the lab are synthetic; this is not yet a GCP deployment command.
+This is a private control-plane workflow. The bounded contract prepares an exact
+secret dependency and deployment candidate, then commits the approved active
+pointer. `day2-gke-release` executes it for installed single-replica GKE app-call
+workloads and publishes serving selections from verified deployment readback.
+The independent lab providers still exercise fault schedules without cloud access.
 
 ## Start with these files
 
 - `ops/Release.roc`: pure step selection from persisted phase and logical occurrence.
+- `ops/GkeRelease.roc`: bounded native build-adoption/release drivers and selector publication.
+- `crates/day2-control/src/gke_release.rs`: exact Secret Manager access, conditional
+  StatefulSet updates, deployment readback and ConfigMap publication.
 - `crates/day2-control/src/release_recipe.rs`: runs the checked compiled Roc recipe.
 - `crates/day2-control/src/release_execution.rs`: typed effects, durable steps,
   leases, provider validation, outbox, and the Temporal activity backend.
@@ -18,13 +22,94 @@ the lab are synthetic; this is not yet a GCP deployment command.
 
 ## Decisions and authority
 
+### Native GKE entrypoint
+
+Install infrastructure with the normal `deploy/gke/stacks/day2-app` root first.
+For this profile, use app calls with exactly two CSI keys (workload and issuer),
+an immutable image, the installed `runtime` Kubernetes service account and one
+SQLite StatefulSet replica. OAuth runtime and app credential provisioning are
+separate profiles. Enable `release_managed = true` on the installed workload;
+the adapter refuses workloads without that ownership annotation. Infrastructure
+plans then read the current image, artifact guard, release annotations and
+immutable instance ConfigMap from the installed controller. They continue to
+manage pod guardrails, storage, identity and edge configuration.
+
+`tofu output -json release_deployment` renders public candidate metadata from
+the selected stack inputs: the static serving binding, image, instance, CSI
+projection, numeric key versions and serving ConfigMap. Key versions are ordered
+`[workload, issuer]` and must match those exact CSI paths. The static deployment
+binding stays stable across software releases; the complete candidate input has
+a separate digest in the durable release plan.
+
+The operator-owned JSON configuration has `version: 1`, `journal`,
+`artifact_store`, `instance`, `owner`, `durability`, `authority` and `candidates`.
+Each candidate contains the existing typed `ReleaseApproval` and `deployment`
+metadata. All candidates belong to one installation/environment. Put callees
+before callers for initial deployment. The catalog instance selects the same
+app bindings and resource catalog as the per-app deployment renderings. The
+artifact store must contain admitted native workers executable on the release
+host; use the qualified Linux architecture for Linux deployment.
+
+```text
+day2-gke-release approve CONFIG
+day2-gke-release run CONFIG TOKEN_FILE
+```
+
+Approval consumes actual successful build-journal records and the configured
+source/policy authority. This CLI makes an explicit local operator assertion;
+it does not authenticate a forge merge or infer authority from GitHub CI.
+`TOKEN_FILE` is a bounded private regular file containing a short-lived Google
+Cloud access token. There is no ambient credential or arbitrary endpoint fallback.
+
+An already qualified native image can be adopted into the build journal:
+
+```text
+day2-gke-release prepare CONFIG ORIGINAL_SOURCE TOOLCHAINS QUALIFIED_DIRECTORY
+```
+
+This prints a configuration with the actual build execution/evidence IDs, ready
+for `approve`. It requires the preserved native qualification's passed profile,
+all 24 required checks, matching native architecture, complete original source
+and toolchain pins, every preserved evidence log, and exact admitted artifact
+and worker bytes. It runs the existing build state machine to record that actual
+evidence; it never replaces a failed or missing qualification with a passing
+result. Source/commit and review authority remain explicit operator assertions,
+not proof supplied by the qualification receipt. Ordinary builds can supply
+their existing successful build IDs without this adoption step.
+
+The command advances the existing release recipe up to 60 times per candidate.
+Pending deployment or unknown writes produce an error and retain the durable
+execution. Rerun the same configuration to continue. A conditional patch tests
+controller UID and resourceVersion before replacing the template. A lost
+acknowledgment reconciles the exact release/effect markers and template; missing
+markers after an unknown write never authorize a blind second mutation.
+
+Fresh readback requires the prepared controller incarnation, ready current pod,
+actual immutable running image, artifact guard, scope and workload identity.
+It checks the numeric Secret Manager key accesses and CSI projection again
+immediately before journal activation. Secret payload bytes are CRC-checked,
+discarded and never journaled. Numeric version accesses are strongly consistent;
+IAM and other Secret Manager changes can be eventually consistent, so a
+successful access is evidence of that observed access, not an instantaneous
+revocation guarantee. See [the provider contract](https://docs.cloud.google.com/secret-manager/docs/access-secret-version).
+
+Activation atomically queues a publication revision with its receipt. After the
+selected candidates are active, the driver publishes their coherent serving
+snapshot to each selected app's named ConfigMap with conditional writes and exact
+readback. Only then does it acknowledge the journal intent. A crash after partial
+publication retries safely; an old acknowledgment cannot erase a newer activation
+and an older publisher cannot overwrite a newer ConfigMap revision. Calls still
+probe physical serving bindings. A single-replica rollout can interrupt calls;
+neither deployment nor publication is an atomic cloud traffic switch. There is
+no cleanup of old immutable instance ConfigMaps in this increment.
+
 The normal path is:
 
 ```text
 approved candidate
   -> prepare dependency
   -> observe exact secret version (wait until usable)
-  -> prepare inactive deployment
+  -> prepare deployment
   -> observe that deployment (wait until ready)
   -> activate under current authority
 ```
@@ -115,6 +200,6 @@ Routing activation, general cleanup/compensation, irreversible destruction and
 broader secret-manager semantics still need contracts and conformance tests.
 
 See [the lab guide](DETERMINISTIC-LAB.md) for campaign/replay commands and
-[verification coverage](VERIFICATION-COVERAGE.md) for the remaining legacy suite
-porting obligation. Small real-provider conformance sandboxes come before Linux
-deployment qualification and the disposable GCP canary.
+[verification coverage](VERIFICATION-COVERAGE.md) for the remaining suite
+porting obligation. HTTP fixtures validate provider protocols separately from
+native runtime qualification and actual GKE deployment evidence.

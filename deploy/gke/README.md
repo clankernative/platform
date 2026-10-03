@@ -19,6 +19,13 @@ come from a separate private instance repository; start with the
 | [qualification-runner](stacks/qualification-runner/main.tf) | Optional x86_64 native Docker VM, off by default, private IP and IAP SSH |
 | [gitea-instance-ci](stacks/gitea-instance-ci/main.tf) | Optional plan-on-PR / apply-on-main CI for an instance repository on Gitea |
 
+Installed app-call workloads can hand software deployment to the native
+`day2-gke-release` command by enabling `release_managed` in the day2-app root.
+The root preserves released image/instance fields during infrastructure plans;
+the release command verifies deployment readback and publishes serving selectors
+automatically. See [the normal release workflow](../../docs/RELEASE-WORKFLOW.md)
+for the two-key profile, explicit operator approval and durable retry behavior.
+
 The cluster example is zonal and uses fixed non-overlapping private ranges in a
 new dedicated VPC. It is a reference deployment, not a multi-zone HA service.
 Review cost, ranges, node sizing and organizational policies before applying.
