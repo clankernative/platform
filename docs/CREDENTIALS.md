@@ -255,10 +255,10 @@ separate management endpoint; apps register their own ordinary queries.
 The private `verify_ingress` selector checks the current head, lineage and
 version state, namespace, family contract, security epoch, expiry, authenticated
 material identity, verifier and immutable operation ceiling. A malformed,
-unknown, rotated or revoked token yields no identity. It is not wired to an API
-route or dispatcher yet. The host must still establish current instance binding,
-key readiness, audience, principal policy and resource authorization before
-accepting an ingress invocation.
+unknown, rotated or revoked token yields no identity. The managed API admission
+adapter wraps this selector and establishes the current instance binding, key
+readiness, audience and principal policy before accepting an invocation.
+Resource authorization remains unsupported in this slice.
 
 `authorize_reveal` serializes an available delivery check and an authorization
 record in SQLite. Only a known successful commit produces a process-local,
