@@ -66,6 +66,9 @@ struct Host {
     /// Issuance must make progress while the originating query holds its own
     /// request permit. Keep this separately bounded from browser admission.
     app_capacity: Arc<Semaphore>,
+    app_issue_capacity: Arc<Semaphore>,
+    app_execute_capacity: Arc<Semaphore>,
+    app_reconcile_capacity: Arc<Semaphore>,
     /// Requests waiting for a permit; bounded by [`MAX_QUEUED`].
     queued: std::sync::atomic::AtomicUsize,
     live_capacity: Arc<Semaphore>,
@@ -365,7 +368,10 @@ impl LocalServer {
             origin: origin.clone(),
             sign_in,
             capacity: Arc::new(Semaphore::new(concurrency)),
-            app_capacity: Arc::new(Semaphore::new(8)),
+            app_capacity: Arc::new(Semaphore::new(16)),
+            app_issue_capacity: Arc::new(Semaphore::new(4)),
+            app_execute_capacity: Arc::new(Semaphore::new(6)),
+            app_reconcile_capacity: Arc::new(Semaphore::new(2)),
             queued: std::sync::atomic::AtomicUsize::new(0),
             live_capacity: Arc::new(Semaphore::new(64)),
             admitting: Arc::new(AtomicBool::new(true)),
@@ -774,6 +780,19 @@ async fn handle_app_call(host: Arc<Host>, request: Request) -> Response {
         Ok(Ok(body)) => body,
         Ok(Err(_)) => return secure(StatusCode::PAYLOAD_TOO_LARGE.into_response()),
         Err(_) => return secure(StatusCode::REQUEST_TIMEOUT.into_response()),
+    };
+    drop(permit);
+    let capacity = if path == "/_platform/app-issue" {
+        &host.app_issue_capacity
+    } else if crate::delegation_wire::claimed_purpose(&body)
+        .is_ok_and(|purpose| purpose == crate::delegation::Purpose::Status)
+    {
+        &host.app_reconcile_capacity
+    } else {
+        &host.app_execute_capacity
+    };
+    let Ok(permit) = capacity.clone().try_acquire_owned() else {
+        return secure(StatusCode::SERVICE_UNAVAILABLE.into_response());
     };
     match tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
         let _permit = permit;

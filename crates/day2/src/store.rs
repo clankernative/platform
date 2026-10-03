@@ -1129,16 +1129,28 @@ impl Runtime {
         }
         drop(connection);
         let result = self.execute_inner(id, fault);
-        if let Err(error) = &result
-            && matches!(
+        let exhausted_send = if result.as_ref().err().is_some_and(|error| {
+            matches!(
                 crate::error::classify(error),
-                crate::error::Failure::AuthorityPolicyChanged
-                    | crate::error::Failure::PreparationAuthorityChanged
-                    | crate::error::Failure::EffectAuthorityChanged
-                    | crate::error::Failure::ContinuationAuthorityChanged
-                    | crate::error::Failure::ResourceAuthorityExpired
-                    | crate::error::Failure::EffectHorizonExceeded
+                crate::error::Failure::ResourceLimitExceeded
+                    | crate::error::Failure::BudgetExhausted
             )
+        }) {
+            open(&self.db)?.query_row("SELECT EXISTS(SELECT 1 FROM day2_external_effects WHERE invocation=?1 AND observation IS NULL AND json_extract(instruction,'$.model')='app.send.v1')", [id], |row| row.get::<_,bool>(0))?
+        } else {
+            false
+        };
+        if let Err(error) = &result
+            && (exhausted_send
+                || matches!(
+                    crate::error::classify(error),
+                    crate::error::Failure::AuthorityPolicyChanged
+                        | crate::error::Failure::PreparationAuthorityChanged
+                        | crate::error::Failure::EffectAuthorityChanged
+                        | crate::error::Failure::ContinuationAuthorityChanged
+                        | crate::error::Failure::ResourceAuthorityExpired
+                        | crate::error::Failure::EffectHorizonExceeded
+                ))
         {
             let mut connection = open(&self.db)?;
             let tx = crate::write_queue::immediate(&mut connection)?;

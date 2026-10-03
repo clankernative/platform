@@ -1,0 +1,4 @@
+{
+  "format": 1,
+  "models": [{ "identity": { "key": "3baa10264ca7f411d11d377c6031cf90", "prefix": "rsv" }, "table": "reservations", "roc_type": "Models.Reservation", "retired": false }]
+}

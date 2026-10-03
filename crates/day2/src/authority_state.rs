@@ -1279,6 +1279,7 @@ fn fence_restored_in(
 ) -> Result<()> {
     require_transaction(connection)?;
     crate::budget::invalidate_restored(connection)?;
+    crate::delegation_commands::invalidate_restored(connection)?;
     let mut entropy = [0_u8; 32];
     getrandom::fill(&mut entropy)
         .map_err(|error| anyhow::anyhow!("authority restore entropy: {error}"))?;

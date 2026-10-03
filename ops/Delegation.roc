@@ -7,4 +7,10 @@ Delegation :: [].{
 		_ = Capability.call!("verify-build", Json.to_str({ fixture: "delegation-peer" }), host!)?
 		Capability.call!("verify-build", Json.to_str({ fixture: "delegation" }), host!)
 	}
+
+	business! : (Str => Try(Str, Str)) => Try(Str, Str)
+	business! = |host!| {
+		_ = Capability.call!("verify-build", Json.to_str({ fixture: "stock-ledger" }), host!)?
+		Capability.call!("verify-build", Json.to_str({ fixture: "request-desk" }), host!)
+	}
 }

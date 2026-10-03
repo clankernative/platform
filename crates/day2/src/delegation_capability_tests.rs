@@ -240,6 +240,43 @@ fn the_grant_decides_what_may_be_called_and_the_request_decides_who_calls_it() -
     Ok(())
 }
 
+#[test]
+fn another_hop_preserves_human_evidence_and_spends_only_its_inherited_subtree() -> Result<()> {
+    let granted = Granted::new()?;
+    let runtime = &granted.caller;
+    let admission = crate::delegation_commands::Admission::query_for_test(
+        "human-root-on-entry",
+        "alice",
+        &crate::digest(b"human-iap-subject"),
+        63,
+    );
+    runtime.accept_delegated(
+        "ask",
+        "hop-two",
+        &json!({}),
+        100,
+        crate::store::Cause::delegated("alice", "entry", "app:entry").remote(&admission),
+    )?;
+    let call = granted_call(runtime, "hop-two", json!({}))?;
+    assert_eq!(call.chain, "entry");
+    let origin = crate::delegation::verify_origin(runtime, &call)?;
+    assert_eq!(origin.root, "human-root-on-entry");
+    assert_eq!(origin.principal, "alice");
+    assert_eq!(origin.subject_digest, crate::digest(b"human-iap-subject"));
+    assert_eq!(
+        crate::delegation_commands::prepare_budget(runtime, &call)?,
+        14
+    );
+    assert_eq!(
+        crate::delegation_commands::prepare_budget(runtime, &call)?,
+        14
+    );
+    let mut substitution = call;
+    substitution.actor = "support".into();
+    assert!(crate::delegation::verify_origin(runtime, &substitution).is_err());
+    Ok(())
+}
+
 fn granted_call(
     runtime: &Runtime,
     id: &str,

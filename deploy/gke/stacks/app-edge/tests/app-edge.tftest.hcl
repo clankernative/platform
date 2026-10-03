@@ -16,6 +16,7 @@ run "app_call_gates_and_serving_reads_are_exactly_scoped" {
       workload_name      = "day2-example"
       serving_api_cidr   = "10.1.0.2/32"
     }
+    runtime_secret_ids = ["example-workload-key", "example-issuer-key"]
   }
   override_data {
     target = data.google_compute_backend_service.app
@@ -44,6 +45,10 @@ run "app_call_gates_and_serving_reads_are_exactly_scoped" {
   override_resource {
     target = google_service_account.app_calls
     values = { email = "example-call@example-tools.iam.gserviceaccount.com", name = "projects/example-tools/serviceAccounts/example-call@example-tools.iam.gserviceaccount.com" }
+  }
+  assert {
+    condition     = toset(keys(google_secret_manager_secret_iam_member.runtime)) == toset(["example-workload-key", "example-issuer-key"]) && alltrue([for grant in google_secret_manager_secret_iam_member.runtime : grant.member == "serviceAccount:example-call@example-tools.iam.gserviceaccount.com" && grant.role == "roles/secretmanager.secretAccessor"])
+    error_message = "CSI access must follow the linked app-call identity and stay limited to the two named keys."
   }
   assert {
     condition     = toset(google_iap_web_backend_service_iam_binding.app_calls["issuer"].members) == toset(["serviceAccount:example-call@example-tools.iam.gserviceaccount.com"]) && toset(google_iap_web_backend_service_iam_binding.app_calls["receiver"].members) == toset(["serviceAccount:caller@example-tools.iam.gserviceaccount.com"])

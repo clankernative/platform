@@ -1,8 +1,8 @@
 # Secret Manager secrets the app's pod may read through the GKE Secret Manager
 # CSI add-on (day2-app provider_credentials). The grant is to the runtime
-# Kubernetes service account's Workload Identity principal on each named
-# secret only: no Google service account, key or mounted token, and the add-on
-# (not the app) performs the read. Secret values are never managed here.
+# Kubernetes service account's Workload Identity principal, or its linked
+# app-call or OAuth Google service account, on each named secret only. The add-on
+# performs the read. Secret values are never managed here.
 variable "runtime_secret_ids" {
   description = "Secret Manager secret ids in project_id whose versions day2-app's provider_credentials mount."
   type        = set(string)
@@ -24,5 +24,5 @@ resource "google_secret_manager_secret_iam_member" "runtime" {
   project   = var.project_id
   secret_id = each.value
   role      = "roles/secretmanager.secretAccessor"
-  member    = local.runtime_workload_identity_principal
+  member    = local.runtime_google_email == "" ? local.runtime_workload_identity_principal : "serviceAccount:${local.runtime_google_email}"
 }

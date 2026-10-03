@@ -245,6 +245,36 @@ fn build_fixture(
     fixtures: &BTreeMap<String, PathBuf>,
 ) -> Result<PathBuf> {
     match fixture {
+        "stock-ledger" => build(root, &root.join("fixtures/stock-ledger")),
+        "request-desk" => {
+            let peer = fixtures
+                .get("stock-ledger")
+                .context("build stock ledger before request desk")?;
+            let inputs = tempfile::tempdir()?;
+            let instance = inputs.path().join("instance.json");
+            let lock = inputs.path().join("imports.json");
+            fs::write(
+                &instance,
+                serde_json::to_vec(
+                    &json!({"installation":"delegation_fixture","environment":"test","apps":{"stock_ledger":{"artifact":peer,"readers":["alice"],"writers":["alice"]}}}),
+                )?,
+            )?;
+            let catalog = day2::instance_catalog::CandidateCatalog::from_instance_file(&instance)?;
+            fs::write(
+                &lock,
+                serde_json::to_vec(&catalog.pin(&[
+                    "stock_ledger.available".into(),
+                    "stock_ledger.reserve".into(),
+                ])?)?,
+            )?;
+            build_recipe(
+                root,
+                &root.join("fixtures/request-desk"),
+                None,
+                None,
+                Some(&BuildImportContext { instance, lock }),
+            )
+        }
         "reports" => build(root, &root.join("examples/reports")),
         "reports-probe" => build_with_overrides(
             root,
@@ -310,9 +340,21 @@ fn build_fixture(
 }
 
 pub fn build_delegation(root: &Path) -> Result<()> {
+    build_delegation_recipe(root, "build-delegation", "delegation-fixtures.json")
+}
+
+pub fn build_delegation_business(root: &Path) -> Result<()> {
+    build_delegation_recipe(
+        root,
+        "build-delegation-business",
+        "delegation-business-fixtures.json",
+    )
+}
+
+fn build_delegation_recipe(root: &Path, recipe: &str, output: &str) -> Result<()> {
     let runner = workflows::build(root)?;
     let mut fixtures = BTreeMap::new();
-    day2::automation::run(&runner, &["build-delegation"], |request| {
+    day2::automation::run(&runner, &[recipe], |request| {
         ensure!(
             request.action == "verify-build",
             "unexpected delegation build action"
@@ -326,7 +368,7 @@ pub fn build_delegation(root: &Path) -> Result<()> {
         Ok(json!({"artifact":artifact}))
     })?;
     fs::write(
-        root.join("artifacts/delegation-fixtures.json"),
+        root.join("artifacts").join(output),
         serde_json::to_vec_pretty(&fixtures)?,
     )?;
     Ok(())
@@ -480,6 +522,28 @@ fn cached_fixture(root: &Path, artifact: &str) -> Result<Option<PathBuf>> {
     Ok(Some(directory))
 }
 
+pub(super) fn linux_delegation_tests(root: &Path) -> Result<()> {
+    ensure!(cfg!(target_os = "linux"), "native Linux test host required");
+    let mut fixtures = BTreeMap::new();
+    for (fixture, variable) in [
+        ("delegation", "DAY2_TEST_DELEGATION_ARTIFACT"),
+        ("delegation-peer", "DAY2_TEST_DELEGATION_PEER_ARTIFACT"),
+        ("request-desk", "DAY2_TEST_REQUEST_DESK_ARTIFACT"),
+        ("stock-ledger", "DAY2_TEST_STOCK_LEDGER_ARTIFACT"),
+    ] {
+        let path = PathBuf::from(std::env::var_os(variable).context(variable)?);
+        let artifact = day2::artifact::LoadedArtifact::load(&path)?;
+        artifact.require_current_api()?;
+        fixtures.insert(fixture.to_owned(), artifact.directory().to_owned());
+    }
+    tests(
+        root,
+        "linux-delegation",
+        &fixtures,
+        std::time::Duration::from_secs(1800),
+    )
+}
+
 pub(super) fn linux_tests(root: &Path, suite: &str, artifact: &Path, probe: &Path) -> Result<()> {
     ensure!(cfg!(target_os = "linux"), "native Linux test host required");
     ensure!(
@@ -514,6 +578,7 @@ fn tests(
         "libraries" | "fast-libraries" => &["--workspace", "--exclude", "day2-roc-worker", "--lib"],
         "linux-sandbox" => &["-p", "day2-sandbox", "--test", "isolation"],
         "linux-worker" => &["-p", "day2", "--test", "linux_worker"],
+        "linux-delegation" => &["-p", "day2-control", "--test", "release_execution"],
         "linux-http" => &[
             "-p",
             "day2",
@@ -749,6 +814,8 @@ fn tests(
             "DAY2_TEST_CREDENTIAL_METADATA_ARTIFACT",
         ),
         ("delegation-peer", "DAY2_TEST_DELEGATION_PEER_ARTIFACT"),
+        ("stock-ledger", "DAY2_TEST_STOCK_LEDGER_ARTIFACT"),
+        ("request-desk", "DAY2_TEST_REQUEST_DESK_ARTIFACT"),
         ("redirect", "DAY2_TEST_REDIRECT_ARTIFACT"),
         (
             "connection-declaration",
@@ -991,6 +1058,8 @@ fn required_steps(scope: &str) -> Result<&'static [&'static str]> {
             "build-connection-declaration",
             "build-oauth-calendar",
             "build-delegation-peer",
+            "build-stock-ledger",
+            "build-request-desk",
             "build-redirect",
             "build-relational",
             "build-collection",

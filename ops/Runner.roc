@@ -47,6 +47,7 @@ run! = |args| match args {
 	}
 	["build-recipe"] => Build.recipe!(call!)
 	["build-delegation"] => Delegation.build!(call!)
+	["build-delegation-business"] => Delegation.business!(call!)
 	["exercise", example, count] => Check.exercise!(example, U64.from_str(count).map_err(|_| "invalid count")?, call!)
 	["ci-event", event_name, action, deleted] => {
 		should_run = Ci.event(event_name, action, deleted == "true")?

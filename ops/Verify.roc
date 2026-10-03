@@ -50,6 +50,8 @@ Verify :: [].{
 			"credential-metadata",
 			"connection-declaration",
 			"oauth-calendar",
+			"stock-ledger",
+			"request-desk",
 			"redirect",
 			"relational",
 			"relational-next",
