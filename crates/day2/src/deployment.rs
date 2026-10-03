@@ -19,6 +19,129 @@ pub fn oauth_setup(instance_path: &Path) -> Result<serde_json::Value> {
     crate::oauth::admission::live::setup(instance_path)
 }
 
+const SHELL_RUNNER: &str = "/usr/local/lib/day2/day2-workflows";
+
+fn shell_layout(instance_path: &Path) -> Result<(PathBuf, Resources)> {
+    ensure!(
+        fs::symlink_metadata(instance_path)?.file_type().is_file(),
+        "instance must be a regular file"
+    );
+    let instance_path = instance_path.canonicalize()?;
+    let instance = Instance::load(&instance_path)?;
+    instance.security_edge()?;
+    crate::oauth::admission::live::validate(&instance)?;
+    let resources = instance
+        .oauth_runtime
+        .as_ref()
+        .context("OAuth runtime missing")?
+        .shell_resources
+        .clone()
+        .context("security shell resources missing")?;
+    resources.validate()?;
+    instance
+        .oauth_shell_transport
+        .as_ref()
+        .context("OAuth shell transport missing")?
+        .validate()?;
+    ensure!(
+        instance
+            .apps
+            .values()
+            .any(|app| !app.oauth_connections.is_empty()),
+        "security shell has no selected connections"
+    );
+    let root = instance_path.parent().context("installation root")?;
+    for app in instance
+        .apps
+        .values()
+        .filter(|app| !app.oauth_connections.is_empty())
+    {
+        artifact_directory(root, &root.join(&app.artifact))?;
+    }
+    if let Ok(expected) = std::env::var("DAY2_EXPECTED_SHELL_INSTANCE") {
+        ensure!(
+            expected == crate::digest(&fs::read(&instance_path)?),
+            "security shell instance changed"
+        );
+    }
+    Ok((instance_path, resources))
+}
+
+fn shell_mount_guards(mounts: &str, instance_path: &Path, runner: &Path) -> Result<()> {
+    let root = instance_path.parent().context("installation root")?;
+    let runner_root = runner.parent().context("workflow runner directory")?;
+    ensure!(
+        read_only_tree(mounts, root)? && read_only_tree(mounts, runner_root)?,
+        "security shell requires read-only installation and workflow mounts"
+    );
+    ensure!(
+        fs::symlink_metadata(runner)?.file_type().is_file()
+            && fs::symlink_metadata(runner.with_extension("json"))?
+                .file_type()
+                .is_file(),
+        "security shell workflows must be regular files"
+    );
+    Ok(())
+}
+
+/// Dedicated stateless GKE shell. No app runtime, database, principal session,
+/// custody provider or writable installation volume is mounted by this host.
+pub async fn serve_security_shell(instance_path: &Path) -> Result<()> {
+    let (instance_path, resources) = shell_layout(instance_path)?;
+    ensure!(cfg!(target_os = "linux"), "security shell requires Linux");
+    container_cgroup_preflight(&resources)?;
+    shell_mount_guards(
+        &bounded_text(Path::new("/proc/self/mountinfo"))?,
+        &instance_path,
+        Path::new(SHELL_RUNNER),
+    )?;
+    let shell = tokio::task::spawn_blocking(move || {
+        crate::oauth::security_shell::SecurityShell::from_gke_runtime(
+            &instance_path,
+            Path::new(SHELL_RUNNER),
+        )
+    })
+    .await
+    .context("security shell startup failed")??
+    .shell;
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, 8080)).await?;
+    let admission = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let mut http = tokio::spawn(shell.serve_bounded(
+        listener,
+        usize::from(resources.http_concurrency()),
+        admission.clone(),
+        async {
+            let _ = shutdown_rx.await;
+        },
+    ));
+    println!(
+        "{}",
+        serde_json::json!({"mode":"security-shell", "replicas":1})
+    );
+    let mut finished = false;
+    let cause = tokio::select! {
+        signal = termination() => signal,
+        result = &mut http => {
+            finished = true;
+            result.context("security shell HTTP supervisor failed").and_then(|result| result)
+                .and_then(|()| anyhow::bail!("security shell HTTP server stopped unexpectedly"))
+        },
+    };
+    admission.store(false, std::sync::atomic::Ordering::Release);
+    let _ = shutdown_tx.send(());
+    if !finished {
+        tokio::time::timeout(
+            Duration::from_secs(u64::from(resources.shutdown_seconds())),
+            &mut http,
+        )
+        .await
+        .context("security shell shutdown grace exceeded")?
+        .context("security shell HTTP drain failed")??;
+    }
+    cause
+}
+
 fn bounded_text(path: &Path) -> Result<String> {
     use std::io::Read;
     let mut value = String::new();
@@ -486,6 +609,48 @@ async fn serve_configured(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn shell_layout_and_mount_guards_refuse_writable_app_storage_and_missing_bounds() -> Result<()>
+    {
+        let selected = crate::oauth::admission::live::tests::selected()?;
+        let mut instance = selected.instance().clone();
+        let dir = tempfile::tempdir()?;
+        let root = dir.path();
+        let artifact = format!("artifacts/{}", "a".repeat(64));
+        fs::create_dir_all(root.join(&artifact))?;
+        instance.apps.get_mut("workspace").unwrap().artifact = artifact;
+        let path = root.join("instance.json");
+        fs::write(&path, serde_json::to_vec(&instance)?)?;
+        assert!(shell_layout(&path).is_err());
+        instance.oauth_runtime.as_mut().unwrap().shell_resources =
+            Some(profile().resources().clone());
+        fs::write(&path, serde_json::to_vec(&instance)?)?;
+        assert_eq!(shell_layout(&path)?.1.http_concurrency(), 4);
+        let runner_dir = root.join("workflow");
+        fs::create_dir(&runner_dir)?;
+        let runner = runner_dir.join("day2-workflows");
+        fs::write(&runner, b"private runner fixture")?;
+        fs::write(runner.with_extension("json"), b"{}")?;
+        let mounts = "1 0 0:1 / / ro - rootfs rootfs ro\n";
+        shell_mount_guards(mounts, &path, &runner)?;
+        for writable in [
+            root.to_path_buf(),
+            root.join(".state"),
+            root.join("artifacts"),
+            runner_dir,
+        ] {
+            let mounts = format!(
+                "{mounts}2 1 0:2 / {} rw - tmpfs tmpfs rw\n",
+                writable.display()
+            );
+            assert!(shell_mount_guards(&mounts, &path, &runner).is_err());
+        }
+        instance.apps.get_mut("workspace").unwrap().artifact = "../outside".into();
+        fs::write(&path, serde_json::to_vec(&instance)?)?;
+        assert!(shell_layout(&path).is_err());
+        Ok(())
+    }
 
     fn profile() -> RuntimeProfile {
         serde_json::from_value(json!({"kind":"linux_sqlite_single_v1","resources":{

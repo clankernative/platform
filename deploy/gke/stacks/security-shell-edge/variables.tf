@@ -67,7 +67,7 @@ variable "iap_members" {
 }
 
 variable "runtime_secret_ids" {
-  description = "Only selected shell attestation and reauthentication client-secret containers. Never include app custody verifier or encryption containers. Secret values and versions are resolved privately by the host."
+  description = "Only selected shell attestation, reauthentication and registration client-secret containers. Never include app custody verifier or encryption containers, even at another version. Secret values and versions are resolved privately by the host."
   type        = set(string)
   default     = []
   validation {

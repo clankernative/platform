@@ -1,0 +1,21 @@
+{
+  "installation": "company",
+  "environment": "production",
+  "identity": {"scheme":"google_iap","hosted_domain":"example.com"},
+  "security_shell": {"origin":"https://security.tools.example.com","iap_audience":"/projects/123456789012/global/backendServices/987654321"},
+  "oauth_shell_transport": {"service_account":"shell@example-tools.iam.gserviceaccount.com"},
+  "oauth_runtime": {
+    "version":1,
+    "shell":{"project":"example-tools","backend_service":"shell-backend","url_map":"shell-map","https_proxy":"shell-proxy","forwarding_rule":"shell-rule","kubernetes_service":"day2-security/security-shell"},
+    "shell_resources":{"memory_mib":512,"cpu_millis":500,"process_limit":1024,"process_limit_enforced_by":"pod","http_concurrency":4,"shutdown_seconds":30}
+  },
+  "apps":{"workspace":{"artifact":"artifacts/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","oauth_connections":{"calendar":{"registration":{"id":"calendar"},"shell_attestation_secret":"attestation","custody_verifier_secret":"verifier","custody_encryption_secret":"encryption"}}}},
+  "oauth_clients":{"version":1,"reauthentication":{"client_id":"123-reauth.apps.googleusercontent.com","credential":"reauth"},"registrations":{"calendar":{"client":{"client_id":"123-calendar.apps.googleusercontent.com","credential":"calendar"},"canary_subject":"112233","canary_tenant":"example.com"}}},
+  "control":{"secrets":{
+    "attestation":{"kind":"gcp_version","project_number":123456789012,"secret":"shell_attestation","version":1},
+    "reauth":{"kind":"gcp_version","project_number":123456789012,"secret":"google_reauth","version":1},
+    "calendar":{"kind":"gcp_version","project_number":123456789012,"secret":"google_calendar","version":1},
+    "verifier":{"kind":"gcp_version","project_number":123456789012,"secret":"custody_verifier","version":1},
+    "encryption":{"kind":"gcp_version","project_number":123456789012,"secret":"custody_encryption","version":1}
+  }}
+}
