@@ -2,6 +2,7 @@
 //! Browser confirmation is separate from app inputs and public result codecs.
 use super::{
     crypto::{KeyLease, VerifierLease},
+    lifecycle::{self, Intent},
     store,
 };
 use crate::{
@@ -115,7 +116,7 @@ pub(super) struct Confirmation {
     pub session: String,
     pub input: Value,
     pub family: String,
-    pub label: String,
+    pub intent: Intent,
     pub artifact: String,
     pub authority: authority_state::AuthorityStamp,
     pub binding: Digest,
@@ -157,7 +158,12 @@ pub(crate) fn access<'a>(
             local_reads: Vec::new(),
             metadata_reads: Vec::new(),
             issues: Vec::new(),
+            rotations: Vec::new(),
+            revocations: Vec::new(),
             issue_label: String::new(),
+            management_lineage: String::new(),
+            rotation_head: String::new(),
+            rotation_revision: String::new(),
             interactive: false,
         };
     Ok(runtime
@@ -266,14 +272,6 @@ impl Runtime {
     }
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct IssueInput {
-    registration: String,
-    invocation: String,
-    label: String,
-}
-
 pub(crate) fn stage(
     tx: &Transaction<'_>,
     runtime: &Runtime,
@@ -282,17 +280,22 @@ pub(crate) fn stage(
     ready: &ReadyKeys,
 ) -> Result<String> {
     ensure!(
-        instruction.decode()? == protocol::Step::CredentialIssue,
-        "credential issuance instruction required"
+        instruction.decode()? == protocol::Step::CredentialMutation,
+        "credential lifecycle instruction required"
     );
-    let input: IssueInput = crate::json::decode(instruction.data.as_bytes())?;
+    let input: Value = crate::json::decode(instruction.data.as_bytes())?;
+    let registration = input
+        .get("registration")
+        .and_then(Value::as_str)
+        .context("credential registration missing")?;
     let origin = crate::store::invocation_context(tx, &request.context.invocation_id)?;
     ensure!(
         origin == request.context
             && origin.caller.is_empty()
             && origin.authenticated.is_empty()
             && origin.authentication == "request"
-            && input.invocation == origin.invocation_id,
+            && input.get("invocation").and_then(Value::as_str)
+                == Some(origin.invocation_id.as_str()),
         "credential issuance requires a direct confirmed invocation"
     );
     let value: Value = crate::json::decode(request.input.as_bytes())?;
@@ -309,17 +312,21 @@ pub(crate) fn stage(
     let proof = load(tx, &origin.invocation_id)?.context("credential confirmation missing")?;
     let access = access(runtime, &request.operation)?;
     ensure!(
-        access.issues == [proof.family.clone()]
-            && value.get(&access.issue_label).and_then(Value::as_str) == Some(input.label.as_str())
-            && input.label == proof.label,
+        access.mutation() == Some((proof.intent.action(), proof.family.as_str()))
+            && lifecycle::intent(access, &value)? == proof.intent
+            && input
+                == proof
+                    .intent
+                    .instruction(registration, &origin.invocation_id)
+            && instruction.kind == format!("credential_{}", proof.intent.action()),
         "credential intent changed after confirmation"
     );
     ensure!(
-        !request
-            .observations
-            .iter()
-            .any(|entry| entry.instruction.kind == "credential_issue"),
-        "one credential issuance per management command"
+        !request.observations.iter().any(|entry| matches!(
+            entry.instruction.kind.as_str(),
+            "credential_issue" | "credential_rotate" | "credential_revoke"
+        )),
+        "one credential lifecycle mutation per management command"
     );
     let family = runtime
         .artifact()
@@ -327,7 +334,7 @@ pub(crate) fn stage(
         .credential_manifest
         .iter()
         .find(|family| {
-            family.registration.as_str() == input.registration && family.id.as_str() == proof.family
+            family.registration.as_str() == registration && family.id.as_str() == proof.family
         })
         .context("credential issue family mismatch")?;
     ensure!(
@@ -367,6 +374,12 @@ pub(crate) fn stage(
         ready,
         now,
     )?;
+    if !matches!(proof.intent, Intent::Issue { .. }) {
+        return lifecycle::stage(tx, request, &proof, family, selected, ready);
+    }
+    let Intent::Issue { label } = &proof.intent else {
+        unreachable!()
+    };
     ensure!(
         (1..=10_000).contains(&ready.max_active_lineages),
         "credential issuance quota unavailable"
@@ -435,11 +448,11 @@ pub(crate) fn stage(
             creator: proof.actor.clone(),
             recipient: proof.actor,
             session: proof.session,
-            label: input.label.clone(),
+            label: label.clone(),
             ceiling,
             issued_at: proof.approved_at,
             expires_at,
-            grant_valid_until: expires_at,
+            grant_valid_until: ready.valid_until,
             reveal_until,
             security_epoch: ready.security_epoch,
         },
@@ -452,8 +465,8 @@ pub(crate) fn stage(
         id: receipt.lineage.clone(),
     };
     Ok(serde_json::to_string(&serde_json::json!({
-        "lineage": super::encode_ref(&input.registration, &lineage)?,
-        "version": receipt.version, "label": input.label, "expires_at": expires_at,
+        "lineage": super::encode_ref(registration, &lineage)?,
+        "version": receipt.version, "label": label, "expires_at": expires_at,
     }))?)
 }
 
@@ -476,11 +489,12 @@ pub(crate) fn validate_commit(
         &crate::json::decode(request.input.as_bytes())?,
         now,
     )?;
-    if request
-        .observations
-        .iter()
-        .any(|entry| entry.instruction.kind == "credential_issue" && entry.error.is_empty())
-    {
+    if request.observations.iter().any(|entry| {
+        matches!(
+            entry.instruction.kind.as_str(),
+            "credential_issue" | "credential_rotate" | "credential_revoke"
+        ) && entry.error.is_empty()
+    }) {
         let proof =
             load(db, &request.context.invocation_id)?.context("credential confirmation missing")?;
         let active = authority_state::current(db)?;
@@ -542,6 +556,215 @@ mod tests {
             })?,
             db.query_row("SELECT count(*) FROM entries", [], |row| row.get(0))?,
         ))
+    }
+
+    fn confirm_input(runtime: &Runtime, operation: &str, id: &str, input: &Value) -> Result<()> {
+        let now = runtime.host().now_ms()?.div_euclid(1000);
+        super::super::verification::confirm(
+            runtime,
+            operation,
+            "alice@example.com",
+            id,
+            input,
+            now,
+        )?;
+        runtime.accept(operation, "alice@example.com", id, input, now)
+    }
+
+    #[test]
+    fn native_lifecycle_is_atomic_terminal_and_recovers_after_reopen() -> Result<()> {
+        for kind in ["client", "personal"] {
+            let (_directory, runtime) = world()?;
+            let simulation = crate::simulation::Simulation::new(runtime, [21; 32], 1_000_000)?;
+            let runtime = simulation.runtime();
+            confirmed(
+                runtime,
+                &format!("credential_metadata.create_{kind}"),
+                "issued",
+            )?;
+            let issued = runtime.execute("issued", Fault::None)?;
+            assert_eq!(issued.status, "success", "{issued:?}");
+            let db = open(runtime.db())?;
+            let original: (String, String) = db.query_row(
+                "SELECT principal,grant_digest FROM day2_credential_lineages",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            let expected = serde_json::json!({"lineage":issued.result["lineage"],"head":issued.result["version"],"revision":1});
+            let rotate = format!("credential_metadata.rotate_{kind}");
+            // An expired bearer can rotate while its independent frozen grant remains valid.
+            simulation.set_time(4_601_000)?;
+            confirm_input(runtime, &rotate, "rotate", &expected)?;
+            confirm_input(runtime, &rotate, "stale", &expected)?;
+            assert!(runtime.execute("rotate", Fault::BeforeCommit).is_err());
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM day2_credential_versions", [], |row| {
+                    row.get::<_, i64>(0)
+                })?,
+                1
+            );
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM key_receipts", [], |row| row
+                    .get::<_, i64>(0))?,
+                1
+            );
+            let rotated = runtime.execute("rotate", Fault::None)?;
+            assert_eq!(rotated.status, "success", "{rotated:?}");
+            assert_eq!(rotated.result["status"], "rotated");
+            assert_eq!(rotated.result["lineage"], issued.result["lineage"]);
+            assert_ne!(rotated.result["version"], issued.result["version"]);
+            let retained: (String, String) = db.query_row(
+                "SELECT principal,grant_digest FROM day2_credential_lineages",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            assert_eq!(original, retained);
+            let stale = runtime.execute("stale", Fault::None)?;
+            assert_eq!(stale.result["status"], "conflict");
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM day2_credential_versions", [], |row| {
+                    row.get::<_, i64>(0)
+                })?,
+                2
+            );
+            let next = serde_json::json!({"lineage":rotated.result["lineage"],"head":rotated.result["version"],"revision":2});
+            confirm_input(runtime, &rotate, "lost-rotation", &next)?;
+            assert!(
+                runtime
+                    .execute("lost-rotation", Fault::AfterCommit)
+                    .is_err()
+            );
+            let reopened = Runtime::load(runtime.instance_path(), runtime.app())?
+                .with_credential_authority(runtime.credentials.as_ref().unwrap().clone());
+            let recovered = reopened.execute("lost-rotation", Fault::None)?;
+            assert_eq!(recovered.result["status"], "rotated");
+            assert_eq!(reopened.execute("lost-rotation", Fault::None)?, recovered);
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM day2_credential_versions", [], |row| {
+                    row.get::<_, i64>(0)
+                })?,
+                3
+            );
+            let revoke = format!("credential_metadata.revoke_{kind}");
+            let target = serde_json::json!({"lineage":issued.result["lineage"]});
+            confirm_input(runtime, &revoke, "revoke", &target)?;
+            assert!(runtime.execute("revoke", Fault::BeforeCommit).is_err());
+            assert_eq!(
+                db.query_row("SELECT state FROM day2_credential_lineages", [], |row| {
+                    row.get::<_, String>(0)
+                })?,
+                "active"
+            );
+            assert!(runtime.execute("revoke", Fault::AfterCommit).is_err());
+            let revoked = reopened.execute("revoke", Fault::None)?;
+            assert_eq!(revoked.result["status"], "revoked");
+            assert_eq!(reopened.execute("revoke", Fault::None)?, revoked);
+            confirm_input(runtime, &revoke, "revoke-again", &target)?;
+            let repeated = runtime.execute("revoke-again", Fault::None)?;
+            assert_eq!(repeated.result["status"], "already_revoked");
+            assert_eq!(repeated.result["revision"], revoked.result["revision"]);
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM day2_credential_versions WHERE state!='revoked'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )?,
+                0
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM day2_credential_deliveries WHERE state!='closed'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )?,
+                0
+            );
+            let terminal = serde_json::json!({"lineage":recovered.result["lineage"],"head":recovered.result["version"],"revision":3});
+            confirm_input(runtime, &rotate, "terminal", &terminal)?;
+            assert_eq!(
+                runtime.execute("terminal", Fault::None)?.result["status"],
+                "conflict"
+            );
+            for id in [
+                "rotate",
+                "stale",
+                "lost-rotation",
+                "revoke",
+                "revoke-again",
+                "terminal",
+            ] {
+                let trace = runtime.trace(id)?;
+                replay(runtime.artifact(), &trace)?;
+                let raw = serde_json::to_string(&trace)?;
+                for private in [
+                    "d2c1.",
+                    "ciphertext",
+                    "security_epoch",
+                    "verifier_key",
+                    "session",
+                ] {
+                    assert!(!raw.contains(private));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn native_lifecycle_rejects_changed_target_and_personal_subject() -> Result<()> {
+        let (_directory, runtime) = world()?;
+        confirmed(&runtime, "credential_metadata.create_personal", "issued")?;
+        let issued = runtime.execute("issued", Fault::None)?;
+        let operation = "credential_metadata.rotate_personal";
+        let input = serde_json::json!({"lineage":issued.result["lineage"],"head":issued.result["version"],"revision":1});
+        confirm_input(&runtime, operation, "hostile", &input)?;
+        let ready = runtime.prepare_credential_keys("hostile")?.unwrap();
+        let mut db = open(runtime.db())?;
+        let tx = db.transaction()?;
+        let request = protocol::Request {
+            operation: operation.into(),
+            input: input.to_string(),
+            context: crate::store::invocation_context(&tx, "hostile")?,
+            observations: Vec::new(),
+        };
+        let proof = load(&tx, "hostile")?.unwrap();
+        let original: String = tx.query_row(
+            "SELECT principal FROM day2_credential_lineages",
+            [],
+            |row| row.get(0),
+        )?;
+        let mut wire = proof.intent.instruction("personal", "hostile");
+        wire["head"] = "changed".into();
+        let mut instruction = protocol::Instruction {
+            kind: "credential_rotate".into(),
+            model: crate::credential_codegen::ROTATE.into(),
+            data: wire.to_string(),
+            ..Default::default()
+        };
+        assert!(stage(&tx, &runtime, &request, &instruction, &ready).is_err());
+        instruction.data = proof.intent.instruction("clients", "hostile").to_string();
+        assert!(stage(&tx, &runtime, &request, &instruction, &ready).is_err());
+        instruction.data = proof.intent.instruction("personal", "hostile").to_string();
+        tx.execute(
+            "UPDATE day2_credential_lineages SET principal='another-human'",
+            [],
+        )?;
+        assert!(stage(&tx, &runtime, &request, &instruction, &ready).is_err());
+        tx.execute(
+            "UPDATE day2_credential_lineages SET principal=?1",
+            [&original],
+        )?;
+        let public = stage(&tx, &runtime, &request, &instruction, &ready)?;
+        let mut repeated = request.clone();
+        repeated.observations.push(protocol::Observation {
+            instruction: instruction.clone(),
+            result: public,
+            error: String::new(),
+        });
+        assert!(stage(&tx, &runtime, &repeated, &instruction, &ready).is_err());
+        tx.rollback()?;
+        assert_eq!(counts(&runtime)?, (1, 1));
+        Ok(())
     }
 
     #[test]

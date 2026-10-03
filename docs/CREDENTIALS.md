@@ -16,8 +16,8 @@ or selectable grants over canonical `Api.write(Commands.<name>)` and
 `Api.read(Reads.<name>)` targets. The family constructor fixes the profile in
 the checked compiler type. The app supplies a stable ID and a bounded lifetime
 in seconds; registration names remain separate from IDs. Generated metadata reads
-and fixed client/personal `issue` are available. Rotation/revocation methods and
-selectable lifecycle inputs remain absent.
+and fixed client/personal `issue`, `rotate` and `revoke` are available. Selectable
+lifecycle inputs remain absent.
 
 The normal build reflects registered families into the artifact and recompares
 them with the native worker at artifact load. It rejects duplicate IDs,
@@ -271,13 +271,57 @@ The current `VerifiedHumanPost` remains an internal input constructed only after
 those checks. Reveal authorization also checks issue, version expiry, grant expiry
 and delivery expiry times.
 
+### Generated rotation and revocation
+
+Fixed client/personal families also expose `rotate(context, { expected })` and
+`revoke(context, { lineage })` as local `Tx` instructions. `RotationOutcome` is
+`Rotated(Issued)` or `Conflict`; `RevocationOutcome` is `Revoked` or
+`AlreadyRevoked`, each carrying only the public lineage and terminal revision.
+Containing interactive commands declare exactly one `Credential.rotate_access`
+or `revoke_access` action and may commit ordinary local product writes with it.
+The declaration constructors and raw lifecycle instructions are sealed in both
+compiler admission profiles. A credential cannot call these interactive commands.
+
+`credential_rotation(lineage_path, head_path, revision_path)` binds distinct
+canonical text lineage/head fields and a U64 revision field in the command's
+checked input contract. `credential_revocation(lineage_path)` binds the terminal
+target. `Credentials.<family>.snapshot_from_parts` decodes these public values
+into a nominal family snapshot; it checks shape only. The host derives the
+security intent from these exact paths and displays the action, lineage and
+precondition on the protected origin. An instruction with substituted values,
+another family/action, an actor override or a second lifecycle mutation fails.
+
+The initial management adapter supports current `Creator` predicates only;
+group management remains unavailable until its live resolver qualifies. Rotation
+also requires the exact selected namespace/family contract, current atomic
+replacement profile, an unretired lineage epoch and still-admitted frozen grant.
+Personal rotation requires the confirmed canonical human to equal the stored
+personal subject. Principal, audience, grant and lineage remain unchanged.
+An expired head may rotate while its independently bounded underlying grant is
+valid. Rotation cannot extend that grant's original deadline or add roots.
+
+The product writer checks the expected head/revision and unique predecessor
+constraint, creates one successor and closes the predecessor's delivery in the
+same transaction as product writes. A losing rotation returns `Conflict` and
+has no delivery. Revocation terminally closes every version/delivery and records
+its public outcome in the same transaction. Same-invocation recovery returns the
+committed public outcome; a newly confirmed revoke of a terminal lineage returns
+`AlreadyRevoked` with the existing revision.
+
+The protected shell resolves replacement delivery only from the successful
+rotation receipt and applies the same recipient/session/epoch checks, POST-only
+reveal and acknowledgement as issuance. GET never contains a secret. Revocation
+and conflict offer finish without reveal. Retrying an ordinary public receipt
+does not restore a delivery permit. Accepted bearer work retains its original
+version and is fenced after rotation/revocation, including after database reopen.
+
 ### Protected browser actions
 
 The build generates typed `SecurityActions.<command>` descriptors from the
 registered command codecs and `ProductReturns.<page>` from admitted app pages.
 Both constructors are sealed in normal/restricted admission. The descriptors are
 navigation data; the protected navigation adapter accepts only the registered
-interactive fixed-family issuance profile. A descriptor for another ordinary
+interactive fixed-family lifecycle profiles. A descriptor for another ordinary
 command grants no authority and is refused by that adapter.
 
 ```roc
@@ -348,8 +392,8 @@ gates from the proposal:
    selected provider/resource/import contracts. Prove the interactive context and
    negative compiler fixtures with the pinned compiler. Client/personal
    declarations, generated metadata reads and fixed-grant interactive issuance
-   and protected browser confirmation/reveal are present. Resource, selectable and
-   impersonation issuance plus generated lifecycle management remain incomplete.
+   and protected browser confirmation/reveal, rotation and revocation are present.
+   Resource, selectable and impersonation issuance/lifecycle remain incomplete.
 2. Complete selected-instance principal/context compatibility across delegated
    and provider paths. Local child commands now inherit path-bound credential
    evidence. Resolve actual key/custody readiness and

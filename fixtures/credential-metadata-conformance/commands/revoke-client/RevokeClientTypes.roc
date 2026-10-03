@@ -1,0 +1,3 @@
+RevokeClientTypes :: [].{
+	Input := { lineage : Str }
+}

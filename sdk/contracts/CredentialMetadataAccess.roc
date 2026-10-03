@@ -6,6 +6,12 @@ CredentialMetadataAccess :: { family : Str, action : Str }.{
 	define_issue : Str -> CredentialMetadataAccess
 	define_issue = |family| { family: family, action: "issue" }
 
+	define_rotate : Str -> CredentialMetadataAccess
+	define_rotate = |family| { family: family, action: "rotate" }
+
+	define_revoke : Str -> CredentialMetadataAccess
+	define_revoke = |family| { family: family, action: "revoke" }
+
 	family : CredentialMetadataAccess -> Str
 	family = |access| access.family
 

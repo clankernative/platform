@@ -1,6 +1,7 @@
 //! Private host navigation, confirmation and delivery for ordinary commands.
 use super::{
     issuance::{self, Confirmation},
+    lifecycle::{self, Intent},
     store,
 };
 use crate::{
@@ -26,7 +27,7 @@ pub(crate) struct Pending {
     pub actor: String,
     pub input: Value,
     pub family: String,
-    pub label: String,
+    pub intent: Intent,
     pub artifact: String,
     pub authority: authority_state::AuthorityStamp,
     pub binding: Digest,
@@ -79,19 +80,13 @@ pub(crate) fn start(
 ) -> Result<String> {
     let access = issuance::access(runtime, operation)?;
     ensure!(
-        access.interactive && access.issues.len() == 1,
+        access.interactive && access.mutation().is_some(),
         "interactive credential command required"
     );
     let op = runtime.artifact().operation(operation)?;
     runtime.artifact().contract().schema.inputs[&op.input_type].validate_input(input)?;
-    let label = input
-        .get(&access.issue_label)
-        .and_then(Value::as_str)
-        .context("credential label required")?;
-    ensure!(
-        !label.trim().is_empty() && label.len() <= 128 && !label.chars().any(char::is_control),
-        "invalid credential label"
-    );
+    let intent = lifecycle::intent(access, input)?;
+    let (_, family) = access.mutation().context("credential action missing")?;
     let instance = Instance::load(runtime.instance_path())?;
     let (_, edge) = instance.security_edge()?;
     if let Some(page) = product_return {
@@ -113,7 +108,7 @@ pub(crate) fn start(
     let selected = active
         .document
         .credentials
-        .get(&access.issues[0])
+        .get(family)
         .context("credential family inactive")?;
     let binding = Digest::of(&selected.binding)?;
     let previous: Option<String> = tx
@@ -150,8 +145,8 @@ pub(crate) fn start(
             operation: operation.into(),
             actor: actor.into(),
             input: input.clone(),
-            family: access.issues[0].clone(),
-            label: label.into(),
+            family: family.into(),
+            intent,
             artifact: runtime.artifact().id().into(),
             authority: active.stamp,
             binding,
@@ -345,7 +340,7 @@ pub(crate) fn confirm(
             session: session.into(),
             input: pending.input.clone(),
             family: pending.family.clone(),
-            label: pending.label.clone(),
+            intent: pending.intent.clone(),
             artifact: pending.artifact.clone(),
             authority: active.stamp,
             binding: ready.binding,
@@ -402,6 +397,23 @@ pub(crate) fn deliver(
         "credential delivery approval changed or expired"
     );
     iap::bind_subject(&tx, identity, now)?;
+    let has_delivery: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM day2_credential_receipts r JOIN day2_invocations i ON i.id=r.invocation
+         WHERE r.invocation=?1 AND r.action IN ('issue','rotate') AND i.status='success')",
+        [&pending.invocation], |row| row.get(0))?;
+    if !has_delivery {
+        let succeeded: bool = tx.query_row(
+            "SELECT status='success' FROM day2_invocations WHERE id=?1",
+            [&pending.invocation],
+            |row| row.get(0),
+        )?;
+        ensure!(
+            acknowledge && succeeded && !matches!(proof.intent, Intent::Issue { .. }),
+            "credential delivery unavailable"
+        );
+        tx.commit()?;
+        return Ok(None);
+    }
     let epoch = runtime.credential_authority()?.reveal_epoch(
         &selected.binding,
         &selected.management,

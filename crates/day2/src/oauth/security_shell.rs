@@ -1000,14 +1000,24 @@ impl SecurityShell {
                 }
                 _ => anyhow::bail!("unsupported interactive credential profile"),
             };
+            let action_title = match pending.intent.action() {
+                "issue" => "Create credential",
+                "rotate" => "Rotate credential",
+                "revoke" => "Revoke credential",
+                _ => anyhow::bail!("unsupported credential action"),
+            };
+            let has_delivery = open(runtime.db())?.query_row(
+                "SELECT EXISTS(SELECT 1 FROM day2_credential_receipts WHERE invocation=?1 AND action IN ('issue','rotate'))",
+                [&pending.invocation], |row| row.get::<_, bool>(0))?;
             let markup = html! { (DOCTYPE) html lang="en" {
                 head { meta charset="utf-8"; title { "Credential action" } }
                 body { main {
-                    h1 { @if confirmed { "Credential delivery" } @else { "Create credential" } }
+                    h1 { @if confirmed { "Credential action completed" } @else { (action_title) } }
                     p { (intent.title) }
                     p { (intent.usage.purpose) }
                     dl { dt { "Application" } dd { (runtime.app()) } dt { "Command" } dd { (pending.operation) }
-                        dt { "Family" } dd { (pending.family) } dt { "Label" } dd { (pending.label) }
+                        dt { "Family" } dd { (pending.family) } dt { "Action" } dd { (action_title) }
+                        dt { "Confirmed intent" } dd { (serde_json::to_string(&pending.intent)?) }
                         dt { "Principal" } dd { (principal) }
                         dt { "Recipient" } dd { (identity.email) }
                         dt { "Lifetime" } dd { (family.lifetime_seconds) " seconds" } }
@@ -1017,7 +1027,7 @@ impl SecurityShell {
                             code { (operation) } }
                     } }
                     @if !confirmed {
-                        p { "Confirm this product command. It creates the credential and its product records together." }
+                        p { "Confirm this product command. The credential transition and product writes commit together." }
                         h2 { "Command input" }
                         pre { (pending.input.to_string()) }
                     }
@@ -1025,9 +1035,9 @@ impl SecurityShell {
                         input type="hidden" name="csrf" value=(session.csrf);
                         input type="hidden" name="challenge" value=(challenge.as_str());
                         @if confirmed {
-                            button type="submit" name="action" value="reveal" { "Reveal key" }
-                            button type="submit" name="action" value="acknowledge" { "Finish and close delivery" }
-                        } @else { button type="submit" name="action" value="confirm" { "Create credential" } }
+                            @if has_delivery { button type="submit" name="action" value="reveal" { "Reveal key" } }
+                            button type="submit" name="action" value="acknowledge" { "Finish" }
+                        } @else { button type="submit" name="action" value="confirm" { (action_title) } }
                     }
                 } }
             } };
@@ -1645,12 +1655,28 @@ mod tests {
         operation: &str,
         id: &str,
     ) -> Result<(String, HeaderMap, ShellSession)> {
+        navigate_input(
+            world,
+            shell,
+            operation,
+            id,
+            &serde_json::json!({"label":"Transcription client"}),
+        )
+    }
+
+    fn navigate_input(
+        world: &BrowserWorld,
+        shell: &SecurityShell,
+        operation: &str,
+        id: &str,
+        input: &serde_json::Value,
+    ) -> Result<(String, HeaderMap, ShellSession)> {
         let url = credentials::start(
             &world.runtime,
             operation,
             "alice@example.com",
             id,
-            &serde_json::json!({"label":"Transcription client"}),
+            input,
             None,
             world.now - 1,
         )?;
@@ -1681,6 +1707,303 @@ mod tests {
             .append_pair("action", action)
             .finish()
             .into_bytes()
+    }
+
+    async fn credential_token(response: Response) -> Result<String> {
+        let html = String::from_utf8(to_bytes(response.into_body(), 8192).await?.to_vec())?;
+        Ok(html
+            .split_once("<pre>")
+            .context("protected token")?
+            .1
+            .split_once("</pre>")
+            .context("protected token end")?
+            .0
+            .into())
+    }
+
+    #[tokio::test]
+    async fn credential_browser_rotates_revokes_and_fences_accepted_work() -> Result<()> {
+        use crate::managed_credentials::ingress;
+        for kind in ["client", "personal"] {
+            let world = browser_world(1)?;
+            let shell = credential_shell(&world, true)?;
+            let (issue_path, issue_headers, issue_session) = navigate(
+                &world,
+                &shell,
+                &format!("credential_metadata.create_{kind}"),
+                "issued",
+            )?;
+            shell.dispatch(
+                &Method::POST,
+                &issue_path,
+                None,
+                &issue_headers,
+                &credential_body(&issue_session, "confirm"),
+                world.now,
+            )?;
+            let issued = world.runtime.execute("issued", crate::store::Fault::None)?;
+            let old_token = credential_token(shell.dispatch(
+                &Method::POST,
+                &issue_path,
+                None,
+                &issue_headers,
+                &credential_body(&issue_session, "reveal"),
+                world.now,
+            )?)
+            .await?;
+            let admission = ingress::prepare(
+                &world.runtime,
+                "credential_metadata.record_use",
+                &old_token,
+                world.now,
+            )?;
+            world.runtime.accept_credential(
+                "credential_metadata.record_use",
+                &admission,
+                "old-work",
+                &serde_json::json!({"note":"use_before_rotation"}),
+                world.now,
+            )?;
+            let expected = serde_json::json!({"lineage":issued.result["lineage"],"head":issued.result["version"],"revision":1});
+            let (path, headers, session) = navigate_input(
+                &world,
+                &shell,
+                &format!("credential_metadata.rotate_{kind}"),
+                "rotated",
+                &expected,
+            )?;
+            let mut wrong = headers.clone();
+            wrong.insert(header::ORIGIN, "https://app.example.com".parse()?);
+            assert!(
+                shell
+                    .dispatch(
+                        &Method::POST,
+                        &path,
+                        None,
+                        &wrong,
+                        &credential_body(&session, "confirm"),
+                        world.now
+                    )
+                    .is_err()
+            );
+            assert_eq!(
+                shell
+                    .dispatch(
+                        &Method::POST,
+                        &path,
+                        None,
+                        &headers,
+                        &credential_body(&session, "confirm"),
+                        world.now
+                    )?
+                    .status(),
+                StatusCode::SEE_OTHER
+            );
+            let rotated = world
+                .runtime
+                .execute("rotated", crate::store::Fault::None)?;
+            assert_eq!(rotated.result["status"], "rotated");
+            assert_eq!(rotated.result["lineage"], issued.result["lineage"]);
+            // Quota one permits replacement: rotation adds no lineage.
+            assert_eq!(
+                open(world.runtime.db())?.query_row(
+                    "SELECT count(*) FROM day2_credential_lineages",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )?,
+                1
+            );
+            assert!(
+                ingress::prepare(
+                    &world.runtime,
+                    "credential_metadata.ping",
+                    &old_token,
+                    world.now
+                )
+                .is_err()
+            );
+            let reopened =
+                crate::store::Runtime::load(world.runtime.instance_path(), world.runtime.app())?
+                    .with_credential_authority(world.authority.clone());
+            assert_eq!(
+                reopened
+                    .execute("old-work", crate::store::Fault::None)?
+                    .status,
+                "blocked"
+            );
+            assert_eq!(
+                open(world.runtime.db())?.query_row(
+                    "SELECT count(*) FROM use_receipts",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )?,
+                0
+            );
+            let before = world.keys.0.load(Ordering::SeqCst);
+            assert!(
+                shell
+                    .dispatch(
+                        &Method::POST,
+                        &issue_path,
+                        None,
+                        &issue_headers,
+                        &credential_body(&issue_session, "reveal"),
+                        world.now
+                    )
+                    .is_err()
+            );
+            assert_eq!(world.keys.0.load(Ordering::SeqCst), before);
+            let public = shell.dispatch(&Method::GET, &path, None, &headers, &[], world.now)?;
+            let public = String::from_utf8(to_bytes(public.into_body(), 32_768).await?.to_vec())?;
+            assert!(!public.contains("d2c1."));
+            let new_token = credential_token(shell.dispatch(
+                &Method::POST,
+                &path,
+                None,
+                &headers,
+                &credential_body(&session, "reveal"),
+                world.now,
+            )?)
+            .await?;
+            let recovered = credential_token(shell.dispatch(
+                &Method::POST,
+                &path,
+                None,
+                &headers,
+                &credential_body(&session, "reveal"),
+                world.now,
+            )?)
+            .await?;
+            assert_eq!(new_token, recovered);
+            let current = ingress::prepare(
+                &world.runtime,
+                "credential_metadata.record_use",
+                &new_token,
+                world.now,
+            )?;
+            world.runtime.accept_credential(
+                "credential_metadata.record_use",
+                &current,
+                "new-work",
+                &serde_json::json!({"note":"use_before_revoke"}),
+                world.now,
+            )?;
+            // A stale predecessor produces Conflict and no new delivery; finish remains available.
+            let (stale_path, stale_headers, stale_session) = navigate_input(
+                &world,
+                &shell,
+                &format!("credential_metadata.rotate_{kind}"),
+                "stale",
+                &expected,
+            )?;
+            shell.dispatch(
+                &Method::POST,
+                &stale_path,
+                None,
+                &stale_headers,
+                &credential_body(&stale_session, "confirm"),
+                world.now,
+            )?;
+            assert_eq!(
+                world
+                    .runtime
+                    .execute("stale", crate::store::Fault::None)?
+                    .result["status"],
+                "conflict"
+            );
+            assert!(
+                shell
+                    .dispatch(
+                        &Method::POST,
+                        &stale_path,
+                        None,
+                        &stale_headers,
+                        &credential_body(&stale_session, "reveal"),
+                        world.now
+                    )
+                    .is_err()
+            );
+            shell.dispatch(
+                &Method::POST,
+                &stale_path,
+                None,
+                &stale_headers,
+                &credential_body(&stale_session, "acknowledge"),
+                world.now,
+            )?;
+            let (revoke_path, revoke_headers, revoke_session) = navigate_input(
+                &world,
+                &shell,
+                &format!("credential_metadata.revoke_{kind}"),
+                "revoked",
+                &serde_json::json!({"lineage":issued.result["lineage"]}),
+            )?;
+            shell.dispatch(
+                &Method::POST,
+                &revoke_path,
+                None,
+                &revoke_headers,
+                &credential_body(&revoke_session, "confirm"),
+                world.now,
+            )?;
+            assert_eq!(
+                world
+                    .runtime
+                    .execute("revoked", crate::store::Fault::None)?
+                    .result["status"],
+                "revoked"
+            );
+            let before = world.keys.0.load(Ordering::SeqCst);
+            assert!(
+                shell
+                    .dispatch(
+                        &Method::POST,
+                        &revoke_path,
+                        None,
+                        &revoke_headers,
+                        &credential_body(&revoke_session, "reveal"),
+                        world.now
+                    )
+                    .is_err()
+            );
+            assert!(
+                shell
+                    .dispatch(
+                        &Method::POST,
+                        &path,
+                        None,
+                        &headers,
+                        &credential_body(&session, "reveal"),
+                        world.now
+                    )
+                    .is_err()
+            );
+            assert_eq!(world.keys.0.load(Ordering::SeqCst), before);
+            assert!(
+                ingress::prepare(
+                    &world.runtime,
+                    "credential_metadata.ping",
+                    &new_token,
+                    world.now
+                )
+                .is_err()
+            );
+            assert_eq!(
+                reopened
+                    .execute("new-work", crate::store::Fault::None)?
+                    .status,
+                "blocked"
+            );
+            shell.dispatch(
+                &Method::POST,
+                &revoke_path,
+                None,
+                &revoke_headers,
+                &credential_body(&revoke_session, "acknowledge"),
+                world.now,
+            )?;
+        }
+        Ok(())
     }
 
     #[tokio::test]

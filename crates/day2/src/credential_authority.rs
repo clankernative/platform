@@ -54,7 +54,7 @@ pub(crate) fn check_step(artifact: &Artifact, operation: &str, step: Step<'_>) -
             matches!(
                 step,
                 Step::Database(_)
-                    | Step::CredentialIssue
+                    | Step::CredentialMutation
                     | Step::Boundary(
                         crate::protocol::Boundary::Decide | crate::protocol::Boundary::Commit
                     )
@@ -124,6 +124,8 @@ fn derive_inner(
     ensure!(
         definition.credential_access.metadata_reads.is_empty()
             && definition.credential_access.issues.is_empty()
+            && definition.credential_access.rotations.is_empty()
+            && definition.credential_access.revocations.is_empty()
             && !definition.credential_access.interactive,
         "credential metadata cannot be a credential ingress root: {name}"
     );

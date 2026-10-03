@@ -7,8 +7,10 @@ family authority, and applies bounded creator visibility before pagination.
 
 The fixed client and personal declarations share a credential-ready query and
 product write. Interactive create commands issue a key and write a public
-product registration atomically. Native host tests exercise protected shell
-confirmation/reveal, credential HTTP reads/writes, retry and revocation during
-durable execution. Generated rotate/revoke commands are not yet included.
+product registration atomically. Fixed-family rotate and revoke commands use
+canonical input selectors for the confirmed lineage/head/revision and commit
+public product receipts with the transition. Native host tests exercise protected
+confirmation and replacement delivery, ordinary bearer reads/writes, concurrent
+rotations, rollback, lost-response/reopen recovery and terminal revocation fencing.
 Build verification uses disposable authority and keys; it provides no deployed
 provider readiness. Metadata tests also seed rows independently.

@@ -39,8 +39,18 @@ pub struct CredentialAccess {
     pub metadata_reads: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub issues: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rotations: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub revocations: Vec<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub issue_label: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub management_lineage: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub rotation_head: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub rotation_revision: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub interactive: bool,
 }
@@ -448,10 +458,19 @@ impl Definition {
 }
 
 impl CredentialAccess {
+    pub(crate) fn mutation(&self) -> Option<(&str, &str)> {
+        self.issues
+            .first()
+            .map(|id| ("issue", id.as_str()))
+            .or_else(|| self.rotations.first().map(|id| ("rotate", id.as_str())))
+            .or_else(|| self.revocations.first().map(|id| ("revoke", id.as_str())))
+    }
+
     fn validate(&self, artifact: &Artifact, operation: &str) -> Result<()> {
+        let mutations = self.issues.len() + self.rotations.len() + self.revocations.len();
         ensure!(
-            self.issues.len() <= 1,
-            "one credential issuance per management command"
+            mutations <= 1,
+            "one credential lifecycle mutation per management command"
         );
         let registered = artifact
             .operations
@@ -464,14 +483,14 @@ impl CredentialAccess {
                 "interactive queries are unsupported"
             );
             ensure!(
-                self.issues.len() == 1,
-                "interactive v1 requires one declared credential issue action"
+                mutations == 1,
+                "interactive v1 requires one declared credential lifecycle action"
             );
         }
-        if let Some(id) = self.issues.first() {
+        if let Some((action, id)) = self.mutation() {
             ensure!(
                 self.interactive,
-                "credential issuance requires an interactive handler"
+                "credential lifecycle mutation requires an interactive handler"
             );
             let family = artifact
                 .credential_declarations
@@ -487,16 +506,27 @@ impl CredentialAccess {
                     family.grant,
                     day2_capabilities::credentials::GrantMode::Fixed
                 ),
-                "only fixed client and personal issuance is supported"
+                "only fixed client and personal lifecycle management is supported"
+            );
+            let fields = &artifact.schema.inputs[&registered.input_type].fields;
+            ensure!(
+                action != "issue" || matches!(fields.get(&self.issue_label), Some(Kind::Text)),
+                "credential label requires a canonical text input path"
             );
             ensure!(
-                matches!(
-                    artifact.schema.inputs[&registered.input_type]
-                        .fields
-                        .get(&self.issue_label),
-                    Some(Kind::Text)
-                ),
-                "credential label requires a canonical text input path"
+                action == "issue"
+                    || matches!(fields.get(&self.management_lineage), Some(Kind::Text)),
+                "credential management requires a canonical lineage text input path"
+            );
+            ensure!(
+                action != "rotate"
+                    || (matches!(fields.get(&self.rotation_head), Some(Kind::Text))
+                        && matches!(
+                            fields.get(&self.rotation_revision),
+                            Some(Kind::Unsigned(crate::numeric::Unsigned::U64))
+                        )
+                        && self.management_lineage != self.rotation_head),
+                "credential rotation requires distinct lineage/head text paths and a U64 revision path"
             );
             let effects = &artifact
                 .app_contract
@@ -510,14 +540,23 @@ impl CredentialAccess {
                     effect.kind.as_str(),
                     "create" | "update" | "update_created" | "soft_delete"
                 )),
-                "interactive issuance permits only local product writes"
-            );
-        } else {
-            ensure!(
-                self.issue_label.is_empty(),
-                "credential label requires issue access"
+                "interactive credential commands permit only local product writes"
             );
         }
+        ensure!(
+            self.issues.len() == 1 || self.issue_label.is_empty(),
+            "credential label requires issue access"
+        );
+        ensure!(
+            self.rotations.len() + self.revocations.len() == 1
+                || self.management_lineage.is_empty(),
+            "credential lineage requires rotate or revoke access"
+        );
+        ensure!(
+            self.rotations.len() == 1
+                || (self.rotation_head.is_empty() && self.rotation_revision.is_empty()),
+            "credential rotation precondition requires rotate access"
+        );
         ensure!(
             self.metadata_reads.len() <= 64,
             "credential metadata access budget"

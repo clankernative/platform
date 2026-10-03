@@ -2,6 +2,12 @@
   "format": 1,
   "models": [
     {
+      "identity": { "key": "19b850e4cddb49c28961c9fb6f5c1f02", "prefix": "key" },
+      "table": "key_receipts",
+      "roc_type": "Models.KeyReceipt",
+      "retired": false
+    },
+    {
       "identity": {
         "key": "67d9d5c8c28c4d3db46d54e5c4924c12",
         "prefix": "ent"
