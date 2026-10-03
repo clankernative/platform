@@ -125,5 +125,23 @@ every call. Publication is part of deployment integration, not an app-maintained
 operation/type catalog.
 
 The local HTTP/provider fixtures establish protocol and host wiring. They do not
-establish real cluster authentication or production readiness; the fresh two-app
-cluster canary belongs to the integrated qualification batch.
+establish real cluster authentication or production readiness.
+
+## Recorded qualification profiles
+
+The native Linux recipe builds both business apps and runs their public HTTP
+model and fault campaign, then qualifies containment, restart, authority
+revocation and supported restore. Its scoped receipt records the exact platform,
+toolchain, runtime and app artifacts; it excludes the complete platform gate and
+broader production certification. The complete local gate remains required.
+
+The October 2, 2026 GKE canary used runtime source `f53742d` with separate
+`request_desk` and `stock_ledger` workloads, managed keys and independent IAP
+gates. A human signed into Request Desk and submitted two requests for 30. Both
+reservations succeeded; Stock Ledger's independent public query returned
+`available: 40`, `reserved: 60`, `count: 2`, matching the recorded actions.
+This was a manual browser campaign, with operator-published selectors from actual
+StatefulSet identities. It establishes real authentication for those pinned
+canary images; it does not qualify a production GKE release publisher or a later
+runtime revision. Screenshots and artifact-bound evidence stay in protected
+operator storage, without browser credentials or signing-key contents.
