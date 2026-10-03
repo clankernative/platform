@@ -2,6 +2,7 @@
 pub(crate) mod authority;
 pub(crate) mod browser;
 pub(crate) mod crypto;
+pub(crate) mod ingress;
 pub(crate) mod issuance;
 pub(crate) mod store;
 pub(crate) mod verification;

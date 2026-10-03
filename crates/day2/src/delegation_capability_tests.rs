@@ -895,6 +895,7 @@ fn impersonation_cannot_be_introduced_by_a_schedule_child_or_later_hop() -> Resu
                 &json!({}),
                 100,
                 Cause {
+                    credential: None,
                     trigger,
                     actor: "customer",
                     caller,

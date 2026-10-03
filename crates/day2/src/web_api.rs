@@ -24,7 +24,8 @@ pub(crate) fn session_allowed(runtime: &Runtime, catalog: &Catalog, actor: &str)
 }
 
 pub(crate) fn is_json(path: &str) -> bool {
-    path == "/api"
+    path.starts_with(crate::managed_credentials::ingress::PREFIX)
+        || path == "/api"
         || path.starts_with(openapi::API_PREFIX)
         || path == openapi::SPEC_PATH
         || path == crate::mcp::PATH
@@ -44,6 +45,12 @@ pub(crate) fn failure(cause: &anyhow::Error) -> Response {
     record_failure(cause);
     let (status, code, message) = failure_details(cause);
     let mut response = error(status, &code, message);
+    if crate::error::classify(cause) == crate::error::Failure::CredentialRejected {
+        response.headers_mut().insert(
+            axum::http::header::WWW_AUTHENTICATE,
+            axum::http::HeaderValue::from_static("Bearer"),
+        );
+    }
     if status == StatusCode::SERVICE_UNAVAILABLE {
         response.headers_mut().insert(
             axum::http::header::RETRY_AFTER,
@@ -69,6 +76,13 @@ pub(crate) fn failure_details(cause: &anyhow::Error) -> (StatusCode, String, &'s
 
 fn typed_failure_details(failure: crate::error::Failure) -> (StatusCode, String, &'static str) {
     use crate::error::Category;
+    if failure == crate::error::Failure::CredentialRejected {
+        return (
+            StatusCode::UNAUTHORIZED,
+            failure.code().into(),
+            "The credential is not valid for this request.",
+        );
+    }
     if failure == crate::error::Failure::ExternalAmbiguous {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,

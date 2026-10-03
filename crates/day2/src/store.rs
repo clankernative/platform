@@ -242,6 +242,7 @@ pub(crate) struct Cause<'a> {
     origin: Option<&'a crate::iap::Verified>,
     remote: Option<&'a crate::delegation_commands::Admission>,
     remote_fence: bool,
+    credential: Option<&'a crate::managed_credentials::ingress::Admission>,
 }
 
 pub(crate) struct RequestIdentity<'a> {
@@ -273,6 +274,7 @@ impl<'a> Cause<'a> {
             origin: None,
             remote: None,
             remote_fence: true,
+            credential: None,
         }
     }
 
@@ -780,6 +782,7 @@ impl Runtime {
                 origin,
                 remote: None,
                 remote_fence: true,
+                credential: None,
             },
         )
     }
@@ -835,6 +838,7 @@ impl Runtime {
                 origin: None,
                 remote: None,
                 remote_fence: true,
+                credential: None,
             },
         )
     }
@@ -856,6 +860,7 @@ impl Runtime {
             origin,
             remote,
             remote_fence,
+            credential,
         } = cause;
         let initiator = if authenticated.is_empty() {
             actor
@@ -1051,6 +1056,11 @@ impl Runtime {
                 }
             }
             crate::delegation::record_root_origin(&tx, id, initiator, origin, !reused)?;
+            if let Some(admission) = credential {
+                crate::managed_credentials::ingress::record(
+                    &tx, self, id, operation, &active, admission,
+                )?;
+            }
             if let Some(admission) = remote {
                 crate::delegation_commands::record_in(&tx, id, admission)?;
             }
@@ -1094,6 +1104,33 @@ impl Runtime {
     ) -> Result<Outcome> {
         self.accept(operation, actor, id, input, now)?;
         self.execute(id, fault)
+    }
+
+    pub(crate) fn accept_credential(
+        &self,
+        operation: &str,
+        admission: &crate::managed_credentials::ingress::Admission,
+        id: &str,
+        input: &Value,
+        now: i64,
+    ) -> Result<()> {
+        self.accept_with_caller(
+            operation,
+            &admission.actor,
+            id,
+            input,
+            now,
+            Cause {
+                trigger: crate::audit::Trigger::Credential,
+                actor: &admission.actor,
+                caller: "",
+                authenticated: "",
+                origin: None,
+                remote: None,
+                remote_fence: true,
+                credential: Some(admission),
+            },
+        )
     }
 
     pub(crate) fn invoke_verified(
@@ -1150,6 +1187,7 @@ impl Runtime {
                         | crate::error::Failure::ContinuationAuthorityChanged
                         | crate::error::Failure::ResourceAuthorityExpired
                         | crate::error::Failure::EffectHorizonExceeded
+                        | crate::error::Failure::CredentialAuthorityChanged
                 ))
         {
             let mut connection = open(&self.db)?;

@@ -38,6 +38,9 @@ macro_rules! failures {
 
 failures! {
     SignInRequired => ("sign_in_required", Authentication),
+    CredentialRejected => ("credential_rejected", Authentication),
+    CredentialUnavailable => ("credential_unavailable", Unavailable),
+    CredentialAuthorityChanged => ("credential_authority_changed", Forbidden),
     // The front door's signed assertion was missing, malformed, forged, expired,
     // or addressed to another application. One code for all of them: a caller
     // probing the edge learns that the assertion failed, not which check did.

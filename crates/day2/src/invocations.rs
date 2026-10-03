@@ -90,6 +90,14 @@ fn status_as(
         crate::error::Failure::ArtifactBindingChanged
     );
     let authority = crate::authority_state::authorize_in(&connection, runtime, &operation, actor)?;
+    crate::managed_credentials::ingress::require(
+        &connection,
+        runtime,
+        id,
+        &operation,
+        actor,
+        &authority,
+    )?;
     if let Some(authenticated) = authenticated {
         let rule = authority.policy()?.may_act_as(
             authenticated,
@@ -252,6 +260,14 @@ pub(crate) fn request(
     connection.execute("INSERT INTO day2_invocations(id,operation,actor,input,artifact,now,status,trigger) VALUES(?1,?2,?3,?4,?5,?6,'pending',?7)", params![id, envelope.command, origin.context.actor, serde_json::to_string(&input)?, runtime.artifact().id(), origin.context.now, crate::audit::Trigger::CommandRequest.as_str()])?;
     crate::authority_state::pin_invocation(connection, &id, &authority.stamp)?;
     crate::resources::inherit_root(connection, &id, &origin.context.invocation_id)?;
+    crate::managed_credentials::ingress::inherit(
+        connection,
+        runtime,
+        &origin.context.invocation_id,
+        &id,
+        &envelope.command,
+        &authority,
+    )?;
     crate::resources::capture_root_budgets(connection, &id, &envelope.command, &authority)?;
     let parent_seed: Vec<u8> = connection.query_row(
         "SELECT seed FROM day2_id_seeds WHERE invocation=?1",

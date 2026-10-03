@@ -18,10 +18,39 @@ const MAX_TOKEN_BYTES: usize = 128;
 /// Distinct key versions are part of material identity. A provider must check
 /// current readiness and purpose before constructing this value.
 pub(crate) struct KeyLease {
-    verifier_key: hmac::Key,
+    verifier: VerifierLease,
     encryption_key: aead::LessSafeKey,
     pub verifier_version: String,
     pub encryption_version: String,
+}
+
+/// Authentication has no encryption key or decryption capability.
+pub(crate) struct VerifierLease {
+    key: hmac::Key,
+    pub verifier_version: String,
+}
+
+impl VerifierLease {
+    pub(crate) fn new(key: &[u8], verifier_version: String) -> Result<Self> {
+        validate_id(&verifier_version)?;
+        ensure!(key.len() >= 32, "invalid verifier key length");
+        Ok(Self {
+            key: hmac::Key::new(hmac::HMAC_SHA256, key),
+            verifier_version,
+        })
+    }
+}
+
+impl AsRef<VerifierLease> for VerifierLease {
+    fn as_ref(&self) -> &VerifierLease {
+        self
+    }
+}
+
+impl AsRef<VerifierLease> for KeyLease {
+    fn as_ref(&self) -> &VerifierLease {
+        &self.verifier
+    }
 }
 
 impl KeyLease {
@@ -37,7 +66,7 @@ impl KeyLease {
         let unbound = aead::UnboundKey::new(&aead::AES_256_GCM, encryption_key)
             .map_err(|_| anyhow::anyhow!("invalid encryption key"))?;
         Ok(Self {
-            verifier_key: hmac::Key::new(hmac::HMAC_SHA256, verifier_key),
+            verifier: VerifierLease::new(verifier_key, verifier_version.clone())?,
             encryption_key: aead::LessSafeKey::new(unbound),
             verifier_version,
             encryption_version,
@@ -186,13 +215,14 @@ pub(crate) fn token_selector(token: &str) -> Result<String> {
 /// Exact expected identity and the stored verifier must come from a current,
 /// accepted lineage/version. This cryptographic check is not authorization.
 pub(crate) fn verify_managed(
-    lease: &KeyLease,
+    lease: &impl AsRef<VerifierLease>,
     identity: &MaterialIdentity,
     expected_selector: &str,
     expected_verifier: &[u8],
     verifier_version: &str,
     token: &str,
 ) -> Result<bool> {
+    let lease = lease.as_ref();
     ensure!(expected_verifier.len() == 32, "invalid stored verifier");
     ensure!(
         verifier_version == lease.verifier_version,
@@ -203,7 +233,7 @@ pub(crate) fn verify_managed(
         return Ok(false);
     }
     let message = verifier_message(identity, &selector, &secret)?;
-    Ok(hmac::verify(&lease.verifier_key, &message, expected_verifier).is_ok())
+    Ok(hmac::verify(&lease.key, &message, expected_verifier).is_ok())
 }
 
 /// Only a role-specific, consuming sink should call this after a known-commit
@@ -251,7 +281,7 @@ fn verifier(
     secret: &[u8; SECRET_BYTES],
 ) -> Result<[u8; 32]> {
     let message = verifier_message(identity, selector, secret)?;
-    let tag = hmac::sign(&lease.verifier_key, &message);
+    let tag = hmac::sign(&lease.verifier.key, &message);
     let mut digest = [0u8; 32];
     digest.copy_from_slice(tag.as_ref());
     Ok(digest)

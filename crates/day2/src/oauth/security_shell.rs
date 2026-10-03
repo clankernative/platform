@@ -1297,7 +1297,7 @@ mod tests {
                     .get("test-subject")
                     .map(|v| v.to_str())
                     .transpose()?
-                    .unwrap_or("google-alice")
+                    .unwrap_or("accounts.google.com:google-alice")
                     .into(),
             })
         }
@@ -1539,7 +1539,34 @@ mod tests {
             origin: "https://app.example.com".into(),
             iap_audience: "/projects/1/global/backendServices/3".into(),
         });
+        let app = instance.apps.get_mut("app").unwrap();
+        app.readers.insert("credential_client:client_keys".into());
+        app.writers.insert("credential_client:client_keys".into());
+        app.authority
+            .as_mut()
+            .context("browser authority")?
+            .operations
+            .get_mut("credential_metadata.ping")
+            .context("credential root")?
+            .actors
+            .insert("credential_client:client_keys".into());
+        app.authority
+            .as_mut()
+            .context("browser authority")?
+            .operations
+            .get_mut("credential_metadata.record_use")
+            .context("credential command root")?
+            .actors
+            .insert("credential_client:client_keys".into());
         std::fs::write(runtime.instance_path(), serde_json::to_vec(&instance)?)?;
+        let runtime = crate::store::Runtime::load(runtime.instance_path(), runtime.app())?;
+        let current = crate::authority_state::current(&open(runtime.db())?)?;
+        crate::authority_state::apply_desired(
+            &runtime,
+            &crate::authority_state::LocalOperator::assert_local("alice@example.com")?,
+            "credential-api-membership",
+            Some(current.stamp),
+        )?;
         let now = runtime.host().now_ms()?.div_euclid(1000);
         let active = crate::authority_state::current(&open(runtime.db())?)?;
         let selections: Vec<_> = active
@@ -1563,7 +1590,10 @@ mod tests {
                 ready_until: now + 298,
                 grant_until: now + 7200,
                 max_active_lineages: quota,
-                issuers: BTreeMap::from([("alice@example.com".into(), "google-alice".into())]),
+                issuers: BTreeMap::from([(
+                    "alice@example.com".into(),
+                    "accounts.google.com:google-alice".into(),
+                )]),
             })
             .collect();
         let keys = Arc::new(BrowserKeys(AtomicUsize::new(0)));
@@ -1651,6 +1681,322 @@ mod tests {
             .append_pair("action", action)
             .finish()
             .into_bytes()
+    }
+
+    #[tokio::test]
+    async fn credential_api_admits_only_current_tokens_and_rechecks_durable_execution() -> Result<()>
+    {
+        use crate::managed_credentials::{ingress, store as credential_store};
+        let world = browser_world(10)?;
+        let shell = credential_shell(&world, true)?;
+        let server =
+            crate::web::LocalServer::bind(world.runtime.clone(), "alice@example.com", 0).await?;
+        let origin = server.origin.clone();
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let serving = tokio::spawn(server.serve(async {
+            let _ = stopped.await;
+        }));
+        let client = reqwest::Client::new();
+        for (operation, id, family) in [
+            (
+                "credential_metadata.create_client",
+                "api-client",
+                "client_keys",
+            ),
+            (
+                "credential_metadata.create_personal",
+                "api-personal",
+                "personal_keys",
+            ),
+        ] {
+            let (path, headers, session) = navigate(&world, &shell, operation, id)?;
+            shell.dispatch(
+                &Method::POST,
+                &path,
+                None,
+                &headers,
+                &credential_body(&session, "confirm"),
+                world.now,
+            )?;
+            let revealed = shell.dispatch(
+                &Method::POST,
+                &path,
+                None,
+                &headers,
+                &credential_body(&session, "reveal"),
+                world.now,
+            )?;
+            let html = String::from_utf8(to_bytes(revealed.into_body(), 8192).await?.to_vec())?;
+            let token = html
+                .split_once("<pre>")
+                .context("protected token")?
+                .1
+                .split_once("</pre>")
+                .context("protected token end")?
+                .0
+                .to_owned();
+            let url = format!("{origin}{}credential_metadata.ping", ingress::PREFIX);
+            let response = client.get(&url).bearer_auth(&token).send().await?;
+            assert_eq!(response.status(), StatusCode::OK);
+            let accepted = response.headers()["x-day2-invocation"].to_str()?.to_owned();
+            assert_eq!(
+                crate::json::decode::<serde_json::Value>(&response.bytes().await?)?,
+                serde_json::json!({"ready":true})
+            );
+            let trace = world.runtime.trace(&accepted)?;
+            assert_eq!(trace.request.context.authentication, "credential");
+            let actor = &trace.request.context.actor;
+            if family == "client_keys" {
+                assert_eq!(crate::authority::client_family(actor), Some(family));
+            } else {
+                assert_eq!(actor, "alice@example.com");
+            }
+            let evidence: String = open(world.runtime.db())?.query_row(
+                "SELECT evidence FROM day2_credential_origins WHERE invocation=?1",
+                [&accepted],
+                |row| row.get(0),
+            )?;
+            assert!(!evidence.contains(&token));
+            assert!(!serde_json::to_string(&trace)?.contains(&token));
+            let status_url = format!("{origin}{}invocations/{accepted}", ingress::PREFIX);
+            assert_eq!(
+                client
+                    .get(&status_url)
+                    .bearer_auth(&token)
+                    .send()
+                    .await?
+                    .status(),
+                StatusCode::OK
+            );
+            let command = format!("{origin}{}credential_metadata.record_use", ingress::PREFIX);
+            let body = format!("{{\"note\":\"use_{id}\"}}");
+            let before: i64 = open(world.runtime.db())?.query_row(
+                "SELECT count(*) FROM use_receipts",
+                [],
+                |row| row.get(0),
+            )?;
+            let mut command_id = String::new();
+            for _ in 0..2 {
+                let response = client
+                    .post(&command)
+                    .bearer_auth(&token)
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", format!("record-{id}"))
+                    .body(body.clone())
+                    .send()
+                    .await?;
+                assert_eq!(response.status(), StatusCode::OK);
+                let current = response.headers()["x-day2-invocation"].to_str()?.to_owned();
+                if command_id.is_empty() {
+                    command_id = current;
+                } else {
+                    assert_eq!(command_id, current);
+                }
+            }
+            let after: i64 = open(world.runtime.db())?.query_row(
+                "SELECT count(*) FROM use_receipts",
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!(after, before + 1);
+            assert_eq!(
+                client
+                    .post(&command)
+                    .bearer_auth(&token)
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", format!("record-{id}"))
+                    .body("{\"note\":\"use_changed\"}")
+                    .send()
+                    .await?
+                    .status(),
+                StatusCode::CONFLICT
+            );
+            for (header, value) in [
+                ("cookie", "session=forged"),
+                ("origin", "https://app.example.com"),
+                ("x-day2-act-as", "alice@example.com"),
+                ("x-goog-iap-jwt-assertion", "forged"),
+            ] {
+                assert_eq!(
+                    client
+                        .get(&url)
+                        .bearer_auth(&token)
+                        .header(header, value)
+                        .send()
+                        .await?
+                        .status(),
+                    StatusCode::UNAUTHORIZED
+                );
+            }
+            assert_eq!(
+                client.get(&url).send().await?.status(),
+                StatusCode::UNAUTHORIZED
+            );
+            assert_eq!(
+                client
+                    .get(&url)
+                    .bearer_auth("invalid")
+                    .send()
+                    .await?
+                    .status(),
+                StatusCode::UNAUTHORIZED
+            );
+            let management = format!(
+                "{origin}{}credential_metadata.create_client",
+                ingress::PREFIX
+            );
+            assert_eq!(
+                client
+                    .post(management)
+                    .bearer_auth(&token)
+                    .header("idempotency-key", "forbidden-management")
+                    .header("content-type", "application/json")
+                    .body("{\"label\":\"unapproved\"}")
+                    .send()
+                    .await?
+                    .status(),
+                StatusCode::UNAUTHORIZED
+            );
+            let pending = format!("pending-{family}");
+            let admission = ingress::prepare(
+                &world.runtime,
+                "credential_metadata.ping",
+                &token,
+                world.now,
+            )?;
+            for change in ["epoch", "verifier", "unavailable", "account"] {
+                if change == "account" && family != "personal_keys" {
+                    continue;
+                }
+                let interrupted = format!("{change}-{family}");
+                world.runtime.accept_credential(
+                    "credential_metadata.ping",
+                    &admission,
+                    &interrupted,
+                    &serde_json::json!({}),
+                    world.now,
+                )?;
+                let mut changed = world.selections.clone();
+                let selected = changed
+                    .iter_mut()
+                    .find(|selected| selected.binding.family.as_str() == family)
+                    .context("selected family")?;
+                match change {
+                    "epoch" => selected.security_epoch += 1,
+                    "verifier" => selected.verifier.version = "verifier_2".into(),
+                    "account" => selected.issuers.clear(),
+                    _ => changed.clear(),
+                }
+                world.authority.replace(changed)?;
+                let response = client.get(&url).bearer_auth(&token).send().await?;
+                assert_eq!(
+                    response.status(),
+                    if change == "unavailable" {
+                        StatusCode::SERVICE_UNAVAILABLE
+                    } else {
+                        StatusCode::UNAUTHORIZED
+                    }
+                );
+                let outcome = world
+                    .runtime
+                    .execute(&interrupted, crate::store::Fault::None);
+                if change == "unavailable" {
+                    assert_eq!(
+                        crate::error::classify(&outcome.unwrap_err()),
+                        crate::error::Failure::CredentialUnavailable
+                    );
+                } else {
+                    assert_eq!(outcome?.status, "blocked");
+                }
+                // Disposable snapshots simulate independent adapter decisions;
+                // production epoch monotonicity needs its selected live adapter.
+                world.authority.replace(world.selections.clone())?;
+            }
+            let missing = format!("missing-origin-{family}");
+            world.runtime.accept_credential(
+                "credential_metadata.ping",
+                &admission,
+                &missing,
+                &serde_json::json!({}),
+                world.now,
+            )?;
+            open(world.runtime.db())?.execute(
+                "DELETE FROM day2_credential_origins WHERE invocation=?1",
+                [&missing],
+            )?;
+            assert_eq!(
+                world
+                    .runtime
+                    .execute(&missing, crate::store::Fault::None)?
+                    .status,
+                "blocked"
+            );
+            world.runtime.accept_credential(
+                "credential_metadata.ping",
+                &admission,
+                &pending,
+                &serde_json::json!({}),
+                world.now,
+            )?;
+            let db = open(world.runtime.db())?;
+            let lineage: String = db.query_row(
+                "SELECT id FROM day2_credential_lineages WHERE family=?1",
+                [family],
+                |row| row.get(0),
+            )?;
+            let active = crate::authority_state::current(&db)?;
+            let mut db = open(world.runtime.db())?;
+            let tx = crate::write_queue::immediate(&mut db)?;
+            credential_store::stage_revoke(
+                &tx,
+                &active.document.credentials[family].binding.namespace,
+                &lineage,
+            )?;
+            tx.commit()?;
+            // A token verified before revocation must fail the acceptance
+            // writer's recheck as well as subsequent HTTP authentication.
+            assert!(
+                world
+                    .runtime
+                    .accept_credential(
+                        "credential_metadata.ping",
+                        &admission,
+                        &format!("stale-admission-{family}"),
+                        &serde_json::json!({}),
+                        world.now
+                    )
+                    .is_err()
+            );
+            assert_eq!(
+                client.get(&url).bearer_auth(&token).send().await?.status(),
+                StatusCode::UNAUTHORIZED
+            );
+            assert_eq!(
+                client
+                    .get(&status_url)
+                    .bearer_auth(&token)
+                    .send()
+                    .await?
+                    .status(),
+                StatusCode::UNAUTHORIZED
+            );
+            // The already-admitted command cannot regain authority after restart.
+            let reopened =
+                crate::store::Runtime::load(world.runtime.instance_path(), world.runtime.app())?
+                    .with_credential_authority(world.authority.clone());
+            let outcome = reopened.execute(&pending, crate::store::Fault::None)?;
+            assert_eq!(outcome.status, "blocked");
+            let reason: String = open(reopened.db())?.query_row(
+                "SELECT reason FROM day2_authority_blocks WHERE invocation=?1",
+                [&pending],
+                |row| row.get(0),
+            )?;
+            assert_eq!(reason, "credential_authority_changed");
+            token.into_bytes().fill(0);
+        }
+        let _ = stop.send(());
+        serving.await??;
+        Ok(())
     }
 
     #[tokio::test]
@@ -1843,7 +2189,7 @@ mod tests {
             [],
             |row| row.get(0),
         )?;
-        assert_eq!(personal, "google-alice");
+        assert_eq!(personal, "accounts.google.com:google-alice");
         Ok(())
     }
 

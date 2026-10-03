@@ -19,6 +19,12 @@ and `writers` remain an outer membership gate: writers can be considered for
 commands and queries; readers only for queries. Either may admit everyone at the
 installation's verified domain ([below](#everyone-at-the-verified-domain)). Passing that gate is insufficient.
 The named operation must also explicitly grant the actor in its authority policy.
+Managed client keys have an explicit `credential_client:<family-id>` membership
+selector for readers, writers and operation actors. It matches only a verified
+`client/<family-id>/<stable-id>` principal, never a human email or the credential's
+creator. The selector is not itself a principal or an administrator. See
+[managed API admission](CREDENTIALS.md#managed-api-admission) for frozen grants
+and durable invocation checks.
 The platform audit viewer, audit APIs and audit CLI commands are available only
 to the enabled app policy's `admins` (owners). Membership and operation grants
 cannot extend that access. Apps may expose their own history through a query

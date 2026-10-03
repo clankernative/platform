@@ -855,7 +855,11 @@ pub(crate) fn require_invocation_in(
         invocation_stamp(connection, id)? == active.stamp && !is_blocked(connection, id)?,
         Failure::AuthorityPolicyChanged
     );
-    authorize_in(connection, runtime, operation, actor)
+    let active = authorize_in(connection, runtime, operation, actor)?;
+    crate::managed_credentials::ingress::require(
+        connection, runtime, id, operation, actor, &active,
+    )?;
+    Ok(active)
 }
 
 pub fn apply(

@@ -926,7 +926,14 @@ impl GrantCeiling {
         audience: ResourceAudienceRef,
         roots: BTreeMap<String, OperationAuthorityContract>,
     ) -> Result<Self> {
-        identifier(&subject)?;
+        // Canonical identity-provider subjects are opaque principal identities,
+        // e.g. IAP's accounts.google.com:<id>, not operation identifiers.
+        ensure!(
+            !subject.is_empty()
+                && subject.len() <= 256
+                && subject.bytes().all(|byte| byte.is_ascii_graphic()),
+            "invalid grant principal"
+        );
         ensure!(
             !roots.is_empty() && roots.len() <= 256,
             "invalid grant root budget"

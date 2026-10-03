@@ -836,6 +836,9 @@ impl Host {
         if path.starts_with(crate::ingress::ROUTE_PREFIX) {
             return Ok((None, None));
         }
+        if path.starts_with(crate::managed_credentials::ingress::PREFIX) {
+            return Ok((None, None));
+        }
         let mut assertions = headers.get_all(crate::iap::ASSERTION_HEADER).iter();
         let (Some(assertion), None) = (assertions.next(), assertions.next()) else {
             anyhow::bail!(crate::error::Failure::InvalidIdentityAssertion);
@@ -900,6 +903,20 @@ impl Host {
             crate::error::Failure::UnsupportedMethod
         );
         self.appearance.check_binding(&self.runtime)?;
+        if uri
+            .path()
+            .starts_with(crate::managed_credentials::ingress::PREFIX)
+        {
+            return crate::managed_credentials::ingress::dispatch(
+                &self.runtime,
+                &self.api,
+                method,
+                uri,
+                headers,
+                body,
+                at,
+            );
+        }
         // A provider delivery carries no browser origin, form encoding or
         // session: what establishes it is the signature over these exact bytes,
         // so it is dispatched before the browser guards and the session check.
