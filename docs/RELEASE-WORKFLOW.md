@@ -48,7 +48,8 @@ metadata. All candidates belong to one installation/environment. Put callees
 before callers for initial deployment. The catalog instance selects the same
 app bindings and resource catalog as the per-app deployment renderings. The
 artifact store must contain admitted native workers executable on the release
-host; use the qualified Linux architecture for Linux deployment.
+host; use the qualified Linux architecture for Linux deployment. Install
+`day2-sandbox` alongside the release executable for native worker admission.
 
 ```text
 day2-gke-release approve CONFIG
@@ -61,7 +62,7 @@ it does not authenticate a forge merge or infer authority from GitHub CI.
 `TOKEN_FILE` is a bounded private regular file containing a short-lived Google
 Cloud access token. There is no ambient credential or arbitrary endpoint fallback.
 
-An already qualified native image can be adopted into the build journal:
+Already qualified native app artifacts can be adopted into the build journal:
 
 ```text
 day2-gke-release prepare CONFIG ORIGINAL_SOURCE TOOLCHAINS QUALIFIED_DIRECTORY
@@ -74,8 +75,10 @@ and toolchain pins, every preserved evidence log, and exact admitted artifact
 and worker bytes. It runs the existing build state machine to record that actual
 evidence; it never replaces a failed or missing qualification with a passing
 result. Source/commit and review authority remain explicit operator assertions,
-not proof supplied by the qualification receipt. Ordinary builds can supply
-their existing successful build IDs without this adoption step.
+not proof supplied by the qualification receipt. The immutable deployment image
+is an explicit operator selection; this adoption checks app build evidence, not
+registry provenance of that image. Ordinary builds can supply their existing
+successful build IDs without this adoption step.
 
 The command advances the existing release recipe up to 60 times per candidate.
 Pending deployment or unknown writes produce an error and retain the durable

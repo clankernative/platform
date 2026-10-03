@@ -577,6 +577,13 @@ fn roc_driver_runs_the_bounded_release_sequence_and_publishes_only_after_all_are
     let result =
         day2::automation::run(&day2::automation::runner()?, &["gke-release"], |request| {
             actions.push(request.action.clone());
+            let input: Value = request.decode()?;
+            let expected = match request.action.as_str() {
+                "gke-release-advance" => json!({"execution":if polls < 2 {"one"} else {"two"}}),
+                "gke-release-wait" => json!({"millis":0}),
+                _ => json!({}),
+            };
+            assert_eq!(input, expected, "{} payload", request.action);
             Ok(match request.action.as_str() {
                 "gke-release-open" => json!({"executions":["one","two"]}),
                 "gke-release-advance" => {
@@ -608,6 +615,7 @@ fn roc_driver_runs_the_bounded_release_sequence_and_publishes_only_after_all_are
             |request| Ok(match request.action.as_str() {
                 "gke-release-open" => json!({"executions":["pending"]}),
                 "gke-release-advance" => {
+                    assert_eq!(request.decode::<Value>()?, json!({"execution":"pending"}));
                     polls += 1;
                     json!({"state":"pending","wait_millis":0})
                 }
@@ -618,5 +626,35 @@ fn roc_driver_runs_the_bounded_release_sequence_and_publishes_only_after_all_are
         .is_err()
     );
     assert_eq!(polls, 60);
+    let mut advances = 0;
+    let built = day2::automation::run(
+        &day2::automation::runner()?,
+        &["gke-release-build"],
+        |request| {
+            let input: Value = request.decode()?;
+            Ok(match request.action.as_str() {
+                "gke-build-open" => {
+                    assert_eq!(input, json!({}));
+                    json!({"executions":["native-build"]})
+                }
+                "gke-build-advance" => {
+                    assert_eq!(input, json!({"execution":"native-build"}));
+                    advances += 1;
+                    json!({"state":if advances == 3 {"active"} else {"pending"},"wait_millis":0})
+                }
+                "gke-release-wait" => {
+                    assert_eq!(input, json!({"millis":0}));
+                    json!({})
+                }
+                "gke-build-finish" => {
+                    assert_eq!(input, json!({}));
+                    json!({"builds":"succeeded"})
+                }
+                _ => anyhow::bail!("unexpected build capability"),
+            })
+        },
+    )?;
+    assert_eq!(advances, 3);
+    assert_eq!(built, json!({"builds":"succeeded"}));
     Ok(())
 }

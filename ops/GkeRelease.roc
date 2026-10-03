@@ -11,9 +11,7 @@ GkeRelease :: [].{
 		raw = Capability.call!(
 			advance,
 			Json.to_str(
-				{
-					execution
-				},
+				{ execution: execution },
 			),
 			host!,
 		)?
