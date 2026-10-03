@@ -591,6 +591,8 @@ Compute reads; an existing app-call identity is reused. Both roots bind the same
 installation shell contract, with company URLs retained in the private instance
 repo. See [native OAuth app deployment](../deploy/gke/README.md#native-oauth-app-deployment).
 These declarations do not audit all effective inherited IAM privileges.
+Use the [installation IAM audit procedure](OAUTH-IAM-AUDIT.md) before reporting
+workload isolation; an API selection or successful secret read is not that evidence.
 
 The next runtime slice must qualify the actual deployed frontend/workload/secret
 policies and wire connect attempt creation.

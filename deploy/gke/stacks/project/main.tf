@@ -11,7 +11,7 @@ locals {
   # APIs the day2 stacks use. Enabling an API is idempotent and the provider
   # refuses to disable one on destroy (disable_on_destroy = false), so
   # removing an entry here only stops managing it.
-  apis = toset([
+  apis = setunion(toset([
     # cluster: the day2 image repository.
     "artifactregistry.googleapis.com",
     # cluster, app-edge, qualification-runner, gitea-instance-ci: VPC, NAT,
@@ -35,7 +35,7 @@ locals {
     "serviceusage.googleapis.com",
     # The state bucket.
     "storage.googleapis.com",
-  ])
+  ]), var.enable_cloud_asset_api ? toset(["cloudasset.googleapis.com"]) : toset([]))
 
   state_object_path = "projects/_/buckets/${var.state_bucket_name}/objects/"
 }

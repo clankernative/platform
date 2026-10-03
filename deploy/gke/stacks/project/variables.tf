@@ -8,6 +8,13 @@ variable "project_id" {
   }
 }
 
+variable "enable_cloud_asset_api" {
+  description = "Enable Cloud Asset Inventory in the project that submits installation IAM audit queries. This grants no audit or workload permissions; the auditor needs separate read authority at the scope being analyzed."
+  type        = bool
+  default     = false
+  nullable    = false
+}
+
 variable "region" {
   description = "Location of the OpenTofu state bucket (and the provider's default region). A bucket's location is immutable: changing this replaces the bucket that holds every stack's state, which prevent_destroy refuses."
   type        = string
