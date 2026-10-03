@@ -104,6 +104,7 @@ run "publishes_the_contract_day2_app_reads" {
       REQUIRED_SERVICE_LABEL_KEY   = "internal-tools.wonderly.io/service"
       REQUIRED_SERVICE_LABEL_VALUE = "app"
       SERVICE_NAME                 = "app"
+      SERVICE_ACCOUNT_NAME         = "runtime"
     })
     error_message = "The contract must hold exactly the keys day2-app reads (plus APP_NAMESPACE), with the backend's numeric ID in the audience."
   }

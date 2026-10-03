@@ -874,6 +874,39 @@ pub(crate) mod tests {
         thread,
     };
 
+    #[test]
+    fn app_deployment_plan_oracle_uses_the_native_closed_instance_contract() -> Result<()> {
+        // OpenTofu asserts that its rendered instance equals this same oracle.
+        // Synthetic revisions exercise schema composition, not artifact admission.
+        let bytes =
+            include_bytes!("../../../../deploy/gke/stacks/day2-app/tests/oauth-instance.json");
+        let instance = Instance::from_bytes(bytes)?;
+        let app = &instance.apps["example_app"];
+        assert_eq!(app.oauth_connections.len(), 1);
+        assert_eq!(
+            instance.oauth_runtime.as_ref().unwrap().apps
+                [&Name::try_from("example_app".to_owned())?]
+                .service_account,
+            "app-native@example-tools.iam.gserviceaccount.com"
+        );
+        assert!(instance.control.as_ref().unwrap().secrets.len() == 5);
+        for (path, value) in [
+            ("/oauth_runtime/apps/example_app/ready", json!(true)),
+            (
+                "/apps/example_app/oauth_connections/calendar/provider_scopes",
+                json!([]),
+            ),
+            ("/control/secrets/verifier/version", json!("latest")),
+            ("/control/apps", json!({})),
+        ] {
+            let mut invalid: serde_json::Value = serde_json::from_slice(bytes)?;
+            let (parent, key) = path.rsplit_once('/').unwrap();
+            invalid.pointer_mut(parent).unwrap()[key] = value;
+            assert!(Instance::from_bytes(&serde_json::to_vec(&invalid)?).is_err());
+        }
+        Ok(())
+    }
+
     struct Tokens;
     impl AccessTokenSource for Tokens {
         fn access_token(&self) -> Result<String> {

@@ -558,16 +558,26 @@ same native campaign and Roc recipe but cannot qualify a Google client.
 
 ## Remaining runtime work
 
-The dedicated shell launcher and deployment root are now available. The next
-runtime slice must qualify the actual deployed frontend/workload/secret policies
-and wire connect attempt creation.
+The dedicated shell launcher and deployment root are now available. The app
+deployment also consumes a canonical single-app selection via
+`day2-app.oauth_instance_json`, preserving the shared OAuth contracts and exact
+secret references. `app-edge.oauth_runtime` supplies the one annotated workload
+identity, named custody/attestation container grants and the native guard's five
+Compute reads; an existing app-call identity is reused. Both roots bind the same
+installation shell contract, with company URLs retained in the private instance
+repo. See [native OAuth app deployment](../deploy/gke/README.md#native-oauth-app-deployment).
+These declarations do not audit all effective inherited IAM privileges.
+
+The next runtime slice must qualify the actual deployed frontend/workload/secret
+policies and wire connect attempt creation.
 Independent app facts and registration publication are now composed in the
 ordinary qualified edge launcher. The real Google web clients and
 their exact secret versions remain required; their instance contract and native
 exact-version loader are available. The edge contract now
 publishes a dedicated keyless signer and supports backend access; these plans
 must still be applied and their live workload/secret policies qualified.
-App-host IAM separately needs its custody and verification keys.
+App-host IAM has a reviewed deployment path for its custody and verification
+keys; it must still be applied and qualified on the actual workload.
 
 This layer provides the guarded shell entrypoint; it does not deploy a live workload,
 create a Google web client, establish

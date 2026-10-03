@@ -37,14 +37,16 @@ locals {
 }
 
 resource "google_service_account" "app_calls" {
-  count        = var.app_calls == null ? 0 : 1
+  # Keep the original state address for the pod's one identity across OAuth-only,
+  # app-call-only and combined selections. Capability changes do not recreate it.
+  count        = var.app_calls == null && var.oauth_runtime == null ? 0 : 1
   project      = var.project_id
-  account_id   = var.app_calls.service_account_id
-  display_name = "Day2 ${var.app_id} app calls"
+  account_id   = var.app_calls == null ? var.oauth_runtime.service_account_id : var.app_calls.service_account_id
+  display_name = var.app_calls == null ? "Day2 ${var.app_id} OAuth readiness" : "Day2 ${var.app_id} app calls"
 }
 
 resource "google_service_account_iam_member" "app_call_workload" {
-  count              = var.app_calls == null ? 0 : 1
+  count              = var.app_calls == null && var.oauth_runtime == null ? 0 : 1
   service_account_id = google_service_account.app_calls[0].name
   role               = "roles/iam.workloadIdentityUser"
   member             = "serviceAccount:${var.project_id}.svc.id.goog[${local.namespace_name}/${local.runtime_service_account}]"
