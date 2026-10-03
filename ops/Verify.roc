@@ -49,6 +49,7 @@ Verify :: [].{
 			"delegation",
 			"credential-metadata",
 			"connection-declaration",
+			"oauth-calendar",
 			"redirect",
 			"relational",
 			"relational-next",

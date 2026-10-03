@@ -36,12 +36,11 @@ const HUMAN_SECONDS: i64 = 120;
 const MAX_BYTES: usize = 128 * 1024;
 
 pub(crate) fn setup(path: &std::path::Path) -> Result<Value> {
-    let mut selected =
-        QualifiedConnections::from_instance_file(path, &crate::oauth::google::catalog()?)?;
+    let mut selected = QualifiedConnections::prepare_instance_file(path)?;
     setup_selected(&mut selected)
 }
 
-fn setup_selected(selected: &mut QualifiedConnections) -> Result<Value> {
+pub(super) fn setup_selected(selected: &mut QualifiedConnections) -> Result<Value> {
     let shell = shell_selection(&selected.instance)?;
     for ((app, name), connection) in &mut selected.entries {
         connection.binding.security_shell = shell.origin.clone();
@@ -103,7 +102,7 @@ fn setup_selected(selected: &mut QualifiedConnections) -> Result<Value> {
         .map(|(app, b)| (app, &b.oauth_connections))
         .collect();
     Ok(
-        serde_json::json!({ "mode":"desired-metadata", "security_shell":shell, "oauth_connections":bindings, "registrations":clients }),
+        serde_json::json!({ "mode":"desired-metadata", "security_shell":shell, "oauth_connections":bindings, "registrations":clients, "instance":selected.instance }),
     )
 }
 
