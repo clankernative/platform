@@ -55,6 +55,12 @@ required deployment step, not a claim supplied by the source tests.
 
 ## Apply order
 
+For installation IAM qualification, select `enable_cloud_asset_api = true` in
+the private project's values. It defaults to false; selection adds only the
+Cloud Asset API to the foundation. Audit authority is granted separately to an
+operator at the analysis scope. See the
+[OAuth IAM audit procedure](../../docs/OAUTH-IAM-AUDIT.md).
+
 Run from the platform root. The examples use absolute private paths because
 `-chdir` changes OpenTofu's path base. Use a different backend prefix for each
 cluster, each app edge and each app workload. Never reuse a saved plan across roots.
