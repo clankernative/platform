@@ -1,0 +1,11 @@
+{
+  "format": 1,
+  "models": [
+    {
+      "identity": { "key": "799d82b065f94d74b973df7e41c28e4d", "prefix": "ent" },
+      "table": "entries",
+      "roc_type": "Models.Entry",
+      "retired": false
+    }
+  ]
+}

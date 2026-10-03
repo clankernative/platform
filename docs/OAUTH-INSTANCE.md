@@ -275,6 +275,30 @@ instance repository. It does not write files, contact Google, retrieve secrets,
 or issue readiness. Changing the shell selection changes its native profile
 revision and dependent callback/attestation/registration pins.
 
+Setup accepts syntactically valid desired bindings whose derived revisions are
+initial or stale. It admits the selected artifact bytes, finds each registered
+requirement, and derives the requirement, reviewed Google profile, custody,
+security origin, account mapping, attestation and registration revisions before
+performing strict qualification. The selected profile **ID** must still match
+the app's declared account policy. Installation/environment/app scope, binding
+generation, registration ID, secret names and numeric versions, key binding IDs,
+and approved product-return selection remain operator selections. A missing
+declaration, wrong profile ID, unknown JSON field or overlapping secret role
+fails setup. Serving constructors always require exact derived pins.
+
+The output includes an `instance` document with the recomputed bindings and
+all other selections preserved. Review it before saving it as the installation
+snapshot. Running setup against that snapshot is idempotent. Recompute and
+register the exact callback after any selection change; the old callback must
+never stand in for the new binding. Client IDs and their exact secret references
+are needed to derive it; no placeholder ID establishes a real registration.
+
+[`fixtures/oauth-calendar-canary`](../fixtures/oauth-calendar-canary/README.md)
+provides a complete, minimal registration target. It declares company-account
+Calendar event reads and exposes only an intent-inspection query. Its native
+build and SQLite/setup checks are part of the full verification campaign; they
+do not perform the Google sandbox campaign or Calendar business dispatch.
+
 The fact source starts empty. A current verified human must first match the
 pending attempt's owner and the app database's immutable IAP subject binding.
 Only then can the host obtain a native owner lease, valid for at most 120

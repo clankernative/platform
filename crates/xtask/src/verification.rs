@@ -265,6 +265,7 @@ fn build_fixture(
             root,
             &root.join("fixtures/connection-declaration-conformance"),
         ),
+        "oauth-calendar" => build(root, &root.join("fixtures/oauth-calendar-canary")),
         "delegation-peer" => build_with_overrides(
             root,
             &root.join("fixtures/delegation-conformance"),
@@ -753,6 +754,7 @@ fn tests(
             "connection-declaration",
             "DAY2_TEST_CONNECTION_DECLARATION_ARTIFACT",
         ),
+        ("oauth-calendar", "DAY2_TEST_OAUTH_CALENDAR_ARTIFACT"),
         ("relational-next", "DAY2_TEST_RELATIONAL_NEXT_ARTIFACT"),
         ("http", "DAY2_TEST_HTTP_ARTIFACT"),
         ("owned", "DAY2_TEST_OWNED_ARTIFACT"),
@@ -851,6 +853,7 @@ fn receipt(
         let redirect = artifact("redirect")?;
         let credential_metadata = artifact("credential-metadata")?;
         let connection_declaration = artifact("connection-declaration")?;
+        let oauth_calendar = artifact("oauth-calendar")?;
         let baseline = artifact("relational")?;
         let collection = artifact("collection")?;
         let next = artifact("relational-next")?;
@@ -867,6 +870,7 @@ fn receipt(
             "redirect":artifact_id(&redirect),
             "credential_metadata":artifact_id(&credential_metadata),
             "connection_declaration":artifact_id(&connection_declaration),
+            "oauth_calendar":artifact_id(&oauth_calendar),
             "collection":artifact_id(&collection),
             "owned":artifact_id(&owned), "owned_probe":artifact_id(&owned_probe),
             "reports":artifact_id(&reports), "reports_probe":artifact_id(&reports_probe),
@@ -985,6 +989,7 @@ fn required_steps(scope: &str) -> Result<&'static [&'static str]> {
             "build-delegation",
             "build-credential-metadata",
             "build-connection-declaration",
+            "build-oauth-calendar",
             "build-delegation-peer",
             "build-redirect",
             "build-relational",
@@ -1085,6 +1090,7 @@ mod tests {
             "build-delegation",
             "build-credential-metadata",
             "build-connection-declaration",
+            "build-oauth-calendar",
             "build-redirect",
             "build-relational",
             "build-collection",
