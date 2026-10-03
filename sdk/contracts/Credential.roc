@@ -58,6 +58,10 @@ Credential :: [].{
 
 	issue_access = |family| CredentialMetadataAccess.define_issue(family.metadata().id)
 
+	rotate_access = |family| CredentialMetadataAccess.define_rotate(family.metadata().id)
+
+	revoke_access = |family| CredentialMetadataAccess.define_revoke(family.metadata().id)
+
 	Label :: { value : Str }.{
 		from_str : Str -> Try(Label, [InvalidLabel])
 		from_str = |value| {

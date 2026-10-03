@@ -58,7 +58,12 @@ Api :: [].{
 		local_reads : List(Str),
 		metadata_reads : List(Str),
 		issues : List(Str),
+		rotations : List(Str),
+		revocations : List(Str),
 		issue_label : Str,
+		management_lineage : Str,
+		rotation_head : Str,
+		rotation_revision : Str,
 		interactive : Bool,
 	}
 
@@ -249,6 +254,16 @@ Api :: [].{
 			..definition,
 			credential_access: if access.action() == "issue" {
 				{ ..definition.credential_access, issues: definition.credential_access.issues.append(access.family()) }
+			} else if access.action() == "rotate" {
+				{
+					..definition.credential_access,
+					rotations: definition.credential_access.rotations.append(access.family()),
+				}
+			} else if access.action() == "revoke" {
+				{
+					..definition.credential_access,
+					revocations: definition.credential_access.revocations.append(access.family()),
+				}
 			} else {
 				{
 					..definition.credential_access,
@@ -265,6 +280,30 @@ Api :: [].{
 		credential_label = |definition, path| {
 			..definition,
 			credential_access: { ..definition.credential_access, issue_label: path.name() },
+		}
+
+		# Shape-only input bindings; current management authority is checked by the host.
+		credential_rotation :
+			CommandDef(input, output, input_fields, output_fields),
+			Path(input, Str),
+			Path(input, Str),
+			Path(input, U64) -> CommandDef(input, output, input_fields, output_fields)
+		credential_rotation = |definition, lineage, head, revision| {
+			..definition,
+			credential_access: {
+				..definition.credential_access,
+				management_lineage: lineage.name(),
+				rotation_head: head.name(),
+				rotation_revision: revision.name(),
+			},
+		}
+
+		credential_revocation :
+			CommandDef(input, output, input_fields, output_fields),
+			Path(input, Str) -> CommandDef(input, output, input_fields, output_fields)
+		credential_revocation = |definition, lineage| {
+			..definition,
+			credential_access: { ..definition.credential_access, management_lineage: lineage.name() },
 		}
 
 		export_version : CommandDef(input, output, input_fields, output_fields) -> U64
@@ -347,6 +386,16 @@ Api :: [].{
 			..definition,
 			credential_access: if access.action() == "issue" {
 				{ ..definition.credential_access, issues: definition.credential_access.issues.append(access.family()) }
+			} else if access.action() == "rotate" {
+				{
+					..definition.credential_access,
+					rotations: definition.credential_access.rotations.append(access.family()),
+				}
+			} else if access.action() == "revoke" {
+				{
+					..definition.credential_access,
+					revocations: definition.credential_access.revocations.append(access.family()),
+				}
 			} else {
 				{
 					..definition.credential_access,
@@ -405,7 +454,12 @@ Api :: [].{
 				local_reads: [],
 				metadata_reads: [],
 				issues: [],
+				rotations: [],
+				revocations: [],
 				issue_label: "",
+				management_lineage: "",
+				rotation_head: "",
+				rotation_revision: "",
 				interactive: handler.requires_interaction(),
 			},
 			verification: definition.verification,
@@ -434,7 +488,12 @@ Api :: [].{
 				local_reads: [],
 				metadata_reads: [],
 				issues: [],
+				rotations: [],
+				revocations: [],
 				issue_label: "",
+				management_lineage: "",
+				rotation_head: "",
+				rotation_revision: "",
 				interactive: handler.requires_interaction(),
 			},
 			required_all_rows: [],

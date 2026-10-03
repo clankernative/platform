@@ -1549,7 +1549,7 @@ impl Runtime {
                                 &request.context.invocation_id,
                             )?;
                         }
-                        if step == Step::CredentialIssue {
+                        if step == Step::CredentialMutation {
                             crate::managed_credentials::issuance::stage(
                                 connection,
                                 self,

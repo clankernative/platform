@@ -81,7 +81,7 @@ pub(crate) fn install(runtime: Runtime) -> Result<Runtime> {
         .is_some_and(|app| {
             app.operations
                 .values()
-                .any(|op| !op.credential_access.issues.is_empty())
+                .any(|op| op.credential_access.mutation().is_some())
         })
     {
         return Ok(runtime);
@@ -117,10 +117,9 @@ pub(crate) fn confirm(
         "credential verification requires disposable providers"
     );
     let access = issuance::access(runtime, operation)?;
-    let family = access
-        .issues
-        .first()
-        .context("credential verification issue family missing")?;
+    let (_, family) = access
+        .mutation()
+        .context("credential verification family missing")?;
     let mut db = open(runtime.db())?;
     let tx = crate::write_queue::immediate(&mut db)?;
     let active = authority_state::authorize_in(&tx, runtime, operation, actor)?;
@@ -149,12 +148,8 @@ pub(crate) fn confirm(
         subject,
         session: format!("verification-{invocation}"),
         input: input.clone(),
-        family: family.clone(),
-        label: input
-            .get(&access.issue_label)
-            .and_then(serde_json::Value::as_str)
-            .context("verification label")?
-            .into(),
+        family: family.into(),
+        intent: super::lifecycle::intent(access, input)?,
         artifact: runtime.artifact().id().into(),
         authority: active.stamp,
         binding: ready.binding,

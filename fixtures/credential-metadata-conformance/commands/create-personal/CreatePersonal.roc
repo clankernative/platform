@@ -48,7 +48,7 @@ CreatePersonal :: [].{
 			follow_ups: [],
 			deprecated: Bool.False,
 		},
-		execution: Api.current_state([Api.create(Data.entries)]),
+		execution: Api.current_state([Api.create(Data.entries), Api.create(Data.key_receipts)]),
 		verification: {
 			input: |_snapshot, seed| Ok({ label: "Personal ${seed.to_str()}" }),
 			check: |before, output, after| {
@@ -74,16 +74,26 @@ CreatePersonal :: [].{
 		).and_then(
 			|issued| {
 				lineage = issued.lineage().to_str()
-				Tx.create(Data.entries, { note: lineage }).map(
-					|_| {
-						{
-							lineage,
-							version: issued.version().id(),
-							label: issued.label(),
-							expires_at: issued.expires_at(),
-						}
-					},
-				)
+				Tx.create(Data.entries, { note: lineage })
+					.and_then(
+						|
+							_,
+						|
+							Tx.create(
+								Data.key_receipts,
+								{ family: "personal", lineage, head: issued.version().id(), revision: 1 },
+							),
+					)
+					.map(
+						|_| {
+							{
+								lineage,
+								version: issued.version().id(),
+								label: issued.label(),
+								expires_at: issued.expires_at(),
+							}
+						},
+					)
 			},
 		)
 	}

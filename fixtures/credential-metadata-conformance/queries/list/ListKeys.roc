@@ -64,7 +64,17 @@ ListKeys :: [].{
 			input: |_snapshot, _seed| Ok({ after: "", limit: 2 }),
 			check: |before, output, after| {
 				state = Data.snapshot(before)?
-				clients = state.entries.keep_if(|row| row.value.note.starts_with("cr1_clients_"))
+				# Creation and revocation each append a public receipt. Metadata lists
+				# lineages once, including terminal ones, rather than counting events.
+				clients = state.entries.keep_if(
+					|row| {
+						row.value.note.starts_with("cr1_clients_")
+							and match state.entries.find_first(|candidate| candidate.value.note == row.value.note) {
+								Ok(first) => first.id == row.id
+								Err(_) => Bool.False
+							}
+					},
+				)
 				items = output.page.items()
 				Ok(
 					before == after and output.status == "ok"
@@ -74,7 +84,13 @@ ListKeys :: [].{
 									.all(
 										|
 											item,
-										| clients.any(|row| row.value.note == item.lineage) and item.state == "active",
+										| clients.any(|row| row.value.note == item.lineage) and item.state == (
+											if state.entries.keep_if(|row| row.value.note == item.lineage).len() > 1 {
+												"revoked"
+											} else {
+												"active"
+											}
+										),
 									),
 				)
 			},
