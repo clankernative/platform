@@ -604,9 +604,9 @@ Manager CSI add-on; no secret value passes through OpenTofu. For each secret:
 1. Store it in Secret Manager in the app's project and note its version number.
 2. List the secret id in `app-edge.runtime_secret_ids`. That grants only the
    app's `runtime` Kubernetes service account's Workload Identity principal
-   `roles/secretmanager.secretAccessor` on that secret. When `app_calls` links
-   that account to a Google service account, the grant uses the linked account
-   that the CSI add-on authenticates as.
+   `roles/secretmanager.secretAccessor` on that secret. When `app_calls` or
+   `oauth_runtime` links that account to a Google service account, the grant uses
+   the linked account that the CSI add-on authenticates as.
 3. In `day2-app.provider_credentials`, pair the day2 credential reference that a
    catalog connection declares (`credential_ref` or `signing_secret_ref`) with
    the exact version (`projects/P/secrets/S/versions/N`, never `latest`) and its

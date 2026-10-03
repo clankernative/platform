@@ -47,6 +47,7 @@ override_resource {
 
 run "one_native_identity_with_exact_read_and_key_grants" {
   command = plan
+  variables { runtime_secret_ids = ["provider_secret"] }
   assert {
     condition = (
       kubernetes_service_account_v1.runtime.metadata[0].annotations["iam.gke.io/gcp-service-account"] == "app-native@example-tools.iam.gserviceaccount.com" &&
@@ -64,6 +65,16 @@ run "one_native_identity_with_exact_read_and_key_grants" {
       alltrue([for grant in values(google_secret_manager_secret_iam_member.oauth_keys) : grant.project == "example-tools" && grant.member == "serviceAccount:app-native@example-tools.iam.gserviceaccount.com" && grant.role == "roles/secretmanager.secretAccessor"])
     )
     error_message = "Native app facts need exactly five Compute read methods and the selected key containers, never OAuth clients."
+  }
+  assert {
+    condition = (
+      toset(keys(google_secret_manager_secret_iam_member.runtime)) == toset(["provider_secret"]) &&
+      google_secret_manager_secret_iam_member.runtime["provider_secret"].project == "example-tools" &&
+      google_secret_manager_secret_iam_member.runtime["provider_secret"].secret_id == "provider_secret" &&
+      google_secret_manager_secret_iam_member.runtime["provider_secret"].member == "serviceAccount:app-native@example-tools.iam.gserviceaccount.com" &&
+      google_secret_manager_secret_iam_member.runtime["provider_secret"].role == "roles/secretmanager.secretAccessor"
+    )
+    error_message = "CSI provider credentials must grant only their named secret to the OAuth-linked runtime identity."
   }
   assert {
     condition = (
