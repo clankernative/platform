@@ -199,3 +199,18 @@ fn resource_policy_rejects_non_ui_paths_and_unknown_kinds() {
         .is_err()
     );
 }
+
+#[test]
+fn adapter_failures_report_stdout_diagnostics() {
+    let out = br#"{"diagnostics":[{"code":"CUI001","message":"components/a.html: invalid form-field id","severity":"error"}],"ok":false,"schemaVersion":1}"#;
+    assert_eq!(
+        adapter_failure(out, b""),
+        "CUI001 components/a.html: invalid form-field id"
+    );
+    assert_eq!(
+        adapter_failure(out, b"boom\n"),
+        "CUI001 components/a.html: invalid form-field id; boom"
+    );
+    assert_eq!(adapter_failure(b"not json", b"crashed"), "crashed");
+    assert_eq!(adapter_failure(b"", b""), "no diagnostics");
+}

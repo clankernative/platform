@@ -597,7 +597,7 @@ fn run_adapter_with_timeout(
             ensure!(
                 status.success(),
                 "UI adapter failed: {}",
-                String::from_utf8_lossy(&err)
+                adapter_failure(&out, &err)
             );
             return Ok(out);
         }
@@ -614,6 +614,36 @@ fn run_adapter_with_timeout(
         thread::sleep(Duration::from_millis(20));
     }
 }
+/// The adapter reports structured diagnostics on stdout; stderr is often empty.
+fn adapter_failure(out: &[u8], err: &[u8]) -> String {
+    let mut parts: Vec<String> = serde_json::from_slice::<serde_json::Value>(out)
+        .ok()
+        .and_then(|v| v["diagnostics"].as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .take(20)
+        .map(|d| {
+            format!(
+                "{} {}",
+                d["code"].as_str().unwrap_or(""),
+                d["message"].as_str().unwrap_or("")
+            )
+            .trim()
+            .to_string()
+        })
+        .filter(|line| !line.is_empty())
+        .collect();
+    let stderr = String::from_utf8_lossy(err).trim().to_string();
+    if !stderr.is_empty() {
+        parts.push(stderr);
+    }
+    if parts.is_empty() {
+        "no diagnostics".into()
+    } else {
+        parts.join("; ")
+    }
+}
+
 fn validate_bundle(
     b: &Bundle,
     lock: &Lock,
