@@ -416,8 +416,15 @@ still required for execution; loading a legacy artifact grants no permission.
 
 ## App Contract Export
 
-`xtask app-contracts` projects the admitted query and route contracts from a
-built artifact as bounded, deterministic JSON. Queries are first-class: one
+`xtask app-contracts` projects the admitted public app surface from a built
+artifact as bounded, deterministic JSON. In addition to the existing query and
+route data, `commands` describes each command's typed contracts, usage, errors,
+example, internal status, HTTP API and edit binding; query entries include their
+GET API path. `forms` lists command forms and their named controls from admitted
+templates (including components), `schedules` records declared command cadence
+and missed-occurrence policy, and `redirects` lists redirect paths and commands.
+These additions preserve schema version 1 and all existing keys. Internal
+commands have `api: null`. Queries are first-class: one
 query appears once even when multiple routes use it, with every route name
 listed. Each route includes its own path, template, live flag, query defaults,
 and exact template `contextKey`; shared platform-supplied template values such

@@ -21,6 +21,10 @@ struct Export<'a> {
     app: &'a str,
     artifact: String,
     queries: BTreeMap<String, QueryExport>,
+    commands: BTreeMap<String, CommandExport>,
+    forms: Vec<FormExport>,
+    schedules: BTreeMap<String, ScheduleExport>,
+    redirects: BTreeMap<String, RedirectExport>,
     view_types: BTreeMap<String, ViewTypeExport>,
     routes: BTreeMap<String, RouteExport>,
     template_context: TemplateContextExport,
@@ -36,6 +40,76 @@ struct QueryExport {
     view_type: Option<String>,
     example: Example,
     routes: Vec<String>,
+    api: ApiExport,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CommandExport {
+    title: String,
+    purpose: String,
+    use_when: Vec<String>,
+    avoid_when: Vec<String>,
+    preconditions: Vec<String>,
+    effects: Vec<String>,
+    result: String,
+    input_schema: Value,
+    output_schema: Value,
+    errors: Vec<ErrorExport>,
+    example: Example,
+    internal: bool,
+    api: Option<ApiExport>,
+    edit: Option<EditExport>,
+}
+
+#[derive(Serialize)]
+struct ErrorExport {
+    name: String,
+    description: String,
+    recovery: String,
+}
+
+#[derive(Serialize)]
+struct ApiExport {
+    method: &'static str,
+    path: String,
+}
+
+#[derive(Serialize)]
+struct EditExport {
+    model: String,
+    id_field: String,
+    version_field: String,
+}
+
+#[derive(Serialize)]
+struct FormExport {
+    template: String,
+    command: String,
+    fields: Vec<FormFieldExport>,
+}
+
+#[derive(Serialize)]
+struct FormFieldExport {
+    name: String,
+    control: &'static str,
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    input_type: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ScheduleExport {
+    command: String,
+    cadence: Value,
+    missed: String,
+    #[serde(rename = "catchUpBound")]
+    catch_up_bound: u64,
+}
+
+#[derive(Serialize)]
+struct RedirectExport {
+    path: String,
+    command: String,
 }
 
 #[derive(Serialize)]
@@ -117,7 +191,7 @@ pub fn export_bytes(artifact_directory: &Path) -> Result<Vec<u8>> {
         );
     }
     let artifact = LoadedArtifact::load(&artifact_directory)?;
-    let document = export(artifact.id(), artifact.contract())?;
+    let document = export(artifact.id(), artifact.contract(), &artifact_directory)?;
     let bytes = serde_json::to_vec_pretty(&document)?;
     ensure!(
         bytes.len() <= MAX_EXPORT_BYTES,
@@ -126,7 +200,11 @@ pub fn export_bytes(artifact_directory: &Path) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn export<'a>(artifact_id: &str, artifact: &'a Artifact) -> Result<Export<'a>> {
+fn export<'a>(
+    artifact_id: &str,
+    artifact: &'a Artifact,
+    artifact_directory: &Path,
+) -> Result<Export<'a>> {
     ensure!(
         artifact.format >= 7,
         "app contracts require explicit admitted routes"
@@ -161,12 +239,36 @@ fn export<'a>(artifact_id: &str, artifact: &'a Artifact) -> Result<Export<'a>> {
     for query in queries.values_mut() {
         query.routes.sort();
     }
+    let commands = export_commands(artifact, definition)?;
+    let forms = export_forms(artifact, artifact_directory)?;
+    let schedules = artifact
+        .schedules
+        .iter()
+        .map(|schedule| (schedule.name.clone(), export_schedule(schedule)))
+        .collect();
+    let redirects = artifact
+        .redirects
+        .iter()
+        .map(|redirect| {
+            (
+                redirect.name.clone(),
+                RedirectExport {
+                    path: redirect.path.clone(),
+                    command: redirect.operation.clone(),
+                },
+            )
+        })
+        .collect();
     Ok(Export {
         schema_version: 1,
         kind: "clanker-app-contracts",
         app: &artifact.namespace,
         artifact: artifact_id.to_owned(),
         queries,
+        commands,
+        forms,
+        schedules,
+        redirects,
         view_types: BTreeMap::new(),
         routes,
         template_context: TemplateContextExport {
@@ -250,7 +352,173 @@ fn export_query(
             output: example_output,
         },
         routes: vec![page.name.clone()],
+        api: ApiExport {
+            method: "GET",
+            path: format!("/api/{}", operation.name),
+        },
     })
+}
+
+fn export_commands(
+    artifact: &Artifact,
+    definition: &crate::app_contract::Definition,
+) -> Result<BTreeMap<String, CommandExport>> {
+    let mut commands = BTreeMap::new();
+    for operation in artifact
+        .operations
+        .iter()
+        .filter(|operation| operation.kind == "command")
+    {
+        let contract = definition
+            .operations
+            .get(&operation.name)
+            .with_context(|| format!("command contract missing: {}", operation.name))?;
+        ensure!(
+            contract.intent.target.input_type == operation.input_type
+                && contract.intent.target.output_type == operation.output_type,
+            "command contract handles differ from admitted operation"
+        );
+        ensure!(
+            !contract.request_example.is_empty() && !contract.response_example.is_empty(),
+            "command contract requires typed input and output examples"
+        );
+        let example_input: Value = serde_json::from_str(&contract.request_example)
+            .context("invalid command example input")?;
+        let example_output: Value = serde_json::from_str(&contract.response_example)
+            .context("invalid command example output")?;
+        let input = artifact
+            .schema
+            .inputs
+            .get(&operation.input_type)
+            .context("command input schema missing")?;
+        let output = artifact
+            .outputs
+            .get(&operation.output_type)
+            .context("command output schema missing")?;
+        input
+            .validate_input(&example_input)
+            .context("command example input does not match its contract")?;
+        output
+            .shape
+            .validate_value(&example_output)
+            .context("command example output does not match its contract")?;
+        let mut input_schema = record_schema(input)?;
+        crate::api_docs::annotate(&mut input_schema, &contract.intent.inputs)?;
+        let mut output_schema = crate::operation_catalog::output_schema(&output.shape);
+        crate::api_docs::annotate(&mut output_schema, &contract.intent.outputs)?;
+        add_output_kinds(&mut output_schema, &output.shape)?;
+        let errors = contract
+            .errors
+            .iter()
+            .map(|name| {
+                let failure = definition
+                    .errors
+                    .get(name)
+                    .with_context(|| format!("command error declaration missing: {name}"))?;
+                Ok(ErrorExport {
+                    name: name.clone(),
+                    description: failure.description.clone(),
+                    recovery: failure.recovery.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let internal = contract.execution.internal;
+        let api = (!internal).then(|| ApiExport {
+            method: "POST",
+            path: format!("/api/{}", operation.name),
+        });
+        let edit = (!contract.execution.model.is_empty()).then(|| EditExport {
+            model: contract.execution.model.clone(),
+            id_field: contract.execution.id_field.clone(),
+            version_field: contract.execution.version_field.clone(),
+        });
+        commands.insert(
+            operation.name.clone(),
+            CommandExport {
+                title: contract.intent.title.clone(),
+                purpose: contract.intent.usage.purpose.clone(),
+                use_when: contract.intent.usage.use_when.clone(),
+                avoid_when: contract.intent.usage.avoid_when.clone(),
+                preconditions: contract.intent.usage.preconditions.clone(),
+                effects: contract.intent.usage.effects.clone(),
+                result: contract.intent.usage.result.clone(),
+                input_schema,
+                output_schema,
+                errors,
+                example: Example {
+                    input: example_input,
+                    output: example_output,
+                },
+                internal,
+                api,
+                edit,
+            },
+        );
+    }
+    Ok(commands)
+}
+
+fn export_forms(artifact: &Artifact, artifact_directory: &Path) -> Result<Vec<FormExport>> {
+    let mut forms = Vec::new();
+    let selector = scraper::Selector::parse("form[data-command]").expect("static selector");
+    for (path, template) in &artifact.templates {
+        let source = crate::web_templates::read_blob(artifact_directory, template)?;
+        let html = scraper::Html::parse_fragment(&source);
+        for form in html.select(&selector) {
+            let command = form
+                .value()
+                .attr("data-command")
+                .context("admitted command form missing command")?
+                .to_owned();
+            let fields = crate::web_forms::controls(form)?
+                .into_iter()
+                .map(|field| {
+                    let hidden = field.hidden;
+                    FormFieldExport {
+                        name: field.name,
+                        control: if hidden {
+                            "hidden"
+                        } else {
+                            match field.tag.as_str() {
+                                "input" => "input",
+                                "textarea" => "textarea",
+                                "select" => "select",
+                                _ => unreachable!("validated form control"),
+                            }
+                        },
+                        input_type: (field.tag == "input").then_some(field.input_type),
+                    }
+                })
+                .collect();
+            forms.push(FormExport {
+                template: format!("ui/{path}"),
+                command,
+                fields,
+            });
+        }
+    }
+    forms.sort_by(|left, right| {
+        (&left.template, &left.command).cmp(&(&right.template, &right.command))
+    });
+    Ok(forms)
+}
+
+fn export_schedule(schedule: &crate::artifact::Schedule) -> ScheduleExport {
+    let hour_ms = 60 * 60 * 1000;
+    let day_ms = 24 * hour_ms;
+    let cadence = if schedule.interval_ms >= day_ms && schedule.interval_ms.is_multiple_of(day_ms) {
+        json!({ "daily": { "everyDays": schedule.interval_ms / day_ms, "hour": schedule.anchor_hour } })
+    } else if schedule.interval_ms.is_multiple_of(hour_ms) {
+        json!({ "hours": schedule.interval_ms / hour_ms })
+    } else {
+        json!({ "minutes": schedule.interval_ms / (60 * 1000) })
+    };
+    ScheduleExport {
+        command: schedule.operation.clone(),
+        cadence,
+        missed: schedule.missed.clone(),
+        catch_up_bound: schedule.catch_up_bound,
+    }
 }
 
 fn company_schema() -> Value {
@@ -556,10 +824,11 @@ mod tests {
             sources: BTreeMap::new(),
             admission: "local-spike-only".into(),
         };
-        let serialized = serde_json::to_value(export("sha256:fixture", &artifact)?)?;
+        let serialized =
+            serde_json::to_value(export("sha256:fixture", &artifact, Path::new("."))?)?;
         assert_eq!(
             serialized,
-            serde_json::to_value(export("sha256:fixture", &artifact)?)?
+            serde_json::to_value(export("sha256:fixture", &artifact, Path::new("."))?)?
         );
         assert_eq!(serialized["schemaVersion"], 1);
         assert_eq!(serialized["kind"], "clanker-app-contracts");
@@ -570,6 +839,18 @@ mod tests {
             "featured"
         );
         assert_eq!(serialized["queries"]["gallery.list"]["routes"][1], "home");
+        assert_eq!(
+            serialized["queries"]["gallery.list"]["api"]["method"],
+            "GET"
+        );
+        assert_eq!(
+            serialized["queries"]["gallery.list"]["api"]["path"],
+            "/api/gallery.list"
+        );
+        assert_eq!(serialized["commands"], json!({}));
+        assert_eq!(serialized["forms"], json!([]));
+        assert_eq!(serialized["schedules"], json!({}));
+        assert_eq!(serialized["redirects"], json!({}));
         assert_eq!(
             serialized["queries"]["gallery.list"]["inputSchema"]["properties"]["limit"]["description"],
             "Maximum items."
