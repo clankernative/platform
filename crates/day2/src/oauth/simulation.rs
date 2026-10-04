@@ -582,12 +582,12 @@ pub(super) fn reduce_steps<T: Clone>(
         let mut candidate = reduced.clone();
         candidate.remove(index);
         attempts += 1;
-        if let Err(error) = check(&candidate) {
-            if classify(&error) == category {
-                reduced = candidate;
-                observed = Some(error);
-                continue;
-            }
+        if let Err(error) = check(&candidate)
+            && classify(&error) == category
+        {
+            reduced = candidate;
+            observed = Some(error);
+            continue;
         }
         index += 1;
     }
