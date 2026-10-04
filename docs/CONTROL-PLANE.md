@@ -86,6 +86,31 @@ binding, trusted builder binding, platform input digest, recipe digest, and
 durable runtime binding. A duplicate request with different inputs is rejected.
 Changing instance defaults cannot redirect an existing request.
 
+The build journal's schema version 3 enforces completed-effect observations and
+paired, byte-bounded Temporal receipts in SQLite. Opening a reviewed version 2
+layout upgrades its two leaf tables in one transaction, preserving effect IDs,
+epochs, ambiguous recovery, accepted inputs and audit sequence numbers. Missing
+constraints, unknown layouts or custom table indexes/triggers, malformed legacy
+rows and unknown incoming relationships refuse admission rather than inventing
+missing evidence. Read-only consumers can inspect a valid version 2 snapshot
+without upgrading it. These checks cover the build journal tables; release and
+secret journals retain their separate schema versions and admission rules.
+Both writable and read-only admission also check stored leaf-state shape and
+foreign-key consistency, including version 3 rows imported with checks disabled.
+Recognition, integrity scans and migration share a cumulative budget of one
+million SQLite VM steps. Budget exhaustion refuses admission and rolls back;
+admission never trims history or raises the bound automatically. The hook is
+removed before returning the journal so existing operations retain their semantics.
+Large journals require explicit retention or a reviewed bounded migration.
+This leaf-state change does not strengthen the historical nullable primary keys on `executions`
+and `execution_acceptance` or prove the validity of every persisted JSON payload.
+
+The first acknowledged Temporal run remains the stored acceptance receipt.
+Replays and later continue-as-new runs may report another run ID for the same
+workflow; they do not replace that receipt or weaken its workflow affinity.
+The [storage tests](../crates/day2-control/tests/journal_storage.rs) exercise real
+SQLite writes, supported upgrades, failed replacement rollback and reopen.
+
 The pure `kernel::State::observe` reducer validates evidence identity and the
 required transition order. The SQLite journal commits effect completion, state,
 and audit together. Time is an explicit input to the journal and simulator;

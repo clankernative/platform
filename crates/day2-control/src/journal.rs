@@ -7,6 +7,261 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::{path::Path, time::Duration};
 
+const CONTROL_VERSION: i64 = 3;
+const CONTROL_ADMISSION_STEPS: usize = 1_000_000;
+const CONTROL_META: &str = "CREATE TABLE control_meta (
+    singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL)";
+const EXECUTIONS: &str = "CREATE TABLE executions (
+    id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, plan TEXT NOT NULL, state TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK(revision>=0), cancel_requested INTEGER NOT NULL CHECK(cancel_requested IN (0,1)))";
+const ACCEPTANCE: &str = "CREATE TABLE execution_acceptance (
+    execution TEXT PRIMARY KEY REFERENCES executions(id), provenance TEXT NOT NULL)";
+const EVENTS: &str = "CREATE TABLE events (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT, execution TEXT NOT NULL REFERENCES executions(id),
+    kind TEXT NOT NULL, body TEXT NOT NULL)";
+const OUTBOX_V2: &str = "CREATE TABLE outbox (
+    execution TEXT PRIMARY KEY REFERENCES executions(id), workflow_id TEXT, run_id TEXT)";
+const EFFECTS_V2: &str = "CREATE TABLE effects (
+    id TEXT PRIMARY KEY, execution TEXT NOT NULL REFERENCES executions(id), kind TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('pending','running','ambiguous','complete')),
+    epoch INTEGER NOT NULL CHECK(epoch>=0), owner TEXT NOT NULL, lease_until INTEGER NOT NULL,
+    observation TEXT, recovery INTEGER NOT NULL CHECK(recovery IN (0,1)), UNIQUE(execution,kind))";
+const OUTBOX: &str = "CREATE TABLE \"outbox\" (
+    execution TEXT PRIMARY KEY NOT NULL REFERENCES executions(id), workflow_id TEXT, run_id TEXT,
+    CHECK((workflow_id IS NULL AND run_id IS NULL) OR
+        (workflow_id IS NOT NULL AND run_id IS NOT NULL
+        AND length(CAST(workflow_id AS BLOB)) BETWEEN 1 AND 256
+        AND length(CAST(run_id AS BLOB)) BETWEEN 1 AND 128)))";
+const EFFECTS: &str = "CREATE TABLE \"effects\" (
+    id TEXT PRIMARY KEY NOT NULL, execution TEXT NOT NULL REFERENCES executions(id), kind TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('pending','running','ambiguous','complete')),
+    epoch INTEGER NOT NULL CHECK(epoch>=0), owner TEXT NOT NULL, lease_until INTEGER NOT NULL,
+    observation TEXT, recovery INTEGER NOT NULL CHECK(recovery IN (0,1)), UNIQUE(execution,kind),
+    CHECK((status='complete' AND observation IS NOT NULL) OR
+        (status!='complete' AND observation IS NULL)))";
+
+fn control_tables(version: i64) -> [(&'static str, &'static str); 7] {
+    [
+        ("control_meta", CONTROL_META),
+        ("executions", EXECUTIONS),
+        ("execution_acceptance", ACCEPTANCE),
+        ("events", EVENTS),
+        ("outbox", if version == 2 { OUTBOX_V2 } else { OUTBOX }),
+        ("effects", if version == 2 { EFFECTS_V2 } else { EFFECTS }),
+        // SQLite owns this table and its exact spelling for AUTOINCREMENT.
+        ("sqlite_sequence", "CREATE TABLE sqlite_sequence(name,seq)"),
+    ]
+}
+
+/// Compare reviewed SQL without treating whitespace inside literals as formatting.
+/// This deliberately rejects equivalent but unreviewed layouts and custom indexes
+/// or triggers on the control tables rather than dropping them during migration.
+fn schema_identity(sql: &str) -> String {
+    let mut quote = None;
+    let mut identity = String::with_capacity(sql.len());
+    let mut space = false;
+    for character in sql.chars() {
+        if let Some(delimiter) = quote {
+            identity.push(character);
+            if character == delimiter {
+                quote = None;
+            }
+        } else if character.is_ascii_whitespace() {
+            space = !identity.is_empty();
+        } else {
+            let word = |value: char| value.is_ascii_alphanumeric() || matches!(value, '_' | '$');
+            if space && identity.chars().next_back().is_some_and(word) && word(character) {
+                identity.push(' ');
+            }
+            space = false;
+            if matches!(character, '\'' | '"' | '`' | '[') {
+                quote = Some(if character == '[' { ']' } else { character });
+                identity.push(character);
+            } else {
+                identity.push(character.to_ascii_lowercase());
+            }
+        }
+    }
+    identity
+}
+
+fn validate_control_schema(connection: &Connection, version: i64) -> Result<()> {
+    ensure!(
+        matches!(version, 2 | CONTROL_VERSION),
+        "unsupported control journal version"
+    );
+    for (table, expected) in control_tables(version) {
+        let actual: Option<(String, String)> = connection
+            .query_row(
+                "SELECT type,sql FROM sqlite_schema WHERE name=?1",
+                [table],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let (kind, sql) = actual.context("missing control journal table")?;
+        ensure!(
+            kind == "table"
+                && sql.len() <= 65_536
+                && schema_identity(&sql) == schema_identity(expected),
+            "unrecognized control journal table layout: {table}"
+        );
+        let customized: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE tbl_name=?1
+                AND type IN ('index','trigger') AND sql IS NOT NULL)",
+            [table],
+            |row| row.get(0),
+        )?;
+        ensure!(
+            !customized,
+            "unrecognized control journal index or trigger: {table}"
+        );
+    }
+    Ok(())
+}
+
+fn control_version(connection: &Connection) -> Result<i64> {
+    connection
+        .query_row(
+            "SELECT version FROM control_meta WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )
+        .context("missing control journal version")
+}
+
+fn validate_control_rows(connection: &Connection) -> Result<()> {
+    let invalid: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM effects WHERE id IS NULL OR
+            status NOT IN ('pending','running','ambiguous','complete') OR
+            epoch<0 OR recovery NOT IN (0,1) OR
+            (status='complete' AND observation IS NULL) OR
+            (status!='complete' AND observation IS NOT NULL)) OR
+            EXISTS(SELECT 1 FROM outbox WHERE execution IS NULL OR
+            (workflow_id IS NULL)!=(run_id IS NULL) OR
+            (workflow_id IS NOT NULL AND
+                (length(CAST(workflow_id AS BLOB)) NOT BETWEEN 1 AND 256 OR
+                 length(CAST(run_id AS BLOB)) NOT BETWEEN 1 AND 128)))",
+        [],
+        |row| row.get(0),
+    )?;
+    ensure!(
+        !invalid,
+        "malformed control journal state requires reviewed recovery"
+    );
+    for table in ["outbox", "effects", "execution_acceptance", "events"] {
+        let mut statement = connection.prepare(&format!("PRAGMA foreign_key_check({table})"))?;
+        ensure!(
+            statement.query([])?.next()?.is_none(),
+            "orphaned control journal row"
+        );
+    }
+    Ok(())
+}
+
+/// One cumulative SQLite work budget for recognition, integrity and migration.
+/// Remove it before returning a journal: ordinary operations keep their existing
+/// semantics. Interrupted transactions are rolled back after disabling the hook,
+/// since the exhausted hook could otherwise interrupt rollback itself.
+fn bounded_control_admission(
+    connection: &mut Connection,
+    admission: impl FnOnce(&mut Connection) -> Result<()>,
+) -> Result<()> {
+    let mut remaining = CONTROL_ADMISSION_STEPS;
+    connection.progress_handler(
+        1,
+        Some(move || {
+            remaining = remaining.saturating_sub(1);
+            remaining == 0
+        }),
+    )?;
+    let result = admission(connection);
+    connection.progress_handler(0, None::<fn() -> bool>)?;
+    if result.is_err() && !connection.is_autocommit() {
+        connection.execute_batch("ROLLBACK")?;
+    }
+    match result {
+        Err(error)
+            if matches!(error.downcast_ref::<rusqlite::Error>(),
+            Some(rusqlite::Error::SqliteFailure(code, _))
+                if code.code == rusqlite::ErrorCode::OperationInterrupted) =>
+        {
+            Err(error.context("control journal admission VM-step budget exhausted"))
+        }
+        result => result,
+    }
+}
+
+fn initialize_control_schema(connection: &mut Connection) -> Result<()> {
+    let tx = day2::write_queue::immediate(connection)?;
+    let existing: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='control_meta')",
+        [],
+        |row| row.get(0),
+    )?;
+    if existing {
+        let version = control_version(&tx)?;
+        validate_control_schema(&tx, version)?;
+        // Imported or corrupted rows may have bypassed SQLite's per-connection
+        // constraint settings. A version stamp and correct DDL are insufficient.
+        validate_control_rows(&tx)?;
+        if version == 2 {
+            // No platform table refers to these two leaf tables. Reject unknown
+            // incoming relationships before replacing their reviewed v2 layouts.
+            let referenced: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema s, pragma_foreign_key_list(s.name) f
+                    WHERE s.type='table' AND lower(f.\"table\") IN ('outbox','effects'))",
+                [],
+                |row| row.get(0),
+            )?;
+            ensure!(
+                !referenced,
+                "unrecognized incoming control journal relationship"
+            );
+            for (table, ddl, columns) in [
+                ("outbox", OUTBOX, "execution,workflow_id,run_id"),
+                (
+                    "effects",
+                    EFFECTS,
+                    "id,execution,kind,status,epoch,owner,lease_until,observation,recovery",
+                ),
+            ] {
+                let temporary = format!("control_{table}_v3");
+                tx.execute_batch(&ddl.replacen(
+                    &format!("\"{table}\""),
+                    &format!("\"{temporary}\""),
+                    1,
+                ))?;
+                tx.execute_batch(&format!(
+                    "INSERT INTO {temporary}({columns}) SELECT {columns} FROM {table};
+                    DROP TABLE {table}; ALTER TABLE {temporary} RENAME TO {table};"
+                ))?;
+            }
+            tx.execute(
+                "UPDATE control_meta SET version=?1 WHERE singleton=1",
+                [CONTROL_VERSION],
+            )?;
+            validate_control_schema(&tx, CONTROL_VERSION)?;
+        }
+    } else {
+        let occupied: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*')",
+            [],
+            |row| row.get(0),
+        )?;
+        ensure!(
+            !occupied,
+            "unrecognized database is not an empty control journal"
+        );
+        for (_, ddl) in control_tables(CONTROL_VERSION).into_iter().take(6) {
+            tx.execute_batch(ddl)?;
+        }
+        tx.execute("INSERT INTO control_meta VALUES(1,?1)", [CONTROL_VERSION])?;
+        validate_control_schema(&tx, CONTROL_VERSION)?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 pub struct Journal {
     pub(crate) connection: Connection,
 }
@@ -139,41 +394,27 @@ impl Journal {
     /// App hosts consume release state without control-plane write authority.
     /// This also accepts an immutable, platform-published SQLite snapshot.
     pub fn open_readonly(path: &Path) -> Result<Self> {
-        let connection =
+        let mut connection =
             Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         connection.busy_timeout(Duration::from_secs(5))?;
+        bounded_control_admission(&mut connection, |connection| {
+            let tx = connection.unchecked_transaction()?;
+            let version = control_version(&tx)?;
+            validate_control_schema(&tx, version)?;
+            validate_control_rows(&tx)?;
+            tx.commit()?;
+            Ok(())
+        })?;
         Ok(Self { connection })
     }
 
     pub fn open(path: &Path) -> Result<Self> {
-        let connection = Connection::open(path)?;
+        let mut connection = Connection::open(path)?;
         connection.busy_timeout(Duration::from_secs(5))?;
-        connection.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;
-            CREATE TABLE IF NOT EXISTS control_meta (singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL);
-            INSERT OR IGNORE INTO control_meta VALUES(1,2);")?;
-        let version: i64 = connection.query_row(
-            "SELECT version FROM control_meta WHERE singleton=1",
-            [],
-            |r| r.get(0),
+        connection.execute_batch(
+            "PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;",
         )?;
-        ensure!(version == 2, "unsupported control journal version");
-        connection.execute_batch("BEGIN IMMEDIATE;
-            CREATE TABLE IF NOT EXISTS executions (
-                id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, plan TEXT NOT NULL, state TEXT NOT NULL,
-                revision INTEGER NOT NULL CHECK(revision>=0), cancel_requested INTEGER NOT NULL CHECK(cancel_requested IN (0,1)));
-            CREATE TABLE IF NOT EXISTS outbox (
-                execution TEXT PRIMARY KEY REFERENCES executions(id), workflow_id TEXT, run_id TEXT);
-            CREATE TABLE IF NOT EXISTS execution_acceptance (
-                execution TEXT PRIMARY KEY REFERENCES executions(id), provenance TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS effects (
-                id TEXT PRIMARY KEY, execution TEXT NOT NULL REFERENCES executions(id), kind TEXT NOT NULL,
-                status TEXT NOT NULL CHECK(status IN ('pending','running','ambiguous','complete')),
-                epoch INTEGER NOT NULL CHECK(epoch>=0), owner TEXT NOT NULL, lease_until INTEGER NOT NULL,
-                observation TEXT, recovery INTEGER NOT NULL CHECK(recovery IN (0,1)), UNIQUE(execution,kind));
-            CREATE TABLE IF NOT EXISTS events (
-                sequence INTEGER PRIMARY KEY AUTOINCREMENT, execution TEXT NOT NULL REFERENCES executions(id),
-                kind TEXT NOT NULL, body TEXT NOT NULL);
-            COMMIT;")?;
+        bounded_control_admission(&mut connection, initialize_control_schema)?;
         let mut journal = Self { connection };
         journal.initialize_release_schema()?;
         journal.initialize_release_execution_schema()?;
@@ -311,6 +552,9 @@ impl Journal {
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
         if let Some(prior_workflow) = prior.0 {
+            // The first acknowledged run is an acceptance receipt, not a fence
+            // against Temporal's later continue-as-new runs. Workflow affinity
+            // remains immutable and a replay does not replace the first receipt.
             ensure!(prior_workflow == workflow, "workflow affinity changed");
         } else {
             tx.execute(
