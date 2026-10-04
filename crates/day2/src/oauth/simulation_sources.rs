@@ -105,6 +105,7 @@ impl Guard {
             || path == "tokio::spawn"
             || path == "tokio::task"
             || path == "web_security::random"
+            || path.ends_with("::web_security::random")
         {
             self.violations.push(path);
         }
@@ -234,6 +235,8 @@ fn ambient_macro_effects_and_namespace_aliases_cannot_bypass_the_guard() -> Resu
         "use std::time as clock; fn f() { clock::Instant::now(); }",
         "fn f() { format!(\"{}\", getrandom::fill(&mut bytes)); }",
         "use reqwest::blocking as wire; fn f() { wire::Client::new(); }",
+        "fn f() { crate::web_security::random(); }",
+        "use crate::web_security::random as nonce; fn f() { nonce(); }",
     ] {
         let mut guard = Guard::default();
         guard.visit_file(&syn::parse_file(source)?);
