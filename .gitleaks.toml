@@ -14,6 +14,13 @@ regexes = [
 ]
 
 [[allowlists]]
+description = "Public nominal identity rows in the Notifications model ledger"
+condition = "AND"
+paths = ['''(^|/)examples/notifications/model-identities\.json$''']
+regexTarget = "line"
+regexes = ['''^\s*\{ "identity": \{ "key": "[a-f0-9]{32}", "prefix": "[a-z]+" \}, "table": "[a-z_]+", "roc_type": "Models\.[A-Za-z]+", "retired": (true|false) \},?$''']
+
+[[allowlists]]
 description = "Public schema identity keys embedded in admission fixtures"
 condition = "AND"
 paths = ['''(^|/)crates/day2/src/app_inference\.rs$''']
