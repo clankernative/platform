@@ -88,6 +88,7 @@ fn platform(directory: &Path) -> Result<PlatformInputs> {
         "Cargo.lock",
         "architecture-rules.json",
         "architecture-boundaries.json",
+        "architecture/clippy.toml",
         "rust-toolchain.toml",
         "toolchain.json",
         ".dockerignore",
@@ -164,9 +165,21 @@ fn platform(directory: &Path) -> Result<PlatformInputs> {
 
 #[test]
 fn architecture_policy_changes_invalidate_the_platform_and_materialization() -> Result<()> {
-    for policy in ["architecture-rules.json", "architecture-boundaries.json"] {
+    for policy in [
+        "architecture-rules.json",
+        "architecture-boundaries.json",
+        "architecture/clippy.toml",
+    ] {
         let directory = tempfile::tempdir()?;
         let approved = platform(directory.path())?;
+        assert!(approved.files().contains_key(&format!("platform/{policy}")));
+        let positive = directory.path().join("positive");
+        fs::create_dir(&positive)?;
+        approved.materialize(&positive)?;
+        assert_eq!(
+            fs::read(positive.join("platform").join(policy))?,
+            b"approved platform input"
+        );
         write(
             &directory.path().join("platform").join(policy),
             b"changed architecture policy",

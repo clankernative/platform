@@ -8,6 +8,7 @@ use std::{
     fs,
     path::{Component, Path, PathBuf},
     process::Command,
+    time::Duration,
 };
 use syn::{
     Attribute, Item, Meta, PathArguments, Token, TypeParamBound, UseTree,
@@ -18,6 +19,8 @@ use syn::{
 const MAX_SOURCE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SOURCES: usize = 4096;
 const MAX_DEPTH: usize = 32;
+const MAX_COMPILER_OUTPUT_BYTES: usize = 1024 * 1024;
+const COMPILER_TIMEOUT: Duration = Duration::from_secs(600);
 const REQUIRED_FORBIDS: [&str; 4] = [
     "unsafe_code",
     "clippy::disallowed_methods",
@@ -75,16 +78,54 @@ pub fn check(root: &Path, packages: &[StrictCrate<'_>]) -> Result<()> {
         "regular Clippy configuration directory required"
     );
     read_regular(&config.join("clippy.toml"))?;
-    let status = clippy_command(root, packages)?
-        .status()
-        .context("run strict crate Clippy")?;
-    ensure!(
-        status.success(),
-        "strict platform crate Clippy rejected production code"
+    let directory = tempfile::tempdir().context("strict compiler log directory")?;
+    let log = directory.path().join("clippy.log");
+    let outcome = day2_ops::process::run(
+        &mut clippy_command(root, packages)?,
+        root,
+        &log,
+        COMPILER_TIMEOUT,
     );
+    // The supervisor has reaped the process group before this bounded read.
+    let metadata = fs::symlink_metadata(&log)?;
+    ensure!(
+        metadata.is_file()
+            && !metadata.file_type().is_symlink()
+            && metadata.len() <= MAX_COMPILER_OUTPUT_BYTES as u64,
+        "strict compiler diagnostic budget"
+    );
+    let diagnostic = read_regular(&log)?;
+    ensure!(
+        diagnostic.len() <= MAX_COMPILER_OUTPUT_BYTES,
+        "strict compiler diagnostic budget"
+    );
+    outcome.with_context(|| {
+        format!(
+            "strict platform crate Clippy rejected production code: {}",
+            String::from_utf8_lossy(&diagnostic)
+        )
+    })?;
+    admit_clippy_diagnostic(&diagnostic)?;
     println!(
         "platform kernel compiler boundary: {} strict crates",
         packages.len()
+    );
+    Ok(())
+}
+
+fn admit_clippy_diagnostic(bytes: &[u8]) -> Result<()> {
+    ensure!(
+        bytes.len() <= MAX_COMPILER_OUTPUT_BYTES,
+        "strict compiler diagnostic budget"
+    );
+    let diagnostic = String::from_utf8_lossy(bytes);
+    // Clippy emits invalid configured paths as diagnostics outside its lint
+    // machinery. Neither forbid nor -Dwarnings promotes those to errors; admit
+    // no compiler warning, so a misspelled restriction cannot silently weaken
+    // the boundary. Optional absent third-party paths use allow-invalid=true.
+    ensure!(
+        !diagnostic.lines().any(|line| line.starts_with("warning:")),
+        "strict platform Clippy emitted a warning: {diagnostic}"
     );
     Ok(())
 }
@@ -93,12 +134,20 @@ fn clippy_command(root: &Path, packages: &[StrictCrate<'_>]) -> Result<Command> 
     let config = root.join("architecture").canonicalize()?;
     let mut command = Command::new("cargo");
     command.current_dir(root).env("CLIPPY_CONF_DIR", config);
-    command.args(["clippy", "--offline", "--locked", "--lib", "--no-deps"]);
+    command.args([
+        "clippy",
+        "--offline",
+        "--locked",
+        "--jobs=2",
+        "--color=never",
+        "--lib",
+        "--no-deps",
+    ]);
     for package in packages {
         command.args(["-p", package.name]);
     }
     pin_lint_flags(&mut command);
-    command.args(["--", "--cap-lints=forbid"]);
+    command.args(["--", "--cap-lints=forbid", "-Dwarnings"]);
     Ok(command)
 }
 
@@ -493,6 +542,15 @@ fn callbacks(syntax: &syn::File) -> Result<()> {
 mod tests {
     use super::*;
 
+    fn admit_clippy_output(output: &std::process::Output) -> Result<()> {
+        ensure!(
+            output.status.success(),
+            "compiler fixture failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        admit_clippy_diagnostic(&output.stderr)
+    }
+
     const ATTRIBUTES: &str = "#![forbid(unsafe_code, clippy::disallowed_methods, clippy::disallowed_types, clippy::disallowed_macros)]\n";
     const CONFIG: &str = include_str!("../../../architecture/clippy.toml");
 
@@ -629,13 +687,7 @@ mod tests {
             fixture.path().join("src/lib.rs"),
             format!("{ATTRIBUTES}pub fn pure(value: u64) -> u64 {{ value }}"),
         )?;
-        assert!(
-            clippy_command(fixture.path(), &packages)?
-                .output()?
-                .status
-                .success(),
-            "positive compiler control failed"
-        );
+        check(fixture.path(), &packages)?;
         for body in [
             "use std::time::SystemTime as Clock; pub fn ambient() { let _ = Clock::now(); }",
             "use std::time as clock; pub fn ambient() { let _ = clock::SystemTime::now(); }",
@@ -718,6 +770,29 @@ mod tests {
                 "wrong rejection: {diagnostic}"
             );
         }
+        fs::write(
+            fixture.path().join("src/lib.rs"),
+            format!("{ATTRIBUTES}pub fn pure(value: u64) -> u64 {{ value }}"),
+        )?;
+        fs::write(
+            fixture.path().join("architecture/clippy.toml"),
+            "disallowed-methods = [{ path = \"std::time::SystemTime::misspelled_now\", reason = \"invalid policy must fail\" }]",
+        )?;
+        let output = clippy_command(fixture.path(), &packages)?.output()?;
+        let diagnostic = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            admit_clippy_output(&output).is_err(),
+            "guard accepted an invalid policy path: {diagnostic}"
+        );
+        assert!(
+            diagnostic.contains("misspelled_now"),
+            "wrong rejection: {diagnostic}"
+        );
+        let rejection = check(fixture.path(), &packages).unwrap_err().to_string();
+        assert!(
+            rejection.contains("misspelled_now"),
+            "wrong supervised rejection: {rejection}"
+        );
         Ok(())
     }
 }

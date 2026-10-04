@@ -406,6 +406,7 @@ pub(super) fn platform_sources(root: &Path) -> Result<BTreeMap<String, String>> 
         "Cargo.lock",
         "architecture-rules.json",
         "architecture-boundaries.json",
+        "architecture/clippy.toml",
         "rust-toolchain.toml",
         "toolchain.json",
         ".dockerignore",
@@ -425,6 +426,61 @@ pub(super) fn platform_sources(root: &Path) -> Result<BTreeMap<String, String>> 
         hash_tree(root, &root.join(directory), &mut hashes)?;
     }
     Ok(hashes)
+}
+
+#[cfg(test)]
+mod platform_input_tests {
+    use super::*;
+
+    #[test]
+    fn clippy_configuration_tampering_changes_native_build_identity() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path();
+        fs::create_dir(root.join("architecture"))?;
+        for name in [
+            "Cargo.toml",
+            "Cargo.lock",
+            "architecture-rules.json",
+            "architecture-boundaries.json",
+            "architecture/clippy.toml",
+            "rust-toolchain.toml",
+            "toolchain.json",
+            ".dockerignore",
+        ] {
+            fs::write(root.join(name), b"approved input")?;
+        }
+        for name in [
+            "crates",
+            "tools",
+            "vendor",
+            "assets",
+            "ops",
+            "infra",
+            "deploy",
+            "toolchains",
+        ] {
+            fs::create_dir(root.join(name))?;
+        }
+        let approved = platform_sources(root)?;
+        assert_eq!(approved, platform_sources(root)?);
+        assert_eq!(
+            approved["architecture/clippy.toml"],
+            digest(b"approved input")
+        );
+        fs::write(
+            root.join("architecture/clippy.toml"),
+            b"weakened restrictions",
+        )?;
+        let changed = platform_sources(root)?;
+        assert_ne!(approved, changed);
+        assert_ne!(
+            approved["architecture/clippy.toml"],
+            changed["architecture/clippy.toml"]
+        );
+        fs::remove_file(root.join("architecture/clippy.toml"))?;
+        assert!(platform_sources(root).is_err());
+        Ok(())
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

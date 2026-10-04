@@ -677,6 +677,16 @@
           "local_path": "crates/day2-capabilities"
         },
         {
+          "name": "day2-kernel",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": "crates/day2-kernel"
+        },
+        {
           "name": "durable-temporal",
           "kind": "normal",
           "target": null,
@@ -872,6 +882,65 @@
             "lib"
           ],
           "source": "crates/day2-control/src/lib.rs"
+        }
+      ]
+    },
+    {
+      "name": "day2-kernel",
+      "manifest": "crates/day2-kernel/Cargo.toml",
+      "role": "kernel",
+      "dependencies": [
+        {
+          "name": "anyhow",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": false,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "day2-capabilities",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": "crates/day2-capabilities"
+        },
+        {
+          "name": "serde",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [
+            "alloc",
+            "derive"
+          ],
+          "default_features": false,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "serde_json",
+          "kind": "dev",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        }
+      ],
+      "production_targets": [
+        {
+          "name": "day2_kernel",
+          "kind": [
+            "lib"
+          ],
+          "source": "crates/day2-kernel/src/lib.rs"
         }
       ]
     },
@@ -1366,6 +1435,16 @@
           "default_features": true,
           "optional": false,
           "local_path": "crates/day2-control"
+        },
+        {
+          "name": "day2-ops",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": "crates/day2-ops"
         },
         {
           "name": "proc-macro2",

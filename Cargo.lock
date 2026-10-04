@@ -4872,6 +4872,7 @@ dependencies = [
  "anyhow",
  "day2",
  "day2-control",
+ "day2-ops",
  "proc-macro2",
  "quote",
  "rusqlite",
