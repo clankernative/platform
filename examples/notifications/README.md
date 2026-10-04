@@ -1,6 +1,6 @@
-# Notifications: owner-authorized configuration
+# Notifications: owner-authorized configuration and Slack delivery
 
-This versioned Roc app implements a complete configuration flow from the
+This versioned Roc app implements configuration and publication flows from the
 Notifications business source, rather than its old starter CRUD port:
 
 1. Check the current human's app ownership through generated
@@ -9,6 +9,8 @@ Notifications business source, rather than its old starter CRUD port:
    validate and preview a message.
 3. Create a new contract version with `version=0`, or edit a positive version's
    template while preserving its field schema.
+4. Enable publication, accept an event against an explicit contract version, and
+   deliver its captured message to the operator-bound Slack channel.
 
 Every app-scoped operation checks ownership before reading or changing business
 state. A negative or mismatched decision refuses the operation. A missing grant,
