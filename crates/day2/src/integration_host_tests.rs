@@ -379,6 +379,31 @@ fn model_response(input: u64, output: u64) -> Value {
 }
 
 #[test]
+fn a_recorded_dispatch_reuses_its_observation_without_an_attempt_or_reservation() -> Result<()> {
+    let provider = Provider::new(vec![Ok(model_response(3, 4))]);
+    let fixture = Fixture::new(Action::OpenAiGenerate, 10, 10, provider.clone())?;
+    let (request, token) = fixture.accept("recorded", "alice")?;
+    let work = fixture.intent(request, &token, 0)?;
+    fixture.complete(&work)?;
+    let observed = fixture.observed("recorded", 0)?;
+    let ledger = serde_json::to_value(fixture.ledger()?)?;
+
+    fixture.complete(&work)?;
+
+    assert_eq!(provider.count(), 1);
+    assert_eq!(fixture.observed("recorded", 0)?, observed);
+    assert_eq!(serde_json::to_value(fixture.ledger()?)?, ledger);
+    let db = open(fixture.runtime.db())?;
+    let attempts: i64 = db.query_row(
+        "SELECT count(*) FROM day2_external_attempts WHERE effect='effect-recorded-0'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(attempts, 1);
+    Ok(())
+}
+
+#[test]
 fn host_live_unknown_attempt_survives_reopen_and_cannot_retry_or_spend_held_capacity() -> Result<()>
 {
     let provider = Provider::new(vec![Err(integrations::AdapterError::TransportUnavailable)]);
