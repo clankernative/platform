@@ -1,5 +1,10 @@
 //! Process-level checks for the Roc binary. There is no Rust CLI implementation.
 #![forbid(unsafe_code)]
+#![forbid(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    clippy::disallowed_macros
+)]
 
 #[cfg(test)]
 mod tests {
