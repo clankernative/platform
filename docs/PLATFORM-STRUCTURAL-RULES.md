@@ -106,7 +106,15 @@ provider sends; response loss remains uncertain until qualified observation.
 
 ## Principle enforcement map
 
-| Principle | Enforcement and evidence |
+This map names obligations, not completed coverage. Slice 1 delivers the source
+and dependency ratchet. The kernel, proof, durable-state and bounded-admission
+changes follow in separate PRs. Existing application behavior remains useful
+evidence, but it does not establish the corresponding platform guarantee.
+Record a completed slice's exact PR, locally checked head and counterexamples
+before treating its row as enforced. Live provider and restore obligations
+remain separate from native source and compiler checks.
+
+| Principle | Mechanisms and required evidence |
 | --- | --- |
 | One canonical operation and transient generation | Checked registration and generated channel contracts; no manually duplicated schemas or provider scope maps. |
 | Pure decisions and mediated nondeterminism | Strict kernel dependencies, architecture/Clippy guards, explicit facts and shared engine ports; reproducible schedules. |
