@@ -746,6 +746,8 @@ impl Session {
                         == BTreeSet::from([
                             "delegation",
                             "delegation-peer",
+                            "app-ownership",
+                            "notifications",
                             "request-desk",
                             "stock-ledger"
                         ]),
@@ -758,6 +760,8 @@ impl Session {
                     ("delegation-peer", "DAY2_TEST_DELEGATION_PEER_ARTIFACT"),
                     ("request-desk", "DAY2_TEST_REQUEST_DESK_ARTIFACT"),
                     ("stock-ledger", "DAY2_TEST_STOCK_LEDGER_ARTIFACT"),
+                    ("app-ownership", "DAY2_TEST_APP_OWNERSHIP_ARTIFACT"),
+                    ("notifications", "DAY2_TEST_NOTIFICATIONS_ARTIFACT"),
                 ] {
                     let path = Path::new(&paths[fixture]);
                     let hash = path

@@ -52,6 +52,8 @@ Verify :: [].{
 			"oauth-calendar",
 			"stock-ledger",
 			"request-desk",
+			"app-ownership",
+			"notifications",
 			"redirect",
 			"relational",
 			"relational-next",

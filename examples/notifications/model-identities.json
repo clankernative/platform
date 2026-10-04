@@ -1,0 +1,8 @@
+{
+  "format": 1,
+  "models": [
+    { "identity": { "key": "b953f483cffb42299c823077b8ae4077", "prefix": "ndef" }, "table": "definitions", "roc_type": "Models.Definition", "retired": false },
+    { "identity": { "key": "7cd3e2070b7f490c8f5a3254f05d7c2c", "prefix": "nver" }, "table": "contract_versions", "roc_type": "Models.ContractVersion", "retired": false },
+    { "identity": { "key": "f4e933908ae14f87b46f9246602146ac", "prefix": "nchg" }, "table": "configuration_changes", "roc_type": "Models.ConfigurationChange", "retired": false }
+  ]
+}

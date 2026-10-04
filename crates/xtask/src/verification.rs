@@ -245,6 +245,33 @@ fn build_fixture(
     fixtures: &BTreeMap<String, PathBuf>,
 ) -> Result<PathBuf> {
     match fixture {
+        "app-ownership" => build(root, &root.join("examples/app-ownership")),
+        "notifications" => {
+            let peer = fixtures
+                .get("app-ownership")
+                .context("build ownership before notifications")?;
+            let inputs = tempfile::tempdir()?;
+            let instance = inputs.path().join("instance.json");
+            let lock = inputs.path().join("imports.json");
+            fs::write(
+                &instance,
+                serde_json::to_vec(
+                    &json!({"installation":"notifications_fixture","environment":"test","apps":{"app_ownership":{"artifact":peer,"readers":["alice"],"writers":["operator"]}}}),
+                )?,
+            )?;
+            let catalog = day2::instance_catalog::CandidateCatalog::from_instance_file(&instance)?;
+            fs::write(
+                &lock,
+                serde_json::to_vec(&catalog.pin(&["app_ownership.check".into()])?)?,
+            )?;
+            build_recipe(
+                root,
+                &root.join("examples/notifications"),
+                None,
+                None,
+                Some(&BuildImportContext { instance, lock }),
+            )
+        }
         "stock-ledger" => build(root, &root.join("fixtures/stock-ledger")),
         "request-desk" => {
             let peer = fixtures
@@ -391,6 +418,8 @@ fn verification_snapshot(root: &Path, recipe: &str) -> Result<String> {
         ("cli", root.join("cli")),
         ("fixtures", root.join("fixtures")),
         ("infra-config", root.join("infra")),
+        ("apps/app-ownership", root.join("examples/app-ownership")),
+        ("apps/notifications", root.join("examples/notifications")),
     ];
     if ["verify-fast", "verify-reports", "verify"].contains(&recipe) {
         sources.push(("apps/reports", root.join("examples/reports")));
@@ -529,6 +558,8 @@ pub(super) fn linux_delegation_tests(root: &Path) -> Result<()> {
         ("delegation", "DAY2_TEST_DELEGATION_ARTIFACT"),
         ("delegation-peer", "DAY2_TEST_DELEGATION_PEER_ARTIFACT"),
         ("request-desk", "DAY2_TEST_REQUEST_DESK_ARTIFACT"),
+        ("app-ownership", "DAY2_TEST_APP_OWNERSHIP_ARTIFACT"),
+        ("notifications", "DAY2_TEST_NOTIFICATIONS_ARTIFACT"),
         ("stock-ledger", "DAY2_TEST_STOCK_LEDGER_ARTIFACT"),
     ] {
         let path = PathBuf::from(std::env::var_os(variable).context(variable)?);
@@ -821,6 +852,8 @@ fn tests(
         ("stock-ledger", "DAY2_TEST_STOCK_LEDGER_ARTIFACT"),
         ("request-desk", "DAY2_TEST_REQUEST_DESK_ARTIFACT"),
         ("redirect", "DAY2_TEST_REDIRECT_ARTIFACT"),
+        ("app-ownership", "DAY2_TEST_APP_OWNERSHIP_ARTIFACT"),
+        ("notifications", "DAY2_TEST_NOTIFICATIONS_ARTIFACT"),
         (
             "connection-declaration",
             "DAY2_TEST_CONNECTION_DECLARATION_ARTIFACT",
@@ -925,6 +958,8 @@ fn receipt(
         let credential_metadata = artifact("credential-metadata")?;
         let connection_declaration = artifact("connection-declaration")?;
         let oauth_calendar = artifact("oauth-calendar")?;
+        let app_ownership = artifact("app-ownership")?;
+        let notifications = artifact("notifications")?;
         let baseline = artifact("relational")?;
         let collection = artifact("collection")?;
         let next = artifact("relational-next")?;
@@ -942,6 +977,7 @@ fn receipt(
             "credential_metadata":artifact_id(&credential_metadata),
             "connection_declaration":artifact_id(&connection_declaration),
             "oauth_calendar":artifact_id(&oauth_calendar),
+            "app_ownership":artifact_id(&app_ownership), "notifications":artifact_id(&notifications),
             "collection":artifact_id(&collection),
             "owned":artifact_id(&owned), "owned_probe":artifact_id(&owned_probe),
             "reports":artifact_id(&reports), "reports_probe":artifact_id(&reports_probe),
@@ -956,7 +992,7 @@ fn receipt(
                 "artifact_format":day2::artifact::CURRENT_FORMAT,
                 "registry":"compiler-derived exact command/query handler records",
                 "context":"opaque; transport and generated factories sealed by admission",
-                "pagination":{"items_per_page":100,"aggregate_output_items":1000,"bare_list_outputs":"rejected"},
+                "pagination":{"items_per_page":day2::output_schema::MAX_PAGE_ITEMS,"aggregate_output_items":day2::output_schema::MAX_TOTAL_COLLECTION_ITEMS,"bare_list_outputs":"rejected"},
                 "selection":{"find":"zero-or-one visible row; ambiguous matches rejected","predicates":"typed equality, LIKE, AND and OR; SQL before limits","ordering":"declared fields with stable ID tie-breaker"},
                 "uniqueness":{"schema":"single and compound keys","writes":"atomic SQLite enforcement on insert and update","migration":"additive, transactional and duplicate-rejecting"},
                 "backup":"complete copied-state structural validation independent of the bounded app-property snapshot; reviewed local provider stores retained; cross-store coherence requires quiesced managed work",
@@ -1064,6 +1100,8 @@ fn required_steps(scope: &str) -> Result<&'static [&'static str]> {
             "build-delegation-peer",
             "build-stock-ledger",
             "build-request-desk",
+            "build-app-ownership",
+            "build-notifications",
             "build-redirect",
             "build-relational",
             "build-collection",

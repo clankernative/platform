@@ -53,6 +53,9 @@ use std::{
 };
 use support::*;
 
+#[path = "release_execution/notifications.rs"]
+mod notifications;
+
 struct Provider {
     plan: ReleaseExecutionPlan,
     approval: ReleaseApproval,
