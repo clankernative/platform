@@ -38,6 +38,11 @@ pub(crate) struct ReviewedCatalog {
 }
 
 impl ReviewedCatalog {
+    #[cfg(test)]
+    pub(super) fn entries(&self) -> impl Iterator<Item = &ReviewedAccess> {
+        self.entries.values()
+    }
+
     pub(crate) fn new(entries: Vec<ReviewedAccess>) -> Result<Self> {
         ensure!(entries.len() <= 64, "OAuth reviewed catalog budget");
         let mut selected = BTreeMap::new();
@@ -1000,7 +1005,7 @@ impl ArtifactApprovalAuthority {
             callback.binding_namespace() == expected_namespace,
             "OAuth selected binding generation changed"
         );
-        let started = std::time::Instant::now();
+        let started = crate::oauth::effects::Instant::now();
         let Some(evidence) = self.readiness.current(&candidate.binding, &slot, now)? else {
             return Ok(None);
         };

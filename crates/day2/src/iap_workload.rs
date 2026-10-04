@@ -1,16 +1,12 @@
 //! Native host credentials for explicitly selected IAP receiver URLs. IAM
 //! Credentials holds the signing key; this adapter never discovers credentials.
 
+use crate::oauth::effects::{self, Client};
 use anyhow::{Result, ensure};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use reqwest::{blocking::Client, header::HeaderValue, redirect::Policy};
+use reqwest::{header::HeaderValue, redirect::Policy};
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::BTreeSet,
-    io::Read,
-    sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use std::{collections::BTreeSet, io::Read, sync::Arc, time::Duration};
 use url::{Host, Url};
 
 const IAM_ORIGIN: &str = "https://iamcredentials.googleapis.com/";
@@ -145,7 +141,7 @@ impl Signer {
             self.audiences.contains(audience),
             "iap_receiver_not_selected"
         );
-        let at = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())?;
+        let at = effects::wall_time()?;
         let claims = Claims {
             iss: self.service_account.clone(),
             sub: self.service_account.clone(),
@@ -273,6 +269,59 @@ mod tests {
                 )
                 .is_err()
             );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn iam_signing_replays_exact_claims_and_response_loss_with_virtual_time() -> Result<()> {
+        use crate::oauth::{effects, simulation::World};
+        struct Access;
+        impl AccessTokens for Access {
+            fn authorization(&self) -> Result<HeaderValue> {
+                Ok(HeaderValue::from_static("Bearer private-simulation-token"))
+            }
+        }
+        for seed in 0..8 {
+            for scenario in 0..3 {
+                let run = || -> Result<_> {
+                    let world = World::new(seed);
+                    effects::scope(world.clone(), || {
+                        let audience = Url::parse("https://app.example/_day2/oauth/approval")?;
+                        let claims = Claims {
+                            iss: "security@company.iam.gserviceaccount.com".into(),
+                            sub: "security@company.iam.gserviceaccount.com".into(),
+                            aud: if scenario == 2 {
+                                "https://other.example/".into()
+                            } else {
+                                audience.as_str().into()
+                            },
+                            iat: 5,
+                            exp: 305,
+                        };
+                        let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"RS256","kid":"fixture"}"#);
+                        let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims)?);
+                        let signature = URL_SAFE_NO_PAD.encode([0; 64]);
+                        world.script(vec![(200, serde_json::json!({"keyId":"fixture", "signedJwt":format!("{header}.{payload}.{signature}")}).to_string())], (scenario == 1).then_some(0));
+                        let signer = Signer::new(
+                            "security@company.iam.gserviceaccount.com",
+                            [audience.clone()].into(),
+                            Arc::new(Access),
+                        )?;
+                        let result = signer.sign_for(&audience);
+                        assert_eq!(result.is_ok(), scenario == 0);
+                        assert_eq!(world.requests().len(), 1);
+                        assert!(
+                            signer
+                                .sign_for(&Url::parse("https://other.example/")?)
+                                .is_err()
+                        );
+                        assert_eq!(world.requests().len(), 1);
+                        Ok((result.is_ok(), world.requests()))
+                    })
+                };
+                assert_eq!(run()?, run()?);
+            }
         }
         Ok(())
     }

@@ -6,11 +6,11 @@ use super::connect::ConnectIntent;
 use super::exchange::ExchangeBinding;
 use super::profiles::ValidatedTokenResponse;
 use crate::managed_credentials::crypto::KeyLease;
+use crate::oauth::effects::fill;
 use anyhow::{Result, ensure};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use day2_capabilities::oauth::ProviderCallbackRef;
 use day2_capabilities::{BindingRef, Digest};
-use getrandom::fill;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -696,8 +696,7 @@ pub(super) fn commit_external_quarantine(
 }
 
 pub(super) fn install_schema(db: &Connection) -> Result<()> {
-    db.execute_batch(
-        "CREATE TABLE IF NOT EXISTS oauth_custody_schema_version (
+    let ddl = "CREATE TABLE IF NOT EXISTS oauth_custody_schema_version (
             version INTEGER PRIMARY KEY
         );
         CREATE TABLE IF NOT EXISTS oauth_private_verifiers (
@@ -744,22 +743,26 @@ pub(super) fn install_schema(db: &Connection) -> Result<()> {
             identity_key_version TEXT NOT NULL,
             identity_nonce BLOB NOT NULL,
             identity_ciphertext BLOB NOT NULL
-        );",
-    )?;
-    let mut versions = db.prepare("SELECT version FROM oauth_custody_schema_version")?;
-    let known = versions
-        .query_map([], |row| row.get::<_, i64>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    ensure!(
-        known.is_empty() || known == [1] || known == [2],
-        "unsupported OAuth custody schema version"
-    );
-    if known.is_empty() {
-        db.execute("INSERT INTO oauth_custody_schema_version VALUES (2)", [])?;
-    } else if known == [1] {
-        db.execute("UPDATE oauth_custody_schema_version SET version = 2", [])?;
-    }
-    Ok(())
+        );";
+    db.execute_batch(ddl)?;
+    super::schema::upgrade(db, "oauth_custody_schema_version", &[1, 2, 3], 3, ddl, &[
+        super::schema::Invariant { table: "oauth_private_verifiers", predicate:
+            "length(reference) > 0 AND length(attempt) > 0 AND length(identity_digest) > 0 AND length(key_version) > 0 AND
+             typeof(nonce) = 'blob' AND length(nonce) = 12 AND typeof(ciphertext) = 'blob' AND length(ciphertext) BETWEEN 16 AND 32784" },
+        super::schema::Invariant { table: "oauth_private_codes", predicate:
+            "length(reference) > 0 AND length(attempt) > 0 AND length(identity_digest) > 0 AND length(key_version) > 0 AND
+             typeof(nonce) = 'blob' AND length(nonce) = 12 AND typeof(ciphertext) = 'blob' AND length(ciphertext) BETWEEN 16 AND 32784" },
+        super::schema::Invariant { table: "oauth_private_tokens", predicate:
+            "length(reference) > 0 AND length(slot) > 0 AND generation > 0 AND length(account) > 0 AND
+             length(identity_digest) > 0 AND length(key_version) > 0 AND
+             typeof(nonce) = 'blob' AND length(nonce) = 12 AND typeof(ciphertext) = 'blob' AND length(ciphertext) BETWEEN 16 AND 32784" },
+        super::schema::Invariant { table: "oauth_external_quarantine", predicate:
+            "length(attempt) > 0 AND length(slot) > 0 AND generation > 0 AND length(account) > 0 AND length(scope_evidence) > 0 AND
+             length(challenge) > 0 AND length(token_reference) > 0 AND length(token_identity_digest) > 0 AND length(token_key_version) > 0 AND
+             length(identity_digest) > 0 AND length(identity_key_version) > 0 AND
+             typeof(token_nonce) = 'blob' AND length(token_nonce) = 12 AND typeof(token_ciphertext) = 'blob' AND length(token_ciphertext) BETWEEN 16 AND 32784 AND
+             typeof(identity_nonce) = 'blob' AND length(identity_nonce) = 12 AND typeof(identity_ciphertext) = 'blob' AND length(identity_ciphertext) BETWEEN 16 AND 32784" },
+    ])
 }
 
 #[cfg(test)]
@@ -780,7 +783,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
         db.execute("UPDATE oauth_custody_schema_version SET version = 99", [])
             .unwrap();
         assert!(super::super::connect::install_schema(&db).is_err());

@@ -6,6 +6,7 @@ use super::{
     OutboundReadiness, QualifiedConnections, binding_namespace, instance_identity, profiles,
 };
 use crate::oauth::approval_registry::{ApprovalKeyProvider, ApprovalKeyPurpose};
+use crate::oauth::effects::{Client, Instant, Response};
 use crate::{artifact::Instance, iap, oauth::approval_keys::AccessTokenSource};
 use anyhow::{Context, Result, ensure};
 use day2_capabilities::{
@@ -15,10 +16,7 @@ use day2_capabilities::{
         SlotOwner,
     },
 };
-use reqwest::{
-    blocking::Client,
-    header::{AUTHORIZATION, HeaderValue},
-};
+use reqwest::header::{AUTHORIZATION, HeaderValue};
 use rusqlite::OptionalExtension;
 use serde_json::Value;
 use std::{
@@ -27,7 +25,7 @@ use std::{
     net::IpAddr,
     path::PathBuf,
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    time::Duration,
 };
 use url::Url;
 
@@ -732,10 +730,10 @@ impl GcpEdge {
         Ok(address)
     }
 
-    fn tls_probe(&self, address: IpAddr) -> Result<reqwest::blocking::Response> {
+    fn tls_probe(&self, address: IpAddr) -> Result<Response> {
         #[cfg(test)]
         if self.fixture {
-            return Ok(self.client.get(self.tls.clone()).send()?);
+            return self.client.get(self.tls.clone()).send();
         }
         let response = self.client.get(self.tls.clone()).send()?;
         ensure!(
@@ -1006,6 +1004,63 @@ pub(crate) mod tests {
             json!({"name":edge.backend,"id":parts[5],"selfLink":backend,"iap":{"enabled":true},"description":json!({"kubernetes.io/service-name":edge.service}).to_string()}),
             json!({"name":edge.map,"selfLink":format!("https://www.googleapis.com/compute/v1/projects/{}/global/urlMaps/{}",edge.project,edge.map),"fingerprint":"stable","defaultService":backend,"hostRules":[{"hosts":[edge.host],"pathMatcher":"shell"}],"pathMatchers":[{"name":"shell","defaultService":backend,"pathRules":[{"paths":["/*"],"service":backend}]}]}),
         )
+    }
+
+    #[test]
+    fn cloud_edge_and_readiness_lease_faults_replay_with_virtual_clocks() -> Result<()> {
+        use crate::oauth::security_shell::ShellGuard;
+        use crate::oauth::{effects, simulation::World};
+        for seed in 0..8 {
+            for fault in std::iter::once(None).chain((0..10).map(Some)) {
+                let run = || -> Result<_> {
+                    let world = World::new(seed);
+                    effects::scope(world.clone(), || {
+                        let selected = selected()?;
+                        let facts = ShellFacts::from_gke(selected.instance(), Arc::new(Tokens))?;
+                        let (project, backend, map) = documents(&facts.edge);
+                        let (proxy, forwarding) = frontend(&facts.edge);
+                        let replies = vec![
+                            (200, project),
+                            (200, backend.clone()),
+                            (200, map.clone()),
+                            (200, proxy.clone()),
+                            (200, forwarding.clone()),
+                            (302, json!("IAP login")),
+                            (200, backend),
+                            (200, map),
+                            (200, proxy),
+                            (200, forwarding),
+                        ];
+                        world.script(
+                            replies
+                                .into_iter()
+                                .map(|(status, value)| (status, value.to_string()))
+                                .collect(),
+                            fault,
+                        );
+                        assert!(facts.lease.lock().unwrap().is_none());
+                        let accepted = facts.check(100).is_ok();
+                        assert_eq!(accepted, fault.is_none());
+                        assert_eq!(facts.lease.lock().unwrap().is_some(), accepted);
+                        if accepted {
+                            facts.check(159)?;
+                            assert_eq!(world.requests().len(), 10);
+                            world.advance(60);
+                            world.script(vec![(403, json!({"error":"retired"}).to_string())], None);
+                            assert!(facts.check(100).is_err());
+                            assert!(facts.lease.lock().unwrap().is_none());
+                        }
+                        Ok((
+                            accepted,
+                            facts.lease.lock().unwrap().is_some(),
+                            world.requests(),
+                        ))
+                    })
+                };
+                assert_eq!(run()?, run()?);
+            }
+        }
+        Ok(())
     }
 
     struct Wire {

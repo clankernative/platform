@@ -52,8 +52,7 @@ pub struct ReplacementReceipt {
 }
 
 pub fn install_schema(db: &Connection) -> Result<()> {
-    db.execute_batch(
-        "PRAGMA foreign_keys = ON;
+    let ddl = "PRAGMA foreign_keys = ON;
         CREATE TABLE IF NOT EXISTS oauth_schema_version (
             version INTEGER PRIMARY KEY
         );
@@ -82,22 +81,25 @@ pub fn install_schema(db: &Connection) -> Result<()> {
             )),
             next_version INTEGER,
             receipt TEXT,
-            CHECK((state = 'replacement_committed') = (next_version IS NOT NULL AND receipt IS NOT NULL)),
+            CHECK((state = 'replacement_committed') = (next_version IS NOT NULL)),
+            CHECK((state = 'replacement_committed') = (receipt IS NOT NULL)),
             UNIQUE(slot, generation, base_version)
-        );",
-    )?;
-    let mut versions = db.prepare("SELECT version FROM oauth_schema_version")?;
-    let known = versions
-        .query_map([], |row| row.get::<_, i64>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    ensure!(
-        known.is_empty() || known == [1],
-        "unsupported OAuth schema version"
-    );
-    if known.is_empty() {
-        db.execute("INSERT INTO oauth_schema_version VALUES (1)", [])?;
-    }
-    Ok(())
+        );";
+    db.execute_batch(ddl)?;
+    super::schema::upgrade(db, "oauth_schema_version", &[1, 2], 2, ddl, &[
+        super::schema::Invariant { table: "oauth_connection_slots", predicate:
+            "generation > 0 AND token_version > 0 AND security_epoch > 0 AND
+             length(slot) > 0 AND length(profile) > 0 AND length(account) > 0 AND length(affinity) > 0 AND
+             status IN ('active', 'reauth_required', 'disabled')" },
+        super::schema::Invariant { table: "oauth_refresh_attempts", predicate:
+            "generation > 0 AND base_version > 0 AND security_epoch > 0 AND
+             length(attempt) > 0 AND length(slot) > 0 AND length(profile) > 0 AND length(account) > 0 AND length(affinity) > 0 AND
+             state IN ('ready', 'may_have_been_sent', 'uncertain', 'replacement_committed', 'publication_rejected', 'reauth_required') AND
+             (state = 'replacement_committed') = (next_version IS NOT NULL) AND
+             (state = 'replacement_committed') = (receipt IS NOT NULL) AND
+             (next_version IS NULL OR next_version = base_version + 1) AND
+             (receipt IS NULL OR length(receipt) > 0)" },
+    ])
 }
 
 /// A caller must establish eligibility from current identity, slot and custody
@@ -676,7 +678,7 @@ mod tests {
     fn unknown_schema_version_fails_closed() {
         let db = Connection::open_in_memory().unwrap();
         install_schema(&db).unwrap();
-        db.execute("UPDATE oauth_schema_version SET version = 2", [])
+        db.execute("UPDATE oauth_schema_version SET version = 3", [])
             .unwrap();
         assert!(install_schema(&db).is_err());
     }

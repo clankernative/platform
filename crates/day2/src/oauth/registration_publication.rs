@@ -4,6 +4,7 @@
 //! canary identity and the original expiry are checked before a native import.
 
 use super::{Receipt, TargetIdentity, VALID_SECONDS};
+use crate::oauth::effects::Instant;
 use crate::{
     iap,
     oauth::{admission, approval_registry, profiles},
@@ -13,7 +14,7 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use day2_capabilities::{BindingRef, Digest, oauth::SecurityOriginRef};
 use ring::hmac;
 use serde::{Deserialize, Serialize};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -287,6 +288,70 @@ pub(in crate::oauth) mod tests {
             email: "canary@example.com".into(),
             subject: "accounts.google.com:google-canary-subject".into(),
         }
+    }
+
+    #[test]
+    fn native_publication_replay_cannot_renew_virtual_or_wall_expiry() -> Result<()> {
+        use crate::oauth::{effects, registration, simulation::World};
+        for seed in 0..8 {
+            let run = || -> Result<_> {
+                let world = World::new(seed);
+                world.script(responses(), None);
+                effects::scope(world.clone(), || {
+                    let (selected, shell) = admission::tests::publication_fixture()?;
+                    let target = selected.google_targets(&shell)?.remove(0);
+                    let codes = crate::oauth::simulation::registration_codes(&target)?;
+                    let mut native = registration::Session::new(
+                        target,
+                        codes,
+                        Arc::new(crate::oauth::registration::tests::TokensSource(
+                            AtomicUsize::new(0),
+                        )),
+                    )?;
+                    for action in crate::oauth::simulation::REGISTRATION_ACTIONS {
+                        native.call(crate::automation::Request {
+                            protocol: 1,
+                            action: action.into(),
+                            input: "{}".into(),
+                        })?;
+                    }
+                    let receipt = native.finish()?;
+                    let keys = Keys::default();
+                    let now = effects::wall_time()?;
+                    let proof = attest(&receipt, &selected, &keys, now)?;
+                    let imported = verify(&proof, "workspace", &identity(), &selected, &keys, now)?;
+                    assert!(imported.fresh(now));
+                    world.advance(299);
+                    let near_expiry = verify(
+                        &proof,
+                        "workspace",
+                        &identity(),
+                        &selected,
+                        &keys,
+                        now + 299,
+                    )?;
+                    assert!(near_expiry.fresh(now + 299));
+                    world.advance(1);
+                    assert!(!receipt.fresh(now));
+                    assert!(!near_expiry.fresh(now + 299));
+                    assert!(
+                        verify(
+                            &proof,
+                            "workspace",
+                            &identity(),
+                            &selected,
+                            &keys,
+                            now + 300
+                        )
+                        .is_err()
+                    );
+                    assert!(attest(&receipt, &selected, &keys, now).is_err());
+                    Ok((serde_json::to_value(proof)?, world.requests()))
+                })
+            };
+            assert_eq!(run()?, run()?);
+        }
+        Ok(())
     }
 
     #[test]

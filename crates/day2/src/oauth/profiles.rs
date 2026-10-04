@@ -1769,11 +1769,16 @@ pub(super) mod tests {
             .unwrap()
             .unwrap();
         let shell = shell_key(&pending);
-        db.execute(
-            "UPDATE oauth_external_quarantine SET token_ciphertext = x'00'",
-            [],
-        )
-        .unwrap();
+        assert!(
+            db.execute(
+                "UPDATE oauth_external_quarantine SET token_ciphertext = x'00'",
+                [],
+            )
+            .is_err()
+        );
+        // A well-shaped but unauthentic envelope passes SQL shape checks and
+        // must still be refused by custody authentication before activation.
+        db.execute("UPDATE oauth_external_quarantine SET token_ciphertext = zeroblob(length(token_ciphertext))", []).unwrap();
         assert!(
             external::approve_external(
                 &mut db,
