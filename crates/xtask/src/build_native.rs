@@ -410,6 +410,7 @@ pub(super) fn platform_sources(root: &Path) -> Result<BTreeMap<String, String>> 
         "rust-toolchain.toml",
         "toolchain.json",
         ".dockerignore",
+        "architecture-proofs.json",
     ] {
         hashes.insert(path.to_string(), digest(&fs::read(root.join(path))?));
     }

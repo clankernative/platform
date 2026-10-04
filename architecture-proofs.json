@@ -1,0 +1,83 @@
+{
+  "version": 1,
+  "proofs": [
+    {
+      "source": "crates/day2-control/src/release.rs",
+      "type_name": "ApprovedRelease",
+      "kind": "readiness",
+      "consuming_methods": [],
+      "methods": ["pub fn id(&self) -> &Digest"],
+      "factories": [
+        {"owner": "Journal", "signature": "pub fn approve_release(&mut self, approval: &ReleaseApproval) -> Result<ApprovedRelease>"},
+        {"owner": "Journal", "signature": "pub fn load_approved_release(&self, id: &Digest) -> Result<ApprovedRelease>"},
+        {"owner": "Journal", "signature": "pub(crate) fn recover_approved_release_in(tx: &Transaction<'_>, id: &Digest) -> Result<ApprovedRelease>"}
+      ]
+    },
+    {
+      "source": "crates/day2-control/src/release.rs",
+      "type_name": "ReadyRelease",
+      "kind": "readiness",
+      "consuming_methods": [],
+      "methods": ["pub fn id(&self) -> &Digest"],
+      "factories": [
+        {"owner": "Journal", "signature": "pub fn prepare_release(&mut self, approved: &ApprovedRelease) -> Result<ReadyRelease>"},
+        {"owner": "Journal", "signature": "pub(crate) fn prepare_release_in(tx: &Transaction<'_>, approved: &ApprovedRelease) -> Result<ReadyRelease>"},
+        {"owner": "Journal", "signature": "pub(crate) fn recover_ready_release_in(tx: &Transaction<'_>, id: &Digest, release: &Digest) -> Result<ReadyRelease>"}
+      ]
+    },
+    {
+      "source": "crates/day2/src/managed_credentials/store.rs",
+      "type_name": "HumanRevealPermit",
+      "kind": "secret_permit",
+      "consuming_methods": [
+        "into_response_body"
+      ],
+      "methods": [
+        "pub(crate) fn encryption_version(&self) -> &str",
+        "pub(crate) fn security_epoch(&self) -> u64",
+        "pub fn into_response_body(self, lease: &KeyLease) -> Result<String>"
+      ],
+      "factories": [
+        {"owner": null, "signature": "pub(crate) fn authorize_reveal(db: &mut Connection, post: VerifiedHumanPost) -> Result<Option<HumanRevealPermit>>"},
+        {"owner": null, "signature": "pub(crate) fn authorize_reveal_in(tx: &Transaction<'_>, post: VerifiedHumanPost) -> Result<Option<PendingReveal>>"},
+        {"owner": "PendingReveal", "signature": "pub(crate) fn commit(self, tx: crate::write_queue::WriteTransaction<'_>) -> Result<HumanRevealPermit>"}
+      ]
+    },
+    {
+      "source": "crates/day2/src/managed_credentials/store.rs",
+      "type_name": "PendingReveal",
+      "kind": "secret_permit",
+      "consuming_methods": [
+        "commit"
+      ],
+      "methods": ["pub(crate) fn commit(self, tx: crate::write_queue::WriteTransaction<'_>) -> Result<HumanRevealPermit>"],
+      "factories": [
+        {"owner": null, "signature": "pub(crate) fn authorize_reveal_in(tx: &Transaction<'_>, post: VerifiedHumanPost) -> Result<Option<PendingReveal>>"}
+      ]
+    },
+    {
+      "source": "crates/day2/src/oauth/exchange.rs",
+      "type_name": "ExchangeDispatchPermit",
+      "kind": "consuming",
+      "consuming_methods": [
+        "send"
+      ],
+      "methods": ["pub fn send(self, transport: impl FnOnce(&ExchangeRequest<'_>) -> Result<TokenHttpResponse>) -> ExchangeObservation"],
+      "factories": [
+        {"owner": null, "signature": "pub fn authorize_and_commit_qualified_exchange(db: &mut Connection, input: OutboundQualification<'_>, now: i64) -> Result<Option<ExchangeDispatchPermit>>"}
+      ]
+    },
+    {
+      "source": "crates/day2/src/oauth/store.rs",
+      "type_name": "RefreshDispatchPermit",
+      "kind": "consuming",
+      "consuming_methods": [
+        "send"
+      ],
+      "methods": ["pub fn attempt(&self) -> &str", "pub fn send<T>(self, transport: impl FnOnce(&RefreshEligibility) -> T) -> T"],
+      "factories": [
+        {"owner": null, "signature": "pub fn authorize_and_commit_dispatch(db: &mut Connection, attempt: &str) -> Result<Option<RefreshDispatchPermit>>"}
+      ]
+    }
+  ]
+}

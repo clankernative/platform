@@ -96,3 +96,6 @@ pub fn digest(bytes: &[u8]) -> String {
     format!("sha256:{:x}", Sha256::digest(bytes))
 }
 mod codegen;
+
+#[cfg(test)]
+mod structural_proof_tests;

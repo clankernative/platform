@@ -92,6 +92,7 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
     let scope = recipe_scope(recipe)?;
     architecture::check(root)?;
     architecture_dependencies::check(root)?;
+    architecture_proofs::check(root)?;
     let snapshot = verification_snapshot(root, recipe)?;
     let runner = workflows::build(root)?;
     let mut fixtures: BTreeMap<String, PathBuf> = BTreeMap::new();
@@ -172,6 +173,7 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
                 ensure!(parameters.is_empty(), "lint accepts no overrides");
                 architecture::check(root)?;
                 architecture_dependencies::check(root)?;
+                architecture_proofs::check(root)?;
                 run(
                     root,
                     Command::new("cargo").args([

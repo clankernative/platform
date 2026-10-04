@@ -95,6 +95,7 @@ fn platform(directory: &Path) -> Result<PlatformInputs> {
         "LICENSE",
         "THIRD-PARTY-NOTICES.txt",
         "dependency-inventory.json",
+        "architecture-proofs.json",
     ] {
         write(&root.join(name), b"approved platform input", false)?;
     }
@@ -168,6 +169,7 @@ fn architecture_policy_changes_invalidate_the_platform_and_materialization() -> 
     for policy in [
         "architecture-rules.json",
         "architecture-boundaries.json",
+        "architecture-proofs.json",
         "architecture/clippy.toml",
     ] {
         let directory = tempfile::tempdir()?;

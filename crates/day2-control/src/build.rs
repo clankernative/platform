@@ -128,6 +128,7 @@ impl PlatformInputs {
             "LICENSE",
             "THIRD-PARTY-NOTICES.txt",
             "dependency-inventory.json",
+            "architecture-proofs.json",
         ] {
             let file = pin_file(&root.join(name))?;
             total += file.bytes;
