@@ -8,6 +8,8 @@ use std::{
     process::Command,
 };
 
+mod architecture;
+mod architecture_dependencies;
 mod build_native;
 mod control_simulation;
 mod formatter_bootstrap;
@@ -250,6 +252,34 @@ fn main() -> Result<()> {
         Some(lock)
     };
     match action.as_str() {
+        "architecture-check" => {
+            ensure!(
+                args.next().is_none(),
+                "architecture-check accepts no arguments"
+            );
+            architecture::check(&root)?;
+            architecture_dependencies::check(&root)?;
+        }
+        "architecture-inventory" => {
+            ensure!(
+                args.next().is_none(),
+                "architecture-inventory accepts no arguments"
+            );
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&architecture::inventory(&root)?)?
+            );
+        }
+        "architecture-dependencies" => {
+            ensure!(
+                args.next().is_none(),
+                "architecture-dependencies accepts no arguments"
+            );
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&architecture_dependencies::inventory(&root)?)?
+            );
+        }
         "source-check" => {
             ensure!(args.next().is_none(), "source-check accepts no arguments");
             tooling::source_check(&root)?;

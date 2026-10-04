@@ -13,3 +13,6 @@ day2 = { path = "../day2" }
 day2-control = { path = "../day2-control" }
 tempfile = "3.27"
 rusqlite = { version = "=0.40.2", features = ["bundled"] }
+syn = { version = "=2.0.119", features = ["full", "visit"] }
+quote = "=1.0.47"
+proc-macro2 = "=1.0.107"

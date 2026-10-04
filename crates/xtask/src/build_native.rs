@@ -404,6 +404,8 @@ pub(super) fn platform_sources(root: &Path) -> Result<BTreeMap<String, String>> 
     for path in [
         "Cargo.toml",
         "Cargo.lock",
+        "architecture-rules.json",
+        "architecture-boundaries.json",
         "rust-toolchain.toml",
         "toolchain.json",
         ".dockerignore",
