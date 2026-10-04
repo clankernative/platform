@@ -21,6 +21,7 @@ ring = "=0.17.14"
 url = "2.5"
 day2 = { path = "../day2" }
 day2-capabilities = { path = "../day2-capabilities" }
+day2-kernel = { path = "../day2-kernel" }
 durable-temporal = { path = "../durable-temporal" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 
