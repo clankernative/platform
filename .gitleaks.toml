@@ -6,7 +6,7 @@ useDefault = true
 [[allowlists]]
 description = "Public schema identity keys, not authentication credentials"
 condition = "AND"
-paths = ['''(^|/)(fixtures/[^/]+|examples/reports)/model-identities\.json$''']
+paths = ['''(^|/)(fixtures/[^/]+|examples/reports|examples/notifications)/model-identities\.json$''']
 regexTarget = "line"
 regexes = [
   '''^\s*"key": "[a-f0-9]{32}",?$''',
