@@ -69,6 +69,7 @@
     "crates/day2-control/tests/iap_service_jwt.rs",
     "crates/day2-control/tests/journal.rs",
     "crates/day2-control/tests/journal_guards.rs",
+    "crates/day2-control/tests/journal_storage.rs",
     "crates/day2-control/tests/kernel_compatibility.rs",
     "crates/day2-control/tests/kubernetes_conformance.rs",
     "crates/day2-control/tests/provider_conformance.rs",
