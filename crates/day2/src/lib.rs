@@ -97,5 +97,4 @@ pub fn digest(bytes: &[u8]) -> String {
 }
 mod codegen;
 
-#[cfg(test)]
-mod structural_proof_tests;
+mod structural_proofs;

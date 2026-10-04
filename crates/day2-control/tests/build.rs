@@ -88,6 +88,7 @@ fn platform(directory: &Path) -> Result<PlatformInputs> {
         "Cargo.lock",
         "architecture-rules.json",
         "architecture-boundaries.json",
+        "architecture-proofs.json",
         "architecture/clippy.toml",
         "rust-toolchain.toml",
         "toolchain.json",
@@ -95,7 +96,6 @@ fn platform(directory: &Path) -> Result<PlatformInputs> {
         "LICENSE",
         "THIRD-PARTY-NOTICES.txt",
         "dependency-inventory.json",
-        "architecture-proofs.json",
     ] {
         write(&root.join(name), b"approved platform input", false)?;
     }

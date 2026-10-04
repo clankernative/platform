@@ -121,6 +121,7 @@ impl PlatformInputs {
             "Cargo.lock",
             "architecture-rules.json",
             "architecture-boundaries.json",
+            "architecture-proofs.json",
             "architecture/clippy.toml",
             "rust-toolchain.toml",
             "toolchain.json",
@@ -128,7 +129,6 @@ impl PlatformInputs {
             "LICENSE",
             "THIRD-PARTY-NOTICES.txt",
             "dependency-inventory.json",
-            "architecture-proofs.json",
         ] {
             let file = pin_file(&root.join(name))?;
             total += file.bytes;

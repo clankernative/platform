@@ -147,6 +147,26 @@ impl ReadyRelease {
     }
 }
 
+// Always compiled, including production cfg(not(test)) implementations elsewhere
+// in this crate. Historical handles may clone, but cannot be created by decoding
+// untrusted wire input or by taking a default value.
+const _: () = {
+    macro_rules! assert_not_impl {
+        ($type:ty, $trait:path) => {{
+            trait AmbiguousIfImpl<A> {
+                fn check() {}
+            }
+            impl<T: ?Sized> AmbiguousIfImpl<()> for T {}
+            impl<T: ?Sized + $trait> AmbiguousIfImpl<u8> for T {}
+            let _ = <$type as AmbiguousIfImpl<_>>::check;
+        }};
+    }
+    assert_not_impl!(ApprovedRelease, Default);
+    assert_not_impl!(ReadyRelease, Default);
+    assert_not_impl!(ApprovedRelease, serde::Deserialize<'static>);
+    assert_not_impl!(ReadyRelease, serde::Deserialize<'static>);
+};
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SecretReceipt {

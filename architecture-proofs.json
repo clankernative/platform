@@ -1,5 +1,9 @@
 {
   "version": 1,
+  "trait_checks": [
+    {"source":"crates/day2/src/structural_proofs.rs","scope":"module","fingerprint":"sha256:ba3a91704ba2357c6cc7b1e83bd2f9895a946c166290699f7759d2b50acd7f3c","registration":{"source":"crates/day2/src/lib.rs","module":"structural_proofs"}},
+    {"source":"crates/day2-control/src/release.rs","scope":"const","fingerprint":"sha256:9c616765ed20205205236e2e4d7cc7a77a49512dcd9d0c33c34e1c40da5209e3","registration":null}
+  ],
   "proofs": [
     {
       "source": "crates/day2-control/src/release.rs",

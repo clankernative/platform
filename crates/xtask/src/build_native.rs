@@ -406,11 +406,11 @@ pub(super) fn platform_sources(root: &Path) -> Result<BTreeMap<String, String>> 
         "Cargo.lock",
         "architecture-rules.json",
         "architecture-boundaries.json",
+        "architecture-proofs.json",
         "architecture/clippy.toml",
         "rust-toolchain.toml",
         "toolchain.json",
         ".dockerignore",
-        "architecture-proofs.json",
     ] {
         hashes.insert(path.to_string(), digest(&fs::read(root.join(path))?));
     }
@@ -770,7 +770,7 @@ mod platform_input_tests {
     use super::*;
 
     #[test]
-    fn clippy_configuration_tampering_changes_native_build_identity() -> Result<()> {
+    fn architecture_policy_tampering_changes_native_build_identity() -> Result<()> {
         let directory = tempfile::tempdir()?;
         let root = directory.path();
         fs::create_dir(root.join("architecture"))?;
@@ -779,6 +779,7 @@ mod platform_input_tests {
             "Cargo.lock",
             "architecture-rules.json",
             "architecture-boundaries.json",
+            "architecture-proofs.json",
             "architecture/clippy.toml",
             "rust-toolchain.toml",
             "toolchain.json",
@@ -800,22 +801,21 @@ mod platform_input_tests {
         }
         let approved = platform_sources(root)?;
         assert_eq!(approved, platform_sources(root)?);
-        assert_eq!(
-            approved["architecture/clippy.toml"],
-            digest(b"approved input")
-        );
-        fs::write(
-            root.join("architecture/clippy.toml"),
-            b"weakened restrictions",
-        )?;
-        let changed = platform_sources(root)?;
-        assert_ne!(approved, changed);
-        assert_ne!(
-            approved["architecture/clippy.toml"],
-            changed["architecture/clippy.toml"]
-        );
-        fs::remove_file(root.join("architecture/clippy.toml"))?;
-        assert!(platform_sources(root).is_err());
+        for policy in [
+            "architecture-rules.json",
+            "architecture-boundaries.json",
+            "architecture-proofs.json",
+            "architecture/clippy.toml",
+        ] {
+            assert_eq!(approved[policy], digest(b"approved input"));
+            fs::write(root.join(policy), b"weakened restrictions")?;
+            let changed = platform_sources(root)?;
+            assert_ne!(approved, changed);
+            assert_ne!(approved[policy], changed[policy]);
+            fs::remove_file(root.join(policy))?;
+            assert!(platform_sources(root).is_err());
+            fs::write(root.join(policy), b"approved input")?;
+        }
         Ok(())
     }
 }

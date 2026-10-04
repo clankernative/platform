@@ -1,5 +1,6 @@
-// Type inference becomes ambiguous if the protected type implements the trait.
-// Unlike an external import failure, this checks private types in their crate.
+//! Production type checks for selected authority handles. These compile in the
+//! normal crate as well as tests, so a cfg(not(test)) trait impl cannot evade them.
+//! Type inference becomes ambiguous if a protected type implements the trait.
 macro_rules! assert_not_impl {
     ($type:ty, $trait:path) => {{
         trait AmbiguousIfImpl<A> {
@@ -21,8 +22,16 @@ macro_rules! assert_consuming {
     };
 }
 
-#[test]
-fn dispatch_and_reveal_permits_cannot_be_reconstructed_or_duplicated() {
+macro_rules! assert_secret_references {
+    ($type:ty) => {
+        assert_not_impl!(&$type, std::fmt::Debug);
+        assert_not_impl!(&mut $type, std::fmt::Debug);
+        assert_not_impl!(&$type, serde::Serialize);
+        assert_not_impl!(&mut $type, serde::Serialize);
+    };
+}
+
+const _: () = {
     assert_consuming!(crate::oauth::exchange::ExchangeDispatchPermit);
     assert_consuming!(crate::oauth::store::RefreshDispatchPermit);
     assert_consuming!(crate::managed_credentials::store::HumanRevealPermit);
@@ -35,4 +44,6 @@ fn dispatch_and_reveal_permits_cannot_be_reconstructed_or_duplicated() {
         crate::managed_credentials::store::PendingReveal,
         std::fmt::Debug
     );
-}
+    assert_secret_references!(crate::managed_credentials::store::HumanRevealPermit);
+    assert_secret_references!(crate::managed_credentials::store::PendingReveal);
+};

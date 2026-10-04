@@ -7,7 +7,7 @@
 
 use anyhow::{Context, Result, ensure};
 use quote::{ToTokens, quote};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, fs, path::Path};
 use syn::{Item, Type, Visibility, punctuated::Punctuated, token::Comma, visit::Visit};
 
@@ -55,6 +55,38 @@ struct Factory {
 struct Policy {
     version: u32,
     proofs: Vec<Proof>,
+    #[serde(default)]
+    trait_checks: Vec<TraitCheck>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum TraitScope {
+    Module,
+    Const,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TraitCheck {
+    source: String,
+    scope: TraitScope,
+    fingerprint: String,
+    registration: Option<Registration>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Registration {
+    source: String,
+    module: String,
+}
+
+#[derive(Serialize)]
+pub struct TraitCheckFinding {
+    source: String,
+    scope: TraitScope,
+    fingerprint: String,
 }
 
 fn read_regular(path: &Path) -> Result<Vec<u8>> {
@@ -147,10 +179,148 @@ fn validate_policy(policy: &Policy) -> Result<()> {
         );
         reviewed_factories(proof)?;
     }
+    ensure!(
+        policy.trait_checks.len() <= 16,
+        "trait check catalog budget"
+    );
+    let mut sources = BTreeSet::new();
+    for check in &policy.trait_checks {
+        ensure!(
+            sources.insert(&check.source),
+            "duplicate trait check source"
+        );
+        ensure!(
+            check.fingerprint.starts_with("sha256:")
+                && check.fingerprint.len() == 71
+                && check.fingerprint[7..]
+                    .bytes()
+                    .all(|value| value.is_ascii_hexdigit()),
+            "invalid trait check fingerprint"
+        );
+        if let Some(registration) = &check.registration {
+            syn::parse_str::<syn::Ident>(&registration.module)?;
+        }
+    }
     Ok(())
 }
 
+fn parse_source(root: &Path, source: &str) -> Result<syn::File> {
+    let relative = Path::new(source);
+    ensure!(
+        relative.starts_with("crates")
+            && relative
+                .extension()
+                .is_some_and(|extension| extension == "rs")
+            && relative
+                .components()
+                .all(|component| matches!(component, std::path::Component::Normal(_))),
+        "invalid trait check source"
+    );
+    let path = source_path(root, source)?;
+    ensure!(
+        path.canonicalize()?.starts_with(root),
+        "trait source leaves platform root"
+    );
+    let bytes = read_regular(&path)?;
+    Ok(syn::parse_file(std::str::from_utf8(&bytes)?)?)
+}
+
+fn trait_check_finding(root: &Path, check: &TraitCheck) -> Result<TraitCheckFinding> {
+    let syntax = parse_source(root, &check.source)?;
+    ensure!(
+        syntax
+            .attrs
+            .iter()
+            .all(|attribute| attribute.path().is_ident("doc")),
+        "trait check source must compile unconditionally"
+    );
+    if let Some(registration) = &check.registration {
+        let library = parse_source(root, &registration.source)?;
+        let registrations: Vec<_> = library
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Mod(module) if module.ident == registration.module => Some(module),
+                _ => None,
+            })
+            .collect();
+        ensure!(
+            registrations.len() == 1
+                && registrations[0].attrs.is_empty()
+                && registrations[0].content.is_none()
+                && matches!(registrations[0].vis, Visibility::Inherited),
+            "selected trait module requires unconditional private registration"
+        );
+        ensure!(
+            Path::new(&registration.source)
+                .parent()
+                .map(|parent| parent.join(format!("{}.rs", registration.module)))
+                .as_deref()
+                == Some(Path::new(&check.source)),
+            "trait module registration must name its exact source"
+        );
+    }
+    let tokens = match check.scope {
+        TraitScope::Module => {
+            ensure!(
+                syntax.items.iter().all(|item| match item {
+                    Item::Macro(item) => item.attrs.is_empty(),
+                    Item::Const(item) => item.attrs.is_empty(),
+                    _ => false,
+                }),
+                "selected trait module must contain unconditional macros and const checks"
+            );
+            ensure!(
+                syntax
+                    .items
+                    .iter()
+                    .any(|item| matches!(item, Item::Const(_))),
+                "selected trait module requires const checks"
+            );
+            let items = &syntax.items;
+            quote!(#(#items)*)
+        }
+        TraitScope::Const => {
+            let checks: Vec<_> = syntax.items.iter().filter_map(|item| {
+                let Item::Const(item) = item else { return None; };
+                let syn::Expr::Block(block) = item.expr.as_ref() else { return None; };
+                block.block.stmts.iter().any(|statement| matches!(statement,
+                    syn::Stmt::Item(Item::Macro(definition)) if definition.ident.as_ref().is_some_and(|name| name == "assert_not_impl")
+                )).then_some(item)
+            }).collect();
+            ensure!(
+                checks.len() == 1 && checks[0].attrs.is_empty(),
+                "selected trait const must compile unconditionally"
+            );
+            checks[0].to_token_stream()
+        }
+    };
+    Ok(TraitCheckFinding {
+        source: check.source.clone(),
+        scope: check.scope,
+        fingerprint: day2::digest(tokens.to_string().as_bytes()),
+    })
+}
+
+/// Read-only normalized assertion facts for explicit policy review.
+pub fn trait_check_inventory(root: &Path) -> Result<Vec<TraitCheckFinding>> {
+    let root = root.canonicalize()?;
+    let policy: Policy = day2::json::decode_evidence(&read_regular(&root.join(POLICY))?)?;
+    validate_policy(&policy)?;
+    policy
+        .trait_checks
+        .iter()
+        .map(|check| trait_check_finding(&root, check))
+        .collect()
+}
+
 fn type_name(ty: &Type) -> Option<String> {
+    match ty {
+        Type::Reference(reference) => return type_name(&reference.elem),
+        Type::Paren(parenthesized) => return type_name(&parenthesized.elem),
+        Type::Group(group) => return type_name(&group.elem),
+        _ => {}
+    }
     let Type::Path(path) = ty else {
         return None;
     };
@@ -503,6 +673,13 @@ pub fn check(root: &Path) -> Result<()> {
     let root = root.canonicalize()?;
     let policy: Policy = day2::json::decode_evidence(&read_regular(&root.join(POLICY))?)?;
     validate_policy(&policy)?;
+    for check in &policy.trait_checks {
+        ensure!(
+            trait_check_finding(&root, check)?.fingerprint == check.fingerprint,
+            "reviewed production trait checks changed: {}",
+            check.source
+        );
+    }
     for proof in &policy.proofs {
         let path = source_path(&root, &proof.source)?;
         ensure!(
@@ -632,9 +809,17 @@ mod tests {
         for source in [
             "#[cfg_attr(feature = \"wire\", derive(Deserialize))] pub struct Permit { claim: Claim } impl Permit { pub fn send(self) {} }",
             "pub struct Permit { claim: Claim } impl Clone for Permit {} impl Permit { pub fn send(self) {} }",
+            "pub struct Permit { claim: Claim } impl Debug for &Permit {} impl Permit { pub fn send(self) {} }",
+            "pub struct Permit { claim: Claim } impl Serialize for &mut (Permit) {} impl Permit { pub fn send(self) {} }",
         ] {
             assert!(check_source(source).is_err());
         }
+        check_source("pub struct Permit { claim: Claim } struct Ordinary; impl Debug for &Ordinary {} impl Permit { pub fn send(self) {} }").unwrap();
+        let grouped = Type::Group(syn::TypeGroup {
+            group_token: Default::default(),
+            elem: Box::new(syn::parse_quote!(&Permit)),
+        });
+        assert_eq!(type_name(&grouped).as_deref(), Some("Permit"));
     }
 
     #[test]
@@ -665,6 +850,7 @@ mod tests {
         let mut policy = Policy {
             version: 1,
             proofs: vec![proof(Kind::Consuming)],
+            trait_checks: vec![],
         };
         validate_policy(&policy).unwrap();
         policy.proofs.push(proof(Kind::Consuming));
@@ -722,43 +908,138 @@ mod tests {
     }
 
     #[test]
+    fn production_trait_catalog_rejects_removal_and_conditional_compilation() -> Result<()> {
+        let fixture = tempfile::tempdir()?;
+        let root = fixture.path().canonicalize()?;
+        let owner = root.join("crates/example/src");
+        fs::create_dir_all(&owner)?;
+        let source =
+            "macro_rules! assert_not_impl { () => {} } const _: () = { assert_not_impl!(); };";
+        fs::write(owner.join("assertions.rs"), source)?;
+        fs::write(owner.join("lib.rs"), "mod assertions;")?;
+        let mut reviewed = TraitCheck {
+            source: "crates/example/src/assertions.rs".into(),
+            scope: TraitScope::Module,
+            fingerprint: String::new(),
+            registration: Some(Registration {
+                source: "crates/example/src/lib.rs".into(),
+                module: "assertions".into(),
+            }),
+        };
+        reviewed.fingerprint = trait_check_finding(&root, &reviewed)?.fingerprint;
+        let checked = |reviewed: &TraitCheck| -> Result<()> {
+            ensure!(
+                trait_check_finding(&root, reviewed)?.fingerprint == reviewed.fingerprint,
+                "trait catalog drift"
+            );
+            Ok(())
+        };
+        checked(&reviewed)?;
+        for registration in [
+            "",
+            "#[cfg(test)] mod assertions;",
+            "pub mod assertions;",
+            "#[path = \"assertions.rs\"] mod assertions;",
+        ] {
+            fs::write(owner.join("lib.rs"), registration)?;
+            assert!(checked(&reviewed).is_err(), "{registration}");
+        }
+        fs::write(owner.join("lib.rs"), "mod assertions;")?;
+        for changed in [
+            "#![cfg(test)] macro_rules! assert_not_impl { () => {} } const _: () = { assert_not_impl!(); };",
+            "macro_rules! assert_not_impl { () => {} } #[cfg(test)] const _: () = { assert_not_impl!(); };",
+            "macro_rules! assert_not_impl { () => {} }",
+            "macro_rules! assert_not_impl { () => {} } const _: () = {};",
+        ] {
+            fs::write(owner.join("assertions.rs"), changed)?;
+            assert!(checked(&reviewed).is_err(), "{changed}");
+        }
+        let ready =
+            "const _: () = { macro_rules! assert_not_impl { () => {} } assert_not_impl!(); };";
+        fs::write(owner.join("assertions.rs"), ready)?;
+        reviewed.scope = TraitScope::Const;
+        reviewed.registration = None;
+        reviewed.fingerprint = trait_check_finding(&root, &reviewed)?.fingerprint;
+        checked(&reviewed)?;
+        for changed in [
+            "",
+            "#[cfg(test)] const _: () = { macro_rules! assert_not_impl { () => {} } assert_not_impl!(); };",
+            "const _: () = { macro_rules! assert_not_impl { () => {} } }; ",
+        ] {
+            fs::write(owner.join("assertions.rs"), changed)?;
+            assert!(checked(&reviewed).is_err(), "{changed}");
+        }
+        Ok(())
+    }
+
+    #[test]
     fn compiler_negative_assertion_detects_traits_implemented_outside_the_owner() -> Result<()> {
         let fixture = tempfile::tempdir()?;
         let source = fixture.path().join("proof.rs");
-        let assertion = r#"
-            mod owner { pub struct Permit; }
-            macro_rules! assert_not_impl {
-                ($type:ty, $trait:path) => {{
-                    trait AmbiguousIfImpl<A> { fn check() {} }
-                    impl<T: ?Sized> AmbiguousIfImpl<()> for T {}
-                    impl<T: ?Sized + $trait> AmbiguousIfImpl<u8> for T {}
-                    let _ = <$type as AmbiguousIfImpl<_>>::check;
-                }};
+        struct ActualMacro(Option<syn::ItemMacro>);
+        impl<'ast> Visit<'ast> for ActualMacro {
+            fn visit_item_macro(&mut self, definition: &'ast syn::ItemMacro) {
+                if definition
+                    .ident
+                    .as_ref()
+                    .is_some_and(|name| name == "assert_not_impl")
+                {
+                    self.0 = Some(definition.clone());
+                }
             }
-            fn main() { assert_not_impl!(owner::Permit, Clone); }
-        "#;
-        for implementation in [
-            "",
-            "impl Clone for owner::Permit { fn clone(&self) -> Self { Self } }",
+        }
+        for actual_source in [
+            include_str!("../../day2/src/structural_proofs.rs"),
+            include_str!("../../day2-control/src/release.rs"),
         ] {
-            fs::write(&source, format!("{assertion}\n{implementation}"))?;
-            let output = std::process::Command::new("rustc")
-                .args(["--edition=2024", "--emit=metadata"])
-                .arg(&source)
-                .arg("--out-dir")
-                .arg(fixture.path())
-                .output()?;
-            let diagnostic = String::from_utf8_lossy(&output.stderr);
-            if implementation.is_empty() {
-                ensure!(
-                    output.status.success(),
-                    "valid proof trait assertion failed: {diagnostic}"
-                );
-            } else {
-                ensure!(
-                    !output.status.success() && diagnostic.contains("E0283"),
-                    "cloneable proof must fail with trait inference ambiguity: {diagnostic}"
-                );
+            let actual = syn::parse_file(actual_source)?;
+            let mut extractor = ActualMacro(None);
+            extractor.visit_file(&actual);
+            let definition = extractor
+                .0
+                .context("actual production negative trait macro")?;
+            ensure!(
+                definition.attrs.is_empty(),
+                "production trait macro must be unconditional"
+            );
+            let assertion = format!(
+                "mod owner {{ pub struct Permit; }} {} const _: () = {{ assert_not_impl!(owner::Permit, Clone); }}; fn main() {{}}",
+                definition.to_token_stream()
+            );
+            let production_only = "#[cfg(not(test))] impl Clone for owner::Permit { fn clone(&self) -> Self { Self } }";
+            for (implementation, test_build, expected_success) in [
+                ("", false, true),
+                (
+                    "impl Clone for owner::Permit { fn clone(&self) -> Self { Self } }",
+                    false,
+                    false,
+                ),
+                (production_only, true, true),
+                (production_only, false, false),
+            ] {
+                fs::write(&source, format!("{assertion}\n{implementation}"))?;
+                let mut compiler = std::process::Command::new("rustc");
+                compiler.args(["--edition=2024", "--emit=metadata"]);
+                if test_build {
+                    compiler.args(["--cfg", "test"]);
+                }
+                let output = compiler
+                    .arg(&source)
+                    .arg("--out-dir")
+                    .arg(fixture.path())
+                    .output()?;
+                let diagnostic = String::from_utf8_lossy(&output.stderr);
+                if expected_success {
+                    ensure!(
+                        output.status.success(),
+                        "valid proof trait assertion failed: {diagnostic}"
+                    );
+                } else {
+                    ensure!(
+                        !output.status.success() && diagnostic.contains("E0283"),
+                        "cloneable proof must fail with trait inference ambiguity: {diagnostic}"
+                    );
+                }
             }
         }
         Ok(())

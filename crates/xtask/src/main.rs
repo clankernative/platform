@@ -273,6 +273,16 @@ fn main() -> Result<()> {
                 serde_json::to_string_pretty(&architecture::inventory(&root)?)?
             );
         }
+        "architecture-proof-inventory" => {
+            ensure!(
+                args.next().is_none(),
+                "architecture-proof-inventory accepts no arguments"
+            );
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&architecture_proofs::trait_check_inventory(&root)?)?
+            );
+        }
         "architecture-dependencies" => {
             ensure!(
                 args.next().is_none(),

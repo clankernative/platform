@@ -133,6 +133,42 @@ permits are consuming, non-Clone, non-Copy, non-Default and non-Deserialize.
 Readiness handles may be cloneable when their use revalidates durable current
 authority. Wire and storage records are separate from verified values.
 
+`architecture-proofs.json` now reviews six release, OAuth dispatch and credential
+reveal handles. The mandatory native architecture check and every verification
+recipe enforce private nonempty fields, admitted derives and inherent method
+signatures, consuming sink receivers, and explicit factory signatures. Direct
+construction, proof-returning factories, owning-module child factories and direct
+proof aliases require review. Always-compiled const type checks reject wire
+traits and cloning for consuming handles in the selected production configuration,
+including trait implementations guarded by `cfg(not(test))`; a native rustc
+fixture uses the actual production macros to exercise that escape. The reviewed
+trait catalog binds normalized macro/const bytes and unconditional private module
+registration, rejecting removal or conditional disabling. The read-only
+`architecture-proof-inventory` reports those normalized fingerprints for review.
+Release doctests reject field construction,
+deserialization and approval used in place of readiness. Policy bytes participate
+in both native and isolated platform input identities; positive capture and
+tampering fixtures verify those pins.
+
+Release workflow recovery now calls the owning journal's checked APIs under its
+transaction rather than constructing sibling-module handles from identifiers.
+Approval recovery validates the persisted row binding, approval digest, request
+identity and generation relation. Readiness recovery validates its digest,
+release binding, approval generation and positive secret revision. Historical
+recovery is distinct from granting current authority: preparation and new
+activation still recheck current approval, catalog and exact secret facts. The
+approval digest does not authenticate every stored metadata field; these local
+checks complement the existing current-authority checks, not cryptographic
+provenance. Real SQLite fixtures reject damaged records and show that historical
+recovery after reopen does not restore revoked authority.
+
+The proof guard checks known syntax in each configured owning module. It does
+not prove authorization semantics inside admitted factories, expand arbitrary
+macros, resolve arbitrary external aliases or certify all authority types.
+Changing an admitted factory's body still requires domain review and behavioral
+tests; private fields and a method inventory alone cannot establish its issuer's
+authority. Protected operations retain independent current-fact validation.
+
 Proofs bind the exact installation, app, operation, artifact, binding, account,
 generation and epoch required for their action. Persisted facts do not become
 current authority merely by decoding. The responsible boundary establishes
@@ -146,9 +182,10 @@ provider sends; response loss remains uncertain until qualified observation.
 
 ## Principle enforcement map
 
-This map names obligations, not completed coverage. Slice 1 delivers the source
-and dependency ratchet. The kernel, proof, durable-state and bounded-admission
-changes follow in separate PRs. Existing application behavior remains useful
+This map names obligations, not completed coverage. Slices 1 through 3 deliver
+the source/dependency ratchet, extracted build kernel and six configured proof
+boundaries. Durable-state and bounded-admission changes follow in separate PRs.
+Existing application behavior remains useful
 evidence, but it does not establish the corresponding platform guarantee.
 Record a completed slice's exact PR, locally checked head and counterexamples
 before treating its row as enforced. Live provider and restore obligations
