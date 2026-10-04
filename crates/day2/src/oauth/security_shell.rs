@@ -1221,6 +1221,40 @@ fn path_for(attempt: &str) -> String {
 }
 
 fn protected(mut response: Response) -> Response {
+    // A form's 303 redirect is still subject to form-action. Finish that POST
+    // on the shell origin, then navigate from a new document to the native-
+    // selected HTTPS destination. No request field selects this destination.
+    if response.status() == StatusCode::SEE_OTHER
+        && let Some(destination) = response.headers().get(header::LOCATION)
+        && let Ok(destination) = destination.to_str()
+        && let Ok(url) = url::Url::parse(destination)
+        && url.scheme() == "https"
+        && url.host_str().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+    {
+        let page = html! {
+            (DOCTYPE)
+            html {
+                head {
+                    meta charset="utf-8";
+                    meta http-equiv="refresh" content=(format!("0;url={destination}"));
+                    title { "Continue" }
+                }
+                body { p { a href=(destination) { "Continue" } } }
+            }
+        };
+        *response.status_mut() = StatusCode::OK;
+        response.headers_mut().remove(header::LOCATION);
+        response.headers_mut().remove(header::CONTENT_LENGTH);
+        response.headers_mut().insert(
+            header::CONTENT_TYPE,
+            "text/html; charset=utf-8"
+                .parse()
+                .expect("static content type"),
+        );
+        *response.body_mut() = axum::body::Body::from(page.into_string());
+    }
     for (name, value) in [
         (
             "content-security-policy",
@@ -1228,7 +1262,9 @@ fn protected(mut response: Response) -> Response {
         ),
         ("x-content-type-options", "nosniff"),
         ("x-frame-options", "DENY"),
-        ("referrer-policy", "no-referrer"),
+        // no-referrer makes browser navigation POSTs send Origin: null.
+        // Keep their HTTPS origin without disclosing callback paths or queries.
+        ("referrer-policy", "strict-origin"),
         ("cache-control", "no-store"),
         (
             "permissions-policy",
@@ -1293,6 +1329,39 @@ mod tests {
 
     struct BrowserIdentity {
         fresh: bool,
+    }
+
+    #[tokio::test]
+    async fn protected_navigation_preserves_form_boundary_and_escapes_handoff() -> Result<()> {
+        let destination = "https://app.example.com/?one=a&two=\"<b>";
+        let response = protected(
+            (
+                StatusCode::SEE_OTHER,
+                [
+                    (header::LOCATION, destination),
+                    (header::SET_COOKIE, "session=closed"),
+                ],
+            )
+                .into_response(),
+        );
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(!response.headers().contains_key(header::LOCATION));
+        assert_eq!(response.headers()[header::SET_COOKIE], "session=closed");
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(response.headers()["referrer-policy"], "strict-origin");
+        assert_eq!(
+            response.headers()["content-security-policy"],
+            "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+        );
+        let page = String::from_utf8(to_bytes(response.into_body(), 8192).await?.to_vec())?;
+        assert!(page.contains("http-equiv=\"refresh\" content=\"0;url=https://app.example.com/?one=a&amp;two=&quot;&lt;b&gt;\""));
+        assert!(page.contains("href=\"https://app.example.com/?one=a&amp;two=&quot;&lt;b&gt;\""));
+        assert!(!page.contains("<b>"));
+        let response =
+            protected((StatusCode::SEE_OTHER, [(header::LOCATION, "/local")]).into_response());
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(response.headers()[header::LOCATION], "/local");
+        Ok(())
     }
     impl FreshAuthenticator for BrowserIdentity {
         fn identify(&self, headers: &HeaderMap, _: i64) -> Result<iap::Verified> {
@@ -1707,6 +1776,30 @@ mod tests {
             .append_pair("action", action)
             .finish()
             .into_bytes()
+    }
+
+    async fn reject_navigation_origins(
+        client: &reqwest::Client,
+        endpoint: &str,
+        headers: &HeaderMap,
+        body: &[u8],
+    ) -> Result<()> {
+        for rejected in [None, Some("null"), Some("https://app.example.com")] {
+            let mut headers = headers.clone();
+            headers.remove(header::ORIGIN);
+            if let Some(origin) = rejected {
+                headers.insert(header::ORIGIN, origin.parse()?);
+            }
+            let response = client
+                .post(endpoint)
+                .headers(headers)
+                .body(body.to_vec())
+                .send()
+                .await?;
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        }
+        Ok(())
     }
 
     async fn credential_token(response: Response) -> Result<String> {
@@ -2327,16 +2420,74 @@ mod tests {
     {
         let world = browser_world(10)?;
         let shell = credential_shell(&world, true)?;
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let endpoint = format!("http://{}", listener.local_addr()?);
+        let (stop, shutdown) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(shell.clone().serve_bounded(
+            listener,
+            4,
+            Arc::new(AtomicBool::new(true)),
+            async {
+                let _ = shutdown.await;
+            },
+        ));
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
         for (operation, id) in [
             ("credential_metadata.create_client", "client-browser"),
             ("credential_metadata.create_personal", "personal-browser"),
         ] {
-            let (path, headers, session) = navigate(&world, &shell, operation, id)?;
             let input = serde_json::json!({"label":"Transcription client"});
+            let url = credentials::start(
+                &world.runtime,
+                operation,
+                "alice@example.com",
+                id,
+                &input,
+                None,
+                world.now - 1,
+            )?;
+            let path = url::Url::parse(&url)?.path().to_owned();
+            let endpoint = format!("{endpoint}{path}");
+            let mut headers = credential_headers();
+            let page = client
+                .get(&endpoint)
+                .headers(headers.clone())
+                .send()
+                .await?;
+            assert_eq!(page.status(), StatusCode::OK);
+            assert_eq!(page.headers()[header::CACHE_CONTROL], "no-store");
+            // strict-origin is the policy that preserves normal navigation POST Origin.
+            assert_eq!(page.headers()["referrer-policy"], "strict-origin");
+            assert_eq!(
+                page.headers()["content-security-policy"],
+                "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+            );
+            let cookie = page.headers()[header::SET_COOKIE]
+                .to_str()?
+                .split(';')
+                .next()
+                .context("credential cookie missing")?
+                .to_owned();
+            headers.insert(header::COOKIE, cookie.parse()?);
+            let session = shell
+                .read_session(&headers, world.now)?
+                .context("credential session missing")?;
+            let at = session.authenticated_at;
+            let page = page.text().await?;
+            assert!(!page.contains("d2c1."));
+            assert!(page.contains(&format!("name=\"csrf\" value=\"{}\"", session.csrf)));
+            assert!(page.contains(&format!(
+                "name=\"challenge\" value=\"{}\"",
+                session.challenge.as_str()
+            )));
+            assert!(page.contains(&format!("method=\"post\" action=\"{path}\"")));
             assert!(
                 world
                     .runtime
-                    .accept(operation, "alice@example.com", id, &input, world.now)
+                    .accept(operation, "alice@example.com", id, &input, at)
                     .is_err()
             );
             let before = world.keys.0.load(Ordering::SeqCst);
@@ -2352,7 +2503,7 @@ mod tests {
                 .preview = Digest::of(&"changed-credential-preview")?;
             assert!(
                 shell
-                    .dispatch(&Method::POST, &path, None, &headers, &confirm, world.now)
+                    .dispatch(&Method::POST, &path, None, &headers, &confirm, at)
                     .is_err()
             );
             assert_eq!(world.keys.0.load(Ordering::SeqCst), before);
@@ -2367,20 +2518,26 @@ mod tests {
             wrong.insert(header::ORIGIN, "https://app.example.com".parse()?);
             assert!(
                 shell
-                    .dispatch(&Method::POST, &path, None, &wrong, &confirm, world.now)
+                    .dispatch(&Method::POST, &path, None, &wrong, &confirm, at)
                     .is_err()
             );
             assert_eq!(world.keys.0.load(Ordering::SeqCst), before);
+            reject_navigation_origins(&client, &endpoint, &headers, &confirm).await?;
+            assert_eq!(world.keys.0.load(Ordering::SeqCst), before);
             assert_eq!(
-                shell
-                    .dispatch(&Method::POST, &path, None, &headers, &confirm, world.now)?
+                client
+                    .post(&endpoint)
+                    .headers(headers.clone())
+                    .body(confirm.clone())
+                    .send()
+                    .await?
                     .status(),
                 StatusCode::SEE_OTHER
             );
             // Lost-response retry runs the identical accepted product invocation.
             assert_eq!(
                 shell
-                    .dispatch(&Method::POST, &path, None, &headers, &confirm, world.now)?
+                    .dispatch(&Method::POST, &path, None, &headers, &confirm, at)?
                     .status(),
                 StatusCode::SEE_OTHER
             );
@@ -2388,8 +2545,13 @@ mod tests {
             assert_eq!(outcome.status, "success", "{outcome:?}");
             assert!(!outcome.result.to_string().contains("d2c1."));
             assert!(!serde_json::to_string(&world.runtime.trace(id)?)?.contains("d2c1."));
-            let get = shell.dispatch(&Method::GET, &path, None, &headers, &[], world.now)?;
-            let page = String::from_utf8(to_bytes(get.into_body(), 8192).await?.to_vec())?;
+            let get = client
+                .get(&endpoint)
+                .headers(headers.clone())
+                .send()
+                .await?;
+            assert_eq!(get.headers()[header::CACHE_CONTROL], "no-store");
+            let page = get.text().await?;
             assert!(!page.contains("d2c1."));
             assert!(page.contains("credential_metadata.ping") && page.contains("3600 seconds"));
             let reveal = credential_body(&session, "reveal");
@@ -2398,14 +2560,14 @@ mod tests {
             wrong.insert("test-subject", "someone-else".parse()?);
             assert!(
                 shell
-                    .dispatch(&Method::POST, &path, None, &wrong, &reveal, world.now)
+                    .dispatch(&Method::POST, &path, None, &wrong, &reveal, at)
                     .is_err()
             );
             let mut wrong = headers.clone();
             wrong.append(header::COOKIE, headers[header::COOKIE].clone());
             assert!(
                 shell
-                    .dispatch(&Method::POST, &path, None, &wrong, &reveal, world.now)
+                    .dispatch(&Method::POST, &path, None, &wrong, &reveal, at)
                     .is_err()
             );
             let mut bad = session.clone();
@@ -2418,7 +2580,7 @@ mod tests {
                         None,
                         &headers,
                         &credential_body(&bad, "reveal"),
-                        world.now
+                        at
                     )
                     .is_err()
             );
@@ -2432,7 +2594,7 @@ mod tests {
                         None,
                         &headers,
                         &credential_body(&bad, "reveal"),
-                        world.now
+                        at
                     )
                     .is_err()
             );
@@ -2444,7 +2606,7 @@ mod tests {
                         Some("version=forged"),
                         &headers,
                         &reveal,
-                        world.now
+                        at
                     )
                     .is_err()
             );
@@ -2462,7 +2624,7 @@ mod tests {
             )?;
             assert!(
                 shell
-                    .dispatch(&Method::POST, &path, None, &headers, &reveal, world.now)
+                    .dispatch(&Method::POST, &path, None, &headers, &reveal, at)
                     .is_err()
             );
             assert_eq!(world.keys.0.load(Ordering::SeqCst), before);
@@ -2470,36 +2632,42 @@ mod tests {
                 "UPDATE day2_credential_receipts SET family_contract=?1 WHERE invocation=?2",
                 rusqlite::params![contract, id],
             )?;
-            let response = protected(shell.dispatch(
-                &Method::POST,
-                &path,
-                None,
-                &headers,
-                &reveal,
-                world.now,
-            )?);
+            reject_navigation_origins(&client, &endpoint, &headers, &reveal).await?;
+            assert_eq!(world.keys.0.load(Ordering::SeqCst), before);
+            let response = client
+                .post(&endpoint)
+                .headers(headers.clone())
+                .body(reveal.clone())
+                .send()
+                .await?;
+            assert_eq!(response.status(), StatusCode::OK);
             assert_eq!(response.headers()["cache-control"], "no-store");
-            let html = String::from_utf8(to_bytes(response.into_body(), 8192).await?.to_vec())?;
+            let html = response.text().await?;
             assert!(html.contains("d2c1."));
             assert!(!html.contains("ciphertext"));
             let acknowledge = credential_body(&session, "acknowledge");
-            assert_eq!(
-                shell
-                    .dispatch(
-                        &Method::POST,
-                        &path,
-                        None,
-                        &headers,
-                        &acknowledge,
-                        world.now
-                    )?
-                    .headers()[header::LOCATION],
-                "https://app.example.com/"
+            let before = world.keys.0.load(Ordering::SeqCst);
+            reject_navigation_origins(&client, &endpoint, &headers, &acknowledge).await?;
+            assert_eq!(world.keys.0.load(Ordering::SeqCst), before);
+            let response = client
+                .post(&endpoint)
+                .headers(headers.clone())
+                .body(acknowledge)
+                .send()
+                .await?;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            assert!(!response.headers().contains_key(header::LOCATION));
+            let page = response.text().await?;
+            assert!(
+                page.contains("http-equiv=\"refresh\" content=\"0;url=https://app.example.com/\"")
             );
+            assert!(page.contains("href=\"https://app.example.com/\""));
+            assert!(!page.contains("d2c1."));
             let before = world.keys.0.load(Ordering::SeqCst);
             assert!(
                 shell
-                    .dispatch(&Method::POST, &path, None, &headers, &reveal, world.now)
+                    .dispatch(&Method::POST, &path, None, &headers, &reveal, at)
                     .is_err()
             );
             assert_eq!(world.keys.0.load(Ordering::SeqCst), before);
@@ -2513,6 +2681,8 @@ mod tests {
             |row| row.get(0),
         )?;
         assert_eq!(personal, "accounts.google.com:google-alice");
+        let _ = stop.send(());
+        tokio::time::timeout(Duration::from_secs(3), server).await???;
         Ok(())
     }
 
