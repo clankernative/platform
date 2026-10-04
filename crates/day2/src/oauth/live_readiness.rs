@@ -1,6 +1,6 @@
 //! Native, short lived readiness for a selected app. Configuration supplies
-//! selectors; Compute/IAP, TLS, exact secret reads and verified humans supply
-//! facts. No receipt or owner lease can be restored from JSON or SQLite.
+//! selectors; Resource Manager, Compute/IAP, TLS, exact secret reads and verified
+//! humans supply facts. No receipt or owner lease can be restored from JSON or SQLite.
 
 use super::{
     OutboundReadiness, QualifiedConnections, binding_namespace, instance_identity, profiles,
@@ -580,6 +580,7 @@ impl OutboundReadiness for Facts {
 struct GcpEdge {
     client: Client,
     endpoint: Url,
+    project_endpoint: Url,
     tls: Url,
     project: String,
     backend: String,
@@ -612,6 +613,9 @@ impl GcpEdge {
                 .timeout(Duration::from_secs(5))
                 .build()?,
             endpoint: Url::parse("https://compute.googleapis.com/compute/v1/")?,
+            project_endpoint: Url::parse(
+                "https://cloudresourcemanager.googleapis.com/v1/projects/",
+            )?,
             tls: Url::parse(&format!("{}/health/ready", edge.origin))?,
             project: selection.project.clone(),
             backend: selection.backend_service.clone(),
@@ -628,6 +632,10 @@ impl GcpEdge {
     }
 
     fn get(&self, path: &str) -> Result<Value> {
+        self.read(self.endpoint.join(path)?)
+    }
+
+    fn read(&self, url: Url) -> Result<Value> {
         let token = self.tokens.access_token()?;
         ensure!(
             !token.is_empty() && token.len() <= 8192 && token.bytes().all(|b| b.is_ascii_graphic()),
@@ -635,29 +643,28 @@ impl GcpEdge {
         );
         let mut auth = HeaderValue::from_str(&format!("Bearer {token}"))?;
         auth.set_sensitive(true);
-        let response = self
-            .client
-            .get(self.endpoint.join(path)?)
-            .header(AUTHORIZATION, auth)
-            .send()?;
+        let response = self.client.get(url).header(AUTHORIZATION, auth).send()?;
         ensure!(
             response.status().is_success()
                 && response
                     .content_length()
                     .is_none_or(|n| n <= MAX_BYTES as u64),
-            "OAuth Compute fact unavailable"
+            "OAuth cloud fact unavailable"
         );
         let mut bytes = Vec::new();
         response
             .take(MAX_BYTES as u64 + 1)
             .read_to_end(&mut bytes)?;
-        ensure!(bytes.len() <= MAX_BYTES, "OAuth Compute fact byte budget");
-        crate::json::decode(&bytes).map_err(|_| anyhow::anyhow!("invalid OAuth Compute fact"))
+        ensure!(bytes.len() <= MAX_BYTES, "OAuth cloud fact byte budget");
+        crate::json::decode(&bytes).map_err(|_| anyhow::anyhow!("invalid OAuth cloud fact"))
     }
 
     fn check(&self) -> Result<()> {
         let project_path = format!("projects/{}", self.project);
-        let project = self.get(&project_path)?;
+        // Compute Project.id is a Compute resource identifier, not the project
+        // number in an IAP audience. Resource Manager binds that number to the
+        // selected project ID without relying on configuration or email names.
+        let project = self.read(self.project_endpoint.join(&self.project)?)?;
         let backend_path = format!("{project_path}/global/backendServices/{}", self.backend);
         let map_path = format!("{project_path}/global/urlMaps/{}", self.map);
         let proxy_path = format!("{project_path}/global/targetHttpsProxies/{}", self.proxy);
@@ -741,9 +748,9 @@ impl GcpEdge {
     }
 
     fn verify(&self, project: &Value, backend: &Value, map: &Value) -> Result<()> {
-        let number = project["id"]
+        let number = project["projectNumber"]
             .as_str()
-            .context("OAuth Compute project identity missing")?;
+            .context("OAuth Resource Manager project identity missing")?;
         let id = backend["id"]
             .as_str()
             .context("OAuth Compute backend identity missing")?;
@@ -752,7 +759,8 @@ impl GcpEdge {
                 && number.bytes().all(|b| b.is_ascii_digit())
                 && !id.is_empty()
                 && id.bytes().all(|b| b.is_ascii_digit())
-                && project["name"] == self.project
+                && project["projectId"] == self.project
+                && project["lifecycleState"] == "ACTIVE"
                 && self.audience == format!("/projects/{number}/global/backendServices/{id}"),
             "OAuth shell IAP audience mismatch"
         );
@@ -994,7 +1002,7 @@ pub(crate) mod tests {
             edge.project, edge.backend
         );
         (
-            json!({"name":edge.project,"id":parts[2]}),
+            json!({"projectId":edge.project,"projectNumber":parts[2],"lifecycleState":"ACTIVE"}),
             json!({"name":edge.backend,"id":parts[5],"selfLink":backend,"iap":{"enabled":true},"description":json!({"kubernetes.io/service-name":edge.service}).to_string()}),
             json!({"name":edge.map,"selfLink":format!("https://www.googleapis.com/compute/v1/projects/{}/global/urlMaps/{}",edge.project,edge.map),"fingerprint":"stable","defaultService":backend,"hostRules":[{"hosts":[edge.host],"pathMatcher":"shell"}],"pathMatchers":[{"name":"shell","defaultService":backend,"pathRules":[{"paths":["/*"],"service":backend}]}]}),
         )
@@ -1074,6 +1082,7 @@ pub(crate) mod tests {
             (200, forwarding),
         ])?;
         edge.endpoint = wire.endpoint.clone();
+        edge.project_endpoint = wire.endpoint.join("resource-manager/v1/projects/")?;
         edge.tls = wire.endpoint.join("health/ready")?;
         edge.fixture = true;
         Ok(wire)
@@ -1115,7 +1124,9 @@ pub(crate) mod tests {
         edge.check()?;
         let requests = wire.worker.join().unwrap();
         assert_eq!(requests.len(), 10);
-        assert!(requests[0].starts_with("get /projects/company-tools http/1.1"));
+        assert!(
+            requests[0].starts_with("get /resource-manager/v1/projects/company-tools http/1.1")
+        );
         assert!(requests[1].starts_with(
             "get /projects/company-tools/global/backendservices/shell-backend http/1.1"
         ));
@@ -1132,11 +1143,45 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn native_edge_uses_resource_manager_project_number_and_rejects_compute_resource_ids()
+    -> Result<()> {
+        let selected = selected()?;
+        let edge = GcpEdge::new(&selected.instance, Arc::new(Tokens))?;
+        assert_eq!(
+            edge.project_endpoint.as_str(),
+            "https://cloudresourcemanager.googleapis.com/v1/projects/"
+        );
+        let (project, backend, map) = documents(&edge);
+        edge.verify(&project, &backend, &map)?;
+        let compute = json!({"name":edge.project,"id":"9876543210987654321"});
+        assert!(edge.verify(&compute, &backend, &map).is_err());
+        for (field, value) in [
+            ("projectNumber", json!("9876543210987654321")),
+            ("projectNumber", json!(123)),
+            ("projectNumber", Value::Null),
+            ("projectId", json!("another-project")),
+            ("lifecycleState", json!("DELETE_REQUESTED")),
+        ] {
+            let mut wrong = project.clone();
+            wrong[field] = value;
+            assert!(edge.verify(&wrong, &backend, &map).is_err());
+        }
+        let mut wrong = edge;
+        wrong.audience = format!(
+            "/projects/9876543210987654321/global/backendServices/{}",
+            backend["id"].as_str().unwrap()
+        );
+        assert!(wrong.verify(&project, &backend, &map).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn native_edge_rejects_cloud_redirects_duplicate_json_and_mid_read_changes() -> Result<()> {
         let selected = selected()?;
         let mut edge = GcpEdge::new(&selected.instance, Arc::new(Tokens))?;
         let wire = Wire::new(vec![(302, json!({}))])?;
         edge.endpoint = wire.endpoint.clone();
+        edge.project_endpoint = wire.endpoint.join("resource-manager/v1/projects/")?;
         assert!(edge.check().is_err());
         wire.worker.join().unwrap();
         let (project, backend, map) = documents(&edge);
@@ -1154,6 +1199,7 @@ pub(crate) mod tests {
             (200, changed),
         ])?;
         edge.endpoint = wire.endpoint.clone();
+        edge.project_endpoint = wire.endpoint.join("resource-manager/v1/projects/")?;
         edge.tls = wire.endpoint.join("health/ready")?;
         edge.fixture = true;
         assert!(edge.check().is_err());
@@ -1315,6 +1361,7 @@ pub(crate) mod tests {
         assert_eq!(requests.len(), 10);
         let unavailable = Wire::new(vec![(403, json!({"error":"retired"}))])?;
         facts.edge.endpoint = unavailable.endpoint.clone();
+        facts.edge.project_endpoint = unavailable.endpoint.join("resource-manager/v1/projects/")?;
         assert!(facts.current(&binding, &slot, 160).is_err());
         assert!(facts.state.lock().unwrap().connections.is_empty());
         unavailable.worker.join().unwrap();
@@ -1346,6 +1393,7 @@ pub(crate) mod tests {
         facts.lease.lock().unwrap().as_mut().unwrap().deadline = Instant::now();
         let unavailable = Wire::new(vec![(403, json!({"error":"retired"}))])?;
         facts.edge.endpoint = unavailable.endpoint.clone();
+        facts.edge.project_endpoint = unavailable.endpoint.join("resource-manager/v1/projects/")?;
         assert!(facts.check(159).is_err());
         assert!(facts.lease.lock().unwrap().is_none());
         unavailable.worker.join().unwrap();
