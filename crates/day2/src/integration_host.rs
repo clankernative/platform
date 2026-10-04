@@ -58,6 +58,15 @@ impl Host {
         self.simulated
     }
 
+    /// Hybrid host qualification: provider sockets remain offline, while the
+    /// explicitly installed app-call port exercises independent native hosts.
+    pub(crate) fn simulated_providers_with_app_calls(database: &Path, scope: &str) -> Self {
+        Self {
+            simulated: false,
+            ..Self::simulated(database, scope)
+        }
+    }
+
     pub(crate) fn execute(
         &self,
         call: &integrations::PreparedCall,

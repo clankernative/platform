@@ -85,7 +85,7 @@ GetConfiguration :: [].{
 															),
 															template: row.value.template,
 															template_revision: row.value.template_revision,
-															enabled: Bool.False,
+															enabled: definition_row.value.enabled,
 														})
 													}
 								}
@@ -124,7 +124,7 @@ GetConfiguration :: [].{
 			avoid_when: ["Treating an old ownership decision as current permission."],
 			preconditions: ["Current direct app ownership."],
 			effects: [],
-			result: "The requested version, or found=false; delivery stays disabled.",
+			result: "The requested version and current delivery enablement, or found=false.",
 		},
 		inputs: {
 			app_id: "Business app identifier.",
@@ -163,7 +163,7 @@ GetConfiguration :: [].{
 			},
 			template: "Current version template.",
 			template_revision: "Revision that last changed this template.",
-			enabled: "False until delivery support is implemented.",
+			enabled: "Whether this event accepts new publications for the operator-bound Slack channel.",
 		},
 		example,
 		input_sources: |_| [],
@@ -188,7 +188,7 @@ GetConfiguration :: [].{
 			before,
 			output,
 			after,
-		| Ok(before == after and !output.enabled and (!output.found or output.revision >= output.template_revision))
+		| Ok(before == after and (!output.found or output.revision >= output.template_revision))
 
 	read_denied =
 		Api.error({

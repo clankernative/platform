@@ -1188,6 +1188,91 @@ fn resource_fixture_for_artifact_with_imports(
         catalog.budgets.extend(people.budgets);
         attachments.extend(people_attachments);
     }
+    // This slot is an explicit Notifications development fixture. It never
+    // synthesizes a production grant or selects a real workspace/channel.
+    if artifact
+        .contract()
+        .operations
+        .iter()
+        .any(|operation| operation.name == "notifications.publish")
+    {
+        let resource = VersionRef {
+            id: "notification_channel".into(),
+            revision: 1,
+        };
+        catalog.connections.insert(
+            resource.id.clone(),
+            ConnectionDefinition {
+                revision: 1,
+                provider: Provider::Slack,
+                live: Some(day2_capabilities::integrations::LiveConnection::Slack {
+                    credential_ref: VersionRef {
+                        id: "synthetic-slack-bot".into(),
+                        revision: 1,
+                    },
+                    workspace_id: "T0SYNTHETIC".into(),
+                    signing_secret_ref: None,
+                }),
+            },
+        );
+        catalog.resources.insert(
+            resource.id.clone(),
+            ResourceDefinition {
+                revision: 1,
+                connection: resource.clone(),
+                target: ResourceTarget::SlackChannel {
+                    channel: day2_capabilities::integrations::SlackChannel {
+                        channel_id: "C0SYNTHETIC".into(),
+                    },
+                },
+            },
+        );
+        for operation_name in ["notifications.set_enabled", "notifications.publish"] {
+            let Some(operation) = policy.operations.get(operation_name) else {
+                continue;
+            };
+            if operation.actors.is_empty() {
+                continue;
+            }
+            let reusable = ReusablePolicy {
+                revision: 1,
+                owner: "local-fixture-operator".into(),
+                delegates: BTreeSet::new(),
+                actors: operation.actors.clone(),
+                allowed_apps: BTreeSet::from([app.into()]),
+                max_duration_seconds: None,
+                slots: BTreeMap::from([(
+                    "notification_channel".into(),
+                    PolicySlot {
+                        kind: ResourceKind::SlackChannel,
+                        allowed_resources: BTreeSet::from([resource.clone()]),
+                        actions: BTreeSet::from([Action::SlackPost]),
+                        limits: Limits {
+                            max_request_bytes: 16_384,
+                            max_response_bytes: 16_384,
+                            max_calls_per_invocation: 2,
+                        },
+                        budgets: vec![],
+                    },
+                )]),
+            };
+            let policy_id = format!(
+                "fixture_{}",
+                &crate::digest(&serde_json::to_vec(&reusable)?)[7..31]
+            );
+            catalog.policies.insert(policy_id.clone(), reusable);
+            attachments.push(Attachment {
+                policy: VersionRef {
+                    id: policy_id,
+                    revision: 1,
+                },
+                operation: operation_name.into(),
+                bindings: BTreeMap::from([("notification_channel".into(), resource.clone())]),
+                actors: None,
+                expires_at_ms: None,
+            });
+        }
+    }
     if !imports.is_empty() {
         catalog.connections.insert(
             "imported_queries".into(),
@@ -1675,7 +1760,7 @@ fn disposable_provider_worlds() -> crate::integrations::simulated::SimulatedFixt
         object_store: ObjectStoreWorld::default(),
         slack: SlackWorld {
             workspace_id: "T0SYNTHETIC".into(),
-            channels: BTreeMap::new(),
+            channels: BTreeMap::from([("C0SYNTHETIC".into(), SlackChannelWorld::default())]),
             sequence: 0,
         },
         snowflake: SnowflakeWorld {

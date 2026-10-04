@@ -61,7 +61,18 @@ SaveConfiguration :: [].{
 					return Tx.reject(Errors.revision_conflict)
 				}
 				revision = current_revision + 1
-				value = { app_id: input.app_id, event_key: input.event_key, description: input.description, revision }
+				enabled = match found {
+					None => Bool.False
+					Some(row) => row.value.enabled
+				}
+				value =
+					{
+						app_id: input.app_id,
+						event_key: input.event_key,
+						description: input.description,
+						revision,
+						enabled,
+					}
 				write = match found {
 					None => Tx.create(Data.definitions, value)
 					Some(row) => Tx.update(Data.definitions, row, value)
@@ -130,12 +141,12 @@ SaveConfiguration :: [].{
 		usage: {
 			purpose: "Create a contract version or edit its template after checking current app ownership.",
 			use_when: ["An app owner configures event messages."],
-			avoid_when: ["Enabling delivery or changing an existing version's field schema."],
+			avoid_when: ["Changing delivery enablement or an existing version's field schema."],
 			preconditions: [
 				"Current direct app ownership, the current revision and a serialized schema within 16 KiB.",
 			],
 			effects: ["Atomically saves the definition, version and immutable actor-attributed change record."],
-			result: "The committed definition revision and contract version. Delivery stays disabled.",
+			result: "The committed definition revision and contract version. Existing delivery enablement is preserved.",
 		},
 		inputs: {
 			app_id: "Business app identifier.",
@@ -209,25 +220,56 @@ SaveConfiguration :: [].{
 	}
 
 	save_denied =
-		Api.error({
-			description: "Current ownership did not authorize this save.",
+		Api.error_cases({
+			description: "Current ownership did not authorize this save or enablement change.",
 			recovery: "Ask an ownership administrator for access.",
-			verification: |_| Api.failed_command(Commands.save, |_snapshot, _seed| Ok({ ..sample(0), app_id: "" })),
+			verification: |_| [
+				Api.failed_command(Commands.save, |_snapshot, _seed| Ok({ ..sample(0), app_id: "" })),
+				Api.failed_command(
+					Commands.set_enabled,
+					|
+						_snapshot,
+						_seed,
+					| Ok({ app_id: "", event_key: "build.completed", expected_revision: 0, enabled: Bool.False }),
+				),
+			],
 		})
 
 	invalid_configuration =
-		Api.error({
+		Api.error_cases({
 			description: "Configuration is invalid, its stored schema exceeds 16 KiB, the version is missing or changed, or its bound is exhausted.",
 			recovery: "Correct or reduce the schema, or create a new contract version without changing an existing schema.",
-			verification: |
-				_,
-			| Api.failed_command(Commands.save, |_snapshot, _seed| Ok({ ..sample(0), template: "{{missing}}" })),
+			verification: |_| [
+				Api.failed_command(Commands.save, |_snapshot, _seed| Ok({ ..sample(0), template: "{{missing}}" })),
+				Api.failed_command(
+					Commands.set_enabled,
+					|
+						_snapshot,
+						_seed,
+					| Ok({ app_id: "demo", event_key: "missing.event", expected_revision: 0, enabled: Bool.False }),
+				),
+			],
 		})
 
 	revision_conflict =
-		Api.error({
+		Api.error_cases({
 			description: "The edit's expected revision is stale or the revision bound is exhausted.",
 			recovery: "Read the current configuration and review the edit again.",
-			verification: |_| Api.failed_command(Commands.save, |_snapshot, _seed| Ok(sample(1_000_001))),
+			verification: |_| [
+				Api.failed_command(Commands.save, |_snapshot, _seed| Ok(sample(1_000_001))),
+				Api.failed_command(
+					Commands.set_enabled,
+					|
+						_snapshot,
+						_seed,
+					|
+						Ok({
+							app_id: "demo",
+							event_key: "build.completed",
+							expected_revision: 1_000_001,
+							enabled: Bool.False,
+						}),
+				),
+			],
 		})
 }

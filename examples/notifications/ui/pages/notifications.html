@@ -11,11 +11,18 @@
   <input id="description" name="description" value="A build completed." required>
   <label for="template">Message template</label>
   <textarea id="template" name="template" required>Build: &#123;&#123;summary&#125;&#125;</textarea>
-  <p>Use the summary field in your message. Saving keeps delivery disabled.</p>
+  <p>Use the summary field in your message. New events start with delivery disabled.</p>
   <label for="summary">Example summary</label>
   <input id="summary" name="summary" value="passed" maxlength="1000" required>
   <button type="button" id="preview-notification">Preview</button>
   <button type="button" id="save-configuration">Save configuration</button>
+  <button type="button" id="enable-delivery">Enable delivery</button>
+  <button type="button" id="disable-delivery">Disable delivery</button>
+  <label for="publication-id">Publication ID</label>
+  <input id="publication-id" name="publication_id" value="" maxlength="128" placeholder="Unique build or event ID">
+  <p>Publishing sends the saved version and example summary to the configured Slack channel. Reuse the same publication ID to check an unresolved send.</p>
+  <button type="button" id="publish-notification">Publish to Slack</button>
+  <button type="button" id="check-publication">Check publication</button>
 </fieldset>
 <p id="configuration-result" role="status" aria-live="polite">Load the current configuration before editing.</p>
 <pre id="notification-preview"></pre>

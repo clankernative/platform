@@ -134,6 +134,21 @@ impl Simulation {
         Self::build(runtime, seed, now_ms)
     }
 
+    /// Separate-host qualification with real app calls and offline provider
+    /// transport. This is explicitly not the fully offline `new` profile: the
+    /// caller must install its reviewed app-call port before selecting it.
+    pub fn with_remote_app_calls(runtime: Runtime, seed: [u8; 32], now_ms: i64) -> Result<Self> {
+        ensure!(
+            runtime.app_call_port().is_some(),
+            "qualification_app_call_port_missing"
+        );
+        let providers = crate::integration_host::Host::simulated_providers_with_app_calls(
+            runtime.db(),
+            runtime.scope(),
+        );
+        Self::build(runtime.with_integrations(providers), seed, now_ms)
+    }
+
     fn build(runtime: Runtime, seed: [u8; 32], now_ms: i64) -> Result<Self> {
         ensure!(
             (0..=253_402_300_799_000).contains(&now_ms),

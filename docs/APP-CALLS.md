@@ -141,7 +141,11 @@ configuration reads, previews and saves using the inherited human. Ownership
 administration is a separate, unexported command restricted by instance policy.
 Each operation checks current ownership; revocation and receiver failure refuse
 new work. The business configuration remains local and revision-checked, with
-atomic actor-attributed changes. Delivery is disabled in this slice. See the
+atomic actor-attributed changes. Notifications also accepts owner-authorized,
+versioned publications and continues them through the ordinary command runtime to
+its operator-bound Slack channel. Retained publication identities cannot resend an
+uncertain provider attempt, and command status remains separately actor-scoped.
+See the
 [Ownership source](../examples/app-ownership/README.md) and
 [Notifications source](../examples/notifications/README.md) for the source
 oracles, bounds and the remote-authorization race boundary.

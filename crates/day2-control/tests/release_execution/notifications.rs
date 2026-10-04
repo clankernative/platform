@@ -2,21 +2,25 @@
 //! IAP and provider observations are explicit fixtures; the Roc apps, codecs,
 //! SQLite transactions, imported grant, signatures and release fence are real.
 use super::*;
+use day2::integrations::simulated::{
+    self, OpenAiWorld, SimulatedFixture, SlackChannelWorld, SlackWorld, SnowflakeWorld,
+};
 
 const ALICE: &str = "alice@example.com";
 const BOB: &str = "bob@example.com";
 const OPERATOR: &str = "operator@example.com";
 
 struct Flow {
-    _directory: tempfile::TempDir,
-    _release: Fixture,
     _receiver: QueryServer,
     caller: QueryServer,
+    _release: Fixture,
     ownership: Runtime,
     notifications: Runtime,
     iap: Arc<FixtureIap>,
     client: reqwest::blocking::Client,
     at: i64,
+    // Server threads and their release probe must stop before state is removed.
+    _directory: tempfile::TempDir,
 }
 
 fn artifact(variable: &str) -> Result<PathBuf> {
@@ -54,6 +58,15 @@ impl Drop for Flow {
                     [database.to_str().context("evidence database")?],
                 )?;
                 fs::set_permissions(&database, fs::Permissions::from_mode(0o600))?;
+                if runtime.app() == "notifications" {
+                    let source = runtime.db().with_file_name(simulated::SLACK_WORLD);
+                    let provider = state.join("slack-fixture.sqlite");
+                    Connection::open(source)?.execute(
+                        "VACUUM INTO ?1",
+                        [provider.to_str().context("provider evidence")?],
+                    )?;
+                    fs::set_permissions(provider, fs::Permissions::from_mode(0o600))?;
+                }
             }
             let manifest = directory.join("capture.json");
             fs::write(
@@ -99,10 +112,26 @@ impl Flow {
             "notifications.home":read,
             "notifications.get":get,
             "notifications.preview":{"actors":actors,"mode":{"kind":"current_state"},"models":{},"observations":["app.query.v1"]},
-            "notifications.save":save
+            "notifications.save":save,
+            "notifications.set_enabled":{"actors":actors,"mode":{"kind":"current_state"},"models":{
+                "definitions":{"read":true,"update_fields":["enabled","revision"],"rows":{"kind":"all"}},
+                "configuration_changes":{"read":true,"create":true,"rows":{"kind":"all"}}
+            },"observations":["app.query.v1"],"effects":["slack.post.v1"]},
+            "notifications.publish":{"actors":actors,"mode":{"kind":"current_state"},"models":{
+                "definitions":{"read":true,"rows":{"kind":"all"}},
+                "contract_versions":{"read":true,"rows":{"kind":"all"}},
+                "publications":{"read":true,"create":true,"update_fields":["slack_accepted","channel","timestamp"],"rows":{"kind":"all"}}
+            },"observations":["app.query.v1"],"effects":["slack.post.v1"]},
+            "notifications.publication":{"actors":actors,"mode":{"kind":"read"},"models":{
+                "publications":{"read":true,"rows":{"kind":"all"}}
+            },"observations":["app.query.v1"]}
         }});
         let schema = delegation::schema_digest_for_artifact(&loaded, "app_ownership.check")?;
-        let resources = json!({"version":1,"connections":{"ownership":{"revision":1,"provider":"local_delegation"}},"resources":{"ownership":{"revision":1,"connection":{"id":"ownership","revision":1},"target":{"kind":"app_operation","app":"app_ownership","operation":"app_ownership.check","schema_digest":schema}}},"policies":{"ownership":{"revision":1,"owner":OPERATOR,"actors":actors,"allowed_apps":["notifications"],"slots":{"ownership":{"kind":"app_operation","allowed_resources":[{"id":"ownership","revision":1}],"actions":["delegate_query"],"limits":{"max_request_bytes":16384,"max_response_bytes":65536,"max_calls_per_invocation":4},"budgets":[]}}}},"budgets":{}});
+        let mut resources = json!({"version":1,"connections":{"ownership":{"revision":1,"provider":"local_delegation"}},"resources":{"ownership":{"revision":1,"connection":{"id":"ownership","revision":1},"target":{"kind":"app_operation","app":"app_ownership","operation":"app_ownership.check","schema_digest":schema}}},"policies":{"ownership":{"revision":1,"owner":OPERATOR,"actors":actors,"allowed_apps":["notifications"],"slots":{"ownership":{"kind":"app_operation","allowed_resources":[{"id":"ownership","revision":1}],"actions":["delegate_query"],"limits":{"max_request_bytes":16384,"max_response_bytes":65536,"max_calls_per_invocation":4},"budgets":[]}}}},"budgets":{}});
+        resources["connections"]["slack"] = json!({"revision":1,"provider":"slack","live":{"provider":"slack","credential_ref":{"id":"day2-bot","revision":1},"workspace_id":"T123","signing_secret_ref":null}});
+        resources["resources"]["channel"] = json!({"revision":1,"connection":{"id":"slack","revision":1},"target":{"kind":"slack_channel","channel":{"channel_id":"C123"}}});
+        resources["policies"]["channel"] = json!({"revision":1,"owner":OPERATOR,"actors":actors,"allowed_apps":["notifications"],"slots":{"notification_channel":{"kind":"slack_channel","allowed_resources":[{"id":"channel","revision":1}],"actions":["slack_post"],"limits":{"max_request_bytes":16384,"max_response_bytes":16384,"max_calls_per_invocation":2},"budgets":[{"id":"slack-daily","revision":1}]}}});
+        resources["budgets"]["slack-daily"] = json!({"revision":1,"scope":"app","period_seconds":86400,"limits":{"calls":200,"bytes":2000000,"cost_microunits":null,"concurrency":2}});
         let mut hosts = BTreeMap::new();
         for (app, path, policy) in [
             ("app_ownership", &ownership_artifact, ownership_policy),
@@ -114,7 +143,8 @@ impl Flow {
             let mut instance = json!({"installation":"alpha","environment":"production","apps":{app:{"artifact":path,"readers":actors,"writers":actors,"authority":policy}}});
             if app == "notifications" {
                 instance["resources"] = resources.clone();
-                let attachments: Vec<_> = ["notifications.get", "notifications.preview", "notifications.save"].into_iter().map(|operation| json!({"policy":{"id":"ownership","revision":1},"operation":operation,"bindings":{"ownership":{"id":"ownership","revision":1}}})).collect();
+                let mut attachments: Vec<_> = ["notifications.get", "notifications.preview", "notifications.save", "notifications.set_enabled", "notifications.publish", "notifications.publication"].into_iter().map(|operation| json!({"policy":{"id":"ownership","revision":1},"operation":operation,"bindings":{"ownership":{"id":"ownership","revision":1}}})).collect();
+                attachments.extend(["notifications.set_enabled", "notifications.publish"].into_iter().map(|operation| json!({"policy":{"id":"channel","revision":1},"operation":operation,"bindings":{"notification_channel":{"id":"channel","revision":1}}})));
                 instance["apps"][app]["resource_policies"] = json!(attachments);
             }
             fs::write(&instance_path, serde_json::to_vec(&instance)?)?;
@@ -216,8 +246,33 @@ impl Flow {
                 )?,
             },
         )?;
+        let providers = SimulatedFixture {
+            slack: SlackWorld {
+                workspace_id: "T123".into(),
+                channels: BTreeMap::from([("C123".into(), SlackChannelWorld::default())]),
+                sequence: 0,
+            },
+            snowflake: SnowflakeWorld {
+                account: "offline".into(),
+                ..Default::default()
+            },
+            openai: OpenAiWorld {
+                project_id: "offline".into(),
+                model: "offline".into(),
+                max_input_tokens: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        simulated::seed(notifications.db(), notifications.scope(), &providers)?;
+        let simulation = day2::simulation::Simulation::with_remote_app_calls(
+            notifications.with_app_call_port(Arc::new(port)),
+            [7; 32],
+            at * 1000,
+        )?;
+        let notifications = simulation.runtime().clone();
         let caller = QueryServer::start(
-            notifications.clone().with_app_call_port(Arc::new(port)),
+            notifications.clone(),
             source,
             BTreeMap::new(),
             BTreeMap::from([("app_ownership".into(), issuer)]),
@@ -363,6 +418,321 @@ impl Flow {
             })?,
         ))
     }
+
+    fn finish(&self, response: reqwest::blocking::Response) -> Result<Value> {
+        let status = response.status();
+        let mut body: Value = response.json()?;
+        ensure!(
+            status == StatusCode::OK || status == StatusCode::ACCEPTED,
+            "command response {status}: {body}"
+        );
+        if status == StatusCode::OK {
+            return Ok(body);
+        }
+        let url = body["status_url"]
+            .as_str()
+            .context("command status URL")?
+            .to_owned();
+        for _ in 0..200 {
+            let response = self.get(&self.caller.origin, &url, ALICE)?.send()?;
+            ensure!(response.status() == StatusCode::OK, "status authorization");
+            body = response.json()?;
+            if body["status"] != "pending" {
+                return Ok(body);
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        anyhow::bail!("command did not settle: {body}")
+    }
+
+    fn configure_enabled(&self) -> Result<()> {
+        self.owner(ALICE, true, "grant")?;
+        assert_eq!(
+            self.post(
+                &self.caller.origin,
+                "notifications.save",
+                ALICE,
+                "configure",
+                &save(0, 0, "Build: {{summary}}")
+            )?
+            .status(),
+            StatusCode::OK
+        );
+        assert_eq!(self.post(&self.caller.origin, "notifications.set_enabled", ALICE, "enable", &json!({"app_id":"demo","event_key":"build.completed","expected_revision":1,"enabled":true}))?.json::<Value>()?, json!({"revision":2,"enabled":true}));
+        Ok(())
+    }
+
+    fn successful(&self, response: reqwest::blocking::Response) -> Result<Value> {
+        let outcome = self.finish(response)?;
+        if let Some(status) = outcome.get("status") {
+            ensure!(status == "success", "command failed: {outcome}");
+            return Ok(outcome["result"].clone());
+        }
+        Ok(outcome)
+    }
+
+    fn slack(&self) -> Result<simulated::World<SlackWorld>> {
+        simulated::update_slack(
+            self.notifications.db(),
+            self.notifications.scope(),
+            |state| Ok(state.clone()),
+        )
+    }
+
+    fn publication_count(&self) -> Result<i64> {
+        Ok(Connection::open(self.notifications.db())?.query_row(
+            "SELECT count(*) FROM publications",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+}
+
+fn publication(id: &str, text: &str) -> Value {
+    json!({"app_id":"demo","event_key":"build.completed","version":1,"publication_id":id,"payload":[{"name":"summary","kind":"text","text":text,"integer":0,"boolean":false}]})
+}
+
+#[test]
+fn notifications_publication_snapshots_version_and_deduplicates_before_disable() -> Result<()> {
+    let flow = Flow::new()?;
+    flow.configure_enabled()?;
+    // A later contract exists, but publishing v1 must use v1's template.
+    assert_eq!(
+        flow.post(
+            &flow.caller.origin,
+            "notifications.save",
+            ALICE,
+            "v2",
+            &save(2, 0, "New: {{summary}}")
+        )?
+        .json::<Value>()?,
+        json!({"revision":3,"version":2})
+    );
+    let input = publication("build-1", "passed <@U123> & {{summary}}");
+    let first = flow.successful(flow.post(
+        &flow.caller.origin,
+        "notifications.publish",
+        ALICE,
+        "publish-1",
+        &input,
+    )?)?;
+    assert_eq!(first["slack_accepted"], true);
+    assert_eq!(first["duplicate"], false);
+    assert_eq!(first["channel"], "C123");
+    let world = flow.slack()?;
+    assert_eq!(world.world.channels["C123"].messages.len(), 1);
+    assert_eq!(
+        world.world.channels["C123"].messages[0].text,
+        "Build: passed &lt;@U123&gt; &amp; {{summary}}"
+    );
+    assert_eq!(world.calls, vec!["auth.test", "chat.postMessage"]);
+    let state = flow.notifications.inspect()?;
+    let snapshot: Value = serde_json::from_str(
+        state["publications"][0]["data"]
+            .as_str()
+            .context("publication snapshot")?,
+    )?;
+    assert_eq!(snapshot["latest_version"], 2);
+    assert_eq!(snapshot["template_revision"], 1);
+    assert_eq!(snapshot["message"], "Build: passed <@U123> & {{summary}}");
+    assert_eq!(snapshot["actor"], ALICE);
+    assert_eq!(flow.post(&flow.caller.origin,"notifications.set_enabled",ALICE,"disable",&json!({"app_id":"demo","event_key":"build.completed","expected_revision":3,"enabled":false}))?.status(),StatusCode::OK);
+    let duplicate = flow.successful(flow.post(
+        &flow.caller.origin,
+        "notifications.publish",
+        ALICE,
+        "fresh-transport-key",
+        &input,
+    )?)?;
+    assert_eq!(duplicate["notification_id"], first["notification_id"]);
+    assert_eq!(duplicate["status_url"], first["status_url"]);
+    assert_eq!(duplicate["duplicate"], true);
+    assert_eq!(duplicate["slack_accepted"], true);
+    assert_eq!(
+        flow.slack()?,
+        world,
+        "duplicates must not contact Slack at all"
+    );
+    assert_eq!(flow.publication_count()?, 1);
+    let changed = flow.post(
+        &flow.caller.origin,
+        "notifications.publish",
+        ALICE,
+        "conflict",
+        &publication("build-1", "changed"),
+    )?;
+    assert_eq!(changed.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        changed.json::<Value>()?["error"]["code"],
+        "app:notifications.publication_conflict"
+    );
+    assert_eq!(
+        flow.post(
+            &flow.caller.origin,
+            "notifications.publish",
+            ALICE,
+            "disabled",
+            &publication("build-2", "passed")
+        )?
+        .status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    assert_eq!(flow.publication_count()?, 1);
+    assert_eq!(flow.slack()?, world);
+    assert_eq!(
+        flow.query(
+            "publication",
+            ALICE,
+            &json!({"app_id":"demo","publication_id":"build-1"})
+        )?
+        .json::<Value>()?,
+        duplicate
+    );
+    flow.owner(ALICE, false, "revoke")?;
+    assert!(
+        !flow
+            .query(
+                "publication",
+                ALICE,
+                &json!({"app_id":"demo","publication_id":"build-1"})
+            )?
+            .status()
+            .is_success()
+    );
+    assert!(
+        !flow
+            .post(
+                &flow.caller.origin,
+                "notifications.publish",
+                ALICE,
+                "revoked",
+                &input
+            )?
+            .status()
+            .is_success()
+    );
+    assert_eq!(flow.slack()?, world);
+    Ok(())
+}
+
+#[test]
+fn notification_provider_uncertainty_never_resends_a_retained_publication() -> Result<()> {
+    let flow = Flow::new()?;
+    flow.configure_enabled()?;
+    simulated::schedule_faults(
+        flow.notifications.db(),
+        flow.notifications.scope(),
+        simulated::SLACK_WORLD,
+        vec![simulated::ScheduledFault {
+            endpoint: "chat.postMessage".into(),
+            remaining: 1,
+            fault: simulated::SimulatedFault::ConnectionLost,
+        }],
+    )?;
+    let input = publication("uncertain-1", "passed");
+    let response = flow.post(
+        &flow.caller.origin,
+        "notifications.publish",
+        ALICE,
+        "uncertain",
+        &input,
+    )?;
+    let outcome = flow.finish(response)?;
+    assert_ne!(outcome["status"], "success");
+    assert_eq!(outcome["error"], "integration_transport_unavailable");
+    let world = flow.slack()?;
+    assert_eq!(world.calls, vec!["auth.test", "chat.postMessage"]);
+    let duplicate = flow.successful(flow.post(
+        &flow.caller.origin,
+        "notifications.publish",
+        ALICE,
+        "different-key",
+        &input,
+    )?)?;
+    assert_eq!(duplicate["duplicate"], true);
+    assert_eq!(duplicate["slack_accepted"], false);
+    assert_eq!(duplicate["channel"], "");
+    assert_eq!(flow.slack()?, world);
+    assert_eq!(flow.publication_count()?, 1);
+    // Reopened runtime sees the same durable failed/uncertain command receipt.
+    let reopened = Runtime::load(flow.notifications.instance_path(), "notifications")?;
+    let id = duplicate["status_url"]
+        .as_str()
+        .context("status URL")?
+        .trim_start_matches("/api/invocations/");
+    let receipt = day2::invocations::status(&reopened, id, ALICE)?;
+    assert_eq!(receipt.error, "integration_transport_unavailable");
+    assert!(day2::invocations::status(&reopened, id, BOB).is_err());
+    assert_eq!(
+        reopened.execute(id, day2::store::Fault::None)?.error,
+        receipt.error
+    );
+    assert_eq!(flow.slack()?, world);
+    Ok(())
+}
+
+#[test]
+fn invalid_and_unauthorized_publications_never_reach_slack() -> Result<()> {
+    let flow = Flow::new()?;
+    flow.configure_enabled()?;
+    let before = flow.slack()?;
+    assert!(
+        !flow
+            .post(
+                &flow.caller.origin,
+                "notifications.publish",
+                BOB,
+                "denied",
+                &publication("bob", "passed")
+            )?
+            .status()
+            .is_success()
+    );
+    let mut cases = vec![
+        publication("", "passed"),
+        publication("long", &"x".repeat(1001)),
+    ];
+    let mut unknown = publication("unknown-version", "passed");
+    unknown["version"] = json!(99);
+    cases.push(unknown);
+    let mut wrong = publication("wrong-type", "passed");
+    wrong["payload"][0]["kind"] = json!("integer");
+    cases.push(wrong);
+    let mut repeated = publication("duplicate-field", "passed");
+    repeated["payload"] = json!([
+        repeated["payload"][0].clone(),
+        repeated["payload"][0].clone()
+    ]);
+    cases.push(repeated);
+    for (index, input) in cases.into_iter().enumerate() {
+        assert_eq!(
+            flow.post(
+                &flow.caller.origin,
+                "notifications.publish",
+                ALICE,
+                &format!("invalid-{index}"),
+                &input
+            )?
+            .status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
+    let mut forged = publication("forged", "passed");
+    forged["actor"] = json!(ALICE);
+    assert_eq!(
+        flow.post(
+            &flow.caller.origin,
+            "notifications.publish",
+            BOB,
+            "forged",
+            &forged
+        )?
+        .status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(flow.publication_count()?, 0);
+    assert_eq!(flow.slack()?, before);
+    Ok(())
 }
 
 fn fields() -> Value {
