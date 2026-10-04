@@ -421,8 +421,14 @@ are mounted. The image contains the selected admitted Linux artifacts and pinned
 workflow distribution; callbacks and company domains continue to come from the
 instance's existing edges.
 
-The edge root adds a custom role containing only the five Compute read methods
-used by the native guard. This planned grant and the published secret list are
+The edge root adds a custom role containing only `resourcemanager.projects.get`
+and four Compute reads: backend services, URL maps, HTTPS proxies and forwarding
+rules. Resource Manager supplies the project number for the IAP audience;
+Compute's project `id` is a separate resource identifier and cannot supply it.
+The native guard checks the selected project ID and active lifecycle state before
+comparing the audience. Confirm `cloudresourcemanager.googleapis.com` is enabled
+in that project before rolling out these hosts; a permission grant alone does
+not enable the API. This planned grant and the published secret list are
 desired policy, not an audit of all effective inherited IAM grants. Actual
 workload, frontend, namespace isolation and least-privilege policy qualification
 remain necessary before claiming installation readiness.

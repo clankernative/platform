@@ -40,7 +40,7 @@ resource "google_project_iam_custom_role" "oauth_edge_reads" {
   role_id = "day2_${replace(var.app_id, "-", "_")}_oauth_edge"
   title   = "Day2 ${var.app_id} OAuth edge reads"
   permissions = [
-    "compute.projects.get",
+    "resourcemanager.projects.get",
     "compute.backendServices.get",
     "compute.urlMaps.get",
     "compute.targetHttpsProxies.get",

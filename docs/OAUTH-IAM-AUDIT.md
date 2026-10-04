@@ -36,7 +36,8 @@ CLOUDSDK_CORE_PROJECT=QUERY_PROJECT gcloud asset analyze-iam-policy \
 ```
 
 Review every returned resource and permission, including conditional grants.
-Compare the five Compute reads and exact secret containers to the deployment;
+Compare `resourcemanager.projects.get`, the four Compute reads (backend services,
+URL maps, HTTPS proxies and forwarding rules) and exact secret containers to the deployment;
 for the shell, also compare its self-only `signJwt` and selected app-backend IAP
 access. Any other permission needs resolution. Follow every outgoing service
 account impersonation path and audit the reachable account's authority too.

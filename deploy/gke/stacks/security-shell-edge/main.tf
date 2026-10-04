@@ -44,7 +44,7 @@ resource "google_project_iam_custom_role" "facts" {
   project     = var.project_id
   role_id     = "day2SecurityShellFacts_${substr(sha256(var.namespace), 0, 8)}"
   title       = "Day2 security shell edge reads"
-  permissions = ["compute.projects.get", "compute.backendServices.get", "compute.urlMaps.get", "compute.targetHttpsProxies.get", "compute.globalForwardingRules.get"]
+  permissions = ["resourcemanager.projects.get", "compute.backendServices.get", "compute.urlMaps.get", "compute.targetHttpsProxies.get", "compute.globalForwardingRules.get"]
 }
 
 resource "google_project_iam_member" "facts" {

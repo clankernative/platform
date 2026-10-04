@@ -5,7 +5,7 @@ mock_provider "kubernetes" {}
 variables {
   namespace     = "day2-security"
   image         = "registry.example.com/day2/shell@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-  instance_json = file("tests/instance.json")
+  instance_json = file("tests/oauth-instance.json")
 }
 
 override_data {
@@ -69,7 +69,7 @@ run "dedicated_stateless_guarded_workload" {
 run "refuses_other_workload_identity" {
   command = plan
   variables {
-    instance_json = jsonencode(merge(jsondecode(file("tests/instance.json")), { oauth_shell_transport = { service_account = "app@example-tools.iam.gserviceaccount.com" } }))
+    instance_json = jsonencode(merge(jsondecode(file("tests/oauth-instance.json")), { oauth_shell_transport = { service_account = "app@example-tools.iam.gserviceaccount.com" } }))
   }
   expect_failures = [kubernetes_config_map_v1.instance]
 }
@@ -77,7 +77,7 @@ run "refuses_other_workload_identity" {
 run "refuses_other_security_origin" {
   command = plan
   variables {
-    instance_json = jsonencode(merge(jsondecode(file("tests/instance.json")), { security_shell = { origin = "https://app.tools.example.com", iap_audience = "/projects/123456789012/global/backendServices/987654321" } }))
+    instance_json = jsonencode(merge(jsondecode(file("tests/oauth-instance.json")), { security_shell = { origin = "https://app.tools.example.com", iap_audience = "/projects/123456789012/global/backendServices/987654321" } }))
   }
   expect_failures = [kubernetes_config_map_v1.instance]
 }
@@ -85,7 +85,7 @@ run "refuses_other_security_origin" {
 run "refuses_custody_container_at_another_version" {
   command = plan
   variables {
-    instance_json = jsonencode(merge(jsondecode(file("tests/instance.json")), { control = { secrets = merge(jsondecode(file("tests/instance.json")).control.secrets, { reauth = { kind = "gcp_version", project_number = 123456789012, secret = "custody_verifier", version = 2 } }) } }))
+    instance_json = jsonencode(merge(jsondecode(file("tests/oauth-instance.json")), { control = { secrets = merge(jsondecode(file("tests/oauth-instance.json")).control.secrets, { reauth = { kind = "gcp_version", project_number = 123456789012, secret = "custody_verifier", version = 2 } }) } }))
   }
   expect_failures = [kubernetes_config_map_v1.instance]
 }
@@ -93,7 +93,7 @@ run "refuses_custody_container_at_another_version" {
 run "refuses_unbounded_resources" {
   command = plan
   variables {
-    instance_json = jsonencode(merge(jsondecode(file("tests/instance.json")), { oauth_runtime = merge(jsondecode(file("tests/instance.json")).oauth_runtime, { shell_resources = { memory_mib = 512, cpu_millis = 500, process_limit = 1024, process_limit_enforced_by = "pod", http_concurrency = 33, shutdown_seconds = 30 } }) }))
+    instance_json = jsonencode(merge(jsondecode(file("tests/oauth-instance.json")), { oauth_runtime = merge(jsondecode(file("tests/oauth-instance.json")).oauth_runtime, { shell_resources = { memory_mib = 512, cpu_millis = 500, process_limit = 1024, process_limit_enforced_by = "pod", http_concurrency = 33, shutdown_seconds = 30 } }) }))
   }
   expect_failures = [kubernetes_config_map_v1.instance]
 }

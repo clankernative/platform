@@ -59,12 +59,12 @@ run "one_native_identity_with_exact_read_and_key_grants" {
   }
   assert {
     condition = (
-      toset(google_project_iam_custom_role.oauth_edge_reads[0].permissions) == toset(["compute.projects.get", "compute.backendServices.get", "compute.urlMaps.get", "compute.targetHttpsProxies.get", "compute.globalForwardingRules.get"]) &&
+      toset(google_project_iam_custom_role.oauth_edge_reads[0].permissions) == toset(["resourcemanager.projects.get", "compute.backendServices.get", "compute.urlMaps.get", "compute.targetHttpsProxies.get", "compute.globalForwardingRules.get"]) &&
       google_project_iam_member.oauth_edge_reads[0].member == "serviceAccount:app-native@example-tools.iam.gserviceaccount.com" &&
       toset(keys(google_secret_manager_secret_iam_member.oauth_keys)) == toset(["custody_verifier", "custody_encryption", "shell_attestation"]) &&
       alltrue([for grant in values(google_secret_manager_secret_iam_member.oauth_keys) : grant.project == "example-tools" && grant.member == "serviceAccount:app-native@example-tools.iam.gserviceaccount.com" && grant.role == "roles/secretmanager.secretAccessor"])
     )
-    error_message = "Native app facts need exactly five Compute read methods and the selected key containers, never OAuth clients."
+    error_message = "Native app facts need the Resource Manager project read, exactly four Compute reads and the selected key containers, never OAuth clients."
   }
   assert {
     condition = (

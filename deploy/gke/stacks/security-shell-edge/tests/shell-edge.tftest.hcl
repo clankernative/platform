@@ -69,7 +69,7 @@ run "one_hostname_drives_the_edge_and_contract" {
   assert {
     condition = (
       google_project_iam_custom_role.sign_jwt.permissions == toset(["iam.serviceAccounts.signJwt"]) &&
-      google_project_iam_custom_role.facts.permissions == toset(["compute.projects.get", "compute.backendServices.get", "compute.urlMaps.get", "compute.targetHttpsProxies.get", "compute.globalForwardingRules.get"]) &&
+      google_project_iam_custom_role.facts.permissions == toset(["resourcemanager.projects.get", "compute.backendServices.get", "compute.urlMaps.get", "compute.targetHttpsProxies.get", "compute.globalForwardingRules.get"]) &&
       google_project_iam_member.facts.member == "serviceAccount:security-shell@example-tools.iam.gserviceaccount.com" &&
       toset(jsondecode(kubernetes_config_map_v1.contract.data["OAUTH_SHELL_SECRET_IDS"])) == toset(var.runtime_secret_ids) &&
       google_service_account_iam_member.sign_jwt.member == "serviceAccount:security-shell@example-tools.iam.gserviceaccount.com" &&
