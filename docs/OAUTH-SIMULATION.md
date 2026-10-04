@@ -79,7 +79,8 @@ semantic history but may occur before a divergent database observation exists.
 
 ## Schema upgrades
 
-Refresh, connect, and inbound state use schema version 2; custody uses version 3.
+Refresh, connect, callback/exchange bindings, and inbound state use schema version 2;
+custody uses version 3.
 Known legacy versions upgrade additively inside a transaction. Before stamping
 the version, admission checks the reviewed column types/nullability/keys, foreign
 keys, unique indexes, installed guard definitions, existing row storage types,

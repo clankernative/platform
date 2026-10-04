@@ -220,19 +220,18 @@ pub fn install_schema(db: &Connection) -> Result<()> {
              (state IN ('awaiting_account_approval', 'activated')) = (scope_evidence IS NOT NULL) AND
              (code_ref IS NULL OR length(code_ref) > 0) AND (account IS NULL OR length(account) > 0) AND
              (scope_evidence IS NULL OR length(scope_evidence) > 0)" },
-        super::schema::Invariant { table: "oauth_callback_bindings", predicate: "length(attempt) > 0 AND length(binding) > 0 AND json_valid(binding)" },
     ])?;
-    let mut versions = db.prepare("SELECT version FROM oauth_callback_schema_version")?;
-    let known = versions
-        .query_map([], |row| row.get::<_, i64>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    ensure!(
-        known.is_empty() || known == [1],
-        "unsupported OAuth callback schema version"
-    );
-    if known.is_empty() {
-        db.execute("INSERT INTO oauth_callback_schema_version VALUES (1)", [])?;
-    }
+    super::schema::upgrade(
+        db,
+        "oauth_callback_schema_version",
+        &[1, 2],
+        2,
+        ddl,
+        &[super::schema::Invariant {
+            table: "oauth_callback_bindings",
+            predicate: "length(attempt) > 0 AND length(binding) > 0 AND json_valid(binding) AND json_type(binding) = 'object'",
+        }],
+    )?;
     super::exchange::install_schema(db)?;
     super::custody::install_schema(db)?;
     Ok(())

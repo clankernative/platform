@@ -22,7 +22,8 @@ pub(super) fn upgrade(
     expected.execute_batch(ddl)?;
     let tx = db.unchecked_transaction()?;
     ensure!(
-        shape(&tx, "table_info", version_table)? == shape(&expected, "table_info", version_table)?,
+        shape(&tx, "table_xinfo", version_table)?
+            == shape(&expected, "table_xinfo", version_table)?,
         "unsupported OAuth version table shape"
     );
     let mut statement = tx.prepare(&format!("SELECT version FROM {version_table}"))?;
@@ -36,7 +37,7 @@ pub(super) fn upgrade(
     );
     for invariant in invariants {
         let Invariant { table, predicate } = invariant;
-        for pragma in ["table_info", "foreign_key_list"] {
+        for pragma in ["table_xinfo", "foreign_key_list"] {
             ensure!(
                 shape(&tx, pragma, table)? == shape(&expected, pragma, table)?,
                 "unsupported OAuth table shape in {table}"
@@ -312,6 +313,14 @@ mod tests {
             ),
             LEGACY_REFRESH.replace("REFERENCES oauth_connection_slots(slot)", ""),
             LEGACY_REFRESH.replace("version INTEGER PRIMARY KEY", "version INTEGER"),
+            LEGACY_REFRESH.replace(
+                "version INTEGER PRIMARY KEY",
+                "version INTEGER PRIMARY KEY, hidden INTEGER GENERATED ALWAYS AS (version + 1)",
+            ).replace("INSERT INTO oauth_schema_version VALUES(1)", "INSERT INTO oauth_schema_version(version) VALUES(1)"),
+            LEGACY_REFRESH.replace(
+                "next_version INTEGER, receipt TEXT,",
+                "next_version INTEGER, receipt TEXT, hidden INTEGER GENERATED ALWAYS AS (generation + 1),",
+            ),
         ] {
             let db = Connection::open_in_memory()?;
             db.execute_batch(&legacy)?;
@@ -331,6 +340,62 @@ mod tests {
         db.execute_batch("DROP TRIGGER oauth_refresh_attempts_shape_INSERT_v2;
             CREATE TRIGGER oauth_refresh_attempts_shape_INSERT_v2 AFTER INSERT ON oauth_refresh_attempts BEGIN SELECT 1; END;")?;
         assert!(super::super::store::install_schema(&db).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_binding_tables_validate_shape_and_guard_json_objects() -> Result<()> {
+        for prefix in ["callback", "exchange"] {
+            let table = format!("oauth_{prefix}_bindings");
+            let version = format!("oauth_{prefix}_schema_version");
+            let legacy = format!(
+                "{LEGACY_CONNECT}
+                 CREATE TABLE {version}(version INTEGER PRIMARY KEY);
+                 INSERT INTO {version} VALUES(1);
+                 CREATE TABLE {table}(attempt TEXT PRIMARY KEY REFERENCES oauth_connect_attempts(attempt), binding TEXT NOT NULL);
+                 INSERT INTO {table} VALUES('attempt', '{{}}');"
+            );
+            let db = Connection::open_in_memory()?;
+            db.execute_batch(&legacy)?;
+            super::super::connect::install_schema(&db)?;
+            assert_eq!(
+                db.query_row(&format!("SELECT version FROM {version}"), [], |row| row
+                    .get::<_, i64>(0))?,
+                2
+            );
+            super::super::connect::install_schema(&db)?;
+            for binding in ["", "broken", "null", "[]", "1"] {
+                assert!(
+                    db.execute(&format!("UPDATE {table} SET binding = ?1"), [binding])
+                        .is_err()
+                );
+            }
+            assert!(
+                db.execute(
+                    &format!("INSERT INTO {table} VALUES('missing-parent', '{{}}')"),
+                    []
+                )
+                .is_err()
+            );
+            for corrupt in [
+                legacy.replace("'{}'", "'null'"),
+                legacy.replace("binding TEXT NOT NULL", "binding BLOB NOT NULL"),
+                legacy.replace("REFERENCES oauth_connect_attempts(attempt)", ""),
+                legacy.replace(
+                    &format!("CREATE TABLE {version}(version INTEGER PRIMARY KEY)"),
+                    &format!("CREATE TABLE {version}(version INTEGER)"),
+                ),
+            ] {
+                let restored = Connection::open_in_memory()?;
+                restored.execute_batch(&corrupt)?;
+                assert!(super::super::connect::install_schema(&restored).is_err());
+                assert_eq!(
+                    restored.query_row(&format!("SELECT version FROM {version}"), [], |row| row
+                        .get::<_, i64>(0))?,
+                    1
+                );
+            }
+        }
         Ok(())
     }
 
