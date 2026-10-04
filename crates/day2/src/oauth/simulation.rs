@@ -565,33 +565,91 @@ fn failure_category(error: &anyhow::Error) -> String {
         .map_or_else(|| error.to_string(), |failure| failure.category.into())
 }
 
+/// Keep the actual last failing observation. Re-running a reduced history and
+/// assuming it fails again would discard evidence of intermittent nondeterminism.
+pub(super) fn reduce_steps<T: Clone>(
+    steps: &[T],
+    budget: usize,
+    category: &str,
+    classify: impl Fn(&anyhow::Error) -> String,
+    mut check: impl FnMut(&[T]) -> Result<()>,
+) -> (Vec<T>, Option<anyhow::Error>) {
+    let mut reduced = steps.to_vec();
+    let mut observed = None;
+    let mut index = 0;
+    let mut attempts = 0;
+    while index < reduced.len() && attempts < budget {
+        let mut candidate = reduced.clone();
+        candidate.remove(index);
+        attempts += 1;
+        if let Err(error) = check(&candidate) {
+            if classify(&error) == category {
+                reduced = candidate;
+                observed = Some(error);
+                continue;
+            }
+        }
+        index += 1;
+    }
+    (reduced, observed)
+}
+
+#[test]
+fn reduction_keeps_observed_evidence_when_a_failure_does_not_repeat() {
+    let mut calls = 0;
+    let (steps, observed) = reduce_steps(
+        &[1, 2, 3],
+        8,
+        "replay",
+        |error| error.to_string(),
+        |_| {
+            calls += 1;
+            if calls == 1 {
+                anyhow::bail!("replay");
+            }
+            Ok(())
+        },
+    );
+    assert_eq!(steps, [2, 3]);
+    assert_eq!(observed.unwrap().to_string(), "replay");
+    let (steps, observed) =
+        reduce_steps(&[1, 2], 8, "replay", |error| error.to_string(), |_| Ok(()));
+    assert_eq!(steps, [1, 2]);
+    assert!(
+        observed.is_none(),
+        "retain the original failure when no reduction repeats it"
+    );
+}
+
 fn verify(program: &Program) -> Result<Trace> {
     match checked(program) {
         Ok(trace) => Ok(trace),
         Err(error) => {
             let fingerprint = failure_category(&error);
-            let mut reduced = program.clone();
             // Bounded semantic deletion preserves the failing oracle category.
             // Reduction never approves or modifies the committed regression corpus.
-            let mut index = 0;
-            let mut attempts = 0;
-            while index < reduced.steps.len() && attempts < 256 {
-                let mut candidate = reduced.clone();
-                candidate.steps.remove(index);
-                attempts += 1;
-                if checked(&candidate)
-                    .is_err_and(|failure| failure_category(&failure) == fingerprint)
-                {
-                    reduced = candidate;
-                } else {
-                    index += 1;
-                }
-            }
+            let (steps, observed) = reduce_steps(
+                &program.steps,
+                256,
+                &fingerprint,
+                failure_category,
+                |steps| {
+                    checked(&Program {
+                        steps: steps.to_vec(),
+                        ..program.clone()
+                    })
+                    .map(|_| ())
+                },
+            );
+            let reduced = Program {
+                steps,
+                ..program.clone()
+            };
             let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../../artifacts/oauth-simulation");
             std::fs::create_dir_all(&directory)?;
             let path = directory.join(format!("failure-{}.json", program.seed));
-            let minimized = checked(&reduced).unwrap_err();
+            let minimized = observed.as_ref().unwrap_or(&error);
             let evidence = serde_json::json!({ "version":1, "implementation":implementation(), "original":program,
                 "reduced":reduced, "failure":fingerprint, "observation":error.downcast_ref::<Divergence>(),
                 "reduced_observation":minimized.downcast_ref::<Divergence>(),

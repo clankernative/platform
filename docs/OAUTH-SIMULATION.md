@@ -64,9 +64,11 @@ observations through the divergent step. Reduction deletes steps while retaining
 the same failure category, within a fixed attempt budget. A replay mismatch
 includes both traces. No callback code, PKCE verifier, access token, client
 credential, provider response body, or authorization header enters the bundle.
-The source identity prevents replaying evidence against a different executable
-implementation. Evidence belongs in protected storage, like other raw replay
-artifacts.
+The source identity binds replay to the compiled OAuth source catalog and its
+recorded build inputs; it is not whole-executable binary attestation. Reduction
+retains actual observed failures even if subsequent attempts pass, so an
+intermittent replay mismatch does not lose its evidence. Evidence belongs in
+protected storage, like other raw replay artifacts.
 
 ```text
 DAY2_OAUTH_REPLAY=<bundle-path> cargo test --locked -p day2 --lib oauth::simulation::replay_saved_oauth_history -- --exact

@@ -384,20 +384,19 @@ fn category(error: &anyhow::Error) -> String {
 fn verify(program: &Program) -> Result<()> {
     if let Err(error) = checked(program) {
         let failure = category(&error);
-        let mut reduced = program.clone();
-        let mut index = 0;
-        let mut attempts = 0;
-        while index < reduced.steps.len() && attempts < 128 {
-            let mut candidate = reduced.clone();
-            candidate.steps.remove(index);
-            attempts += 1;
-            if checked(&candidate).is_err_and(|error| category(&error) == failure) {
-                reduced = candidate;
-            } else {
-                index += 1;
-            }
-        }
-        let minimized = checked(&reduced).unwrap_err();
+        let (steps, observed) =
+            super::reduce_steps(&program.steps, 128, &failure, category, |steps| {
+                checked(&Program {
+                    steps: steps.to_vec(),
+                    ..program.clone()
+                })
+                .map(|_| ())
+            });
+        let reduced = Program {
+            steps,
+            ..program.clone()
+        };
+        let minimized = observed.as_ref().unwrap_or(&error);
         let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../artifacts/oauth-simulation");
         std::fs::create_dir_all(&directory)?;

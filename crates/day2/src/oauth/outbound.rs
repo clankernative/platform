@@ -392,7 +392,7 @@ mod tests {
             .unwrap(),
             CallbackOutcome::Rejected
         );
-        db.execute("UPDATE oauth_callback_schema_version SET version = 2", [])
+        db.execute("UPDATE oauth_callback_schema_version SET version = 3", [])
             .unwrap();
         assert!(connect::install_schema(&db).is_err());
     }
