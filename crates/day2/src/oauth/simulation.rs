@@ -128,6 +128,7 @@ struct Trace {
 struct Provider {
     replies: VecDeque<(u16, String)>,
     requests: Vec<(String, String)>,
+    addresses: Vec<(String, String, String)>,
     fail_at: Option<usize>,
 }
 
@@ -211,6 +212,7 @@ impl effects::Hooks for World {
                     | "www.gstatic.com"
                     | "security.example.com"
                     | "app.example"
+                    | "gitlab.com"
             ),
             "unselected simulation endpoint"
         );
@@ -219,6 +221,11 @@ impl effects::Hooks for World {
         provider
             .requests
             .push((request.method().to_string(), request.url().path().into()));
+        provider.addresses.push((
+            request.method().to_string(),
+            host.to_owned(),
+            request.url().path().into(),
+        ));
         ensure!(provider.fail_at != Some(index), "simulated response loss");
         let (status, body) = provider
             .replies
@@ -686,6 +693,18 @@ fn replay_saved_oauth_history() -> Result<()> {
     if evidence["domain"] == "inbound" {
         return inbound_campaign::replay(&evidence);
     }
+    if evidence["domain"] == "registration" {
+        let seed = evidence["seed"]
+            .as_u64()
+            .ok_or_else(|| anyhow::anyhow!("registration replay seed missing"))?;
+        let fault = serde_json::from_value(evidence["fault"].clone())?;
+        let expires = evidence["expires"]
+            .as_bool()
+            .ok_or_else(|| anyhow::anyhow!("registration replay expiry missing"))?;
+        let driver = serde_json::from_value(evidence["driver"].clone())?;
+        checked_registration(seed, fault, expires, driver)?;
+        return Ok(());
+    }
     ensure!(
         evidence.get("domain").is_none() || evidence["domain"] == "outbound",
         "unsupported OAuth replay domain"
@@ -795,17 +814,122 @@ pub(super) const REGISTRATION_ACTIONS: [&str; 9] = [
     "oauth-registration-seal",
 ];
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RegistrationDriver {
+    GoogleMapped,
+    GoogleExternal,
+    GitlabExternal,
+}
+
+impl RegistrationDriver {
+    fn target(self) -> Result<registration::Target> {
+        use day2_capabilities::oauth::AccountBindingPolicy::*;
+        match self {
+            Self::GoogleMapped => registration::tests::target_for(MappedHuman),
+            Self::GoogleExternal => registration::tests::target_for(ExplicitExternalAccount),
+            Self::GitlabExternal => registration::tests::gitlab_target(),
+        }
+    }
+
+    fn responses(self) -> Vec<(u16, String)> {
+        match self {
+            Self::GoogleMapped | Self::GoogleExternal => registration::tests::responses(),
+            Self::GitlabExternal => registration::tests::gitlab_responses(),
+        }
+    }
+
+    /// Independent protocol obligations, not counts learned from production I/O.
+    fn calls(self) -> [usize; 9] {
+        match self {
+            Self::GoogleMapped | Self::GoogleExternal => [1; 9],
+            Self::GitlabExternal => [1, 1, 2, 1, 2, 1, 2, 1, 1],
+        }
+    }
+
+    /// Public wire addresses are protocol obligations. Do not derive them from
+    /// the implementation's profile, target or observed transport history.
+    fn addresses(self) -> Vec<(String, String, String)> {
+        let secret = (
+            "GET",
+            "secretmanager.googleapis.com",
+            "/v1/projects/12345/secrets/google_client_secret/versions/7:access",
+        );
+        let google_token = ("POST", "oauth2.googleapis.com", "/token");
+        let google_account = ("GET", "openidconnect.googleapis.com", "/v1/userinfo");
+        let gitlab_token = ("POST", "gitlab.com", "/oauth/token");
+        let gitlab_info = ("GET", "gitlab.com", "/oauth/token/info");
+        let gitlab_account = ("GET", "gitlab.com", "/api/v4/user");
+        match self {
+            Self::GoogleMapped | Self::GoogleExternal => vec![
+                secret,
+                google_token,
+                google_token,
+                google_token,
+                google_token,
+                google_account,
+                google_token,
+                google_account,
+                secret,
+            ],
+            Self::GitlabExternal => vec![
+                secret,
+                gitlab_token,
+                gitlab_token,
+                gitlab_info,
+                gitlab_token,
+                gitlab_token,
+                gitlab_info,
+                gitlab_account,
+                gitlab_token,
+                gitlab_info,
+                gitlab_account,
+                secret,
+            ],
+        }
+        .into_iter()
+        .map(|(method, host, path)| (method.into(), host.into(), path.into()))
+        .collect()
+    }
+
+    fn pins(self) -> (&'static str, &'static str, &'static str, &'static str) {
+        match self {
+            Self::GoogleMapped | Self::GoogleExternal => (
+                "google_calendar_simulator_v1",
+                "google-calendar-registration-reference-v1",
+                "google_calendar_conformance_v1",
+                "google-calendar-registration-wire-campaign-v1",
+            ),
+            Self::GitlabExternal => (
+                "gitlab_projects_simulator_v1",
+                "gitlab-projects-registration-reference-v1",
+                "gitlab_projects_conformance_v1",
+                "gitlab-projects-registration-wire-campaign-v1",
+            ),
+        }
+    }
+}
+
 fn registration_campaign(
     seed: u64,
     fault: Option<usize>,
     expires: bool,
-    policy: day2_capabilities::oauth::AccountBindingPolicy,
+    driver: RegistrationDriver,
 ) -> Result<serde_json::Value> {
+    ensure!(
+        fault.is_none_or(|at| at < driver.calls().iter().sum::<usize>()),
+        "invalid registration fault boundary"
+    );
     let world = World::new(seed);
-    world.provider.lock().unwrap().replies = registration::tests::responses().into();
+    let addresses = driver.addresses();
+    ensure!(
+        driver.calls().iter().sum::<usize>() == addresses.len(),
+        "registration reference obligations disagree"
+    );
+    world.provider.lock().unwrap().replies = driver.responses().into();
     world.provider.lock().unwrap().fail_at = fault;
     effects::scope(world.clone(), || {
-        let target = registration::tests::target_for(policy)?;
+        let target = driver.target()?;
         let codes = registration_codes(&target)?;
         let mut session = registration::Session::new(
             target,
@@ -815,53 +939,127 @@ fn registration_campaign(
             )),
         )?;
         let mut results = Vec::new();
+        let mut end = 0;
+        let mut expired_at = None;
         for (index, action) in REGISTRATION_ACTIONS.iter().enumerate() {
-            if expires && fault == Some(index) {
+            let start = end;
+            end += driver.calls()[index];
+            if expires && expired_at.is_none() && fault.is_some_and(|at| at < end) {
                 world.advance(301);
+                expired_at = Some(start);
             }
             let result = session.call(crate::automation::Request {
                 protocol: 1,
                 action: (*action).into(),
                 input: "{}".into(),
             });
-            // Each native step has exactly one HTTP call, except a pre-I/O
-            // expiry. The independent order/fault oracle predicts closure.
-            let expected = fault.is_none_or(|boundary| index < boundary);
-            ensure!(
-                result.is_ok() == expected,
-                "registration fault oracle diverged"
-            );
+            let expected = fault.is_none_or(|boundary| end <= boundary);
             results.push(result.is_ok());
+            if result.is_ok() != expected {
+                return Err(RegistrationDivergence { category: "registration_acceptance",
+                    observation: serde_json::json!({"step":index,"expected":expected,"steps":results,"requests":world.requests()}) }.into());
+            }
+            let count = expired_at.unwrap_or_else(|| fault.map_or(end, |at| end.min(at + 1)));
+            let observed = world.provider.lock().unwrap().addresses.clone();
+            if observed.as_slice() != &addresses[..count] {
+                return Err(RegistrationDivergence {
+                    category: "registration_io_fence",
+                    observation: serde_json::json!({"step":index,"expected":&addresses[..count],"steps":results,"addresses":observed}),
+                }.into());
+            }
         }
         let receipt = session.finish();
-        ensure!(
-            receipt.is_ok() == fault.is_none(),
-            "registration unexpectedly qualified"
-        );
+        if receipt.is_ok() != fault.is_none() {
+            return Err(RegistrationDivergence { category: "registration_readiness",
+                observation: serde_json::json!({"expected":fault.is_none(),"ready":receipt.is_ok(),"steps":results,"requests":world.requests()}) }.into());
+        }
         if let Ok(receipt) = receipt {
-            ensure!(
-                receipt.fresh(effects::wall_time()?),
-                "fresh registration receipt unavailable"
-            );
+            if !receipt.fresh(effects::wall_time()?) {
+                return Err(RegistrationDivergence {
+                    category: "registration_freshness",
+                    observation: serde_json::json!({"expected":true,"fresh":false,"steps":results,"requests":world.requests()}),
+                }.into());
+            }
             world.advance(300);
-            ensure!(
-                !receipt.fresh(effects::wall_time()?),
-                "expired registration remained ready"
-            );
+            if receipt.fresh(effects::wall_time()?) {
+                return Err(RegistrationDivergence {
+                    category: "registration_expiry",
+                    observation: serde_json::json!({"expected":false,"fresh":true,"steps":results,"requests":world.requests()}),
+                }.into());
+            }
         }
         Ok(serde_json::json!({"steps":results,"requests":world.provider.lock().unwrap().requests}))
     })
 }
 
+#[derive(Debug, Serialize)]
+struct RegistrationDivergence {
+    category: &'static str,
+    observation: serde_json::Value,
+}
+
+impl std::fmt::Display for RegistrationDivergence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.category)
+    }
+}
+
+impl std::error::Error for RegistrationDivergence {}
+
+fn checked_registration(
+    seed: u64,
+    fault: Option<usize>,
+    expires: bool,
+    driver: RegistrationDriver,
+) -> Result<()> {
+    let first = registration_campaign(seed, fault, expires, driver)?;
+    let replay = registration_campaign(seed, fault, expires, driver)?;
+    if first != replay {
+        return Err(RegistrationDivergence {
+            category: "registration_replay",
+            observation: serde_json::json!({"first":first,"replay":replay}),
+        }
+        .into());
+    }
+    Ok(())
+}
+
+fn verify_registration(
+    seed: u64,
+    fault: Option<usize>,
+    expires: bool,
+    driver: RegistrationDriver,
+) -> Result<()> {
+    if let Err(error) = checked_registration(seed, fault, expires, driver) {
+        let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../artifacts/oauth-simulation");
+        std::fs::create_dir_all(&directory)?;
+        let path = directory.join(format!(
+            "registration-{driver:?}-{seed}-{}-{expires}.json",
+            fault.map_or("none".into(), |at| at.to_string())
+        ));
+        let evidence = serde_json::json!({"version":1,"domain":"registration","implementation":implementation(),
+            "seed":seed,"fault":fault,"expires":expires,"driver":driver,
+            "observation":error.downcast_ref::<RegistrationDivergence>(),
+            "replay":"DAY2_OAUTH_REPLAY=<path> cargo test --locked -p day2 --lib oauth::simulation::replay_saved_oauth_history -- --exact"});
+        std::fs::write(&path, serde_json::to_vec_pretty(&evidence)?)?;
+        anyhow::bail!(
+            "OAuth registration simulation failed; counterexample: {}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn registration_protocol_and_faults_replay_without_network_or_real_time() -> Result<()> {
-    use day2_capabilities::oauth::AccountBindingPolicy;
     let mut covered = std::collections::BTreeSet::new();
-    for policy in [
-        AccountBindingPolicy::MappedHuman,
-        AccountBindingPolicy::ExplicitExternalAccount,
+    for driver in [
+        RegistrationDriver::GoogleMapped,
+        RegistrationDriver::GoogleExternal,
+        RegistrationDriver::GitlabExternal,
     ] {
-        let target = registration::tests::target_for(policy.clone())?;
+        let target = driver.target()?;
         let profile = target.reviewed();
         let expected = |name: &str, contract: &str| {
             day2_capabilities::BindingRef::pin(
@@ -869,17 +1067,10 @@ fn registration_protocol_and_faults_replay_without_network_or_real_time() -> Res
                 &contract,
             )
         };
+        let (simulator, model, conformance, campaign) = driver.pins();
         ensure!(
-            profile.simulator
-                == expected(
-                    "google_calendar_simulator_v1",
-                    "google-calendar-registration-reference-v1"
-                )?
-                && profile.conformance
-                    == expected(
-                        "google_calendar_conformance_v1",
-                        "google-calendar-registration-wire-campaign-v1"
-                    )?,
+            profile.simulator == expected(simulator, model)?
+                && profile.conformance == expected(conformance, campaign)?,
             "unbound runnable OAuth campaign"
         );
         covered.insert(Digest::of(&(
@@ -889,18 +1080,20 @@ fn registration_protocol_and_faults_replay_without_network_or_real_time() -> Res
             &profile.conformance,
         ))?);
         for seed in 0..8 {
-            for fault in std::iter::once(None).chain((0..9).map(Some)) {
+            for fault in
+                std::iter::once(None).chain((0..driver.calls().iter().sum::<usize>()).map(Some))
+            {
                 for expires in [false, true] {
-                    ensure!(
-                        registration_campaign(seed, fault, expires, policy.clone())?
-                            == registration_campaign(seed, fault, expires, policy.clone())?,
-                        "registration replay diverged"
-                    );
+                    verify_registration(seed, fault, expires, driver)?;
                 }
             }
         }
     }
-    let catalog = super::google::catalog()?;
+    require_registration_drivers(&covered)
+}
+
+fn require_registration_drivers(covered: &std::collections::BTreeSet<Digest>) -> Result<()> {
+    let catalog = super::catalog::reviewed()?;
     let required = catalog
         .entries()
         .map(|entry| {
@@ -913,9 +1106,29 @@ fn registration_protocol_and_faults_replay_without_network_or_real_time() -> Res
         })
         .collect::<Result<std::collections::BTreeSet<_>>>()?;
     ensure!(
-        required == covered,
+        &required == covered,
         "every reviewed OAuth adapter/profile/simulator/conformance tuple needs a runnable campaign"
     );
+    Ok(())
+}
+
+#[test]
+fn publishing_a_profile_without_its_driver_fails_the_coverage_gate() -> Result<()> {
+    let mut covered = std::collections::BTreeSet::new();
+    for driver in [
+        RegistrationDriver::GoogleMapped,
+        RegistrationDriver::GoogleExternal,
+    ] {
+        let target = driver.target()?;
+        let profile = target.reviewed();
+        covered.insert(Digest::of(&(
+            profile.protocol.identity().binding.clone(),
+            &profile.adapter,
+            &profile.simulator,
+            &profile.conformance,
+        ))?);
+    }
+    assert!(require_registration_drivers(&covered).is_err());
     Ok(())
 }
 

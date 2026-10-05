@@ -1,8 +1,8 @@
-//! Live Google registration qualification. Desired metadata is portable; only
+//! Live reviewed-provider registration qualification. Desired metadata is portable; only
 //! this native wire campaign can issue the non-serializable readiness receipt.
 //! Roc owns probe order. Every native step is one-shot, bounded and redacted.
 
-use super::{admission, approval_keys, google, profiles};
+use super::{admission, approval_keys, catalog, profiles};
 use crate::oauth::effects::{self, Client, Instant, Response};
 use anyhow::{Context, Result, ensure};
 use day2_capabilities::{
@@ -12,7 +12,7 @@ use day2_capabilities::{
     },
 };
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::{
     collections::BTreeMap,
     io::Read,
@@ -34,6 +34,7 @@ pub(crate) struct Target {
     shell: profiles::SecurityShellEvidence,
     permission: day2_capabilities::oauth::ProviderPermissionContract,
     reviewed: profiles::ReviewedBrowserCodeProfile,
+    adapter: catalog::Adapter,
     registration: Name,
     callback: ProviderCallbackRef,
     callback_url: String,
@@ -42,16 +43,15 @@ pub(crate) struct Target {
     credential: BindingRef,
     canary_subject: String,
     canary_tenant: String,
+    qualification_subject: String,
     logical_id: String,
 }
 
 pub(crate) struct ClientSelection {
     pub registration: Name,
-    pub client_id: String,
+    pub client: day2_capabilities::oauth::ProviderClient,
     pub secret: SecretProvider,
-    /// Exact Google subject, not email, of the explicitly selected canary user.
-    pub canary_subject: String,
-    pub canary_tenant: String,
+    pub canary: day2_capabilities::oauth::RegistrationCanary,
 }
 
 impl Target {
@@ -74,14 +74,15 @@ impl Target {
 
     pub(crate) fn new(
         requirement: &ConnectionRequirement,
+        profile: &BindingRef,
         instance: BindingRef,
         namespace: String,
         shell: profiles::SecurityShellEvidence,
         selected: ClientSelection,
     ) -> Result<Self> {
-        let profile = google::reviewed(&requirement.account_policy)?.profile;
-        let (reviewed, permission) =
-            google::catalog()?.resolve(requirement, &profile.protocol.identity().binding)?;
+        let (reviewed, permission) = catalog::reviewed()?.resolve(requirement, profile)?;
+        let adapter = catalog::Adapter::selected(&reviewed)?;
+        adapter.validate_client(&selected.client)?;
         ensure!(
             instance == shell.instance
                 && shell.origin.0.revision
@@ -91,21 +92,30 @@ impl Target {
                         &shell.origin_url,
                         &shell.qualification,
                     ))?,
-            "Google registration shell selection mismatch"
+            "Provider registration shell selection mismatch"
         );
         ensure!(
             !namespace.is_empty()
                 && namespace.len() <= 256
                 && namespace.bytes().all(|byte| byte.is_ascii_graphic()),
-            "invalid Google binding namespace"
+            "invalid provider binding namespace"
         );
-        client_id(&selected.client_id)?;
-        subject(&selected.canary_subject)?;
+        subject(&selected.canary.provider_subject)?;
+        let human = selected
+            .canary
+            .qualification_subject
+            .strip_prefix("accounts.google.com:");
         ensure!(
-            crate::artifact::dns_name(&selected.canary_tenant)
-                && selected.canary_tenant == selected.canary_tenant.to_ascii_lowercase(),
-            "invalid Google canary tenant"
+            human.is_some_and(|s| subject(s).is_ok()),
+            "invalid qualification human"
         );
+        ensure!(
+            crate::artifact::dns_name(&selected.canary.provider_tenant)
+                && selected.canary.provider_tenant
+                    == selected.canary.provider_tenant.to_ascii_lowercase(),
+            "invalid provider canary tenant"
+        );
+        adapter.validate_canary(&selected.canary)?;
         let callback = ProviderCallbackRef::derive(&shell.origin, &permission.profile, &namespace)?;
         let callback_url = profiles::derived_callback_url(&shell.origin_url, &callback)?;
         let SecretProvider::GcpVersion {
@@ -120,21 +130,24 @@ impl Target {
         };
         secret.validate()?;
         let credential =
-            super::clients::credential_reference(&instance, &selected.client_id, &secret)?;
+            super::clients::provider_credential_reference(&instance, &selected.client, &secret)?;
+        let client_id = selected.client.client_id().to_owned();
         Ok(Self {
             instance,
             namespace,
             shell,
             permission,
             reviewed,
+            adapter,
             registration: selected.registration,
             callback,
             callback_url,
-            client_id: selected.client_id,
+            client_id,
             secret,
             credential,
-            canary_subject: selected.canary_subject,
-            canary_tenant: selected.canary_tenant,
+            canary_subject: selected.canary.provider_subject,
+            canary_tenant: selected.canary.provider_tenant,
+            qualification_subject: selected.canary.qualification_subject,
             logical_id: requirement.logical_id.clone(),
         })
     }
@@ -142,13 +155,14 @@ impl Target {
     /// Setup output contains no secret or readiness claim. The native shell
     /// uses this exact callback, never the separate reauthentication callback.
     pub(crate) fn description(&self) -> serde_json::Value {
-        serde_json::json!({
+        let mut value = serde_json::json!({
             "registration":self.registration, "profile":self.permission.profile,
             "client_id":self.client_id, "client_credential":self.credential,
             "callback_url":self.callback_url, "scopes":self.scopes(),
-            "registration_class":"confidential_pkce_s256", "access_type":"offline",
-            "include_granted_scopes":false, "prompt":"consent select_account",
-        })
+            "registration_class":"confidential_pkce_s256",
+        });
+        self.adapter.describe(&mut value);
+        value
     }
 
     fn scopes(&self) -> std::collections::BTreeSet<String> {
@@ -179,6 +193,19 @@ impl Target {
             &self.canary_subject,
             &self.canary_tenant,
         ))?;
+        // Preserve historical Google evidence pins when its selected human is
+        // the same canary. Other selections bind both independently named IDs.
+        let confirmation = if self.adapter == catalog::Adapter::GoogleCalendar
+            && self.qualification_subject == format!("accounts.google.com:{}", self.canary_subject)
+        {
+            confirmation
+        } else {
+            Digest::of(&(
+                "oauth-provider-registration-canary-v2",
+                confirmation,
+                &self.qualification_subject,
+            ))?
+        };
         let revision = Digest::of(&(
             "oauth-provider-registration-evidence-v1",
             &self.instance,
@@ -209,21 +236,6 @@ impl Target {
     }
 }
 
-fn client_id(value: &str) -> Result<()> {
-    let local = value
-        .strip_suffix(".apps.googleusercontent.com")
-        .context("invalid Google web client")?;
-    ensure!(
-        value.len() <= 255
-            && !local.is_empty()
-            && local
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'),
-        "invalid Google web client"
-    );
-    Ok(())
-}
-
 #[path = "qualification_shell.rs"]
 pub(super) mod shell;
 
@@ -232,7 +244,7 @@ fn subject(value: &str) -> Result<()> {
         !value.is_empty()
             && value.len() <= 255
             && value.bytes().all(|byte| byte.is_ascii_graphic()),
-        "invalid Google account subject"
+        "invalid provider account subject"
     );
     Ok(())
 }
@@ -265,6 +277,8 @@ pub(crate) struct Authorization {
     purpose: Purpose,
     session: Digest,
     started: Instant,
+    issuer: String,
+    adapter: catalog::Adapter,
 }
 
 impl Authorization {
@@ -275,7 +289,7 @@ impl Authorization {
     ) -> Result<(Self, String)> {
         let state = effects::random()?;
         let verifier = effects::random()?;
-        let mut authorization = Url::parse(google::AUTHORIZATION)?;
+        let mut authorization = Url::parse(&target.reviewed.authorization_endpoint)?;
         authorization.query_pairs_mut().extend_pairs([
             ("client_id", target.client_id.as_str()),
             ("redirect_uri", target.callback_url.as_str()),
@@ -284,9 +298,6 @@ impl Authorization {
                 "scope",
                 &target.scopes().into_iter().collect::<Vec<_>>().join(" "),
             ),
-            ("access_type", "offline"),
-            ("include_granted_scopes", "false"),
-            ("prompt", "consent select_account"),
             ("state", &state),
             (
                 "code_challenge",
@@ -294,14 +305,19 @@ impl Authorization {
             ),
             ("code_challenge_method", "S256"),
         ]);
+        authorization
+            .query_pairs_mut()
+            .extend_pairs(target.adapter.authorization_extras().iter().copied());
         Ok((
             Self {
                 state,
                 verifier,
-                target: Digest::of(&target.description())?,
+                target: Digest::of(&target.setup_description()?)?,
                 purpose,
                 session,
                 started: Instant::now(),
+                issuer: target.reviewed.issuer_url.clone(),
+                adapter: target.adapter,
             },
             authorization.into(),
         ))
@@ -311,18 +327,13 @@ impl Authorization {
         ensure!(
             &self.session == session
                 && self.started.elapsed() < Duration::from_secs(VALID_SECONDS as u64),
-            "Google canary session expired or changed"
+            "Provider canary session expired or changed"
         );
         let parsed = super::protocol::parse_callback(
             query,
             &super::protocol::CallbackParameters {
                 require_issuer: false,
-                allowed_extras: std::collections::BTreeSet::from([
-                    "scope".into(),
-                    "authuser".into(),
-                    "prompt".into(),
-                    "hd".into(),
-                ]),
+                allowed_extras: self.adapter.callback_extras(),
             },
         )?;
         let super::protocol::ParsedCallback::Code {
@@ -331,14 +342,12 @@ impl Authorization {
             issuer,
         } = parsed
         else {
-            anyhow::bail!("Google canary authorization denied");
+            anyhow::bail!("Provider canary authorization denied");
         };
         ensure!(
             state.as_str() == self.state
-                && issuer
-                    .as_deref()
-                    .is_none_or(|value| value == google::ISSUER),
-            "Google canary callback binding mismatch"
+                && issuer.as_deref().is_none_or(|value| value == self.issuer),
+            "Provider canary callback binding mismatch"
         );
         Ok(Code {
             code: code.as_str().into(),
@@ -357,54 +366,26 @@ pub(crate) struct Codes {
     pub reject_credential: Code,
 }
 
-struct Tokens {
-    access: String,
-    refresh: Option<String>,
-}
+use super::catalog::Tokens;
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct GoogleTokens {
-    access_token: String,
-    refresh_token: Option<String>,
-    token_type: String,
-    expires_in: u64,
-    scope: String,
-    // Google returns this for the reviewed identity scopes. Account evidence
-    // comes from the fixed TLS UserInfo endpoint using the same access token.
-    id_token: Option<String>,
-    refresh_token_expires_in: Option<u64>,
-}
-
-#[derive(Serialize)]
-struct NormalizedTokens<'a> {
-    access_token: &'a str,
-    refresh_token: Option<&'a str>,
-    token_type: &'a str,
-    expires_in: u64,
-    scope: String,
-}
-
-#[derive(Deserialize)]
-struct UserInfo {
-    sub: String,
-    email: String,
-    email_verified: bool,
-    hd: String,
-}
-
-struct Wire {
+pub(super) struct Wire {
     client: Client,
     token: Url,
     userinfo: Url,
+    adapter: catalog::Adapter,
 }
 
 impl Wire {
-    fn new() -> Result<Self> {
-        Self::at(Url::parse(google::TOKEN)?, Url::parse(google::USERINFO)?)
+    fn new(target: &Target) -> Result<Self> {
+        let userinfo = target.adapter.userinfo();
+        Self::at(
+            Url::parse(&target.reviewed.token_endpoint)?,
+            Url::parse(userinfo)?,
+            target.adapter,
+        )
     }
 
-    fn at(token: Url, userinfo: Url) -> Result<Self> {
+    fn at(token: Url, userinfo: Url, adapter: catalog::Adapter) -> Result<Self> {
         Ok(Self {
             client: Client::builder()
                 .no_proxy()
@@ -415,64 +396,44 @@ impl Wire {
                 .build()?,
             token,
             userinfo,
+            adapter,
         })
     }
 
     fn token(&self, form: &[(&str, &str)], target: &Target, refresh: bool) -> Result<Tokens> {
+        ensure!(
+            self.adapter == target.adapter,
+            "OAuth wire profile mismatch"
+        );
         let response = self
             .client
             .post(self.token.clone())
             .form(form)
             .send()
-            .map_err(|_| anyhow::anyhow!("Google token observation unavailable; do not retry"))?;
-        let raw: GoogleTokens = crate::json::decode(&body(response)?)
-            .map_err(|_| anyhow::anyhow!("invalid Google token response"))?;
-        if let Some(id_token) = &raw.id_token {
-            ensure!(
-                !id_token.is_empty()
-                    && id_token.len() <= 16_384
-                    && id_token.bytes().all(|byte| byte.is_ascii_graphic()),
-                "invalid Google identity token material"
-            );
-        }
-        ensure!(
-            raw.refresh_token_expires_in
-                .is_none_or(|seconds| seconds > 0),
-            "invalid Google refresh lifetime"
-        );
-        let normalized = serde_json::to_vec(&NormalizedTokens {
-            access_token: &raw.access_token,
-            refresh_token: if refresh {
-                None
-            } else {
-                raw.refresh_token.as_deref()
+            .map_err(|_| anyhow::anyhow!("Provider token observation unavailable; do not retry"))?;
+        self.adapter.tokens(
+            &body(response)?,
+            catalog::TokenContext {
+                reviewed: &target.reviewed,
+                permission: &target.permission,
+                client_id: &target.client_id,
+                subject: &target.canary_subject,
             },
-            token_type: &raw.token_type,
-            expires_in: raw.expires_in,
-            scope: google::normalize_scope(&raw.scope)?,
-        })?;
-        let protocol = if refresh {
-            profiles::ConfidentialPkceProfile::NoRefresh(
-                target.reviewed.protocol.identity().clone(),
-            )
-        } else {
-            target.reviewed.protocol.clone()
-        };
-        protocol.validate_token_response(&normalized, &target.permission)?;
-        ensure!(
-            raw.access_token.bytes().all(|byte| byte.is_ascii_graphic())
-                && raw
-                    .refresh_token
-                    .as_ref()
-                    .is_none_or(|token| !token.is_empty()
-                        && token.len() <= 8192
-                        && token.bytes().all(|byte| byte.is_ascii_graphic())),
-            "invalid Google token material"
-        );
-        Ok(Tokens {
-            access: raw.access_token,
-            refresh: raw.refresh_token,
-        })
+            refresh,
+            self,
+        )
+    }
+
+    pub(super) fn token_info(&self, access: &str) -> Result<Vec<u8>> {
+        let mut authorization = HeaderValue::from_str(&format!("Bearer {access}"))?;
+        authorization.set_sensitive(true);
+        let info = self
+            .client
+            .get(self.adapter.token_info(&self.token)?)
+            .header(AUTHORIZATION, authorization)
+            .send()
+            .map_err(|_| anyhow::anyhow!("provider token evidence unavailable; do not retry"))?;
+        body(info)
     }
 
     fn reject(&self, form: &[(&str, &str)], purpose: Purpose) -> Result<()> {
@@ -481,7 +442,7 @@ impl Wire {
             .post(self.token.clone())
             .form(form)
             .send()
-            .map_err(|_| anyhow::anyhow!("Google negative canary unavailable; do not retry"))?;
+            .map_err(|_| anyhow::anyhow!("Provider negative canary unavailable; do not retry"))?;
         let allowed_status = match purpose {
             Purpose::RejectPkce => response.status().as_u16() == 400,
             Purpose::RejectCredential => matches!(response.status().as_u16(), 400 | 401),
@@ -489,7 +450,7 @@ impl Wire {
         };
         ensure!(
             allowed_status,
-            "Google accepted or failed to classify a negative canary"
+            "Provider accepted or failed to classify a negative canary"
         );
         let raw = bounded_body(response)?;
         #[derive(Deserialize)]
@@ -502,7 +463,7 @@ impl Wire {
             _uri: Option<String>,
         }
         let denial: Denial = crate::json::decode(&raw)
-            .map_err(|_| anyhow::anyhow!("invalid Google negative canary"))?;
+            .map_err(|_| anyhow::anyhow!("invalid provider negative canary"))?;
         ensure!(
             match purpose {
                 Purpose::RejectPkce => denial.error == "invalid_grant",
@@ -512,12 +473,16 @@ impl Wire {
                 ),
                 Purpose::Positive => false,
             },
-            "Google negative canary did not establish the required obligation"
+            "Provider negative canary did not establish the required obligation"
         );
         Ok(())
     }
 
     fn account(&self, access: &str, target: &Target) -> Result<()> {
+        ensure!(
+            self.adapter == target.adapter,
+            "OAuth wire profile mismatch"
+        );
         let mut authorization = HeaderValue::from_str(&format!("Bearer {access}"))?;
         authorization.set_sensitive(true);
         let response = self
@@ -525,25 +490,16 @@ impl Wire {
             .get(self.userinfo.clone())
             .header(AUTHORIZATION, authorization)
             .send()
-            .map_err(|_| anyhow::anyhow!("Google account observation unavailable"))?;
-        let account: UserInfo = crate::json::decode(&body(response)?)
-            .map_err(|_| anyhow::anyhow!("invalid Google account response"))?;
-        subject(&account.sub)?;
-        ensure!(
-            account.sub == target.canary_subject
-                && account.hd == target.canary_tenant
-                && account.email_verified
-                && !account.email.is_empty()
-                && account.email.len() <= 320
-                && account.email.bytes().all(|byte| byte.is_ascii_graphic())
-                && account.email.contains('@'),
-            "Google canary account mismatch"
-        );
-        Ok(())
+            .map_err(|_| anyhow::anyhow!("Provider account observation unavailable"))?;
+        self.adapter.account(
+            &body(response)?,
+            &target.canary_subject,
+            &target.canary_tenant,
+        )
     }
 
     #[cfg(test)]
-    fn fixture(origin: &str) -> Result<Self> {
+    fn fixture(origin: &str, adapter: catalog::Adapter) -> Result<Self> {
         let origin = Url::parse(origin)?;
         ensure!(
             origin.scheme() == "http"
@@ -553,16 +509,16 @@ impl Wire {
                 && origin.query().is_none()
                 && origin.fragment().is_none()
                 && origin.path() == "/",
-            "invalid Google wire fixture"
+            "invalid provider wire fixture"
         );
-        Self::at(origin.join("token")?, origin.join("userinfo")?)
+        Self::at(origin.join("token")?, origin.join("userinfo")?, adapter)
     }
 }
 
 fn body(response: Response) -> Result<Vec<u8>> {
     ensure!(
         response.status().as_u16() == 200,
-        "Google qualification rejected; do not retry"
+        "Provider qualification rejected; do not retry"
     );
     bounded_body(response)
 }
@@ -574,20 +530,20 @@ fn bounded_body(response: Response) -> Result<Vec<u8>> {
             .get(CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
             .is_some_and(|value| value.split(';').next() == Some("application/json")),
-        "invalid Google response content type"
+        "invalid provider response content type"
     );
     ensure!(
         response
             .content_length()
             .is_none_or(|length| length <= MAX_RESPONSE as u64),
-        "Google response too large"
+        "Provider response too large"
     );
     let mut bytes = Vec::new();
     response
         .take(MAX_RESPONSE as u64 + 1)
         .read_to_end(&mut bytes)
-        .map_err(|_| anyhow::anyhow!("Google response unavailable; do not retry"))?;
-    ensure!(bytes.len() <= MAX_RESPONSE, "Google response too large");
+        .map_err(|_| anyhow::anyhow!("Provider response unavailable; do not retry"))?;
+    ensure!(bytes.len() <= MAX_RESPONSE, "Provider response too large");
     Ok(bytes)
 }
 
@@ -624,10 +580,11 @@ impl Session {
         codes: Codes,
         tokens: Arc<dyn approval_keys::AccessTokenSource>,
     ) -> Result<Self> {
+        let wire = Wire::new(&target)?;
         Self::at(
             target,
             codes,
-            Wire::new()?,
+            wire,
             approval_keys::GcpSecretReader::new(tokens)?,
         )
     }
@@ -638,7 +595,11 @@ impl Session {
         wire: Wire,
         reader: approval_keys::GcpSecretReader,
     ) -> Result<Self> {
-        let identity = Digest::of(&target.description())?;
+        ensure!(
+            wire.adapter == target.adapter,
+            "OAuth wire profile mismatch"
+        );
+        let identity = Digest::of(&target.setup_description()?)?;
         for (code, purpose) in [
             (&codes.positive, Purpose::Positive),
             (&codes.reject_pkce, Purpose::RejectPkce),
@@ -652,7 +613,7 @@ impl Session {
                     && code.purpose == purpose
                     && code.session == codes.positive.session
                     && Instant::now() < code.deadline,
-                "invalid Google canary code binding"
+                "invalid provider canary code binding"
             );
             super::custody::pkce_challenge(&code.verifier)?;
         }
@@ -660,7 +621,7 @@ impl Session {
             codes.positive.code != codes.reject_pkce.code
                 && codes.positive.code != codes.reject_credential.code
                 && codes.reject_pkce.code != codes.reject_credential.code,
-            "Google canaries must use distinct one-time codes"
+            "Provider canaries must use distinct one-time codes"
         );
         Ok(Self {
             target,
@@ -690,18 +651,18 @@ impl Session {
             self.receipt = None;
         }
         result.map_err(|_| {
-            anyhow::anyhow!("Google registration qualification failed; start a new canary")
+            anyhow::anyhow!("Provider registration qualification failed; start a new canary")
         })
     }
 
     fn step(&mut self, request: crate::automation::Request) -> Result<serde_json::Value> {
         ensure!(
             request.decode::<serde_json::Value>()? == serde_json::json!({}),
-            "Google probe does not accept workflow-selected arguments"
+            "Provider probe does not accept workflow-selected arguments"
         );
         ensure!(
             self.started.elapsed() < Duration::from_secs(VALID_SECONDS as u64),
-            "Google probe expired"
+            "Provider probe expired"
         );
         let expected = match request.action.as_str() {
             "oauth-registration-open" => Step::Open,
@@ -713,29 +674,25 @@ impl Session {
             "oauth-registration-refresh" => Step::Refresh,
             "oauth-registration-refresh-account" => Step::RefreshedAccount,
             "oauth-registration-seal" => Step::Seal,
-            _ => anyhow::bail!("unknown Google probe operation"),
+            _ => anyhow::bail!("unknown provider probe operation"),
         };
         ensure!(
             self.step == expected,
-            "Google probe order or replay refused"
+            "Provider probe order or replay refused"
         );
         self.step = Step::Failed; // fence before credential/network operations
         match expected {
             Step::Open => {
                 let raw = self.reader.load(&self.target.secret)?;
-                let secret = String::from_utf8(raw)
-                    .map_err(|_| anyhow::anyhow!("invalid Google client secret"))?;
-                ensure!(
-                    !secret.is_empty()
-                        && secret.len() <= 2048
-                        && secret.bytes().all(|byte| byte.is_ascii_graphic()),
-                    "invalid Google client secret"
-                );
+                let secret = super::clients::credential(raw)?;
                 self.secret = Some(secret);
                 self.step = Step::RejectPkce;
             }
             Step::RejectPkce | Step::RejectCredential => {
-                let codes = self.codes.as_ref().context("Google canary codes missing")?;
+                let codes = self
+                    .codes
+                    .as_ref()
+                    .context("Provider canary codes missing")?;
                 let (code, purpose) = if expected == Step::RejectPkce {
                     (&codes.reject_pkce, Purpose::RejectPkce)
                 } else {
@@ -769,7 +726,7 @@ impl Session {
                         "client_secret",
                         self.secret
                             .as_deref()
-                            .context("Google credential missing")?,
+                            .context("Provider credential missing")?,
                     ));
                 }
                 self.wire.reject(&form, purpose)?;
@@ -788,7 +745,7 @@ impl Session {
                 let code = &self
                     .codes
                     .as_ref()
-                    .context("Google canary codes missing")?
+                    .context("Provider canary codes missing")?
                     .reject_pkce;
                 self.wire.token(
                     &[
@@ -799,7 +756,7 @@ impl Session {
                             "client_secret",
                             self.secret
                                 .as_deref()
-                                .context("Google credential missing")?,
+                                .context("Provider credential missing")?,
                         ),
                         ("redirect_uri", &self.target.callback_url),
                         ("code_verifier", &code.verifier),
@@ -810,7 +767,7 @@ impl Session {
                 self.step = Step::RejectCredential;
             }
             Step::Exchange => {
-                let code = self.codes.take().context("Google code missing")?.positive;
+                let code = self.codes.take().context("Provider code missing")?.positive;
                 self.tokens = Some(
                     self.wire.token(
                         &[
@@ -821,7 +778,7 @@ impl Session {
                                 "client_secret",
                                 self.secret
                                     .as_deref()
-                                    .context("Google credential missing")?,
+                                    .context("Provider credential missing")?,
                             ),
                             ("redirect_uri", &self.target.callback_url),
                             ("code_verifier", &code.verifier),
@@ -837,38 +794,56 @@ impl Session {
                     &self
                         .tokens
                         .as_ref()
-                        .context("Google tokens missing")?
+                        .context("Provider tokens missing")?
                         .access,
                     &self.target,
                 )?;
                 self.step = Step::Refresh;
             }
             Step::Refresh => {
-                let tokens = self.tokens.take().context("Google tokens missing")?;
-                let refresh = tokens.refresh.context("Google refresh missing")?;
+                let tokens = self.tokens.take().context("Provider tokens missing")?;
+                let refresh = tokens.refresh.context("Provider refresh missing")?;
                 let mut replacement = self.wire.token(
                     &[
                         ("grant_type", "refresh_token"),
                         ("refresh_token", &refresh),
                         ("client_id", &self.target.client_id),
+                        ("redirect_uri", &self.target.callback_url),
                         (
                             "client_secret",
                             self.secret
                                 .as_deref()
-                                .context("Google credential missing")?,
+                                .context("Provider credential missing")?,
                         ),
                     ],
                     &self.target,
                     true,
                 )?;
-                ensure!(
-                    replacement
-                        .refresh
-                        .as_ref()
-                        .is_none_or(|value| value == &refresh),
-                    "Google reusable refresh unexpectedly rotated"
-                );
-                replacement.refresh = Some(refresh);
+                match &self.target.reviewed.protocol {
+                    profiles::ConfidentialPkceProfile::Reusable { .. } => {
+                        ensure!(
+                            replacement
+                                .refresh
+                                .as_ref()
+                                .is_none_or(|value| value == &refresh),
+                            "reusable refresh unexpectedly rotated"
+                        );
+                        replacement.refresh = Some(refresh);
+                    }
+                    profiles::ConfidentialPkceProfile::Rotating { .. } => {
+                        ensure!(
+                            replacement
+                                .refresh
+                                .as_ref()
+                                .is_some_and(|value| value != &refresh)
+                                && replacement.access != tokens.access,
+                            "rotating refresh did not replace its token pair"
+                        );
+                    }
+                    profiles::ConfidentialPkceProfile::NoRefresh(_) => {
+                        anyhow::bail!("refresh campaign requires a refresh profile")
+                    }
+                }
                 self.tokens = Some(replacement);
                 self.step = Step::RefreshedAccount;
             }
@@ -877,7 +852,7 @@ impl Session {
                     &self
                         .tokens
                         .as_ref()
-                        .context("Google tokens missing")?
+                        .context("Provider tokens missing")?
                         .access,
                     &self.target,
                 )?;
@@ -889,7 +864,7 @@ impl Session {
                 let raw = self.reader.load(&self.target.secret)?;
                 ensure!(
                     Some(raw.as_slice()) == self.secret.as_ref().map(|value| value.as_bytes()),
-                    "Google client credential changed"
+                    "Provider client credential changed"
                 );
                 let checked_at = effects::wall_time()?;
                 self.receipt = Some(Receipt {
@@ -918,10 +893,10 @@ impl Session {
     }
 
     pub(crate) fn finish(mut self) -> Result<Receipt> {
-        ensure!(self.step == Step::Complete, "Google canary incomplete");
+        ensure!(self.step == Step::Complete, "Provider canary incomplete");
         self.receipt
             .take()
-            .context("Google qualification receipt missing")
+            .context("Provider qualification receipt missing")
     }
 
     pub(crate) fn run(mut self, runner: &Path) -> Result<Receipt> {
@@ -964,12 +939,12 @@ impl Receipt {
 
 /// Registration readiness augments, never replaces, the independent live
 /// shell, custody and account-mapping source. Every host starts with no receipts.
-pub(crate) struct GoogleReadiness {
+pub(crate) struct ProviderReadiness {
     facts: Arc<dyn admission::OutboundReadiness>,
     receipts: RwLock<BTreeMap<String, Receipt>>,
 }
 
-impl GoogleReadiness {
+impl ProviderReadiness {
     pub(crate) fn new(facts: Arc<dyn admission::OutboundReadiness>) -> Self {
         Self {
             facts,
@@ -981,11 +956,11 @@ impl GoogleReadiness {
         let mut receipts = self
             .receipts
             .write()
-            .map_err(|_| anyhow::anyhow!("Google readiness lock poisoned"))?;
+            .map_err(|_| anyhow::anyhow!("Provider readiness lock poisoned"))?;
         let id = receipt.registration.registration.id.as_str().to_owned();
         ensure!(
             receipts.contains_key(&id) || receipts.len() < 128,
-            "Google readiness budget"
+            "Provider readiness budget"
         );
         // Republishing the same wire proof cannot reset its monotonic lease.
         // A newly completed campaign has a later source qualification time.
@@ -1011,7 +986,7 @@ impl GoogleReadiness {
     pub(crate) fn retire(&self, registration: &Name) -> Result<()> {
         self.receipts
             .write()
-            .map_err(|_| anyhow::anyhow!("Google readiness lock poisoned"))?
+            .map_err(|_| anyhow::anyhow!("Provider readiness lock poisoned"))?
             .remove(registration.as_str());
         Ok(())
     }
@@ -1020,7 +995,7 @@ impl GoogleReadiness {
 #[path = "registration_publication.rs"]
 pub(super) mod publication;
 
-impl admission::OutboundReadiness for GoogleReadiness {
+impl admission::OutboundReadiness for ProviderReadiness {
     fn selected_runtime(&self) -> Result<Option<Digest>> {
         self.facts.selected_runtime()
     }
@@ -1038,7 +1013,7 @@ impl admission::OutboundReadiness for GoogleReadiness {
         let receipts = self
             .receipts
             .read()
-            .map_err(|_| anyhow::anyhow!("Google readiness lock poisoned"))?;
+            .map_err(|_| anyhow::anyhow!("Provider readiness lock poisoned"))?;
         let Some(receipt) = receipts.get(binding.registration.id.as_str()) else {
             return Ok(None);
         };
@@ -1067,7 +1042,7 @@ impl admission::OutboundReadiness for GoogleReadiness {
                 && evidence.instance == receipt.target.instance
                 && evidence.binding_namespace == receipt.target.namespace
                 && evidence.shell == receipt.target.shell,
-            "Google registration readiness evidence mismatch"
+            "Provider registration readiness evidence mismatch"
         );
         Ok(Some(evidence))
     }

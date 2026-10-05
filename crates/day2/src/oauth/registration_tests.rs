@@ -2,7 +2,7 @@
 //! credentials never establish live Google or installation readiness.
 
 use super::*;
-use crate::oauth::admission::OutboundReadiness;
+use crate::oauth::{admission::OutboundReadiness, gitlab, google};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use day2_capabilities::oauth::{
     AccountBindingPolicy, ConnectionOwner, ProductReturnRef, SecurityOriginRef, SlotOwner,
@@ -108,17 +108,24 @@ pub(in crate::oauth) fn fixture() -> Result<Fixture> {
     };
     let target = Target::new(
         &requirement,
+        &binding.profile,
         instance.clone(),
         admission::binding_namespace(&binding)?,
         shell.clone(),
         ClientSelection {
             registration: binding.registration.id.clone(),
-            client_id: "12345-fixture.apps.googleusercontent.com".into(),
+            client: day2_capabilities::oauth::ProviderClient::Google {
+                client_id: "12345-fixture.apps.googleusercontent.com".into(),
+                credential: Name::try_from("calendar_client".to_owned())?,
+            },
             secret: serde_json::from_value(
                 json!({"kind":"gcp_version","project_number":12345,"secret":"google_client_secret","version":7}),
             )?,
-            canary_subject: "google-canary-subject".into(),
-            canary_tenant: "example.com".into(),
+            canary: day2_capabilities::oauth::RegistrationCanary {
+                qualification_subject: "accounts.google.com:google-canary-subject".into(),
+                provider_subject: "google-canary-subject".into(),
+                provider_tenant: "example.com".into(),
+            },
         },
     )?;
     binding.registration = target.registration_evidence()?.registration;
@@ -173,18 +180,29 @@ pub(in crate::oauth) fn target_for(policy: AccountBindingPolicy) -> Result<Targe
     };
     Target::new(
         &requirement,
+        &google::reviewed(&requirement.account_policy)?
+            .profile
+            .protocol
+            .identity()
+            .binding,
         target.instance,
         target.namespace,
         target.shell,
         ClientSelection {
             registration: target.registration,
-            client_id: target.client_id,
+            client: day2_capabilities::oauth::ProviderClient::Google {
+                client_id: target.client_id,
+                credential: Name::try_from("calendar_client".to_owned())?,
+            },
             secret: serde_json::from_value(
                 json!({"kind":"gcp_version","project_number":target.secret.project_number,
             "secret":target.secret.secret,"version":target.secret.version}),
             )?,
-            canary_subject: target.canary_subject,
-            canary_tenant: target.canary_tenant,
+            canary: day2_capabilities::oauth::RegistrationCanary {
+                qualification_subject: target.qualification_subject,
+                provider_subject: target.canary_subject,
+                provider_tenant: target.canary_tenant,
+            },
         },
     )
 }
@@ -193,6 +211,154 @@ pub(in crate::oauth) fn secret_response() -> Value {
     json!({"name":"projects/12345/secrets/google_client_secret/versions/7", "payload":{
         "data":STANDARD.encode(SECRET_CANARY), "dataCrc32c":crc32c::crc32c(SECRET_CANARY.as_bytes()).to_string(),
     }})
+}
+
+pub(in crate::oauth) fn gitlab_target() -> Result<Target> {
+    let base = fixture()?.target;
+    let requirement = ConnectionRequirement {
+        logical_id: "work_projects".into(),
+        revision: 1,
+        capability: gitlab::CAPABILITY.into(),
+        actions: BTreeSet::from(["list_projects".into()]),
+        owner: ConnectionOwner::CurrentHuman,
+        account_policy: AccountBindingPolicy::ExplicitExternalAccount,
+        usage: "Read selected GitLab projects.".into(),
+    };
+    Target::new(
+        &requirement,
+        &gitlab::reviewed()?.profile.protocol.identity().binding,
+        base.instance,
+        base.namespace,
+        base.shell,
+        ClientSelection {
+            registration: Name::try_from("gitlab_registration".to_owned())?,
+            client: day2_capabilities::oauth::ProviderClient::Gitlab {
+                client_id: "a".repeat(64),
+                credential: Name::try_from("gitlab_client".to_owned())?,
+            },
+            secret: serde_json::from_value(
+                json!({"kind":"gcp_version","project_number":12345,"secret":"google_client_secret","version":7}),
+            )?,
+            canary: day2_capabilities::oauth::RegistrationCanary {
+                qualification_subject: "accounts.google.com:shell-human".into(),
+                provider_subject: "42".into(),
+                provider_tenant: "gitlab.com".into(),
+            },
+        },
+    )
+}
+
+pub(in crate::oauth) fn gitlab_responses() -> Vec<(u16, String)> {
+    let token = |rotated: bool| {
+        json!({"access_token":if rotated { "private-fixture-rotated-access" } else { ACCESS_CANARY },"token_type":"bearer","expires_in":7200,
+        "refresh_token":if rotated { "private-fixture-rotated-refresh" } else { REFRESH_CANARY }, "created_at":5})
+    };
+    let info = || {
+        json!({"resource_owner_id":42,"scope":["read_api","read_user"],"scopes":["read_api","read_user"],
+        "expires_in":7199,"expires_in_seconds":7199,"created_at":5,
+        "application":{"uid":"a".repeat(64)}})
+    };
+    let account = || json!({"id":42,"state":"active","locked":false,"username":"display-only"});
+    vec![
+        (200, secret_response()),
+        (400, json!({"error":"invalid_grant"})),
+        (200, token(false)),
+        (200, info()),
+        (401, json!({"error":"invalid_client"})),
+        (200, token(false)),
+        (200, info()),
+        (200, account()),
+        (200, token(true)),
+        (200, info()),
+        (200, account()),
+        (200, secret_response()),
+    ]
+    .into_iter()
+    .map(|(status, body)| (status, body.to_string()))
+    .collect()
+}
+
+#[test]
+fn gitlab_actual_wire_campaign_checks_rotation_scopes_client_and_account() -> Result<()> {
+    let server = Server::new(gitlab_responses())?;
+    let mut selected = session(gitlab_target()?, &server)?;
+    campaign(&mut selected)?;
+    let receipt = selected.finish()?;
+    assert_eq!(
+        receipt.registration().issuer,
+        gitlab::reviewed()?.profile.issuer
+    );
+    let requests = server.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 12);
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|r| r.starts_with("GET /token/info "))
+            .count(),
+        3
+    );
+    assert!(requests[8].contains("redirect_uri="));
+    for (index, value) in [
+        (
+            3,
+            json!({"resource_owner_id":43,"scope":["read_api","read_user"],"expires_in":7199,"created_at":5,"application":{"uid":"a".repeat(64)}}),
+        ),
+        (
+            6,
+            json!({"resource_owner_id":42,"scope":["api","read_user"],"expires_in":7199,"created_at":5,"application":{"uid":"a".repeat(64)}}),
+        ),
+        (
+            6,
+            json!({"resource_owner_id":42,"scope":["read_api","read_user"],"expires_in":7199,"created_at":5,"application":{"uid":"b".repeat(64)}}),
+        ),
+        (
+            6,
+            json!({"resource_owner_id":42,"scope":["read_api","read_user"],"scopes":["api"],"expires_in":7199,"created_at":5,"application":{"uid":"a".repeat(64)}}),
+        ),
+        (7, json!({"id":42,"state":"active","locked":true})),
+        (
+            8,
+            json!({"access_token":ACCESS_CANARY,"token_type":"bearer","expires_in":7200,"refresh_token":REFRESH_CANARY,"created_at":5}),
+        ),
+    ] {
+        let mut responses = gitlab_responses();
+        responses[index].1 = value.to_string();
+        let server = Server::new(responses)?;
+        let mut selected = session(gitlab_target()?, &server)?;
+        assert!(campaign(&mut selected).is_err());
+        assert!(selected.finish().is_err());
+        drop(server);
+    }
+    Ok(())
+}
+
+#[test]
+fn provider_codes_pin_both_canary_roles_before_any_native_io() -> Result<()> {
+    let world = crate::oauth::simulation::World::new(81);
+    crate::oauth::effects::scope(world.clone(), || -> Result<()> {
+        for field in [
+            "provider_subject",
+            "provider_tenant",
+            "qualification_subject",
+        ] {
+            let original = gitlab_target()?;
+            let codes = crate::oauth::simulation::registration_codes(&original)?;
+            let mut changed = original.clone();
+            match field {
+                "provider_subject" => changed.canary_subject = "43".into(),
+                "provider_tenant" => changed.canary_tenant = "other.example".into(),
+                "qualification_subject" => {
+                    changed.qualification_subject = "accounts.google.com:other-human".into()
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                Session::new(changed, codes, Arc::new(TokensSource(AtomicUsize::new(0)))).is_err()
+            );
+        }
+        assert!(world.requests().is_empty());
+        Ok(())
+    })
 }
 
 fn token_response(refresh: bool) -> Value {
@@ -304,7 +470,7 @@ impl Drop for Server {
 }
 
 pub(super) fn session(target: Target, server: &Server) -> Result<Session> {
-    let identity = Digest::of(&target.description())?;
+    let identity = Digest::of(&target.setup_description()?)?;
     let code = |raw: &str, purpose| Code {
         code: raw.into(),
         verifier: "v".repeat(43),
@@ -318,10 +484,11 @@ pub(super) fn session(target: Target, server: &Server) -> Result<Session> {
         reject_pkce: code("negative-pkce-code", Purpose::RejectPkce),
         reject_credential: code("negative-credential-code", Purpose::RejectCredential),
     };
+    let wire = Wire::fixture(&server.endpoint, target.adapter)?;
     Session::at(
         target,
         codes,
-        Wire::fixture(&server.endpoint)?,
+        wire,
         approval_keys::GcpSecretReader::fixture(
             &server.endpoint,
             Arc::new(TokensSource(AtomicUsize::new(0))),
@@ -514,7 +681,7 @@ fn google_errors_response_loss_wrong_account_scopes_and_rotation_never_seal_or_r
         let error = session.call(request(ACTIONS[failed_index])).unwrap_err();
         assert_eq!(
             error.to_string(),
-            "Google registration qualification failed; start a new canary"
+            "Provider registration qualification failed; start a new canary"
         );
         for secret in [CODE_CANARY, SECRET_CANARY, ACCESS_CANARY, REFRESH_CANARY] {
             assert!(!format!("{error:#}").contains(secret));
@@ -584,7 +751,7 @@ fn readiness_requires_live_receipt_exact_selection_freshness_and_independent_fac
         evidence: fixture.evidence.clone(),
         calls: AtomicUsize::new(0),
     });
-    let readiness = GoogleReadiness::new(facts.clone());
+    let readiness = ProviderReadiness::new(facts.clone());
     let server = Server::new(responses())?;
     let mut session = session(fixture.target, &server)?;
     campaign(&mut session)?;
@@ -644,11 +811,11 @@ fn readiness_requires_live_receipt_exact_selection_freshness_and_independent_fac
             .is_none()
     );
     assert!(
-        GoogleReadiness::new(facts.clone())
+        ProviderReadiness::new(facts.clone())
             .current(&fixture.binding, &fixture.slot, now)?
             .is_none()
     );
-    crate::oauth::host::Providers::google(Arc::new(readiness))?;
+    crate::oauth::host::Providers::reviewed(Arc::new(readiness))?;
     Ok(())
 }
 

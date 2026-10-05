@@ -50,6 +50,7 @@ Verify :: [].{
 			"credential-metadata",
 			"connection-declaration",
 			"oauth-calendar",
+			"oauth-gitlab",
 			"stock-ledger",
 			"request-desk",
 			"app-ownership",

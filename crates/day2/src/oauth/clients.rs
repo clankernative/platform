@@ -1,10 +1,13 @@
-//! Installation-owned Google client selection. This is desired configuration,
+//! Installation-owned provider client selection. This is desired configuration,
 //! never registration readiness. Credentials are resolved only by native code.
 
 use super::approval_keys::{AccessTokenSource, GcpSecretReader, GcpSecretVersion};
 use crate::artifact::Instance;
 use anyhow::{Context, Result, ensure};
-use day2_capabilities::{BindingRef, Name, SecretProvider, oauth::GoogleWebClient};
+use day2_capabilities::{
+    BindingRef, Name, SecretProvider,
+    oauth::{GoogleWebClient, ProviderClient},
+};
 use std::{collections::BTreeSet, sync::Arc};
 
 /// The reviewed edge grants unconditional container access, across versions. Shell
@@ -42,7 +45,7 @@ pub(crate) fn shell_secret_containers(instance: &Instance) -> Result<BTreeSet<(u
     };
     let mut selected = BTreeSet::from([container(&catalog.reauthentication.credential)?]);
     for registration in catalog.registrations.values() {
-        selected.insert(container(&registration.client.credential)?);
+        selected.insert(container(registration.client().credential())?);
     }
     let mut custody = BTreeSet::new();
     for binding in instance
@@ -78,7 +81,7 @@ pub(crate) fn validate(instance: &Instance) -> Result<()> {
     for selected in catalog.registrations.values() {
         let secret = control
             .secrets
-            .get(&selected.client.credential)
+            .get(selected.client().credential())
             .context("OAuth provider client credential missing")?;
         ensure!(
             secret != reauthentication,
@@ -108,7 +111,9 @@ pub(crate) fn validate(instance: &Instance) -> Result<()> {
                     && catalog
                         .registrations
                         .values()
-                        .all(|client| control.secrets.get(&client.client.credential) != Some(key)),
+                        .all(
+                            |client| control.secrets.get(client.client().credential()) != Some(key)
+                        ),
                 "OAuth client credentials cannot be custody or attestation keys"
             );
         }
@@ -118,12 +123,16 @@ pub(crate) fn validate(instance: &Instance) -> Result<()> {
 
 pub(super) fn version(instance: &Instance, client: &GoogleWebClient) -> Result<GcpSecretVersion> {
     client.validate()?;
+    version_for(instance, &client.credential)
+}
+
+fn version_for(instance: &Instance, credential: &Name) -> Result<GcpSecretVersion> {
     let provider = instance
         .control
         .as_ref()
         .context("OAuth client secret catalog missing")?
         .secrets
-        .get(&client.credential)
+        .get(credential)
         .context("OAuth client credential missing")?;
     let SecretProvider::GcpVersion {
         project_number,
@@ -160,12 +169,12 @@ pub(super) fn reauthentication(
 
 pub(super) fn credential(raw: Vec<u8>) -> Result<String> {
     let value =
-        String::from_utf8(raw).map_err(|_| anyhow::anyhow!("invalid Google client credential"))?;
+        String::from_utf8(raw).map_err(|_| anyhow::anyhow!("invalid OAuth client credential"))?;
     ensure!(
         !value.is_empty()
             && value.len() <= 2048
             && value.bytes().all(|byte| byte.is_ascii_graphic()),
-        "invalid Google client credential"
+        "invalid OAuth client credential"
     );
     Ok(value)
 }
@@ -194,6 +203,39 @@ pub(super) fn selected_credential(
         &super::admission::instance_identity(instance)?,
         &client.client_id,
         &version(instance, client)?,
+    )
+}
+
+pub(super) fn provider_credential_reference(
+    instance: &BindingRef,
+    client: &ProviderClient,
+    secret: &GcpSecretVersion,
+) -> Result<BindingRef> {
+    client.validate()?;
+    match client {
+        ProviderClient::Google { client_id, .. } => {
+            credential_reference(instance, client_id, secret)
+        }
+        ProviderClient::Gitlab { client_id, .. } => BindingRef::pin(
+            Name::try_from("gitlab_client_credential".to_owned())?,
+            &(
+                "oauth-gitlab-client-credential-v1",
+                instance,
+                client_id,
+                secret,
+            ),
+        ),
+    }
+}
+
+pub(super) fn selected_provider_credential(
+    instance: &Instance,
+    client: &ProviderClient,
+) -> Result<BindingRef> {
+    provider_credential_reference(
+        &super::admission::instance_identity(instance)?,
+        client,
+        &version_for(instance, client.credential())?,
     )
 }
 
@@ -285,6 +327,74 @@ mod tests {
         let mut other = document;
         other["security_shell"]["origin"] = json!("https://security.other-company.example");
         assert!(Instance::from_bytes(&serde_json::to_vec(&other)?).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn tagged_clients_are_closed_and_do_not_confuse_shell_and_provider_identities() -> Result<()> {
+        let mut document = document();
+        document["oauth_clients"]["version"] = json!(2);
+        document["oauth_clients"]["registrations"]["calendar_registration"] = json!({
+            "client":{"kind":"gitlab","client_id":"a".repeat(64),"credential":"calendar"},
+            "canary":{"qualification_subject":"accounts.google.com:shell-human","provider_subject":"42","provider_tenant":"gitlab.com"}
+        });
+        let instance = Instance::from_bytes(&serde_json::to_vec(&document)?)?;
+        assert_eq!(
+            serde_json::to_value(&instance)?["oauth_clients"],
+            document["oauth_clients"]
+        );
+        let client = instance
+            .oauth_clients
+            .as_ref()
+            .unwrap()
+            .registrations
+            .values()
+            .next()
+            .unwrap()
+            .client();
+        assert_eq!(
+            selected_provider_credential(&instance, &client)?
+                .id
+                .as_str(),
+            "gitlab_client_credential"
+        );
+        for (path, value) in [
+            ("/oauth_clients/version", json!(1)),
+            ("/oauth_clients/version", json!(3)),
+            (
+                "/oauth_clients/registrations/calendar_registration/client/kind",
+                json!("unreviewed"),
+            ),
+            (
+                "/oauth_clients/registrations/calendar_registration/client/client_id",
+                json!("123-google.apps.googleusercontent.com"),
+            ),
+            (
+                "/oauth_clients/registrations/calendar_registration/client/credential",
+                json!("reauth"),
+            ),
+            (
+                "/oauth_clients/registrations/calendar_registration/canary/qualification_subject",
+                json!("42"),
+            ),
+            (
+                "/oauth_clients/registrations/calendar_registration/canary/provider_tenant",
+                json!("GITLAB.COM"),
+            ),
+        ] {
+            let mut invalid = document.clone();
+            *invalid.pointer_mut(path).unwrap() = value;
+            assert!(
+                Instance::from_bytes(&serde_json::to_vec(&invalid)?).is_err(),
+                "{path}"
+            );
+        }
+        for field in ["secret", "ready", "origin", "token_endpoint", "scopes"] {
+            let mut invalid = document.clone();
+            invalid["oauth_clients"]["registrations"]["calendar_registration"]["client"][field] =
+                json!(true);
+            assert!(Instance::from_bytes(&serde_json::to_vec(&invalid)?).is_err());
+        }
         Ok(())
     }
 
