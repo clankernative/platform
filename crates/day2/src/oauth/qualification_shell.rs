@@ -56,6 +56,14 @@ enum Stage {
     Authorization(Authorization),
 }
 
+struct Request<'a> {
+    method: &'a Method,
+    path: &'a str,
+    query: Option<&'a str>,
+    headers: &'a HeaderMap,
+    body: &'a [u8],
+}
+
 struct Pending {
     target: Target,
     generation: u64,
@@ -197,7 +205,11 @@ impl Canaries {
         identity: &iap::Verified,
         now: i64,
     ) -> Result<Response> {
-        self.route(method, path, query, headers, body, identity, now)
+        self.route(
+            Request { method, path, query, headers, body },
+            identity,
+            now,
+        )
             .map_err(|error| {
                 QualificationFailure::at(
                     if path.starts_with(CALLBACK) {
@@ -210,17 +222,13 @@ impl Canaries {
             })
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn route(
         &self,
-        method: &Method,
-        path: &str,
-        query: Option<&str>,
-        headers: &HeaderMap,
-        body: &[u8],
+        request: Request<'_>,
         identity: &iap::Verified,
         now: i64,
     ) -> Result<Response> {
+        let Request { method, path, query, headers, body } = request;
         if path.starts_with(CALLBACK) {
             ensure!(
                 *method == Method::GET && body.is_empty(),
