@@ -160,11 +160,14 @@ The reviewed extension workflow is:
 
 1. Define semantic intent in the explicit SDK catalog if the capability is new.
    Keep client IDs, URLs and provider scopes out of app declarations.
+   Seal helpers that call restricted constructors and pin their reviewed bytes.
 2. Add a native profile with pinned endpoints, exact semantic scope interpretation,
    account evidence, refresh behavior and a recovery policy. Add its closed client
    selection and native registry dispatch; unsupported combinations must fail.
 3. Implement wire parsing and I/O through the shared OAuth effects boundary.
    Provider observations cannot manufacture account approval or live readiness.
+   Catalog new native sources in `architecture-rules.json` and pass
+   `xtask architecture-check`; new adapters do not gain ambient effect access.
 4. Add independent deterministic obligations, every relevant fault boundary and
    exact replay, plus native HTTP conformance. Register every published
    profile/adapter/simulator/conformance tuple and its compiled source identity.
@@ -303,8 +306,8 @@ with the host's bounded concurrency, body deadline and shutdown admission guard.
 The shell workload is never issued an app human session. The OAuth route prefix
 is reserved even when no receiver is selected.
 
-The ordinary `day2-serve INSTANCE APP --edge` entry point now composes the native
-Google host when the installation selects `oauth_runtime`. This happens after
+The ordinary `day2-serve INSTANCE APP --edge` entry point now composes the reviewed
+provider host when the installation selects `oauth_runtime`. This happens after
 kernel, artifact and current authority admission. A nonempty OAuth selection
 without that typed catalog or an explicitly supplied native provider still fails
 startup. The canary workload and renewal path require their separate launcher.
