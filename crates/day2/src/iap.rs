@@ -89,13 +89,19 @@ pub struct GoogleKeys;
 
 impl KeySource for GoogleKeys {
     fn fetch(&self) -> Result<String> {
-        let response = reqwest::blocking::Client::builder()
+        use std::io::Read;
+        let response = crate::oauth::effects::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
             .timeout(std::time::Duration::from_secs(5))
             .build()?
             .get(KEYS_URL)
             .send()?
             .error_for_status()?;
-        Ok(response.text()?)
+        let mut bytes = Vec::new();
+        response.take(65_537).read_to_end(&mut bytes)?;
+        anyhow::ensure!(bytes.len() <= 65_536, "IAP key set too large");
+        Ok(String::from_utf8(bytes)?)
     }
 }
 

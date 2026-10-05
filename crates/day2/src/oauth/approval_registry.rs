@@ -491,12 +491,7 @@ impl StoredAppApprovals {
                 authority,
             )?,
             app,
-            clock: Arc::new(|| {
-                Ok(std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)?
-                    .as_secs()
-                    .try_into()?)
-            }),
+            clock: Arc::new(crate::oauth::effects::wall_time),
         })
     }
 

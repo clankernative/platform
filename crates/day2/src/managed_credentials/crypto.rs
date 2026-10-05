@@ -78,7 +78,7 @@ impl KeyLease {
     pub(crate) fn seal_oauth(&self, aad: &[u8], plaintext: &[u8]) -> Result<([u8; 12], Vec<u8>)> {
         ensure!(!aad.is_empty(), "missing OAuth custody identity");
         let mut nonce = [0u8; 12];
-        fill(&mut nonce).map_err(|_| anyhow::anyhow!("credential entropy unavailable"))?;
+        crate::oauth::effects::fill(&mut nonce)?;
         let mut ciphertext = plaintext.to_vec();
         self.encryption_key
             .seal_in_place_append_tag(

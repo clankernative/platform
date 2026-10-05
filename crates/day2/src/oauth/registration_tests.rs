@@ -48,14 +48,14 @@ impl approval_keys::AccessTokenSource for TokensSource {
     }
 }
 
-pub(super) struct Fixture {
-    pub(super) target: Target,
-    pub(super) binding: OutboundConnectionBinding,
-    pub(super) slot: ConnectionSlotKey,
-    pub(super) evidence: profiles::OutboundInstanceEvidence,
+pub(in crate::oauth) struct Fixture {
+    pub(in crate::oauth) target: Target,
+    pub(in crate::oauth) binding: OutboundConnectionBinding,
+    pub(in crate::oauth) slot: ConnectionSlotKey,
+    pub(in crate::oauth) evidence: profiles::OutboundInstanceEvidence,
 }
 
-pub(super) fn fixture() -> Result<Fixture> {
+pub(in crate::oauth) fn fixture() -> Result<Fixture> {
     let instance = pin("company_instance");
     let origin_url = "https://security.example.com/".to_owned();
     let qualification = Digest::of(&"fixture-independent-shell-qualification")?;
@@ -160,6 +160,35 @@ pub(super) fn fixture() -> Result<Fixture> {
     })
 }
 
+pub(in crate::oauth) fn target_for(policy: AccountBindingPolicy) -> Result<Target> {
+    let target = fixture()?.target;
+    let requirement = ConnectionRequirement {
+        logical_id: target.logical_id.clone(),
+        revision: 1,
+        capability: google::CAPABILITY.into(),
+        actions: BTreeSet::from(["list_events".into()]),
+        owner: ConnectionOwner::CurrentHuman,
+        account_policy: policy,
+        usage: "Read work calendar availability.".into(),
+    };
+    Target::new(
+        &requirement,
+        target.instance,
+        target.namespace,
+        target.shell,
+        ClientSelection {
+            registration: target.registration,
+            client_id: target.client_id,
+            secret: serde_json::from_value(
+                json!({"kind":"gcp_version","project_number":target.secret.project_number,
+            "secret":target.secret.secret,"version":target.secret.version}),
+            )?,
+            canary_subject: target.canary_subject,
+            canary_tenant: target.canary_tenant,
+        },
+    )
+}
+
 pub(in crate::oauth) fn secret_response() -> Value {
     json!({"name":"projects/12345/secrets/google_client_secret/versions/7", "payload":{
         "data":STANDARD.encode(SECRET_CANARY), "dataCrc32c":crc32c::crc32c(SECRET_CANARY.as_bytes()).to_string(),
@@ -179,7 +208,7 @@ fn account_response() -> Value {
     json!({"sub":"google-canary-subject","hd":"example.com","email":"display@example.net","email_verified":true,"name":"Display only"})
 }
 
-pub(super) fn responses() -> Vec<(u16, String)> {
+pub(in crate::oauth) fn responses() -> Vec<(u16, String)> {
     vec![
         (200, secret_response()),
         (400, json!({"error":"invalid_grant"})),

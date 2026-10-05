@@ -5,7 +5,8 @@ use super::{
     approval_keys::{GcpSecretReader, GcpSecretVersion},
     security_shell::{FreshAuthenticator, ReauthStart},
 };
-use crate::{iap, web_security};
+use crate::iap;
+use crate::oauth::effects;
 use anyhow::{Context, Result, ensure};
 use axum::http::HeaderMap;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -35,7 +36,7 @@ pub(crate) struct GoogleKeys;
 impl KeySource for GoogleKeys {
     fn fetch(&self) -> Result<String> {
         use std::io::Read;
-        let response = reqwest::blocking::Client::builder()
+        let response = effects::Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .retry(reqwest::retry::never())
@@ -71,7 +72,7 @@ pub(crate) trait CodeExchange: Send + Sync {
 pub(crate) struct GoogleCodeExchange {
     reader: GcpSecretReader,
     version: GcpSecretVersion,
-    client: reqwest::blocking::Client,
+    client: effects::Client,
     endpoint: url::Url,
 }
 
@@ -82,7 +83,7 @@ impl GoogleCodeExchange {
             reader,
             version,
             endpoint: url::Url::parse(TOKEN_URL)?,
-            client: reqwest::blocking::Client::builder()
+            client: effects::Client::builder()
                 .no_proxy()
                 .redirect(reqwest::redirect::Policy::none())
                 .retry(reqwest::retry::never())
@@ -307,9 +308,9 @@ impl GoogleOidc {
             attempt.len() <= 128 && !attempt.is_empty(),
             "invalid OIDC attempt"
         );
-        let state = web_security::random()?;
-        let nonce = web_security::random()?;
-        let verifier = web_security::random()?;
+        let state = effects::random()?;
+        let nonce = effects::random()?;
+        let verifier = effects::random()?;
         let code_challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
         let pending = Pending {
             attempt: attempt.to_owned(),
@@ -664,6 +665,98 @@ mod tests {
             email: "person@example.com".into(),
             subject: "accounts.google.com:112233".into(),
         }
+    }
+
+    #[test]
+    fn native_oidc_secret_token_keys_and_one_use_callbacks_replay_without_network() -> Result<()> {
+        use crate::oauth::{
+            effects,
+            registration::tests::{TokensSource, secret_response},
+            simulation::World,
+        };
+        use std::sync::{Arc, atomic::AtomicUsize};
+        for seed in 0..8 {
+            for fault in [None, Some(0), Some(1)] {
+                let run = || -> Result<_> {
+                    let world = World::new(seed);
+                    world.script(
+                        vec![
+                            (200, secret_response().to_string()),
+                            (200, r#"{"id_token":"private-fixture-id-token"}"#.into()),
+                        ],
+                        fault,
+                    );
+                    effects::scope(world.clone(), || {
+                        let reader =
+                            GcpSecretReader::new(Arc::new(TokensSource(AtomicUsize::new(0))))?;
+                        let exchange = GoogleCodeExchange::new(
+                            reader,
+                            GcpSecretVersion {
+                                project_number: 12345,
+                                secret: "google_client_secret".into(),
+                                version: 7,
+                            },
+                        )?;
+                        let token = exchange.exchange(
+                            "private-code",
+                            &"v".repeat(43),
+                            "https://security.example.com/_day2/reauth/callback",
+                            "123.apps.googleusercontent.com",
+                        );
+                        assert_eq!(token.is_ok(), fault.is_none());
+                        if let Err(error) = &token {
+                            assert!(!format!("{error:#}").contains("private-fixture"));
+                        }
+                        let oidc = oidc();
+                        let location =
+                            oidc.begin(&identity(), "attempt", &Digest::of(&"pending")?, 5)?;
+                        let url = url::Url::parse(&location)?;
+                        let state = url
+                            .query_pairs()
+                            .find(|(name, _)| name == "state")
+                            .unwrap()
+                            .1
+                            .into_owned();
+                        world.advance(300);
+                        let callback = format!(
+                            "state={state}&code=private-code&iss=https%3A%2F%2Faccounts.google.com"
+                        );
+                        assert!(
+                            oidc.complete(&callback, &identity(), effects::wall_time()?)
+                                .is_err()
+                        );
+                        assert!(oidc.pending.lock().unwrap().is_empty());
+                        assert!(oidc.complete(&callback, &identity(), 5).is_err());
+                        Ok((token.is_ok(), Digest::of(&location)?, world.requests()))
+                    })
+                };
+                assert_eq!(run()?, run()?);
+            }
+            let world = World::new(seed);
+            world.script(vec![(200, FixedKeys.fetch()?)], None);
+            effects::scope(world.clone(), || -> Result<()> {
+                let oidc = GoogleOidc::new(
+                    "123.apps.googleusercontent.com".into(),
+                    "example.com".into(),
+                    "https://security.example.com/",
+                    Box::new(NoExchange),
+                    Box::new(GoogleKeys),
+                )?;
+                let token = format!("{HEADER}.{PAYLOAD}.{SIGNATURE}");
+                assert_eq!(
+                    oidc.verify_id_token(&token, "fixture_nonce", &identity(), 1_700_000_001)?
+                        .auth_time,
+                    1_700_000_000
+                );
+                assert!(
+                    oidc.verify_id_token(&token, "wrong_nonce", &identity(), 1_700_000_001)
+                        .is_err()
+                );
+                assert_eq!(world.requests().len(), 1);
+                Ok(())
+            })?;
+        }
+        Ok(())
     }
 
     #[test]

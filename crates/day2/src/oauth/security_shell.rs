@@ -7,6 +7,7 @@ use super::{
     admission, approval_keys, connect, external, profiles, registration, shell_oidc,
     shell_transport,
 };
+use crate::oauth::effects;
 use crate::{artifact::Instance, iap, managed_credentials::browser as credentials};
 use crate::{managed_credentials::crypto::KeyLease, store::open, web_security};
 use anyhow::{Context, Result, ensure};
@@ -30,7 +31,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 use tokio::{
     net::TcpListener,
@@ -164,7 +165,7 @@ struct RegistrationPublication {
 
 impl registration::shell::ReceiptPublisher for RegistrationPublication {
     fn publish(&self, receipt: &registration::Receipt, headers: &HeaderMap, _: i64) -> Result<()> {
-        let now = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())?;
+        let now = effects::wall_time()?;
         if let Some(guard) = &self.guard {
             guard.check(now)?;
         }
@@ -480,20 +481,20 @@ impl SecurityShell {
         admission: Arc<AtomicBool>,
     ) -> Response {
         let (parts, body) = request.into_parts();
-        let body = match tokio::time::timeout(Duration::from_secs(3), to_bytes(body, 4096)).await {
+        let body = match effects::timeout(Duration::from_secs(3), to_bytes(body, 4096)).await {
             Ok(Ok(body)) => body,
             Ok(Err(_)) => return protected(StatusCode::PAYLOAD_TOO_LARGE.into_response()),
             Err(_) => return protected(StatusCode::REQUEST_TIMEOUT.into_response()),
         };
-        let at = match SystemTime::now().duration_since(UNIX_EPOCH) {
-            Ok(time) => time.as_secs() as i64,
+        let at = match effects::wall_time() {
+            Ok(time) => time,
             Err(_) => return protected(StatusCode::SERVICE_UNAVAILABLE.into_response()),
         };
         let method = parts.method;
         let path = parts.uri.path().to_owned();
         let query = parts.uri.query().map(str::to_owned);
         let headers = parts.headers;
-        let response = tokio::task::spawn_blocking(move || {
+        let response = effects::spawn_blocking(move || {
             // A disconnected browser cannot release capacity while its native
             // provider operation is still running and cannot be cancelled.
             let _permit = permit;
@@ -715,7 +716,7 @@ impl SecurityShell {
                 && at - human.authenticated_at <= SESSION_SECONDS,
             "fresh shell authentication required"
         );
-        let token = web_security::random()?;
+        let token = effects::random()?;
         let session = ShellSession {
             attempt: pending.attempt().to_owned(),
             human: human.human,
@@ -724,7 +725,7 @@ impl SecurityShell {
             preview: pending.digest()?,
             authenticated_at: human.authenticated_at,
             expires_at: human.authenticated_at + SESSION_SECONDS,
-            csrf: web_security::random()?,
+            csrf: effects::random()?,
         };
         let mut sessions = self
             .sessions
@@ -891,7 +892,7 @@ impl SecurityShell {
                 && at - human.authenticated_at <= SESSION_SECONDS,
             "fresh credential authentication required"
         );
-        let token = web_security::random()?;
+        let token = effects::random()?;
         let session = ShellSession {
             attempt: pending.attempt.clone(),
             human: human.human,
@@ -900,7 +901,7 @@ impl SecurityShell {
             preview: pending.challenge()?,
             authenticated_at: human.authenticated_at,
             expires_at: (human.authenticated_at + SESSION_SECONDS).min(pending.expires_at),
-            csrf: web_security::random()?,
+            csrf: effects::random()?,
         };
         let mut sessions = self
             .sessions
@@ -1433,6 +1434,51 @@ mod tests {
             approvals,
             Arc::new(BrowserIdentity { fresh: false }),
         )
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn body_deadlines_and_blocking_dispatch_use_the_simulated_environment() -> Result<()> {
+        let world = crate::oauth::simulation::World::new(11);
+        effects::scope_async(world.clone(), async {
+            let shell = isolated_shell()?;
+            let capacity = Arc::new(Semaphore::new(1));
+            let start = tokio::time::Instant::now();
+            let body = axum::body::Body::from_stream(tokio_stream::pending::<
+                Result<axum::body::Bytes, std::io::Error>,
+            >());
+            let request = Request::builder()
+                .uri("/_day2/oauth/approve/attempt")
+                .header(header::HOST, "security.example.com")
+                .body(body)?;
+            let response = shell
+                .clone()
+                .handle(
+                    request,
+                    capacity.clone().acquire_owned().await?,
+                    Arc::new(AtomicBool::new(true)),
+                )
+                .await;
+            assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+            assert_eq!(tokio::time::Instant::now() - start, Duration::from_secs(3));
+            assert_eq!(capacity.available_permits(), 1);
+            assert_eq!(effects::wall_time()?, 5);
+            let request = Request::builder()
+                .uri("/_day2/oauth/approve/attempt")
+                .header(header::HOST, "security.example.com")
+                .body(axum::body::Body::empty())?;
+            let response = shell
+                .handle(
+                    request,
+                    capacity.clone().acquire_owned().await?,
+                    Arc::new(AtomicBool::new(false)),
+                )
+                .await;
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            assert_eq!(capacity.available_permits(), 1);
+            assert!(world.requests().is_empty());
+            Ok(())
+        })
+        .await
     }
 
     #[tokio::test]

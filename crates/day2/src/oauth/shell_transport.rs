@@ -2,7 +2,8 @@
 //! confirmation cross this boundary. Custody and SQLite stay with the app host.
 
 use super::{account::ProviderAccount, external, security_shell::ApprovalContext};
-use crate::{artifact::Instance, iap, web_security};
+use crate::oauth::effects::{self, Client, Instant};
+use crate::{artifact::Instance, iap};
 use anyhow::{Context, Result, ensure};
 use axum::{
     Router,
@@ -12,13 +13,13 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use day2_capabilities::Digest;
-use reqwest::{blocking::Client, header::HeaderValue};
+use reqwest::header::HeaderValue;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::Read,
     sync::Arc,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 use url::Url;
 
@@ -357,13 +358,13 @@ impl AppApprovalReceiver {
         permit: Option<tokio::sync::OwnedSemaphorePermit>,
     ) -> Response {
         let (parts, body) = request.into_parts();
-        let body =
-            match tokio::time::timeout(Duration::from_secs(3), to_bytes(body, MAX_REQUEST)).await {
-                Ok(Ok(body)) => body,
-                Ok(Err(_)) => return protected(StatusCode::PAYLOAD_TOO_LARGE.into_response()),
-                Err(_) => return protected(StatusCode::REQUEST_TIMEOUT.into_response()),
-            };
-        let result = tokio::task::spawn_blocking(move || {
+        let body = match effects::timeout(Duration::from_secs(3), to_bytes(body, MAX_REQUEST)).await
+        {
+            Ok(Ok(body)) => body,
+            Ok(Err(_)) => return protected(StatusCode::PAYLOAD_TOO_LARGE.into_response()),
+            Err(_) => return protected(StatusCode::REQUEST_TIMEOUT.into_response()),
+        };
+        let result = effects::spawn_blocking(move || {
             // Keep host capacity until authentication and local settlement
             // finish, including when the HTTP caller disconnects.
             let _permit = permit;
@@ -788,7 +789,7 @@ pub(crate) fn scoped_attempt(installation: &str, environment: &str, app: &str) -
     Ok(format!(
         "{}{}",
         route_prefix(installation, environment, app)?,
-        web_security::random()?
+        effects::random()?
     ))
 }
 
@@ -831,10 +832,7 @@ fn one_assertion(headers: &HeaderMap) -> Result<&str> {
 }
 
 fn now() -> Result<i64> {
-    Ok(SystemTime::now()
-        .duration_since(UNIX_EPOCH)?
-        .as_secs()
-        .try_into()?)
+    effects::wall_time()
 }
 
 fn protected(mut response: Response) -> Response {
