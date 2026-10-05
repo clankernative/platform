@@ -42,6 +42,7 @@ them does not complete every RADICAL obligation.
 | Dispatch states | An admitted permit missing its attempt, capability or reservation; cloning or decoding a consuming permit. | Admitted dispatch executes once; recorded replay retains the observation and ledger without another provider call. |
 | Write admission bounds | Excess waiting writers/live database lines, ticket/deadline overflow and splitting one live queue during registry churn. | FIFO, independent databases, cancellation and existing busy/nested transaction behavior remain valid. |
 | Provider coverage debt | Covered actions becoming pending, additional pending actions, duplicate/stale debt and missing ownership metadata. | The current exact pending set and existing SQLite world attribution and sabotage fixtures remain valid. |
+| Qualification input bounds | File growth defeating a metadata-only budget, consumption from a replacement pathname, or an unrepresentable lookahead. | Exact-limit inputs preserve their bytes/digests; consumption stays on the admitted descriptor and reads at most one excess byte. |
 
 ## File leases and merge order
 
@@ -227,6 +228,19 @@ ticket exhaustion and unrepresentable deadlines fail as `SQLITE_BUSY`.
 The existing 30-second maximum, shorter caller deadlines, nested passthrough and
 SQLite's cross-process busy handling remain unchanged. These are fixed native
 admission budgets rather than instance or application configuration.
+
+Qualified release receipt, toolchain and evidence-log reads use a private
+`BoundedInput`. Admission checks the limit-plus-one lookahead before filesystem
+access, validates the opened regular descriptor, and on Unix compares its
+device/inode to the inspected pathname. Consumption uses that same descriptor
+through `Take`, stopping at the ceiling plus one byte and rejecting excess with
+the existing budget error. Native callsites retain their 1 MiB receipt/toolchain
+and 16 MiB log limits. A file growing after admission cannot cause an unbounded
+read; replacing the pathname after admission does not change the consumed
+object. Actual file fixtures check the shared cursor, growth, replacement,
+overflow, exact/zero limits and invalid file types. This closes the selected
+reader's byte/identity gap; it does not establish filesystem containment,
+snapshot coherence or an I/O wall-time bound for every platform reader.
 
 ## Principle enforcement map
 

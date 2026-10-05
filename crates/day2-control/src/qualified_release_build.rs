@@ -14,18 +14,63 @@ use day2::{artifact::LoadedArtifact, automation};
 use serde_json::{Value, json};
 use std::{
     fs,
+    io::Read,
     path::Path,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 fn bounded(path: &Path, limit: u64) -> Result<Vec<u8>> {
-    let metadata = fs::symlink_metadata(path)?;
-    ensure!(
-        metadata.is_file() && metadata.len() <= limit,
-        "qualified_build_input_budget"
-    );
-    Ok(fs::read(path)?)
+    BoundedInput::open(path, limit)?.read()
+}
+
+struct BoundedInput {
+    file: fs::File,
+    limit: u64,
+    read_limit: u64,
+}
+impl BoundedInput {
+    fn open(path: &Path, limit: u64) -> Result<Self> {
+        let read_limit = limit
+            .checked_add(1)
+            .context("qualified_build_input_budget")?;
+        let path_metadata = fs::symlink_metadata(path)?;
+        ensure!(
+            path_metadata.is_file() && path_metadata.len() <= limit,
+            "qualified_build_input_budget"
+        );
+        let file = fs::File::open(path)?;
+        let metadata = file.metadata()?;
+        ensure!(
+            metadata.is_file() && metadata.len() <= limit,
+            "qualified_build_input_budget"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            ensure!(
+                metadata.dev() == path_metadata.dev() && metadata.ino() == path_metadata.ino(),
+                "qualified_build_input_budget"
+            );
+        }
+        Ok(Self {
+            file,
+            limit,
+            read_limit,
+        })
+    }
+
+    fn read(mut self) -> Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        (&mut self.file)
+            .take(self.read_limit)
+            .read_to_end(&mut bytes)?;
+        ensure!(
+            u64::try_from(bytes.len())? <= self.limit,
+            "qualified_build_input_budget"
+        );
+        Ok(bytes)
+    }
 }
 
 pub fn check_receipt(
@@ -307,4 +352,99 @@ pub fn prepare(
             _ => anyhow::bail!("unknown_qualified_build_capability"),
         },
     )
+}
+
+#[cfg(test)]
+mod bounded_input_tests {
+    use super::*;
+    use std::io::{Seek, Write};
+
+    #[test]
+    fn exact_limit_preserves_bytes_and_digest() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("receipt.json");
+        let bytes = b"{}\n";
+        fs::write(&path, bytes).unwrap();
+        let admitted = bounded(&path, u64::try_from(bytes.len()).unwrap()).unwrap();
+        assert_eq!(admitted.as_slice(), bytes);
+        assert_eq!(Digest::new(&admitted), Digest::new(bytes));
+        assert_eq!(
+            bounded(&path, 2).unwrap_err().to_string(),
+            "qualified_build_input_budget"
+        );
+        fs::write(&path, b"").unwrap();
+        assert!(bounded(&path, 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn growth_after_admission_rejects_after_one_excess_byte() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("evidence.log");
+        fs::write(&path, b"abc").unwrap();
+        let input = BoundedInput::open(&path, 3).unwrap();
+        let mut cursor = input.file.try_clone().unwrap();
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(&[b'x'; 32])
+            .unwrap();
+        assert_eq!(
+            input.read().unwrap_err().to_string(),
+            "qualified_build_input_budget"
+        );
+        assert_eq!(cursor.stream_position().unwrap(), 4);
+    }
+
+    #[test]
+    fn pathname_replacement_keeps_the_admitted_descriptor() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("evidence.log");
+        fs::write(&path, b"original").unwrap();
+        let input = BoundedInput::open(&path, 8).unwrap();
+        fs::rename(&path, directory.path().join("original.log")).unwrap();
+        fs::write(&path, b"unadmitted replacement").unwrap();
+        assert_eq!(input.read().unwrap().as_slice(), b"original");
+    }
+
+    #[test]
+    fn maximum_limit_rejects_before_file_admission() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("evidence.log");
+        fs::write(&path, b"original").unwrap();
+        assert_eq!(
+            BoundedInput::open(&path, u64::MAX)
+                .err()
+                .unwrap()
+                .to_string(),
+            "qualified_build_input_budget"
+        );
+        assert_eq!(
+            BoundedInput::open(&directory.path().join("missing.log"), u64::MAX)
+                .err()
+                .unwrap()
+                .to_string(),
+            "qualified_build_input_budget"
+        );
+    }
+
+    #[test]
+    fn directories_and_final_symlinks_are_rejected() {
+        let directory = tempfile::tempdir().unwrap();
+        assert_eq!(
+            bounded(directory.path(), 1024).unwrap_err().to_string(),
+            "qualified_build_input_budget"
+        );
+        #[cfg(unix)]
+        {
+            let path = directory.path().join("evidence.log");
+            let link = directory.path().join("linked.log");
+            fs::write(&path, b"original").unwrap();
+            std::os::unix::fs::symlink(&path, &link).unwrap();
+            assert_eq!(
+                bounded(&link, 1024).unwrap_err().to_string(),
+                "qualified_build_input_budget"
+            );
+        }
+    }
 }
