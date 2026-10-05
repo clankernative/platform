@@ -118,14 +118,7 @@ pub fn validate(declarations: &[ConnectionDeclaration], artifact: &Artifact) -> 
 /// Closed semantic contracts shared by declaration admission and reviewed
 /// provider selection. Adding a capability requires a corresponding SDK contract.
 pub(crate) fn validate_access(requirement: &ConnectionRequirement) -> Result<()> {
-    ensure!(
-        requirement.capability == "google_calendar_events"
-            && (requirement.actions == BTreeSet::from(["list_events".to_owned()])
-                || requirement.actions
-                    == BTreeSet::from(["list_events".to_owned(), "create_event".to_owned()])),
-        "unsupported semantic connection access"
-    );
-    Ok(())
+    super::catalog::validate_access(requirement)
 }
 
 #[cfg(test)]

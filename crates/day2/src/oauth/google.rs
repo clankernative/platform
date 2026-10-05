@@ -4,6 +4,7 @@
 use super::{admission, profiles};
 use anyhow::{Result, ensure};
 use day2_capabilities::{BindingRef, Digest, Name, oauth::AccountBindingPolicy};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) const ISSUER: &str = "https://accounts.google.com";
@@ -104,6 +105,7 @@ pub(super) fn reviewed(policy: &AccountBindingPolicy) -> Result<admission::Revie
     })
 }
 
+#[cfg(test)]
 pub(crate) fn catalog() -> Result<admission::ReviewedCatalog> {
     admission::ReviewedCatalog::new(vec![
         reviewed(&AccountBindingPolicy::MappedHuman)?,
@@ -133,6 +135,109 @@ pub(super) fn normalize_scope(raw: &str) -> Result<String> {
     }
     ensure!(scopes.len() <= 32, "Google scope budget");
     Ok(scopes.into_iter().collect::<Vec<_>>().join(" "))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GoogleTokens {
+    access_token: String,
+    refresh_token: Option<String>,
+    token_type: String,
+    expires_in: u64,
+    scope: String,
+    // Google returns this for the reviewed identity scopes. Account evidence
+    // comes from the fixed TLS UserInfo endpoint using the same access token.
+    id_token: Option<String>,
+    refresh_token_expires_in: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct NormalizedTokens<'a> {
+    access_token: &'a str,
+    refresh_token: Option<&'a str>,
+    token_type: &'a str,
+    expires_in: u64,
+    scope: String,
+}
+
+#[derive(Deserialize)]
+struct UserInfo {
+    sub: String,
+    email: String,
+    email_verified: bool,
+    hd: String,
+}
+
+pub(super) fn tokens(
+    raw: &[u8],
+    context: super::catalog::TokenContext<'_>,
+    refresh: bool,
+) -> Result<super::catalog::Tokens> {
+    let raw: GoogleTokens =
+        crate::json::decode(raw).map_err(|_| anyhow::anyhow!("invalid Google token response"))?;
+    if let Some(id_token) = &raw.id_token {
+        ensure!(
+            !id_token.is_empty()
+                && id_token.len() <= 16_384
+                && id_token.bytes().all(|byte| byte.is_ascii_graphic()),
+            "invalid Google identity token material"
+        );
+    }
+    ensure!(
+        raw.refresh_token_expires_in
+            .is_none_or(|seconds| seconds > 0),
+        "invalid Google refresh lifetime"
+    );
+    let normalized = serde_json::to_vec(&NormalizedTokens {
+        access_token: &raw.access_token,
+        refresh_token: if refresh {
+            None
+        } else {
+            raw.refresh_token.as_deref()
+        },
+        token_type: &raw.token_type,
+        expires_in: raw.expires_in,
+        scope: normalize_scope(&raw.scope)?,
+    })?;
+    let protocol = if refresh {
+        profiles::ConfidentialPkceProfile::NoRefresh(context.reviewed.protocol.identity().clone())
+    } else {
+        context.reviewed.protocol.clone()
+    };
+    protocol.validate_token_response(&normalized, context.permission)?;
+    ensure!(
+        raw.access_token.bytes().all(|byte| byte.is_ascii_graphic())
+            && raw
+                .refresh_token
+                .as_ref()
+                .is_none_or(|token| !token.is_empty()
+                    && token.len() <= 8192
+                    && token.bytes().all(|byte| byte.is_ascii_graphic())),
+        "invalid Google token material"
+    );
+    Ok(super::catalog::Tokens {
+        access: raw.access_token,
+        refresh: raw.refresh_token,
+    })
+}
+
+pub(super) fn account(raw: &[u8], subject: &str, tenant: &str) -> Result<()> {
+    let account: UserInfo =
+        crate::json::decode(raw).map_err(|_| anyhow::anyhow!("invalid Google account response"))?;
+    ensure!(
+        !account.sub.is_empty()
+            && account.sub.len() <= 255
+            && account.sub.bytes().all(|b| b.is_ascii_graphic())
+            && account.sub == subject
+            && account.hd == tenant
+            && account.email_verified
+            && !account.email.is_empty()
+            && account.email.len() <= 320
+            && account.email.bytes().all(|b| b.is_ascii_graphic())
+            && account.email.contains('@'),
+        "Google account mismatch"
+    );
+    Ok(())
 }
 
 #[cfg(test)]

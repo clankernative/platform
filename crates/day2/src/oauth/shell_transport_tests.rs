@@ -827,7 +827,7 @@ impl crate::oauth::admission::OutboundReadiness for NoLiveFacts {
 
 struct NativeRegistrationSink {
     authority: crate::oauth::admission::ArtifactApprovalAuthority,
-    readiness: Arc<crate::oauth::registration::GoogleReadiness>,
+    readiness: Arc<crate::oauth::registration::ProviderReadiness>,
     calls: Arc<AtomicUsize>,
 }
 impl RegistrationSink for NativeRegistrationSink {
@@ -850,7 +850,7 @@ fn native_registration_crosses_authenticated_http_once_even_when_response_is_los
     use crate::oauth::{
         admission,
         registration::{
-            GoogleReadiness,
+            ProviderReadiness,
             publication::{self, tests as native},
         },
     };
@@ -867,7 +867,7 @@ fn native_registration_crosses_authenticated_http_once_even_when_response_is_los
                 .parse()?,
         );
         human_headers.insert(header::COOKIE, "private-browser-cookie".parse()?);
-        let readiness = Arc::new(GoogleReadiness::new(Arc::new(NoLiveFacts)));
+        let readiness = Arc::new(ProviderReadiness::new(Arc::new(NoLiveFacts)));
         let calls = Arc::new(AtomicUsize::new(0));
         let authority = admission::ArtifactApprovalAuthority::with_keys(
             selected,

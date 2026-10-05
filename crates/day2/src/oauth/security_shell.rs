@@ -185,7 +185,7 @@ impl SecurityShell {
     ) -> Result<RegistrationShell> {
         let selected = admission::QualifiedConnections::from_instance_file(
             instance_path,
-            &super::google::catalog()?,
+            &super::catalog::reviewed()?,
         )?;
         let instance = selected.instance();
         super::clients::shell_secret_containers(instance)?;
@@ -206,7 +206,7 @@ impl SecurityShell {
             instance,
             tokens.clone(),
         )?);
-        let targets = selected.google_targets(facts.selection())?;
+        let targets = selected.registration_targets(facts.selection())?;
         ensure!(
             !targets.is_empty(),
             "security shell has no selected registrations"
@@ -234,7 +234,7 @@ impl SecurityShell {
         Arc::get_mut(&mut shell)
             .context("security shell already shared")?
             .guard = Some(facts.clone());
-        let readiness = Arc::new(registration::GoogleReadiness::new(Arc::new(NoAppFacts)));
+        let readiness = Arc::new(registration::ProviderReadiness::new(Arc::new(NoAppFacts)));
         let canaries = Arc::new(
             registration::shell::Canaries::new(&origin, targets, runner, tokens, readiness)?
                 .with_publication(Arc::new(RegistrationPublication {
@@ -269,13 +269,13 @@ impl SecurityShell {
         instance_path: &Path,
         shell: &profiles::SecurityShellEvidence,
         runner: &Path,
-        readiness: Arc<registration::GoogleReadiness>,
+        readiness: Arc<registration::ProviderReadiness>,
     ) -> Result<RegistrationShell> {
         let selected = admission::QualifiedConnections::from_instance_file(
             instance_path,
-            &super::google::catalog()?,
+            &super::catalog::reviewed()?,
         )?;
-        let targets = selected.google_targets(shell)?;
+        let targets = selected.registration_targets(shell)?;
         let origin = selected.instance().security_edge()?.1.origin.clone();
         let tokens = Arc::new(approval_keys::GkeMetadataAccessTokens::selected(
             &selected

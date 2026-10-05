@@ -35,6 +35,11 @@ const MODULES: &[Module] = &[
         app_export: true,
     },
     Module {
+        file: "GitlabProjects.roc",
+        source: "contracts/GitlabProjects.roc",
+        app_export: true,
+    },
+    Module {
         file: "SecurityAction.roc",
         source: "contracts/SecurityAction.roc",
         app_export: true,

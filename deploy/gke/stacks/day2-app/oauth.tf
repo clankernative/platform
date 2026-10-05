@@ -11,9 +11,9 @@ variable "oauth_instance_json" {
       length(jsondecode(var.oauth_instance_json).apps) == 1 &&
       length(jsondecode(var.oauth_instance_json).oauth_runtime.apps) == 1 &&
       jsondecode(var.oauth_instance_json).oauth_runtime.version == 1 &&
-      jsondecode(var.oauth_instance_json).oauth_clients.version == 1,
+      contains([1, 2], jsondecode(var.oauth_instance_json).oauth_clients.version),
     false)
-    error_message = "oauth_instance_json must be bounded single-app canonical instance JSON with version 1 OAuth runtime/client selections."
+    error_message = "oauth_instance_json must be bounded single-app canonical instance JSON with version 1 OAuth runtime and version 1 or 2 OAuth client selections."
   }
 }
 

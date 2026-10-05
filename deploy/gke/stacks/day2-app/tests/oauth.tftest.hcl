@@ -72,6 +72,32 @@ run "renders_the_native_selected_instance_without_rewriting_pins" {
   }
 }
 
+run "preserves_tagged_provider_clients" {
+  command = plan
+  variables {
+    oauth_instance_json = jsonencode(merge(jsondecode(file("tests/oauth-instance.json")), {
+      oauth_clients = {
+        version          = 2
+        reauthentication = jsondecode(file("tests/oauth-instance.json")).oauth_clients.reauthentication
+        registrations = {
+          calendar_client = {
+            client = { kind = "google", client_id = "123-calendar.apps.googleusercontent.com", credential = "calendar" }
+            canary = { qualification_subject = "accounts.google.com:112233", provider_subject = "112233", provider_tenant = "example.com" }
+          }
+        }
+      }
+    }))
+  }
+  assert {
+    condition = (
+      jsondecode(kubernetes_config_map_v1.instance.data["instance.json"]).oauth_clients.version == 2 &&
+      jsondecode(kubernetes_config_map_v1.instance.data["instance.json"]).oauth_clients.registrations.calendar_client.client.kind == "google" &&
+      jsondecode(kubernetes_config_map_v1.instance.data["instance.json"]).oauth_clients.registrations.calendar_client.canary.provider_subject == "112233"
+    )
+    error_message = "The deployment must preserve provider and canary role tags. Native admission still verifies their compatibility."
+  }
+}
+
 run "refuses_another_annotation" {
   command = plan
   override_data {

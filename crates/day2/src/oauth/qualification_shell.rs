@@ -1,7 +1,7 @@
 //! IAP-authenticated, one-use browser routing for the private qualification
 //! campaign. No callback, form or instance boolean can manufacture a receipt.
 
-use super::{Authorization, Codes, GoogleReadiness, Purpose, Receipt, Session, Target};
+use super::{Authorization, Codes, ProviderReadiness, Purpose, Receipt, Session, Target};
 use crate::oauth::effects::{self, Instant};
 use crate::{iap, oauth::approval_keys::AccessTokenSource};
 use anyhow::{Context, Result, ensure};
@@ -76,7 +76,7 @@ pub(crate) struct Canaries {
     origin: String,
     state: Mutex<State>,
     campaign: Arc<dyn Campaign>,
-    readiness: Arc<GoogleReadiness>,
+    readiness: Arc<ProviderReadiness>,
     publisher: Option<Arc<dyn ReceiptPublisher>>,
 }
 
@@ -86,7 +86,7 @@ impl Canaries {
         targets: Vec<Target>,
         runner: &Path,
         tokens: Arc<dyn AccessTokenSource>,
-        readiness: Arc<GoogleReadiness>,
+        readiness: Arc<ProviderReadiness>,
     ) -> Result<Self> {
         Self::at(
             origin,
@@ -103,7 +103,7 @@ impl Canaries {
         origin: &str,
         targets: Vec<Target>,
         campaign: Arc<dyn Campaign>,
-        readiness: Arc<GoogleReadiness>,
+        readiness: Arc<ProviderReadiness>,
     ) -> Result<Self> {
         let url = url::Url::parse(origin)?;
         ensure!(
@@ -271,9 +271,9 @@ impl Canaries {
                 reject_credential: None,
             },
         );
-        let markup = html! { (DOCTYPE) html lang="en" { head { meta charset="utf-8"; title { "Google OAuth qualification" } }
-            body { h1 { "Google OAuth qualification" }
-                p { "Use the isolated canary account. Three Google authorizations are required. The campaign tests code exchange, account identity and refresh." }
+        let markup = html! { (DOCTYPE) html lang="en" { head { meta charset="utf-8"; title { "Provider OAuth qualification" } }
+            body { h1 { "Provider OAuth qualification" }
+                p { "Use the isolated canary account. Three provider authorizations are required. The campaign tests code exchange, account identity and refresh." }
                 p { "This setup describes the selected client and exact callback. It does not establish readiness." }
                 pre { (description) }
                 form method="post" action=(path) { input type="hidden" name="csrf" value=(csrf); button type="submit" { "Start qualification" } }
@@ -450,7 +450,7 @@ fn fresh(pending: &Pending, now: i64) -> bool {
 
 fn selected_human(target: &Target, identity: &iap::Verified) -> Result<()> {
     ensure!(
-        identity.subject == format!("accounts.google.com:{}", target.canary_subject),
+        identity.subject == target.qualification_subject,
         "qualification requires the selected canary human"
     );
     Ok(())
@@ -534,10 +534,11 @@ mod tests {
 
     impl Campaign for FixtureCampaign {
         fn run(&self, target: Target, codes: Codes) -> Result<Receipt> {
+            let wire = Wire::fixture(&self.endpoint, target.adapter)?;
             let receipt = Session::at(
                 target,
                 codes,
-                Wire::fixture(&self.endpoint)?,
+                wire,
                 approval_keys::GcpSecretReader::fixture(
                     &self.endpoint,
                     Arc::new(TokensSource(AtomicUsize::new(0))),
@@ -727,7 +728,7 @@ mod tests {
     fn mounted_qualification_routes_require_the_shell_host_and_iap_identity() -> Result<()> {
         let fixture = fixture()?;
         let server = Server::new(vec![])?;
-        let readiness = Arc::new(GoogleReadiness::new(Arc::new(Facts(fixture.evidence))));
+        let readiness = Arc::new(ProviderReadiness::new(Arc::new(Facts(fixture.evidence))));
         let campaign = Arc::new(FixtureCampaign {
             endpoint: server.endpoint.clone(),
             runner: crate::automation::runner()?,
@@ -781,7 +782,7 @@ mod tests {
         }
 
         let fixture = fixture()?;
-        let readiness = Arc::new(GoogleReadiness::new(Arc::new(Facts(fixture.evidence))));
+        let readiness = Arc::new(ProviderReadiness::new(Arc::new(Facts(fixture.evidence))));
         let canaries = Arc::new(Canaries::at(
             "https://security.example.com",
             vec![fixture.target],
@@ -909,7 +910,7 @@ mod tests {
     -> Result<()> {
         let fixture = fixture()?;
         let server = Server::new(responses())?;
-        let readiness = Arc::new(GoogleReadiness::new(Arc::new(Facts(
+        let readiness = Arc::new(ProviderReadiness::new(Arc::new(Facts(
             fixture.evidence.clone(),
         ))));
         let campaign = Arc::new(FixtureCampaign {
@@ -989,7 +990,7 @@ mod tests {
     {
         let fixture = fixture()?;
         let server = Server::new(responses())?;
-        let readiness = Arc::new(GoogleReadiness::new(Arc::new(Facts(fixture.evidence))));
+        let readiness = Arc::new(ProviderReadiness::new(Arc::new(Facts(fixture.evidence))));
         let published = Arc::new(PublicationObserved {
             calls: AtomicUsize::new(0),
             fail: true,
@@ -1056,7 +1057,7 @@ mod tests {
     -> Result<()> {
         let server = Server::new(vec![])?;
         let fixture = fixture()?;
-        let readiness = Arc::new(GoogleReadiness::new(Arc::new(Facts(fixture.evidence))));
+        let readiness = Arc::new(ProviderReadiness::new(Arc::new(Facts(fixture.evidence))));
         let campaign = Arc::new(FixtureCampaign {
             endpoint: server.endpoint.clone(),
             runner: crate::automation::runner()?,
@@ -1112,7 +1113,7 @@ mod tests {
     async fn forms_cannot_choose_credentials_and_failed_callbacks_are_consumed() -> Result<()> {
         let fixture = fixture()?;
         let server = Server::new(vec![])?;
-        let readiness = Arc::new(GoogleReadiness::new(Arc::new(Facts(fixture.evidence))));
+        let readiness = Arc::new(ProviderReadiness::new(Arc::new(Facts(fixture.evidence))));
         let campaign = Arc::new(FixtureCampaign {
             endpoint: server.endpoint.clone(),
             runner: crate::automation::runner()?,
@@ -1243,7 +1244,7 @@ mod tests {
     async fn retirement_while_wire_campaign_runs_refuses_late_receipt_publication() -> Result<()> {
         let fixture = fixture()?;
         let server = Server::new(responses())?;
-        let readiness = Arc::new(GoogleReadiness::new(Arc::new(Facts(fixture.evidence))));
+        let readiness = Arc::new(ProviderReadiness::new(Arc::new(Facts(fixture.evidence))));
         let (sealed, observed) = mpsc::channel();
         let (resume, resumed) = mpsc::channel();
         let campaign = Arc::new(FixtureCampaign {

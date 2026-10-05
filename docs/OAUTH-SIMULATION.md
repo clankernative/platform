@@ -30,7 +30,7 @@ to exactly the same complete bounded reserved-table snapshots. Snapshots include
 every row and column; binary values have length and content fingerprints, and a
 row-budget overflow fails rather than truncating the state.
 
-Additional seeded campaigns cover both reviewed Google registration policies,
+Additional seeded campaigns cover both Google registration policies and GitLab,
 native Secret Manager/token/userinfo/refresh parsing, workload metadata identity,
 OIDC key and token reads, one-use reauthentication callbacks, IAM receiver
 credentials, private transport substitution/response loss, cloud routing checks,
@@ -104,5 +104,37 @@ These are durable structural invariants. Semantic account identity, authority,
 current epochs, authenticated freshness, and custody authentication remain
 enforced by the qualified nominal APIs and transaction fences. SQL shape checks
 do not replace those checks or prove every possible safety property. The future
-nominal outbound Use API and provider/client extensibility remain separate work;
-these campaigns cover the code that currently exists.
+nominal outbound Use API remains separate work; these campaigns cover the code
+that currently exists.
+
+## Provider extension coverage
+
+The published registry is `oauth/catalog.rs`. Its Google mapped-human, Google
+external-account and GitLab external-account profiles must exactly equal the
+set of runnable adapter/profile/simulator/conformance tuples. A negative gate
+test removes the GitLab driver and proves the catalog cannot pass coverage.
+Future extensions must update the explicit source inventory and provide a
+driver; another profile label or a simulator digest alone is insufficient.
+
+Registration drivers execute the actual native wire adapter through the shared
+controlled clock/entropy/transport boundary. Google has nine HTTP boundaries;
+GitLab has twelve, including token-info evidence after every exchange/refresh.
+The independent order model owns these counts. Eight seeds cover loss and
+pre-I/O expiry at every boundary, repeat each history exactly, and check that
+failed sessions cannot issue receipts and expired receipts lose readiness.
+GitLab's real HTTP fixtures additionally reject broader scopes, wrong clients,
+wrong numeric subjects, locked accounts and non-rotating refresh responses.
+
+Registration divergences persist redacted step/request observations with the
+seed, provider driver, fault boundary, expiry schedule and complete compiled
+source identity under `artifacts/oauth-simulation/registration-*.json`. Use the
+existing `DAY2_OAUTH_REPLAY` entry point to replay them; bodies, tokens and
+headers do not enter those observations. Each registration history has a fixed
+nine-step campaign; outbound/inbound state histories retain their bounded
+semantic reduction and complete real-SQLite snapshots.
+
+The full gate also builds `oauth-gitlab-canary` and admits its real nominal SDK
+declaration. The setup integration test runs that same artifact for two companies
+with different clients and account ceilings, derives distinct callback and
+registration pins, and rejects a provider substitution. Desired metadata and
+simulated/native fixture receipts cannot establish live GitLab readiness.

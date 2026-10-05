@@ -12,7 +12,7 @@ use anyhow::{Context, Result, ensure};
 use day2_capabilities::{
     BindingRef, Digest, Name,
     oauth::{
-        AccountBindingPolicy, ConnectionSlotKey, GoogleAccountPolicy, OutboundConnectionBinding,
+        AccountBindingPolicy, ConnectionSlotKey, OutboundConnectionBinding, ProviderAccountPolicy,
         SlotOwner,
     },
 };
@@ -60,7 +60,7 @@ pub(super) fn setup_selected(selected: &mut QualifiedConnections) -> Result<Valu
                     Facts::mapping_revision(&selected.instance)?
             }
             AccountBindingPolicy::InstallationAccount => {
-                anyhow::bail!("Google installation accounts are not reviewed")
+                anyhow::bail!("installation accounts are not reviewed by this host")
             }
         }
         selected
@@ -71,7 +71,7 @@ pub(super) fn setup_selected(selected: &mut QualifiedConnections) -> Result<Valu
             .oauth_connections
             .insert(name.clone(), connection.binding.clone());
     }
-    let targets = selected.google_targets(&shell)?;
+    let targets = selected.registration_targets(&shell)?;
     let mut clients = Vec::new();
     for target in targets {
         let registration = target.registration_evidence()?.registration;
@@ -302,10 +302,10 @@ impl Facts {
                     (&connection.requirement.account_policy, account),
                     (
                         AccountBindingPolicy::MappedHuman,
-                        GoogleAccountPolicy::IapSubject
+                        ProviderAccountPolicy::IapSubject
                     ) | (
                         AccountBindingPolicy::ExplicitExternalAccount,
-                        GoogleAccountPolicy::ExternalAccounts { .. }
+                        ProviderAccountPolicy::ExternalAccounts { .. }
                     )
                 ),
                 "OAuth runtime account policy mismatch"
@@ -314,7 +314,7 @@ impl Facts {
                 connection.binding.security_shell == shell.origin,
                 "OAuth runtime shell revision mismatch"
             );
-            if matches!(account, GoogleAccountPolicy::IapSubject) {
+            if matches!(account, ProviderAccountPolicy::IapSubject) {
                 ensure!(
                     connection.binding.account_binding.revision
                         == Self::mapping_revision(&selected.instance)?,
@@ -322,7 +322,7 @@ impl Facts {
                 );
             }
         }
-        for target in selected.google_targets(&shell)? {
+        for target in selected.registration_targets(&shell)? {
             let expected = target.registration_evidence()?.registration;
             let mut matched = false;
             for connection in selected.entries.values() {
@@ -514,12 +514,12 @@ impl OutboundReadiness for Facts {
             .accounts[&Name::try_from(registration.clone())?];
         let instance = instance_identity(&self.selected.instance)?;
         let account = match account {
-            GoogleAccountPolicy::IapSubject => profiles::AccountBindingEvidence::MappedHuman {
+            ProviderAccountPolicy::IapSubject => profiles::AccountBindingEvidence::MappedHuman {
                 instance: instance.clone(),
                 mapping: binding.account_binding.clone(),
                 owner: owner.clone(),
             },
-            GoogleAccountPolicy::ExternalAccounts {
+            ProviderAccountPolicy::ExternalAccounts {
                 allowed_tenants,
                 allowed_subjects,
             } => {
@@ -551,7 +551,7 @@ impl OutboundReadiness for Facts {
         };
         let target = self
             .selected
-            .google_targets(&self.shell)?
+            .registration_targets(&self.shell)?
             .into_iter()
             .find(|t| t.publication_matches(&binding.registration.id, &namespace))
             .context("OAuth live registration target missing")?;
@@ -980,7 +980,7 @@ pub(crate) mod tests {
             connection.binding.account_binding = connection.binding.shell_attestation.clone();
             connection.shell_attestation.binding = connection.binding.shell_attestation.clone();
         }
-        let target = selected.google_targets(&shell)?.remove(0);
+        let target = selected.registration_targets(&shell)?.remove(0);
         let connection = selected.entries.values_mut().next().unwrap();
         connection.binding.registration = target.registration_evidence()?.registration;
         selected

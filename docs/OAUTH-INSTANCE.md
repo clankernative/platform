@@ -87,6 +87,98 @@ derives the reauthentication callback. Admitted app requirements, reviewed
 profiles, full binding namespaces and independent shell evidence derive provider
 callbacks. Company domains stay in the instance's edge configuration.
 
+### Reviewed provider extensions and version 2 clients
+
+`oauth/catalog.rs` composes the reviewed provider profiles independently of the
+protocol kernels. Declaration admission asks this registry for semantic access;
+the app SDK publishes each capability explicitly. Native host startup, setup,
+registration qualification, publication and readiness use the same catalog.
+Publishing a provider does not select it for any company or mint readiness.
+Only `apps[app].oauth_connections` selects profiles for that company's declared
+requirements. The client and runtime account catalogs supply the corresponding
+registration and account ceilings. Unselected requirements remain inactive.
+
+Version 1 retains its exact Google shape and evidence pins. Version 2 requires
+tagged provider clients and independently named qualification/provider accounts:
+
+```json
+"oauth_clients": {
+  "version": 2,
+  "reauthentication": {
+    "client_id": "123-reauth.apps.googleusercontent.com",
+    "credential": "google_reauth_client"
+  },
+  "registrations": {
+    "projects_registration": {
+      "client": {
+        "kind": "gitlab",
+        "client_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "credential": "gitlab_client"
+      },
+      "canary": {
+        "qualification_subject": "accounts.google.com:112233",
+        "provider_subject": "42",
+        "provider_tenant": "gitlab.com"
+      }
+    }
+  }
+}
+```
+
+The existing `oauth_runtime.apps[app].accounts[requirement]` selects
+`external_accounts`, with `allowed_tenants: ["gitlab.com"]` and an optional
+nonempty ceiling of canonical numeric GitLab subject IDs. The app declares
+`GitlabProjects.read_projects` and `explicit_external_account`; the binding
+selects `gitlab_projects_external_v1`. Setup derives current revisions from the
+actual admitted declaration. Missing clients, provider/profile mismatches,
+unsupported owner/account combinations, unknown kinds or versions, mixed v1/v2
+shapes, inline credentials, authored endpoints/scopes and key-role substitutions
+fail admission. Different companies choose clients, exact secret references and
+account ceilings in their ordinary instance documents without kernel changes.
+
+GitLab.com is a second actual native registration adapter, with rotating refresh
+and mandatory reauthorization after uncertainty. Its fixed token-info endpoint
+establishes exact scopes, client ID and resource owner even when the token
+response omits scope. Its account endpoint verifies the numeric, active,
+unlocked subject. Email/display fields cannot map it to the shell human. The
+selected shell human authorizes the canary campaign independently. These wire
+contracts follow [GitLab's OAuth API](https://docs.gitlab.com/api/oauth2/) and
+[current-user API](https://docs.gitlab.com/api/users/#retrieve-the-current-user).
+`read_api` also permits other REST reads at GitLab; the future native business
+dispatcher must enforce the declared `list_projects` action. This slice publishes
+registration qualification and semantic intent, without granting app API dispatch.
+
+Adding a reviewed provider means adding its native adapter/profile and semantic
+SDK contract when needed, explicitly registering them, and supplying runnable
+deterministic and HTTP conformance drivers for every published tuple. No
+connection, callback, exchange, custody, refresh-store or account-approval kernel
+changes are needed for this second provider. Company customization of endpoints
+or different protocols requires a new reviewed, pinned profile and its drivers;
+configuration cannot upload arbitrary code or assert conformance/readiness.
+
+The reviewed extension workflow is:
+
+1. Define semantic intent in the explicit SDK catalog if the capability is new.
+   Keep client IDs, URLs and provider scopes out of app declarations.
+2. Add a native profile with pinned endpoints, exact semantic scope interpretation,
+   account evidence, refresh behavior and a recovery policy. Add its closed client
+   selection and native registry dispatch; unsupported combinations must fail.
+3. Implement wire parsing and I/O through the shared OAuth effects boundary.
+   Provider observations cannot manufacture account approval or live readiness.
+4. Add independent deterministic obligations, every relevant fault boundary and
+   exact replay, plus native HTTP conformance. Register every published
+   profile/adapter/simulator/conformance tuple and its compiled source identity.
+5. Build a real app declaration canary through `ops/Verify.roc`, exercise ordinary
+   instance setup/admission, and pass the full gate. Companies then select that
+   reviewed profile and their own clients, secrets and account ceilings.
+
+The selected GKE security shell still uses Google IAP and Google fresh
+reauthentication. That infrastructure identity adapter is separate from outbound
+provider selection. This change does not implement GitLab API execution through
+the future typed `Use` API, qualify a live client, deploy either provider, or
+support arbitrary self-managed GitLab origins. Native live qualification remains
+required for each exact client, callback, profile and instance selection.
+
 ## Callback and current approval lookup
 
 The host derives the callback namespace from the complete selected namespace,
@@ -346,7 +438,7 @@ Runtime selection changes fail closed against the fact source's pinned catalog.
 Restart the app host to compose a new fact source after changing that catalog;
 native receipts and facts are never persisted or carried into the restart.
 The native source supplies expected registration metadata only behind the
-existing `GoogleReadiness` gate: a signed fresh live canary publication remains
+existing `ProviderReadiness` gate: a signed fresh live canary publication remains
 required independently.
 
 ### Dedicated shell launcher
@@ -453,8 +545,8 @@ client credential revision, shell origin and signature. It loads only the
 attestation key for this import. The native canary receipt itself remains
 non-serializable; parsing publication JSON cannot populate readiness.
 
-`Providers::google` mounts this receiver on the same app authority and native
-`GoogleReadiness` registry used by approval lookup. Selection replacement holds
+`Providers::reviewed` mounts this receiver on the same app authority and native
+`ProviderReadiness` registry used by approval lookup. Selection replacement holds
 the same authority lock as import and settlement. Changed or removed bindings
 refuse old publications before key acquisition. Registration evidence augments
 the independent live shell/custody/account source; a successful import cannot
@@ -481,7 +573,7 @@ and replay cannot activate the same attempt twice.
 
 ## Reviewed Google Calendar registration
 
-The native `oauth/google.rs` catalog publishes `google_calendar_mapped_v1` and
+The native `oauth/catalog.rs` registry publishes Google's `google_calendar_mapped_v1` and
 `google_calendar_external_v1`: confidential S256 browser-code profiles with
 reusable refresh and no automatic retry. Installation-owned access is not reviewed.
 The catalog derives identity scopes and Calendar `events.readonly`/`events`
@@ -532,10 +624,10 @@ never enter recipe responses or receipts. Every host starts with an empty
 receipt registry. Desired JSON, restored state, simulator output and an
 operator-authored digest cannot create a live receipt.
 
-`GoogleReadiness` checks the selected registration, profile, requirement,
+`ProviderReadiness` checks the selected registration, profile, requirement,
 generation and security shell before consulting the independent live
 `OutboundReadiness` source. The selected GKE source independently checks the
-shell edge, custody availability and current owner/policy. `Providers::google`
+shell edge, custody availability and current owner/policy. `Providers::reviewed`
 combines this gate with the reviewed catalog. A Google probe does not qualify
 those other services. The host must arrange renewal before expiry; this slice
 introduces neither a background renewal loop nor an app refresh job.
@@ -568,12 +660,13 @@ session, collect the three distinct authorizations, run the pinned recipe and
 publish its native receipt into that host's registry. The native
 `SecurityShell::from_gke_with_registration` constructor now composes those routes
 from one admitted instance snapshot, live shell evidence, the pinned recipe
-runner and a native `GoogleReadiness` registry. The launcher supplies that live
+runner and a native `ProviderReadiness` registry. The launcher supplies that live
 evidence; desired JSON cannot provide it.
 
 Only the explicitly selected canary IAP subject may open
-`/_day2/oauth/qualification/<registration ID>`. Its tenant must equal the shell's
-verified installation tenant. The page shows the exact callback, scopes, client
+`/_day2/oauth/qualification/<registration ID>`. A legacy version 1 Google canary
+must use the shell's verified installation tenant; version 2 selects the provider
+account independently. The page shows the exact callback, scopes, client
 and secret-version reference and the desired registration pin; those setup
 values do not assert readiness. A same-origin CSRF-protected POST starts three
 distinct Google authorizations. The digest-derived provider callback accepts
