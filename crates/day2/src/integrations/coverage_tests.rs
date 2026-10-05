@@ -27,12 +27,14 @@
 //! strictly stronger than "did not error": an action that errors identically
 //! against two different worlds has not demonstrated a world at all.
 //!
-//! Scope, stated rather than implied: this covers the three providers simulated
-//! at the *transport* seam. The five synthetic providers are served at the
-//! *adapter* seam and need the instance/policy harness to invoke; they are not
-//! yet covered here. `every_provider_is_covered_or_declared_pending` fails if a
-//! provider is neither covered nor on the explicit pending list, so the gap is
-//! visible and shrinking rather than silent.
+//! Scope: this covers the transport simulations. Five native/synthetic providers
+//! and local delegation need adapter/callee harnesses and remain pending here.
+//! Their exact actions have reviewed debt records with owners and removal
+//! conditions. Both gates reject new or stale debt before skipping an action;
+//! classifying a whole additional provider as pending cannot shrink coverage.
+//! This is a test-only coverage ratchet, not production provider admission or
+//! evidence of live protocol qualification. The independent supply gate still
+//! exercises every provider, including those pending here.
 
 use super::*;
 use crate::integrations::simulated::{
@@ -40,14 +42,14 @@ use crate::integrations::simulated::{
     OpenAiWorld, SimulatedCredentials, SimulatedFixture, SimulatedTransport, SlackChannelWorld,
     SlackMessage, SlackWorld, SnowflakeViewWorld, SnowflakeWorld, StoredObject, seed,
 };
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use day2_capabilities::{
     integrations::{LiveConnection, OpenAiText, SlackChannel, SnowflakeScalarType, SnowflakeView},
     resources::{Action, Provider, ResourceTarget, VersionRef},
 };
 use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 const SCOPE: &str = "coverage/app";
 
@@ -136,6 +138,205 @@ fn demonstration(action: Action) -> Demonstration {
         // the delegation harness can stand up a second application.
         | Action::DelegateQuery | Action::DelegateSend | Action::DelegateStatus => Demonstration::PendingAdapterSeam,
     }
+}
+
+#[derive(Clone, Copy)]
+struct PendingDebt {
+    action: Action,
+    owner: &'static str,
+    reason: &'static str,
+    remove_when: &'static str,
+}
+
+const ADAPTER_REASON: &str =
+    "This action runs at the native/synthetic adapter seam and needs an admitted instance/policy harness.";
+const ADAPTER_REMOVAL: &str =
+    "Remove when every action of this provider is driven through its real offline handler against distinguishable own worlds, with read/effect attribution and constant/wrong-world negatives.";
+const DELEGATION_REASON: &str =
+    "The transport harness cannot establish the admitted caller/callee boundary for query, send and status.";
+const DELEGATION_REMOVAL: &str =
+    "The delegation owner must cover all three actions with an admitted caller/callee harness demonstrating exact target authority, responses and effects in the appropriate world.";
+
+// Existing coverage debt, not permission to admit a provider without evidence.
+// Keep individual action keys: adding an action to an existing pending provider
+// must also fail until its exact debt and removal condition receive review.
+const REVIEWED_PENDING_DEBT: &[PendingDebt] = &[
+    PendingDebt {
+        action: Action::NotificationsResolve,
+        owner: "platform notification runtime",
+        reason: ADAPTER_REASON,
+        remove_when: ADAPTER_REMOVAL,
+    },
+    PendingDebt {
+        action: Action::NotificationsLatest,
+        owner: "platform notification runtime",
+        reason: ADAPTER_REASON,
+        remove_when: ADAPTER_REMOVAL,
+    },
+    PendingDebt {
+        action: Action::NotificationsSend,
+        owner: "platform notification runtime",
+        reason: ADAPTER_REASON,
+        remove_when: ADAPTER_REMOVAL,
+    },
+    PendingDebt {
+        action: Action::CartaSnapshot,
+        owner: "platform Carta capture adapter",
+        reason: ADAPTER_REASON,
+        remove_when: ADAPTER_REMOVAL,
+    },
+    PendingDebt {
+        action: Action::CartaRecord,
+        owner: "platform Carta capture adapter",
+        reason: ADAPTER_REASON,
+        remove_when: ADAPTER_REMOVAL,
+    },
+    PendingDebt {
+        action: Action::GoogleDirectorySnapshot,
+        owner: "platform Google directory/people adapter",
+        reason: ADAPTER_REASON,
+        remove_when: ADAPTER_REMOVAL,
+    },
+    PendingDebt {
+        action: Action::GoogleDirectoryRecord,
+        owner: "platform Google directory/people adapter",
+        reason: ADAPTER_REASON,
+        remove_when: ADAPTER_REMOVAL,
+    },
+    PendingDebt {
+        action: Action::GoogleDirectoryCreateUser,
+        owner: "platform Google directory/people adapter",
+        reason: ADAPTER_REASON,
+        remove_when: ADAPTER_REMOVAL,
+    },
+    PendingDebt {
+        action: Action::GoogleDirectoryPatchAttributes,
+        owner: "platform Google directory/people adapter",
+        reason: ADAPTER_REASON,
+        remove_when: ADAPTER_REMOVAL,
+    },
+    PendingDebt {
+        action: Action::GoogleDirectoryEnsureGroupMember,
+        owner: "platform Google directory/people adapter",
+        reason: ADAPTER_REASON,
+        remove_when: ADAPTER_REMOVAL,
+    },
+    PendingDebt {
+        action: Action::LinearEnsureAccess,
+        owner: "platform Linear/people adapter",
+        reason: ADAPTER_REASON,
+        remove_when: ADAPTER_REMOVAL,
+    },
+    PendingDebt {
+        action: Action::LinearSuspend,
+        owner: "platform Linear/people adapter",
+        reason: ADAPTER_REASON,
+        remove_when: ADAPTER_REMOVAL,
+    },
+    PendingDebt {
+        action: Action::OperatorAlertsSend,
+        owner: "platform operator-alert adapter",
+        reason: ADAPTER_REASON,
+        remove_when: ADAPTER_REMOVAL,
+    },
+    PendingDebt {
+        action: Action::DelegateQuery,
+        owner: "platform delegation boundary",
+        reason: DELEGATION_REASON,
+        remove_when: DELEGATION_REMOVAL,
+    },
+    PendingDebt {
+        action: Action::DelegateSend,
+        owner: "platform delegation boundary",
+        reason: DELEGATION_REASON,
+        remove_when: DELEGATION_REMOVAL,
+    },
+    PendingDebt {
+        action: Action::DelegateStatus,
+        owner: "platform delegation boundary",
+        reason: DELEGATION_REASON,
+        remove_when: DELEGATION_REMOVAL,
+    },
+];
+
+fn current_coverage() -> BTreeMap<Action, Demonstration> {
+    Action::ALL
+        .iter()
+        .copied()
+        .map(|action| (action, demonstration(action)))
+        .collect()
+}
+
+fn validate_pending_debt(
+    coverage: &BTreeMap<Action, Demonstration>,
+    debt: &[PendingDebt],
+) -> Result<()> {
+    let declared: BTreeSet<_> = Action::ALL.iter().copied().collect();
+    ensure!(
+        coverage.keys().copied().collect::<BTreeSet<_>>() == declared,
+        "coverage catalog differs from declared actions"
+    );
+    let mut reviewed = BTreeSet::new();
+    for entry in debt {
+        ensure!(
+            declared.contains(&entry.action),
+            "undeclared reviewed coverage debt: {}",
+            entry.action.capability()
+        );
+        ensure!(
+            !entry.owner.trim().is_empty()
+                && !entry.reason.trim().is_empty()
+                && !entry.remove_when.trim().is_empty(),
+            "coverage debt metadata missing: {}",
+            entry.action.capability()
+        );
+        ensure!(
+            reviewed.insert(entry.action),
+            "duplicate reviewed coverage debt: {}",
+            entry.action.capability()
+        );
+    }
+    let pending: BTreeSet<_> = coverage
+        .iter()
+        .filter_map(|(action, mode)| {
+            (*mode == Demonstration::PendingAdapterSeam).then_some(*action)
+        })
+        .collect();
+    if let Some(action) = pending.difference(&reviewed).next() {
+        anyhow::bail!("unreviewed pending coverage: {}", action.capability());
+    }
+    if let Some(action) = reviewed.difference(&pending).next() {
+        anyhow::bail!("stale reviewed coverage debt: {}", action.capability());
+    }
+    Ok(())
+}
+
+fn validate_provider_coverage(coverage: &BTreeMap<Action, Demonstration>) -> Result<()> {
+    for provider in Provider::ALL {
+        let actions: Vec<_> = coverage
+            .iter()
+            .filter(|(action, _)| action.provider() == *provider)
+            .map(|(_, mode)| *mode)
+            .collect();
+        ensure!(
+            !actions.is_empty(),
+            "{} declares no actions",
+            provider.name()
+        );
+        let pending = actions
+            .iter()
+            .all(|mode| *mode == Demonstration::PendingAdapterSeam);
+        let covered = actions
+            .iter()
+            .all(|mode| *mode != Demonstration::PendingAdapterSeam);
+        ensure!(
+            pending || covered,
+            "{} mixes covered and pending actions; a provider is demonstrated \
+             as a whole or not at all",
+            provider.name()
+        );
+    }
+    Ok(())
 }
 
 /// Which of two distinguishable worlds to seed.
@@ -633,9 +834,11 @@ fn check(
 /// counter, not the channel's history.
 #[test]
 fn every_action_demonstrates_its_own_declared_world() -> Result<()> {
+    let coverage = current_coverage();
+    validate_pending_debt(&coverage, REVIEWED_PENDING_DEBT)?;
     let mut checked = 0;
-    for action in Action::ALL.iter().copied() {
-        if demonstration(action) == Demonstration::PendingAdapterSeam {
+    for (action, mode) in coverage {
+        if mode == Demonstration::PendingAdapterSeam {
             continue;
         }
         if let Err(failure) = check(action, |variant| observe(action, variant)) {
@@ -643,38 +846,105 @@ fn every_action_demonstrates_its_own_declared_world() -> Result<()> {
         }
         checked += 1;
     }
-    assert!(checked > 0, "no actions checked");
+    assert_eq!(checked, Action::ALL.len() - REVIEWED_PENDING_DEBT.len());
     Ok(())
 }
 
-/// Every provider is covered or explicitly pending, never silently absent. This
-/// is what stops the gate quietly shrinking to whatever still passes.
+/// Every provider is covered or has exactly reviewed pending debt. Completeness
+/// alone accepts a whole provider becoming pending; the debt ratchet forbids it.
 #[test]
-fn every_provider_is_covered_or_declared_pending() {
-    for provider in Provider::ALL {
-        let actions: Vec<_> = Action::ALL
-            .iter()
-            .copied()
-            .filter(|action| action.provider() == *provider)
-            .collect();
-        assert!(
-            !actions.is_empty(),
-            "{} declares no actions",
-            provider.name()
-        );
-        let pending = actions
-            .iter()
-            .all(|action| demonstration(*action) == Demonstration::PendingAdapterSeam);
-        let covered = actions
-            .iter()
-            .all(|action| demonstration(*action) != Demonstration::PendingAdapterSeam);
-        assert!(
-            pending || covered,
-            "{} mixes covered and pending actions; a provider is demonstrated \
-             as a whole or not at all",
-            provider.name()
-        );
+fn every_provider_is_covered_or_declared_pending() -> Result<()> {
+    let coverage = current_coverage();
+    validate_pending_debt(&coverage, REVIEWED_PENDING_DEBT)?;
+    validate_provider_coverage(&coverage)
+}
+
+#[test]
+fn the_current_catalog_has_exactly_its_reviewed_pending_debt() -> Result<()> {
+    assert_eq!(REVIEWED_PENDING_DEBT.len(), 16);
+    validate_pending_debt(&current_coverage(), REVIEWED_PENDING_DEBT)
+}
+
+#[test]
+fn a_wholly_pending_github_provider_cannot_escape_world_coverage() -> Result<()> {
+    let mut coverage = current_coverage();
+    validate_pending_debt(&coverage, REVIEWED_PENDING_DEBT)?;
+    for action in [Action::GitHubJob, Action::GitHubJobLog] {
+        coverage.insert(action, Demonstration::PendingAdapterSeam);
     }
+    // The former completeness rule accepts this downgrade. The actual debt
+    // validator, used before either gate can skip actions, must reject it.
+    validate_provider_coverage(&coverage)?;
+    let error = validate_pending_debt(&coverage, REVIEWED_PENDING_DEBT).unwrap_err();
+    assert!(
+        error.to_string().contains("unreviewed pending coverage"),
+        "unexpected rejection: {error}"
+    );
+    Ok(())
+}
+
+#[test]
+fn reviewed_pending_debt_rejects_duplicate_and_stale_records() -> Result<()> {
+    let coverage = current_coverage();
+    let mut debt = REVIEWED_PENDING_DEBT.to_vec();
+    debt.push(debt[0]);
+    let error = validate_pending_debt(&coverage, &debt).unwrap_err();
+    assert!(error.to_string().contains("duplicate reviewed coverage debt"));
+
+    // Closing all actions of a provider must also retire its old debt records.
+    let mut closed = coverage;
+    closed.insert(
+        Action::NotificationsResolve,
+        Demonstration::ResultReflectsWorld,
+    );
+    closed.insert(
+        Action::NotificationsLatest,
+        Demonstration::ResultReflectsWorld,
+    );
+    closed.insert(
+        Action::NotificationsSend,
+        Demonstration::EffectLandsInWorld,
+    );
+    validate_provider_coverage(&closed)?;
+    let error = validate_pending_debt(&closed, REVIEWED_PENDING_DEBT).unwrap_err();
+    assert!(error.to_string().contains("stale reviewed coverage debt"));
+    Ok(())
+}
+
+#[test]
+fn reviewed_pending_debt_requires_owner_reason_and_removal_condition() {
+    let coverage = current_coverage();
+    for incomplete in [
+        PendingDebt {
+            owner: " ",
+            ..REVIEWED_PENDING_DEBT[0]
+        },
+        PendingDebt {
+            reason: " ",
+            ..REVIEWED_PENDING_DEBT[0]
+        },
+        PendingDebt {
+            remove_when: " ",
+            ..REVIEWED_PENDING_DEBT[0]
+        },
+    ] {
+        let mut debt = REVIEWED_PENDING_DEBT.to_vec();
+        debt[0] = incomplete;
+        let error = validate_pending_debt(&coverage, &debt).unwrap_err();
+        assert!(error.to_string().contains("coverage debt metadata missing"));
+    }
+}
+
+#[test]
+fn coverage_cannot_omit_a_declared_action() {
+    let mut coverage = current_coverage();
+    coverage.remove(&Action::GitHubJob);
+    let error = validate_pending_debt(&coverage, REVIEWED_PENDING_DEBT).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("coverage catalog differs from declared actions")
+    );
 }
 
 /// The saboteur. Each way a simulation can be fake must actually be rejected —

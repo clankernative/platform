@@ -41,6 +41,7 @@ them does not complete every RADICAL obligation.
 | Journal constraints | Partial completion/outbox states, malformed imported rows, forged schema versions and migrations exceeding admission work. | Valid v2 upgrades are atomic, legitimate Temporal run changes remain legal, and valid v3 journals reopen. |
 | Dispatch states | An admitted permit missing its attempt, capability or reservation; cloning or decoding a consuming permit. | Admitted dispatch executes once; recorded replay retains the observation and ledger without another provider call. |
 | Write admission bounds | Excess waiting writers/live database lines, ticket/deadline overflow and splitting one live queue during registry churn. | FIFO, independent databases, cancellation and existing busy/nested transaction behavior remain valid. |
+| Provider coverage debt | Covered actions becoming pending, additional pending actions, duplicate/stale debt and missing ownership metadata. | The current exact pending set and existing SQLite world attribution and sabotage fixtures remain valid. |
 
 ## File leases and merge order
 
@@ -133,6 +134,21 @@ exemption or additional ambient effects to its callers. The existing sealed
 OAuth and credential proof APIs are unchanged. OAuth's schema admission scans
 remain a separate bounded-work obligation; the build journal's budget does not
 cover them.
+
+Provider world-coverage tests now require exactly 16 reviewed pending actions
+across LocalNotifications, SyntheticCarta, SyntheticGoogleDirectory,
+SyntheticLinear, SyntheticOperatorAlerts and LocalDelegation. Each action names
+an owner, reason and removal condition. New debt, duplicate records and stale
+records fail before either gate can skip an action. Closing a provider's coverage
+requires retiring its records; adding an action to a pending provider requires
+explicit review rather than inheriting a provider-wide exception.
+The GitHub job/log downgrade fixture demonstrates that the former whole-provider
+completeness rule accepts a regression that this exact debt validator rejects.
+These are test-only coverage rules, exercised by fast/workspace library tests
+and the full workspace runtime suite. Pending status does not deny production
+admission or establish live protocol qualification. Existing supply tests and
+SQLite world attribution and sabotage fixtures remain independent evidence.
+Delegation implementation and its current source lease are unchanged.
 
 The syntax checker is an accidental-drift guard. It does not perform full rustc
 name resolution, expand arbitrary dependency macros or prove purity through
