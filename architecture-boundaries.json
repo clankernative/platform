@@ -237,6 +237,16 @@
           "local_path": null
         },
         {
+          "name": "proc-macro2",
+          "kind": "dev",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
           "name": "proptest",
           "kind": "dev",
           "target": null,
@@ -371,6 +381,19 @@
           "local_path": null
         },
         {
+          "name": "syn",
+          "kind": "dev",
+          "target": null,
+          "rename": null,
+          "features": [
+            "full",
+            "visit"
+          ],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
           "name": "tempfile",
           "kind": "normal",
           "target": null,
@@ -387,6 +410,18 @@
           "rename": null,
           "features": [
             "formatting"
+          ],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "tokio",
+          "kind": "dev",
+          "target": null,
+          "rename": null,
+          "features": [
+            "test-util"
           ],
           "default_features": true,
           "optional": false,

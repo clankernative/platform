@@ -81,6 +81,15 @@ capability. New sources default to no ambient effects. Strict contract/kernel
 boundaries have no effect allowances. Production adapters may retain narrowly
 reviewed effect access; every adapter call is still individually catalogued.
 
+Merged OAuth PR111 supplies its production/simulation effects port and lifecycle
+campaigns. Its integration catalogs five source files and three dev dependency
+entries, retires 65 legacy effect groups (73 occurrences), and retains seven
+individually reviewed raw calls inside `oauth/effects.rs`. This grants no file
+exemption or additional ambient effects to its callers. The existing sealed
+OAuth and credential proof APIs are unchanged. OAuth's schema admission scans
+remain a separate bounded-work obligation; the build journal's budget does not
+cover them.
+
 The syntax checker is an accidental-drift guard. It does not perform full rustc
 name resolution, expand arbitrary dependency macros or prove purity through
 unknown helpers. Dependency boundaries, restricted APIs and Clippy restrictions
