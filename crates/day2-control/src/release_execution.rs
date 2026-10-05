@@ -5,7 +5,7 @@
 
 use crate::journal::{Journal, RecoveryMode};
 use crate::provider_evidence::{DeploymentIncarnation, RevisionRelation, StateEvidence};
-use crate::release::{self, ApprovedRelease, ReadyRelease, ReleaseAuthority, ReleaseNotReady};
+use crate::release::{self, ReleaseAuthority, ReleaseNotReady};
 use crate::release::{ActivationReceipt, ReleaseApproval, ReleaseTarget, SecretObservation};
 use crate::{BindingRef, Digest, Name};
 use anyhow::{Result, ensure};
@@ -1254,13 +1254,14 @@ impl Journal {
                             .is_some_and(|fact| fact.readiness == stored.readiness),
                         "deployment has no exact current readback"
                     );
-                    let ready = ReadyRelease {
-                        id: stored
+                    let ready = Journal::recover_ready_release_in(
+                        &tx,
+                        stored
                             .readiness
-                            .clone()
+                            .as_ref()
                             .ok_or_else(|| anyhow::anyhow!("missing release readiness"))?,
-                        release: stored.snapshot.plan.release.clone(),
-                    };
+                        &stored.snapshot.plan.release,
+                    )?;
                     let catalog = catalog?;
                     stored.activation = Some(Journal::activate_release_in_checked(
                         &tx,
@@ -1479,17 +1480,7 @@ fn validate_stored_state(connection: &Connection, stored: &StoredExecution) -> R
         }
     }
     if let Some(readiness) = &stored.readiness {
-        let body: String = connection.query_row(
-            "SELECT body FROM release_readiness WHERE id=?1 AND release=?2",
-            params![readiness.as_str(), snapshot.plan.release.as_str()],
-            |r| r.get(0),
-        )?;
-        let proof: release::StoredReady = serde_json::from_str(&body)?;
-        ensure!(
-            proof.release == snapshot.plan.release
-                && Digest::of(&("day2-release-readiness-v1", &proof))? == *readiness,
-            "stored release readiness receipt mismatch"
-        );
+        release::read_readiness(connection, readiness, &snapshot.plan.release)?;
     }
     for (fact, family, binding, operation) in [
         (
@@ -1742,16 +1733,7 @@ fn readiness_current(connection: &Connection, stored: &StoredExecution) -> Resul
     let Some(id) = &stored.readiness else {
         return Ok(false);
     };
-    let body: String = connection.query_row(
-        "SELECT body FROM release_readiness WHERE id=?1",
-        [id.as_str()],
-        |r| r.get(0),
-    )?;
-    let proof: release::StoredReady = serde_json::from_str(&body)?;
-    ensure!(
-        Digest::of(&("day2-release-readiness-v1", &proof))? == *id,
-        "release readiness identity mismatch"
-    );
+    let proof = release::read_readiness(connection, id, &stored.snapshot.plan.release)?;
     match release::ready_secret(connection, &stored.approval) {
         Ok((revision, observation)) => {
             Ok(revision == proof.secret_revision
@@ -1987,14 +1969,13 @@ fn apply_observation(
                     stored.snapshot.waiting = Some(ReleaseWait::SecretMetadata);
                     return Ok(());
                 }
-                match Journal::prepare_release_in(
+                let approved = Journal::recover_approved_release_in(
                     connection,
-                    &ApprovedRelease {
-                        id: stored.snapshot.plan.release.clone(),
-                    },
-                ) {
+                    &stored.snapshot.plan.release,
+                )?;
+                match Journal::prepare_release_in(connection, &approved) {
                     Ok(ready) => {
-                        stored.readiness = Some(ready.id);
+                        stored.readiness = Some(ready.id().clone());
                         stored.snapshot.phase = ReleasePhase::SecretReady;
                     }
                     Err(error) if error.downcast_ref::<ReleaseNotReady>().is_some() => {

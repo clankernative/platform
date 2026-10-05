@@ -88,6 +88,7 @@ fn platform(directory: &Path) -> Result<PlatformInputs> {
         "Cargo.lock",
         "architecture-rules.json",
         "architecture-boundaries.json",
+        "architecture-proofs.json",
         "architecture/clippy.toml",
         "rust-toolchain.toml",
         "toolchain.json",
@@ -168,6 +169,7 @@ fn architecture_policy_changes_invalidate_the_platform_and_materialization() -> 
     for policy in [
         "architecture-rules.json",
         "architecture-boundaries.json",
+        "architecture-proofs.json",
         "architecture/clippy.toml",
     ] {
         let directory = tempfile::tempdir()?;

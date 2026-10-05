@@ -11,6 +11,7 @@ use std::{
 mod architecture;
 mod architecture_dependencies;
 mod architecture_kernel;
+mod architecture_proofs;
 mod build_native;
 mod control_simulation;
 mod formatter_bootstrap;
@@ -260,6 +261,7 @@ fn main() -> Result<()> {
             );
             architecture::check(&root)?;
             architecture_dependencies::check(&root)?;
+            architecture_proofs::check(&root)?;
         }
         "architecture-inventory" => {
             ensure!(
@@ -269,6 +271,16 @@ fn main() -> Result<()> {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&architecture::inventory(&root)?)?
+            );
+        }
+        "architecture-proof-inventory" => {
+            ensure!(
+                args.next().is_none(),
+                "architecture-proof-inventory accepts no arguments"
+            );
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&architecture_proofs::trait_check_inventory(&root)?)?
             );
         }
         "architecture-dependencies" => {

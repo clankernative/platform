@@ -82,11 +82,26 @@ pub struct ReleaseApproval {
     pub secret: ImmutableSecretRef,
 }
 
-/// Neither handle is deserializable or caller-constructible. Possession alone
-/// never authorizes a mutation: every use rechecks persisted current authority.
+/// Identity of a persisted approval, issued or recovered by the release journal.
+/// Recovery does not restore current authority. Preparation and new activation
+/// recheck desired generation, authority, build and secret reservation. Stops
+/// check release status and preserve the recorded operator attribution.
+///
+/// Callers cannot construct an approval handle:
+/// ```compile_fail,E0451
+/// use day2_control::{Digest, release::ApprovedRelease};
+/// let _ = ApprovedRelease { id: Digest::new(b"invented approval") };
+/// ```
+///
+/// Untrusted serialized input cannot become an approval handle:
+/// ```compile_fail,E0277
+/// use day2_control::release::ApprovedRelease;
+/// fn accepts_wire_input<T: serde::de::DeserializeOwned>() {}
+/// accepts_wire_input::<ApprovedRelease>();
+/// ```
 #[derive(Clone, Debug)]
 pub struct ApprovedRelease {
-    pub(crate) id: Digest,
+    id: Digest,
 }
 impl ApprovedRelease {
     pub fn id(&self) -> &Digest {
@@ -94,16 +109,63 @@ impl ApprovedRelease {
     }
 }
 
+/// Identity of persisted readiness for one approved release generation.
+/// Recovering this handle verifies the stored proof's identity and generation;
+/// new activation still checks current authority and exact secret readiness.
+///
+/// Callers cannot pair invented readiness with a release:
+/// ```compile_fail,E0451
+/// use day2_control::{Digest, release::ReadyRelease};
+/// let _ = ReadyRelease {
+///     id: Digest::new(b"invented readiness"),
+///     release: Digest::new(b"invented release"),
+/// };
+/// ```
+///
+/// Untrusted serialized input cannot become a readiness handle:
+/// ```compile_fail,E0277
+/// use day2_control::release::ReadyRelease;
+/// fn accepts_wire_input<T: serde::de::DeserializeOwned>() {}
+/// accepts_wire_input::<ReadyRelease>();
+/// ```
+///
+/// Approval identity cannot be used as readiness:
+/// ```compile_fail,E0308
+/// use day2_control::{journal::Journal, release::ApprovedRelease};
+/// fn activate_too_early(journal: &mut Journal, approved: &ApprovedRelease) {
+///     let _ = journal.activate_release(approved);
+/// }
+/// ```
 #[derive(Clone, Debug)]
 pub struct ReadyRelease {
-    pub(crate) id: Digest,
-    pub(crate) release: Digest,
+    id: Digest,
+    release: Digest,
 }
 impl ReadyRelease {
     pub fn id(&self) -> &Digest {
         &self.id
     }
 }
+
+// Always compiled, including production cfg(not(test)) implementations elsewhere
+// in this crate. Historical handles may clone, but cannot be created by decoding
+// untrusted wire input or by taking a default value.
+const _: () = {
+    macro_rules! assert_not_impl {
+        ($type:ty, $trait:path) => {{
+            trait AmbiguousIfImpl<A> {
+                fn check() {}
+            }
+            impl<T: ?Sized> AmbiguousIfImpl<()> for T {}
+            impl<T: ?Sized + $trait> AmbiguousIfImpl<u8> for T {}
+            let _ = <$type as AmbiguousIfImpl<_>>::check;
+        }};
+    }
+    assert_not_impl!(ApprovedRelease, Default);
+    assert_not_impl!(ReadyRelease, Default);
+    assert_not_impl!(ApprovedRelease, serde::Deserialize<'static>);
+    assert_not_impl!(ReadyRelease, serde::Deserialize<'static>);
+};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -371,8 +433,9 @@ impl Journal {
                 "release request reused with different inputs"
             );
             // Historical redelivery returns the original receipt, never restores desired state.
+            let approved = Self::recover_approved_release_in(&tx, &id)?;
             tx.commit()?;
-            return Ok(ApprovedRelease { id });
+            return Ok(approved);
         }
         let state = read_state(&tx, &approval.target)?;
         ensure!(
@@ -444,16 +507,55 @@ impl Journal {
         if changed == 1 {
             release_event(tx, &stored.approval.target, "ready", &ready)?;
         }
-        Ok(ReadyRelease {
-            id,
-            release: approved.id.clone(),
-        })
+        Self::recover_ready_release_in(tx, &id, &approved.id)
     }
 
-    /// Restores identity after a host restart, not current mutation authority.
+    /// Restores verified persisted identity after a host restart. A cancelled,
+    /// superseded or already activated approval can be recovered; recovery grants
+    /// no current mutation authority. Preparation and new activation require
+    /// current authority; stops retain their status and attribution guards.
+    ///
+    /// Handles are obtained through checked journal APIs:
+    /// ```no_run
+    /// use day2_control::{Digest, journal::Journal};
+    /// # fn example() -> anyhow::Result<()> {
+    /// let mut journal = Journal::open(std::path::Path::new("release.sqlite"))?;
+    /// let approved = journal.load_approved_release(&Digest::new(b"persisted approval"))?;
+    /// let ready = journal.prepare_release(&approved)?;
+    /// let receipt = journal.activate_release(&ready)?;
+    /// assert_eq!(&receipt.readiness, ready.id());
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn load_approved_release(&self, id: &Digest) -> Result<ApprovedRelease> {
-        read_approval(&self.connection, id)?;
+        let tx = self.connection.unchecked_transaction()?;
+        let approved = Self::recover_approved_release_in(&tx, id)?;
+        tx.commit()?;
+        Ok(approved)
+    }
+
+    /// Recover historical identity inside the caller's transaction. Current
+    /// authority remains the responsibility of the protected release operation.
+    pub(crate) fn recover_approved_release_in(
+        tx: &Transaction<'_>,
+        id: &Digest,
+    ) -> Result<ApprovedRelease> {
+        read_approval(tx, id)?;
         Ok(ApprovedRelease { id: id.clone() })
+    }
+
+    /// Recover only a persisted readiness proof for this release generation.
+    /// This does not grant current authority or attest to current provider facts.
+    pub(crate) fn recover_ready_release_in(
+        tx: &Transaction<'_>,
+        id: &Digest,
+        release: &Digest,
+    ) -> Result<ReadyRelease> {
+        read_readiness(tx, id, release)?;
+        Ok(ReadyRelease {
+            id: id.clone(),
+            release: release.clone(),
+        })
     }
 
     /// This commits the authority pointer, not an atomic mutation of cloud state.
@@ -496,16 +598,7 @@ impl Journal {
             );
             return Ok(receipt);
         }
-        let body: String = tx.query_row(
-            "SELECT body FROM release_readiness WHERE id=?1 AND release=?2",
-            params![ready.id.as_str(), ready.release.as_str()],
-            |row| row.get(0),
-        )?;
-        let proof: StoredReady = serde_json::from_str(&body)?;
-        ensure!(
-            Digest::of(&("day2-release-readiness-v1", &proof))? == ready.id,
-            "readiness receipt integrity mismatch"
-        );
+        let proof = read_readiness(tx, &ready.id, &ready.release)?;
         let stored = current_approval(tx, &ready.release)?;
         crate::release_catalog::check_activation_candidate(
             tx,
@@ -513,10 +606,6 @@ impl Journal {
             &stored.approval,
             catalog,
         )?;
-        ensure!(
-            proof.release == ready.release && proof.generation == stored.generation,
-            "readiness belongs to another release generation"
-        );
         let (revision, observation) = ready_secret(tx, &stored.approval)?;
         ensure!(
             revision == proof.secret_revision && Digest::of(&observation)? == proof.secret_evidence,
@@ -767,10 +856,10 @@ pub(crate) fn observe<T: Serialize>(
 }
 
 pub(crate) fn read_approval(connection: &Connection, id: &Digest) -> Result<StoredApproval> {
-    let (fingerprint, body): (String, String) = connection.query_row(
-        "SELECT fingerprint,body FROM release_approvals WHERE id=?1",
+    let (target, fingerprint, body): (String, String, String) = connection.query_row(
+        "SELECT target,fingerprint,body FROM release_approvals WHERE id=?1",
         [id.as_str()],
-        |row| Ok((row.get(0)?, row.get(1)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )?;
     let stored: StoredApproval = serde_json::from_str(&body)?;
     ensure!(
@@ -785,7 +874,42 @@ pub(crate) fn read_approval(connection: &Connection, id: &Digest) -> Result<Stor
         ))? == *id,
         "release approval identity mismatch"
     );
+    ensure!(
+        target == target_key(&stored.approval.target)?
+            && stored.generation == successor(stored.approval.expected_generation)?
+            && stored.authority_revision > 0,
+        "release approval generation or authority identity mismatch"
+    );
     Ok(stored)
+}
+
+/// Validates historical proof identity; current authority and provider readiness
+/// are checked by the operation that uses the proof.
+pub(crate) fn read_readiness(
+    connection: &Connection,
+    id: &Digest,
+    release: &Digest,
+) -> Result<StoredReady> {
+    let body: String = connection.query_row(
+        "SELECT body FROM release_readiness WHERE id=?1 AND release=?2",
+        params![id.as_str(), release.as_str()],
+        |row| row.get(0),
+    )?;
+    let proof: StoredReady = serde_json::from_str(&body)?;
+    ensure!(
+        Digest::of(&("day2-release-readiness-v1", &proof))? == *id,
+        "readiness receipt integrity mismatch"
+    );
+    let approval = read_approval(connection, release)?;
+    ensure!(
+        proof.release == *release && proof.generation == approval.generation,
+        "readiness belongs to another release generation"
+    );
+    ensure!(
+        proof.secret_revision > 0,
+        "invalid secret readiness revision"
+    );
+    Ok(proof)
 }
 
 fn validate_authority(approval: &ReleaseApproval, authority: &ReleaseAuthority) -> Result<()> {
@@ -962,4 +1086,267 @@ pub(crate) fn release_event<T: Serialize>(
         params![target_key(target)?, kind, serde_json::to_string(body)?],
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod proof_recovery_tests {
+    use super::*;
+
+    fn name(value: &str) -> Name {
+        value.to_owned().try_into().unwrap()
+    }
+
+    /// Recovery validates historical evidence without inventing current facts.
+    /// These records deliberately have no current desired slot or successful build.
+    fn fixture() -> (tempfile::TempDir, Journal, Digest, Digest) {
+        let directory = tempfile::tempdir().unwrap();
+        let mut journal = Journal::open(&directory.path().join("release.sqlite")).unwrap();
+        let source = BindingRef::pin(name("forge"), &"repository").unwrap();
+        let approval = ReleaseApproval {
+            target: ReleaseTarget {
+                company: name("company"),
+                environment: name("staging"),
+                app: name("reports"),
+            },
+            request: name("release-1"),
+            expected_generation: 7,
+            build_execution: Digest::new(b"historical build"),
+            artifact: Digest::new(b"artifact"),
+            evidence: Digest::new(b"evidence"),
+            git: GitApproval {
+                source,
+                commit: GitOid::try_from(format!("{:040x}", 1)).unwrap(),
+                policy: Digest::new(b"policy"),
+                receipt: Digest::new(b"approval receipt"),
+                actor: "reviewer".to_owned().try_into().unwrap(),
+            },
+            secret: ImmutableSecretRef {
+                binding: BindingRef::pin(name("secrets"), &"project").unwrap(),
+                secret: name("credential"),
+                version: NonZeroU64::new(1).unwrap(),
+            },
+        };
+        let id = Digest::of(&("day2-release-v1", &approval.target, &approval.request)).unwrap();
+        let stored = StoredApproval {
+            approval,
+            generation: 8,
+            authority_revision: 2,
+        };
+        let ready = StoredReady {
+            release: id.clone(),
+            generation: stored.generation,
+            secret_revision: 3,
+            secret_evidence: Digest::new(b"historical secret observation"),
+        };
+        let readiness = Digest::of(&("day2-release-readiness-v1", &ready)).unwrap();
+        journal
+            .register_runtime_secret(
+                &stored.approval.target,
+                &stored.approval.secret,
+                &crate::runtime_secret::ProviderResource {
+                    provider: name("test"),
+                    account: name("company"),
+                    secret: name("credential"),
+                },
+                &stored.approval.git.actor,
+            )
+            .unwrap();
+        let tx = journal.connection.transaction().unwrap();
+        crate::runtime_secret::reserve_release_in(&tx, &id, &stored.approval).unwrap();
+        tx.execute(
+            "INSERT INTO release_approvals VALUES(?1,?2,?3,?4)",
+            params![
+                id.as_str(),
+                target_key(&stored.approval.target).unwrap(),
+                Digest::of(&stored.approval).unwrap().as_str(),
+                serde_json::to_string(&stored).unwrap(),
+            ],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO release_status VALUES(?1,'revoked')",
+            [id.as_str()],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO release_readiness VALUES(?1,?2,?3)",
+            params![
+                readiness.as_str(),
+                id.as_str(),
+                serde_json::to_string(&ready).unwrap(),
+            ],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        (directory, journal, id, readiness)
+    }
+
+    #[test]
+    fn recover_historical_proofs_after_reopen_without_granting_current_authority() {
+        let (directory, journal, id, readiness) = fixture();
+        drop(journal);
+        let mut journal = Journal::open(&directory.path().join("release.sqlite")).unwrap();
+        let tx = journal.connection.transaction().unwrap();
+        let approved = Journal::recover_approved_release_in(&tx, &id).unwrap();
+        let ready = Journal::recover_ready_release_in(&tx, &readiness, &id).unwrap();
+        assert_eq!(approved.id(), &id);
+        assert_eq!(ready.id(), &readiness);
+        assert_eq!(
+            Journal::prepare_release_in(&tx, &approved)
+                .unwrap_err()
+                .to_string(),
+            "release is not approved and pending"
+        );
+        assert_eq!(
+            Journal::activate_release_in_checked(&tx, &ready, None)
+                .unwrap_err()
+                .to_string(),
+            "release is not approved and pending"
+        );
+        let events: i64 = tx
+            .query_row("SELECT count(*) FROM release_events", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(events, 0, "identity recovery must not mutate release state");
+        tx.commit().unwrap();
+    }
+
+    #[test]
+    fn approval_recovery_rejects_unknown_identity_and_damaged_persisted_records() {
+        for damage in 0..5 {
+            let (_directory, mut journal, id, _readiness) = fixture();
+            let tx = journal.connection.transaction().unwrap();
+            assert!(
+                Journal::recover_approved_release_in(&tx, &Digest::new(b"unknown approval"))
+                    .is_err()
+            );
+            tx.execute_batch("DROP TRIGGER release_approvals_no_update")
+                .unwrap();
+            let mut stored = read_approval(&tx, &id).unwrap();
+            let mut target = target_key(&stored.approval.target).unwrap();
+            let mut fingerprint = Digest::of(&stored.approval).unwrap();
+            match damage {
+                0 => stored.approval.artifact = Digest::new(b"forged artifact"),
+                1 => {
+                    stored.approval.request = name("forged-request");
+                    fingerprint = Digest::of(&stored.approval).unwrap();
+                }
+                2 => stored.generation += 1,
+                3 => stored.authority_revision = 0,
+                4 => target = "another target".to_owned(),
+                _ => unreachable!(),
+            }
+            tx.execute(
+                "UPDATE release_approvals SET target=?1,fingerprint=?2,body=?3 WHERE id=?4",
+                params![
+                    target,
+                    fingerprint.as_str(),
+                    serde_json::to_string(&stored).unwrap(),
+                    id.as_str(),
+                ],
+            )
+            .unwrap();
+            let error = Journal::recover_approved_release_in(&tx, &id).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                match damage {
+                    0 => "release approval integrity mismatch",
+                    1 => "release approval identity mismatch",
+                    2..=4 => "release approval generation or authority identity mismatch",
+                    _ => unreachable!(),
+                }
+            );
+            tx.rollback().unwrap();
+        }
+    }
+
+    #[test]
+    fn readiness_recovery_rejects_unknown_alias_and_damaged_persisted_proofs() {
+        for damage in 0..6 {
+            let (_directory, mut journal, release, id) = fixture();
+            let tx = journal.connection.transaction().unwrap();
+            assert!(
+                Journal::recover_ready_release_in(
+                    &tx,
+                    &Digest::new(b"unknown readiness"),
+                    &release
+                )
+                .is_err()
+            );
+            let mut proof = read_readiness(&tx, &id, &release).unwrap();
+            let mut row_release = release.clone();
+            let mut row_id = id.clone();
+            match damage {
+                0 => proof.secret_evidence = Digest::new(b"forged observation"),
+                1 => row_id = Digest::new(b"forged readiness alias"),
+                2 => {
+                    proof.release = Digest::new(b"another release");
+                    row_id = Digest::of(&("day2-release-readiness-v1", &proof)).unwrap();
+                }
+                3 => {
+                    proof.generation += 1;
+                    row_id = Digest::of(&("day2-release-readiness-v1", &proof)).unwrap();
+                }
+                4 => {
+                    proof.secret_revision = 0;
+                    row_id = Digest::of(&("day2-release-readiness-v1", &proof)).unwrap();
+                }
+                5 => {
+                    let mut other = read_approval(&tx, &release).unwrap();
+                    other.approval.request = name("another-release");
+                    row_release = Digest::of(&(
+                        "day2-release-v1",
+                        &other.approval.target,
+                        &other.approval.request,
+                    ))
+                    .unwrap();
+                    tx.execute(
+                        "INSERT INTO release_approvals VALUES(?1,?2,?3,?4)",
+                        params![
+                            row_release.as_str(),
+                            target_key(&other.approval.target).unwrap(),
+                            Digest::of(&other.approval).unwrap().as_str(),
+                            serde_json::to_string(&other).unwrap(),
+                        ],
+                    )
+                    .unwrap();
+                }
+                _ => unreachable!(),
+            }
+            tx.execute(
+                "UPDATE release_readiness SET id=?1,release=?2,body=?3 WHERE id=?4",
+                params![
+                    row_id.as_str(),
+                    row_release.as_str(),
+                    serde_json::to_string(&proof).unwrap(),
+                    id.as_str(),
+                ],
+            )
+            .unwrap();
+            let error = Journal::recover_ready_release_in(&tx, &row_id, &release).unwrap_err();
+            match damage {
+                0 | 1 => assert_eq!(error.to_string(), "readiness receipt integrity mismatch"),
+                2 | 3 => {
+                    assert_eq!(
+                        error.to_string(),
+                        "readiness belongs to another release generation"
+                    )
+                }
+                4 => assert_eq!(error.to_string(), "invalid secret readiness revision"),
+                5 => assert!(matches!(
+                    error.downcast_ref::<rusqlite::Error>(),
+                    Some(rusqlite::Error::QueryReturnedNoRows)
+                )),
+                _ => unreachable!(),
+            }
+            if damage == 5 {
+                assert_eq!(
+                    Journal::recover_ready_release_in(&tx, &row_id, &row_release)
+                        .unwrap_err()
+                        .to_string(),
+                    "readiness belongs to another release generation"
+                );
+            }
+            tx.rollback().unwrap();
+        }
+    }
 }
