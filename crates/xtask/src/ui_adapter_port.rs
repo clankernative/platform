@@ -297,6 +297,20 @@ fn package_inputs(root: &Path) -> Result<BTreeMap<String, Vec<u8>>> {
                         .to_owned(),
                 );
             }
+            // Locked type declarations are process inputs, not browser resources.
+            // Older component manifests omit this optional asset list.
+            if let Some(contracts) = c["assets"].get("contracts") {
+                for val in contracts
+                    .as_array()
+                    .ok_or_else(|| anyhow!("invalid component contracts"))?
+                {
+                    names.insert(
+                        val.as_str()
+                            .ok_or_else(|| anyhow!("invalid component contract"))?
+                            .to_owned(),
+                    );
+                }
+            }
             for val in c["fixtures"]
                 .as_array()
                 .ok_or_else(|| anyhow!("invalid component fixtures"))?

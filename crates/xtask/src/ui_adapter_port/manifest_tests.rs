@@ -1,4 +1,8 @@
 use super::*;
+
+#[path = "contracts_tests.rs"]
+mod contract_tests;
+
 fn fixture_bundle(
     captured: &Path,
 ) -> (
