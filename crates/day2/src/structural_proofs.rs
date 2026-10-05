@@ -32,6 +32,7 @@ macro_rules! assert_secret_references {
 }
 
 const _: () = {
+    assert_consuming!(crate::execution::DispatchPermit);
     assert_consuming!(crate::oauth::exchange::ExchangeDispatchPermit);
     assert_consuming!(crate::oauth::store::RefreshDispatchPermit);
     assert_consuming!(crate::managed_credentials::store::HumanRevealPermit);

@@ -236,10 +236,16 @@ pub(crate) struct DispatchPermit {
     scope: String,
     instruction: Instruction,
     effect: String,
-    attempt: Option<String>,
-    capability: Option<crate::capabilities::Authorized>,
-    recorded: Option<Observation>,
-    reservation: Option<crate::budget::Reservation>,
+    payload: DispatchPayload,
+}
+
+enum DispatchPayload {
+    Recorded(Box<Observation>),
+    Admitted {
+        attempt: String,
+        capability: Box<crate::capabilities::Authorized>,
+        reservation: crate::budget::Reservation,
+    },
 }
 
 fn require_authority(
@@ -471,11 +477,10 @@ pub(crate) fn admit_dispatch(runtime: &Runtime, work: &Work) -> Result<DispatchP
     let recorded = recorded
         .map(|value| serde_json::from_str::<Observation>(&value))
         .transpose()?;
-    if let Some(recorded) = &recorded {
-        crate::resources::validate_cached(&tx, runtime, &work.trace.request, recorded)?;
-    }
-    let mut reservation = None;
-    let attempt = if recorded.is_none() {
+    let payload = if let Some(recorded) = recorded {
+        crate::resources::validate_cached(&tx, runtime, &work.trace.request, &recorded)?;
+        DispatchPayload::Recorded(Box::new(recorded))
+    } else {
         if work.instruction.model == "app.send.v1" {
             let at = runtime.host().now_ms()?;
             let retry: Option<(i64, i64)> = tx
@@ -538,7 +543,7 @@ pub(crate) fn admit_dispatch(runtime: &Runtime, work: &Work) -> Result<DispatchP
         }
         let attempt = format!("{}_attempt_{ordinal}", work.identity);
         crate::resources::record_use(&tx, &attempt, capability.resource())?;
-        reservation = Some(crate::resources::reserve_in(
+        let reservation = crate::resources::reserve_in(
             &tx,
             runtime,
             &work.trace.request,
@@ -546,7 +551,7 @@ pub(crate) fn admit_dispatch(runtime: &Runtime, work: &Work) -> Result<DispatchP
             &attempt,
             capability.resource(),
             capability.quote(),
-        )?);
+        )?;
         tx.execute(
             "INSERT INTO day2_external_attempts VALUES(?1,?2,?3,?4,?5,NULL)",
             params![
@@ -557,9 +562,11 @@ pub(crate) fn admit_dispatch(runtime: &Runtime, work: &Work) -> Result<DispatchP
                 i64::try_from(active.stamp.revision)?
             ],
         )?;
-        Some(attempt)
-    } else {
-        None
+        DispatchPayload::Admitted {
+            attempt,
+            capability: Box::new(capability),
+            reservation,
+        }
     };
     tx.commit()?;
     Ok(DispatchPermit {
@@ -568,75 +575,78 @@ pub(crate) fn admit_dispatch(runtime: &Runtime, work: &Work) -> Result<DispatchP
         scope: runtime.scope().to_owned(),
         instruction: work.instruction.clone(),
         effect: work.identity.clone(),
-        attempt,
-        capability: recorded.is_none().then_some(capability),
-        recorded,
-        reservation,
+        payload,
     })
 }
 
 /// The permit is consumed without reopening authority. Provider calls never
 /// hold the application transaction and may outlive a subsequent revocation.
 pub(crate) fn perform(runtime: &Runtime, permit: DispatchPermit) -> Result<Performed> {
-    ensure!(
-        permit.database == runtime.db()
-            && permit.artifact == runtime.artifact().id()
-            && permit.scope == runtime.scope(),
-        "execution_binding_changed"
-    );
-    if let Some(observation) = permit.recorded {
-        return Ok(Performed {
-            observation,
-            called_provider: false,
-            attempt: None,
-            effect: permit.effect,
-            reservation: None,
-            correlation: Vec::new(),
-            pending: false,
-            usage: crate::resources::ProviderUsage {
-                known: true,
-                ..Default::default()
-            },
+    permit.perform(runtime)
+}
+
+impl DispatchPermit {
+    fn perform(self, runtime: &Runtime) -> Result<Performed> {
+        let permit = self;
+        ensure!(
+            permit.database == runtime.db()
+                && permit.artifact == runtime.artifact().id()
+                && permit.scope == runtime.scope(),
+            "execution_binding_changed"
+        );
+        let (attempt, capability, reservation) = match permit.payload {
+            DispatchPayload::Recorded(observation) => {
+                return Ok(Performed {
+                    observation: *observation,
+                    called_provider: false,
+                    attempt: None,
+                    effect: permit.effect,
+                    reservation: None,
+                    correlation: Vec::new(),
+                    pending: false,
+                    usage: crate::resources::ProviderUsage {
+                        known: true,
+                        ..Default::default()
+                    },
+                });
+            }
+            DispatchPayload::Admitted {
+                attempt,
+                capability,
+                reservation,
+            } => (attempt, capability, reservation),
+        };
+        let resource = capability.resource().clone();
+        let completed =
+            crate::capabilities::execute(runtime, *capability, &permit.effect, &attempt);
+        let result = completed.result.and_then(|result| {
+            crate::resources::validate_result(&resource, &result)?;
+            Ok(result)
         });
+        let observation = match result {
+            Ok(result) => Observation {
+                instruction: permit.instruction,
+                result,
+                error: String::new(),
+            },
+            Err(error) => Observation {
+                instruction: permit.instruction,
+                result: String::new(),
+                error: crate::error::observation_code(&error),
+            },
+        };
+        let observation = crate::resources::bounded_observation(observation)?;
+        Ok(Performed {
+            observation,
+            called_provider: completed.usage.dispatched,
+            attempt: Some(attempt),
+            effect: permit.effect,
+            reservation: Some(reservation),
+            usage: completed.usage,
+            correlation: completed.correlation,
+            pending: completed.pending,
+        })
     }
-    let capability = permit.capability.context("dispatch_permit_missing")?;
-    let resource = capability.resource().clone();
-    let completed = crate::capabilities::execute(
-        runtime,
-        capability,
-        &permit.effect,
-        permit
-            .attempt
-            .as_deref()
-            .context("dispatch_attempt_missing")?,
-    );
-    let result = completed.result.and_then(|result| {
-        crate::resources::validate_result(&resource, &result)?;
-        Ok(result)
-    });
-    let observation = match result {
-        Ok(result) => Observation {
-            instruction: permit.instruction,
-            result,
-            error: String::new(),
-        },
-        Err(error) => Observation {
-            instruction: permit.instruction,
-            result: String::new(),
-            error: crate::error::observation_code(&error),
-        },
-    };
-    let observation = crate::resources::bounded_observation(observation)?;
-    Ok(Performed {
-        observation,
-        called_provider: completed.usage.dispatched,
-        attempt: permit.attempt,
-        effect: permit.effect,
-        reservation: permit.reservation,
-        usage: completed.usage,
-        correlation: completed.correlation,
-        pending: completed.pending,
-    })
 }
 
 /// Record knowledge of an already performed effect even when authority changed

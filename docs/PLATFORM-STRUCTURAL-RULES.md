@@ -29,6 +29,19 @@ already being implemented by another session is integrated once, after handoff.
 Every completed slice removes its obsolete exceptions rather than refreshing
 them into a larger baseline.
 
+The initial platform enforcement work is split into the following reviewable
+PRs. These are implementation steps within the broader slices above; completing
+them does not complete every RADICAL obligation.
+
+| PR | Rejected counterexample | Positive control |
+| --- | --- | --- |
+| Effect and dependency rules | New raw clock/entropy/I/O sites, moved allowances, unknown sources/dependencies and weakened policy inputs. | Existing reviewed adapters and unchanged captured build inputs remain valid. |
+| Restricted decision kernel | Ambient calls through aliases, weakened lint caps, additional production targets and callback/async kernel interfaces. | The actual build kernel and existing control compatibility callers compile and run. |
+| Sealed proof boundaries | Sibling field construction, wire deserialization, consuming-handle cloning, wrong-stage activation and unreviewed factories. | Checked durable recovery and current-authority revalidation accept valid release histories. |
+| Journal constraints | Partial completion/outbox states, malformed imported rows, forged schema versions and migrations exceeding admission work. | Valid v2 upgrades are atomic, legitimate Temporal run changes remain legal, and valid v3 journals reopen. |
+| Dispatch states | An admitted permit missing its attempt, capability or reservation; cloning or decoding a consuming permit. | Admitted dispatch executes once; recorded replay retains the observation and ledger without another provider call. |
+| Write admission bounds | Excess waiting writers/live database lines, ticket/deadline overflow and splitting one live queue during registry churn. | FIFO, independent databases, cancellation and existing busy/nested transaction behavior remain valid. |
+
 ## File leases and merge order
 
 An owner declares exact files, worktree, base/head and resource use before editing.
@@ -133,7 +146,7 @@ permits are consuming, non-Clone, non-Copy, non-Default and non-Deserialize.
 Readiness handles may be cloneable when their use revalidates durable current
 authority. Wire and storage records are separate from verified values.
 
-`architecture-proofs.json` now reviews six release, OAuth dispatch and credential
+`architecture-proofs.json` now reviews seven release, generic/OAuth dispatch and credential
 reveal handles. The mandatory native architecture check and every verification
 recipe enforce private nonempty fields, admitted derives and inherent method
 signatures, consuming sink receivers, and explicit factory signatures. Direct
@@ -180,10 +193,20 @@ including direct malformed writes and supported upgrades. Network operations
 never occur inside business transactions. Durable dispatch fencing precedes
 provider sends; response loss remains uncertain until qualified observation.
 
+The generic dispatch permit contains a private sum type: a recorded observation,
+or an admitted attempt with its authorized capability and budget reservation.
+Every admitted field is mandatory, so the former independent optional fields
+cannot describe a missing capability, attempt or reservation. The consuming
+sink matches both variants exhaustively. A real SQLite/provider fixture checks
+that replaying a recorded result creates no attempt, spends no additional budget
+and makes no second provider call. This representation change does not classify
+all later provider uncertainty or settlement states; those retain their current
+durable fencing and reconciliation rules.
+
 ## Principle enforcement map
 
 This map names obligations, not completed coverage. Slices 1 through 3 deliver
-the source/dependency ratchet, extracted build kernel and six configured proof
+the source/dependency ratchet, extracted build kernel and configured proof
 boundaries. Durable-state and bounded-admission changes follow in separate PRs.
 Existing application behavior remains useful
 evidence, but it does not establish the corresponding platform guarantee.
