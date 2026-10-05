@@ -1124,8 +1124,13 @@ fn existing_approvals_without_consumer_registry_require_explicit_migration() {
         )
         .unwrap();
     let legacy = directory.path().join("legacy.sqlite");
+    // Consumer migration is a component guard on a recognized journal. A lone
+    // release table is an unknown root and must fail before reaching this guard.
+    drop(Journal::open(&legacy).unwrap());
     let connection = Connection::open(&legacy).unwrap();
-    connection.execute_batch("CREATE TABLE release_approvals(id TEXT PRIMARY KEY,target TEXT NOT NULL,fingerprint TEXT NOT NULL,body TEXT NOT NULL);").unwrap();
+    connection
+        .execute_batch("DROP TABLE runtime_secret_consumers")
+        .unwrap();
     connection
         .execute(
             "INSERT INTO release_approvals VALUES(?1,?2,?3,?4)",
@@ -1139,8 +1144,30 @@ fn existing_approvals_without_consumer_registry_require_explicit_migration() {
     assert!(
         error
             .to_string()
-            .contains("explicit runtime secret consumer migration")
+            .contains("explicit runtime secret consumer migration"),
+        "{error:#}"
     );
+    let connection = Connection::open(&legacy).unwrap();
+    let preserved: (String, String, String, String) = connection
+        .query_row(
+            "SELECT id,target,fingerprint,body FROM release_approvals",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(preserved, row);
+    let recreated: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='runtime_secret_consumers')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!recreated, "rejected consumer migration must roll back");
+    let version: i64 = connection
+        .query_row("SELECT version FROM control_meta", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 3);
 }
 
 #[test]
