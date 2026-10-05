@@ -647,6 +647,64 @@ fn remote(endpoint: Url, bearers: Arc<Bearers>) -> RemoteApprovals {
     }
 }
 
+#[test]
+fn private_transport_replays_response_loss_and_receiver_substitution() -> Result<()> {
+    use crate::oauth::{effects, simulation::World};
+    for seed in 0..8 {
+        for scenario in 0..4 {
+            let run = || -> Result<_> {
+                let world = World::new(seed);
+                effects::scope(world.clone(), || {
+                    let id = scoped_attempt("installation", "production", "app")?;
+                    let body = json!({"operation":"lookup","version":1,"app":if scenario == 2 { "other" } else { "app" },
+                        "attempt":id,"owned":false,"view":null});
+                    world.script(
+                        vec![(if scenario == 3 { 302 } else { 200 }, body.to_string())],
+                        (scenario == 1).then_some(0),
+                    );
+                    let bearers = Arc::new(Bearers::default());
+                    let remote = remote(
+                        Url::parse("https://app.example/_day2/oauth/approval")?,
+                        bearers.clone(),
+                    );
+                    let mut headers = HeaderMap::new();
+                    headers.insert(
+                        iap::ASSERTION_HEADER,
+                        HeaderValue::from_static("simulated-private-human-assertion"),
+                    );
+                    let response = remote.pending(&id, &human(), &headers, effects::wall_time()?);
+                    assert_eq!(response.is_ok(), scenario == 0);
+                    assert_eq!(
+                        world.requests().len(),
+                        1,
+                        "ambiguous transport must not retry"
+                    );
+                    assert_eq!(
+                        bearers.0.lock().unwrap().as_slice(),
+                        &[(
+                            "app".into(),
+                            "https://app.example/_day2/oauth/approval".into()
+                        )]
+                    );
+                    assert!(
+                        remote
+                            .pending("unrouted-attempt", &human(), &headers, 5)?
+                            .is_none()
+                    );
+                    assert_eq!(
+                        world.requests().len(),
+                        1,
+                        "unselected route must not fan out"
+                    );
+                    Ok((id, response.is_ok(), world.requests()))
+                })
+            };
+            assert_eq!(run()?, run()?);
+        }
+    }
+    Ok(())
+}
+
 struct WireRequest {
     method: Method,
     path: String,

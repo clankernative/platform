@@ -5,13 +5,11 @@
 use super::approval_registry::{
     ApprovalKeyMaterial, ApprovalKeyProvider, ApprovalKeyPurpose, ApprovalKeyRef,
 };
+use crate::oauth::effects::Client;
 use anyhow::{Context, Result, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use day2_capabilities::BindingRef;
-use reqwest::{
-    blocking::Client,
-    header::{AUTHORIZATION, HeaderValue},
-};
+use reqwest::header::{AUTHORIZATION, HeaderValue};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},

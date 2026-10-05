@@ -14,3 +14,8 @@ Private app migrations and company acceptance tests belong to downstream private
 repositories. Passing this public gate makes no claim about those applications.
 Linux kernel/runtime qualification is a separate native campaign documented in
 [the runtime guide](../deploy/linux-sqlite/README.md).
+
+OAuth's required seeded host/protocol campaigns, effect-boundary guard, catalog
+coverage gate, implementation-bound replay, and durable schema upgrades are
+documented in [OAuth simulation and durable invariants](OAUTH-SIMULATION.md).
+They run in both library gates and complement real adapter/crash qualification.

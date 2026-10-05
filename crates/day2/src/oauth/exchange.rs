@@ -166,27 +166,25 @@ pub(crate) fn prepare_authorization(
 }
 
 pub(super) fn install_schema(db: &Connection) -> Result<()> {
-    db.execute_batch(
-        "CREATE TABLE IF NOT EXISTS oauth_exchange_schema_version (
+    let ddl = "CREATE TABLE IF NOT EXISTS oauth_exchange_schema_version (
             version INTEGER PRIMARY KEY
         );
         CREATE TABLE IF NOT EXISTS oauth_exchange_bindings (
             attempt TEXT PRIMARY KEY REFERENCES oauth_connect_attempts(attempt),
             binding TEXT NOT NULL
-        );",
-    )?;
-    let mut versions = db.prepare("SELECT version FROM oauth_exchange_schema_version")?;
-    let known = versions
-        .query_map([], |row| row.get::<_, i64>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    ensure!(
-        known.is_empty() || known == [1],
-        "unsupported OAuth exchange schema version"
-    );
-    if known.is_empty() {
-        db.execute("INSERT INTO oauth_exchange_schema_version VALUES (1)", [])?;
-    }
-    Ok(())
+        );";
+    db.execute_batch(ddl)?;
+    super::schema::upgrade(
+        db,
+        "oauth_exchange_schema_version",
+        &[1, 2],
+        2,
+        ddl,
+        &[super::schema::Invariant {
+            table: "oauth_exchange_bindings",
+            predicate: "length(attempt) > 0 AND length(binding) > 0 AND json_valid(binding) AND json_type(binding) = 'object'",
+        }],
+    )
 }
 
 pub(super) fn store_binding(

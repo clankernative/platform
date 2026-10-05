@@ -169,8 +169,7 @@ impl LegacyExchangeDispatchPermit {
 
 pub fn install_schema(db: &Connection) -> Result<()> {
     super::store::install_schema(db)?;
-    db.execute_batch(
-        "CREATE TABLE IF NOT EXISTS oauth_connect_schema_version (
+    let ddl = "CREATE TABLE IF NOT EXISTS oauth_connect_schema_version (
             version INTEGER PRIMARY KEY
         );
         CREATE TABLE IF NOT EXISTS oauth_callback_schema_version (
@@ -199,36 +198,40 @@ pub fn install_schema(db: &Connection) -> Result<()> {
             scope_evidence TEXT,
             CHECK((state IN ('exchange_ready', 'exchange_may_have_been_sent',
                   'exchange_uncertain')) = (code_ref IS NOT NULL)),
-            CHECK((state IN ('awaiting_account_approval', 'activated')) =
-                  (account IS NOT NULL AND scope_evidence IS NOT NULL))
+            CHECK((state IN ('awaiting_account_approval', 'activated')) = (account IS NOT NULL)),
+            CHECK((state IN ('awaiting_account_approval', 'activated')) = (scope_evidence IS NOT NULL))
         );
         CREATE TABLE IF NOT EXISTS oauth_callback_bindings (
             attempt TEXT PRIMARY KEY REFERENCES oauth_connect_attempts(attempt),
             binding TEXT NOT NULL
-        );",
+        );";
+    db.execute_batch(ddl)?;
+    super::schema::upgrade(db, "oauth_connect_schema_version", &[1, 2], 2, ddl, &[
+        super::schema::Invariant { table: "oauth_connect_attempts", predicate:
+            "expected_epoch > 0 AND proposed_generation > 0 AND
+             ((expected_generation IS NULL AND proposed_generation = 1) OR
+              (expected_generation > 0 AND proposed_generation = expected_generation + 1)) AND
+             length(attempt) > 0 AND length(slot) > 0 AND length(owner) > 0 AND length(profile) > 0 AND
+             length(registration) > 0 AND length(callback) > 0 AND length(consent) > 0 AND
+             state IN ('awaiting_provider_authorization', 'exchange_ready', 'exchange_may_have_been_sent',
+                       'awaiting_account_approval', 'activated', 'denied', 'cancelled', 'expired', 'exchange_uncertain', 'activation_rejected') AND
+             (state IN ('exchange_ready', 'exchange_may_have_been_sent', 'exchange_uncertain')) = (code_ref IS NOT NULL) AND
+             (state IN ('awaiting_account_approval', 'activated')) = (account IS NOT NULL) AND
+             (state IN ('awaiting_account_approval', 'activated')) = (scope_evidence IS NOT NULL) AND
+             (code_ref IS NULL OR length(code_ref) > 0) AND (account IS NULL OR length(account) > 0) AND
+             (scope_evidence IS NULL OR length(scope_evidence) > 0)" },
+    ])?;
+    super::schema::upgrade(
+        db,
+        "oauth_callback_schema_version",
+        &[1, 2],
+        2,
+        ddl,
+        &[super::schema::Invariant {
+            table: "oauth_callback_bindings",
+            predicate: "length(attempt) > 0 AND length(binding) > 0 AND json_valid(binding) AND json_type(binding) = 'object'",
+        }],
     )?;
-    let mut versions = db.prepare("SELECT version FROM oauth_connect_schema_version")?;
-    let known = versions
-        .query_map([], |row| row.get::<_, i64>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    ensure!(
-        known.is_empty() || known == [1],
-        "unsupported outbound OAuth schema version"
-    );
-    if known.is_empty() {
-        db.execute("INSERT INTO oauth_connect_schema_version VALUES (1)", [])?;
-    }
-    let mut versions = db.prepare("SELECT version FROM oauth_callback_schema_version")?;
-    let known = versions
-        .query_map([], |row| row.get::<_, i64>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    ensure!(
-        known.is_empty() || known == [1],
-        "unsupported OAuth callback schema version"
-    );
-    if known.is_empty() {
-        db.execute("INSERT INTO oauth_callback_schema_version VALUES (1)", [])?;
-    }
     super::exchange::install_schema(db)?;
     super::custody::install_schema(db)?;
     Ok(())
@@ -1318,7 +1321,7 @@ mod tests {
     fn unknown_connect_schema_version_fails_closed() {
         let db = Connection::open_in_memory().unwrap();
         install_schema(&db).unwrap();
-        db.execute("UPDATE oauth_connect_schema_version SET version = 2", [])
+        db.execute("UPDATE oauth_connect_schema_version SET version = 3", [])
             .unwrap();
         assert!(install_schema(&db).is_err());
     }

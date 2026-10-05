@@ -2,7 +2,8 @@
 //! campaign. No callback, form or instance boolean can manufacture a receipt.
 
 use super::{Authorization, Codes, GoogleReadiness, Purpose, Receipt, Session, Target};
-use crate::{iap, oauth::approval_keys::AccessTokenSource, web_security};
+use crate::oauth::effects::{self, Instant};
+use crate::{iap, oauth::approval_keys::AccessTokenSource};
 use anyhow::{Context, Result, ensure};
 use axum::{
     http::{HeaderMap, Method, StatusCode, header},
@@ -14,7 +15,7 @@ use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 const PREFIX: &str = "/_day2/oauth/qualification/";
@@ -246,8 +247,8 @@ impl Canaries {
         selected_human(&target, identity)?;
         state.pending.retain(|_, pending| fresh(pending, now));
         ensure!(state.pending.len() < 128, "qualification session budget");
-        let token = web_security::random()?;
-        let csrf = web_security::random()?;
+        let token = effects::random()?;
+        let csrf = effects::random()?;
         let session = Digest::of(&(
             "oauth-canary-shell-session-v1",
             &token,
