@@ -395,6 +395,17 @@ canary callback checks that guard again after provider probes and before signing
 and publishing the receipt. The shell registry supplies no app readiness facts;
 the destination app independently verifies publication and live facts.
 
+Browser responses use `Referrer-Policy: strict-origin`: HTTPS form submissions
+retain their exact Origin, while referrers omit paths and callback queries.
+`no-referrer` would make a navigation POST send `Origin: null`, which the shell
+refuses. Every form remains restricted by `form-action 'self'`. For a native
+absolute HTTPS 303 destination, the HTTP layer returns a no-store HTML handoff
+with an escaped refresh target and Continue link; navigation starts from that
+document. This supports Google authorization and owning-app returns without
+allowing off-origin form targets. Relative 303 responses and native workflow
+protocols are unchanged. The HTTP regression checks cover these response and
+request envelopes; a live browser campaign is still required for qualification.
+
 `/health/live` and `/health/ready` are bounded, unauthenticated process probes with
 no-store responses. Readiness reports completed static startup admission and
 whether the listener accepts work; it does not report Google registration,
