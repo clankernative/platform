@@ -148,14 +148,10 @@ struct PendingDebt {
     remove_when: &'static str,
 }
 
-const ADAPTER_REASON: &str =
-    "This action runs at the native/synthetic adapter seam and needs an admitted instance/policy harness.";
-const ADAPTER_REMOVAL: &str =
-    "Remove when every action of this provider is driven through its real offline handler against distinguishable own worlds, with read/effect attribution and constant/wrong-world negatives.";
-const DELEGATION_REASON: &str =
-    "The transport harness cannot establish the admitted caller/callee boundary for query, send and status.";
-const DELEGATION_REMOVAL: &str =
-    "The delegation owner must cover all three actions with an admitted caller/callee harness demonstrating exact target authority, responses and effects in the appropriate world.";
+const ADAPTER_REASON: &str = "This action runs at the native/synthetic adapter seam and needs an admitted instance/policy harness.";
+const ADAPTER_REMOVAL: &str = "Remove when every action of this provider is driven through its real offline handler against distinguishable own worlds, with read/effect attribution and constant/wrong-world negatives.";
+const DELEGATION_REASON: &str = "The transport harness cannot establish the admitted caller/callee boundary for query, send and status.";
+const DELEGATION_REMOVAL: &str = "The delegation owner must cover all three actions with an admitted caller/callee harness demonstrating exact target authority, responses and effects in the appropriate world.";
 
 // Existing coverage debt, not permission to admit a provider without evidence.
 // Keep individual action keys: adding an action to an existing pending provider
@@ -889,7 +885,11 @@ fn reviewed_pending_debt_rejects_duplicate_and_stale_records() -> Result<()> {
     let mut debt = REVIEWED_PENDING_DEBT.to_vec();
     debt.push(debt[0]);
     let error = validate_pending_debt(&coverage, &debt).unwrap_err();
-    assert!(error.to_string().contains("duplicate reviewed coverage debt"));
+    assert!(
+        error
+            .to_string()
+            .contains("duplicate reviewed coverage debt")
+    );
 
     // Closing all actions of a provider must also retire its old debt records.
     let mut closed = coverage;
@@ -901,10 +901,7 @@ fn reviewed_pending_debt_rejects_duplicate_and_stale_records() -> Result<()> {
         Action::NotificationsLatest,
         Demonstration::ResultReflectsWorld,
     );
-    closed.insert(
-        Action::NotificationsSend,
-        Demonstration::EffectLandsInWorld,
-    );
+    closed.insert(Action::NotificationsSend, Demonstration::EffectLandsInWorld);
     validate_provider_coverage(&closed)?;
     let error = validate_pending_debt(&closed, REVIEWED_PENDING_DEBT).unwrap_err();
     assert!(error.to_string().contains("stale reviewed coverage debt"));
