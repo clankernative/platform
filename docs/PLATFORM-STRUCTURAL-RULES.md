@@ -203,12 +203,22 @@ and makes no second provider call. This representation change does not classify
 all later provider uncertainty or settlement states; those retain their current
 durable fencing and reconciliation rules.
 
+Native SQLite write admission retains FIFO order with at most 64 waiting writers
+per database and 1024 database lines in the process registry. The registry keeps
+weak references and reclaims only lines with no remaining holder, waiter or
+enrolling caller, preserving one queue for every live database path. Saturation,
+ticket exhaustion and unrepresentable deadlines fail as `SQLITE_BUSY`.
+The existing 30-second maximum, shorter caller deadlines, nested passthrough and
+SQLite's cross-process busy handling remain unchanged. These are fixed native
+admission budgets rather than instance or application configuration.
+
 ## Principle enforcement map
 
-This map names obligations, not completed coverage. Slices 1 through 3 deliver
-the source/dependency ratchet, extracted build kernel and configured proof
-boundaries. Durable-state and bounded-admission changes follow in separate PRs.
-Existing application behavior remains useful
+This map names obligations, not completed coverage. The initial PRs deliver
+the source/dependency ratchet, extracted build kernel, configured proof
+boundaries, journal storage constraints, dispatch admission states and fixed
+SQLite write-admission budgets. Broader durable-state, provider and overload
+qualification remains required. Existing application behavior remains useful
 evidence, but it does not establish the corresponding platform guarantee.
 Record a completed slice's exact PR, locally checked head and counterexamples
 before treating its row as enforced. Live provider and restore obligations
