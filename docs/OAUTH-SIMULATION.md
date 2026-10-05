@@ -119,9 +119,12 @@ driver; another profile label or a simulator digest alone is insufficient.
 Registration drivers execute the actual native wire adapter through the shared
 controlled clock/entropy/transport boundary. Google has nine HTTP boundaries;
 GitLab has twelve, including token-info evidence after every exchange/refresh.
-The independent order model owns these counts. Eight seeds cover loss and
-pre-I/O expiry at every boundary, repeat each history exactly, and check that
-failed sessions cannot issue receipts and expired receipts lose readiness.
+The independent order model owns these counts and exact public method/host/path
+sequences. Eight seeds cover loss at every HTTP boundary and pre-step expiry
+across those schedules. Every step must match the expected request prefix;
+wrong endpoints, retries or I/O after failure/expiry fail the oracle even when
+the session returns an error. Histories repeat exactly, failed sessions cannot
+issue receipts, and expired receipts lose readiness.
 GitLab's real HTTP fixtures additionally reject broader scopes, wrong clients,
 wrong numeric subjects, locked accounts and non-rotating refresh responses.
 

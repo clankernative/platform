@@ -128,6 +128,7 @@ struct Trace {
 struct Provider {
     replies: VecDeque<(u16, String)>,
     requests: Vec<(String, String)>,
+    addresses: Vec<(String, String, String)>,
     fail_at: Option<usize>,
 }
 
@@ -220,6 +221,11 @@ impl effects::Hooks for World {
         provider
             .requests
             .push((request.method().to_string(), request.url().path().into()));
+        provider.addresses.push((
+            request.method().to_string(),
+            host.to_owned(),
+            request.url().path().into(),
+        ));
         ensure!(provider.fail_at != Some(index), "simulated response loss");
         let (status, body) = provider
             .replies
@@ -841,6 +847,51 @@ impl RegistrationDriver {
         }
     }
 
+    /// Public wire addresses are protocol obligations. Do not derive them from
+    /// the implementation's profile, target or observed transport history.
+    fn addresses(self) -> Vec<(String, String, String)> {
+        let secret = (
+            "GET",
+            "secretmanager.googleapis.com",
+            "/v1/projects/12345/secrets/google_client_secret/versions/7:access",
+        );
+        let google_token = ("POST", "oauth2.googleapis.com", "/token");
+        let google_account = ("GET", "openidconnect.googleapis.com", "/v1/userinfo");
+        let gitlab_token = ("POST", "gitlab.com", "/oauth/token");
+        let gitlab_info = ("GET", "gitlab.com", "/oauth/token/info");
+        let gitlab_account = ("GET", "gitlab.com", "/api/v4/user");
+        match self {
+            Self::GoogleMapped | Self::GoogleExternal => vec![
+                secret,
+                google_token,
+                google_token,
+                google_token,
+                google_token,
+                google_account,
+                google_token,
+                google_account,
+                secret,
+            ],
+            Self::GitlabExternal => vec![
+                secret,
+                gitlab_token,
+                gitlab_token,
+                gitlab_info,
+                gitlab_token,
+                gitlab_token,
+                gitlab_info,
+                gitlab_account,
+                gitlab_token,
+                gitlab_info,
+                gitlab_account,
+                secret,
+            ],
+        }
+        .into_iter()
+        .map(|(method, host, path)| (method.into(), host.into(), path.into()))
+        .collect()
+    }
+
     fn pins(self) -> (&'static str, &'static str, &'static str, &'static str) {
         match self {
             Self::GoogleMapped | Self::GoogleExternal => (
@@ -870,6 +921,11 @@ fn registration_campaign(
         "invalid registration fault boundary"
     );
     let world = World::new(seed);
+    let addresses = driver.addresses();
+    ensure!(
+        driver.calls().iter().sum::<usize>() == addresses.len(),
+        "registration reference obligations disagree"
+    );
     world.provider.lock().unwrap().replies = driver.responses().into();
     world.provider.lock().unwrap().fail_at = fault;
     effects::scope(world.clone(), || {
@@ -884,12 +940,13 @@ fn registration_campaign(
         )?;
         let mut results = Vec::new();
         let mut end = 0;
-        let mut expired = false;
+        let mut expired_at = None;
         for (index, action) in REGISTRATION_ACTIONS.iter().enumerate() {
+            let start = end;
             end += driver.calls()[index];
-            if expires && !expired && fault.is_some_and(|at| at < end) {
+            if expires && expired_at.is_none() && fault.is_some_and(|at| at < end) {
                 world.advance(301);
-                expired = true;
+                expired_at = Some(start);
             }
             let result = session.call(crate::automation::Request {
                 protocol: 1,
@@ -901,6 +958,14 @@ fn registration_campaign(
             if result.is_ok() != expected {
                 return Err(RegistrationDivergence { category: "registration_acceptance",
                     observation: serde_json::json!({"step":index,"expected":expected,"steps":results,"requests":world.requests()}) }.into());
+            }
+            let count = expired_at.unwrap_or_else(|| fault.map_or(end, |at| end.min(at + 1)));
+            let observed = world.provider.lock().unwrap().addresses.clone();
+            if observed.as_slice() != &addresses[..count] {
+                return Err(RegistrationDivergence {
+                    category: "registration_io_fence",
+                    observation: serde_json::json!({"step":index,"expected":&addresses[..count],"steps":results,"addresses":observed}),
+                }.into());
             }
         }
         let receipt = session.finish();
