@@ -1,0 +1,16 @@
+[package]
+name = "day2-kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Reviewed production dependency allowlist: anyhow, serde, day2-capabilities.
+# The source is no_std; day2-capabilities currently uses std internally, so this
+# is not a claim that the transitive graph is no_std or effect-free.
+[dependencies]
+anyhow = { version = "1.0", default-features = false }
+serde = { version = "1.0", default-features = false, features = ["alloc", "derive"] }
+day2-capabilities = { path = "../day2-capabilities" }
+
+[dev-dependencies]
+serde_json = "1.0"

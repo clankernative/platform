@@ -561,6 +561,7 @@ dependencies = [
  "crc32c",
  "day2",
  "day2-capabilities",
+ "day2-kernel",
  "durable-temporal",
  "hmac",
  "proptest",
@@ -575,6 +576,16 @@ dependencies = [
  "tempfile",
  "tokio",
  "url",
+]
+
+[[package]]
+name = "day2-kernel"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "day2-capabilities",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -4861,6 +4872,7 @@ dependencies = [
  "anyhow",
  "day2",
  "day2-control",
+ "day2-ops",
  "proc-macro2",
  "quote",
  "rusqlite",

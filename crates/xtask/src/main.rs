@@ -10,6 +10,7 @@ use std::{
 
 mod architecture;
 mod architecture_dependencies;
+mod architecture_kernel;
 mod build_native;
 mod control_simulation;
 mod formatter_bootstrap;

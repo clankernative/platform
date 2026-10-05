@@ -1,5 +1,10 @@
 //! Provider-free installation contracts. This crate has no runtime or effect APIs.
 #![forbid(unsafe_code)]
+#![forbid(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    clippy::disallowed_macros
+)]
 
 pub mod credentials;
 pub mod integrations;

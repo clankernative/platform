@@ -365,26 +365,38 @@ pub fn check(root: &Path) -> Result<()> {
                 package.name
             );
         }
-        if package.role == Role::Kernel {
-            let source = root
-                .join(Path::new(&package.manifest).parent().unwrap())
-                .join("src/lib.rs");
-            let syntax = syn::parse_file(&fs::read_to_string(source)?)?;
-            ensure!(
-                syntax
-                    .attrs
-                    .iter()
-                    .any(|attribute| attribute.path().is_ident("no_std")),
-                "kernel {} must use no_std",
-                package.name
-            );
-        }
     }
+    let strict = strict_libraries(&policy)?;
+    super::architecture_kernel::check(&root, &strict)?;
     println!(
         "Workspace dependency boundaries checked: {} packages",
         policy.packages.len()
     );
     Ok(())
+}
+
+fn strict_libraries(policy: &Policy) -> Result<Vec<super::architecture_kernel::StrictCrate<'_>>> {
+    policy
+        .packages
+        .iter()
+        .filter(|package| package.role.strict())
+        .map(|package| {
+            // `compare` established that these are Cargo's actual sources. A
+            // strict package is library-only; adding a bin or build script must
+            // first establish a separate reviewed enforcement boundary.
+            ensure!(
+                package.production_targets.len() == 1
+                    && package.production_targets[0].kind == ["lib"],
+                "strict {} must have one production library target",
+                package.name
+            );
+            Ok(super::architecture_kernel::StrictCrate {
+                name: &package.name,
+                source: &package.production_targets[0].source,
+                kernel: package.role == Role::Kernel,
+            })
+        })
+        .collect()
 }
 
 pub fn inventory(root: &Path) -> Result<serde_json::Value> {
@@ -398,6 +410,33 @@ pub fn inventory(root: &Path) -> Result<serde_json::Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strict_libraries_use_verified_targets_and_reject_uncovered_production_targets() -> Result<()>
+    {
+        let mut kernel = package("kernel", Role::Kernel);
+        kernel.production_targets[0].source = "crates/kernel/decision.rs".into();
+        let mut policy = Policy {
+            version: 1,
+            packages: vec![kernel],
+        };
+        let selected = strict_libraries(&policy)?;
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].source, "crates/kernel/decision.rs");
+        assert!(selected[0].kernel);
+        for kind in ["bin", "custom-build", "proc-macro"] {
+            policy.packages[0].production_targets[0].kind = vec![kind.into()];
+            assert!(strict_libraries(&policy).is_err());
+        }
+        policy.packages[0].production_targets[0].kind = vec!["lib".into()];
+        policy.packages[0].production_targets.push(Target {
+            name: "extra".into(),
+            kind: vec!["bin".into()],
+            source: "crates/kernel/main.rs".into(),
+        });
+        assert!(strict_libraries(&policy).is_err());
+        Ok(())
+    }
 
     fn package(name: &str, role: Role) -> Package {
         Package {

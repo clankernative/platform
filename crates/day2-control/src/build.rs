@@ -121,6 +121,7 @@ impl PlatformInputs {
             "Cargo.lock",
             "architecture-rules.json",
             "architecture-boundaries.json",
+            "architecture/clippy.toml",
             "rust-toolchain.toml",
             "toolchain.json",
             ".dockerignore",

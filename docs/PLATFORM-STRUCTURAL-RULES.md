@@ -75,6 +75,37 @@ Kernel source uses `no_std`; dependencies may still use std transitively, so thi
 is a source/API boundary rather than proof of transitive purity. Dependency
 versions and actual resolved transitive packages remain pinned by Cargo.lock.
 
+The production build decision engine and `BuildPlan` now live in `day2-kernel`.
+The existing `day2-control::{kernel,contracts}` paths reexport these same types;
+the control adapter retains I/O and `Instance` planning. Kernel dependencies are
+explicitly limited to `anyhow`, `serde`, and shared `day2-capabilities`, with
+`serde_json` available only in tests. Historical wire behavior is preserved:
+unknown discriminators and malformed data-bearing variants reject, while serde
+unit variants such as `Accepted` still accept extra fields pending a separate
+codec admission change.
+
+After verifying Cargo's exact target sources and dependencies, the boundary
+checker requires unconditional crate-level `forbid` attributes for unsafe code
+and Clippy's disallowed methods, types and macros. It checks strict production
+libraries with the pinned `architecture/clippy.toml`, including resolved aliases,
+and replaces inherited lint-cap flags so they cannot weaken this host check.
+Strict packages have one production library target; adding a binary or build
+script needs a reviewed enforcement boundary. Kernel sources additionally
+require unconditional `no_std` and reject explicit function-pointer, callback,
+async and Future interfaces. Pure closures and serialization bounds remain
+valid. This syntax check does not prove purity through arbitrary serialization
+implementations, macro expansion or transitive dependencies.
+
+The compiler check uses the native process supervisor with two build jobs, a
+ten-minute deadline, process-group cleanup and bounded diagnostic logs. Invalid
+configured standard-library paths fail admission even when Clippy emits only a
+warning; absent optional third-party paths are explicitly marked in the policy.
+
+The shared Clippy configuration is included in native and isolated build input
+identities. Tampering changes the identity and prevents materializing previously
+captured inputs. Kernel state and compatibility tests run in required control
+and workspace runtime suites.
+
 An allowance documents why an existing call remains, its owning boundary and
 the condition for removing it. It is technical debt, not a new general-purpose
 capability. New sources default to no ambient effects. Strict contract/kernel
