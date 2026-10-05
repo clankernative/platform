@@ -1201,8 +1201,7 @@ pub(super) mod tests {
         }
     }
 
-    pub(in crate::oauth) fn publication_fixture()
-    -> Result<(QualifiedConnections, profiles::SecurityShellEvidence)> {
+    fn reviewed_google_fixture() -> Result<Fixture> {
         let mut fixture = fixture(AccountBindingPolicy::ExplicitExternalAccount)?;
         fixture.catalog = super::super::google::catalog()?;
         let profile =
@@ -1221,6 +1220,12 @@ pub(super) mod tests {
             .get_mut("calendar")
             .unwrap()
             .profile = profile;
+        Ok(fixture)
+    }
+
+    pub(in crate::oauth) fn publication_fixture()
+    -> Result<(QualifiedConnections, profiles::SecurityShellEvidence)> {
+        let mut fixture = reviewed_google_fixture()?;
         let control = fixture.instance.control.as_mut().unwrap();
         control.secrets.insert(name("reauth_client"), serde_json::from_value(json!({"kind":"gcp_version","project_number":12345,"secret":"google_reauth","version":3}))?);
         control.secrets.insert(name("calendar_client"), serde_json::from_value(json!({"kind":"gcp_version","project_number":12345,"secret":"google_client_secret","version":7}))?);
@@ -1629,7 +1634,7 @@ pub(super) mod tests {
 
     #[test]
     fn app_projection_keeps_its_client_and_control_refs_without_sibling_artifacts() -> Result<()> {
-        let mut fixture = fixture(AccountBindingPolicy::ExplicitExternalAccount)?;
+        let mut fixture = reviewed_google_fixture()?;
         let sibling = fixture.instance.apps["workspace"].clone();
         let mut sibling = sibling;
         sibling.oauth_connections.clear();
