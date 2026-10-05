@@ -493,6 +493,7 @@ mod tests {
         tests::{Server, TokensSource, fixture, responses},
     };
     use super::*;
+    use crate::oauth::google;
     use std::sync::{atomic::AtomicUsize, mpsc};
 
     struct Facts(super::super::profiles::OutboundInstanceEvidence);
@@ -887,7 +888,7 @@ mod tests {
             "http-equiv=\"refresh\" content=\"0;url={destination}\""
         )));
         let location = url::Url::parse(&destination.replace("&amp;", "&"))?;
-        let authorization = url::Url::parse(super::super::google::AUTHORIZATION)?;
+        let authorization = url::Url::parse(google::AUTHORIZATION)?;
         assert_eq!(location.origin(), authorization.origin());
         assert_eq!(location.path(), authorization.path());
         let sources = csp

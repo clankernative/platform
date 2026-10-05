@@ -2,7 +2,7 @@
 //! credentials never establish live Google or installation readiness.
 
 use super::*;
-use crate::oauth::admission::OutboundReadiness;
+use crate::oauth::{admission::OutboundReadiness, gitlab, google};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use day2_capabilities::oauth::{
     AccountBindingPolicy, ConnectionOwner, ProductReturnRef, SecurityOriginRef, SlotOwner,
