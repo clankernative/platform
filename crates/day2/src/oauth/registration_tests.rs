@@ -679,10 +679,21 @@ fn google_errors_response_loss_wrong_account_scopes_and_rotation_never_seal_or_r
             session.call(request(action))?;
         }
         let error = session.call(request(ACTIONS[failed_index])).unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "Provider registration qualification failed; start a new canary"
-        );
+        let diagnostic = error
+            .downcast_ref::<QualificationFailure>()
+            .context("native qualification diagnostic missing")?;
+        let stages = [
+            QualificationStage::CredentialLoad,
+            QualificationStage::RejectPkce,
+            QualificationStage::VerifyPkce,
+            QualificationStage::RejectCredential,
+            QualificationStage::Exchange,
+            QualificationStage::Account,
+            QualificationStage::Refresh,
+            QualificationStage::RefreshedAccount,
+            QualificationStage::CredentialRecheck,
+        ];
+        assert_eq!(diagnostic.stage, stages[failed_index]);
         for secret in [CODE_CANARY, SECRET_CANARY, ACCESS_CANARY, REFRESH_CANARY] {
             assert!(!format!("{error:#}").contains(secret));
         }
@@ -693,6 +704,45 @@ fn google_errors_response_loss_wrong_account_scopes_and_rotation_never_seal_or_r
         }
         assert_eq!(server.requests.lock().unwrap().len(), count);
         assert!(session.finish().is_err());
+    }
+    Ok(())
+}
+
+#[test]
+fn qualification_diagnostics_discard_untrusted_error_chains() {
+    let raw = format!("https://provider.example/token?code={CODE_CANARY} secret={SECRET_CANARY} access={ACCESS_CANARY} refresh={REFRESH_CANARY}");
+    let error = QualificationFailure::at(
+        QualificationStage::Publication,
+        anyhow::anyhow!(raw).context("untrusted upstream diagnostic"),
+    );
+    let error = QualificationFailure::at(QualificationStage::Callback, error);
+    let diagnostic = error.downcast_ref::<QualificationFailure>().unwrap();
+    assert_eq!(diagnostic.stage(), "owning_app_publication");
+    assert_eq!(diagnostic.outcome(), "refused");
+    assert!(error.source().is_none());
+    for secret in [CODE_CANARY, SECRET_CANARY, ACCESS_CANARY, REFRESH_CANARY] {
+        assert!(!format!("{error:#}").contains(secret));
+    }
+}
+
+#[test]
+fn failed_native_workflow_preserves_the_observed_qualification_stage() -> Result<()> {
+    let mut replies = responses();
+    replies[2] = (400, json!({"error":"invalid_grant", "error_description":SECRET_CANARY}).to_string());
+    let server = Server::new(replies)?;
+    let session = session(fixture()?.target, &server)?;
+    let error = session
+        .run(&crate::automation::runner()?)
+        .err()
+        .context("failed PKCE recovery unexpectedly qualified")?;
+    let diagnostic = error
+        .downcast_ref::<QualificationFailure>()
+        .context("Roc transport erased the native diagnostic")?;
+    assert_eq!(diagnostic.stage(), "verify_correct_pkce");
+    assert_eq!(diagnostic.outcome(), "provider_http_400_invalid_grant");
+    assert_eq!(server.requests.lock().unwrap().len(), 3);
+    for secret in [CODE_CANARY, SECRET_CANARY, ACCESS_CANARY, REFRESH_CANARY] {
+        assert!(!format!("{error:#}").contains(secret));
     }
     Ok(())
 }

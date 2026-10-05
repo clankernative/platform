@@ -167,7 +167,12 @@ impl registration::shell::ReceiptPublisher for RegistrationPublication {
     fn publish(&self, receipt: &registration::Receipt, headers: &HeaderMap, _: i64) -> Result<()> {
         let now = effects::wall_time()?;
         if let Some(guard) = &self.guard {
-            guard.check(now)?;
+            guard.check(now).map_err(|error| {
+                registration::QualificationFailure::at(
+                    registration::QualificationStage::ShellReadiness,
+                    error,
+                )
+            })?;
         }
         self.signer
             .publish_registration(receipt, self.approvals.as_ref(), headers, now)
@@ -507,7 +512,7 @@ impl SecurityShell {
         .await;
         protected(match response {
             Ok(Ok(response)) => response,
-            Ok(Err(_)) => StatusCode::FORBIDDEN.into_response(),
+            Ok(Err(error)) => qualification_failure_response(&error),
             Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
         })
     }
@@ -532,7 +537,16 @@ impl SecurityShell {
         );
         let identity = self.authenticator.identify(headers, at)?;
         if let Some(guard) = &self.guard {
-            guard.check(at)?;
+            guard.check(at).map_err(|error| {
+                if registration::shell::reserved(path) {
+                    registration::QualificationFailure::at(
+                        registration::QualificationStage::ShellReadiness,
+                        error,
+                    )
+                } else {
+                    error
+                }
+            })?;
         }
         if registration::shell::reserved(path) {
             return self
@@ -1221,6 +1235,28 @@ fn path_for(attempt: &str) -> String {
     format!("{PREFIX}{attempt}")
 }
 
+fn qualification_failure_response(error: &anyhow::Error) -> Response {
+    let Some(failure) = error.downcast_ref::<registration::QualificationFailure>() else {
+        return StatusCode::FORBIDDEN.into_response();
+    };
+    let markup = html! { (DOCTYPE) html lang="en" {
+        head { meta charset="utf-8"; title { "Qualification failed" } }
+        body {
+            h1 { "Qualification failed" }
+            p { "Registration readiness was not confirmed by this attempt." }
+            p { "Stage: " code { (failure.stage()) } }
+            p { "Outcome: " code { (failure.outcome()) } }
+            p { "Resolve the failure before starting a new qualification. Do not replay a callback." }
+        }
+    }};
+    (
+        StatusCode::FORBIDDEN,
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        markup.into_string(),
+    )
+        .into_response()
+}
+
 fn protected(mut response: Response) -> Response {
     // A form's 303 redirect is still subject to form-action. Finish that POST
     // on the shell origin, then navigate from a new document to the native-
@@ -1291,6 +1327,31 @@ mod tests {
         collections::BTreeMap,
         sync::atomic::{AtomicUsize, Ordering},
     };
+
+    #[tokio::test]
+    async fn qualification_failure_page_exposes_only_closed_native_diagnostics() -> Result<()> {
+        let secret = "private-fixture-code-and-client-secret";
+        let error = registration::QualificationFailure::at(
+            registration::QualificationStage::Publication,
+            anyhow::anyhow!("https://provider.example/callback?code={secret}"),
+        );
+        let response = protected(qualification_failure_response(&error));
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(response.headers()["referrer-policy"], "strict-origin");
+        let body = to_bytes(response.into_body(), 4096).await?;
+        let body = std::str::from_utf8(&body)?;
+        assert!(body.contains("Qualification failed"));
+        assert!(body.contains("owning_app_publication"));
+        assert!(body.contains("refused"));
+        assert!(!body.contains(secret));
+        assert!(!body.contains("provider.example"));
+
+        let response = qualification_failure_response(&anyhow::anyhow!(secret));
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(to_bytes(response.into_body(), 4096).await?.is_empty());
+        Ok(())
+    }
 
     struct NoOAuth;
     impl shell_transport::ShellApprovals for NoOAuth {

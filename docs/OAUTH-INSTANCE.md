@@ -677,6 +677,17 @@ only the selected route, one-use state, selected human and five-minute shell
 cookie. Query data and forms cannot choose a client, credential, verifier or
 target. Raw codes and tokens never appear in the page or response.
 
+An authenticated qualification refusal keeps HTTP 403 and reports only a closed
+native stage/outcome on a no-store page. Code collection, credential loading,
+PKCE rejection/recovery, client authentication, exchange, account identity,
+refresh, current shell selection and owning-app publication remain distinct.
+Provider HTTP status and a closed error-code classification may be shown.
+Provider response bodies, arbitrary error chains, URLs, account values, codes,
+verifiers, tokens, credentials and cookies
+are never rendered. The native diagnostic survives the Roc workflow's text
+transport without retaining the underlying error. The failure page is not a
+readiness receipt, and publication response loss remains ambiguous.
+
 The final callback runs `ops/OAuthRegistration.roc` once outside the routing
 lock. A failed or lost exchange requires a new campaign. Selection replacement
 clears browser state and retires the local receipts; a campaign finishing after
