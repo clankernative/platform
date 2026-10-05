@@ -1,0 +1,3 @@
+ReceiptStatusTypes :: [].{
+	Input := { receipt : Str }
+}

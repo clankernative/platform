@@ -1,0 +1,3 @@
+RevokePersonalTypes :: [].{
+	Input := { lineage : Str }
+}

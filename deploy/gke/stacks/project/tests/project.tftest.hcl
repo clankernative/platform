@@ -75,6 +75,37 @@ run "enables_exactly_the_day2_apis" {
   }
 }
 
+run "selected_audit_api_preserves_the_foundation_contract" {
+  command = plan
+
+  variables {
+    enable_cloud_asset_api = true
+  }
+
+  assert {
+    condition = (
+      length(google_project_service.api) == 12 &&
+      google_project_service.api["cloudasset.googleapis.com"].project == "example-project" &&
+      google_project_service.api["cloudasset.googleapis.com"].disable_on_destroy == false &&
+      contains(output.enabled_apis, "cloudasset.googleapis.com")
+    )
+    error_message = "the selected audit API is enabled in the query project and is never disabled on destroy"
+  }
+
+  assert {
+    condition = (
+      google_storage_bucket.opentofu_state.name == "example-project-tofu-state" &&
+      length(google_storage_bucket_iam_binding.state_object_writers) == 5 &&
+      length(google_storage_bucket_iam_binding.state_object_readers) == 5 &&
+      alltrue([for binding in google_storage_bucket_iam_binding.state_object_writers :
+      binding.members == toset(["serviceAccount:apply@example-project.iam.gserviceaccount.com"])]) &&
+      alltrue([for binding in google_storage_bucket_iam_binding.state_object_readers :
+      binding.members == toset(["user:operator@example.com"])])
+    )
+    error_message = "selecting audit metadata does not change the state bucket or its selected readers and writers"
+  }
+}
+
 run "state_access_is_per_prefix" {
   command = plan
 

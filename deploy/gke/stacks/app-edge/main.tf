@@ -94,6 +94,7 @@ locals {
     REQUIRED_SERVICE_LABEL_KEY   = local.service_label_key
     REQUIRED_SERVICE_LABEL_VALUE = local.service_label_value
     SERVICE_NAME                 = local.service_name
+    SERVICE_ACCOUNT_NAME         = local.runtime_service_account
   }
 }
 
@@ -114,9 +115,10 @@ resource "kubernetes_namespace_v1" "app" {
 # namespaces). day2-app does not mount its token.
 resource "kubernetes_service_account_v1" "runtime" {
   metadata {
-    name      = local.runtime_service_account
-    namespace = kubernetes_namespace_v1.app.metadata[0].name
-    labels    = local.platform_labels
+    name        = local.runtime_service_account
+    namespace   = kubernetes_namespace_v1.app.metadata[0].name
+    labels      = local.platform_labels
+    annotations = local.runtime_google_email == "" ? {} : { "iam.gke.io/gcp-service-account" = local.runtime_google_email }
   }
 }
 
@@ -699,6 +701,32 @@ resource "kubernetes_ingress_v1" "app" {
 
       http {
         dynamic "path" {
+          for_each = var.credential_api ? [true] : []
+          content {
+            path      = "/_day2/credentials/api/*"
+            path_type = "ImplementationSpecific"
+            backend {
+              service {
+                name = kubernetes_service_v1.credential_api[0].metadata[0].name
+                port { name = "http" }
+              }
+            }
+          }
+        }
+        dynamic "path" {
+          for_each = local.app_call_gates
+          content {
+            path      = path.key == "issuer" ? "/_platform/app-issue" : "/_platform/app-query"
+            path_type = "Exact"
+            backend {
+              service {
+                name = kubernetes_service_v1.app_calls[path.key].metadata[0].name
+                port { name = "http" }
+              }
+            }
+          }
+        }
+        dynamic "path" {
           for_each = var.signed_webhook_paths
           content {
             path      = path.value
@@ -782,9 +810,25 @@ resource "kubernetes_config_map_v1" "platform_contract" {
     labels    = local.platform_labels
   }
 
-  data = local.contract_data
+  data = merge(local.contract_data, local.app_call_contract, local.oauth_runtime_contract)
 
-  depends_on = [google_iap_web_backend_service_iam_binding.app_access]
+  depends_on = [google_iap_web_backend_service_iam_binding.app_access, google_service_account_iam_member.app_call_workload, google_project_iam_member.oauth_edge_reads, google_secret_manager_secret_iam_member.oauth_keys]
+
+  lifecycle {
+    precondition {
+      condition = var.oauth_runtime == null ? true : try(
+        var.security_shell_contract != null && local.backend_service_resolved &&
+        (var.app_calls == null ? true : var.app_calls.service_account_id == var.oauth_runtime.service_account_id) &&
+        local.runtime_google_email != local.oauth_shell_account &&
+        toset(jsondecode(local.oauth_shell_contract["OAUTH_SHELL_SECRET_IDS"])) != toset([]) &&
+        length(setintersection(var.oauth_runtime.custody_secret_ids, toset(jsondecode(local.oauth_shell_contract["OAUTH_SHELL_SECRET_IDS"])))) == 0 &&
+        length(setsubtract(var.oauth_runtime.attestation_secret_ids, toset(jsondecode(local.oauth_shell_contract["OAUTH_SHELL_SECRET_IDS"])))) == 0 &&
+        length(setintersection(var.runtime_secret_ids, toset(jsondecode(local.oauth_shell_contract["OAUTH_SHELL_SECRET_IDS"])))) == 0 &&
+        split("/", local.oauth_shell_contract["IAP_JWT_AUDIENCE"])[2] == var.project_number,
+      false)
+      error_message = "OAuth requires the resolved same-project shell, one app/app-call identity distinct from the shell, custody containers absent from shell IAM, and shared attestation containers only. CSI grants may not expose shell client or attestation containers."
+    }
+  }
 }
 
 # --- Network policy -----------------------------------------------------------

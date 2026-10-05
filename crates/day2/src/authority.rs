@@ -365,6 +365,8 @@ impl Policy {
                                 && !operators.contains(effective)
                                 && !effective.starts_with("app:")
                                 && !effective.starts_with("svc:")
+                                && !effective.starts_with("client/")
+                                && !effective.starts_with("credential_client:")
                                 && !effective.starts_with(DOMAIN_PREFIX)
                         }
                     }
@@ -581,6 +583,10 @@ pub const DOMAIN_PREFIX: &str = "domain:";
 /// or appear in the audit as who acted.
 pub(crate) fn valid_actor(actor: &str) -> Result<()> {
     ensure!(
+        !actor.starts_with("credential_client:"),
+        "a credential client family is not a principal"
+    );
+    ensure!(
         !actor.starts_with(DOMAIN_PREFIX),
         "a {DOMAIN_PREFIX} entry names a set of people, not one principal, and is accepted only \
          in readers, writers and operation actors: {actor}"
@@ -604,6 +610,10 @@ pub(crate) fn valid_actor(actor: &str) -> Result<()> {
 /// any other domain — or any domain at all without an identity provider, as in
 /// local development — is refused rather than left to match nobody.
 pub(crate) fn valid_entry(entry: &str, hosted_domain: Option<&str>) -> Result<()> {
+    if let Some(family) = entry.strip_prefix("credential_client:") {
+        day2_capabilities::Name::try_from(family.to_owned())?;
+        return Ok(());
+    }
     let Some(domain) = entry_domain(entry)? else {
         return Ok(());
     };
@@ -624,6 +634,10 @@ pub(crate) fn valid_entry(entry: &str, hosted_domain: Option<&str>) -> Result<()
 
 /// The domain a well-formed entry admits, or `None` for a principal.
 fn entry_domain(entry: &str) -> Result<Option<&str>> {
+    if let Some(family) = entry.strip_prefix("credential_client:") {
+        day2_capabilities::Name::try_from(family.to_owned())?;
+        return Ok(None);
+    }
     let Some(domain) = entry.strip_prefix(DOMAIN_PREFIX) else {
         valid_actor(entry)?;
         return Ok(None);
@@ -645,10 +659,24 @@ fn entry_domain(entry: &str) -> Result<Option<&str>> {
 /// actor spelled as a domain entry is never admitted, even by that same entry.
 pub(crate) fn admits(entries: &BTreeSet<String>, actor: &str) -> bool {
     !actor.starts_with(DOMAIN_PREFIX)
+        && !actor.starts_with("credential_client:")
         && (entries.contains(actor)
+            || client_family(actor)
+                .is_some_and(|family| entries.contains(&format!("credential_client:{family}")))
             || actor.split_once('@').is_some_and(|(_, domain)| {
                 in_domain(actor, domain) && entries.contains(&format!("{DOMAIN_PREFIX}{domain}"))
             }))
+}
+
+/// The host creates this namespace only after verifying a managed client token.
+pub(crate) fn client_family(actor: &str) -> Option<&str> {
+    let (family, id) = actor.strip_prefix("client/")?.split_once('/')?;
+    (day2_capabilities::Name::try_from(family.to_owned()).is_ok()
+        && id.len() == 64
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()))
+    .then_some(family)
 }
 
 /// Whether `actor` is a person's address at exactly `domain`.
@@ -669,6 +697,8 @@ pub(crate) fn in_domain(actor: &str, domain: &str) -> bool {
         && !host.ends_with(".gserviceaccount.com")
         && !actor.starts_with("app:")
         && !actor.starts_with("svc:")
+        && !actor.starts_with("client/")
+        && !actor.starts_with("credential_client:")
         && !actor.starts_with(DOMAIN_PREFIX)
         && local
             .bytes()
@@ -683,6 +713,35 @@ mod domain_tests {
 
     fn entries(values: &[&str]) -> BTreeSet<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    #[test]
+    fn credential_client_membership_is_family_specific_and_never_human_membership() {
+        let client = format!("client/client_keys/{}", "a".repeat(64));
+        let allowed = entries(&["credential_client:client_keys"]);
+        assert!(valid_entry("credential_client:client_keys", None).is_ok());
+        assert!(valid_actor("credential_client:client_keys").is_err());
+        assert!(admits(&allowed, &client));
+        for denied in [
+            "alice@example.com".to_owned(),
+            "credential_client:client_keys".to_owned(),
+            format!("client/personal_keys/{}", "a".repeat(64)),
+            format!("client/client_keys/{}", "A".repeat(64)),
+            "client/client_keys/short".to_owned(),
+            "client/client_keys/alice@example.com".to_owned(),
+        ] {
+            assert!(!admits(&allowed, &denied), "{denied}");
+        }
+        assert!(!admits(
+            &entries(&["domain:example.com", "alice@example.com"]),
+            &client
+        ));
+        assert!(!in_domain(
+            "client/client_keys/alice@example.com",
+            "example.com"
+        ));
+        assert!(valid_entry("credential_client:", None).is_err());
+        assert!(valid_entry("credential_client:client_keys/other", None).is_err());
     }
 
     #[test]

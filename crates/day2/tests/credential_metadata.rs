@@ -23,6 +23,52 @@ struct World {
     runtime: Runtime,
 }
 
+#[test]
+fn lifecycle_admission_rejects_unbound_or_ambiguous_management_intent() -> Result<()> {
+    let path = PathBuf::from(
+        std::env::var_os("DAY2_TEST_CREDENTIAL_METADATA_ARTIFACT")
+            .context("credential fixture required")?,
+    );
+    let artifact = LoadedArtifact::load(&path)?;
+    for mutation in [
+        "missing_lineage",
+        "missing_head",
+        "wrong_revision_type",
+        "mixed_action",
+        "ordinary_context",
+        "unknown_family",
+    ] {
+        let mut contract = artifact.contract().clone();
+        let access = &mut contract
+            .app_contract
+            .as_mut()
+            .unwrap()
+            .operations
+            .get_mut("credential_metadata.rotate_client")
+            .unwrap()
+            .credential_access;
+        match mutation {
+            "missing_lineage" => access.management_lineage.clear(),
+            "missing_head" => access.rotation_head.clear(),
+            "wrong_revision_type" => access.rotation_revision = access.rotation_head.clone(),
+            "mixed_action" => access.revocations = access.rotations.clone(),
+            "ordinary_context" => access.interactive = false,
+            "unknown_family" => access.rotations = vec!["unknown".into()],
+            _ => unreachable!(),
+        }
+        assert!(
+            contract
+                .app_contract
+                .as_ref()
+                .unwrap()
+                .validate(&contract)
+                .is_err(),
+            "accepted {mutation}"
+        );
+    }
+    Ok(())
+}
+
 impl World {
     fn new() -> Result<Self> {
         let artifact_path = PathBuf::from(std::env::var_os("DAY2_TEST_CREDENTIAL_METADATA_ARTIFACT")
@@ -619,6 +665,54 @@ step = |raw| raw
         fs::write(directory.join("app/main.roc"), &positive)?;
         let (success, diagnostics) = run(directory, "check")?;
         ensure!(success, "native interactive issuance: {diagnostics}");
+    }
+    let lifecycle_positive = format!(
+        "{issuance_base}\nrotate : InteractiveContext, Credentials.ManagementSnapshot_clients -> Tx(Credentials.RotationOutcome_clients)\nrotate = |context, expected| (Credentials.clients.rotate)(context, {{ expected: expected }})\nrevoke : InteractiveContext, Credentials.Ref_personal -> Tx(Credentials.RevocationOutcome_personal)\nrevoke = |context, lineage| (Credentials.personal.revoke)(context, {{ lineage: lineage }})\n"
+    );
+    for directory in [&stage, &restricted] {
+        fs::write(directory.join("app/main.roc"), &lifecycle_positive)?;
+        let (success, diagnostics) = run(directory, "check")?;
+        ensure!(success, "native interactive lifecycle: {diagnostics}");
+        for (probe, expected) in [
+            (
+                "probe : Context, Credentials.ManagementSnapshot_clients -> Tx(Credentials.RotationOutcome_clients)\nprobe = |context, expected| (Credentials.clients.rotate)(context, { expected: expected })",
+                "Context",
+            ),
+            (
+                "probe : Context, Credentials.Ref_clients -> Tx(Credentials.RevocationOutcome_clients)\nprobe = |context, lineage| (Credentials.clients.revoke)(context, { lineage: lineage })",
+                "Context",
+            ),
+            (
+                "probe : InteractiveContext, Credentials.ManagementSnapshot_personal -> Tx(Credentials.RotationOutcome_clients)\nprobe = |context, expected| (Credentials.clients.rotate)(context, { expected: expected })",
+                "ManagementSnapshot_personal",
+            ),
+            (
+                "probe : InteractiveContext, Credentials.Ref_personal -> Tx(Credentials.RevocationOutcome_clients)\nprobe = |context, lineage| (Credentials.clients.revoke)(context, { lineage: lineage })",
+                "Ref_personal",
+            ),
+            (
+                "probe = |context, expected| (Credentials.clients.rotate)(context, { expected, actor: \"alice\" })",
+                "actor",
+            ),
+            (
+                "probe = |context, lineage| (Credentials.personal.revoke)(context, { lineage, version: \"other\" })",
+                "version",
+            ),
+            (
+                "probe : Credentials.Issued_clients -> Str\nprobe = |issued| issued.token",
+                "token",
+            ),
+        ] {
+            fs::write(
+                directory.join("app/main.roc"),
+                format!("{issuance_base}\n{probe}\n"),
+            )?;
+            let (success, diagnostics) = run(directory, "check")?;
+            ensure!(
+                !success && diagnostics.contains(expected),
+                "negative lifecycle fixture: {diagnostics}"
+            );
+        }
     }
     for (probe, expected) in [
         (

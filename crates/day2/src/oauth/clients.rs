@@ -5,7 +5,61 @@ use super::approval_keys::{AccessTokenSource, GcpSecretReader, GcpSecretVersion}
 use crate::artifact::Instance;
 use anyhow::{Context, Result, ensure};
 use day2_capabilities::{BindingRef, Name, SecretProvider, oauth::GoogleWebClient};
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
+
+/// The reviewed edge grants unconditional container access, across versions. Shell
+/// client and attestation selections must not expose an app custody container.
+pub(crate) fn shell_secret_containers(instance: &Instance) -> Result<BTreeSet<(u64, String)>> {
+    validate(instance)?;
+    let catalog = instance
+        .oauth_clients
+        .as_ref()
+        .context("OAuth clients missing")?;
+    let control = instance
+        .control
+        .as_ref()
+        .context("OAuth client secret catalog missing")?;
+    let registrations: BTreeSet<_> = instance
+        .apps
+        .values()
+        .flat_map(|app| app.oauth_connections.values())
+        .map(|binding| binding.registration.id.clone())
+        .collect();
+    ensure!(
+        registrations == catalog.registrations.keys().cloned().collect(),
+        "security shell client catalog must exactly cover selected registrations"
+    );
+    let container = |name: &Name| -> Result<(u64, String)> {
+        let SecretProvider::GcpVersion {
+            project_number,
+            secret,
+            ..
+        } = control
+            .secrets
+            .get(name)
+            .context("OAuth secret provider missing")?;
+        Ok((project_number.get(), secret.as_str().into()))
+    };
+    let mut selected = BTreeSet::from([container(&catalog.reauthentication.credential)?]);
+    for registration in catalog.registrations.values() {
+        selected.insert(container(&registration.client.credential)?);
+    }
+    let mut custody = BTreeSet::new();
+    for binding in instance
+        .apps
+        .values()
+        .flat_map(|app| app.oauth_connections.values())
+    {
+        selected.insert(container(&binding.shell_attestation_secret)?);
+        custody.insert(container(&binding.custody_verifier_secret)?);
+        custody.insert(container(&binding.custody_encryption_secret)?);
+    }
+    ensure!(
+        selected.is_disjoint(&custody),
+        "security shell cannot access app custody secret containers"
+    );
+    Ok(selected)
+}
 
 pub(crate) fn validate(instance: &Instance) -> Result<()> {
     let Some(catalog) = &instance.oauth_clients else {
@@ -145,6 +199,51 @@ pub(super) fn selected_credential(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn shell_cannot_read_custody_containers_even_at_distinct_versions() -> anyhow::Result<()> {
+        let selected = crate::oauth::admission::live::tests::selected()?;
+        let mut instance = selected.instance().clone();
+        let containers = super::shell_secret_containers(&instance)?;
+        assert_eq!(containers.len(), 3);
+        let mut excess = instance.clone();
+        let client = excess
+            .oauth_clients
+            .as_ref()
+            .unwrap()
+            .registrations
+            .values()
+            .next()
+            .unwrap()
+            .clone();
+        excess
+            .oauth_clients
+            .as_mut()
+            .unwrap()
+            .registrations
+            .insert(Name::try_from("unused_client".to_owned())?, client);
+        assert!(super::shell_secret_containers(&excess).is_err());
+        let connection = instance.apps["workspace"].oauth_connections["calendar"].clone();
+        let credential = instance
+            .oauth_clients
+            .as_ref()
+            .unwrap()
+            .reauthentication
+            .credential
+            .clone();
+        let mut shared =
+            instance.control.as_ref().unwrap().secrets[&connection.custody_verifier_secret].clone();
+        let day2_capabilities::SecretProvider::GcpVersion { version, .. } = &mut shared;
+        *version = std::num::NonZeroU64::new(version.get() + 1).unwrap();
+        instance
+            .control
+            .as_mut()
+            .unwrap()
+            .secrets
+            .insert(credential, shared);
+        super::validate(&instance)?; // Exact versions differ, but IAM is container-wide.
+        assert!(super::shell_secret_containers(&instance).is_err());
+        Ok(())
+    }
     use super::*;
     use serde_json::{Value, json};
 

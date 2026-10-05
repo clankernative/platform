@@ -9,6 +9,10 @@ use std::{
 };
 
 mod app_contracts;
+mod architecture;
+mod architecture_dependencies;
+mod architecture_kernel;
+mod architecture_proofs;
 mod build_native;
 mod control_simulation;
 mod formatter_bootstrap;
@@ -258,6 +262,45 @@ fn main() -> Result<()> {
         Some(lock)
     };
     match action.as_str() {
+        "architecture-check" => {
+            ensure!(
+                args.next().is_none(),
+                "architecture-check accepts no arguments"
+            );
+            architecture::check(&root)?;
+            architecture_dependencies::check(&root)?;
+            architecture_proofs::check(&root)?;
+        }
+        "architecture-inventory" => {
+            ensure!(
+                args.next().is_none(),
+                "architecture-inventory accepts no arguments"
+            );
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&architecture::inventory(&root)?)?
+            );
+        }
+        "architecture-proof-inventory" => {
+            ensure!(
+                args.next().is_none(),
+                "architecture-proof-inventory accepts no arguments"
+            );
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&architecture_proofs::trait_check_inventory(&root)?)?
+            );
+        }
+        "architecture-dependencies" => {
+            ensure!(
+                args.next().is_none(),
+                "architecture-dependencies accepts no arguments"
+            );
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&architecture_dependencies::inventory(&root)?)?
+            );
+        }
         "source-check" => {
             ensure!(args.next().is_none(), "source-check accepts no arguments");
             tooling::source_check(&root)?;
@@ -450,6 +493,8 @@ fn main() -> Result<()> {
             };
             build_recipe(&root, &app, None, None, context.as_ref())?;
         }
+        "build-delegation" => verification::build_delegation(&root)?,
+        "build-delegation-business" => verification::build_delegation_business(&root)?,
         "catalog-candidate" => {
             let instance = PathBuf::from(
                 args.next()
@@ -743,6 +788,13 @@ fn main() -> Result<()> {
                 runtime_image.as_deref(),
                 prior_suites.as_deref(),
             )?;
+        }
+        "linux-test-delegation" => {
+            ensure!(
+                cfg!(target_os = "linux") && args.next().is_none(),
+                "closed native Linux delegation test required"
+            );
+            verification::linux_delegation_tests(&root)?;
         }
         "linux-test-suite" => {
             let suite = args

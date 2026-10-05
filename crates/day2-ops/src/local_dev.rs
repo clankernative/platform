@@ -149,13 +149,7 @@ fn private(path: &Path) -> Result<()> {
 }
 
 fn atomic(path: &Path, value: &impl Serialize) -> Result<()> {
-    let mut file = tempfile::NamedTempFile::new_in(path.parent().context("local file parent")?)?;
-    file.as_file()
-        .set_permissions(fs::Permissions::from_mode(0o600))?;
-    file.write_all(&serde_json::to_vec_pretty(value)?)?;
-    file.as_file().sync_all()?;
-    file.persist(path)?;
-    Ok(())
+    atomic_bytes(path, &serde_json::to_vec_pretty(value)?)
 }
 
 fn atomic_bytes(path: &Path, bytes: &[u8]) -> Result<()> {

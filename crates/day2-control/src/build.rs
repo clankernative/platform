@@ -119,6 +119,10 @@ impl PlatformInputs {
         for name in [
             "Cargo.toml",
             "Cargo.lock",
+            "architecture-rules.json",
+            "architecture-boundaries.json",
+            "architecture-proofs.json",
+            "architecture/clippy.toml",
             "rust-toolchain.toml",
             "toolchain.json",
             ".dockerignore",

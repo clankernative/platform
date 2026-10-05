@@ -1,0 +1,1558 @@
+{
+  "version": 1,
+  "packages": [
+    {
+      "name": "day2",
+      "manifest": "crates/day2/Cargo.toml",
+      "role": "runtime",
+      "dependencies": [
+        {
+          "name": "anyhow",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "axum",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "base64",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "clanker-ui-runtime",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": "vendor/clanker-ui-runtime"
+        },
+        {
+          "name": "cookie",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "crc32c",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "cssparser",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "day2-capabilities",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": "crates/day2-capabilities"
+        },
+        {
+          "name": "day2-sandbox",
+          "kind": "normal",
+          "target": "cfg(target_os = \"linux\")",
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": "crates/day2-sandbox"
+        },
+        {
+          "name": "ego-tree",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "getrandom",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "hmac",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "html5ever",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "html5gum",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "image",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [
+            "jpeg",
+            "png",
+            "webp"
+          ],
+          "default_features": false,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "maud",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "minijinja",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [
+            "debug",
+            "fuel",
+            "multi_template",
+            "serde",
+            "unstable_machinery"
+          ],
+          "default_features": false,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "oxc_allocator",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "oxc_ast",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "oxc_ast_visit",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "oxc_parser",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "oxc_span",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "percent-encoding",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "proc-macro2",
+          "kind": "dev",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "proptest",
+          "kind": "dev",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "reqwest",
+          "kind": "dev",
+          "target": null,
+          "rename": null,
+          "features": [
+            "blocking",
+            "cookies"
+          ],
+          "default_features": false,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "reqwest",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [
+            "blocking",
+            "rustls-tls"
+          ],
+          "default_features": false,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "resvg",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": false,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "ring",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "roxmltree",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "rusqlite",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [
+            "bundled",
+            "hooks",
+            "limits"
+          ],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "rustix",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [
+            "fs"
+          ],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "scraper",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "serde",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [
+            "derive"
+          ],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "serde_json",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "sha2",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "syn",
+          "kind": "dev",
+          "target": null,
+          "rename": null,
+          "features": [
+            "full",
+            "visit"
+          ],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "tempfile",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "time",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [
+            "formatting"
+          ],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "tokio",
+          "kind": "dev",
+          "target": null,
+          "rename": null,
+          "features": [
+            "test-util"
+          ],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "tokio",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [
+            "macros",
+            "net",
+            "rt-multi-thread",
+            "signal",
+            "sync",
+            "time"
+          ],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "tokio-stream",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "url",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        }
+      ],
+      "production_targets": [
+        {
+          "name": "day2",
+          "kind": [
+            "bin"
+          ],
+          "source": "crates/day2/src/main.rs"
+        },
+        {
+          "name": "day2",
+          "kind": [
+            "lib"
+          ],
+          "source": "crates/day2/src/lib.rs"
+        },
+        {
+          "name": "day2-health",
+          "kind": [
+            "bin"
+          ],
+          "source": "crates/day2/src/bin/day2-health.rs"
+        },
+        {
+          "name": "day2-inspect",
+          "kind": [
+            "bin"
+          ],
+          "source": "crates/day2/src/bin/day2-inspect.rs"
+        },
+        {
+          "name": "day2-package",
+          "kind": [
+            "bin"
+          ],
+          "source": "crates/day2/src/bin/day2-package.rs"
+        },
+        {
+          "name": "day2-security-shell",
+          "kind": [
+            "bin"
+          ],
+          "source": "crates/day2/src/bin/day2-security-shell.rs"
+        },
+        {
+          "name": "sandbox_probe",
+          "kind": [
+            "bin"
+          ],
+          "source": "crates/day2/src/bin/sandbox_probe.rs"
+        }
+      ]
+    },
+    {
+      "name": "day2-capabilities",
+      "manifest": "crates/day2-capabilities/Cargo.toml",
+      "role": "contracts",
+      "dependencies": [
+        {
+          "name": "anyhow",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "serde",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [
+            "derive"
+          ],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "serde_json",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "sha2",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        }
+      ],
+      "production_targets": [
+        {
+          "name": "day2_capabilities",
+          "kind": [
+            "lib"
+          ],
+          "source": "crates/day2-capabilities/src/lib.rs"
+        }
+      ]
+    },
+    {
+      "name": "day2-cli-checks",
+      "manifest": "cli/checks/Cargo.toml",
+      "role": "contracts",
+      "dependencies": [
+        {
+          "name": "serde_json",
+          "kind": "dev",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "tempfile",
+          "kind": "dev",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        }
+      ],
+      "production_targets": [
+        {
+          "name": "day2_cli_checks",
+          "kind": [
+            "lib"
+          ],
+          "source": "cli/checks/src/lib.rs"
+        }
+      ]
+    },
+    {
+      "name": "day2-control",
+      "manifest": "crates/day2-control/Cargo.toml",
+      "role": "runtime",
+      "dependencies": [
+        {
+          "name": "anyhow",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "axum",
+          "kind": "dev",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "base64",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "crc32c",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "day2",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": "crates/day2"
+        },
+        {
+          "name": "day2-capabilities",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": "crates/day2-capabilities"
+        },
+        {
+          "name": "day2-kernel",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": "crates/day2-kernel"
+        },
+        {
+          "name": "durable-temporal",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": "crates/durable-temporal"
+        },
+        {
+          "name": "hmac",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "proptest",
+          "kind": "dev",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "reqwest",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [
+            "blocking",
+            "json",
+            "rustls-tls"
+          ],
+          "default_features": false,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "ring",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "rusqlite",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [
+            "bundled"
+          ],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "serde",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [
+            "derive"
+          ],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "serde_json",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "serde_yaml",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "sha1",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "sha2",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "tempfile",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "tokio",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [
+            "macros",
+            "rt-multi-thread",
+            "sync",
+            "time"
+          ],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "url",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        }
+      ],
+      "production_targets": [
+        {
+          "name": "control",
+          "kind": [
+            "bin"
+          ],
+          "source": "crates/day2-control/src/bin/control.rs"
+        },
+        {
+          "name": "day2-app-keygen",
+          "kind": [
+            "bin"
+          ],
+          "source": "crates/day2-control/src/bin/day2-app-keygen.rs"
+        },
+        {
+          "name": "day2-gke-release",
+          "kind": [
+            "bin"
+          ],
+          "source": "crates/day2-control/src/bin/day2-gke-release.rs"
+        },
+        {
+          "name": "day2-serve",
+          "kind": [
+            "bin"
+          ],
+          "source": "crates/day2-control/src/bin/day2-serve.rs"
+        },
+        {
+          "name": "day2-serving-snapshot",
+          "kind": [
+            "bin"
+          ],
+          "source": "crates/day2-control/src/bin/day2-serving-snapshot.rs"
+        },
+        {
+          "name": "day2_control",
+          "kind": [
+            "lib"
+          ],
+          "source": "crates/day2-control/src/lib.rs"
+        }
+      ]
+    },
+    {
+      "name": "day2-kernel",
+      "manifest": "crates/day2-kernel/Cargo.toml",
+      "role": "kernel",
+      "dependencies": [
+        {
+          "name": "anyhow",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": false,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "day2-capabilities",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": "crates/day2-capabilities"
+        },
+        {
+          "name": "serde",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [
+            "alloc",
+            "derive"
+          ],
+          "default_features": false,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "serde_json",
+          "kind": "dev",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        }
+      ],
+      "production_targets": [
+        {
+          "name": "day2_kernel",
+          "kind": [
+            "lib"
+          ],
+          "source": "crates/day2-kernel/src/lib.rs"
+        }
+      ]
+    },
+    {
+      "name": "day2-ops",
+      "manifest": "crates/day2-ops/Cargo.toml",
+      "role": "tool",
+      "dependencies": [
+        {
+          "name": "anyhow",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "day2",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": "crates/day2"
+        },
+        {
+          "name": "day2-capabilities",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": "crates/day2-capabilities"
+        },
+        {
+          "name": "flate2",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "reqwest",
+          "kind": "dev",
+          "target": null,
+          "rename": null,
+          "features": [
+            "blocking",
+            "cookies"
+          ],
+          "default_features": false,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "reqwest",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [
+            "blocking",
+            "rustls-tls"
+          ],
+          "default_features": false,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "rusqlite",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [
+            "backup",
+            "bundled"
+          ],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "rustix",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [
+            "process"
+          ],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "serde",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [
+            "derive"
+          ],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "serde_json",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "sha2",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "tar",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": false,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "tempfile",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "tokio",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [
+            "rt-multi-thread",
+            "signal"
+          ],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        }
+      ],
+      "production_targets": [
+        {
+          "name": "day2-backup",
+          "kind": [
+            "bin"
+          ],
+          "source": "crates/day2-ops/src/bin/day2-backup.rs"
+        },
+        {
+          "name": "day2-host",
+          "kind": [
+            "bin"
+          ],
+          "source": "crates/day2-ops/src/main.rs"
+        },
+        {
+          "name": "day2-provision-credentials",
+          "kind": [
+            "bin"
+          ],
+          "source": "crates/day2-ops/src/bin/day2-provision-credentials.rs"
+        },
+        {
+          "name": "day2_ops",
+          "kind": [
+            "lib"
+          ],
+          "source": "crates/day2-ops/src/lib.rs"
+        }
+      ]
+    },
+    {
+      "name": "day2-roc-worker",
+      "manifest": "crates/worker/Cargo.toml",
+      "role": "abi",
+      "dependencies": [],
+      "production_targets": [
+        {
+          "name": "day2_roc_worker",
+          "kind": [
+            "staticlib"
+          ],
+          "source": "crates/worker/src/lib.rs"
+        }
+      ]
+    },
+    {
+      "name": "day2-sandbox",
+      "manifest": "crates/day2-sandbox/Cargo.toml",
+      "role": "adapter",
+      "dependencies": [
+        {
+          "name": "anyhow",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "landlock",
+          "kind": "normal",
+          "target": "cfg(target_os = \"linux\")",
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "nix",
+          "kind": "normal",
+          "target": "cfg(target_os = \"linux\")",
+          "rename": null,
+          "features": [
+            "fs",
+            "process",
+            "resource",
+            "signal"
+          ],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "seccompiler",
+          "kind": "normal",
+          "target": "cfg(target_os = \"linux\")",
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "tempfile",
+          "kind": "dev",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        }
+      ],
+      "production_targets": [
+        {
+          "name": "day2-compiler-sandbox",
+          "kind": [
+            "bin"
+          ],
+          "source": "crates/day2-sandbox/src/bin/day2-compiler-sandbox.rs"
+        },
+        {
+          "name": "day2-sandbox",
+          "kind": [
+            "bin"
+          ],
+          "source": "crates/day2-sandbox/src/main.rs"
+        },
+        {
+          "name": "day2-sandbox-probe",
+          "kind": [
+            "bin"
+          ],
+          "source": "crates/day2-sandbox/src/bin/day2-sandbox-probe.rs"
+        },
+        {
+          "name": "day2_sandbox",
+          "kind": [
+            "lib"
+          ],
+          "source": "crates/day2-sandbox/src/lib.rs"
+        }
+      ]
+    },
+    {
+      "name": "durable-temporal",
+      "manifest": "crates/durable-temporal/Cargo.toml",
+      "role": "adapter",
+      "dependencies": [
+        {
+          "name": "anyhow",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "futures",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "rusqlite",
+          "kind": "dev",
+          "target": null,
+          "rename": null,
+          "features": [
+            "bundled"
+          ],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "serde",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [
+            "derive"
+          ],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "serde_json",
+          "kind": "dev",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "tempfile",
+          "kind": "dev",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "temporalio-client",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [
+            "vendored-protox"
+          ],
+          "default_features": false,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "temporalio-common",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": false,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "temporalio-macros",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "temporalio-sdk",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": false,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "temporalio-workflow",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "tokio",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [
+            "macros",
+            "rt-multi-thread",
+            "sync",
+            "time"
+          ],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "url",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        }
+      ],
+      "production_targets": [
+        {
+          "name": "durable_temporal",
+          "kind": [
+            "lib"
+          ],
+          "source": "crates/durable-temporal/src/lib.rs"
+        }
+      ]
+    },
+    {
+      "name": "xtask",
+      "manifest": "crates/xtask/Cargo.toml",
+      "role": "tool",
+      "dependencies": [
+        {
+          "name": "anyhow",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "day2",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": "crates/day2"
+        },
+        {
+          "name": "day2-control",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": "crates/day2-control"
+        },
+        {
+          "name": "day2-ops",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": "crates/day2-ops"
+        },
+        {
+          "name": "proc-macro2",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "quote",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "rusqlite",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [
+            "bundled"
+          ],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "serde",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [
+            "derive"
+          ],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "serde_json",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "sha2",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "syn",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [
+            "full",
+            "visit"
+          ],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "tempfile",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        }
+      ],
+      "production_targets": [
+        {
+          "name": "xtask",
+          "kind": [
+            "bin"
+          ],
+          "source": "crates/xtask/src/main.rs"
+        }
+      ]
+    }
+  ]
+}

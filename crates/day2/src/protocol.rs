@@ -75,7 +75,7 @@ impl<'a> Database<'a> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Step<'a> {
-    CredentialIssue,
+    CredentialMutation,
     Database(Database<'a>),
     Request {
         model: &'a str,
@@ -98,7 +98,9 @@ impl Step<'_> {
     pub(crate) fn mutation(self) -> bool {
         matches!(
             self,
-            Self::Database(Database::Write { .. }) | Self::Request { .. } | Self::CredentialIssue
+            Self::Database(Database::Write { .. })
+                | Self::Request { .. }
+                | Self::CredentialMutation
         )
     }
 }
@@ -143,7 +145,7 @@ impl Phase {
                 Self::Decide | Self::Complete,
                 Step::Database(_)
                 | Step::Request { .. }
-                | Step::CredentialIssue
+                | Step::CredentialMutation
                 | Step::Boundary(Commit),
             ) => self,
             (Self::Decide, Step::Boundary(Effects)) => Self::Effects,
@@ -337,15 +339,17 @@ impl Instruction {
         let named = !self.model.is_empty();
         let payload = !self.data.is_empty() && self.data.len() <= 65_536;
         Ok(match self.kind.as_str() {
-            "credential_issue" => {
+            "credential_issue" | "credential_rotate" | "credential_revoke" => {
+                let model = match self.kind.as_str() {
+                    "credential_issue" => crate::credential_codegen::ISSUE,
+                    "credential_rotate" => crate::credential_codegen::ROTATE,
+                    _ => crate::credential_codegen::REVOKE,
+                };
                 ensure!(
-                    self.model == crate::credential_codegen::ISSUE
-                        && empty_row
-                        && empty_page
-                        && payload,
-                    "invalid_credential_issue_instruction"
+                    self.model == model && empty_row && empty_page && payload,
+                    "invalid_credential_lifecycle_instruction"
                 );
-                Step::CredentialIssue
+                Step::CredentialMutation
             }
             "decide" | "effects" | "complete" | "commit" => {
                 ensure!(self.only_kind(&self.kind), "invalid_boundary_instruction");

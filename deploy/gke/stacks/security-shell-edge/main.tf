@@ -38,6 +38,21 @@ resource "google_service_account_iam_member" "sign_jwt" {
   member             = "serviceAccount:${google_service_account.shell.email}"
 }
 
+# Five read-only methods used by the shell's independent native edge guard.
+# This grants neither policy mutation nor secret access nor app authority.
+resource "google_project_iam_custom_role" "facts" {
+  project     = var.project_id
+  role_id     = "day2SecurityShellFacts_${substr(sha256(var.namespace), 0, 8)}"
+  title       = "Day2 security shell edge reads"
+  permissions = ["resourcemanager.projects.get", "compute.backendServices.get", "compute.urlMaps.get", "compute.targetHttpsProxies.get", "compute.globalForwardingRules.get"]
+}
+
+resource "google_project_iam_member" "facts" {
+  project = var.project_id
+  role    = google_project_iam_custom_role.facts.name
+  member  = "serviceAccount:${google_service_account.shell.email}"
+}
+
 resource "kubernetes_namespace_v1" "shell" {
   metadata {
     name   = var.namespace
@@ -226,8 +241,9 @@ resource "kubernetes_config_map_v1" "contract" {
     SERVICE_NAME                 = local.service_name
     SERVICE_ACCOUNT_NAME         = kubernetes_service_account_v1.shell.metadata[0].name
     OAUTH_SHELL_SERVICE_ACCOUNT  = google_service_account.shell.email
+    OAUTH_SHELL_SECRET_IDS       = jsonencode(sort(tolist(var.runtime_secret_ids)))
     REQUIRED_SERVICE_LABEL_KEY   = "day2.dev/service"
     REQUIRED_SERVICE_LABEL_VALUE = "security-shell"
   }
-  depends_on = [google_iap_web_backend_service_iam_binding.shell, google_service_account_iam_member.workload, google_service_account_iam_member.sign_jwt]
+  depends_on = [google_iap_web_backend_service_iam_binding.shell, google_service_account_iam_member.workload, google_service_account_iam_member.sign_jwt, google_project_iam_member.facts, google_secret_manager_secret_iam_member.shell]
 }

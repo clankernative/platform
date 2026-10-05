@@ -4,6 +4,101 @@ mock_provider "google" {}
 mock_provider "kubernetes" {}
 mock_provider "cloudflare" {}
 
+run "credential_api_is_disabled_by_default" {
+  command = plan
+  variables { backend_service_name = "" }
+  assert {
+    condition     = length(kubernetes_service_v1.credential_api) == 0 && length(kubernetes_manifest.credential_api) == 0
+    error_message = "An ordinary app must not publish a managed credential backend."
+  }
+}
+
+run "credential_api_keeps_the_human_default_protected" {
+  command = plan
+  variables {
+    credential_api       = true
+    backend_service_name = ""
+  }
+  assert {
+    condition     = kubernetes_manifest.credential_api[0].manifest.spec.iap.enabled == false && kubernetes_manifest.backend_config.manifest.spec.iap.enabled == true
+    error_message = "Credential verification belongs to the host; human authentication remains on IAP."
+  }
+  assert {
+    condition = kubernetes_ingress_v1.app.spec[0].default_backend[0].service[0].name == "app" && length([
+      for path in kubernetes_ingress_v1.app.spec[0].rule[0].http[0].path : path
+      if path.backend[0].service[0].name == "credential-api" && path.path == "/_day2/credentials/api/*" && path.path_type == "ImplementationSpecific"
+      ]) == 1 && length([
+      for path in kubernetes_ingress_v1.app.spec[0].rule[0].http[0].path : path
+      if path.backend[0].service[0].name == "credential-api"
+    ]) == 1
+    error_message = "Only the reserved credential API prefix may reach the credential backend."
+  }
+}
+
+run "app_call_gates_and_serving_reads_are_exactly_scoped" {
+  command = plan
+  variables {
+    app_calls = {
+      service_account_id = "example-call"
+      issuer_backend     = "issuer-backend"
+      receiver_backend   = "receiver-backend"
+      incoming_workloads = ["caller@example-tools.iam.gserviceaccount.com"]
+      serving_readers    = ["caller@example-tools.iam.gserviceaccount.com"]
+      workload_name      = "day2-example"
+      serving_api_cidr   = "10.1.0.2/32"
+    }
+    runtime_secret_ids = ["example-workload-key", "example-issuer-key"]
+  }
+  override_data {
+    target = data.google_compute_backend_service.app
+    values = {
+      generated_id = 1
+      description  = "{\"kubernetes.io/service-name\":\"app-example/app\"}"
+      iap          = [{ enabled = true, oauth2_client_id = "", oauth2_client_secret = "", oauth2_client_secret_sha256 = "" }]
+    }
+  }
+  override_data {
+    target = data.google_compute_backend_service.app_call_issuer
+    values = {
+      generated_id = 2
+      description  = "{\"kubernetes.io/service-name\":\"app-example/app-issuer\"}"
+      iap          = [{ enabled = true, oauth2_client_id = "", oauth2_client_secret = "", oauth2_client_secret_sha256 = "" }]
+    }
+  }
+  override_data {
+    target = data.google_compute_backend_service.app_call_receiver
+    values = {
+      generated_id = 3
+      description  = "{\"kubernetes.io/service-name\":\"app-example/app-receiver\"}"
+      iap          = [{ enabled = true, oauth2_client_id = "", oauth2_client_secret = "", oauth2_client_secret_sha256 = "" }]
+    }
+  }
+  override_resource {
+    target = google_service_account.app_calls
+    values = { email = "example-call@example-tools.iam.gserviceaccount.com", name = "projects/example-tools/serviceAccounts/example-call@example-tools.iam.gserviceaccount.com" }
+  }
+  assert {
+    condition     = toset(keys(google_secret_manager_secret_iam_member.runtime)) == toset(["example-workload-key", "example-issuer-key"]) && alltrue([for grant in google_secret_manager_secret_iam_member.runtime : grant.member == "serviceAccount:example-call@example-tools.iam.gserviceaccount.com" && grant.role == "roles/secretmanager.secretAccessor"])
+    error_message = "CSI access must follow the linked app-call identity and stay limited to the two named keys."
+  }
+  assert {
+    condition     = toset(google_iap_web_backend_service_iam_binding.app_calls["issuer"].members) == toset(["serviceAccount:example-call@example-tools.iam.gserviceaccount.com"]) && toset(google_iap_web_backend_service_iam_binding.app_calls["receiver"].members) == toset(["serviceAccount:caller@example-tools.iam.gserviceaccount.com"])
+    error_message = "Only the source workload can issue; only selected incoming workloads can enter the receiver gate."
+  }
+  assert {
+    condition     = toset(google_project_iam_custom_role.app_call_signer[0].permissions) == toset(["iam.serviceAccounts.signJwt"]) && toset(google_project_iam_custom_role.app_call_discovery[0].permissions) == toset(["container.clusters.get"])
+    error_message = "No broad token-creator or cluster-reader IAM authority is needed."
+  }
+  assert {
+    condition     = alltrue([for rule in kubernetes_role_v1.app_call_serving[0].rule : toset(rule.verbs) == toset(["get"]) && length(rule.resource_names) == 1]) && kubernetes_service_account_v1.runtime.metadata[0].annotations["iam.gke.io/gcp-service-account"] == "example-call@example-tools.iam.gserviceaccount.com"
+    error_message = "Provider evidence must be readable only for the exact host, pod and workload identity."
+  }
+  assert {
+    condition     = kubernetes_config_map_v1.platform_contract.data["APP_CALL_ISSUER_AUDIENCE"] == "/projects/123456789012/global/backendServices/2" && kubernetes_config_map_v1.platform_contract.data["APP_CALL_RECEIVER_AUDIENCE"] == "/projects/123456789012/global/backendServices/3"
+    error_message = "The host must receive independently resolved IAP audiences."
+  }
+}
+
 variables {
   project_id           = "example-tools"
   project_number       = "123456789012"
@@ -45,6 +140,7 @@ run "publishes_the_contract_day2_app_reads" {
       REQUIRED_SERVICE_LABEL_KEY   = "internal-tools.wonderly.io/service"
       REQUIRED_SERVICE_LABEL_VALUE = "app"
       SERVICE_NAME                 = "app"
+      SERVICE_ACCOUNT_NAME         = "runtime"
     })
     error_message = "The contract must hold exactly the keys day2-app reads (plus APP_NAMESPACE), with the backend's numeric ID in the audience."
   }

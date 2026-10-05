@@ -38,6 +38,11 @@ pub(crate) struct ReviewedCatalog {
 }
 
 impl ReviewedCatalog {
+    #[cfg(test)]
+    pub(super) fn entries(&self) -> impl Iterator<Item = &ReviewedAccess> {
+        self.entries.values()
+    }
+
     pub(crate) fn new(entries: Vec<ReviewedAccess>) -> Result<Self> {
         ensure!(entries.len() <= 64, "OAuth reviewed catalog budget");
         let mut selected = BTreeMap::new();
@@ -359,6 +364,9 @@ impl QualifiedConnections {
             "OAuth app is not installed"
         );
         instance.apps.retain(|name, _| name == app);
+        if let Some(runtime) = &mut instance.oauth_runtime {
+            runtime.apps.retain(|name, _| name.as_str() == app);
+        }
         if let Some(control) = &mut instance.control {
             control.apps.retain(|name, _| name.as_str() == app);
             control
@@ -393,6 +401,20 @@ impl QualifiedConnections {
     }
 
     pub(crate) fn from_instance_file(path: &Path, catalog: &ReviewedCatalog) -> Result<Self> {
+        let (instance, artifacts) = Self::load_instance_artifacts(path)?;
+        Self::qualify(&instance, &artifacts, catalog)
+    }
+
+    /// Only the read-only setup command may replace desired pins. Serving
+    /// constructors always compare the operator selection with admitted bytes.
+    pub(super) fn prepare_instance_file(path: &Path) -> Result<Self> {
+        let (instance, artifacts) = Self::load_instance_artifacts(path)?;
+        Self::prepare_instance(instance, &artifacts)
+    }
+
+    fn load_instance_artifacts(
+        path: &Path,
+    ) -> Result<(Instance, BTreeMap<String, LoadedArtifact>)> {
         let path = path.canonicalize()?;
         let instance = Instance::load(&path)?;
         let parent = path.parent().context("OAuth instance directory missing")?;
@@ -406,7 +428,88 @@ impl QualifiedConnections {
                 LoadedArtifact::load(&parent.join(&selected.artifact))?,
             );
         }
-        Self::qualify(&instance, &artifacts, catalog)
+        Ok((instance, artifacts))
+    }
+
+    fn prepare_instance(
+        instance: Instance,
+        artifacts: &BTreeMap<String, LoadedArtifact>,
+    ) -> Result<Self> {
+        let mut instance = Instance::from_bytes(&serde_json::to_vec(&instance)?)?;
+        let shell = live::shell_selection(&instance)?;
+        let mapping = live::Facts::mapping_revision(&instance)?;
+        let mut prepared = BTreeMap::new();
+        for (app, selected) in &instance.apps {
+            if selected.oauth_connections.is_empty() {
+                continue;
+            }
+            let artifact = artifacts
+                .get(app)
+                .context("OAuth selected artifact missing")?;
+            artifact.require_current_api()?;
+            ensure!(
+                artifact.contract().namespace == *app,
+                "OAuth selected artifact namespace mismatch"
+            );
+            super::declaration::validate(
+                &artifact.contract().connection_declarations,
+                artifact.contract(),
+            )?;
+            for (name, selected_binding) in &selected.oauth_connections {
+                let requirement = &artifact
+                    .contract()
+                    .connection_declarations
+                    .iter()
+                    .find(|entry| entry.registration.as_str() == name)
+                    .context("OAuth selected requirement is not declared")?
+                    .requirement;
+                let mut binding = selected_binding.clone();
+                let reviewed = super::google::reviewed(&requirement.account_policy)?;
+                ensure!(
+                    binding.profile.id == reviewed.profile.protocol.identity().binding.id,
+                    "OAuth setup profile does not match declared account policy"
+                );
+                binding.profile = reviewed.profile.protocol.identity().binding.clone();
+                binding.requirement = requirement.nominal_identity()?;
+                binding.security_shell = shell.origin.clone();
+                let secrets = &instance
+                    .control
+                    .as_ref()
+                    .context("OAuth secret catalog missing")?
+                    .secrets;
+                binding.custody.revision = custody_revision(
+                    &instance,
+                    &secrets[&binding.custody_verifier_secret],
+                    &secrets[&binding.custody_encryption_secret],
+                )?;
+                binding.shell_attestation.revision = shell_key_revision(
+                    &instance,
+                    &shell.origin,
+                    &secrets[&binding.shell_attestation_secret],
+                )?;
+                match requirement.account_policy {
+                    AccountBindingPolicy::ExplicitExternalAccount => {
+                        binding.account_binding = binding.shell_attestation.clone()
+                    }
+                    AccountBindingPolicy::MappedHuman => {
+                        binding.account_binding.revision = mapping.clone()
+                    }
+                    AccountBindingPolicy::InstallationAccount => {
+                        anyhow::bail!("Google installation accounts are not reviewed")
+                    }
+                }
+                prepared.insert((app.clone(), name.clone()), binding);
+            }
+        }
+        for ((app, name), binding) in prepared {
+            instance
+                .apps
+                .get_mut(&app)
+                .context("OAuth app missing")?
+                .oauth_connections
+                .insert(name, binding);
+        }
+        Self::qualify(&instance, artifacts, &super::google::catalog()?)
     }
 
     /// Requirements come from admitted artifacts, clients from the existing
@@ -735,6 +838,14 @@ pub(crate) fn binding_namespace(binding: &OutboundConnectionBinding) -> Result<S
 /// instance configuration. Its implementation must check current external
 /// qualification; an operator-authored digest alone is not readiness.
 pub(crate) trait OutboundReadiness: Send + Sync {
+    fn selected_runtime(&self) -> Result<Option<Digest>> {
+        Ok(None)
+    }
+
+    fn observe_identity(&self, _identity: &crate::iap::Verified, _now: i64) -> Result<()> {
+        Ok(())
+    }
+
     fn current(
         &self,
         binding: &OutboundConnectionBinding,
@@ -742,6 +853,9 @@ pub(crate) trait OutboundReadiness: Send + Sync {
         now: i64,
     ) -> Result<Option<profiles::OutboundInstanceEvidence>>;
 }
+
+#[path = "live_readiness.rs"]
+pub(crate) mod live;
 
 struct AuthorityState {
     selected: QualifiedConnections,
@@ -846,6 +960,12 @@ impl ArtifactApprovalAuthority {
         now: i64,
     ) -> Result<Option<ApprovalTerms>> {
         let selected = &state.selected;
+        if let Some(runtime) = &selected.instance.oauth_runtime {
+            ensure!(
+                self.readiness.selected_runtime()? == Some(Digest::of(runtime)?),
+                "OAuth live runtime selection changed"
+            );
+        }
         let mut found = None;
         for ((candidate_app, _), candidate) in &selected.entries {
             if candidate_app != app {
@@ -885,7 +1005,7 @@ impl ArtifactApprovalAuthority {
             callback.binding_namespace() == expected_namespace,
             "OAuth selected binding generation changed"
         );
-        let started = std::time::Instant::now();
+        let started = crate::oauth::effects::Instant::now();
         let Some(evidence) = self.readiness.current(&candidate.binding, &slot, now)? else {
             return Ok(None);
         };
@@ -952,6 +1072,18 @@ impl ArtifactApprovalAuthority {
 }
 
 impl ApprovalAuthority for ArtifactApprovalAuthority {
+    fn observe_identity(&self, app: &str, identity: &crate::iap::Verified, now: i64) -> Result<()> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| anyhow::anyhow!("OAuth selection lock poisoned"))?;
+        ensure!(
+            state.selected.instance.apps.contains_key(app),
+            "OAuth human observation app mismatch"
+        );
+        self.readiness.observe_identity(identity, now)
+    }
+
     fn current(
         &self,
         app: &str,
@@ -1286,6 +1418,93 @@ pub(super) mod tests {
                 .len(),
             1
         );
+        Ok(())
+    }
+
+    #[test]
+    fn setup_prepares_initial_and_rotated_pins_while_serving_refuses_old_selection() -> Result<()> {
+        let fixture = fixture(AccountBindingPolicy::ExplicitExternalAccount)?;
+        let instance = live::tests::selected()?.instance;
+        let mut draft = instance.clone();
+        let stale = Digest::of(&"stale desired pin")?;
+        let binding = draft
+            .apps
+            .get_mut("workspace")
+            .unwrap()
+            .oauth_connections
+            .get_mut("calendar")
+            .unwrap();
+        binding.requirement = stale.clone();
+        binding.profile.revision = stale.clone();
+        binding.custody.revision = stale.clone();
+        binding.security_shell.0.revision = stale.clone();
+        binding.shell_attestation.revision = stale.clone();
+        binding.account_binding.revision = stale.clone();
+        binding.registration.revision = stale;
+        let catalog = super::super::google::catalog()?;
+        assert!(QualifiedConnections::qualify(&draft, &fixture.artifacts, &catalog).is_err());
+        let mut prepared =
+            QualifiedConnections::prepare_instance(draft.clone(), &fixture.artifacts)?;
+        live::setup_selected(&mut prepared)?;
+        assert_eq!(
+            prepared.instance.apps["workspace"].oauth_connections,
+            instance.apps["workspace"].oauth_connections
+        );
+
+        let SecretProvider::GcpVersion { version, .. } = draft
+            .control
+            .as_mut()
+            .unwrap()
+            .secrets
+            .get_mut(&name("encryption"))
+            .unwrap();
+        *version = std::num::NonZeroU64::new(version.get() + 1).unwrap();
+        let rotated = QualifiedConnections::prepare_instance(draft.clone(), &fixture.artifacts)?;
+        assert_ne!(
+            rotated.instance.apps["workspace"].oauth_connections["calendar"].custody,
+            instance.apps["workspace"].oauth_connections["calendar"].custody
+        );
+        assert!(QualifiedConnections::qualify(&draft, &fixture.artifacts, &catalog).is_err());
+        assert_eq!(rotated.instance.control, draft.control);
+        assert_eq!(
+            serde_json::to_value(&rotated.instance.apps["workspace"].edge)?,
+            serde_json::to_value(&draft.apps["workspace"].edge)?
+        );
+        assert_eq!(
+            rotated.instance.apps["workspace"].oauth_connections["calendar"].product_return,
+            draft.apps["workspace"].oauth_connections["calendar"].product_return
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn setup_refuses_wrong_profile_artifact_and_secret_roles() -> Result<()> {
+        let fixture = fixture(AccountBindingPolicy::ExplicitExternalAccount)?;
+        let instance = live::tests::selected()?.instance;
+        let mut wrong = instance.clone();
+        wrong
+            .apps
+            .get_mut("workspace")
+            .unwrap()
+            .oauth_connections
+            .get_mut("calendar")
+            .unwrap()
+            .profile
+            .id = name("google_calendar_mapped_v1");
+        assert!(QualifiedConnections::prepare_instance(wrong, &fixture.artifacts).is_err());
+        assert!(
+            QualifiedConnections::prepare_instance(instance.clone(), &BTreeMap::new()).is_err()
+        );
+        let mut wrong = instance;
+        wrong
+            .apps
+            .get_mut("workspace")
+            .unwrap()
+            .oauth_connections
+            .get_mut("calendar")
+            .unwrap()
+            .custody_encryption_secret = name("verifier");
+        assert!(QualifiedConnections::prepare_instance(wrong, &fixture.artifacts).is_err());
         Ok(())
     }
 
@@ -1783,6 +2002,56 @@ pub(super) mod tests {
     #[derive(Default)]
     struct Keys {
         calls: AtomicUsize,
+    }
+
+    #[test]
+    fn changed_runtime_catalog_refuses_old_facts_before_cloud_or_key_acquisition() -> Result<()> {
+        struct PinnedFacts {
+            revision: Digest,
+            calls: AtomicUsize,
+        }
+        impl OutboundReadiness for PinnedFacts {
+            fn selected_runtime(&self) -> Result<Option<Digest>> {
+                Ok(Some(self.revision.clone()))
+            }
+            fn current(
+                &self,
+                _: &OutboundConnectionBinding,
+                _: &ConnectionSlotKey,
+                _: i64,
+            ) -> Result<Option<profiles::OutboundInstanceEvidence>> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                anyhow::bail!("retired source must not run")
+            }
+        }
+        let facts = fixture(AccountBindingPolicy::ExplicitExternalAccount)?;
+        let mut selected = facts.qualify()?;
+        let mut config: day2_capabilities::oauth::RuntimeCatalog = serde_json::from_value(
+            json!({"version":1,"shell":{"project":"company-tools","backend_service":"shell-backend","url_map":"shell-map","https_proxy":"shell-proxy","forwarding_rule":"shell-https","kubernetes_service":"tools/security-shell"},
+            "apps":{"workspace":{"service_account":"app@company-tools.iam.gserviceaccount.com","accounts":{"calendar":{"kind":"external_accounts","allowed_tenants":["example.com"],"allowed_subjects":null}}}}}),
+        )?;
+        config.validate()?;
+        let source = Arc::new(PinnedFacts {
+            revision: Digest::of(&config)?,
+            calls: AtomicUsize::new(0),
+        });
+        config
+            .apps
+            .get_mut(&name("workspace"))
+            .unwrap()
+            .service_account = "replacement@company-tools.iam.gserviceaccount.com".into();
+        selected.instance.oauth_runtime = Some(config);
+        let keys = Arc::new(Keys::default());
+        let authority =
+            ArtifactApprovalAuthority::with_keys(selected, source.clone(), keys.clone());
+        assert!(
+            authority
+                .current("workspace", &facts.intent, &facts.callback, 5)
+                .is_err()
+        );
+        assert_eq!(source.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(keys.calls.load(Ordering::SeqCst), 0);
+        Ok(())
     }
     impl ApprovalKeyProvider for Keys {
         fn load(

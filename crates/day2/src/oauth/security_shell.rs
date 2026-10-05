@@ -7,6 +7,7 @@ use super::{
     admission, approval_keys, connect, external, profiles, registration, shell_oidc,
     shell_transport,
 };
+use crate::oauth::effects;
 use crate::{artifact::Instance, iap, managed_credentials::browser as credentials};
 use crate::{managed_credentials::crypto::KeyLease, store::open, web_security};
 use anyhow::{Context, Result, ensure};
@@ -24,16 +25,40 @@ use day2_capabilities::{
 use maud::{DOCTYPE, html};
 use std::{
     collections::HashMap,
+    future::Future,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
-    time::{SystemTime, UNIX_EPOCH},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
 };
-use tokio::net::TcpListener;
+use tokio::{
+    net::TcpListener,
+    sync::{OwnedSemaphorePermit, Semaphore},
+};
 
 const COOKIE: &str = "__Host-day2_security_shell";
 const PREFIX: &str = "/oauth/approvals/";
 const SESSION_SECONDS: i64 = 300;
 const MAX_SESSIONS: usize = 1024;
+
+pub(crate) trait ShellGuard: Send + Sync {
+    fn check(&self, now: i64) -> Result<()>;
+}
+
+struct NoAppFacts;
+
+impl admission::OutboundReadiness for NoAppFacts {
+    fn current(
+        &self,
+        _: &day2_capabilities::oauth::OutboundConnectionBinding,
+        _: &day2_capabilities::oauth::ConnectionSlotKey,
+        _: i64,
+    ) -> Result<Option<profiles::OutboundInstanceEvidence>> {
+        Ok(None)
+    }
+}
 
 /// The host registry resolves these current, admitted values on each request.
 /// Request fields never select a requirement, key, registration or account.
@@ -123,6 +148,7 @@ pub(crate) struct SecurityShell {
     sessions: Mutex<HashMap<String, ShellSession>>,
     credentials: Option<Arc<credentials::Registry>>,
     canaries: Option<Arc<registration::shell::Canaries>>,
+    guard: Option<Arc<dyn ShellGuard>>,
 }
 
 pub(crate) struct RegistrationShell {
@@ -134,17 +160,96 @@ pub(crate) struct RegistrationShell {
 struct RegistrationPublication {
     signer: Arc<admission::ArtifactShellSigner>,
     approvals: Arc<shell_transport::RemoteApprovals>,
+    guard: Option<Arc<dyn ShellGuard>>,
 }
 
 impl registration::shell::ReceiptPublisher for RegistrationPublication {
     fn publish(&self, receipt: &registration::Receipt, headers: &HeaderMap, _: i64) -> Result<()> {
-        let now = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())?;
+        let now = effects::wall_time()?;
+        if let Some(guard) = &self.guard {
+            guard.check(now)?;
+        }
         self.signer
             .publish_registration(receipt, self.approvals.as_ref(), headers, now)
     }
 }
 
 impl SecurityShell {
+    /// The ordinary GKE launcher uses one immutable admitted selection, empty
+    /// receipts and the dedicated shell identity. Target pins are desired
+    /// metadata; native edge guards run before authenticated dispatch and again
+    /// after provider probes, before publication.
+    pub(crate) fn from_gke_runtime(
+        instance_path: &Path,
+        runner: &Path,
+    ) -> Result<RegistrationShell> {
+        let selected = admission::QualifiedConnections::from_instance_file(
+            instance_path,
+            &super::google::catalog()?,
+        )?;
+        let instance = selected.instance();
+        super::clients::shell_secret_containers(instance)?;
+        instance
+            .oauth_runtime
+            .as_ref()
+            .context("OAuth runtime missing")?
+            .shell_resources
+            .as_ref()
+            .context("security shell resources missing")?;
+        let account = &instance
+            .oauth_shell_transport
+            .as_ref()
+            .context("OAuth shell transport missing")?
+            .service_account;
+        let tokens = Arc::new(approval_keys::GkeMetadataAccessTokens::selected(account)?);
+        let facts = Arc::new(admission::live::ShellFacts::from_gke(
+            instance,
+            tokens.clone(),
+        )?);
+        let targets = selected.google_targets(facts.selection())?;
+        ensure!(
+            !targets.is_empty(),
+            "security shell has no selected registrations"
+        );
+        for target in &targets {
+            let expected = target.registration_evidence()?;
+            let mut current = false;
+            for binding in instance
+                .apps
+                .values()
+                .flat_map(|app| app.oauth_connections.values())
+            {
+                if target.publication_matches(
+                    &binding.registration.id,
+                    &admission::binding_namespace(binding)?,
+                ) && binding.registration == expected.registration
+                {
+                    current = true;
+                }
+            }
+            ensure!(current, "security shell registration selection changed");
+        }
+        let origin = instance.security_edge()?.1.origin.clone();
+        let (mut shell, signer, approvals) = Self::from_selected(selected)?;
+        Arc::get_mut(&mut shell)
+            .context("security shell already shared")?
+            .guard = Some(facts.clone());
+        let readiness = Arc::new(registration::GoogleReadiness::new(Arc::new(NoAppFacts)));
+        let canaries = Arc::new(
+            registration::shell::Canaries::new(&origin, targets, runner, tokens, readiness)?
+                .with_publication(Arc::new(RegistrationPublication {
+                    signer: signer.clone(),
+                    approvals,
+                    guard: Some(facts),
+                })),
+        );
+        Ok(RegistrationShell {
+            shell: shell.with_registration(canaries.clone())?,
+            signer,
+            canaries,
+        })
+    }
+
     /// Compose the shell from the exact instance-selected artifacts and keys.
     /// This is an explicit GKE host entry point, not an application route or a
     /// readiness assertion. The shell has no app storage paths or custody keys.
@@ -172,19 +277,22 @@ impl SecurityShell {
         )?;
         let targets = selected.google_targets(shell)?;
         let origin = selected.instance().security_edge()?.1.origin.clone();
+        let tokens = Arc::new(approval_keys::GkeMetadataAccessTokens::selected(
+            &selected
+                .instance()
+                .oauth_shell_transport
+                .as_ref()
+                .context("OAuth shell transport missing")?
+                .service_account,
+        )?);
         let (shell, signer, approvals) = Self::from_selected(selected)?;
         let canaries = Arc::new(
-            registration::shell::Canaries::new(
-                &origin,
-                targets,
-                runner,
-                Arc::new(approval_keys::GkeMetadataAccessTokens::new()?),
-                readiness,
-            )?
-            .with_publication(Arc::new(RegistrationPublication {
-                signer: signer.clone(),
-                approvals,
-            })),
+            registration::shell::Canaries::new(&origin, targets, runner, tokens, readiness)?
+                .with_publication(Arc::new(RegistrationPublication {
+                    signer: signer.clone(),
+                    approvals,
+                    guard: None,
+                })),
         );
         Ok(RegistrationShell {
             shell: shell.with_registration(canaries.clone())?,
@@ -201,17 +309,21 @@ impl SecurityShell {
         Arc<shell_transport::RemoteApprovals>,
     )> {
         let instance = selected.instance().clone();
+        let tokens = Arc::new(approval_keys::GkeMetadataAccessTokens::selected(
+            &instance
+                .oauth_shell_transport
+                .as_ref()
+                .context("OAuth shell transport missing")?
+                .service_account,
+        )?);
         let bearers = Arc::new(super::workload::IapWorkload::from_gke_instance(&instance)?);
         let signer = Arc::new(admission::ArtifactShellSigner::with_gcp(
             selected,
-            Arc::new(approval_keys::GkeMetadataAccessTokens::new()?),
+            tokens.clone(),
         )?);
         let (identity, edge) = instance.security_edge()?;
         let origin = format!("{}/", edge.origin);
-        let (client_id, exchange) = super::clients::reauthentication(
-            &instance,
-            Arc::new(approval_keys::GkeMetadataAccessTokens::new()?),
-        )?;
+        let (client_id, exchange) = super::clients::reauthentication(&instance, tokens)?;
         let authenticator = Arc::new(shell_oidc::GoogleFreshAuthenticator::new(
             &edge.iap_audience,
             &identity.hosted_domain,
@@ -267,6 +379,7 @@ impl SecurityShell {
             sessions: Mutex::new(HashMap::new()),
             credentials: None,
             canaries: None,
+            guard: None,
         }))
     }
 
@@ -288,11 +401,60 @@ impl SecurityShell {
     }
 
     pub(crate) async fn serve(self: Arc<Self>, listener: TcpListener) -> Result<()> {
+        self.serve_bounded(
+            listener,
+            32,
+            Arc::new(AtomicBool::new(true)),
+            std::future::pending(),
+        )
+        .await
+    }
+
+    pub(crate) async fn serve_bounded(
+        self: Arc<Self>,
+        listener: TcpListener,
+        concurrency: usize,
+        admission: Arc<AtomicBool>,
+        shutdown: impl Future<Output = ()> + Send + 'static,
+    ) -> Result<()> {
+        ensure!(
+            (1..=32).contains(&concurrency),
+            "invalid security shell concurrency"
+        );
+        let capacity = Arc::new(Semaphore::new(concurrency));
+        let router_capacity = capacity.clone();
         let router = Router::new().fallback(move |request: Request| {
             let shell = self.clone();
-            async move { shell.handle(request).await }
+            let admission = admission.clone();
+            let capacity = router_capacity.clone();
+            async move {
+                let path = request.uri().path();
+                if matches!(path, "/health/live" | "/health/ready") {
+                    let status =
+                        if request.method() != Method::GET || request.uri().query().is_some() {
+                            StatusCode::BAD_REQUEST
+                        } else if path == "/health/ready" && !admission.load(Ordering::Acquire) {
+                            StatusCode::SERVICE_UNAVAILABLE
+                        } else {
+                            StatusCode::OK
+                        };
+                    return protected(status.into_response());
+                }
+                if !admission.load(Ordering::Acquire) {
+                    return protected(StatusCode::SERVICE_UNAVAILABLE.into_response());
+                }
+                let Ok(permit) = capacity.try_acquire_owned() else {
+                    return protected(StatusCode::SERVICE_UNAVAILABLE.into_response());
+                };
+                shell.handle(request, permit, admission).await
+            }
         });
-        axum::serve(listener, router).await?;
+        axum::serve(listener, router)
+            .with_graceful_shutdown(shutdown)
+            .await?;
+        // Detached HTTP requests may have an unabortable native operation. Its
+        // permit remains held through completion, including browser disconnect.
+        let _drained = capacity.acquire_many(concurrency.try_into()?).await?;
         Ok(())
     }
 
@@ -312,21 +474,34 @@ impl SecurityShell {
         Ok(self)
     }
 
-    async fn handle(self: Arc<Self>, request: Request) -> Response {
+    async fn handle(
+        self: Arc<Self>,
+        request: Request,
+        permit: OwnedSemaphorePermit,
+        admission: Arc<AtomicBool>,
+    ) -> Response {
         let (parts, body) = request.into_parts();
-        let body = match to_bytes(body, 4096).await {
-            Ok(body) => body,
-            Err(_) => return protected(StatusCode::PAYLOAD_TOO_LARGE.into_response()),
+        let body = match effects::timeout(Duration::from_secs(3), to_bytes(body, 4096)).await {
+            Ok(Ok(body)) => body,
+            Ok(Err(_)) => return protected(StatusCode::PAYLOAD_TOO_LARGE.into_response()),
+            Err(_) => return protected(StatusCode::REQUEST_TIMEOUT.into_response()),
         };
-        let at = match SystemTime::now().duration_since(UNIX_EPOCH) {
-            Ok(time) => time.as_secs() as i64,
+        let at = match effects::wall_time() {
+            Ok(time) => time,
             Err(_) => return protected(StatusCode::SERVICE_UNAVAILABLE.into_response()),
         };
         let method = parts.method;
         let path = parts.uri.path().to_owned();
         let query = parts.uri.query().map(str::to_owned);
         let headers = parts.headers;
-        let response = tokio::task::spawn_blocking(move || {
+        let response = effects::spawn_blocking(move || {
+            // A disconnected browser cannot release capacity while its native
+            // provider operation is still running and cannot be cancelled.
+            let _permit = permit;
+            ensure!(
+                admission.load(Ordering::Acquire),
+                "security shell is draining"
+            );
             self.dispatch(&method, &path, query.as_deref(), &headers, &body, at)
         })
         .await;
@@ -356,6 +531,9 @@ impl SecurityShell {
             "invalid security shell request"
         );
         let identity = self.authenticator.identify(headers, at)?;
+        if let Some(guard) = &self.guard {
+            guard.check(at)?;
+        }
         if registration::shell::reserved(path) {
             return self
                 .canaries
@@ -538,7 +716,7 @@ impl SecurityShell {
                 && at - human.authenticated_at <= SESSION_SECONDS,
             "fresh shell authentication required"
         );
-        let token = web_security::random()?;
+        let token = effects::random()?;
         let session = ShellSession {
             attempt: pending.attempt().to_owned(),
             human: human.human,
@@ -547,7 +725,7 @@ impl SecurityShell {
             preview: pending.digest()?,
             authenticated_at: human.authenticated_at,
             expires_at: human.authenticated_at + SESSION_SECONDS,
-            csrf: web_security::random()?,
+            csrf: effects::random()?,
         };
         let mut sessions = self
             .sessions
@@ -714,7 +892,7 @@ impl SecurityShell {
                 && at - human.authenticated_at <= SESSION_SECONDS,
             "fresh credential authentication required"
         );
-        let token = web_security::random()?;
+        let token = effects::random()?;
         let session = ShellSession {
             attempt: pending.attempt.clone(),
             human: human.human,
@@ -723,7 +901,7 @@ impl SecurityShell {
             preview: pending.challenge()?,
             authenticated_at: human.authenticated_at,
             expires_at: (human.authenticated_at + SESSION_SECONDS).min(pending.expires_at),
-            csrf: web_security::random()?,
+            csrf: effects::random()?,
         };
         let mut sessions = self
             .sessions
@@ -823,14 +1001,24 @@ impl SecurityShell {
                 }
                 _ => anyhow::bail!("unsupported interactive credential profile"),
             };
+            let action_title = match pending.intent.action() {
+                "issue" => "Create credential",
+                "rotate" => "Rotate credential",
+                "revoke" => "Revoke credential",
+                _ => anyhow::bail!("unsupported credential action"),
+            };
+            let has_delivery = open(runtime.db())?.query_row(
+                "SELECT EXISTS(SELECT 1 FROM day2_credential_receipts WHERE invocation=?1 AND action IN ('issue','rotate'))",
+                [&pending.invocation], |row| row.get::<_, bool>(0))?;
             let markup = html! { (DOCTYPE) html lang="en" {
                 head { meta charset="utf-8"; title { "Credential action" } }
                 body { main {
-                    h1 { @if confirmed { "Credential delivery" } @else { "Create credential" } }
+                    h1 { @if confirmed { "Credential action completed" } @else { (action_title) } }
                     p { (intent.title) }
                     p { (intent.usage.purpose) }
                     dl { dt { "Application" } dd { (runtime.app()) } dt { "Command" } dd { (pending.operation) }
-                        dt { "Family" } dd { (pending.family) } dt { "Label" } dd { (pending.label) }
+                        dt { "Family" } dd { (pending.family) } dt { "Action" } dd { (action_title) }
+                        dt { "Confirmed intent" } dd { (serde_json::to_string(&pending.intent)?) }
                         dt { "Principal" } dd { (principal) }
                         dt { "Recipient" } dd { (identity.email) }
                         dt { "Lifetime" } dd { (family.lifetime_seconds) " seconds" } }
@@ -840,7 +1028,7 @@ impl SecurityShell {
                             code { (operation) } }
                     } }
                     @if !confirmed {
-                        p { "Confirm this product command. It creates the credential and its product records together." }
+                        p { "Confirm this product command. The credential transition and product writes commit together." }
                         h2 { "Command input" }
                         pre { (pending.input.to_string()) }
                     }
@@ -848,9 +1036,9 @@ impl SecurityShell {
                         input type="hidden" name="csrf" value=(session.csrf);
                         input type="hidden" name="challenge" value=(challenge.as_str());
                         @if confirmed {
-                            button type="submit" name="action" value="reveal" { "Reveal key" }
-                            button type="submit" name="action" value="acknowledge" { "Finish and close delivery" }
-                        } @else { button type="submit" name="action" value="confirm" { "Create credential" } }
+                            @if has_delivery { button type="submit" name="action" value="reveal" { "Reveal key" } }
+                            button type="submit" name="action" value="acknowledge" { "Finish" }
+                        } @else { button type="submit" name="action" value="confirm" { (action_title) } }
                     }
                 } }
             } };
@@ -1034,6 +1222,40 @@ fn path_for(attempt: &str) -> String {
 }
 
 fn protected(mut response: Response) -> Response {
+    // A form's 303 redirect is still subject to form-action. Finish that POST
+    // on the shell origin, then navigate from a new document to the native-
+    // selected HTTPS destination. No request field selects this destination.
+    if response.status() == StatusCode::SEE_OTHER
+        && let Some(destination) = response.headers().get(header::LOCATION)
+        && let Ok(destination) = destination.to_str()
+        && let Ok(url) = url::Url::parse(destination)
+        && url.scheme() == "https"
+        && url.host_str().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+    {
+        let page = html! {
+            (DOCTYPE)
+            html {
+                head {
+                    meta charset="utf-8";
+                    meta http-equiv="refresh" content=(format!("0;url={destination}"));
+                    title { "Continue" }
+                }
+                body { p { a href=(destination) { "Continue" } } }
+            }
+        };
+        *response.status_mut() = StatusCode::OK;
+        response.headers_mut().remove(header::LOCATION);
+        response.headers_mut().remove(header::CONTENT_LENGTH);
+        response.headers_mut().insert(
+            header::CONTENT_TYPE,
+            "text/html; charset=utf-8"
+                .parse()
+                .expect("static content type"),
+        );
+        *response.body_mut() = axum::body::Body::from(page.into_string());
+    }
     for (name, value) in [
         (
             "content-security-policy",
@@ -1041,7 +1263,9 @@ fn protected(mut response: Response) -> Response {
         ),
         ("x-content-type-options", "nosniff"),
         ("x-frame-options", "DENY"),
-        ("referrer-policy", "no-referrer"),
+        // no-referrer makes browser navigation POSTs send Origin: null.
+        // Keep their HTTPS origin without disclosing callback paths or queries.
+        ("referrer-policy", "strict-origin"),
         ("cache-control", "no-store"),
         (
             "permissions-policy",
@@ -1107,6 +1331,39 @@ mod tests {
     struct BrowserIdentity {
         fresh: bool,
     }
+
+    #[tokio::test]
+    async fn protected_navigation_preserves_form_boundary_and_escapes_handoff() -> Result<()> {
+        let destination = "https://app.example.com/?one=a&two=\"<b>";
+        let response = protected(
+            (
+                StatusCode::SEE_OTHER,
+                [
+                    (header::LOCATION, destination),
+                    (header::SET_COOKIE, "session=closed"),
+                ],
+            )
+                .into_response(),
+        );
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(!response.headers().contains_key(header::LOCATION));
+        assert_eq!(response.headers()[header::SET_COOKIE], "session=closed");
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(response.headers()["referrer-policy"], "strict-origin");
+        assert_eq!(
+            response.headers()["content-security-policy"],
+            "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+        );
+        let page = String::from_utf8(to_bytes(response.into_body(), 8192).await?.to_vec())?;
+        assert!(page.contains("http-equiv=\"refresh\" content=\"0;url=https://app.example.com/?one=a&amp;two=&quot;&lt;b&gt;\""));
+        assert!(page.contains("href=\"https://app.example.com/?one=a&amp;two=&quot;&lt;b&gt;\""));
+        assert!(!page.contains("<b>"));
+        let response =
+            protected((StatusCode::SEE_OTHER, [(header::LOCATION, "/local")]).into_response());
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(response.headers()[header::LOCATION], "/local");
+        Ok(())
+    }
     impl FreshAuthenticator for BrowserIdentity {
         fn identify(&self, headers: &HeaderMap, _: i64) -> Result<iap::Verified> {
             Ok(iap::Verified {
@@ -1120,7 +1377,7 @@ mod tests {
                     .get("test-subject")
                     .map(|v| v.to_str())
                     .transpose()?
-                    .unwrap_or("google-alice")
+                    .unwrap_or("accounts.google.com:google-alice")
                     .into(),
             })
         }
@@ -1145,6 +1402,213 @@ mod tests {
     }
 
     struct BrowserKeys(AtomicUsize);
+    struct HoldingGuard {
+        calls: AtomicUsize,
+        entered: tokio::sync::Notify,
+        released: Mutex<bool>,
+        release: std::sync::Condvar,
+    }
+
+    impl ShellGuard for HoldingGuard {
+        fn check(&self, _: i64) -> Result<()> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.entered.notify_one();
+            let mut released = self.released.lock().unwrap();
+            while !*released {
+                let (next, timeout) = self
+                    .release
+                    .wait_timeout(released, Duration::from_secs(10))
+                    .unwrap();
+                ensure!(!timeout.timed_out(), "fixture native dispatch deadline");
+                released = next;
+            }
+            Ok(())
+        }
+    }
+
+    fn isolated_shell() -> Result<Arc<SecurityShell>> {
+        let approvals = Arc::new(NoOAuth);
+        SecurityShell::with_transport(
+            "https://security.example.com/".into(),
+            approvals.clone(),
+            approvals,
+            Arc::new(BrowserIdentity { fresh: false }),
+        )
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn body_deadlines_and_blocking_dispatch_use_the_simulated_environment() -> Result<()> {
+        let world = crate::oauth::simulation::World::new(11);
+        effects::scope_async(world.clone(), async {
+            let shell = isolated_shell()?;
+            let capacity = Arc::new(Semaphore::new(1));
+            let start = tokio::time::Instant::now();
+            let body = axum::body::Body::from_stream(tokio_stream::pending::<
+                Result<axum::body::Bytes, std::io::Error>,
+            >());
+            let request = Request::builder()
+                .uri("/_day2/oauth/approve/attempt")
+                .header(header::HOST, "security.example.com")
+                .body(body)?;
+            let response = shell
+                .clone()
+                .handle(
+                    request,
+                    capacity.clone().acquire_owned().await?,
+                    Arc::new(AtomicBool::new(true)),
+                )
+                .await;
+            assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+            assert_eq!(tokio::time::Instant::now() - start, Duration::from_secs(3));
+            assert_eq!(capacity.available_permits(), 1);
+            assert_eq!(effects::wall_time()?, 5);
+            let request = Request::builder()
+                .uri("/_day2/oauth/approve/attempt")
+                .header(header::HOST, "security.example.com")
+                .body(axum::body::Body::empty())?;
+            let response = shell
+                .handle(
+                    request,
+                    capacity.clone().acquire_owned().await?,
+                    Arc::new(AtomicBool::new(false)),
+                )
+                .await;
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            assert_eq!(capacity.available_permits(), 1);
+            assert!(world.requests().is_empty());
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn guarded_http_keeps_capacity_through_disconnect_and_drains_native_dispatch()
+    -> Result<()> {
+        let guard = Arc::new(HoldingGuard {
+            calls: AtomicUsize::new(0),
+            entered: tokio::sync::Notify::new(),
+            released: Mutex::new(false),
+            release: std::sync::Condvar::new(),
+        });
+        let mut shell = isolated_shell()?;
+        Arc::get_mut(&mut shell).unwrap().guard = Some(guard.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let endpoint = format!("http://{}", listener.local_addr()?);
+        let admission = Arc::new(AtomicBool::new(true));
+        let (stop, shutdown) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(shell.serve_bounded(listener, 1, admission.clone(), async {
+            let _ = shutdown.await;
+        }));
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
+        assert_eq!(
+            client
+                .get(format!("{endpoint}/oauth/approvals/attempt"))
+                .header(header::HOST, "other.example.com")
+                .send()
+                .await?
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(guard.calls.load(Ordering::SeqCst), 0);
+        let browser = tokio::spawn({
+            let client = client.clone();
+            let endpoint = endpoint.clone();
+            async move {
+                client
+                    .get(format!("{endpoint}/oauth/approvals/attempt"))
+                    .header(header::HOST, "security.example.com")
+                    .send()
+                    .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(3), guard.entered.notified()).await?;
+        browser.abort();
+        assert_eq!(
+            client
+                .get(format!("{endpoint}/oauth/approvals/attempt"))
+                .header(header::HOST, "security.example.com")
+                .send()
+                .await?
+                .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        let health = client
+            .get(format!("{endpoint}/health/ready"))
+            .send()
+            .await?;
+        assert_eq!(health.status(), StatusCode::OK);
+        assert_eq!(health.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(guard.calls.load(Ordering::SeqCst), 1);
+        admission.store(false, Ordering::Release);
+        assert_eq!(
+            client
+                .get(format!("{endpoint}/health/ready"))
+                .send()
+                .await?
+                .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            client
+                .get(format!("{endpoint}/oauth/approvals/attempt"))
+                .header(header::HOST, "security.example.com")
+                .send()
+                .await?
+                .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        let _ = stop.send(());
+        tokio::task::yield_now().await;
+        assert!(!server.is_finished());
+        *guard.released.lock().unwrap() = true;
+        guard.release.notify_all();
+        tokio::time::timeout(Duration::from_secs(3), server).await???;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn shell_http_bounds_body_size_and_body_wait_before_native_dispatch() -> Result<()> {
+        let shell = isolated_shell()?;
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let (stop, shutdown) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(shell.serve_bounded(
+            listener,
+            1,
+            Arc::new(AtomicBool::new(true)),
+            async {
+                let _ = shutdown.await;
+            },
+        ));
+        let client = reqwest::Client::builder().no_proxy().build()?;
+        assert_eq!(
+            client
+                .post(format!("http://{address}/oauth/approvals/attempt"))
+                .header(header::HOST, "security.example.com")
+                .body(vec![b'x'; 4097])
+                .send()
+                .await?
+                .status(),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+        let response = tokio::task::spawn_blocking(move || -> Result<String> {
+            use std::io::{Read, Write};
+            let mut socket = std::net::TcpStream::connect(address)?;
+            socket.set_read_timeout(Some(Duration::from_secs(5)))?;
+            socket.write_all(b"POST /oauth/approvals/attempt HTTP/1.1\r\nHost: security.example.com\r\nContent-Length: 10\r\nConnection: close\r\n\r\n")?;
+            let mut response = String::new();
+            socket.read_to_string(&mut response)?;
+            Ok(response)
+        }).await??;
+        assert!(response.starts_with("HTTP/1.1 408"), "{response}");
+        let _ = stop.send(());
+        tokio::time::timeout(Duration::from_secs(3), server).await???;
+        Ok(())
+    }
+
     impl ApprovalKeyProvider for BrowserKeys {
         fn load(
             &self,
@@ -1200,7 +1664,34 @@ mod tests {
             origin: "https://app.example.com".into(),
             iap_audience: "/projects/1/global/backendServices/3".into(),
         });
+        let app = instance.apps.get_mut("app").unwrap();
+        app.readers.insert("credential_client:client_keys".into());
+        app.writers.insert("credential_client:client_keys".into());
+        app.authority
+            .as_mut()
+            .context("browser authority")?
+            .operations
+            .get_mut("credential_metadata.ping")
+            .context("credential root")?
+            .actors
+            .insert("credential_client:client_keys".into());
+        app.authority
+            .as_mut()
+            .context("browser authority")?
+            .operations
+            .get_mut("credential_metadata.record_use")
+            .context("credential command root")?
+            .actors
+            .insert("credential_client:client_keys".into());
         std::fs::write(runtime.instance_path(), serde_json::to_vec(&instance)?)?;
+        let runtime = crate::store::Runtime::load(runtime.instance_path(), runtime.app())?;
+        let current = crate::authority_state::current(&open(runtime.db())?)?;
+        crate::authority_state::apply_desired(
+            &runtime,
+            &crate::authority_state::LocalOperator::assert_local("alice@example.com")?,
+            "credential-api-membership",
+            Some(current.stamp),
+        )?;
         let now = runtime.host().now_ms()?.div_euclid(1000);
         let active = crate::authority_state::current(&open(runtime.db())?)?;
         let selections: Vec<_> = active
@@ -1224,7 +1715,10 @@ mod tests {
                 ready_until: now + 298,
                 grant_until: now + 7200,
                 max_active_lineages: quota,
-                issuers: BTreeMap::from([("alice@example.com".into(), "google-alice".into())]),
+                issuers: BTreeMap::from([(
+                    "alice@example.com".into(),
+                    "accounts.google.com:google-alice".into(),
+                )]),
             })
             .collect();
         let keys = Arc::new(BrowserKeys(AtomicUsize::new(0)));
@@ -1276,12 +1770,28 @@ mod tests {
         operation: &str,
         id: &str,
     ) -> Result<(String, HeaderMap, ShellSession)> {
+        navigate_input(
+            world,
+            shell,
+            operation,
+            id,
+            &serde_json::json!({"label":"Transcription client"}),
+        )
+    }
+
+    fn navigate_input(
+        world: &BrowserWorld,
+        shell: &SecurityShell,
+        operation: &str,
+        id: &str,
+        input: &serde_json::Value,
+    ) -> Result<(String, HeaderMap, ShellSession)> {
         let url = credentials::start(
             &world.runtime,
             operation,
             "alice@example.com",
             id,
-            &serde_json::json!({"label":"Transcription client"}),
+            input,
             None,
             world.now - 1,
         )?;
@@ -1314,21 +1824,716 @@ mod tests {
             .into_bytes()
     }
 
+    async fn reject_navigation_origins(
+        client: &reqwest::Client,
+        endpoint: &str,
+        headers: &HeaderMap,
+        body: &[u8],
+    ) -> Result<()> {
+        for rejected in [None, Some("null"), Some("https://app.example.com")] {
+            let mut headers = headers.clone();
+            headers.remove(header::ORIGIN);
+            if let Some(origin) = rejected {
+                headers.insert(header::ORIGIN, origin.parse()?);
+            }
+            let response = client
+                .post(endpoint)
+                .headers(headers)
+                .body(body.to_vec())
+                .send()
+                .await?;
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        }
+        Ok(())
+    }
+
+    async fn credential_token(response: Response) -> Result<String> {
+        let html = String::from_utf8(to_bytes(response.into_body(), 8192).await?.to_vec())?;
+        Ok(html
+            .split_once("<pre>")
+            .context("protected token")?
+            .1
+            .split_once("</pre>")
+            .context("protected token end")?
+            .0
+            .into())
+    }
+
+    #[tokio::test]
+    async fn credential_browser_rotates_revokes_and_fences_accepted_work() -> Result<()> {
+        use crate::managed_credentials::ingress;
+        for kind in ["client", "personal"] {
+            let world = browser_world(1)?;
+            let shell = credential_shell(&world, true)?;
+            let (issue_path, issue_headers, issue_session) = navigate(
+                &world,
+                &shell,
+                &format!("credential_metadata.create_{kind}"),
+                "issued",
+            )?;
+            shell.dispatch(
+                &Method::POST,
+                &issue_path,
+                None,
+                &issue_headers,
+                &credential_body(&issue_session, "confirm"),
+                world.now,
+            )?;
+            let issued = world.runtime.execute("issued", crate::store::Fault::None)?;
+            let old_token = credential_token(shell.dispatch(
+                &Method::POST,
+                &issue_path,
+                None,
+                &issue_headers,
+                &credential_body(&issue_session, "reveal"),
+                world.now,
+            )?)
+            .await?;
+            let admission = ingress::prepare(
+                &world.runtime,
+                "credential_metadata.record_use",
+                &old_token,
+                world.now,
+            )?;
+            world.runtime.accept_credential(
+                "credential_metadata.record_use",
+                &admission,
+                "old-work",
+                &serde_json::json!({"note":"use_before_rotation"}),
+                world.now,
+            )?;
+            let expected = serde_json::json!({"lineage":issued.result["lineage"],"head":issued.result["version"],"revision":1});
+            let (path, headers, session) = navigate_input(
+                &world,
+                &shell,
+                &format!("credential_metadata.rotate_{kind}"),
+                "rotated",
+                &expected,
+            )?;
+            let mut wrong = headers.clone();
+            wrong.insert(header::ORIGIN, "https://app.example.com".parse()?);
+            assert!(
+                shell
+                    .dispatch(
+                        &Method::POST,
+                        &path,
+                        None,
+                        &wrong,
+                        &credential_body(&session, "confirm"),
+                        world.now
+                    )
+                    .is_err()
+            );
+            assert_eq!(
+                shell
+                    .dispatch(
+                        &Method::POST,
+                        &path,
+                        None,
+                        &headers,
+                        &credential_body(&session, "confirm"),
+                        world.now
+                    )?
+                    .status(),
+                StatusCode::SEE_OTHER
+            );
+            let rotated = world
+                .runtime
+                .execute("rotated", crate::store::Fault::None)?;
+            assert_eq!(rotated.result["status"], "rotated");
+            assert_eq!(rotated.result["lineage"], issued.result["lineage"]);
+            // Quota one permits replacement: rotation adds no lineage.
+            assert_eq!(
+                open(world.runtime.db())?.query_row(
+                    "SELECT count(*) FROM day2_credential_lineages",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )?,
+                1
+            );
+            assert!(
+                ingress::prepare(
+                    &world.runtime,
+                    "credential_metadata.ping",
+                    &old_token,
+                    world.now
+                )
+                .is_err()
+            );
+            let reopened =
+                crate::store::Runtime::load(world.runtime.instance_path(), world.runtime.app())?
+                    .with_credential_authority(world.authority.clone());
+            assert_eq!(
+                reopened
+                    .execute("old-work", crate::store::Fault::None)?
+                    .status,
+                "blocked"
+            );
+            assert_eq!(
+                open(world.runtime.db())?.query_row(
+                    "SELECT count(*) FROM use_receipts",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )?,
+                0
+            );
+            let before = world.keys.0.load(Ordering::SeqCst);
+            assert!(
+                shell
+                    .dispatch(
+                        &Method::POST,
+                        &issue_path,
+                        None,
+                        &issue_headers,
+                        &credential_body(&issue_session, "reveal"),
+                        world.now
+                    )
+                    .is_err()
+            );
+            assert_eq!(world.keys.0.load(Ordering::SeqCst), before);
+            let public = shell.dispatch(&Method::GET, &path, None, &headers, &[], world.now)?;
+            let public = String::from_utf8(to_bytes(public.into_body(), 32_768).await?.to_vec())?;
+            assert!(!public.contains("d2c1."));
+            let new_token = credential_token(shell.dispatch(
+                &Method::POST,
+                &path,
+                None,
+                &headers,
+                &credential_body(&session, "reveal"),
+                world.now,
+            )?)
+            .await?;
+            let recovered = credential_token(shell.dispatch(
+                &Method::POST,
+                &path,
+                None,
+                &headers,
+                &credential_body(&session, "reveal"),
+                world.now,
+            )?)
+            .await?;
+            assert_eq!(new_token, recovered);
+            let current = ingress::prepare(
+                &world.runtime,
+                "credential_metadata.record_use",
+                &new_token,
+                world.now,
+            )?;
+            world.runtime.accept_credential(
+                "credential_metadata.record_use",
+                &current,
+                "new-work",
+                &serde_json::json!({"note":"use_before_revoke"}),
+                world.now,
+            )?;
+            // A stale predecessor produces Conflict and no new delivery; finish remains available.
+            let (stale_path, stale_headers, stale_session) = navigate_input(
+                &world,
+                &shell,
+                &format!("credential_metadata.rotate_{kind}"),
+                "stale",
+                &expected,
+            )?;
+            shell.dispatch(
+                &Method::POST,
+                &stale_path,
+                None,
+                &stale_headers,
+                &credential_body(&stale_session, "confirm"),
+                world.now,
+            )?;
+            assert_eq!(
+                world
+                    .runtime
+                    .execute("stale", crate::store::Fault::None)?
+                    .result["status"],
+                "conflict"
+            );
+            assert!(
+                shell
+                    .dispatch(
+                        &Method::POST,
+                        &stale_path,
+                        None,
+                        &stale_headers,
+                        &credential_body(&stale_session, "reveal"),
+                        world.now
+                    )
+                    .is_err()
+            );
+            shell.dispatch(
+                &Method::POST,
+                &stale_path,
+                None,
+                &stale_headers,
+                &credential_body(&stale_session, "acknowledge"),
+                world.now,
+            )?;
+            let (revoke_path, revoke_headers, revoke_session) = navigate_input(
+                &world,
+                &shell,
+                &format!("credential_metadata.revoke_{kind}"),
+                "revoked",
+                &serde_json::json!({"lineage":issued.result["lineage"]}),
+            )?;
+            shell.dispatch(
+                &Method::POST,
+                &revoke_path,
+                None,
+                &revoke_headers,
+                &credential_body(&revoke_session, "confirm"),
+                world.now,
+            )?;
+            assert_eq!(
+                world
+                    .runtime
+                    .execute("revoked", crate::store::Fault::None)?
+                    .result["status"],
+                "revoked"
+            );
+            let before = world.keys.0.load(Ordering::SeqCst);
+            assert!(
+                shell
+                    .dispatch(
+                        &Method::POST,
+                        &revoke_path,
+                        None,
+                        &revoke_headers,
+                        &credential_body(&revoke_session, "reveal"),
+                        world.now
+                    )
+                    .is_err()
+            );
+            assert!(
+                shell
+                    .dispatch(
+                        &Method::POST,
+                        &path,
+                        None,
+                        &headers,
+                        &credential_body(&session, "reveal"),
+                        world.now
+                    )
+                    .is_err()
+            );
+            assert_eq!(world.keys.0.load(Ordering::SeqCst), before);
+            assert!(
+                ingress::prepare(
+                    &world.runtime,
+                    "credential_metadata.ping",
+                    &new_token,
+                    world.now
+                )
+                .is_err()
+            );
+            assert_eq!(
+                reopened
+                    .execute("new-work", crate::store::Fault::None)?
+                    .status,
+                "blocked"
+            );
+            shell.dispatch(
+                &Method::POST,
+                &revoke_path,
+                None,
+                &revoke_headers,
+                &credential_body(&revoke_session, "acknowledge"),
+                world.now,
+            )?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn credential_api_admits_only_current_tokens_and_rechecks_durable_execution() -> Result<()>
+    {
+        use crate::managed_credentials::{ingress, store as credential_store};
+        let world = browser_world(10)?;
+        let shell = credential_shell(&world, true)?;
+        let server =
+            crate::web::LocalServer::bind(world.runtime.clone(), "alice@example.com", 0).await?;
+        let origin = server.origin.clone();
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let serving = tokio::spawn(server.serve(async {
+            let _ = stopped.await;
+        }));
+        let client = reqwest::Client::new();
+        for (operation, id, family) in [
+            (
+                "credential_metadata.create_client",
+                "api-client",
+                "client_keys",
+            ),
+            (
+                "credential_metadata.create_personal",
+                "api-personal",
+                "personal_keys",
+            ),
+        ] {
+            let (path, headers, session) = navigate(&world, &shell, operation, id)?;
+            shell.dispatch(
+                &Method::POST,
+                &path,
+                None,
+                &headers,
+                &credential_body(&session, "confirm"),
+                world.now,
+            )?;
+            let revealed = shell.dispatch(
+                &Method::POST,
+                &path,
+                None,
+                &headers,
+                &credential_body(&session, "reveal"),
+                world.now,
+            )?;
+            let html = String::from_utf8(to_bytes(revealed.into_body(), 8192).await?.to_vec())?;
+            let token = html
+                .split_once("<pre>")
+                .context("protected token")?
+                .1
+                .split_once("</pre>")
+                .context("protected token end")?
+                .0
+                .to_owned();
+            let url = format!("{origin}{}credential_metadata.ping", ingress::PREFIX);
+            let response = client.get(&url).bearer_auth(&token).send().await?;
+            assert_eq!(response.status(), StatusCode::OK);
+            let accepted = response.headers()["x-day2-invocation"].to_str()?.to_owned();
+            assert_eq!(
+                crate::json::decode::<serde_json::Value>(&response.bytes().await?)?,
+                serde_json::json!({"ready":true})
+            );
+            let trace = world.runtime.trace(&accepted)?;
+            assert_eq!(trace.request.context.authentication, "credential");
+            let actor = &trace.request.context.actor;
+            if family == "client_keys" {
+                assert_eq!(crate::authority::client_family(actor), Some(family));
+            } else {
+                assert_eq!(actor, "alice@example.com");
+            }
+            let evidence: String = open(world.runtime.db())?.query_row(
+                "SELECT evidence FROM day2_credential_origins WHERE invocation=?1",
+                [&accepted],
+                |row| row.get(0),
+            )?;
+            assert!(!evidence.contains(&token));
+            assert!(!serde_json::to_string(&trace)?.contains(&token));
+            let status_url = format!("{origin}{}invocations/{accepted}", ingress::PREFIX);
+            assert_eq!(
+                client
+                    .get(&status_url)
+                    .bearer_auth(&token)
+                    .send()
+                    .await?
+                    .status(),
+                StatusCode::OK
+            );
+            let command = format!("{origin}{}credential_metadata.record_use", ingress::PREFIX);
+            let body = format!("{{\"note\":\"use_{id}\"}}");
+            let before: i64 = open(world.runtime.db())?.query_row(
+                "SELECT count(*) FROM use_receipts",
+                [],
+                |row| row.get(0),
+            )?;
+            let mut command_id = String::new();
+            for _ in 0..2 {
+                let response = client
+                    .post(&command)
+                    .bearer_auth(&token)
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", format!("record-{id}"))
+                    .body(body.clone())
+                    .send()
+                    .await?;
+                assert_eq!(response.status(), StatusCode::OK);
+                let current = response.headers()["x-day2-invocation"].to_str()?.to_owned();
+                if command_id.is_empty() {
+                    command_id = current;
+                } else {
+                    assert_eq!(command_id, current);
+                }
+            }
+            let after: i64 = open(world.runtime.db())?.query_row(
+                "SELECT count(*) FROM use_receipts",
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!(after, before + 1);
+            assert_eq!(
+                client
+                    .post(&command)
+                    .bearer_auth(&token)
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", format!("record-{id}"))
+                    .body("{\"note\":\"use_changed\"}")
+                    .send()
+                    .await?
+                    .status(),
+                StatusCode::CONFLICT
+            );
+            for (header, value) in [
+                ("cookie", "session=forged"),
+                ("origin", "https://app.example.com"),
+                ("x-day2-act-as", "alice@example.com"),
+                ("x-goog-iap-jwt-assertion", "forged"),
+            ] {
+                assert_eq!(
+                    client
+                        .get(&url)
+                        .bearer_auth(&token)
+                        .header(header, value)
+                        .send()
+                        .await?
+                        .status(),
+                    StatusCode::UNAUTHORIZED
+                );
+            }
+            assert_eq!(
+                client.get(&url).send().await?.status(),
+                StatusCode::UNAUTHORIZED
+            );
+            assert_eq!(
+                client
+                    .get(&url)
+                    .bearer_auth("invalid")
+                    .send()
+                    .await?
+                    .status(),
+                StatusCode::UNAUTHORIZED
+            );
+            let management = format!(
+                "{origin}{}credential_metadata.create_client",
+                ingress::PREFIX
+            );
+            assert_eq!(
+                client
+                    .post(management)
+                    .bearer_auth(&token)
+                    .header("idempotency-key", "forbidden-management")
+                    .header("content-type", "application/json")
+                    .body("{\"label\":\"unapproved\"}")
+                    .send()
+                    .await?
+                    .status(),
+                StatusCode::UNAUTHORIZED
+            );
+            let pending = format!("pending-{family}");
+            let admission = ingress::prepare(
+                &world.runtime,
+                "credential_metadata.ping",
+                &token,
+                world.now,
+            )?;
+            for change in ["epoch", "verifier", "unavailable", "account"] {
+                if change == "account" && family != "personal_keys" {
+                    continue;
+                }
+                let interrupted = format!("{change}-{family}");
+                world.runtime.accept_credential(
+                    "credential_metadata.ping",
+                    &admission,
+                    &interrupted,
+                    &serde_json::json!({}),
+                    world.now,
+                )?;
+                let mut changed = world.selections.clone();
+                let selected = changed
+                    .iter_mut()
+                    .find(|selected| selected.binding.family.as_str() == family)
+                    .context("selected family")?;
+                match change {
+                    "epoch" => selected.security_epoch += 1,
+                    "verifier" => selected.verifier.version = "verifier_2".into(),
+                    "account" => selected.issuers.clear(),
+                    _ => changed.clear(),
+                }
+                world.authority.replace(changed)?;
+                let response = client.get(&url).bearer_auth(&token).send().await?;
+                assert_eq!(
+                    response.status(),
+                    if change == "unavailable" {
+                        StatusCode::SERVICE_UNAVAILABLE
+                    } else {
+                        StatusCode::UNAUTHORIZED
+                    }
+                );
+                let outcome = world
+                    .runtime
+                    .execute(&interrupted, crate::store::Fault::None);
+                if change == "unavailable" {
+                    assert_eq!(
+                        crate::error::classify(&outcome.unwrap_err()),
+                        crate::error::Failure::CredentialUnavailable
+                    );
+                } else {
+                    assert_eq!(outcome?.status, "blocked");
+                }
+                // Disposable snapshots simulate independent adapter decisions;
+                // production epoch monotonicity needs its selected live adapter.
+                world.authority.replace(world.selections.clone())?;
+            }
+            let missing = format!("missing-origin-{family}");
+            world.runtime.accept_credential(
+                "credential_metadata.ping",
+                &admission,
+                &missing,
+                &serde_json::json!({}),
+                world.now,
+            )?;
+            open(world.runtime.db())?.execute(
+                "DELETE FROM day2_credential_origins WHERE invocation=?1",
+                [&missing],
+            )?;
+            assert_eq!(
+                world
+                    .runtime
+                    .execute(&missing, crate::store::Fault::None)?
+                    .status,
+                "blocked"
+            );
+            world.runtime.accept_credential(
+                "credential_metadata.ping",
+                &admission,
+                &pending,
+                &serde_json::json!({}),
+                world.now,
+            )?;
+            let db = open(world.runtime.db())?;
+            let lineage: String = db.query_row(
+                "SELECT id FROM day2_credential_lineages WHERE family=?1",
+                [family],
+                |row| row.get(0),
+            )?;
+            let active = crate::authority_state::current(&db)?;
+            let mut db = open(world.runtime.db())?;
+            let tx = crate::write_queue::immediate(&mut db)?;
+            credential_store::stage_revoke(
+                &tx,
+                &active.document.credentials[family].binding.namespace,
+                &lineage,
+            )?;
+            tx.commit()?;
+            // A token verified before revocation must fail the acceptance
+            // writer's recheck as well as subsequent HTTP authentication.
+            assert!(
+                world
+                    .runtime
+                    .accept_credential(
+                        "credential_metadata.ping",
+                        &admission,
+                        &format!("stale-admission-{family}"),
+                        &serde_json::json!({}),
+                        world.now
+                    )
+                    .is_err()
+            );
+            assert_eq!(
+                client.get(&url).bearer_auth(&token).send().await?.status(),
+                StatusCode::UNAUTHORIZED
+            );
+            assert_eq!(
+                client
+                    .get(&status_url)
+                    .bearer_auth(&token)
+                    .send()
+                    .await?
+                    .status(),
+                StatusCode::UNAUTHORIZED
+            );
+            // The already-admitted command cannot regain authority after restart.
+            let reopened =
+                crate::store::Runtime::load(world.runtime.instance_path(), world.runtime.app())?
+                    .with_credential_authority(world.authority.clone());
+            let outcome = reopened.execute(&pending, crate::store::Fault::None)?;
+            assert_eq!(outcome.status, "blocked");
+            let reason: String = open(reopened.db())?.query_row(
+                "SELECT reason FROM day2_authority_blocks WHERE invocation=?1",
+                [&pending],
+                |row| row.get(0),
+            )?;
+            assert_eq!(reason, "credential_authority_changed");
+            token.into_bytes().fill(0);
+        }
+        let _ = stop.send(());
+        serving.await??;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn credential_browser_issues_native_product_commands_and_protects_delivery() -> Result<()>
     {
         let world = browser_world(10)?;
         let shell = credential_shell(&world, true)?;
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let endpoint = format!("http://{}", listener.local_addr()?);
+        let (stop, shutdown) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(shell.clone().serve_bounded(
+            listener,
+            4,
+            Arc::new(AtomicBool::new(true)),
+            async {
+                let _ = shutdown.await;
+            },
+        ));
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
         for (operation, id) in [
             ("credential_metadata.create_client", "client-browser"),
             ("credential_metadata.create_personal", "personal-browser"),
         ] {
-            let (path, headers, session) = navigate(&world, &shell, operation, id)?;
             let input = serde_json::json!({"label":"Transcription client"});
+            let url = credentials::start(
+                &world.runtime,
+                operation,
+                "alice@example.com",
+                id,
+                &input,
+                None,
+                world.now - 1,
+            )?;
+            let path = url::Url::parse(&url)?.path().to_owned();
+            let endpoint = format!("{endpoint}{path}");
+            let mut headers = credential_headers();
+            let page = client
+                .get(&endpoint)
+                .headers(headers.clone())
+                .send()
+                .await?;
+            assert_eq!(page.status(), StatusCode::OK);
+            assert_eq!(page.headers()[header::CACHE_CONTROL], "no-store");
+            // strict-origin is the policy that preserves normal navigation POST Origin.
+            assert_eq!(page.headers()["referrer-policy"], "strict-origin");
+            assert_eq!(
+                page.headers()["content-security-policy"],
+                "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+            );
+            let cookie = page.headers()[header::SET_COOKIE]
+                .to_str()?
+                .split(';')
+                .next()
+                .context("credential cookie missing")?
+                .to_owned();
+            headers.insert(header::COOKIE, cookie.parse()?);
+            let session = shell
+                .read_session(&headers, world.now)?
+                .context("credential session missing")?;
+            let at = session.authenticated_at;
+            let page = page.text().await?;
+            assert!(!page.contains("d2c1."));
+            assert!(page.contains(&format!("name=\"csrf\" value=\"{}\"", session.csrf)));
+            assert!(page.contains(&format!(
+                "name=\"challenge\" value=\"{}\"",
+                session.challenge.as_str()
+            )));
+            assert!(page.contains(&format!("method=\"post\" action=\"{path}\"")));
             assert!(
                 world
                     .runtime
-                    .accept(operation, "alice@example.com", id, &input, world.now)
+                    .accept(operation, "alice@example.com", id, &input, at)
                     .is_err()
             );
             let before = world.keys.0.load(Ordering::SeqCst);
@@ -1344,7 +2549,7 @@ mod tests {
                 .preview = Digest::of(&"changed-credential-preview")?;
             assert!(
                 shell
-                    .dispatch(&Method::POST, &path, None, &headers, &confirm, world.now)
+                    .dispatch(&Method::POST, &path, None, &headers, &confirm, at)
                     .is_err()
             );
             assert_eq!(world.keys.0.load(Ordering::SeqCst), before);
@@ -1359,20 +2564,26 @@ mod tests {
             wrong.insert(header::ORIGIN, "https://app.example.com".parse()?);
             assert!(
                 shell
-                    .dispatch(&Method::POST, &path, None, &wrong, &confirm, world.now)
+                    .dispatch(&Method::POST, &path, None, &wrong, &confirm, at)
                     .is_err()
             );
             assert_eq!(world.keys.0.load(Ordering::SeqCst), before);
+            reject_navigation_origins(&client, &endpoint, &headers, &confirm).await?;
+            assert_eq!(world.keys.0.load(Ordering::SeqCst), before);
             assert_eq!(
-                shell
-                    .dispatch(&Method::POST, &path, None, &headers, &confirm, world.now)?
+                client
+                    .post(&endpoint)
+                    .headers(headers.clone())
+                    .body(confirm.clone())
+                    .send()
+                    .await?
                     .status(),
                 StatusCode::SEE_OTHER
             );
             // Lost-response retry runs the identical accepted product invocation.
             assert_eq!(
                 shell
-                    .dispatch(&Method::POST, &path, None, &headers, &confirm, world.now)?
+                    .dispatch(&Method::POST, &path, None, &headers, &confirm, at)?
                     .status(),
                 StatusCode::SEE_OTHER
             );
@@ -1380,8 +2591,13 @@ mod tests {
             assert_eq!(outcome.status, "success", "{outcome:?}");
             assert!(!outcome.result.to_string().contains("d2c1."));
             assert!(!serde_json::to_string(&world.runtime.trace(id)?)?.contains("d2c1."));
-            let get = shell.dispatch(&Method::GET, &path, None, &headers, &[], world.now)?;
-            let page = String::from_utf8(to_bytes(get.into_body(), 8192).await?.to_vec())?;
+            let get = client
+                .get(&endpoint)
+                .headers(headers.clone())
+                .send()
+                .await?;
+            assert_eq!(get.headers()[header::CACHE_CONTROL], "no-store");
+            let page = get.text().await?;
             assert!(!page.contains("d2c1."));
             assert!(page.contains("credential_metadata.ping") && page.contains("3600 seconds"));
             let reveal = credential_body(&session, "reveal");
@@ -1390,14 +2606,14 @@ mod tests {
             wrong.insert("test-subject", "someone-else".parse()?);
             assert!(
                 shell
-                    .dispatch(&Method::POST, &path, None, &wrong, &reveal, world.now)
+                    .dispatch(&Method::POST, &path, None, &wrong, &reveal, at)
                     .is_err()
             );
             let mut wrong = headers.clone();
             wrong.append(header::COOKIE, headers[header::COOKIE].clone());
             assert!(
                 shell
-                    .dispatch(&Method::POST, &path, None, &wrong, &reveal, world.now)
+                    .dispatch(&Method::POST, &path, None, &wrong, &reveal, at)
                     .is_err()
             );
             let mut bad = session.clone();
@@ -1410,7 +2626,7 @@ mod tests {
                         None,
                         &headers,
                         &credential_body(&bad, "reveal"),
-                        world.now
+                        at
                     )
                     .is_err()
             );
@@ -1424,7 +2640,7 @@ mod tests {
                         None,
                         &headers,
                         &credential_body(&bad, "reveal"),
-                        world.now
+                        at
                     )
                     .is_err()
             );
@@ -1436,7 +2652,7 @@ mod tests {
                         Some("version=forged"),
                         &headers,
                         &reveal,
-                        world.now
+                        at
                     )
                     .is_err()
             );
@@ -1454,7 +2670,7 @@ mod tests {
             )?;
             assert!(
                 shell
-                    .dispatch(&Method::POST, &path, None, &headers, &reveal, world.now)
+                    .dispatch(&Method::POST, &path, None, &headers, &reveal, at)
                     .is_err()
             );
             assert_eq!(world.keys.0.load(Ordering::SeqCst), before);
@@ -1462,36 +2678,42 @@ mod tests {
                 "UPDATE day2_credential_receipts SET family_contract=?1 WHERE invocation=?2",
                 rusqlite::params![contract, id],
             )?;
-            let response = protected(shell.dispatch(
-                &Method::POST,
-                &path,
-                None,
-                &headers,
-                &reveal,
-                world.now,
-            )?);
+            reject_navigation_origins(&client, &endpoint, &headers, &reveal).await?;
+            assert_eq!(world.keys.0.load(Ordering::SeqCst), before);
+            let response = client
+                .post(&endpoint)
+                .headers(headers.clone())
+                .body(reveal.clone())
+                .send()
+                .await?;
+            assert_eq!(response.status(), StatusCode::OK);
             assert_eq!(response.headers()["cache-control"], "no-store");
-            let html = String::from_utf8(to_bytes(response.into_body(), 8192).await?.to_vec())?;
+            let html = response.text().await?;
             assert!(html.contains("d2c1."));
             assert!(!html.contains("ciphertext"));
             let acknowledge = credential_body(&session, "acknowledge");
-            assert_eq!(
-                shell
-                    .dispatch(
-                        &Method::POST,
-                        &path,
-                        None,
-                        &headers,
-                        &acknowledge,
-                        world.now
-                    )?
-                    .headers()[header::LOCATION],
-                "https://app.example.com/"
+            let before = world.keys.0.load(Ordering::SeqCst);
+            reject_navigation_origins(&client, &endpoint, &headers, &acknowledge).await?;
+            assert_eq!(world.keys.0.load(Ordering::SeqCst), before);
+            let response = client
+                .post(&endpoint)
+                .headers(headers.clone())
+                .body(acknowledge)
+                .send()
+                .await?;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            assert!(!response.headers().contains_key(header::LOCATION));
+            let page = response.text().await?;
+            assert!(
+                page.contains("http-equiv=\"refresh\" content=\"0;url=https://app.example.com/\"")
             );
+            assert!(page.contains("href=\"https://app.example.com/\""));
+            assert!(!page.contains("d2c1."));
             let before = world.keys.0.load(Ordering::SeqCst);
             assert!(
                 shell
-                    .dispatch(&Method::POST, &path, None, &headers, &reveal, world.now)
+                    .dispatch(&Method::POST, &path, None, &headers, &reveal, at)
                     .is_err()
             );
             assert_eq!(world.keys.0.load(Ordering::SeqCst), before);
@@ -1504,7 +2726,9 @@ mod tests {
             [],
             |row| row.get(0),
         )?;
-        assert_eq!(personal, "google-alice");
+        assert_eq!(personal, "accounts.google.com:google-alice");
+        let _ = stop.send(());
+        tokio::time::timeout(Duration::from_secs(3), server).await???;
         Ok(())
     }
 

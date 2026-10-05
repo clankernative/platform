@@ -86,6 +86,10 @@ fn platform(directory: &Path) -> Result<PlatformInputs> {
     for name in [
         "Cargo.toml",
         "Cargo.lock",
+        "architecture-rules.json",
+        "architecture-boundaries.json",
+        "architecture-proofs.json",
+        "architecture/clippy.toml",
         "rust-toolchain.toml",
         "toolchain.json",
         ".dockerignore",
@@ -158,6 +162,41 @@ fn platform(directory: &Path) -> Result<PlatformInputs> {
         false,
     )?;
     PlatformInputs::capture(&root, &directory.join(".toolchains"))
+}
+
+#[test]
+fn architecture_policy_changes_invalidate_the_platform_and_materialization() -> Result<()> {
+    for policy in [
+        "architecture-rules.json",
+        "architecture-boundaries.json",
+        "architecture-proofs.json",
+        "architecture/clippy.toml",
+    ] {
+        let directory = tempfile::tempdir()?;
+        let approved = platform(directory.path())?;
+        assert!(approved.files().contains_key(&format!("platform/{policy}")));
+        let positive = directory.path().join("positive");
+        fs::create_dir(&positive)?;
+        approved.materialize(&positive)?;
+        assert_eq!(
+            fs::read(positive.join("platform").join(policy))?,
+            b"approved platform input"
+        );
+        write(
+            &directory.path().join("platform").join(policy),
+            b"changed architecture policy",
+            false,
+        )?;
+        let changed = PlatformInputs::capture(
+            &directory.path().join("platform"),
+            &directory.path().join(".toolchains"),
+        )?;
+        assert_ne!(approved.digest(), changed.digest());
+        let staged = directory.path().join("staged");
+        fs::create_dir(&staged)?;
+        assert!(approved.materialize(&staged).is_err());
+    }
+    Ok(())
 }
 
 fn runner(directory: &Path) -> Result<TrustedRunner> {

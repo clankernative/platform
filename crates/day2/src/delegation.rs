@@ -1,17 +1,7 @@
-//! App-to-app delegation: one application reading another's published operation.
-//!
-//! The call never leaves the instance. Both applications are installed here,
-//! their databases are siblings under one state directory, and the host loads
-//! the callee the same way it loads the caller. There is no socket, no
-//! credential and no transport — which is why the provider that carries it
-//! declares no connection.
-//!
-//! What it is *not* is a way to borrow authority. A delegated call runs as the
-//! same actor the caller was running as, and the callee's own policy decides
-//! independently whether that actor may run that operation. The grant says the
-//! caller may ask; it never says the answer is yes. A compromised caller can
-//! therefore reach nothing the person it is acting for could not already reach
-//! by calling the callee directly.
+//! Typed calls within one installation/environment. Separately served hosts
+//! authenticate workload and inherited human evidence; the receiving operation
+//! independently authorizes the effective actor. Queries are observations,
+//! command sends are durable effects, and receipt lookup grants no mutation.
 use crate::store::Runtime;
 use anyhow::{Result, ensure};
 use rusqlite::{OptionalExtension, params};
@@ -81,6 +71,27 @@ pub(crate) fn record_root_origin(
 /// and preserve the call's actor, causal identity, and target contract.
 pub trait AppCallPort: Send + Sync {
     fn query(&self, caller: &Runtime, call: &Call) -> Result<String>;
+
+    fn send(&self, _caller: &Runtime, _call: &Call) -> Result<String> {
+        anyhow::bail!("app_command_port_unbound")
+    }
+
+    fn status(&self, _caller: &Runtime, _call: &Call) -> Result<String> {
+        anyhow::bail!("app_command_status_unbound")
+    }
+
+    /// Private host ingress. Implementations verify the IAP workload assertion
+    /// and signed request before entering the ordinary receiver runtime.
+    fn receive(
+        &self,
+        _runtime: &Runtime,
+        _path: &str,
+        _wire: &[u8],
+        _assertion: &str,
+        _at: i64,
+    ) -> Result<Vec<u8>> {
+        anyhow::bail!("app_call_ingress_unbound")
+    }
 }
 
 /// A remote signer must inherit its actor and chain from the current durable
@@ -88,17 +99,21 @@ pub trait AppCallPort: Send + Sync {
 pub struct OriginEvidence {
     pub root: String,
     pub principal: String,
-    pub subject: String,
+    pub subject_digest: String,
 }
 
 pub fn verify_origin(runtime: &Runtime, call: &Call) -> Result<OriginEvidence> {
     ensure!(call.caller == runtime.app(), "delegated_caller_changed");
     let mut connection = crate::store::open(runtime.db())?;
-    let tx = connection.transaction()?;
+    // Exact grant resolution may record host-owned resource handles. Reserve
+    // the writer before reading authority so concurrent scheduling cannot turn
+    // this snapshot into a failed deferred-to-writer upgrade. No provider call
+    // or business mutation runs inside this transaction.
+    let tx = crate::write_queue::immediate(&mut connection)?;
     runtime.check_binding(&tx)?;
-    let origin: Option<(String, String, String, String, i64, String)> = tx
+    let origin: Option<(String, String, String, String, i64, String, String)> = tx
         .query_row(
-            "SELECT operation,actor,caller,artifact,now,status FROM day2_invocations WHERE id=?1",
+            "SELECT operation,actor,caller,artifact,now,status,input FROM day2_invocations WHERE id=?1",
             params![call.origin],
             |row| {
                 Ok((
@@ -108,11 +123,12 @@ pub fn verify_origin(runtime: &Runtime, call: &Call) -> Result<OriginEvidence> {
                     row.get(3)?,
                     row.get(4)?,
                     row.get(5)?,
+                    row.get(6)?,
                 ))
             },
         )
         .optional()?;
-    let (operation, actor, chain, artifact, now, status) =
+    let (operation, actor, chain, artifact, now, status, input) =
         origin.ok_or_else(|| anyhow::anyhow!("delegated_origin_missing"))?;
     ensure!(
         actor == call.actor
@@ -129,7 +145,74 @@ pub fn verify_origin(runtime: &Runtime, call: &Call) -> Result<OriginEvidence> {
         &operation,
         &call.actor,
     )?;
+    // Issuance admits the exact imported operation under the source's current
+    // grant. Possession of a pending human invocation is not itself permission
+    // to ask any peer to execute arbitrary work for that person.
+    let request = crate::protocol::Request {
+        operation,
+        input,
+        context: crate::store::invocation_context(&tx, &call.origin)?,
+        observations: Vec::new(),
+    };
+    let active = crate::authority_state::current(&tx)?;
+    if call.purpose == Purpose::Send {
+        let intent: String = tx.query_row("SELECT instruction FROM day2_external_effects WHERE identity=?1 AND invocation=?2 AND observation IS NULL", params![call.step,call.origin], |row| row.get(0))?;
+        let intent: crate::protocol::Instruction = crate::json::decode(intent.as_bytes())?;
+        let input: crate::resources::ImportedQuery = crate::json::decode(intent.data.as_bytes())?;
+        ensure!(
+            intent.kind == "external"
+                && intent.model == "app.send.v1"
+                && input.contract.operation == call.operation
+                && Some(input.contract.digest) == call.contract_digest
+                && serde_json::from_str::<Value>(&input.input)?
+                    == serde_json::from_str::<Value>(&call.input)?,
+            "delegated_effect_intent_changed"
+        );
+    }
+    let contract = call
+        .contract_digest
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("delegated_contract_missing"))?;
+    let admitted = crate::capabilities::authorized(&tx, runtime, &request, &crate::protocol::Instruction {
+        kind: call.purpose.instruction_kind().into(),
+        model: call.purpose.capability().into(),
+        data: serde_json::json!({"contract":{"operation":call.operation,"digest":contract},"input":call.input}).to_string(),
+        ..Default::default()
+    }, active.policy()?, &call.step)?;
+    ensure!(
+        admitted.delegated_call() == Some(call),
+        "delegated_grant_changed"
+    );
     let root = crate::resources::root_in(&tx, &call.origin)?;
+    let inherited: Option<String> = tx
+        .query_row(
+            "SELECT evidence FROM day2_inherited_origins WHERE invocation=?1",
+            [&root],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(inherited) = inherited {
+        let inherited: crate::delegation_commands::InheritedOrigin =
+            crate::json::decode(inherited.as_bytes())?;
+        ensure!(
+            inherited.actor == call.actor && !call.chain.is_empty(),
+            "delegated_origin_changed"
+        );
+        let bound: Option<String> = tx
+            .query_row(
+                "SELECT subject FROM day2_principals WHERE email=?1",
+                [&inherited.principal],
+                |row| row.get(0),
+            )
+            .optional()?;
+        ensure!(bound.is_none_or(|subject| crate::digest(subject.as_bytes()) == inherited.subject_digest), "delegated_origin_subject_changed");
+        tx.commit()?;
+        return Ok(OriginEvidence {
+            root: inherited.root,
+            principal: inherited.principal,
+            subject_digest: inherited.subject_digest,
+        });
+    }
     let root_identity: Option<(String, String, String, String, String, String)> = tx
         .query_row(
             "SELECT i.actor,i.trigger,i.authenticated,i.caller,o.principal,o.subject
@@ -167,7 +250,7 @@ pub fn verify_origin(runtime: &Runtime, call: &Call) -> Result<OriginEvidence> {
     Ok(OriginEvidence {
         root,
         principal,
-        subject,
+        subject_digest: crate::digest(subject.as_bytes()),
     })
 }
 
@@ -223,6 +306,10 @@ pub(crate) fn extend(recorded: &str, caller: &str, callee: &str) -> Result<Strin
 /// The chain must not already contain the callee. A→B→A is a loop that spends a
 /// budget and reads as a hang.
 pub fn read(runtime: &Runtime, call: &Call) -> Result<String> {
+    ensure!(
+        call.purpose == Purpose::Query,
+        "delegated_query_requires_read"
+    );
     // Authorization-only checks have no step. They must never dispatch: an
     // actual read needs a stable identity to deduplicate the callee invocation.
     ensure!(!call.step.is_empty(), "delegated_read_requires_a_step");
@@ -261,7 +348,7 @@ pub fn read(runtime: &Runtime, call: &Call) -> Result<String> {
     } else {
         None
     };
-    let result = execute_callee(&callee, call, &chain);
+    let result = execute_callee(&callee, call, &chain, None);
     if let Some(fence) = &fence {
         fence.check(runtime, &callee)?;
     }
@@ -281,6 +368,8 @@ pub fn receive_verified(
         "delegated_target_changed"
     );
     let call = Call {
+        purpose: request.purpose,
+        source_epoch: request.source_epoch.clone(),
         app: request.target.app.clone(),
         operation: request.operation.clone(),
         schema_digest: request.schema_digest.clone(),
@@ -294,58 +383,90 @@ pub fn receive_verified(
         now: request.now,
     };
     let chain = extend(&call.chain, &call.caller, &call.app)?;
-    execute_callee(callee, &call, &chain)
+    ensure!(
+        call.purpose == Purpose::Query,
+        "delegated_query_requires_read"
+    );
+    let admission = crate::delegation_commands::admission(verified, request.issued_at)?;
+    execute_callee(callee, &call, &chain, Some(&admission))
 }
 
-fn execute_callee(callee: &Runtime, call: &Call, chain: &str) -> Result<String> {
+pub(crate) fn require_contract(
+    callee: &Runtime,
+    operation: &str,
+    schema: &str,
+    contract: Option<&str>,
+    kind: &str,
+) -> Result<()> {
     let definition = callee
         .artifact()
-        .route(&call.operation)
-        .map_err(|_| anyhow::anyhow!("delegated_operation_unknown: {}", call.operation))?;
+        .route(operation)
+        .map_err(|_| anyhow::anyhow!("delegated_operation_unknown: {}", operation))?;
     ensure!(
-        definition.kind == "query",
-        "delegated_operation_is_not_a_query: {}",
-        call.operation
+        definition.kind == kind,
+        "delegated_operation_is_not_a_{kind}: {operation}"
     );
-    let actual = schema_digest(callee, &call.operation)?;
+    let actual = schema_digest(callee, operation)?;
     ensure!(
-        actual == call.schema_digest,
+        actual == schema,
         "delegated_schema_changed: {} now has {actual}",
-        call.operation
+        operation
     );
-    if let Some(expected) = &call.contract_digest {
+    if let Some(expected) = contract {
         let package = callee
             .artifact()
             .contract()
             .export_manifest
             .as_ref()
-            .and_then(|manifest| manifest.exports.get(&call.operation))
+            .and_then(|manifest| manifest.exports.get(operation))
             .ok_or_else(|| anyhow::anyhow!("delegated_contract_not_exported"))?;
         ensure!(
-            &package.digest == expected,
+            package.digest == expected,
             "delegated_contract_changed: {}",
-            call.operation
+            operation
         );
     }
+    Ok(())
+}
+
+fn execute_callee(
+    callee: &Runtime,
+    call: &Call,
+    chain: &str,
+    remote: Option<&crate::delegation_commands::Admission>,
+) -> Result<String> {
+    require_contract(
+        callee,
+        &call.operation,
+        &call.schema_digest,
+        call.contract_digest.as_deref(),
+        "query",
+    )?;
     // Derived from the caller's invocation and the step within it, so a retried
     // preparation reaches the same invocation of the callee rather than a second
     // one, and a replay of the caller reuses the receipt the first run left.
     let id = format!(
         "dlg_{}",
-        &crate::digest(&serde_json::to_vec(&(&call.origin, &call.step))?)["sha256:".len()..][..32]
+        &crate::digest(&serde_json::to_vec(&(
+            &call.caller,
+            &call.source_epoch,
+            &call.origin,
+            &call.step,
+            callee.scope()
+        ))?)["sha256:".len()..][..32]
     );
     let input: Value = serde_json::from_str(&call.input)?;
     // The calling application is who authenticated to the callee; the principal
     // the work is for is unchanged. That is the same pair impersonation records,
     // on the same columns — an application acting for a person is one case of it.
     let authenticated = format!("app:{}", call.caller);
-    callee.accept_delegated(
-        &call.operation,
-        &id,
-        &input,
-        call.now,
-        crate::store::Cause::delegated(&call.actor, chain, &authenticated),
-    )?;
+    let cause = crate::store::Cause::delegated(&call.actor, chain, &authenticated);
+    let cause = if let Some(admission) = remote {
+        cause.remote(admission)
+    } else {
+        cause
+    };
+    callee.accept_delegated(&call.operation, &id, &input, call.now, cause)?;
     let outcome = callee.execute(&id, crate::store::Fault::None)?;
     ensure!(
         outcome.status == "success",
@@ -355,10 +476,46 @@ fn execute_callee(callee: &Runtime, call: &Call, chain: &str) -> Result<String> 
     Ok(serde_json::to_string(&outcome.result)?)
 }
 
+pub fn send(runtime: &Runtime, call: &Call) -> Result<String> {
+    ensure!(
+        call.purpose == Purpose::Send && call.caller == runtime.app() && !call.step.is_empty(),
+        "invalid_app_send"
+    );
+    extend(&call.chain, &call.caller, &call.app)?;
+    if runtime.integrations().is_simulated() {
+        return crate::integrations::simulated::delegated_send(runtime.db(), runtime.scope(), call);
+    }
+    runtime
+        .app_call_port()
+        .ok_or_else(|| anyhow::anyhow!("app_command_port_unbound"))?
+        .send(runtime, call)
+}
+
+pub fn status(runtime: &Runtime, call: &Call) -> Result<String> {
+    ensure!(
+        call.purpose == Purpose::Status && call.caller == runtime.app() && !call.step.is_empty(),
+        "invalid_app_status"
+    );
+    extend(&call.chain, &call.caller, &call.app)?;
+    if runtime.integrations().is_simulated() {
+        return crate::integrations::simulated::delegated_status(
+            runtime.db(),
+            runtime.scope(),
+            call,
+        );
+    }
+    runtime
+        .app_call_port()
+        .ok_or_else(|| anyhow::anyhow!("app_command_status_unbound"))?
+        .status(runtime, call)
+}
+
 /// What the caller is asking for, resolved from its grant and its context.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Call {
+    pub purpose: Purpose,
+    pub source_epoch: String,
     pub app: String,
     pub operation: String,
     pub schema_digest: String,
@@ -370,6 +527,32 @@ pub struct Call {
     pub chain: String,
     pub caller: String,
     pub now: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Purpose {
+    Query,
+    Send,
+    Status,
+}
+
+impl Purpose {
+    pub fn capability(self) -> &'static str {
+        match self {
+            Self::Query => "app.query.v1",
+            Self::Send => "app.send.v1",
+            Self::Status => "app.status.v1",
+        }
+    }
+
+    pub fn instruction_kind(self) -> &'static str {
+        if self == Self::Send {
+            "external"
+        } else {
+            "observe"
+        }
+    }
 }
 
 /// The reviewed shape of one operation: what it accepts and what it returns.

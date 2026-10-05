@@ -14,9 +14,17 @@ come from a separate private instance repository; start with the
 | [tenancy](stacks/tenancy/main.tf) | Retained SQLite storage and snapshot classes, admission policies for app namespaces (including the backup Job service account exception) |
 | [app-edge](stacks/app-edge/main.tf) | Per app: namespace, runtime service account, retained disk, quotas, Service, IAP BackendConfig, HTTPS redirect, managed certificate, static IP, Cloudflare DNS, Ingress, network policy, image repository, workload state bucket, GKE backup plan, off-cluster backup bucket with its object-create-only Workload Identity uploader, and the platform contract |
 | [security-shell-edge](stacks/security-shell-edge/main.tf) | Per installation: dedicated security namespace, shell service account, named secret access, IAP Service/backend, certificate, DNS, routing, network policy and a shell contract consumed by app deployments |
+| [security-shell](stacks/security-shell/main.tf) | Separate stateless shell Deployment and read-only instance ConfigMap, consuming the resolved installation edge and exact selected secret-container contract |
 | [day2-app](stacks/day2-app/main.tf) | Instance ConfigMap, one-replica StatefulSet and the hourly off-cluster backup CronJob |
 | [qualification-runner](stacks/qualification-runner/main.tf) | Optional x86_64 native Docker VM, off by default, private IP and IAP SSH |
 | [gitea-instance-ci](stacks/gitea-instance-ci/main.tf) | Optional plan-on-PR / apply-on-main CI for an instance repository on Gitea |
+
+Installed app-call workloads can hand software deployment to the native
+`day2-gke-release` command by enabling `release_managed` in the day2-app root.
+The root preserves released image/instance fields during infrastructure plans;
+the release command verifies deployment readback and publishes serving selectors
+automatically. See [the normal release workflow](../../docs/RELEASE-WORKFLOW.md)
+for the two-key profile, explicit operator approval and durable retry behavior.
 
 The cluster example is zonal and uses fixed non-overlapping private ranges in a
 new dedicated VPC. It is a reference deployment, not a multi-zone HA service.
@@ -53,6 +61,12 @@ required deployment step, not a claim supplied by the source tests.
    and its own authority policy. An IAP group grant does not grant app operations.
 
 ## Apply order
+
+For installation IAM qualification, select `enable_cloud_asset_api = true` in
+the private project's values. It defaults to false; selection adds only the
+Cloud Asset API to the foundation. Audit authority is granted separately to an
+operator at the analysis scope. See the
+[OAuth IAM audit procedure](../../docs/OAUTH-IAM-AUDIT.md).
 
 Run from the platform root. The examples use absolute private paths because
 `-chdir` changes OpenTofu's path base. Use a different backend prefix for each
@@ -152,8 +166,9 @@ instance; successful DNS/TLS provisioning alone does not qualify OAuth.
 The shared `apps[app].oauth_connections` contract selects app-owned requirements,
 reviewed profiles and version-pinned key providers. See
 [selected outbound OAuth connections](../../docs/OAUTH-INSTANCE.md) for the
-instance fields, callback namespace and current readiness checks. This contract
-does not yet add OAuth selection variables or a shell workload to `day2-app`.
+instance fields, callback namespace and current readiness checks. `day2-app`
+accepts the canonical single-app instance selection as `oauth_instance_json`;
+the separate `security-shell` root serves the installation shell.
 
 Private approval transport also selects `oauth_shell_transport.service_account`
 from the published shell contract. Pass the same `security_shell_contract`
@@ -162,16 +177,69 @@ to its app backend's IAP access binding. The shell contract must have a resolved
 IAP audience distinct from the app's audience. Its locations reuse ordinary
 selected app edges; no receiver hostname list is authored separately.
 
-`security-shell-edge.runtime_secret_ids` must include only selected attestation
-and reauthentication client-secret containers. App custody verifier and encryption
-containers belong in each selected `app-edge.runtime_secret_ids`, together with
-its attestation verification container. The shell secret IAM member changes from
+`security-shell-edge.runtime_secret_ids` must include only selected attestation,
+reauthentication and provider client-secret containers. Select app custody
+verifier/encryption containers in `app-edge.oauth_runtime.custody_secret_ids`
+and attestation verification containers in `attestation_secret_ids`. These
+native reads use the linked app Google service account. The separate
+`app-edge.runtime_secret_ids` remains for ordinary provider credentials read by
+the CSI add-on; it must not grant shell client or attestation containers.
+The shell secret IAM member changes from
 the direct Kubernetes federation principal to its dedicated Google service
 account when applying this update; review that policy migration before rollout.
 No secret value is read by OpenTofu. Applying these plans still does not qualify
 live workload identity, secret custody, provider readiness or OAuth registration.
 
+### Native OAuth app deployment
+
+In the private instance's app-edge inputs, opt into `oauth_runtime` with a
+`service_account_id`, `custody_secret_ids` and `attestation_secret_ids`. The
+edge creates one runtime Google service account, links only the app's `runtime`
+Kubernetes service account and grants the named key containers plus exactly the
+five Compute read methods used by native readiness. It grants no OAuth JWT
+signing authority. If `app_calls` already selects an identity, use that same
+`service_account_id`: its existing resource address and permissions are retained,
+and no second Google service account or workload binding is created.
+
+Pass the same resolved `security_shell_contract` to both roots. The published
+app contract binds its project, runtime identity, key containers and shell
+contract reference. `day2-app.oauth_instance_json` takes the complete canonical
+**single-app** native instance JSON from the private company repo, including
+`control.secrets`, `oauth_clients`, `oauth_runtime` and `oauth_connections`.
+This uses the shared native schema rather than a separate Terraform OAuth
+catalog. Use a deployment module's `file(...)` expression or the existing
+instance tooling to supply its bytes as this string input; tfvars files do not
+evaluate `file(...)` expressions. Keep all company URLs and exact numeric secret
+versions in that private selection.
+
+The workload root copies OAuth/control metadata intact and renders the ordinary
+app settings from its existing inputs. It checks installation/environment,
+artifact, binding namespace, account/client coverage, both edges, project,
+selected shell contract, exact key-container grants and the actual KSA's GSA
+annotation. Add `iam.gke.io/gke-metadata-server-enabled = "true"` to the selected
+node labels. Wrong identities, stale selections, extra grants, floating key
+versions and any app-key/client container overlap are refused before rollout.
+The native launcher still performs closed-schema and admitted-artifact/pin
+checks; planned policy cannot create readiness.
+
+OAuth keys are read natively by exact numeric version; there is no new secret
+volume, credential registration init container or secret value in OpenTofu.
+The existing provider-credential provisioning instance is composed before
+OAuth metadata is added, preserving its operator-only control contract. Backup
+jobs retain the configuration references for restore and their separate
+object-create-only identity; they receive no OAuth key grant. Review the actual
+effective IAM policy, including inherited grants and other KSA/GSA bindings,
+before qualifying the live installation. Named container grants apply to every
+version; native exact-version selection does not narrow that IAM permission.
+
 ## Build, qualify and deploy
+
+For a selected managed-credential verifier, `app-edge.credential_api = true`
+adds a separate backend for `/_day2/credentials/api/*`. The app host verifies
+the bearer token against its current selected authority and frozen grant.
+Human routes and the default backend retain IAP. The flag is off by default;
+it does not install key, epoch, clock or account-mapping adapters. See
+[credential API admission](../../docs/CREDENTIALS.md#managed-api-admission).
 
 Follow [native Linux qualification](../linux-sqlite/README.md) on a real engine of
 the target architecture. `xtask qualify-linux` uses public Reports and row-authority
@@ -201,6 +269,45 @@ pool's actual PID bound; a declared value is not a substitute for checking it.
 Initialize, plan and apply `day2-app` with its separate backend. Confirm rollout,
 readiness, authenticated access, denial for an unauthorized account, app operation
 authority and rejection of unsigned direct requests. Retain this evidence privately.
+
+## Deploy the dedicated OAuth shell
+
+After resolving `security-shell-edge`, create the separate Google Web clients
+and store their credentials in exact Secret Manager versions. Keep the selected
+client IDs, provider references, company origin, resource selectors and
+`oauth_runtime.shell_resources` in the private instance repository; see
+[OAuth instance setup](../../docs/OAUTH-INSTANCE.md#dedicated-shell-launcher).
+Use `day2 oauth-setup INSTANCE` to derive the dependent bindings and exact Google
+callback URLs. Desired setup metadata cannot enable provider readiness.
+
+The shell edge's `runtime_secret_ids` must contain exactly the selected
+reauthentication and registration client-secret containers and shell attestation
+containers. It must exclude all app custody containers, even if selecting another
+version. Apply the updated edge contract before planning the workload; the new
+workload refuses an unresolved contract or a different declared secret set.
+
+Build `images/security-shell/Dockerfile` using the reviewed digest-pinned
+platform runtime image and a context containing only the selected admitted Linux
+`artifacts/` tree. Preserve its reviewed read-only file modes. The platform runtime
+now includes `day2-security-shell` and its pinned Roc workflow distribution.
+It has no shell script, package installation or application build hook.
+
+Initialize and plan `stacks/security-shell` with its own private GCS backend
+prefix, the dedicated edge namespace, digest-pinned shell image and
+`instance_json = file(...)` input from that same instance repository. The root
+consumes the existing edge's service account and selector; it creates no app PVC,
+credential mount, identity or alternative URL catalog. Use the actual qualified
+metadata-enabled node pool. The selected pod PID limit is a declaration until
+verified against that pool; native startup separately checks memory/CPU bounds.
+
+Before claiming live readiness, retain evidence for the exact deployed image,
+instance digest, admitted artifact set, node/cgroup bounds, service-account
+mapping, effective IAM and namespace/network isolation. Confirm readiness/drain,
+unsigned direct-request denial and authenticated routing. Process probes alone
+do not qualify a Google client; perform the signed live registration campaign
+from the selected canary account and observe the owning app's acknowledgement.
+No live shell deployment or Google qualification has been performed by these
+source and mocked-plan tests.
 
 ## Instance CI on Gitea
 
@@ -455,6 +562,8 @@ Several fields are fixed or seeded once:
 - Readers, writers and operation actors are lowercase e-mail addresses, or
   `domain:<hosted_domain>` for everyone at the domain IAP verifies. The root
   refuses any other `domain:` entry, as day2 does.
+- Managed client membership is explicit as `credential_client:<family-id>`;
+  these principals do not inherit their creator's human membership.
 - Readers, writers and authority are copied into the app's database
   on the first start only. Later changes need explicit activation (`day2
   activate`).
@@ -517,7 +626,9 @@ Manager CSI add-on; no secret value passes through OpenTofu. For each secret:
 1. Store it in Secret Manager in the app's project and note its version number.
 2. List the secret id in `app-edge.runtime_secret_ids`. That grants only the
    app's `runtime` Kubernetes service account's Workload Identity principal
-   `roles/secretmanager.secretAccessor` on that secret.
+   `roles/secretmanager.secretAccessor` on that secret. When `app_calls` or
+   `oauth_runtime` links that account to a Google service account, the grant uses
+   the linked account that the CSI add-on authenticates as.
 3. In `day2-app.provider_credentials`, pair the day2 credential reference that a
    catalog connection declares (`credential_ref` or `signing_secret_ref`) with
    the exact version (`projects/P/secrets/S/versions/N`, never `latest`) and its

@@ -504,14 +504,17 @@ fn export_forms(artifact: &Artifact, artifact_directory: &Path) -> Result<Vec<Fo
 }
 
 fn export_schedule(schedule: &crate::artifact::Schedule) -> ScheduleExport {
-    let hour_ms = 60 * 60 * 1000;
+    let minute_ms = 60 * 1000;
+    let hour_ms = 60 * minute_ms;
     let day_ms = 24 * hour_ms;
     let cadence = if schedule.interval_ms >= day_ms && schedule.interval_ms.is_multiple_of(day_ms) {
         json!({ "daily": { "everyDays": schedule.interval_ms / day_ms, "hour": schedule.anchor_hour } })
     } else if schedule.interval_ms.is_multiple_of(hour_ms) {
         json!({ "hours": schedule.interval_ms / hour_ms })
+    } else if schedule.interval_ms.is_multiple_of(minute_ms) {
+        json!({ "minutes": schedule.interval_ms / minute_ms })
     } else {
-        json!({ "minutes": schedule.interval_ms / (60 * 1000) })
+        json!({ "milliseconds": schedule.interval_ms })
     };
     ScheduleExport {
         command: schedule.operation.clone(),
@@ -737,7 +740,7 @@ mod tests {
             follow_ups: Vec::new(),
         };
         let contract = crate::app_contract::Operation {
-            intent,
+            intent: intent.clone(),
             request_example: r#"{"limit":2}"#.into(),
             response_example: r#"{"title":"Example"}"#.into(),
             deprecated: false,
@@ -747,10 +750,46 @@ mod tests {
             errors: Vec::new(),
             required_all_rows: Vec::new(),
         };
+        let mut command_intent = intent;
+        command_intent.target.operation = "gallery.save".into();
+        command_intent.title = "Save item".into();
+        let command = crate::app_contract::Operation {
+            intent: command_intent,
+            request_example: r#"{"limit":2}"#.into(),
+            response_example: r#"{"title":"Saved"}"#.into(),
+            deprecated: false,
+            export_version: 0,
+            execution: Default::default(),
+            credential_access: Default::default(),
+            errors: vec!["gallery:invalid_item".into()],
+            required_all_rows: Vec::new(),
+        };
+        let error = crate::app_contract::Failure {
+            code: "gallery:invalid_item".into(),
+            description: "The item is invalid.".into(),
+            recovery: "Correct the item and retry.".into(),
+            operation: command.intent.target.clone(),
+            additional_operations: Vec::new(),
+        };
+        let directory = tempfile::tempdir()?;
+        let template_bytes =
+            b"<form data-command=\"gallery.save\"><input name=\"limit\" type=\"number\"></form>";
+        let template_digest = crate::digest(template_bytes);
+        fs::create_dir(directory.path().join("web_templates"))?;
+        fs::write(
+            directory
+                .path()
+                .join("web_templates")
+                .join(format!("{}.html", &template_digest[7..])),
+            template_bytes,
+        )?;
         let artifact = Artifact {
             format: crate::artifact::CURRENT_FORMAT,
             app_contract: Some(crate::app_contract::Definition {
-                operations: BTreeMap::from([("gallery.list".into(), contract)]),
+                operations: BTreeMap::from([
+                    ("gallery.list".into(), contract),
+                    ("gallery.save".into(), command),
+                ]),
                 presentation: crate::app_contract::Presentation {
                     stylesheet: String::new(),
                     script: String::new(),
@@ -758,7 +797,7 @@ mod tests {
                 identities: String::new(),
                 invariants: BTreeMap::new(),
                 domains: BTreeMap::new(),
-                errors: BTreeMap::new(),
+                errors: BTreeMap::from([("gallery:invalid_item".into(), error)]),
             }),
             export_manifest: None,
             imports: None,
@@ -773,12 +812,20 @@ mod tests {
             schema_digest: schema.hash()?,
             schema,
             identities: crate::identity::Registry::default(),
-            operations: vec![crate::artifact::Operation {
-                name: "gallery.list".into(),
-                kind: "query".into(),
-                input_type: "Input".into(),
-                output_type: "Output".into(),
-            }],
+            operations: vec![
+                crate::artifact::Operation {
+                    name: "gallery.list".into(),
+                    kind: "query".into(),
+                    input_type: "Input".into(),
+                    output_type: "Output".into(),
+                },
+                crate::artifact::Operation {
+                    name: "gallery.save".into(),
+                    kind: "command".into(),
+                    input_type: "Input".into(),
+                    output_type: "Output".into(),
+                },
+            ],
             properties: Vec::new(),
             pages: vec![
                 Page {
@@ -806,7 +853,16 @@ mod tests {
                     live_refresh_ms: 0,
                 },
             ],
-            schedules: Vec::new(),
+            schedules: vec![crate::artifact::Schedule {
+                name: "minute-and-half".into(),
+                operation: "gallery.save".into(),
+                input: r#"{"limit":2}"#.into(),
+                input_type: "Input".into(),
+                interval_ms: 90_000,
+                anchor_hour: 3,
+                missed: "skip".into(),
+                catch_up_bound: 0,
+            }],
             ingress: Vec::new(),
             redirects: Vec::new(),
             assets: Default::default(),
@@ -818,18 +874,20 @@ mod tests {
                     roc_type: "Output".into(),
                 },
             )]),
-            templates: Default::default(),
+            templates: BTreeMap::from([(
+                "pages/home.html".into(),
+                crate::web_templates::Template {
+                    digest: template_digest,
+                    bytes: template_bytes.len() as u64,
+                },
+            )]),
             api_docs: BTreeMap::new(),
             operation_metadata: BTreeMap::new(),
             sources: BTreeMap::new(),
             admission: "local-spike-only".into(),
         };
         let serialized =
-            serde_json::to_value(export("sha256:fixture", &artifact, Path::new("."))?)?;
-        assert_eq!(
-            serialized,
-            serde_json::to_value(export("sha256:fixture", &artifact, Path::new("."))?)?
-        );
+            serde_json::to_value(export("sha256:fixture", &artifact, directory.path())?)?;
         assert_eq!(serialized["schemaVersion"], 1);
         assert_eq!(serialized["kind"], "clanker-app-contracts");
         assert_eq!(serialized["artifact"], "sha256:fixture");
@@ -847,9 +905,29 @@ mod tests {
             serialized["queries"]["gallery.list"]["api"]["path"],
             "/api/gallery.list"
         );
-        assert_eq!(serialized["commands"], json!({}));
-        assert_eq!(serialized["forms"], json!([]));
-        assert_eq!(serialized["schedules"], json!({}));
+        assert_eq!(
+            serialized["commands"]["gallery.save"]["api"]["method"],
+            "POST"
+        );
+        assert_eq!(
+            serialized["commands"]["gallery.save"]["api"]["path"],
+            "/api/gallery.save"
+        );
+        assert_eq!(serialized["commands"]["gallery.save"]["edit"], Value::Null);
+        assert_eq!(
+            serialized["commands"]["gallery.save"]["errors"][0]["name"],
+            "gallery:invalid_item"
+        );
+        assert_eq!(
+            serialized["commands"]["gallery.save"]["errors"][0]["recovery"],
+            "Correct the item and retry."
+        );
+        assert_eq!(serialized["forms"][0]["command"], "gallery.save");
+        assert_eq!(serialized["forms"][0]["fields"][0]["name"], "limit");
+        assert_eq!(
+            serialized["schedules"]["minute-and-half"]["cadence"],
+            json!({"milliseconds": 90_000})
+        );
         assert_eq!(serialized["redirects"], json!({}));
         assert_eq!(
             serialized["queries"]["gallery.list"]["inputSchema"]["properties"]["limit"]["description"],
@@ -887,6 +965,33 @@ mod tests {
             serialized["templateContext"]["shared"]["company"]["kind"],
             "record"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn declared_schedule_cadence_preserves_exact_intervals() -> Result<()> {
+        let mut schedule = crate::artifact::Schedule {
+            name: "sweep".into(),
+            operation: "gallery.save".into(),
+            input: "{}".into(),
+            input_type: "Input".into(),
+            interval_ms: 90_000,
+            anchor_hour: 3,
+            missed: "skip".into(),
+            catch_up_bound: 0,
+        };
+        for (interval, cadence) in [
+            (90_000, json!({"milliseconds": 90_000})),
+            (120_000, json!({"minutes": 2})),
+            (7_200_000, json!({"hours": 2})),
+            (172_800_000, json!({"daily": {"everyDays": 2, "hour": 3}})),
+        ] {
+            schedule.interval_ms = interval;
+            assert_eq!(
+                serde_json::to_value(export_schedule(&schedule))?["cadence"],
+                cadence
+            );
+        }
         Ok(())
     }
 

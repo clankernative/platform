@@ -13,6 +13,7 @@ fn write_bytes(source: &Path, path: &str, value: &[u8]) -> Result<()> {
     Ok(())
 }
 
+// Header-only data for admission limits; these bytes are not a decodable font.
 fn test_woff2(length: usize) -> Vec<u8> {
     assert!(length >= 49);
     let mut bytes = vec![0u8; length];
@@ -235,32 +236,22 @@ fn resource_sources_reject_symlinks_non_ui_files_and_paths() -> Result<()> {
 }
 
 #[test]
-fn reviewed_geist_woff2_resources_are_admitted_and_css_urls_resolve() -> Result<()> {
-    // Reviewed, OFL-licensed bytes are local fixtures: CI needs no sibling checkout.
-    const SANS: &[u8] = include_bytes!("fixtures/fonts/geist-sans-variable.woff2");
-    const MONO: &[u8] = include_bytes!("fixtures/fonts/geist-mono-variable.woff2");
+fn woff2_resource_bytes_and_css_font_closure_survive_packaging() -> Result<()> {
+    const FONT: &[u8] = include!("fixtures/fonts/test-subset.rs");
     let directory = tempfile::tempdir()?;
     let source = directory.path().join("ui");
-    write_bytes(&source, "fonts/geist-sans-variable.woff2", SANS)?;
-    write_bytes(&source, "fonts/geist-mono-variable.woff2", MONO)?;
+    write_bytes(&source, "fonts/test-subset.woff2", FONT)?;
     write(
         &source,
         "app.css",
-        "@font-face { font-family: Geist; src: url(\"./fonts/geist-sans-variable.woff2\") format(\"woff2\"); }",
+        "@font-face { font-family: Test; src: url(./fonts/test-subset.woff2) format(\"woff2\"); }",
     )?;
     let target = directory.path().join("out");
     let catalog = web_resources::package(&source, &target)?;
+    assert_eq!(catalog["fonts/test-subset.woff2"].media_type, "font/woff2");
     assert_eq!(
-        catalog["fonts/geist-sans-variable.woff2"].media_type,
-        "font/woff2"
-    );
-    assert_eq!(
-        catalog["fonts/geist-mono-variable.woff2"].media_type,
-        "font/woff2"
-    );
-    assert_eq!(
-        web_resources::read_blob(&target, &catalog["fonts/geist-sans-variable.woff2"])?,
-        SANS
+        web_resources::read_blob(&target, &catalog["fonts/test-subset.woff2"])?,
+        FONT
     );
     web_resources::validate_blobs(&target, &catalog)?;
 
@@ -342,6 +333,23 @@ fn woff2_header_type_path_and_budget_are_bounded() -> Result<()> {
     write_bytes(&source, "fonts/mismatch.woff2", &mismatch)?;
     assert!(web_resources::package(&source, &directory.path().join("mismatch-out")).is_err());
     fs::remove_file(source.join("fonts/mismatch.woff2"))?;
+    for (offset, value, message) in [
+        (12, 0u32, "ui_woff2_header_invalid"),
+        (20, 0u32, "ui_woff2_header_invalid"),
+        (20, 17u32, "ui_woff2_compressed_length_invalid"),
+    ] {
+        let mut bytes = test_woff2(64);
+        if offset == 12 {
+            bytes[offset..offset + 2].copy_from_slice(&(value as u16).to_be_bytes());
+        } else {
+            bytes[offset..offset + 4].copy_from_slice(&value.to_be_bytes());
+        }
+        write_bytes(&source, "fonts/header.woff2", &bytes)?;
+        let error =
+            web_resources::package(&source, &directory.path().join("header-out")).unwrap_err();
+        assert!(format!("{error:#}").contains(message), "{error:#}");
+        fs::remove_file(source.join("fonts/header.woff2"))?;
+    }
     let mut expanded = test_woff2(64);
     expanded[16..20].copy_from_slice(&((16 * 1024 * 1024 + 1) as u32).to_be_bytes());
     write_bytes(&source, "fonts/expanded.woff2", &expanded)?;

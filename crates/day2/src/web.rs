@@ -63,6 +63,12 @@ struct Host {
     secret: Vec<u8>,
     sign_in: SignIn,
     capacity: Arc<Semaphore>,
+    /// Issuance must make progress while the originating query holds its own
+    /// request permit. Keep this separately bounded from browser admission.
+    app_capacity: Arc<Semaphore>,
+    app_issue_capacity: Arc<Semaphore>,
+    app_execute_capacity: Arc<Semaphore>,
+    app_reconcile_capacity: Arc<Semaphore>,
     /// Requests waiting for a permit; bounded by [`MAX_QUEUED`].
     queued: std::sync::atomic::AtomicUsize,
     live_capacity: Arc<Semaphore>,
@@ -362,6 +368,10 @@ impl LocalServer {
             origin: origin.clone(),
             sign_in,
             capacity: Arc::new(Semaphore::new(concurrency)),
+            app_capacity: Arc::new(Semaphore::new(16)),
+            app_issue_capacity: Arc::new(Semaphore::new(4)),
+            app_execute_capacity: Arc::new(Semaphore::new(6)),
+            app_reconcile_capacity: Arc::new(Semaphore::new(2)),
             queued: std::sync::atomic::AtomicUsize::new(0),
             live_capacity: Arc::new(Semaphore::new(64)),
             admitting: Arc::new(AtomicBool::new(true)),
@@ -576,6 +586,9 @@ async fn handle(State(host): State<Arc<Host>>, request: Request) -> Response {
     if !host.admitting.load(Ordering::Acquire) {
         return secure(StatusCode::SERVICE_UNAVAILABLE.into_response());
     }
+    if request.uri().path().starts_with("/_platform/app-") {
+        return handle_app_call(host, request).await;
+    }
     let json = crate::web_api::is_json(request.uri().path());
     let live_request = request.method() == Method::GET
         && request.uri().path() == "/_live"
@@ -720,6 +733,84 @@ async fn handle(State(host): State<Arc<Host>>, request: Request) -> Response {
         response
     })
 }
+
+async fn handle_app_call(host: Arc<Host>, request: Request) -> Response {
+    let path = request.uri().path().to_owned();
+    if !matches!(
+        path.as_str(),
+        "/_platform/app-issue" | "/_platform/app-query"
+    ) {
+        return secure(StatusCode::NOT_FOUND.into_response());
+    }
+    if request.method() != Method::POST || request.uri().query().is_some() {
+        return secure(StatusCode::METHOD_NOT_ALLOWED.into_response());
+    }
+    let Some(port) = host.runtime.app_call_port().cloned() else {
+        return secure(StatusCode::NOT_FOUND.into_response());
+    };
+    let mut assertions = request
+        .headers()
+        .get_all(crate::iap::ASSERTION_HEADER)
+        .iter();
+    let (Some(assertion), None) = (assertions.next(), assertions.next()) else {
+        return secure(StatusCode::UNAUTHORIZED.into_response());
+    };
+    let Some(assertion) = assertion
+        .to_str()
+        .ok()
+        .filter(|assertion| assertion.len() <= 16_384)
+        .map(str::to_owned)
+    else {
+        return secure(StatusCode::UNAUTHORIZED.into_response());
+    };
+    let Ok(permit) = host.app_capacity.clone().try_acquire_owned() else {
+        return secure(StatusCode::SERVICE_UNAVAILABLE.into_response());
+    };
+    let maximum = if path == "/_platform/app-issue" {
+        300_000
+    } else {
+        200_000
+    };
+    let body = match tokio::time::timeout(
+        Duration::from_secs(3),
+        to_bytes(request.into_body(), maximum),
+    )
+    .await
+    {
+        Ok(Ok(body)) => body,
+        Ok(Err(_)) => return secure(StatusCode::PAYLOAD_TOO_LARGE.into_response()),
+        Err(_) => return secure(StatusCode::REQUEST_TIMEOUT.into_response()),
+    };
+    drop(permit);
+    let capacity = if path == "/_platform/app-issue" {
+        &host.app_issue_capacity
+    } else if crate::delegation_wire::claimed_purpose(&body)
+        .is_ok_and(|purpose| purpose == crate::delegation::Purpose::Status)
+    {
+        &host.app_reconcile_capacity
+    } else {
+        &host.app_execute_capacity
+    };
+    let Ok(permit) = capacity.clone().try_acquire_owned() else {
+        return secure(StatusCode::SERVICE_UNAVAILABLE.into_response());
+    };
+    match tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
+        let _permit = permit;
+        let at = now()?;
+        host.runtime.web_event(at, None, "app_call", 102)?;
+        let result = port.receive(&host.runtime, &path, &body, &assertion, at);
+        host.runtime
+            .web_event(at, None, "app_call", if result.is_ok() { 200 } else { 403 })?;
+        result
+    })
+    .await
+    {
+        Ok(Ok(body)) => {
+            secure(([(header::CONTENT_TYPE, "application/json")], body).into_response())
+        }
+        _ => secure((StatusCode::FORBIDDEN, "{\"error\":\"app_call_refused\"}").into_response()),
+    }
+}
 impl Host {
     /// Who a request is from, before anything else looks at it.
     ///
@@ -743,6 +834,9 @@ impl Host {
             return Ok((cookie(), None));
         };
         if path.starts_with(crate::ingress::ROUTE_PREFIX) {
+            return Ok((None, None));
+        }
+        if path.starts_with(crate::managed_credentials::ingress::PREFIX) {
             return Ok((None, None));
         }
         let mut assertions = headers.get_all(crate::iap::ASSERTION_HEADER).iter();
@@ -809,6 +903,20 @@ impl Host {
             crate::error::Failure::UnsupportedMethod
         );
         self.appearance.check_binding(&self.runtime)?;
+        if uri
+            .path()
+            .starts_with(crate::managed_credentials::ingress::PREFIX)
+        {
+            return crate::managed_credentials::ingress::dispatch(
+                &self.runtime,
+                &self.api,
+                method,
+                uri,
+                headers,
+                body,
+                at,
+            );
+        }
         // A provider delivery carries no browser origin, form encoding or
         // session: what establishes it is the signature over these exact bytes,
         // so it is dispatched before the browser guards and the session check.
@@ -1447,11 +1555,8 @@ impl Host {
                         @if let Some(stylesheet) = stylesheet { link rel="stylesheet" href=(stylesheet); }
                         script type="module" src="/assets/platform/datastar-1.0.1.js" {}
                         script type="module" src="/assets/platform/forms.js" {}
-                        // The app entrypoint restores browser-local chrome before first paint.
-                        // Apps should load optional, heavy surfaces lazily from this bootstrap.
-                        @if let Some(script) = script { script type="module" blocking="render" src=(script) {} }
-                        // Optional presentation behavior has its own admitted entry;
-                        // it neither replaces nor render-blocks the app bootstrap.
+                        @if let Some(script) = script { script type="module" src=(script) {} }
+                        // Component behavior has a separate admitted entrypoint.
                         @if let Some(script) = component_script { script type="module" src=(script) {} }
                     }
                     body { (live) (content) }

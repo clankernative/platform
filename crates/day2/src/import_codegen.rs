@@ -4,7 +4,7 @@
 //! whose contract and resource authority are verified by the host.
 
 use anyhow::{Context, Result, ensure};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::instance_catalog::ImportedContracts;
 
@@ -41,75 +41,74 @@ fn render(imports: &ImportedContracts, admission: bool) -> Result<String> {
     imports.verify()?;
     let mut names = BTreeSet::new();
     let mut functions = BTreeSet::new();
-    let mut source = if imports
-        .operations
-        .values()
-        .any(|package| package.operation.kind == crate::operation_contract::Kind::Query)
-    {
+    let mut source = if !imports.operations.is_empty() {
         String::from("import pf.Observe\n\n")
     } else {
         String::new()
     };
+    if imports
+        .operations
+        .values()
+        .any(|package| package.operation.kind == crate::operation_contract::Kind::Command)
+    {
+        source.push_str("import pf.Effects\n\n");
+    }
     source
         .push_str("# Generated from exact checked import contracts.\nImportedContracts :: [].{\n");
+    let mut types = BTreeMap::new();
+    let mut shapes = BTreeMap::new();
+    for package in imports.operations.values() {
+        for id in [&package.operation.input, &package.operation.output] {
+            if types.contains_key(id) {
+                continue;
+            }
+            let object = &package
+                .types
+                .get(id)
+                .context("imported type missing")?
+                .object;
+            let contract: crate::output_schema::Contract = if object.schema.get("fields").is_some()
+            {
+                crate::operation_contract::input_contract(&serde_json::from_value(
+                    object.schema.clone(),
+                )?)?
+            } else {
+                serde_json::from_value(object.schema.clone())?
+            };
+            ensure!(
+                object.dependencies.is_empty(),
+                "unsupported imported codec dependencies"
+            );
+            let nominal = crate::schema::roc_type_name(&contract.roc_type).is_ok()
+                && matches!(contract.shape, crate::output_schema::Type::Record(_));
+            let wire = if matches!(&contract.shape, crate::output_schema::Type::Record(fields) if fields.is_empty())
+            {
+                "{}".into()
+            } else {
+                contract.shape.wire_annotation()
+            };
+            let annotation = if nominal {
+                let name = format!("Contract{}", &crate::digest(id.as_bytes())[7..23]);
+                source.push_str(&format!("\t{name} := {}\n\n", wire));
+                name
+            } else {
+                wire
+            };
+            types.insert(id.clone(), annotation);
+            shapes.insert(id.clone(), contract.shape);
+        }
+    }
     for package in imports.operations.values() {
         let prefix = type_name(&package.operation.id)?;
         ensure!(names.insert(prefix.clone()), "imported type name collision");
-        let input = &package
-            .types
-            .get(&package.operation.input)
-            .context("imported input type missing")?
-            .object;
-        let output = &package
-            .types
-            .get(&package.operation.output)
-            .context("imported output type missing")?
-            .object;
-        ensure!(
-            input.dependencies.is_empty() && output.dependencies.is_empty(),
-            "generated import needs self-contained structural types"
-        );
-        let input: crate::schema::Record = serde_json::from_value(input.schema.clone())?;
-        ensure!(
-            input.identity.is_none() && input.roc_type.is_none(),
-            "generated import does not yet support nominal input types"
-        );
-        let output: crate::output_schema::Contract = serde_json::from_value(output.schema.clone())?;
-        ensure!(
-            package.operation.output.contains(".operation."),
-            "generated import does not yet support nominal output types"
-        );
-        let input_fields = input
-            .fields
-            .iter()
-            .map(|(field, kind)| {
-                ensure!(
-                    crate::schema::identifier(field).is_ok(),
-                    "unsupported imported input field"
-                );
-                let shape = match kind {
-                    crate::schema::Kind::Integer
-                    | crate::schema::Kind::Unsigned(_)
-                    | crate::schema::Kind::Text
-                    | crate::schema::Kind::Boolean
-                    | crate::schema::Kind::OptionalText => kind.wire_type(true).to_owned(),
-                    crate::schema::Kind::InputShape { shape, .. } => shape.wire_annotation(),
-                    _ => anyhow::bail!("unsupported generated import input shape"),
-                };
-                Ok(format!("{field} : {shape}"))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let input_type = if input_fields.is_empty() {
-            "{}".to_owned()
-        } else {
-            format!("{{ {} }}", input_fields.join(", "))
-        };
+        let input_type = &types[&package.operation.input];
+        let output_type = &types[&package.operation.output];
         source.push_str(&format!(
             "\t{prefix}Input : {input_type}\n\n\t{prefix}Output : {}\n\n",
-            output.shape.wire_annotation()
+            output_type
         ));
+        let function = package.operation.id.replace(['.', '-'], "_");
         if package.operation.kind == crate::operation_contract::Kind::Query {
-            let function = package.operation.id.replace(['.', '-'], "_");
             crate::schema::identifier(&function)?;
             ensure!(
                 functions.insert(function.clone()),
@@ -127,8 +126,68 @@ fn render(imports: &ImportedContracts, admission: bool) -> Result<String> {
             };
             let operation = serde_json::to_string(&package.operation.id)?;
             let digest = serde_json::to_string(&package.digest)?;
+            let input = match &shapes[&package.operation.input] {
+                crate::output_schema::Type::Record(fields) => format!(
+                    "{{ {} }}",
+                    fields
+                        .keys()
+                        .map(|field| format!("{field}: input.{field}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                _ => "input".into(),
+            };
+            let output = match &shapes[&package.operation.output] {
+                crate::output_schema::Type::Record(fields) => format!(
+                    "{{ {} }}",
+                    fields
+                        .keys()
+                        .map(|field| format!("{field}: dto.{field}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                _ => "dto".into(),
+            };
+            let wire_output = shapes[&package.operation.output].wire_annotation();
+            let argument = if input == "{  }" { "_input" } else { "input" };
             source.push_str(&format!(
-                "\t{function} : {prefix}Input -> Observe({prefix}Output)\n\t{function} = |input|\n\t\tObserve.{capability}(\n\t\t\t\"app.query.v1\",\n\t\t\tJson.to_str({{ contract: {{ operation: {operation}, digest: {digest} }}, input: Json.to_str(input) }}),\n\t\t).and_then(|raw| {{\n\t\t\tparsed : Try({prefix}Output, _)\n\t\t\tparsed = Json.parse(raw)\n\t\t\tObserve.{from_host}(parsed.map_err(|_| \"invalid_imported_response\"))\n\t\t}})\n\n"
+                "\t{function} : {prefix}Input -> Observe({prefix}Output)\n\t{function} = |{argument}|\n\t\tObserve.{capability}(\n\t\t\t\"app.query.v1\",\n\t\t\tJson.to_str({{ contract: {{ operation: {operation}, digest: {digest} }}, input: Json.to_str({input}) }}),\n\t\t).and_then(|raw| {{\n\t\t\tparsed : Try({wire_output}, _)\n\t\t\tparsed = Json.parse(raw)\n\t\t\tresult : Try({prefix}Output, Str)\n\t\t\tresult = match parsed {{\n\t\t\t\tOk(dto) => Ok({output})\n\t\t\t\tErr(_) => Err(\"invalid_imported_response\")\n\t\t\t}}\n\t\t\tObserve.{from_host}(result)\n\t\t}})\n\n"
+            ));
+        } else {
+            let send = format!("{function}_send");
+            let status = format!("{function}_status");
+            crate::schema::identifier(&send)?;
+            crate::schema::identifier(&status)?;
+            ensure!(
+                functions.insert(send.clone()) && functions.insert(status.clone()),
+                "imported function name collision"
+            );
+            let capability = if admission {
+                "admission_capability"
+            } else {
+                "capability"
+            };
+            let from_host = if admission {
+                "admission_from_host"
+            } else {
+                "from_host"
+            };
+            let operation = serde_json::to_string(&package.operation.id)?;
+            let digest = serde_json::to_string(&package.digest)?;
+            let input = match &shapes[&package.operation.input] {
+                crate::output_schema::Type::Record(fields) => format!(
+                    "{{ {} }}",
+                    fields
+                        .keys()
+                        .map(|field| format!("{field}: input.{field}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                _ => "input".into(),
+            };
+            let argument = if input == "{  }" { "_input" } else { "input" };
+            source.push_str(&format!(
+                "\t{prefix}Receipt := {{ id : Str }}\n\n\t{prefix}Status : [Pending, Success, Refused, Blocked, Unknown]\n\n\t{send} : {prefix}Input -> Effects({prefix}Receipt)\n\t{send} = |{argument}|\n\t\tEffects.{capability}(\n\t\t\t\"app.send.v1\",\n\t\t\tJson.to_str({{ contract: {{ operation: {operation}, digest: {digest} }}, input: Json.to_str({input}) }}),\n\t\t).and_then(|raw| {{\n\t\t\tparsed : Try({{ id : Str, status : Str }}, _)\n\t\t\tparsed = Json.parse(raw)\n\t\t\tresult : Try({prefix}Receipt, Str)\n\t\t\tresult = match parsed {{\n\t\t\t\tOk(dto) if dto.status == \"accepted\" => Ok({{ id: dto.id }})\n\t\t\t\t_ => Err(\"invalid_imported_receipt\")\n\t\t\t}}\n\t\t\tEffects.{from_host}(result)\n\t\t}})\n\n\t{status} : {prefix}Receipt -> Observe({prefix}Status)\n\t{status} = |receipt|\n\t\tObserve.{capability}(\n\t\t\t\"app.status.v1\",\n\t\t\tJson.to_str({{ contract: {{ operation: {operation}, digest: {digest} }}, input: Json.to_str({{ id: receipt.id }}) }}),\n\t\t).and_then(|raw| {{\n\t\t\tparsed : Try({{ id : Str, status : Str }}, _)\n\t\t\tparsed = Json.parse(raw)\n\t\t\tresult : Try({prefix}Status, Str)\n\t\t\tresult = match parsed {{\n\t\t\t\tOk(dto) if dto.id == receipt.id => match dto.status {{\n\t\t\t\t\t\"pending\" => Ok(Pending)\n\t\t\t\t\t\"success\" => Ok(Success)\n\t\t\t\t\t\"refused\" => Ok(Refused)\n\t\t\t\t\t\"blocked\" => Ok(Blocked)\n\t\t\t\t\t\"unknown\" => Ok(Unknown)\n\t\t\t\t\t_ => Err(\"invalid_imported_status\")\n\t\t\t\t}}\n\t\t\t\t_ => Err(\"invalid_imported_status\")\n\t\t\t}}\n\t\t\tObserve.{from_host}(result)\n\t\t}})\n\n"
             ));
         }
     }
@@ -223,7 +282,7 @@ mod tests {
     }
 
     #[test]
-    fn commands_have_contract_types_without_a_read_function() {
+    fn commands_generate_effects_and_scoped_status_reads() {
         let mut imports = imported();
         let package = imports.operations.get_mut("directory.lookup").unwrap();
         let objects = package
@@ -235,12 +294,23 @@ mod tests {
         operation.kind = Kind::Command;
         *package = Package::derive(operation, &objects).unwrap();
         let source = module(&imports).unwrap();
-        assert!(!source.contains("import pf.Observe"));
+        assert!(source.contains("import pf.Observe"));
+        assert!(source.contains(
+            "directory_lookup_send : DirectoryLookupInput -> Effects(DirectoryLookupReceipt)"
+        ));
+        assert!(source.contains(
+            "directory_lookup_status : DirectoryLookupReceipt -> Observe(DirectoryLookupStatus)"
+        ));
+        assert!(
+            admission_module(&imports)
+                .unwrap()
+                .contains("Effects.admission_capability(")
+        );
         assert!(!source.contains("directory_lookup ="));
     }
 
     #[test]
-    fn rejects_nominal_input_until_identity_preserving_codegen_exists() {
+    fn emits_a_stable_nominal_input_type() {
         let mut imports = imported();
         let package = imports.operations.get_mut("directory.lookup").unwrap();
         let input = package
@@ -255,6 +325,8 @@ mod tests {
             .collect();
         *package = Package::derive(package.operation.clone(), &objects).unwrap();
         imports.types = package.types.clone();
-        assert!(module(&imports).is_err());
+        let source = module(&imports).unwrap();
+        assert!(source.contains(" := {}"));
+        assert!(source.contains("DirectoryLookupInput : Contract"));
     }
 }

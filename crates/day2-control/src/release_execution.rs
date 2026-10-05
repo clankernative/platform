@@ -5,7 +5,7 @@
 
 use crate::journal::{Journal, RecoveryMode};
 use crate::provider_evidence::{DeploymentIncarnation, RevisionRelation, StateEvidence};
-use crate::release::{self, ApprovedRelease, ReadyRelease, ReleaseAuthority, ReleaseNotReady};
+use crate::release::{self, ReleaseAuthority, ReleaseNotReady};
 use crate::release::{ActivationReceipt, ReleaseApproval, ReleaseTarget, SecretObservation};
 use crate::{BindingRef, Digest, Name};
 use anyhow::{Result, ensure};
@@ -24,6 +24,8 @@ pub struct ReleaseExecutionPlan {
     pub durability: BindingRef,
     pub resources: BindingRef,
     pub deployment: BindingRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deployment_input: Option<Digest>,
 }
 impl ReleaseExecutionPlan {
     pub fn execution_id(&self) -> Result<Digest> {
@@ -106,6 +108,12 @@ pub trait Recipe: Send + Sync + 'static {
 pub trait Capabilities: Send + Sync + 'static {
     fn validate(&self, plan: &ReleaseExecutionPlan, approval: &ReleaseApproval) -> Result<()>;
     fn perform(&self, lease: &ReleaseLease) -> Result<ReleaseEffectResult>;
+
+    /// Fresh native provider checks immediately before the journal's atomic
+    /// activation. This runs outside its write transaction and grants no authority.
+    fn verify_activation(&self, _lease: &ReleaseLease) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -382,6 +390,7 @@ impl ReleaseExecutionHost {
         )?;
         tx.commit()?;
         if lease.step.operation == ReleaseOperation::Activate {
+            self.capabilities.verify_activation(lease)?;
             return Ok(ReleaseEffectResult::Activate {});
         }
         match self.capabilities.perform(lease) {
@@ -595,7 +604,8 @@ pub struct ObservedServingBinding {
     pub incarnation: DeploymentIncarnation,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SelectedServing {
     pub activation: Digest,
     pub generation: u64,
@@ -609,6 +619,52 @@ pub trait ServingProbe {
 }
 
 impl Journal {
+    /// The original preparation receipt, never reconstructed from a later poll.
+    pub fn prepared_release_deployment(
+        &self,
+        execution: &Digest,
+    ) -> Result<Option<(ReleaseProviderFact, DeploymentIncarnation)>> {
+        let stored = read_execution(&self.connection, execution)?;
+        Ok(stored.deployment.zip(stored.incarnation))
+    }
+
+    /// Publish only checked active selectors. App hosts need no access to the
+    /// control-plane journal or its company-private operational evidence.
+    pub fn serving_snapshot(
+        &self,
+        targets: &[ReleaseTarget],
+    ) -> Result<crate::serving_snapshot::ServingSnapshot> {
+        ensure!(
+            !targets.is_empty() && targets.len() <= 32,
+            "serving_snapshot_target_budget"
+        );
+        let tx = self.connection.unchecked_transaction()?;
+        let snapshot = self.serving_snapshot_in(&tx, targets)?;
+        tx.commit()?;
+        Ok(snapshot)
+    }
+
+    pub(crate) fn serving_snapshot_in(
+        &self,
+        tx: &Transaction<'_>,
+        targets: &[ReleaseTarget],
+    ) -> Result<crate::serving_snapshot::ServingSnapshot> {
+        ensure!(
+            !targets.is_empty() && targets.len() <= 32,
+            "serving_snapshot_target_budget"
+        );
+        let mut selections = Vec::new();
+        for target in targets {
+            let (activation, generation, binding) = selected_active_serving_in(tx, target)?;
+            selections.push(SelectedServing {
+                activation,
+                generation,
+                binding,
+            });
+        }
+        crate::serving_snapshot::ServingSnapshot::new(selections)
+    }
+
     /// Bracket one host-side call with fresh serving-provider observations and
     /// active-release checks. A result is never returned after either binding
     /// changes. The probe and transport must authenticate the remote workload;
@@ -672,7 +728,16 @@ fn selected_active_serving(
     target: &ReleaseTarget,
 ) -> Result<(Digest, u64, ObservedServingBinding)> {
     let tx = connection.unchecked_transaction()?;
-    let state = release::read_state(&tx, target)?;
+    let result = selected_active_serving_in(&tx, target)?;
+    tx.commit()?;
+    Ok(result)
+}
+
+fn selected_active_serving_in(
+    tx: &Connection,
+    target: &ReleaseTarget,
+) -> Result<(Digest, u64, ObservedServingBinding)> {
+    let state = release::read_state(tx, target)?;
     let active = state
         .active
         .ok_or_else(|| anyhow::anyhow!("serving release is not active"))?;
@@ -699,14 +764,14 @@ fn selected_active_serving(
         immutable == active,
         "active serving release differs from immutable activation"
     );
-    let approved = release::read_approval(&tx, &active.release)?;
+    let approved = release::read_approval(tx, &active.release)?;
     ensure!(
         approved.generation == active.generation
             && approved.approval.target == *target
             && approved.approval.artifact == active.artifact,
         "active serving release differs from approval"
     );
-    let binding = validated_execution_binding(&tx, &active.release, true)?;
+    let binding = validated_execution_binding(tx, &active.release, true)?;
     ensure!(
         binding.target == *target && binding.artifact == active.artifact,
         "active serving workflow differs from selection"
@@ -717,7 +782,6 @@ fn selected_active_serving(
         deployment: binding.deployment,
         incarnation: binding.incarnation,
     };
-    tx.commit()?;
     Ok((active.id, active.generation, observed))
 }
 
@@ -817,6 +881,11 @@ impl Journal {
             epoch INTEGER NOT NULL CHECK(epoch>0),owner TEXT NOT NULL,lease_until INTEGER NOT NULL,
             result TEXT, recovery INTEGER NOT NULL CHECK(recovery IN (0,1)),
             started INTEGER NOT NULL CHECK(started IN (0,1)), UNIQUE(execution,ordinal));")?;
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS release_serving_publications(
+            scope TEXT PRIMARY KEY, revision INTEGER NOT NULL CHECK(revision>0),
+            published_revision INTEGER NOT NULL DEFAULT 0, published_digest TEXT);",
+        )?;
         tx.commit()?;
         Ok(())
     }
@@ -1185,13 +1254,14 @@ impl Journal {
                             .is_some_and(|fact| fact.readiness == stored.readiness),
                         "deployment has no exact current readback"
                     );
-                    let ready = ReadyRelease {
-                        id: stored
+                    let ready = Journal::recover_ready_release_in(
+                        &tx,
+                        stored
                             .readiness
-                            .clone()
+                            .as_ref()
                             .ok_or_else(|| anyhow::anyhow!("missing release readiness"))?,
-                        release: stored.snapshot.plan.release.clone(),
-                    };
+                        &stored.snapshot.plan.release,
+                    )?;
                     let catalog = catalog?;
                     stored.activation = Some(Journal::activate_release_in_checked(
                         &tx,
@@ -1201,6 +1271,7 @@ impl Journal {
                     stored.snapshot.phase = ReleasePhase::Active;
                     stored.snapshot.terminal = Some(ReleaseTerminal::Activated);
                     stored.snapshot.waiting = None;
+                    crate::serving_publication::enqueue_in(&tx, &stored.snapshot.target)?;
                 }
                 complete_step(&tx, &mut stored, lease, &encoded)?;
             }
@@ -1409,17 +1480,7 @@ fn validate_stored_state(connection: &Connection, stored: &StoredExecution) -> R
         }
     }
     if let Some(readiness) = &stored.readiness {
-        let body: String = connection.query_row(
-            "SELECT body FROM release_readiness WHERE id=?1 AND release=?2",
-            params![readiness.as_str(), snapshot.plan.release.as_str()],
-            |r| r.get(0),
-        )?;
-        let proof: release::StoredReady = serde_json::from_str(&body)?;
-        ensure!(
-            proof.release == snapshot.plan.release
-                && Digest::of(&("day2-release-readiness-v1", &proof))? == *readiness,
-            "stored release readiness receipt mismatch"
-        );
+        release::read_readiness(connection, readiness, &snapshot.plan.release)?;
     }
     for (fact, family, binding, operation) in [
         (
@@ -1672,16 +1733,7 @@ fn readiness_current(connection: &Connection, stored: &StoredExecution) -> Resul
     let Some(id) = &stored.readiness else {
         return Ok(false);
     };
-    let body: String = connection.query_row(
-        "SELECT body FROM release_readiness WHERE id=?1",
-        [id.as_str()],
-        |r| r.get(0),
-    )?;
-    let proof: release::StoredReady = serde_json::from_str(&body)?;
-    ensure!(
-        Digest::of(&("day2-release-readiness-v1", &proof))? == *id,
-        "release readiness identity mismatch"
-    );
+    let proof = release::read_readiness(connection, id, &stored.snapshot.plan.release)?;
     match release::ready_secret(connection, &stored.approval) {
         Ok((revision, observation)) => {
             Ok(revision == proof.secret_revision
@@ -1917,14 +1969,13 @@ fn apply_observation(
                     stored.snapshot.waiting = Some(ReleaseWait::SecretMetadata);
                     return Ok(());
                 }
-                match Journal::prepare_release_in(
+                let approved = Journal::recover_approved_release_in(
                     connection,
-                    &ApprovedRelease {
-                        id: stored.snapshot.plan.release.clone(),
-                    },
-                ) {
+                    &stored.snapshot.plan.release,
+                )?;
+                match Journal::prepare_release_in(connection, &approved) {
                     Ok(ready) => {
-                        stored.readiness = Some(ready.id);
+                        stored.readiness = Some(ready.id().clone());
                         stored.snapshot.phase = ReleasePhase::SecretReady;
                     }
                     Err(error) if error.downcast_ref::<ReleaseNotReady>().is_some() => {

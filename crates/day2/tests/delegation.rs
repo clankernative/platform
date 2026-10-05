@@ -65,6 +65,7 @@ impl Pair {
             security_shell: None,
             oauth_shell_transport: None,
             oauth_clients: None,
+            oauth_runtime: None,
         };
         let path = directory.path().join("instance.json");
         fs::write(&path, serde_json::to_vec(&instance)?)?;
@@ -81,6 +82,8 @@ impl Pair {
 
     fn call(&self, operation: &str, digest: &str) -> delegation::Call {
         delegation::Call {
+            purpose: delegation::Purpose::Query,
+            source_epoch: String::new(),
             app: "callee".into(),
             operation: operation.into(),
             schema_digest: digest.into(),

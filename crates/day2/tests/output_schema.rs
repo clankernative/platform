@@ -408,11 +408,15 @@ fn collection_envelopes_enforce_canonical_cursors_continuations_and_nested_budge
     }
     let nested = Type::CollectionPage(Box::new(shape));
     let full = json!({"items":vec!["item";100],"has_more":false,"next_after":"100"});
-    nested
-        .validate_value(&json!({"items":vec![full.clone();9],"has_more":false,"next_after":"9"}))?;
+    let mut pages = vec![full; 10];
+    // Count both the outer items and their children. The complete Notifications
+    // schema needs 20 fields plus 1000 enum choices; the host still has a hard cap.
+    pages.push(json!({"items":vec!["item";13],"has_more":false,"next_after":"13"}));
+    nested.validate_value(&json!({"items":pages,"has_more":false,"next_after":"11"}))?;
+    pages[10]["items"] = json!(vec!["item"; 14]);
     assert!(
         nested
-            .validate_value(&json!({"items":vec![full;10],"has_more":false,"next_after":"10"}))
+            .validate_value(&json!({"items":pages,"has_more":false,"next_after":"11"}))
             .is_err()
     );
     assert_eq!(Type::Cursor.template_shape(), Type::String);

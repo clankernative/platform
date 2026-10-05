@@ -240,6 +240,9 @@ pub(crate) struct Cause<'a> {
     /// Empty means they are the same, which is the ordinary case.
     authenticated: &'a str,
     origin: Option<&'a crate::iap::Verified>,
+    remote: Option<&'a crate::delegation_commands::Admission>,
+    remote_fence: bool,
+    credential: Option<&'a crate::managed_credentials::ingress::Admission>,
 }
 
 pub(crate) struct RequestIdentity<'a> {
@@ -269,7 +272,15 @@ impl<'a> Cause<'a> {
             caller,
             authenticated,
             origin: None,
+            remote: None,
+            remote_fence: true,
+            credential: None,
         }
+    }
+
+    pub(crate) fn remote(mut self, admission: &'a crate::delegation_commands::Admission) -> Self {
+        self.remote = Some(admission);
+        self
     }
 }
 
@@ -399,8 +410,9 @@ impl Runtime {
         self
     }
 
-    pub(crate) fn app_call_port(&self) -> Option<&dyn crate::delegation::AppCallPort> {
-        self.app_calls.as_deref()
+    /// Host-owned adapter; never exposed through the application SDK.
+    pub fn app_call_port(&self) -> Option<&Arc<dyn crate::delegation::AppCallPort>> {
+        self.app_calls.as_ref()
     }
 
     pub(crate) fn integrations(&self) -> &crate::integration_host::Host {
@@ -608,6 +620,7 @@ impl Runtime {
         }
         crate::audit::upgrade(&tx)?;
         crate::delegation::upgrade_origin(&tx)?;
+        crate::delegation_commands::upgrade(&tx)?;
         crate::invocations::upgrade(&tx)?;
         crate::resources::upgrade(&tx)?;
         crate::budget::upgrade(&tx)?;
@@ -767,6 +780,9 @@ impl Runtime {
                     authenticated
                 },
                 origin,
+                remote: None,
+                remote_fence: true,
+                credential: None,
             },
         )
     }
@@ -783,6 +799,19 @@ impl Runtime {
         // principal the work is for is unchanged by the hop.
         cause: Cause<'_>,
     ) -> Result<()> {
+        self.accept_with_caller(operation, cause.actor, id, input, now, cause)
+    }
+
+    pub(crate) fn accept_remote(
+        &self,
+        operation: &str,
+        id: &str,
+        input: &Value,
+        now: i64,
+        mut cause: Cause<'_>,
+        original_fence: bool,
+    ) -> Result<()> {
+        cause.remote_fence = original_fence;
         self.accept_with_caller(operation, cause.actor, id, input, now, cause)
     }
 
@@ -807,6 +836,9 @@ impl Runtime {
                 caller: "",
                 authenticated: "",
                 origin: None,
+                remote: None,
+                remote_fence: true,
+                credential: None,
             },
         )
     }
@@ -826,6 +858,9 @@ impl Runtime {
             caller,
             authenticated,
             origin,
+            remote,
+            remote_fence,
+            credential,
         } = cause;
         let initiator = if authenticated.is_empty() {
             actor
@@ -877,6 +912,29 @@ impl Runtime {
                 crate::managed_credentials::issuance::require_confirmation(
                     &tx, self, operation, actor, id, input, now,
                 )?;
+            }
+            if let Some(admission) = remote {
+                ensure!(admission.origin.actor == actor, "delegated_origin_changed");
+                if crate::delegation_commands::reused_in(&tx, admission)? {
+                    crate::audit::record_attempt(
+                        &tx,
+                        self,
+                        Attempt {
+                            kind: AttemptKind::Admission,
+                            trigger,
+                            identity: id,
+                            actor,
+                            initiator,
+                            operation,
+                            outcome: AttemptOutcome::Reused,
+                            reason: None,
+                            at_ms: now.checked_mul(1000).context("audit_clock")?,
+                        },
+                    )?;
+                    tx.commit()?;
+                    return Ok(());
+                }
+                ensure!(remote_fence, "app_send_original_receiver_missing");
             }
             // *Whom* the work is for is chosen once, at the outermost
             // invocation, and is immutable for the whole call tree.
@@ -998,6 +1056,14 @@ impl Runtime {
                 }
             }
             crate::delegation::record_root_origin(&tx, id, initiator, origin, !reused)?;
+            if let Some(admission) = credential {
+                crate::managed_credentials::ingress::record(
+                    &tx, self, id, operation, &active, admission,
+                )?;
+            }
+            if let Some(admission) = remote {
+                crate::delegation_commands::record_in(&tx, id, admission)?;
+            }
             reason = AttemptReason::StorageRejected;
             crate::audit::record_attempt(
                 &tx,
@@ -1040,6 +1106,33 @@ impl Runtime {
         self.execute(id, fault)
     }
 
+    pub(crate) fn accept_credential(
+        &self,
+        operation: &str,
+        admission: &crate::managed_credentials::ingress::Admission,
+        id: &str,
+        input: &Value,
+        now: i64,
+    ) -> Result<()> {
+        self.accept_with_caller(
+            operation,
+            &admission.actor,
+            id,
+            input,
+            now,
+            Cause {
+                trigger: crate::audit::Trigger::Credential,
+                actor: &admission.actor,
+                caller: "",
+                authenticated: "",
+                origin: None,
+                remote: None,
+                remote_fence: true,
+                credential: Some(admission),
+            },
+        )
+    }
+
     pub(crate) fn invoke_verified(
         &self,
         operation: &str,
@@ -1073,15 +1166,29 @@ impl Runtime {
         }
         drop(connection);
         let result = self.execute_inner(id, fault);
-        if let Err(error) = &result
-            && matches!(
+        let exhausted_send = if result.as_ref().err().is_some_and(|error| {
+            matches!(
                 crate::error::classify(error),
-                crate::error::Failure::AuthorityPolicyChanged
-                    | crate::error::Failure::PreparationAuthorityChanged
-                    | crate::error::Failure::EffectAuthorityChanged
-                    | crate::error::Failure::ContinuationAuthorityChanged
-                    | crate::error::Failure::ResourceAuthorityExpired
+                crate::error::Failure::ResourceLimitExceeded
+                    | crate::error::Failure::BudgetExhausted
             )
+        }) {
+            open(&self.db)?.query_row("SELECT EXISTS(SELECT 1 FROM day2_external_effects WHERE invocation=?1 AND observation IS NULL AND json_extract(instruction,'$.model')='app.send.v1')", [id], |row| row.get::<_,bool>(0))?
+        } else {
+            false
+        };
+        if let Err(error) = &result
+            && (exhausted_send
+                || matches!(
+                    crate::error::classify(error),
+                    crate::error::Failure::AuthorityPolicyChanged
+                        | crate::error::Failure::PreparationAuthorityChanged
+                        | crate::error::Failure::EffectAuthorityChanged
+                        | crate::error::Failure::ContinuationAuthorityChanged
+                        | crate::error::Failure::ResourceAuthorityExpired
+                        | crate::error::Failure::EffectHorizonExceeded
+                        | crate::error::Failure::CredentialAuthorityChanged
+                ))
         {
             let mut connection = open(&self.db)?;
             let tx = crate::write_queue::immediate(&mut connection)?;
@@ -1442,7 +1549,7 @@ impl Runtime {
                                 &request.context.invocation_id,
                             )?;
                         }
-                        if step == Step::CredentialIssue {
+                        if step == Step::CredentialMutation {
                             crate::managed_credentials::issuance::stage(
                                 connection,
                                 self,

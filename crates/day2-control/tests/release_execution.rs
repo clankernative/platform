@@ -7,7 +7,7 @@ use axum::{
     body::Bytes,
     extract::State,
     http::{HeaderMap, Method, StatusCode, Uri},
-    routing::{any, post},
+    routing::any,
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use day2::{
@@ -18,6 +18,7 @@ use day2::{
     iap::{self, KeySource},
     store::Runtime,
 };
+use day2_control::app_host::HostAppCalls;
 use day2_control::iap_service_jwt::{Gate, GkeMetadataAccessTokens, IapServiceJwt};
 use day2_control::journal::{Journal, RecoveryMode};
 use day2_control::provider_evidence::{ReadBarrier, RevisionToken, StateEvidence};
@@ -44,13 +45,16 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc,
     },
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use support::*;
+
+#[path = "release_execution/notifications.rs"]
+mod notifications;
 
 struct Provider {
     plan: ReleaseExecutionPlan,
@@ -250,6 +254,53 @@ fn serving_fence_requires_an_active_release_and_fresh_matching_workload() {
 }
 
 #[test]
+fn published_serving_snapshot_is_scoped_and_rechecked_after_the_call() -> Result<()> {
+    use day2_control::serving_snapshot::ServingSnapshot;
+    let fixture = Fixture::new(true);
+    fixture.until(ReleasePhase::Active, &mut 0);
+    let probe = fixture.serving_probe();
+    let target = &fixture.provider.approval.target;
+    let path = fixture._directory.path().join("serving.json");
+    let snapshot = Journal::open(&fixture.path)?.serving_snapshot(std::slice::from_ref(target))?;
+    let bytes = serde_json::to_vec(&snapshot)?;
+    fs::write(&path, &bytes)?;
+    let selected = ServingSnapshot::with_selection(&path, target, &probe, |entry| {
+        Ok(entry.activation.clone())
+    })?;
+    assert_eq!(
+        Some(selected),
+        Journal::open(&fixture.path)?
+            .release_state(target)?
+            .active
+            .map(|entry| entry.id)
+    );
+    assert!(
+        ServingSnapshot::with_selection(&path, target, &probe, |_| {
+            let mut changed: Value = serde_json::from_slice(&bytes)?;
+            changed["selections"][0]["generation"] = json!(2);
+            fs::write(&path, changed.to_string())?;
+            Ok("do not disclose this result")
+        })
+        .is_err()
+    );
+    let mut value: Value = serde_json::from_slice(&bytes)?;
+    let entry = value["selections"][0].clone();
+    value["selections"].as_array_mut().unwrap().push(entry);
+    fs::write(&path, value.to_string())?;
+    assert!(
+        ServingSnapshot::read(&path).is_err(),
+        "duplicate target selections are refused"
+    );
+    value["selections"][1]["binding"]["target"]["company"] = json!("another_company");
+    fs::write(&path, value.to_string())?;
+    assert!(
+        ServingSnapshot::read(&path).is_err(),
+        "a host publication cannot combine companies"
+    );
+    Ok(())
+}
+
+#[test]
 fn serving_fence_rechecks_the_selected_release_after_the_call() {
     let fixture = Fixture::new(true);
     fixture.until(ReleasePhase::Active, &mut 0);
@@ -272,6 +323,465 @@ struct QueryServer {
     origin: String,
     stop: Option<tokio::sync::oneshot::Sender<()>>,
     thread: Option<thread::JoinHandle<Result<()>>>,
+}
+
+/// The business oracle uses only public HTTP observations from both apps. It
+/// never runs a transition or authorization function to compute expected stock.
+#[derive(Default)]
+struct StockModel {
+    quantities: BTreeMap<String, Vec<u64>>,
+}
+
+impl StockModel {
+    fn reserve(&mut self, actor: &str, quantity: u64) -> &'static str {
+        let rows = self.quantities.entry(actor.to_owned()).or_default();
+        let used: u64 = rows.iter().sum();
+        if quantity == 0 || quantity > 100 - used {
+            "refused"
+        } else {
+            rows.push(quantity);
+            "success"
+        }
+    }
+
+    fn snapshot(&self, actor: &str) -> Value {
+        let rows = self.quantities.get(actor).cloned().unwrap_or_default();
+        let reserved: u64 = rows.iter().sum();
+        json!({"available":100-reserved,"reserved":reserved,"count":rows.len()})
+    }
+}
+
+struct BusinessEvidence {
+    path: PathBuf,
+    document: Value,
+}
+
+impl BusinessEvidence {
+    fn new(caller: &Runtime, callee: &Runtime) -> Result<Self> {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../artifacts/delegation-business-evidence");
+        fs::create_dir_all(&root)?;
+        let directory = tempfile::Builder::new()
+            .prefix("campaign-")
+            .tempdir_in(root)?
+            .keep();
+        let evidence = Self {
+            path: directory.join("trace.json"),
+            document: json!({"format":1,"profile":"public-http-protocol-fixture","seed":42,"artifacts":{"request_desk":caller.artifact().id(),"stock_ledger":callee.artifact().id()},"contracts":callee.artifact().contract().export_manifest,"steps":[],"status":"running"}),
+        };
+        evidence.save()?;
+        Ok(evidence)
+    }
+
+    fn save(&self) -> Result<()> {
+        use std::io::Write;
+        let bytes = serde_json::to_vec_pretty(&self.document)?;
+        ensure!(bytes.len() <= 131_072, "business trace byte budget");
+        let mut file =
+            tempfile::NamedTempFile::new_in(self.path.parent().context("trace directory")?)?;
+        file.write_all(&bytes)?;
+        file.as_file().sync_all()?;
+        file.persist(&self.path)?;
+        Ok(())
+    }
+
+    fn preserve_failed_host(&self, runtime: &Runtime) -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = self
+            .path
+            .parent()
+            .context("trace directory")?
+            .join(runtime.app());
+        fs::create_dir(&directory)?;
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
+        let instance = directory.join("instance.json");
+        fs::copy(runtime.instance_path(), &instance)?;
+        fs::set_permissions(&instance, fs::Permissions::from_mode(0o600))?;
+        let state = directory.join(".state");
+        fs::create_dir(&state)?;
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o700))?;
+        let database = state.join(runtime.db().file_name().context("host database name")?);
+        let connection = Connection::open(runtime.db())?;
+        connection.busy_timeout(Duration::from_secs(2))?;
+        connection.execute(
+            "VACUUM INTO ?1",
+            [database.to_str().context("evidence path")?],
+        )?;
+        fs::set_permissions(&database, fs::Permissions::from_mode(0o600))?;
+        Ok(())
+    }
+}
+
+fn replay_business_observations(document: &Value) -> Result<()> {
+    ensure!(
+        document["format"] == 1 && document["profile"] == "public-http-protocol-fixture",
+        "business trace profile"
+    );
+    for app in ["request_desk", "stock_ledger"] {
+        day2::assets::hash_part(
+            document["artifacts"][app]
+                .as_str()
+                .context("trace artifact")?,
+        )?;
+    }
+    let mut model = StockModel::default();
+    for step in document["steps"].as_array().context("trace schedule")? {
+        let actor = step["actor"].as_str().context("trace actor")?;
+        let expected = model.reserve(actor, step["quantity"].as_u64().context("trace quantity")?);
+        ensure!(
+            step["status"] == expected,
+            "business status differs during offline replay"
+        );
+        for (owner, actual) in step["snapshots"]
+            .as_object()
+            .context("trace public snapshots")?
+        {
+            ensure!(
+                *actual == model.snapshot(owner),
+                "owned stock differs during offline replay"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn replay_recorded_business_observations_without_hosts_or_providers() -> Result<()> {
+    let Some(path) = std::env::var_os("DAY2_REPLAY_DELEGATION_EVIDENCE") else {
+        return Ok(());
+    };
+    ensure!(
+        fs::metadata(&path)?.len() <= 131_072,
+        "business trace byte budget"
+    );
+    replay_business_observations(&serde_json::from_slice(&fs::read(path)?)?)
+}
+
+#[test]
+fn public_business_commands_conserve_owned_stock_and_report_refusals() -> Result<()> {
+    let desk = std::env::var_os("DAY2_TEST_REQUEST_DESK_ARTIFACT")
+        .map(PathBuf::from)
+        .context("run xtask build-delegation-business")?;
+    let stock = std::env::var_os("DAY2_TEST_STOCK_LEDGER_ARTIFACT")
+        .map(PathBuf::from)
+        .context("run xtask build-delegation-business")?;
+    let stock_artifact = day2::artifact::LoadedArtifact::load(&stock)?;
+    let actors = json!(["alice@example.com", "bob@example.com"]);
+    let directory = tempfile::tempdir()?;
+    let mut hosts = BTreeMap::new();
+    for (app, artifact, policy) in [
+        (
+            "stock_ledger",
+            &stock,
+            json!({"version":1,"admins":[],"operations":{
+                "stock_ledger.available":{"actors":actors,"mode":{"kind":"read"},"models":{"reservations":{"read":true,"rows":{"kind":"owner_or_admin","field":"owner"}}}},
+                "stock_ledger.reserve":{"actors":actors,"mode":{"kind":"current_state"},"models":{"reservations":{"read":true,"create":true,"rows":{"kind":"owner_or_admin","field":"owner"}}}}
+            }}),
+        ),
+        (
+            "request_desk",
+            &desk,
+            json!({"version":1,"admins":[],"operations":{
+                "request_desk.request":{"actors":actors,"mode":{"kind":"current_state"},"models":{"requests":{"read":true,"create":true,"update_fields":["receipt"],"rows":{"kind":"owner_or_admin","field":"owner"}}},"observations":["app.query.v1"],"effects":["app.send.v1"]},
+            "request_desk.progress":{"actors":actors,"mode":{"kind":"read"},"models":{},"observations":["app.status.v1"]}
+            ,"request_desk.home":{"actors":actors,"mode":{"kind":"read"},"models":{}}
+            }}),
+        ),
+    ] {
+        let state = directory.path().join(app);
+        fs::create_dir(&state)?;
+        let path = state.join("instance.json");
+        let mut instance = json!({"installation":"alpha","environment":"production","apps":{app:{"artifact":artifact,"readers":actors,"writers":actors,"authority":policy}}});
+        if app == "request_desk" {
+            let mut resources = json!({"version":1,"connections":{"peer":{"revision":1,"provider":"local_delegation"}},"resources":{},"policies":{},"budgets":{}});
+            let mut attachments = Vec::new();
+            for (slot, target, actions, operations) in [
+                (
+                    "read",
+                    "stock_ledger.available",
+                    json!(["delegate_query"]),
+                    vec!["request_desk.request"],
+                ),
+                (
+                    "command",
+                    "stock_ledger.reserve",
+                    json!(["delegate_send", "delegate_status"]),
+                    vec!["request_desk.request", "request_desk.progress"],
+                ),
+            ] {
+                resources["resources"][slot] = json!({"revision":1,"connection":{"id":"peer","revision":1},"target":{"kind":"app_operation","app":"stock_ledger","operation":target,"schema_digest":delegation::schema_digest_for_artifact(&stock_artifact,target)?}});
+                resources["policies"][slot] = json!({"revision":1,"owner":"operator","actors":actors,"allowed_apps":[app],"slots":{slot:{"kind":"app_operation","allowed_resources":[{"id":slot,"revision":1}],"actions":actions,"limits":{"max_request_bytes":16384,"max_response_bytes":65536,"max_calls_per_invocation":4},"budgets":[]}}});
+                for operation in operations {
+                    attachments.push(json!({"policy":{"id":slot,"revision":1},"operation":operation,"bindings":{slot:{"id":slot,"revision":1}}}));
+                }
+            }
+            instance["resources"] = resources;
+            instance["apps"][app]["resource_policies"] = json!(attachments);
+        }
+        fs::write(&path, serde_json::to_vec(&instance)?)?;
+        let runtime = Runtime::load(&path, app)?;
+        runtime.initialize()?;
+        hosts.insert(app, runtime);
+    }
+    let callee = &hosts["stock_ledger"];
+    let caller = &hosts["request_desk"];
+    let mut evidence = BusinessEvidence::new(caller, callee)?;
+    let campaign = (|| -> Result<()> {
+        let fixture = Fixture::new_for_app(
+            true,
+            Some(&callee.artifact().id().to_owned().try_into()?),
+            "stock_ledger",
+        );
+        fixture.until(ReleasePhase::Active, &mut 0);
+        let target = fixture.provider.approval.target.clone();
+        let source = ReleaseTarget {
+            app: name("request_desk"),
+            ..target.clone()
+        };
+        let snapshot = directory.path().join("serving.json");
+        fs::write(
+            &snapshot,
+            serde_json::to_vec(
+                &Journal::open(&fixture.path)?.serving_snapshot(std::slice::from_ref(&target))?,
+            )?,
+        )?;
+        let probe = Arc::new(fixture.serving_probe());
+        let key = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new())
+            .map_err(|_| anyhow::anyhow!("fixture key"))?;
+        let signer = Signer::from_pkcs8("desk-key", key.as_ref())?;
+        let workload_verifier = || {
+            Verifier::new(BTreeMap::from([(
+                "desk-key".into(),
+                TrustedKey {
+                    source: Scope::from_runtime(caller).unwrap(),
+                    public_key: signer.public_key(),
+                },
+            )]))
+        };
+        let issuer_key = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new())
+            .map_err(|_| anyhow::anyhow!("fixture issuer key"))?;
+        let issuer_signer =
+            IssuerSigner::from_pkcs8("desk-issuer", "desk-issuer-key", issuer_key.as_ref())?;
+        let issuer_verifier = IssuerVerifier::new(
+            "desk-issuer",
+            BTreeMap::from([("desk-issuer-key".into(), issuer_signer.public_key())]),
+            "/projects/123/global/backendServices/target",
+        )?;
+        let iap = Arc::new(FixtureIap::new()?);
+        let email = "desk@project.iam.gserviceaccount.com";
+        let issuer = Arc::new(RemoteQueryIssuer::new(
+            source.clone(),
+            target.clone(),
+            email,
+            "/projects/123/global/backendServices/issuer",
+            iap.verifier("/projects/123/global/backendServices/issuer", email)?,
+            workload_verifier()?,
+            issuer_signer,
+        )?);
+        let receiver = Arc::new(RemoteQueryReceiver::new(
+            snapshot.clone(),
+            probe.clone(),
+            target.clone(),
+            callee.clone(),
+            workload_verifier()?,
+            issuer_verifier,
+            iap.verifier("/projects/123/global/backendServices/target", email)?,
+        )?);
+        let stock_server = QueryServer::start(
+            callee.clone(),
+            target.clone(),
+            BTreeMap::from([("request_desk".into(), receiver)]),
+            BTreeMap::new(),
+            iap.clone(),
+        )?;
+        let at = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())?;
+        let port = RemoteQueryPort::loopback_fixture(
+            snapshot,
+            probe,
+            source.clone(),
+            target,
+            &format!("{}/_platform/app-query", stock_server.origin),
+            RemoteQueryAuth {
+                workload_signer: Signer::from_pkcs8("desk-key", key.as_ref())?,
+                issuer: issuer.clone(),
+                issuer_assertion: iap.assertion(
+                    "/projects/123/global/backendServices/issuer",
+                    email,
+                    at,
+                )?,
+                target_assertion: iap.assertion(
+                    "/projects/123/global/backendServices/target",
+                    email,
+                    at,
+                )?,
+            },
+        )?;
+        let desk_server = QueryServer::start(
+            caller.clone().with_app_call_port(Arc::new(port)),
+            source,
+            BTreeMap::new(),
+            BTreeMap::from([("stock_ledger".into(), issuer)]),
+            iap.clone(),
+        )?;
+        let client = reqwest::blocking::Client::new();
+        let person = |url: String, actor: &str| -> Result<reqwest::blocking::RequestBuilder> {
+            Ok(client
+                .get(url)
+                .header("Host", "app.fixture.example")
+                .header(
+                    iap::ASSERTION_HEADER,
+                    iap.assertion("/projects/123/global/backendServices/browser", actor, at)?,
+                ))
+        };
+        let mut model = StockModel::default();
+        let mut schedule = vec![
+            ("alice@example.com", 30),
+            ("bob@example.com", 25),
+            ("alice@example.com", 80),
+            ("alice@example.com", 70),
+            ("bob@example.com", 0),
+            ("bob@example.com", 75),
+        ];
+        let mut seed = 42_u64;
+        for _ in 0..10 {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            schedule.push((
+                if seed & 1 == 0 {
+                    "alice@example.com"
+                } else {
+                    "bob@example.com"
+                },
+                (seed >> 32) % 121,
+            ));
+        }
+        for (index, (actor, quantity)) in schedule.into_iter().enumerate() {
+            evidence.document["pending"] = json!({"step":index,"actor":actor,"quantity":quantity});
+            evidence.save()?;
+            let session_response =
+                person(format!("{}/api/session", desk_server.origin), actor)?.send()?;
+            let cookie = session_response.headers()["set-cookie"]
+                .to_str()?
+                .split(';')
+                .next()
+                .context("session cookie")?
+                .to_owned();
+            let session: Value = session_response.json()?;
+            let request = client
+                .post(format!("{}/api/request_desk.request", desk_server.origin))
+                .header("Host", "app.fixture.example")
+                .header(
+                    iap::ASSERTION_HEADER,
+                    iap.assertion("/projects/123/global/backendServices/browser", actor, at)?,
+                )
+                .header("Cookie", &cookie)
+                .header("Origin", "https://app.fixture.example")
+                .header(
+                    "X-CSRF-Token",
+                    session["csrf_token"].as_str().context("csrf")?,
+                )
+                .header("Idempotency-Key", format!("business-{index}"))
+                .json(&json!({"quantity":quantity}));
+            let duplicate = request.try_clone().context("duplicate public request")?;
+            let response = request.send()?;
+            let code = response.status();
+            let invocation = response
+                .headers()
+                .get("x-day2-invocation")
+                .context("public invocation identity")?
+                .clone();
+            let mut local: Value = response.json()?;
+            ensure!(
+                code == StatusCode::ACCEPTED || code == StatusCode::OK,
+                "business command refused: {local}"
+            );
+            let repeated = duplicate.send()?;
+            ensure!(
+                repeated.status().is_success()
+                    && repeated.headers().get("x-day2-invocation") == Some(&invocation),
+                "duplicate public command changed identity"
+            );
+            if code == StatusCode::OK {
+                local = json!({"status":"success","result":local});
+            }
+            let status_url = local["status_url"].as_str().map(str::to_owned);
+            let deadline = std::time::Instant::now() + Duration::from_secs(20);
+            while local["status"] == "pending" {
+                ensure!(
+                    std::time::Instant::now() < deadline,
+                    "source command stuck: {local}"
+                );
+                thread::sleep(Duration::from_millis(25));
+                local = person(
+                    format!(
+                        "{}{}",
+                        desk_server.origin,
+                        status_url.as_deref().context("source status URL")?
+                    ),
+                    actor,
+                )?
+                .send()?
+                .json()?;
+            }
+            let receipt = local["result"]["receipt"]
+                .as_str()
+                .context("native command receipt")?;
+            let expected = model.reserve(actor, quantity);
+            let observed = loop {
+                let progress: Value = person(
+                    format!(
+                        "{}/api/request_desk.progress?receipt={receipt}",
+                        desk_server.origin
+                    ),
+                    actor,
+                )?
+                .send()?
+                .json()?;
+                if progress["status"] != "pending" {
+                    break progress["status"]
+                        .as_str()
+                        .context("closed status")?
+                        .to_owned();
+                }
+                ensure!(
+                    std::time::Instant::now() < deadline,
+                    "receiver stuck: {progress}"
+                );
+                thread::sleep(Duration::from_millis(25));
+            };
+            let mut snapshots = BTreeMap::new();
+            for owner in ["alice@example.com", "bob@example.com"] {
+                let actual: Value = person(
+                    format!("{}/api/stock_ledger.available", stock_server.origin),
+                    owner,
+                )?
+                .send()?
+                .json()?;
+                snapshots.insert(owner, actual);
+            }
+            evidence.document["steps"].as_array_mut().context("trace steps")?.push(json!({"actor":actor,"quantity":quantity,"receipt":receipt,"status":observed,"snapshots":snapshots,"duplicate":true}));
+            evidence.document["pending"] = Value::Null;
+            evidence.save()?;
+            ensure!(observed == expected, "business status after step {index}");
+            for (owner, actual) in snapshots {
+                ensure!(
+                    actual == model.snapshot(owner),
+                    "owned stock after step {index}"
+                );
+            }
+        }
+        replay_business_observations(&evidence.document)?;
+        Ok(())
+    })();
+    if campaign.is_err() {
+        // Preserve host journals for diagnosis separately from the public
+        // business oracle. The private snapshot never computes expected stock.
+        evidence.preserve_failed_host(caller)?;
+        evidence.preserve_failed_host(callee)?;
+    }
+    evidence.document["status"] = json!(if campaign.is_ok() { "passed" } else { "failed" });
+    evidence.save()?;
+    eprintln!("Business replay evidence: {}", evidence.path.display());
+    campaign
 }
 
 struct FixtureIap {
@@ -310,7 +820,7 @@ impl FixtureIap {
             URL_SAFE_NO_PAD.encode(
                 json!({
                     "iss":iap::ISSUER,"aud":audience,"exp":at+600,
-                    "sub":"service-account-fixture","email":email
+                    "sub":"service-account-fixture","email":email,"hd":"example.com"
                 })
                 .to_string()
             )
@@ -331,7 +841,13 @@ impl FixtureIap {
 }
 
 impl QueryServer {
-    fn start(receiver: Arc<RemoteQueryReceiver>) -> Result<Self> {
+    fn start(
+        runtime: Runtime,
+        own: ReleaseTarget,
+        incoming: BTreeMap<String, Arc<RemoteQueryReceiver>>,
+        issuers: BTreeMap<String, Arc<RemoteQueryIssuer>>,
+        iap: Arc<FixtureIap>,
+    ) -> Result<Self> {
         let (send, receive) = mpsc::channel();
         let (stop, done) = tokio::sync::oneshot::channel();
         let thread = thread::spawn(move || {
@@ -342,42 +858,25 @@ impl QueryServer {
                 .block_on(async move {
                     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
                     send.send(format!("http://{}", listener.local_addr()?))?;
-                    let router = Router::new()
-                        .route(
-                            "/_platform/app-query",
-                            post(
-                                |State(receiver): State<Arc<RemoteQueryReceiver>>,
-                                 headers: HeaderMap,
-                                 body: Bytes| async move {
-                                    let mut assertions =
-                                        headers.get_all(iap::ASSERTION_HEADER).iter();
-                                    let assertion = match (assertions.next(), assertions.next()) {
-                                        (Some(value), None) => {
-                                            value.to_str().ok().map(str::to_owned)
-                                        }
-                                        _ => None,
-                                    };
-                                    let answer = tokio::task::spawn_blocking(move || {
-                                        let at = i64::try_from(
-                                            SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
-                                        )?;
-                                        receiver.handle(
-                                            &body,
-                                            assertion.as_deref().unwrap_or(""),
-                                            at,
-                                        )
-                                    })
-                                    .await;
-                                    match answer {
-                                        Ok(Ok(result)) => (StatusCode::OK, result),
-                                        _ => (StatusCode::FORBIDDEN, "refused".to_owned()),
-                                    }
-                                },
-                            ),
-                        )
-                        .with_state(receiver);
-                    axum::serve(listener, router)
-                        .with_graceful_shutdown(async {
+                    let outbound = runtime.app_call_port().cloned();
+                    let runtime = runtime.with_app_call_port(Arc::new(FixtureHostCalls {
+                        ingress: HostAppCalls::new(own, BTreeMap::new(), issuers, incoming)?,
+                        outbound,
+                    }));
+                    let edge = day2::artifact::Edge {
+                        origin: "https://app.fixture.example".into(),
+                        iap_audience: "/projects/123/global/backendServices/browser".into(),
+                    };
+                    let verifier = iap::Verifier::new(
+                        &edge.iap_audience,
+                        "example.com",
+                        Box::new(FixtureKeys(iap.keys.clone())),
+                    )?;
+                    let server = day2::web::LocalServer::bind_edge_listener(
+                        runtime, listener, &edge, verifier, 1,
+                    )?;
+                    server
+                        .serve(async {
                             let _ = done.await;
                         })
                         .await?;
@@ -392,6 +891,58 @@ impl QueryServer {
     }
 }
 
+struct FixtureHostCalls {
+    ingress: HostAppCalls,
+    outbound: Option<Arc<dyn day2::delegation::AppCallPort>>,
+}
+
+#[derive(Default)]
+struct UnavailableSend(AtomicUsize);
+
+impl day2::delegation::AppCallPort for UnavailableSend {
+    fn query(&self, _: &Runtime, _: &Call) -> Result<String> {
+        anyhow::bail!("fault campaign only sends")
+    }
+
+    fn send(&self, _: &Runtime, _: &Call) -> Result<String> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        anyhow::bail!("fault campaign unavailable transport")
+    }
+}
+
+impl day2::delegation::AppCallPort for FixtureHostCalls {
+    fn send(&self, runtime: &Runtime, call: &Call) -> Result<String> {
+        self.outbound
+            .as_ref()
+            .context("fixture outbound port")?
+            .send(runtime, call)
+    }
+
+    fn status(&self, runtime: &Runtime, call: &Call) -> Result<String> {
+        self.outbound
+            .as_ref()
+            .context("fixture outbound port")?
+            .status(runtime, call)
+    }
+    fn query(&self, runtime: &Runtime, call: &Call) -> Result<String> {
+        self.outbound
+            .as_ref()
+            .context("fixture outbound port")?
+            .query(runtime, call)
+    }
+
+    fn receive(
+        &self,
+        runtime: &Runtime,
+        path: &str,
+        wire: &[u8],
+        assertion: &str,
+        at: i64,
+    ) -> Result<Vec<u8>> {
+        day2::delegation::AppCallPort::receive(&self.ingress, runtime, path, wire, assertion, at)
+    }
+}
+
 struct GatedServer {
     origin: String,
     stop: Option<tokio::sync::oneshot::Sender<()>>,
@@ -400,9 +951,8 @@ struct GatedServer {
 
 struct GatedState {
     origin: String,
-    caller: Runtime,
-    issuer: Arc<RemoteQueryIssuer>,
-    receiver: Arc<RemoteQueryReceiver>,
+    issuer_endpoint: String,
+    receiver_endpoint: String,
     iap: Arc<FixtureIap>,
     workload_email: String,
     issuer_audience: String,
@@ -516,11 +1066,22 @@ async fn gated_request(
         Err(_) => return (StatusCode::FORBIDDEN, Vec::new()),
     };
     let result = tokio::task::spawn_blocking(move || {
-        if uri.path() == "/_platform/app-issue" {
-            state.issuer.handle(&state.caller, &body, &assertion, at)
+        let endpoint = if uri.path() == "/_platform/app-issue" {
+            &state.issuer_endpoint
         } else {
-            Ok(state.receiver.handle(&body, &assertion, at)?.into_bytes())
-        }
+            &state.receiver_endpoint
+        };
+        let response = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(10))
+            .build()?
+            .post(endpoint)
+            .header(iap::ASSERTION_HEADER, assertion)
+            .body(body.to_vec())
+            .send()?;
+        ensure!(response.status().is_success(), "fixture app host refused");
+        Ok::<_, anyhow::Error>(response.bytes()?.to_vec())
     })
     .await;
     match result {
@@ -531,9 +1092,8 @@ async fn gated_request(
 
 impl GatedServer {
     fn start(
-        caller: Runtime,
-        issuer: Arc<RemoteQueryIssuer>,
-        receiver: Arc<RemoteQueryReceiver>,
+        issuer_endpoint: String,
+        receiver_endpoint: String,
         iap: Arc<FixtureIap>,
         workload_email: &str,
         issuer_audience: &str,
@@ -554,9 +1114,8 @@ impl GatedServer {
                     let origin = format!("http://{}", listener.local_addr()?);
                     let state = Arc::new(GatedState {
                         origin: origin.clone(),
-                        caller,
-                        issuer,
-                        receiver,
+                        issuer_endpoint,
+                        receiver_endpoint,
                         iap,
                         workload_email,
                         issuer_audience,
@@ -606,36 +1165,83 @@ impl Drop for QueryServer {
 
 #[test]
 fn signed_query_crosses_separate_host_databases_and_fences_serving_generation() -> Result<()> {
-    let artifact = std::env::var_os("DAY2_TEST_REPORTS_ARTIFACT")
+    let artifact = std::env::var_os("DAY2_TEST_DELEGATION_ARTIFACT")
         .map(PathBuf::from)
         .context("run xtask verify with compiled fixtures")?;
-    let policy: Value = serde_json::from_str(include_str!(
-        "../../../fixtures/authority-policies/reports.json"
-    ))?;
+    let peer = std::env::var_os("DAY2_TEST_DELEGATION_PEER_ARTIFACT")
+        .map(PathBuf::from)
+        .context("run xtask build-delegation")?;
+    let peer_artifact = day2::artifact::LoadedArtifact::load(&peer)?;
+    let schema_digest =
+        delegation::schema_digest_for_artifact(&peer_artifact, "peer_identity.who")?;
+    let command_schema =
+        delegation::schema_digest_for_artifact(&peer_artifact, "peer_identity.record")?;
     let host = |app: &str| -> Result<(tempfile::TempDir, Runtime)> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("instance.json");
-        fs::write(
-            &path,
-            serde_json::to_vec(&json!({
-                "installation":"alpha","environment":"production",
-                "apps":{app:{
-                    "artifact":artifact,"readers":["alice"],"writers":["alice"],
-                    "authority":policy
-                }}
-            }))?,
-        )?;
+        let mut policy = if app == "caller" {
+            json!({"version":1,"admins":[],"operations":{
+                "delegation.who":{"actors":["alice"],"mode":{"kind":"read"},"models":{}},
+                "delegation.forward":{"actors":["alice"],"mode":{"kind":"read"},"models":{},"observations":["app.query.v1"]},
+                "delegation.send":{"actors":["alice"],"mode":{"kind":"current_state"},"models":{},"effects":["app.send.v1"]},
+                "delegation.status":{"actors":["alice"],"mode":{"kind":"read"},"models":{},"observations":["app.status.v1"]},
+                "delegation.history":{"actors":["alice"],"mode":{"kind":"read"},"models":{},"observations":["audit.history.v1"]},
+                "delegation.record":{"actors":["alice"],"mode":{"kind":"current_state"},"models":{"entries":{"read":true,"create":true,"rows":{"kind":"all"}}}}
+            }})
+        } else {
+            json!({"version":1,"admins":[],"operations":{
+                "peer_identity.who":{"actors":["alice"],"mode":{"kind":"read"},"models":{}},
+                "peer_identity.history":{"actors":["alice"],"mode":{"kind":"read"},"models":{},"observations":["audit.history.v1"]},
+                "peer_identity.record":{"actors":["alice"],"mode":{"kind":"current_state"},"models":{"entries":{"read":true,"create":true,"rows":{"kind":"all"}}}}
+            }})
+        };
+        for operation in policy["operations"].as_object_mut().unwrap().values_mut() {
+            operation["actors"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!("alice@example.com"));
+        }
+        let resource_policies = if app == "caller" {
+            json!([{"policy":{"id":"peer_read","revision":1},"operation":"delegation.forward","bindings":{"delegation":{"id":"peer","revision":1}}}])
+        } else {
+            json!([])
+        };
+        let mut instance = json!({
+            "installation":"alpha","environment":"production",
+            "apps":{app:{
+                "artifact":if app == "caller" { &artifact } else { &peer },"readers":["alice","alice@example.com"],"writers":["alice","alice@example.com"],
+                "authority":policy,"resource_policies":resource_policies
+            }},
+            "resources":{"version":1,"connections":{"peer":{"revision":1,"provider":"local_delegation"}},
+                "resources":{"peer":{"revision":1,"connection":{"id":"peer","revision":1},"target":{"kind":"app_operation","app":"peer_identity","operation":"peer_identity.who","schema_digest":schema_digest}}},
+                "policies":{"peer_read":{"revision":1,"owner":"alice","actors":["alice","alice@example.com"],"allowed_apps":["caller"],"slots":{"delegation":{"kind":"app_operation","allowed_resources":[{"id":"peer","revision":1}],"actions":["delegate_query"],"limits":{"max_request_bytes":16384,"max_response_bytes":65536,"max_calls_per_invocation":4},"budgets":[]}}}},"budgets":{}}
+        });
+        if app == "caller" {
+            instance["resources"]["resources"]["peer_command"] = json!({"revision":1,"connection":{"id":"peer","revision":1},"target":{"kind":"app_operation","app":"peer_identity","operation":"peer_identity.record","schema_digest":command_schema}});
+            instance["resources"]["policies"]["peer_command"] = json!({"revision":1,"owner":"alice","actors":["alice","alice@example.com"],"allowed_apps":["caller"],"slots":{"command":{"kind":"app_operation","allowed_resources":[{"id":"peer_command","revision":1}],"actions":["delegate_send","delegate_status"],"limits":{"max_request_bytes":16384,"max_response_bytes":65536,"max_calls_per_invocation":4},"budgets":[]}}});
+            for operation in ["delegation.send", "delegation.status"] {
+                instance["apps"][app]["resource_policies"].as_array_mut().unwrap().push(json!({"policy":{"id":"peer_command","revision":1},"operation":operation,"bindings":{"command":{"id":"peer_command","revision":1}}}));
+            }
+        }
+        fs::write(&path, serde_json::to_vec(&instance)?)?;
         let runtime = Runtime::load(&path, app)?;
         runtime.initialize()?;
         Ok((directory, runtime))
     };
-    let (callee_directory, callee) = host("reports")?;
+    let (callee_directory, callee) = host("peer_identity")?;
     let (caller_directory, caller) = host("caller")?;
     let artifact_id: Digest = callee.artifact().id().to_owned().try_into()?;
-    let fixture = Fixture::new_with_artifact(true, Some(&artifact_id));
+    let fixture = Fixture::new_for_app(true, Some(&artifact_id), "peer_identity");
     fixture.until(ReleasePhase::Active, &mut 0);
     let probe = Arc::new(fixture.serving_probe());
     let target = fixture.provider.approval.target.clone();
+    let snapshot_path = fixture._directory.path().join("serving.json");
+    fs::write(
+        &snapshot_path,
+        serde_json::to_vec(
+            &Journal::open(&fixture.path)?.serving_snapshot(std::slice::from_ref(&target))?,
+        )?,
+    )?;
     let source = ReleaseTarget {
         app: name("caller"),
         ..target.clone()
@@ -684,7 +1290,7 @@ fn signed_query_crosses_separate_host_databases_and_fences_serving_generation() 
         issuer_signer,
     )?);
     let receiver = Arc::new(RemoteQueryReceiver::new(
-        fixture.path.clone(),
+        snapshot_path.clone(),
         probe.clone(),
         target.clone(),
         callee.clone(),
@@ -692,9 +1298,22 @@ fn signed_query_crosses_separate_host_databases_and_fences_serving_generation() 
         issuer_verifier,
         iap.verifier(target_audience, workload_email)?,
     )?);
-    let server = QueryServer::start(receiver.clone())?;
+    let server = QueryServer::start(
+        callee.clone(),
+        target.clone(),
+        BTreeMap::from([("caller".into(), receiver.clone())]),
+        BTreeMap::new(),
+        iap.clone(),
+    )?;
+    let issuer_server = QueryServer::start(
+        caller.clone(),
+        source.clone(),
+        BTreeMap::new(),
+        BTreeMap::from([("peer_identity".into(), issuer.clone())]),
+        iap.clone(),
+    )?;
     let port = RemoteQueryPort::loopback_fixture(
-        fixture.path.clone(),
+        snapshot_path.clone(),
         probe.clone(),
         source.clone(),
         target.clone(),
@@ -708,11 +1327,24 @@ fn signed_query_crosses_separate_host_databases_and_fences_serving_generation() 
     )?;
     let caller = caller.with_app_call_port(Arc::new(port));
     let call = Call {
-        app: "reports".into(),
-        operation: "reports.list".into(),
-        schema_digest: delegation::schema_digest(&callee, "reports.list")?,
-        contract_digest: None,
-        input: json!({"after":"","limit":20}).to_string(),
+        purpose: day2::delegation::Purpose::Query,
+        source_epoch: day2::authority_state::current(&Connection::open(caller.db())?)?
+            .stamp
+            .epoch,
+        app: "peer_identity".into(),
+        operation: "peer_identity.who".into(),
+        schema_digest: schema_digest.clone(),
+        contract_digest: Some(
+            peer_artifact
+                .contract()
+                .export_manifest
+                .as_ref()
+                .unwrap()
+                .exports["peer_identity.who"]
+                .digest
+                .clone(),
+        ),
+        input: "{}".into(),
         actor: "alice".into(),
         origin: "root-invocation".into(),
         step: "ob_root-invocation_0".into(),
@@ -721,7 +1353,7 @@ fn signed_query_crosses_separate_host_databases_and_fences_serving_generation() 
         now: 100,
     };
     caller.accept(
-        "reports.list",
+        "delegation.forward",
         "alice",
         "root-invocation",
         &serde_json::from_str(&call.input)?,
@@ -744,10 +1376,9 @@ fn signed_query_crosses_separate_host_databases_and_fences_serving_generation() 
     let answer: Value = serde_json::from_str(&delegation::read(&caller, &call)?)?;
     assert!(answer.is_object() || answer.is_array());
     let gated = GatedServer::start(
-        caller.clone(),
-        issuer.clone(),
-        receiver,
-        iap,
+        format!("{}/_platform/app-issue", issuer_server.origin),
+        format!("{}/_platform/app-query", server.origin),
+        iap.clone(),
         workload_email,
         issuer_audience,
         target_audience,
@@ -764,9 +1395,9 @@ fn signed_query_crosses_separate_host_databases_and_fences_serving_generation() 
         tokens,
     )?);
     let http_port = RemoteQueryPort::iap_http(
-        fixture.path.clone(),
+        snapshot_path.clone(),
         probe.clone(),
-        source,
+        source.clone(),
         target.clone(),
         Signer::from_pkcs8("caller-key-1", pkcs8.as_ref())?,
         credentials.clone(),
@@ -780,7 +1411,7 @@ fn signed_query_crosses_separate_host_databases_and_fences_serving_generation() 
     assert!(
         !caller_directory
             .path()
-            .join(".state/reports.sqlite")
+            .join(".state/peer_identity.sqlite")
             .exists()
     );
     assert!(
@@ -803,7 +1434,7 @@ fn signed_query_crosses_separate_host_databases_and_fences_serving_generation() 
     let client = reqwest::blocking::Client::new();
     assert_eq!(
         client.post(&endpoint).body("{}").send()?.status(),
-        StatusCode::FORBIDDEN
+        StatusCode::UNAUTHORIZED
     );
     let signer = Signer::from_pkcs8("caller-key-1", pkcs8.as_ref())?;
     let active = Journal::open(&fixture.path)?
@@ -812,11 +1443,15 @@ fn signed_query_crosses_separate_host_databases_and_fences_serving_generation() 
         .context("active test release")?;
     let forged = Query {
         version: 1,
+        purpose: day2::delegation::Purpose::Query,
+        source_epoch: call.source_epoch.clone(),
+        budget: day2::delegation_commands::prepare_budget(&caller, &call)?,
+        delivery: None,
         source: source_scope,
         target: Scope::from_runtime(&callee)?,
         operation: call.operation.clone(),
         schema_digest: call.schema_digest.clone(),
-        contract_digest: None,
+        contract_digest: call.contract_digest.clone(),
         input: serde_json::from_str(&call.input)?,
         actor: "mallory".into(),
         origin: "forged-origin".into(),
@@ -865,6 +1500,17 @@ fn signed_query_crosses_separate_host_databases_and_fences_serving_generation() 
         &issuer_assertion,
         at,
     )?;
+    assert_eq!(
+        client
+            .post(&endpoint)
+            .header(iap::ASSERTION_HEADER, &target_assertion)
+            .header(iap::ASSERTION_HEADER, &target_assertion)
+            .body(issued_query(&valid_workload, &valid_proof)?)
+            .send()?
+            .status(),
+        StatusCode::UNAUTHORIZED,
+        "duplicate assertions fail before ingress admission"
+    );
     let gated_client = reqwest::blocking::Client::new();
     let issued = issued_query(&valid_workload, &valid_proof)?;
     assert_eq!(
@@ -906,7 +1552,7 @@ fn signed_query_crosses_separate_host_databases_and_fences_serving_generation() 
             .body(issued_query(&valid_workload, &valid_proof)?)
             .send()?
             .status(),
-        StatusCode::FORBIDDEN,
+        StatusCode::UNAUTHORIZED,
         "the receiver requires its own IAP assertion"
     );
     assert_eq!(
@@ -1014,6 +1660,240 @@ fn signed_query_crosses_separate_host_databases_and_fences_serving_generation() 
     probe.0.lock().unwrap().incarnation.generation =
         "replacement-generation".to_owned().try_into()?;
     assert!(delegation::read(&caller, &call).is_err());
+    probe.0.lock().unwrap().incarnation.generation = incarnation(
+        fixture
+            .provider
+            .preparations
+            .lock()
+            .unwrap()
+            .values()
+            .next()
+            .unwrap(),
+    )
+    .generation;
+    // Enter through the actual human edge. The native generated client creates
+    // the observation and the host records verified root evidence itself.
+    let browser_server = QueryServer::start(
+        http_caller,
+        source.clone(),
+        BTreeMap::new(),
+        BTreeMap::from([("peer_identity".into(), issuer)]),
+        iap.clone(),
+    )?;
+    let response = client
+        .get(format!("{}/api/delegation.forward", browser_server.origin))
+        .header("Host", "app.fixture.example")
+        .header(
+            iap::ASSERTION_HEADER,
+            iap.assertion(
+                "/projects/123/global/backendServices/browser",
+                "alice@example.com",
+                at,
+            )?,
+        )
+        .send()?;
+    let status = response.status();
+    let body = response.text()?;
+    assert_eq!(status, StatusCode::OK, "native typed call: {body}");
+    let attribution: (String, String, String) = Connection::open(callee.db())?.query_row(
+        "SELECT actor,authenticated,caller FROM day2_invocations WHERE actor='alice@example.com' AND id LIKE 'dlg_%'",
+        [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    assert_eq!(
+        attribution,
+        (
+            "alice@example.com".into(),
+            "app:caller".into(),
+            "caller".into()
+        )
+    );
+    // End the browser campaign before controlling the source execution clock.
+    // These fixture hosts each run the ordinary command scheduler; leaving
+    // either alive would race the deliberate source crash below.
+    drop(browser_server);
+    drop(gated);
+    drop(issuer_server);
+    // The native generated effect reaches the same private host port. Crash
+    // after receiver acceptance and before caller settlement, then reopen A.
+    caller.accept(
+        "delegation.send",
+        "alice",
+        "send-lost-ack",
+        &json!({"note":"durable"}),
+        100,
+    )?;
+    Connection::open(caller.db())?.execute("INSERT INTO day2_invocation_origins VALUES('send-lost-ack','alice','fixture-iap-subject','iap')", [])?;
+    assert_eq!(
+        caller
+            .execute("send-lost-ack", day2::store::Fault::None)?
+            .status,
+        "pending"
+    );
+    let interrupted = caller.execute("send-lost-ack", day2::store::Fault::AfterExternal(1));
+    assert!(
+        interrupted.is_err(),
+        "expected interrupted send: {interrupted:?}"
+    );
+    let inbox: (String, String) = Connection::open(callee.db())?.query_row(
+        "SELECT id,invocation FROM day2_app_inbox",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let reopened_peer = Runtime::load(callee.instance_path(), callee.app())?;
+    reopened_peer.initialize()?;
+    assert_eq!(
+        reopened_peer
+            .execute(&inbox.1, day2::store::Fault::None)?
+            .status,
+        "success"
+    );
+    thread::sleep(Duration::from_secs(6));
+    let reopened_caller = Runtime::load(caller.instance_path(), caller.app())?
+        .with_app_call_port(caller.app_call_port().unwrap().clone());
+    reopened_caller.initialize()?;
+    let receipt = reopened_caller.execute("send-lost-ack", day2::store::Fault::None)?;
+    assert_eq!(receipt.status, "success", "{receipt:?}");
+    assert_eq!(receipt.result["receipt"], inbox.0);
+    assert_eq!(
+        Connection::open(callee.db())?.query_row(
+            "SELECT count(*) FROM day2_app_inbox",
+            [],
+            |row| row.get::<_, i64>(0)
+        )?,
+        1
+    );
+    assert_eq!(
+        Connection::open(callee.db())?
+            .query_row("SELECT count(*) FROM entries", [], |row| row
+                .get::<_, i64>(0))?,
+        1
+    );
+    reopened_caller.accept(
+        "delegation.status",
+        "alice",
+        "status-after-reopen",
+        &json!({"receipt":inbox.0}),
+        100,
+    )?;
+    Connection::open(caller.db())?.execute("INSERT INTO day2_invocation_origins VALUES('status-after-reopen','alice','fixture-iap-subject','iap')", [])?;
+    let progress = reopened_caller.execute("status-after-reopen", day2::store::Fault::None)?;
+    assert_eq!(progress.status, "success", "{progress:?}");
+    assert_eq!(progress.result["status"], "success");
+    // Move only the test retry clock between turns. The production scheduler,
+    // resource accounting, native continuation and durable block all run.
+    let unavailable = Arc::new(UnavailableSend::default());
+    let failed_caller = caller.clone().with_app_call_port(unavailable.clone());
+    failed_caller.accept(
+        "delegation.send",
+        "alice",
+        "send-unavailable",
+        &json!({"note":"uncertain"}),
+        100,
+    )?;
+    assert_eq!(
+        failed_caller
+            .execute("send-unavailable", day2::store::Fault::None)?
+            .status,
+        "pending"
+    );
+    assert_eq!(
+        failed_caller
+            .execute("send-unavailable", day2::store::Fault::None)?
+            .status,
+        "pending"
+    );
+    assert_eq!(unavailable.0.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        failed_caller
+            .execute("send-unavailable", day2::store::Fault::None)?
+            .status,
+        "pending"
+    );
+    assert_eq!(
+        unavailable.0.load(Ordering::SeqCst),
+        1,
+        "waiting must release the worker without dispatching again"
+    );
+    for _ in 0..3 {
+        Connection::open(caller.db())?.execute("UPDATE day2_external_retries SET due_ms=0 WHERE effect IN (SELECT identity FROM day2_external_effects WHERE invocation='send-unavailable')", [])?;
+        assert_eq!(
+            failed_caller
+                .execute("send-unavailable", day2::store::Fault::None)?
+                .status,
+            "pending"
+        );
+    }
+    Connection::open(caller.db())?.execute("UPDATE day2_external_retries SET due_ms=0 WHERE effect IN (SELECT identity FROM day2_external_effects WHERE invocation='send-unavailable')", [])?;
+    assert_eq!(
+        failed_caller
+            .execute("send-unavailable", day2::store::Fault::None)?
+            .status,
+        "blocked"
+    );
+    assert_eq!(
+        failed_caller
+            .execute("send-unavailable", day2::store::Fault::None)?
+            .status,
+        "blocked"
+    );
+    assert_eq!(
+        unavailable.0.load(Ordering::SeqCst),
+        4,
+        "finite retries must never dispatch a fifth attempt"
+    );
+    failed_caller.accept(
+        "delegation.send",
+        "alice",
+        "send-restored",
+        &json!({"note":"old backup"}),
+        100,
+    )?;
+    assert_eq!(
+        failed_caller
+            .execute("send-restored", day2::store::Fault::None)?
+            .status,
+        "pending"
+    );
+    let mut connection = Connection::open(caller.db())?;
+    connection.pragma_update(None, "foreign_keys", true)?;
+    let tx = connection.transaction()?;
+    let old_epoch = day2::authority_state::current(&tx)?.stamp.epoch;
+    day2::authority_state::invalidate_restored(&tx, caller.artifact().directory())?;
+    assert_ne!(day2::authority_state::current(&tx)?.stamp.epoch, old_epoch);
+    tx.commit()?;
+    assert_eq!(
+        failed_caller
+            .execute("send-restored", day2::store::Fault::None)?
+            .status,
+        "blocked"
+    );
+    assert_eq!(unavailable.0.load(Ordering::SeqCst), 4);
+    assert!(
+        delegation::verify_origin(&caller, &call).is_err(),
+        "a source restore cannot issue a fresh proof for old work"
+    );
+    let active = day2::authority_state::current(&Connection::open(callee.db())?)?;
+    let mut withdrawn = active.document;
+    withdrawn.enabled = false;
+    day2::authority_state::apply(
+        &callee,
+        &day2::authority_state::LocalOperator::assert_local("test")?,
+        &day2::authority_state::ApplyAuthority {
+            request_id: "receiver-revoked".into(),
+            expected: Some(active.stamp),
+            document: withdrawn,
+        },
+    )?;
+    assert!(
+        receiver
+            .handle(
+                &issued_query(&valid_workload, &valid_proof)?,
+                &target_assertion,
+                at
+            )
+            .is_err(),
+        "a previously signed proof never replaces current receiver policy"
+    );
     Ok(())
 }
 
@@ -1023,11 +1903,26 @@ impl Fixture {
     }
 
     fn new_with_artifact(secret_ready: bool, artifact: Option<&Digest>) -> Self {
+        Self::new_for_app(secret_ready, artifact, "reports")
+    }
+
+    fn new_for_app(secret_ready: bool, artifact: Option<&Digest>, app: &str) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("release.sqlite");
         let mut journal = Journal::open(&path).unwrap();
-        configure(&mut journal, &target("alpha"), &plan("alpha", 1));
-        let approval = approval_with_artifact(&mut journal, "alpha", 1, 0, artifact);
+        let mut target = target("alpha");
+        target.app = name(app);
+        let mut build = plan("alpha", 1);
+        build.app = name(app);
+        configure(&mut journal, &target, &build);
+        let approval = approval_for(
+            &mut journal,
+            &target,
+            &build,
+            0,
+            day2_control::kernel::CredentialPresence::Absent,
+            artifact,
+        );
         let approved = journal.approve_release(&approval).unwrap();
         let recipe = Arc::new(CompiledReleaseRecipe::installed().unwrap());
         let plan = ReleaseExecutionPlan {
@@ -1036,6 +1931,7 @@ impl Fixture {
             durability: plan("alpha", 1).profile.durability,
             resources: approval.secret.binding.clone(),
             deployment: BindingRef::pin(name("deployment"), &"synthetic-runtime-v1").unwrap(),
+            deployment_input: None,
         };
         let provider = Arc::new(Provider {
             plan: plan.clone(),

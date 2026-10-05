@@ -54,6 +54,29 @@ fn fixture_bundle(
     (bundle, lock, package, hashes)
 }
 #[test]
+fn bundle_validation_rejects_unsupported_runtime_abi_and_resource_kind() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut bundle, lock, package, hashes) = fixture_bundle(temp.path());
+    validate_bundle(&bundle, &lock, &package, temp.path(), &hashes).unwrap();
+    bundle.runtime_abi = 2;
+    let error = validate_bundle(&bundle, &lock, &package, temp.path(), &hashes).unwrap_err();
+    assert!(error.to_string().contains("runtime ABI"));
+    bundle.runtime_abi = 1;
+    bundle.resources.push(Resource {
+        path: "ui/module.js".into(),
+        source: None,
+        content: Some("export {};".into()),
+        digest: sha(b"export {};"),
+        bytes: 10,
+        kind: "module".into(),
+    });
+    validate_bundle(&bundle, &lock, &package, temp.path(), &hashes).unwrap();
+    bundle.resources[0].kind = "executable".into();
+    let error = validate_bundle(&bundle, &lock, &package, temp.path(), &hashes).unwrap_err();
+    assert!(error.to_string().contains("unknown resource kind"));
+}
+
+#[test]
 fn input_manifest_can_omit_unused_app_assets_but_not_locked_inputs_or_templates() {
     let temp = tempfile::tempdir().unwrap();
     let (mut b, lock, package, hashes) = fixture_bundle(temp.path());

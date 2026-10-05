@@ -14,7 +14,7 @@ RecordEntry :: [].{
 		contract,
 		execution: Api.current_state([Api.create(Data.entries)]),
 		verification: { input: verify_input, check: verify_result },
-	})
+	}).cross_app({ version: 1 })
 
 	handle : Context, RecordEntryTypes.Input -> Tx(Output)
 	handle = |context, input| Tx.create(Data.entries, { actor: context.actor(), note: input.note })

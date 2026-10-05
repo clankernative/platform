@@ -240,6 +240,43 @@ fn the_grant_decides_what_may_be_called_and_the_request_decides_who_calls_it() -
     Ok(())
 }
 
+#[test]
+fn another_hop_preserves_human_evidence_and_spends_only_its_inherited_subtree() -> Result<()> {
+    let granted = Granted::new()?;
+    let runtime = &granted.caller;
+    let admission = crate::delegation_commands::Admission::query_for_test(
+        "human-root-on-entry",
+        "alice",
+        &crate::digest(b"human-iap-subject"),
+        63,
+    );
+    runtime.accept_delegated(
+        "ask",
+        "hop-two",
+        &json!({}),
+        100,
+        crate::store::Cause::delegated("alice", "entry", "app:entry").remote(&admission),
+    )?;
+    let call = granted_call(runtime, "hop-two", json!({}))?;
+    assert_eq!(call.chain, "entry");
+    let origin = crate::delegation::verify_origin(runtime, &call)?;
+    assert_eq!(origin.root, "human-root-on-entry");
+    assert_eq!(origin.principal, "alice");
+    assert_eq!(origin.subject_digest, crate::digest(b"human-iap-subject"));
+    assert_eq!(
+        crate::delegation_commands::prepare_budget(runtime, &call)?,
+        14
+    );
+    assert_eq!(
+        crate::delegation_commands::prepare_budget(runtime, &call)?,
+        14
+    );
+    let mut substitution = call;
+    substitution.actor = "support".into();
+    assert!(crate::delegation::verify_origin(runtime, &substitution).is_err());
+    Ok(())
+}
+
 fn granted_call(
     runtime: &Runtime,
     id: &str,
@@ -274,13 +311,21 @@ fn granted_call_at(
         },
     )?
     .context("resource binding result")?;
-    let token = serde_json::from_str::<serde_json::Value>(&bound)?["token"]
+    let _token = serde_json::from_str::<serde_json::Value>(&bound)?["token"]
         .as_str()
         .context("handle token")?
         .to_owned();
 
     let active = crate::authority_state::current(&tx)?;
-    let mut data = json!({"handle":token,"input":"{}"});
+    let digest = &runtime
+        .artifact()
+        .contract()
+        .imports
+        .as_ref()
+        .context("imported contracts")?
+        .operations["callee.list"]
+        .digest;
+    let mut data = json!({"contract":{"operation":"callee.list","digest":digest},"input":"{}"});
     data.as_object_mut()
         .unwrap()
         .extend(extra.as_object().unwrap().clone());
@@ -850,11 +895,14 @@ fn impersonation_cannot_be_introduced_by_a_schedule_child_or_later_hop() -> Resu
                 &json!({}),
                 100,
                 Cause {
+                    credential: None,
                     trigger,
                     actor: "customer",
                     caller,
                     authenticated: "alice",
                     origin: None,
+                    remote: None,
+                    remote_fence: true,
                 },
             ),
             id,

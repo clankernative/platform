@@ -51,6 +51,10 @@ It requires substantial time and disk space. Private company apps are never
 discovered or included by either command. Company acceptance suites run in their
 own private repos against the platform version they deploy.
 
+Both gates check the reviewed [platform structural rules](docs/PLATFORM-STRUCTURAL-RULES.md).
+Use `cargo run --locked -p xtask -- architecture-check` for focused feedback.
+`architecture-inventory` prints source/effect facts without changing policy.
+
 Use `cargo run --locked -p xtask -- fmt` for authored Rust and Roc. Run
 `cargo run --locked -p xtask -- build /absolute/path/to/private-app` to build a
 separate app. Build outputs stay in ignored `artifacts/`; they can contain private

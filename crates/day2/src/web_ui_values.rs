@@ -1,9 +1,7 @@
 //! Narrow host checks for values emitted by build-expanded Native UI bindings.
 use anyhow::{Context, Result, ensure};
-#[allow(unused_imports)]
 pub(crate) use clanker_ui_runtime::{
-    ImageSource, button_size, button_variant, field_text, image, initials, numeric_literal, plain,
-    progress_complete, progress_maximum, progress_value, text, token, validate_remote_image_source,
+    ImageSource, image, numeric_literal, plain, text, validate_remote_image_source,
 };
 use std::collections::BTreeSet;
 
@@ -167,6 +165,10 @@ pub(crate) fn validate_navigation(markup: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clanker_ui_runtime::{
+        button_size, button_variant, field_text, initials, progress_complete, progress_maximum,
+        progress_value, token,
+    };
     use minijinja::Value;
 
     #[test]

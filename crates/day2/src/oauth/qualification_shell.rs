@@ -2,7 +2,8 @@
 //! campaign. No callback, form or instance boolean can manufacture a receipt.
 
 use super::{Authorization, Codes, GoogleReadiness, Purpose, Receipt, Session, Target};
-use crate::{iap, oauth::approval_keys::AccessTokenSource, web_security};
+use crate::oauth::effects::{self, Instant};
+use crate::{iap, oauth::approval_keys::AccessTokenSource};
 use anyhow::{Context, Result, ensure};
 use axum::{
     http::{HeaderMap, Method, StatusCode, header},
@@ -14,7 +15,7 @@ use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 const PREFIX: &str = "/_day2/oauth/qualification/";
@@ -246,8 +247,8 @@ impl Canaries {
         selected_human(&target, identity)?;
         state.pending.retain(|_, pending| fresh(pending, now));
         ensure!(state.pending.len() < 128, "qualification session budget");
-        let token = web_security::random()?;
-        let csrf = web_security::random()?;
+        let token = effects::random()?;
+        let csrf = effects::random()?;
         let session = Digest::of(&(
             "oauth-canary-shell-session-v1",
             &token,
@@ -767,6 +768,139 @@ mod tests {
                 .is_err()
         );
         assert!(server.requests.lock().unwrap().is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn mounted_form_preserves_navigation_origin_and_uses_google_handoff() -> Result<()> {
+        struct NoCampaign;
+        impl Campaign for NoCampaign {
+            fn run(&self, _: Target, _: Codes) -> Result<Receipt> {
+                anyhow::bail!("form submission must not run the provider campaign")
+            }
+        }
+
+        let fixture = fixture()?;
+        let readiness = Arc::new(GoogleReadiness::new(Arc::new(Facts(fixture.evidence))));
+        let canaries = Arc::new(Canaries::at(
+            "https://security.example.com",
+            vec![fixture.target],
+            Arc::new(NoCampaign),
+            readiness,
+        )?);
+        let shell = crate::oauth::security_shell::SecurityShell::with_transport(
+            "https://security.example.com/".into(),
+            Arc::new(NoApprovals),
+            Arc::new(NoApprovals),
+            Arc::new(ProofIdentity),
+        )?
+        .with_registration(canaries)?;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let endpoint = format!("http://{}", listener.local_addr()?);
+        let (stop, shutdown) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(shell.serve_bounded(
+            listener,
+            4,
+            Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            async {
+                let _ = shutdown.await;
+            },
+        ));
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
+        let path = format!("{PREFIX}calendar_registration");
+        let endpoint = format!("{endpoint}{path}");
+        let page = client
+            .get(&endpoint)
+            .header(header::HOST, "security.example.com")
+            .header("test-proof", "verified")
+            .send()
+            .await?;
+        assert_eq!(page.status(), StatusCode::OK);
+        let policy = page.headers()["referrer-policy"].to_str()?.to_owned();
+        let csp = page.headers()["content-security-policy"]
+            .to_str()?
+            .to_owned();
+        assert_eq!(page.headers()[header::CACHE_CONTROL], "no-store");
+        let cookie = page.headers()[header::SET_COOKIE]
+            .to_str()?
+            .split(';')
+            .next()
+            .context("canary cookie missing")?
+            .to_owned();
+        let markup = page.text().await?;
+        assert!(markup.contains(&format!("method=\"post\" action=\"{path}\"")));
+        let csrf = markup
+            .split("name=\"csrf\" value=\"")
+            .nth(1)
+            .context("form csrf missing")?
+            .split('"')
+            .next()
+            .context("csrf value missing")?;
+        // Fetch's append-request-Origin algorithm makes a non-CORS navigation
+        // POST opaque under no-referrer. strict-origin preserves HTTPS Origin
+        // while sending no source path/query, including OAuth callback codes.
+        let origin = match policy.as_str() {
+            "no-referrer" => "null",
+            "strict-origin" => "https://security.example.com",
+            _ => anyhow::bail!("unexpected shell navigation referrer policy"),
+        };
+        for rejected in [Some("null"), None, Some("https://other.example.com")] {
+            let mut request = client
+                .post(&endpoint)
+                .header(header::HOST, "security.example.com")
+                .header("test-proof", "verified")
+                .header(header::COOKIE, &cookie)
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(format!("csrf={csrf}"));
+            if let Some(origin) = rejected {
+                request = request.header(header::ORIGIN, origin);
+            }
+            assert_eq!(request.send().await?.status(), StatusCode::FORBIDDEN);
+        }
+        let response = client
+            .post(&endpoint)
+            .header(header::HOST, "security.example.com")
+            .header("test-proof", "verified")
+            .header(header::COOKIE, &cookie)
+            .header(header::ORIGIN, origin)
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(format!("csrf={csrf}"))
+            .send()
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        assert!(!response.headers().contains_key(header::LOCATION));
+        assert_eq!(response.headers()["content-security-policy"].to_str()?, csp);
+        let handoff = response.text().await?;
+        let destination = handoff
+            .split("href=\"")
+            .nth(1)
+            .context("handoff link missing")?
+            .split('"')
+            .next()
+            .context("handoff destination missing")?;
+        assert!(handoff.contains(&format!(
+            "http-equiv=\"refresh\" content=\"0;url={destination}\""
+        )));
+        let location = url::Url::parse(&destination.replace("&amp;", "&"))?;
+        let authorization = url::Url::parse(super::super::google::AUTHORIZATION)?;
+        assert_eq!(location.origin(), authorization.origin());
+        assert_eq!(location.path(), authorization.path());
+        let sources = csp
+            .split(';')
+            .find_map(|directive| directive.trim().strip_prefix("form-action "))
+            .context("form-action missing")?
+            .split_whitespace()
+            .collect::<Vec<_>>();
+        assert_eq!(sources, vec!["'self'"]);
+        assert!(csp.contains("default-src 'none'"));
+        assert!(csp.contains("frame-ancestors 'none'"));
+        assert!(csp.contains("base-uri 'none'"));
+        let _ = stop.send(());
+        tokio::time::timeout(Duration::from_secs(3), server).await???;
         Ok(())
     }
 

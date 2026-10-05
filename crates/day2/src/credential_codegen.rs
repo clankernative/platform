@@ -6,6 +6,8 @@ pub const MODULE: &str = "Credentials.roc";
 pub const LIST: &str = "credential.metadata.list.v1";
 pub const INSPECT: &str = "credential.metadata.inspect.v1";
 pub const ISSUE: &str = "credential.issue.v1";
+pub const ROTATE: &str = "credential.rotate.v1";
+pub const REVOKE: &str = "credential.revoke.v1";
 
 pub fn observation(name: &str) -> bool {
     [LIST, INSPECT].contains(&name)
@@ -64,6 +66,8 @@ fn render<'a>(
             "Page",
             "Ref",
             "Issued",
+            "RotationOutcome",
+            "RevocationOutcome",
         ] {
             body = body.replace(&format!("{ty}(family)"), &format!("{ty}_{name}"));
         }
@@ -87,6 +91,9 @@ fn render<'a>(
             "read_list",
             "read_inspect",
             "issue_fixed",
+            "rotate_fixed",
+            "revoke_lineage",
+            "snapshot_from_parts",
         ] {
             body = body.replace(function, &format!("day2_{function}_{name}"));
         }
@@ -108,8 +115,22 @@ fn render<'a>(
                 "|context, request| {prefix}day2_issue_fixed_{name}(\"{name}\", context, request.label)"
             )
         };
+        let rotate = if provisional {
+            "|_context, _request| Tx.host_reject(\"credential_rotation_unavailable\")".into()
+        } else {
+            format!(
+                "|context, request| {prefix}day2_rotate_fixed_{name}(\"{name}\", context, request.expected)"
+            )
+        };
+        let revoke = if provisional {
+            "|_context, _request| Tx.host_reject(\"credential_revocation_unavailable\")".into()
+        } else {
+            format!(
+                "|context, request| {prefix}day2_revoke_lineage_{name}(\"{name}\", context, request.lineage)"
+            )
+        };
         source.push_str(&format!(
-            "    {name} : {{ issue : InteractiveContext, {{ label : Credential.Label }} -> Tx(Issued_{name}), list : ListRequest_{name} -> Observe(Try(Page_{name}, ListFailure_{name})), inspect : {{ lineage : Ref_{name} }} -> Observe(Try(Inspection_{name}, InspectionFailure_{name})), start : Cursor_{name}, cursor_from_str : Str -> Try(Cursor_{name}, [InvalidCursor]), ref_from_str : Str -> Try(Ref_{name}, [InvalidRef]) }}\n    {name} = {{\n        issue: {issue},\n        list: {list},\n        inspect: {inspect},\n        start: {{ value: PlatformCursor.start }},\n        cursor_from_str: |raw| day2_cursor_from_str_{name}(\"{name}\", raw),\n        ref_from_str: |raw| day2_ref_from_str_{name}(\"{name}\", raw),\n    }}\n\n"
+            "    {name} : {{ issue : InteractiveContext, {{ label : Credential.Label }} -> Tx(Issued_{name}), rotate : InteractiveContext, {{ expected : ManagementSnapshot_{name} }} -> Tx(RotationOutcome_{name}), revoke : InteractiveContext, {{ lineage : Ref_{name} }} -> Tx(RevocationOutcome_{name}), snapshot_from_parts : {{ lineage : Ref_{name}, head : Str, revision : U64 }} -> Try(ManagementSnapshot_{name}, [InvalidSnapshot]), list : ListRequest_{name} -> Observe(Try(Page_{name}, ListFailure_{name})), inspect : {{ lineage : Ref_{name} }} -> Observe(Try(Inspection_{name}, InspectionFailure_{name})), start : Cursor_{name}, cursor_from_str : Str -> Try(Cursor_{name}, [InvalidCursor]), ref_from_str : Str -> Try(Ref_{name}, [InvalidRef]) }}\n    {name} = {{\n        issue: {issue},\n        rotate: {rotate},\n        revoke: {revoke},\n        snapshot_from_parts: day2_snapshot_from_parts_{name},\n        list: {list},\n        inspect: {inspect},\n        start: {{ value: PlatformCursor.start }},\n        cursor_from_str: |raw| day2_cursor_from_str_{name}(\"{name}\", raw),\n        ref_from_str: |raw| day2_ref_from_str_{name}(\"{name}\", raw),\n    }}\n\n"
         ));
     }
     source.push_str("}\n");
@@ -123,6 +144,48 @@ import pf.CollectionPage
 
 # Generated safe metadata. Decoding proves shape, never visibility or authority.
 Credentials :: [].{
+    RotationOutcome(family) : [Rotated(Issued(family)), Conflict]
+    RevocationOutcome(family) : [Revoked({ lineage : Ref(family), revision : U64 }), AlreadyRevoked({ lineage : Ref(family), revision : U64 })]
+
+    # Pure shape codec for a stale-able management precondition, never authority.
+    snapshot_from_parts : { lineage : Ref(family), head : Str, revision : U64 } -> Try(ManagementSnapshot(family), [InvalidSnapshot])
+    snapshot_from_parts = |parts| {
+        if parts.revision == 0 or parts.head.is_empty() or parts.head.count_utf8_bytes() > 160 or !parts.head.to_utf8().all(|byte| (byte >= 48 and byte <= 57) or (byte >= 65 and byte <= 90) or (byte >= 97 and byte <= 122) or byte == 45 or byte == 95) {
+            return Err(InvalidSnapshot)
+        }
+        Ok({ lineage: parts.lineage, head: { lineage: parts.lineage, id: parts.head }, revision: parts.revision, state: Active })
+    }
+
+    $PREFIX$rotate_fixed : Str, InteractiveContext, ManagementSnapshot(family) -> Tx(RotationOutcome(family))
+    $PREFIX$rotate_fixed = |registration, context, expected| Tx.$PREFIX$capability(
+        "credential_rotate", "credential.rotate.v1",
+        Json.to_str({ registration, invocation: context.invocation_id(), lineage: expected.lineage().to_str(), head: expected.head().id(), revision: expected.revision() }),
+    ).and_then(|raw| {
+        parsed : Try({ conflict : Bool, lineage : Str, version : Str, label : Str, expires_at : I64 }, _)
+        parsed = Json.parse(raw)
+        Tx.$PREFIX$from_host(parsed.map_err(|_| "invalid_credential_rotation")).and_then(|wire| {
+            if wire.conflict { return Tx.succeed(Conflict) }
+            decoded = ref_from_str(registration, wire.lineage).map_err(|_| "invalid_credential_rotation")
+            Tx.$PREFIX$from_host(decoded).map(|lineage| Rotated({ lineage, version: { lineage, id: wire.version }, label: wire.label, expires_at: wire.expires_at }))
+        })
+    })
+
+    $PREFIX$revoke_lineage : Str, InteractiveContext, Ref(family) -> Tx(RevocationOutcome(family))
+    $PREFIX$revoke_lineage = |registration, context, lineage| Tx.$PREFIX$capability(
+        "credential_revoke", "credential.revoke.v1",
+        Json.to_str({ registration, invocation: context.invocation_id(), lineage: lineage.to_str() }),
+    ).and_then(|raw| {
+        parsed : Try({ already_revoked : Bool, lineage : Str, revision : U64 }, _)
+        parsed = Json.parse(raw)
+        Tx.$PREFIX$from_host(parsed.map_err(|_| "invalid_credential_revocation")).and_then(|wire| {
+            decoded = ref_from_str(registration, wire.lineage).map_err(|_| "invalid_credential_revocation")
+            Tx.$PREFIX$from_host(decoded).map(|reference| {
+                result = { lineage: reference, revision: wire.revision }
+                if wire.already_revoked { AlreadyRevoked(result) } else { Revoked(result) }
+            })
+        })
+    })
+
     Issued(family) :: { lineage : Ref(family), version : VersionRef(family), label : Str, expires_at : I64 }.{
         lineage : Issued(family) -> Ref(family)
         lineage = |issued| issued.lineage

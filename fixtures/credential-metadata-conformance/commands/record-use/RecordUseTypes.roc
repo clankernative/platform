@@ -1,0 +1,3 @@
+RecordUseTypes :: [].{
+	Input := { note : Str }
+}

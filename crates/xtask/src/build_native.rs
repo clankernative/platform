@@ -405,6 +405,10 @@ pub(super) fn platform_sources(root: &Path) -> Result<BTreeMap<String, String>> 
     for path in [
         "Cargo.toml",
         "Cargo.lock",
+        "architecture-rules.json",
+        "architecture-boundaries.json",
+        "architecture-proofs.json",
+        "architecture/clippy.toml",
         "rust-toolchain.toml",
         "toolchain.json",
         ".dockerignore",
@@ -760,4 +764,59 @@ pub fn execute(
         "workflow build receipt differs from published artifact"
     );
     Ok(artifact)
+}
+
+#[cfg(test)]
+mod platform_input_tests {
+    use super::*;
+
+    #[test]
+    fn architecture_policy_tampering_changes_native_build_identity() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path();
+        fs::create_dir(root.join("architecture"))?;
+        for name in [
+            "Cargo.toml",
+            "Cargo.lock",
+            "architecture-rules.json",
+            "architecture-boundaries.json",
+            "architecture-proofs.json",
+            "architecture/clippy.toml",
+            "rust-toolchain.toml",
+            "toolchain.json",
+            ".dockerignore",
+        ] {
+            fs::write(root.join(name), b"approved input")?;
+        }
+        for name in [
+            "crates",
+            "tools",
+            "vendor",
+            "assets",
+            "ops",
+            "infra",
+            "deploy",
+            "toolchains",
+        ] {
+            fs::create_dir(root.join(name))?;
+        }
+        let approved = platform_sources(root)?;
+        assert_eq!(approved, platform_sources(root)?);
+        for policy in [
+            "architecture-rules.json",
+            "architecture-boundaries.json",
+            "architecture-proofs.json",
+            "architecture/clippy.toml",
+        ] {
+            assert_eq!(approved[policy], digest(b"approved input"));
+            fs::write(root.join(policy), b"weakened restrictions")?;
+            let changed = platform_sources(root)?;
+            assert_ne!(approved, changed);
+            assert_ne!(approved[policy], changed[policy]);
+            fs::remove_file(root.join(policy))?;
+            assert!(platform_sources(root).is_err());
+            fs::write(root.join(policy), b"approved input")?;
+        }
+        Ok(())
+    }
 }

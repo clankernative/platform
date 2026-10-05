@@ -34,6 +34,10 @@ pub fn manifest(artifact: &Artifact) -> Result<Vec<ManifestFamily>> {
     credentials::build_manifest(artifact.credential_declarations.clone(), &catalog)
 }
 
+pub(crate) fn operation(artifact: &Artifact, name: &str) -> Result<OperationAuthorityContract> {
+    derive(artifact, name, &mut BTreeSet::new())
+}
+
 /// The same declared bound used to build a manifest is enforced for every
 /// invocation of an opted-in operation, regardless of ingress channel.
 pub(crate) fn check_step(artifact: &Artifact, operation: &str, step: Step<'_>) -> Result<()> {
@@ -50,7 +54,7 @@ pub(crate) fn check_step(artifact: &Artifact, operation: &str, step: Step<'_>) -
             matches!(
                 step,
                 Step::Database(_)
-                    | Step::CredentialIssue
+                    | Step::CredentialMutation
                     | Step::Boundary(
                         crate::protocol::Boundary::Decide | crate::protocol::Boundary::Commit
                     )
@@ -120,6 +124,8 @@ fn derive_inner(
     ensure!(
         definition.credential_access.metadata_reads.is_empty()
             && definition.credential_access.issues.is_empty()
+            && definition.credential_access.rotations.is_empty()
+            && definition.credential_access.revocations.is_empty()
             && !definition.credential_access.interactive,
         "credential metadata cannot be a credential ingress root: {name}"
     );

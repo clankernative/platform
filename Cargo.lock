@@ -524,6 +524,7 @@ dependencies = [
  "oxc_parser",
  "oxc_span",
  "percent-encoding",
+ "proc-macro2",
  "proptest",
  "reqwest",
  "resvg",
@@ -535,11 +536,11 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "syn 2.0.119",
  "tempfile",
  "time",
  "tokio",
  "tokio-stream",
- "unicode-segmentation",
  "url",
 ]
 
@@ -571,6 +572,7 @@ dependencies = [
  "crc32c",
  "day2",
  "day2-capabilities",
+ "day2-kernel",
  "durable-temporal",
  "hmac",
  "proptest",
@@ -579,11 +581,22 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "serde_yaml",
  "sha1",
  "sha2",
  "tempfile",
  "tokio",
  "url",
+]
+
+[[package]]
+name = "day2-kernel"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "day2-capabilities",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -3317,6 +3330,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_yaml"
+version = "0.9.34+deprecated"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a8b1a1a2ebf674015cc02edccce75287f1a0130d394307b36743c2f5d504b47"
+dependencies = [
+ "indexmap",
+ "itoa",
+ "ryu",
+ "serde",
+ "unsafe-libyaml",
+]
+
+[[package]]
 name = "servo_arc"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4296,6 +4322,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
 
 [[package]]
+name = "unsafe-libyaml"
+version = "0.2.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
+
+[[package]]
 name = "untrusted"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4851,12 +4883,15 @@ dependencies = [
  "anyhow",
  "day2",
  "day2-control",
+ "day2-ops",
+ "proc-macro2",
+ "quote",
  "rusqlite",
  "serde",
  "serde_json",
  "sha2",
+ "syn 2.0.119",
  "tempfile",
- "unicode-segmentation",
 ]
 
 [[package]]

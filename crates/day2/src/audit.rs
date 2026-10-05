@@ -559,6 +559,8 @@ pub(crate) fn validate_event_stream(db: &Connection) -> Result<()> {
 pub enum Trigger {
     /// An actor asked for it: HTTP, MCP, a form or the CLI.
     Request,
+    /// A host-verified managed credential, never an interactive browser session.
+    Credential,
     /// An occurrence of a declared schedule. No actor asked; the instance bound one.
     Schedule,
     /// Another command requested it inside its own transaction.
@@ -575,6 +577,7 @@ impl Trigger {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Request => "request",
+            Self::Credential => "credential",
             Self::Schedule => "schedule",
             Self::CommandRequest => "command_request",
             Self::Ingress => "ingress",
@@ -1139,6 +1142,7 @@ impl Runtime {
             "command_request" => Trigger::CommandRequest,
             "ingress" => Trigger::Ingress,
             "delegated" => Trigger::Delegated,
+            "credential" => Trigger::Credential,
             _ => Trigger::Request,
         };
         record_attempt(

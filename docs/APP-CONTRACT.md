@@ -107,13 +107,16 @@ an app-to-app hop uses the admitted resource grant and leaves that field empty.
 `application` is the immediate caller and `chain` lists applications oldest
 first. Apps cannot construct these facts or override them through input.
 
-For a prepared cross-app query, resolve an operator-owned binding with
-`Resource.bind(context, "delegation")`, then call `Delegate.query(resource, "{}")`.
-The resource pins the callee and its query schema; the effective actor is inherited,
-not a method argument. The answer is recorded JSON for deterministic replay.
+For a prepared cross-app query, call the generated function from the caller's
+locked `ImportedContracts` module, for example
+`ImportedContracts.peer_identity_who({})`. It accepts the checked input and returns
+`Observe` of the checked output. Shared nominal records have one generated identity
+per contract type. The host selects the operator-owned grant and exact contract;
+the effective actor is inherited. The answer is journaled for deterministic replay.
 The callee independently authorizes the actor. See the complete
 [request identity fixture](../fixtures/delegation-conformance/README.md) and
 [HTTP request contract](WEB.md#acting-on-behalf-of-another-actor).
+See [app-call host deployment](APP-CALLS.md) for the private authenticated transport.
 
 `Api.soft_delete(Data.tickets)` declares deletion. The same declaration also
 permits `Tx.restore` on that model: an operation allowed to delete a row must
@@ -200,11 +203,6 @@ templates. An optional `redirects` record registers `Redirect.route(...)` declar
 each binding one public command and one text field of its result; admission
 checks them against that command's contract (see [redirect routes](WEB.md#redirect-routes)). Resources and source overlays are captured before packaging, and
 platform inputs are checked for changes before publication and selection.
-
-The declared app module is a render-blocking bootstrap in supporting browsers.
-Restore browser-local chrome synchronously there, and use admitted literal dynamic
-imports for optional, heavier surfaces. Server-rendered content must remain usable
-when JavaScript is disabled or unavailable.
 
 Format 12 requires a complete contract. The loader rederives types/registrations,
 checks resources and compares the serialized contract and manifest with the

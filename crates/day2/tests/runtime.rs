@@ -69,6 +69,7 @@ impl World {
             security_shell: None,
             oauth_shell_transport: None,
             oauth_clients: None,
+            oauth_runtime: None,
         };
         let path = directory.path().join("instance.json");
         fs::write(&path, serde_json::to_vec(&instance)?)?;

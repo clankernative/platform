@@ -152,6 +152,8 @@ providers! {
         world: "delegation.simulated.sqlite",
         actions: {
             DelegateQuery => "app.query.v1" (read),
+            DelegateSend => "app.send.v1" (write),
+            DelegateStatus => "app.status.v1" (read),
         },
     },
     SyntheticLinear {

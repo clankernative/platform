@@ -2,6 +2,123 @@
 # override, so this never contacts a cluster.
 mock_provider "kubernetes" {}
 
+run "preserves_explicit_credential_client_membership" {
+  command = plan
+  variables {
+    readers = ["qa@example.com", "credential_client:client_keys"]
+    writers = ["credential_client:client_keys"]
+  }
+  assert {
+    condition     = contains(jsondecode(kubernetes_config_map_v1.instance.data["instance.json"]).apps.example_app.readers, "credential_client:client_keys") && jsondecode(kubernetes_config_map_v1.instance.data["instance.json"]).apps.example_app.writers == ["credential_client:client_keys"]
+    error_message = "Client keys must receive an explicit family selector without being rewritten as human accounts."
+  }
+}
+
+run "wires_private_app_calls_into_the_normal_host" {
+  command = plan
+  override_data {
+    target = data.kubernetes_config_map_v1.platform_contract
+    values = { data = {
+      APP_DOMAIN                   = "example.test.example.com"
+      IAP_JWT_AUDIENCE             = "/projects/123/global/backendServices/1"
+      APP_CALL_ISSUER_AUDIENCE     = "/projects/123/global/backendServices/2"
+      APP_CALL_RECEIVER_AUDIENCE   = "/projects/123/global/backendServices/3"
+      APP_CALL_WORKLOAD_EMAIL      = "example-call@example-tools.iam.gserviceaccount.com"
+      PVC_NAME                     = "data"
+      SERVICE_NAME                 = "app"
+      REQUIRED_SERVICE_LABEL_KEY   = "platform.example.com/service"
+      REQUIRED_SERVICE_LABEL_VALUE = "app"
+    } }
+  }
+  variables {
+    app_calls = {
+      workload_key                = { id = "workload-1", secret_version = "projects/123/secrets/workload/versions/1" }
+      issuer_key                  = { issuer = "example-issuer", id = "issuer-1", secret_version = "projects/123/secrets/issuer/versions/1" }
+      serving_snapshot_config_map = "active-app-serving"
+      serving = { example_app = {
+        target         = { company = "exampleco", environment = "production", app = "example_app" }
+        project_number = 123
+        location       = "us-central1-a"
+        cluster        = "day2"
+        namespace      = "app-example"
+        workload       = "day2-example-app"
+        workload_email = "example-call@example-tools.iam.gserviceaccount.com"
+        deployment     = { id = "deployment", revision = "sha256:0000000000000000000000000000000000000000000000000000000000000000" }
+      } }
+      outgoing = {}
+      incoming = {}
+    }
+  }
+  assert {
+    condition     = contains(kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[0].args, "--app-calls") && jsondecode(kubernetes_config_map_v1.app_calls[0].data["host.json"]).workload_email == "example-call@example-tools.iam.gserviceaccount.com"
+    error_message = "The real day2-serve entrypoint must receive its fixed private host bindings."
+  }
+  assert {
+    condition     = kubernetes_stateful_set_v1.day2.metadata[0].annotations["day2.dev/artifact"] == "sha256:9ef287e05cb53f593b35c140140e83306e8c487cca417ff9f23f58568340b6bb" && length(kubernetes_manifest.app_call_keys) == 1
+    error_message = "Serving evidence must expose the exact artifact and keys must use the managed CSI mount."
+  }
+  assert {
+    condition     = length([for volume in kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].volume : volume if volume.name == "app-call-selection" && volume.config_map[0].optional]) == 1
+    error_message = "The host can become ready before activation publishes the selector; calls still fail closed until it exists."
+  }
+}
+
+run "infrastructure_preserves_software_after_release_handoff" {
+  command = plan
+  variables {
+    release_managed = true
+    app_calls = {
+      workload_key                = { id = "workload-1", secret_version = "projects/123/secrets/workload/versions/1" }
+      issuer_key                  = { issuer = "example-issuer", id = "issuer-1", secret_version = "projects/123/secrets/issuer/versions/1" }
+      serving_snapshot_config_map = "active-app-serving"
+      serving                     = {}
+      outgoing                    = {}
+      incoming                    = {}
+    }
+  }
+  override_data {
+    target = data.kubernetes_config_map_v1.platform_contract
+    values = { data = {
+      APP_DOMAIN                   = "example.test.example.com"
+      IAP_JWT_AUDIENCE             = "/projects/123/global/backendServices/1"
+      APP_CALL_ISSUER_AUDIENCE     = "/projects/123/global/backendServices/2"
+      APP_CALL_RECEIVER_AUDIENCE   = "/projects/123/global/backendServices/3"
+      APP_CALL_WORKLOAD_EMAIL      = "example-call@example-tools.iam.gserviceaccount.com"
+      PVC_NAME                     = "data"
+      SERVICE_NAME                 = "app"
+      REQUIRED_SERVICE_LABEL_KEY   = "platform.example.com/service"
+      REQUIRED_SERVICE_LABEL_VALUE = "app"
+    } }
+  }
+  override_data {
+    target = data.kubernetes_resource.release
+    values = { object = {
+      metadata = { name = "day2-example-app", namespace = "app-example", annotations = {
+        "day2.dev/release-effect" = "effect-two", "day2.dev/release-id" = "release-two"
+      } }
+      spec = { template = {
+        metadata = { annotations = {
+          "day2.dev/installation"    = "exampleco", "day2.dev/environment" = "production", "day2.dev/app" = "example_app"
+          "day2.dev/artifact"        = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          "day2.dev/instance-sha256" = "released-instance", "day2.dev/release-id" = "release-two"
+        } }
+        spec = {
+          containers = [{ name = "day2", image = "registry.example.com/app@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", env = [{ name = "DAY2_EXPECTED_ARTIFACT", value = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }] }]
+          volumes    = [{ name = "instance", configMap = { name = "day2-release-two" } }]
+        }
+      } }
+    } }
+  }
+  assert {
+    condition     = kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[0].image == "registry.example.com/app@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" && kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[0].env[0].value == "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    error_message = "An infrastructure plan must keep the released image and artifact guard."
+  }
+  assert {
+    condition     = kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].volume[0].config_map[0].name == "day2-release-two" && kubernetes_stateful_set_v1.day2.metadata[0].annotations["day2.dev/release-effect"] == "effect-two" && kubernetes_stateful_set_v1.day2.spec[0].template[0].metadata[0].annotations["day2.dev/release-id"] == "release-two"
+    error_message = "Infrastructure must preserve the immutable release instance and reconciliation markers."
+  }
+}
+
 override_data {
   target = data.kubernetes_config_map_v1.security_shell_contract
   values = {

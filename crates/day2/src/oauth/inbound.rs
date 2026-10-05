@@ -95,8 +95,7 @@ pub struct RefreshExchange {
 }
 
 pub fn install_schema(db: &Connection) -> Result<()> {
-    db.execute_batch(
-        "PRAGMA foreign_keys = ON;
+    let ddl = "PRAGMA foreign_keys = ON;
         CREATE TABLE IF NOT EXISTS oauth_inbound_schema_version (
             version INTEGER PRIMARY KEY
         );
@@ -139,20 +138,22 @@ pub fn install_schema(db: &Connection) -> Result<()> {
             grant_epoch INTEGER NOT NULL,
             roots TEXT NOT NULL,
             expires_at INTEGER NOT NULL
-        );",
-    )?;
-    let mut versions = db.prepare("SELECT version FROM oauth_inbound_schema_version")?;
-    let known = versions
-        .query_map([], |row| row.get::<_, i64>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    ensure!(
-        known.is_empty() || known == [1],
-        "unsupported inbound OAuth schema version"
-    );
-    if known.is_empty() {
-        db.execute("INSERT INTO oauth_inbound_schema_version VALUES (1)", [])?;
-    }
-    Ok(())
+        );";
+    db.execute_batch(ddl)?;
+    super::schema::upgrade(db, "oauth_inbound_schema_version", &[1, 2], 2, ddl, &[
+        super::schema::Invariant { table: "oauth_inbound_grants", predicate:
+            "length(id) > 0 AND length(ceiling) > 0 AND length(digest) > 0 AND epoch > 0 AND status IN ('active', 'revoked')" },
+        super::schema::Invariant { table: "oauth_inbound_codes", predicate:
+            "length(code_hash) > 0 AND length(grant_id) > 0 AND length(client) > 0 AND length(redirect) > 0 AND
+             length(pkce_challenge) = 43 AND length(audience) > 0 AND state IN ('ready', 'consumed') AND
+             (state = 'consumed') = (receipt IS NOT NULL) AND (receipt IS NULL OR length(receipt) > 0)" },
+        super::schema::Invariant { table: "oauth_inbound_refresh", predicate:
+            "length(token_hash) > 0 AND length(family) > 0 AND generation > 0 AND length(grant_id) > 0 AND grant_epoch > 0 AND
+             length(roots) > 0 AND state IN ('active', 'consumed', 'revoked') AND
+             (state = 'consumed') = (successor IS NOT NULL) AND (successor IS NULL OR (length(successor) > 0 AND successor != token_hash))" },
+        super::schema::Invariant { table: "oauth_inbound_access", predicate:
+            "length(token_hash) > 0 AND length(grant_id) > 0 AND grant_epoch > 0 AND length(roots) > 0" },
+    ])
 }
 
 /// The security shell has already obtained exact interactive consent. This
@@ -549,7 +550,7 @@ fn identifier(value: &str) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::oauth) mod tests {
     use super::*;
     use day2_capabilities::Name;
     use day2_capabilities::oauth::{AuthorityNode, ClientChannelContract, OperationKind};
@@ -575,7 +576,7 @@ mod tests {
         .unwrap()
     }
 
-    fn ceiling() -> GrantCeiling {
+    pub(in crate::oauth) fn ceiling() -> GrantCeiling {
         let read = root("ghostwright.read");
         let publish = root("ghostwright.publish");
         ClientChannelContract::derive(
@@ -925,7 +926,7 @@ mod tests {
     fn unknown_inbound_schema_version_fails_closed() {
         let db = Connection::open_in_memory().unwrap();
         install_schema(&db).unwrap();
-        db.execute("UPDATE oauth_inbound_schema_version SET version = 2", [])
+        db.execute("UPDATE oauth_inbound_schema_version SET version = 3", [])
             .unwrap();
         assert!(install_schema(&db).is_err());
     }

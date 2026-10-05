@@ -1,0 +1,8 @@
+<h1>{{ home.title }}</h1>
+<p>Request a reservation from your stock allowance.</p>
+<form id="stock-request" data-command="request_desk.request">
+  <label for="quantity">Quantity</label>
+  <input id="quantity" name="quantity" type="number" min="0" max="100" value="30" required>
+  <button type="submit">Request stock</button>
+</form>
+<p id="request-result" role="status" aria-live="polite">Ready.</p>

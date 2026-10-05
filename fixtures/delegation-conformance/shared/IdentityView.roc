@@ -1,7 +1,7 @@
 import pf.Context
 
 IdentityView :: [].{
-	Value : { actor : Str, authenticated : Str, rule : Str, caller : Str, authentication : Str }
+	Value := { actor : Str, authenticated : Str, rule : Str, caller : Str, authentication : Str }
 
 	fields = {
 		actor: "Effective actor authorized by the host.",

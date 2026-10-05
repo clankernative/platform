@@ -1070,6 +1070,7 @@ impl RuntimeSession {
             before["journal"] == restored["journal"],
             "restored execution or audit journal differs"
         );
+        verify_restored_delegation_fence(&before, &restored)?;
         ensure!(
             restored["authority"]["document"]["enabled"] == false,
             "restore enabled historical grants"
@@ -1082,15 +1083,17 @@ impl RuntimeSession {
             restored["sessions"] == 0 && restored["session_secrets"] == 0,
             "restore retained browser authority"
         );
+        let source_after = self.native_evidence(0, INSTANCE)?;
         ensure!(
-            before["authority"]["stamp"]
-                == self.native_evidence(0, INSTANCE)?["authority"]["stamp"],
+            before["authority"]["stamp"] == source_after["authority"]["stamp"]
+                && before["delegation_restore_fence"] == source_after["delegation_restore_fence"],
             "backup or restore changed source authority"
         );
         let runtime_backup = self.runtime_backup(0, &before)?;
         let (startup, activation, override_digest) = self.start_restored(&restored)?;
         Ok(
             json!({"coverage":"backup-restore-fencing","domain":before["domain"],"journal":before["journal"],
+            "delegation_restore_fence":restored["delegation_restore_fence"],
             "source_epoch":before["authority"]["stamp"]["epoch"],"restored_epoch":restored["authority"]["stamp"]["epoch"],
             "historical_grants_disabled":true,"browser_sessions_rotated":true,
             "restored_server_started":true,"restored_startup":startup,"fresh_policy_activation":activation,
@@ -1181,6 +1184,7 @@ impl RuntimeSession {
             before["domain"] == restored["domain"] && before["journal"] == restored["journal"],
             "runtime image backup restored different domain or journal contents"
         );
+        verify_restored_delegation_fence(before, &restored)?;
         ensure!(
             restored["authority"]["document"]["enabled"] == false
                 && restored["sessions"] == 0
@@ -1253,7 +1257,9 @@ impl RuntimeSession {
         )?;
         let rebound = self.native_evidence(index, INSTANCE)?;
         ensure!(
-            rebound["domain"] == restored["domain"] && rebound["journal"] == restored["journal"],
+            rebound["domain"] == restored["domain"]
+                && rebound["journal"] == restored["journal"]
+                && rebound["delegation_restore_fence"] == restored["delegation_restore_fence"],
             "recovery activation changed domain or execution journals"
         );
         let startup = self.start(index)?;
@@ -2639,7 +2645,7 @@ pub fn native_strict_denial(instance: &Path) -> Result<Value> {
 /// needed: the explicitly authorized machine operator samples one SQLite read
 /// transaction, including every row within a fail-closed qualification budget.
 pub fn native_evidence(instance: &Path) -> Result<Value> {
-    use rusqlite::{Connection, OpenFlags, types::ValueRef};
+    use rusqlite::{Connection, OpenFlags, OptionalExtension, types::ValueRef};
     ensure!(
         cfg!(target_os = "linux"),
         "native runtime evidence requires Linux"
@@ -2664,6 +2670,7 @@ pub fn native_evidence(instance: &Path) -> Result<Value> {
         "day2_web_secret",
         "day2_budget_meta",
         "day2_selection_cursor_pins",
+        "day2_app_restore_fence",
     ]);
     let mut domain = BTreeMap::new();
     let mut journal = BTreeMap::new();
@@ -2736,11 +2743,61 @@ pub fn native_evidence(instance: &Path) -> Result<Value> {
         [],
         |row| row.get(0),
     )?;
+    let restore_not_before: Option<i64> = transaction
+        .query_row(
+            "SELECT not_before FROM day2_app_restore_fence WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let sampled_at_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
     Ok(
         json!({"artifact":runtime.artifact().id(),"scope":runtime.scope(),
         "domain":domain,"journal":journal,"authority":authority,"pending":pending,
         "sessions":count("day2_web_sessions")?,"session_secrets":count("day2_web_secret")?,
+        "sampled_at_unix":sampled_at_unix,
+        "delegation_restore_fence":{"not_before":restore_not_before},
         "snapshot":"single SQLite read transaction; complete bounded row digests",
         "restore_mutable_tables_excluded":excluded}),
     )
+}
+
+fn verify_restored_delegation_fence(before: &Value, restored: &Value) -> Result<()> {
+    let cutoff = restored["delegation_restore_fence"]["not_before"]
+        .as_i64()
+        .context("restore omitted delegation fence")?;
+    let prior = before["delegation_restore_fence"]["not_before"]
+        .as_i64()
+        .unwrap_or(0);
+    let started = before["sampled_at_unix"]
+        .as_i64()
+        .context("source evidence time missing")?;
+    let completed = restored["sampled_at_unix"]
+        .as_i64()
+        .context("restore evidence time missing")?;
+    ensure!(
+        cutoff > 0 && cutoff >= prior && cutoff >= started && cutoff <= completed,
+        "restore delegation fence is stale or outside the observed interval"
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod restore_fence_tests {
+    use super::*;
+
+    #[test]
+    fn restored_fence_requires_fresh_non_decreasing_cutoff() {
+        let before = json!({"sampled_at_unix":100,"delegation_restore_fence":{"not_before":90}});
+        let after = |cutoff: Value| json!({"sampled_at_unix":102,"delegation_restore_fence":{"not_before":cutoff}});
+        assert!(verify_restored_delegation_fence(&before, &after(json!(101))).is_ok());
+        for cutoff in [Value::Null, json!(89), json!(99), json!(103)] {
+            assert!(verify_restored_delegation_fence(&before, &after(cutoff)).is_err());
+        }
+        let previously_fenced =
+            json!({"sampled_at_unix":100,"delegation_restore_fence":{"not_before":102}});
+        assert!(verify_restored_delegation_fence(&previously_fenced, &after(json!(101))).is_err());
+    }
 }

@@ -11,18 +11,28 @@
 //! already treat as a retryable storage failure. A thread that already holds the
 //! turn for a database passes through, so nested use behaves exactly as SQLite
 //! alone would.
+//!
+//! Admission retains at most 64 queued waiters per database and 1024 database
+//! lines with live users. Saturation and arithmetic exhaustion also fail as busy.
+//! The registry holds weak references: an idle line can disappear only after
+//! every holder, waiter and caller enrolling in that line releases its strong
+//! reference. Reclaiming an idle path therefore cannot split an active FIFO.
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 use std::{
     cell::RefCell,
     collections::{HashMap, HashSet, VecDeque},
     ops::{Deref, DerefMut},
-    path::PathBuf,
-    sync::{Arc, Condvar, Mutex, OnceLock},
+    path::{Path, PathBuf},
+    sync::{Arc, Condvar, Mutex, OnceLock, Weak},
     time::{Duration, Instant},
 };
 
 /// How long a writer waits for its turn before failing as busy.
 pub const WAIT: Duration = Duration::from_secs(30);
+
+// Fixed native admission budgets, independent of instance/app configuration.
+const MAX_WAITERS: usize = 64;
+const MAX_DATABASES: usize = 1024;
 
 #[derive(Default)]
 struct Line {
@@ -37,8 +47,45 @@ struct State {
     holder: Option<u64>,
 }
 
-fn lines() -> &'static Mutex<HashMap<PathBuf, Arc<Line>>> {
-    static LINES: OnceLock<Mutex<HashMap<PathBuf, Arc<Line>>>> = OnceLock::new();
+impl State {
+    fn enqueue(&mut self) -> rusqlite::Result<u64> {
+        if self.waiting.len() >= MAX_WAITERS {
+            return Err(busy("write queue waiter capacity exceeded"));
+        }
+        let ticket = self.next;
+        let next = ticket
+            .checked_add(1)
+            .ok_or_else(|| busy("write queue ticket space exhausted"))?;
+        self.waiting.push_back(ticket);
+        self.next = next;
+        Ok(ticket)
+    }
+}
+
+#[derive(Default)]
+struct Registry {
+    lines: HashMap<PathBuf, Weak<Line>>,
+}
+
+impl Registry {
+    fn line(&mut self, path: &Path) -> rusqlite::Result<Arc<Line>> {
+        if let Some(line) = self.lines.get(path).and_then(Weak::upgrade) {
+            return Ok(line);
+        }
+        // Only a zero strong count is reclaimable. Even a caller that has not
+        // yet acquired the state mutex keeps its queue's identity alive.
+        self.lines.retain(|_, line| line.strong_count() != 0);
+        if self.lines.len() >= MAX_DATABASES {
+            return Err(busy("write queue database capacity exceeded"));
+        }
+        let line = Arc::new(Line::default());
+        self.lines.insert(path.to_owned(), Arc::downgrade(&line));
+        Ok(line)
+    }
+}
+
+fn lines() -> &'static Mutex<Registry> {
+    static LINES: OnceLock<Mutex<Registry>> = OnceLock::new();
     LINES.get_or_init(Default::default)
 }
 
@@ -89,20 +136,20 @@ impl Turn {
         if HELD.with(|held| held.borrow().contains(&path)) {
             return Ok(Self::Passthrough);
         }
+        let deadline = Instant::now()
+            .checked_add(wait)
+            .ok_or_else(|| busy("write queue deadline overflow"))?;
         let line = lines()
             .lock()
             .map_err(|_| busy("write queue unavailable"))?
-            .entry(path.clone())
-            .or_default()
-            .clone();
-        let deadline = Instant::now() + wait;
+            .line(&path)?;
         let mut state = line
             .state
             .lock()
             .map_err(|_| busy("write queue unavailable"))?;
-        let ticket = state.next;
-        state.next += 1;
-        state.waiting.push_back(ticket);
+        let ticket = state.enqueue()?;
+        #[cfg(test)]
+        line.ready.notify_all();
         loop {
             if state.holder.is_none() && state.waiting.front() == Some(&ticket) {
                 state.waiting.pop_front();
@@ -205,7 +252,9 @@ fn immediate_within(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Barrier, mpsc};
+    use std::sync::Barrier;
+
+    const TEST_WAIT: Duration = Duration::from_secs(5);
 
     fn database() -> (tempfile::TempDir, PathBuf) {
         let directory = tempfile::tempdir().unwrap();
@@ -214,7 +263,67 @@ mod tests {
         connection
             .execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE log(writer INTEGER NOT NULL);")
             .unwrap();
+        // SQLite reports the normalized file path used by production admission
+        // (macOS temporary-directory aliases may have a different spelling).
+        let path = PathBuf::from(connection.path().unwrap());
         (directory, path)
+    }
+
+    fn registered_line(path: &Path) -> Arc<Line> {
+        let line = lines()
+            .lock()
+            .unwrap()
+            .lines
+            .get(path)
+            .and_then(Weak::upgrade);
+        line.expect("a holding transaction keeps its line alive")
+    }
+
+    fn await_waiters(line: &Line, expected: usize) {
+        let deadline = Instant::now().checked_add(TEST_WAIT).unwrap();
+        let mut state = line.state.lock().unwrap();
+        while state.waiting.len() != expected {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            assert!(
+                !remaining.is_zero(),
+                "waiter acknowledgement deadline exceeded"
+            );
+            state = line.ready.wait_timeout(state, remaining).unwrap().0;
+        }
+    }
+
+    fn writer(
+        path: PathBuf,
+        value: i64,
+        wait: Duration,
+    ) -> std::thread::JoinHandle<rusqlite::Result<()>> {
+        std::thread::spawn(move || {
+            let mut connection = Connection::open(path)?;
+            let transaction = immediate_within(&mut connection, wait)?;
+            transaction.execute("INSERT INTO log VALUES (?1)", [value])?;
+            transaction.commit()
+        })
+    }
+
+    fn written(connection: &Connection) -> Vec<i64> {
+        connection
+            .prepare("SELECT writer FROM log ORDER BY rowid")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    fn assert_busy(error: &rusqlite::Error, message: &str) {
+        assert_eq!(
+            error.sqlite_error_code(),
+            Some(rusqlite::ErrorCode::DatabaseBusy)
+        );
+        assert!(
+            error.to_string().contains(message),
+            "wrong rejection: {error}"
+        );
     }
 
     #[test]
@@ -222,36 +331,171 @@ mod tests {
         let (_directory, path) = database();
         let mut first = Connection::open(&path).unwrap();
         let holding = immediate(&mut first).unwrap();
-        let (arrived, order) = mpsc::channel();
+        let line = registered_line(&path);
         let mut writers = Vec::new();
-        for writer in 0..6_i64 {
-            let path = path.clone();
-            let arrived = arrived.clone();
-            writers.push(std::thread::spawn(move || {
-                let mut connection = Connection::open(&path).unwrap();
-                arrived.send(()).unwrap();
-                let transaction = immediate(&mut connection).unwrap();
-                transaction
-                    .execute("INSERT INTO log VALUES (?1)", [writer])
-                    .unwrap();
-                transaction.commit().unwrap();
-            }));
-            // Queue each writer before starting the next, so arrival order is known.
-            order.recv().unwrap();
-            std::thread::sleep(Duration::from_millis(20));
+        for value in 0..6_i64 {
+            writers.push(writer(path.clone(), value, TEST_WAIT));
+            // Acknowledge actual enrollment under the queue mutex, rather than
+            // guessing arrival order from scheduling or an arbitrary sleep.
+            await_waiters(&line, writers.len());
         }
         holding.commit().unwrap();
         for writer in writers {
-            writer.join().unwrap();
+            writer.join().unwrap().unwrap();
         }
-        let written: Vec<i64> = first
-            .prepare("SELECT writer FROM log ORDER BY rowid")
+        assert_eq!(written(&first), (0..6).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn waiter_cap_plus_one_rejects_without_reordering_admitted_sqlite_writes() {
+        let (_directory, path) = database();
+        let mut first = Connection::open(&path).unwrap();
+        let holding = immediate(&mut first).unwrap();
+        let line = registered_line(&path);
+        let mut writers = Vec::new();
+        for value in 0..MAX_WAITERS {
+            writers.push(writer(path.clone(), value as i64, TEST_WAIT));
+            await_waiters(&line, writers.len());
+        }
+        let next = line.state.lock().unwrap().next;
+        let rejected = writer(path.clone(), -1, Duration::ZERO)
+            .join()
             .unwrap()
-            .query_map([], |row| row.get(0))
+            .unwrap_err();
+        assert_busy(&rejected, "waiter capacity exceeded");
+        let state = line.state.lock().unwrap();
+        assert_eq!(state.waiting.len(), MAX_WAITERS);
+        assert_eq!(state.next, next);
+        drop(state);
+        holding.commit().unwrap();
+        for writer in writers {
+            writer.join().unwrap().unwrap();
+        }
+        assert_eq!(written(&first), (0..MAX_WAITERS as i64).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn checked_ticket_exhaustion_rejects_without_mutating_the_queue() {
+        let mut state = State {
+            next: u64::MAX - 1,
+            waiting: VecDeque::new(),
+            holder: Some(u64::MAX - 2),
+        };
+        assert_eq!(state.enqueue().unwrap(), u64::MAX - 1);
+        let waiting = state.waiting.clone();
+        assert_busy(&state.enqueue().unwrap_err(), "ticket space exhausted");
+        assert_eq!(state.next, u64::MAX);
+        assert_eq!(state.waiting, waiting);
+        assert_eq!(state.holder, Some(u64::MAX - 2));
+        assert_eq!(State::default().enqueue().unwrap(), 0);
+    }
+
+    #[test]
+    fn an_unrepresentable_deadline_rejects_before_registering_a_line() {
+        let (_directory, path) = database();
+        let error = Turn::take(path.to_str(), Duration::MAX)
+            .map(|_| ())
+            .unwrap_err();
+        assert_busy(&error, "deadline overflow");
+        assert!(!lines().lock().unwrap().lines.contains_key(&path));
+        // Zero wait still admits a free line immediately, as before.
+        drop(Turn::take(path.to_str(), Duration::ZERO).unwrap());
+    }
+
+    #[test]
+    fn registry_cap_preserves_live_identity_before_enrollment_and_reclaims_only_dead_lines() {
+        let mut registry = Registry::default();
+        let path = PathBuf::from("pending.sqlite");
+        let pending = registry.line(&path).unwrap();
+        let identity = Arc::downgrade(&pending);
+        let mut live = Vec::new();
+        for index in 1..MAX_DATABASES {
+            live.push(
+                registry
+                    .line(&PathBuf::from(format!("{index}.sqlite")))
+                    .unwrap(),
+            );
+        }
+        assert_eq!(registry.lines.len(), MAX_DATABASES);
+        let same = registry.line(&path).unwrap();
+        assert!(Arc::ptr_eq(&pending, &same));
+        let extra = PathBuf::from("over-cap.sqlite");
+        let rejected = registry.line(&extra).err().unwrap();
+        assert_busy(&rejected, "database capacity exceeded");
+        drop(pending);
+        // The remaining caller has not enqueued a ticket, but still owns the
+        // identity. Treating an empty State as idle would split its queue.
+        assert_busy(
+            &registry.line(&extra).err().unwrap(),
+            "database capacity exceeded",
+        );
+        drop(same);
+        assert!(identity.upgrade().is_none());
+        let admitted = registry.line(&extra).unwrap();
+        assert_eq!(registry.lines.len(), MAX_DATABASES);
+        assert!(!registry.lines.contains_key(&path));
+        drop(admitted);
+        let renewed = registry.line(&path).unwrap();
+        assert!(Arc::ptr_eq(&renewed, &registry.line(&path).unwrap()));
+        assert_eq!(live.len(), MAX_DATABASES - 1);
+    }
+
+    #[test]
+    fn repeated_idle_paths_do_not_grow_the_process_registry() {
+        let mut registry = Registry::default();
+        for _ in 0..3 {
+            for index in 0..=MAX_DATABASES {
+                let path = PathBuf::from(format!("churn-{index}.sqlite"));
+                let line = registry.line(&path).unwrap();
+                let identity = Arc::downgrade(&line);
+                assert!(Arc::ptr_eq(&line, &registry.line(&path).unwrap()));
+                drop(line);
+                assert!(identity.upgrade().is_none());
+                assert!(registry.lines.len() <= MAX_DATABASES);
+            }
+        }
+        assert_eq!(registry.lines.len(), 1);
+    }
+
+    #[test]
+    fn timeout_and_holder_drop_preserve_fifo_and_rollback_before_the_next_writer() {
+        let (_directory, path) = database();
+        let mut first = Connection::open(&path).unwrap();
+        let holding = immediate(&mut first).unwrap();
+        holding.execute("INSERT INTO log VALUES (-1)", []).unwrap();
+        let line = registered_line(&path);
+        let expires = writer(path.clone(), 0, Duration::from_millis(500));
+        await_waiters(&line, 1);
+        let second = writer(path.clone(), 1, TEST_WAIT);
+        await_waiters(&line, 2);
+        let third = writer(path.clone(), 2, TEST_WAIT);
+        await_waiters(&line, 3);
+        assert_busy(&expires.join().unwrap().unwrap_err(), "wait exceeded");
+        await_waiters(&line, 2);
+        drop(holding);
+        second.join().unwrap().unwrap();
+        third.join().unwrap().unwrap();
+        assert_eq!(written(&first), [1, 2]);
+    }
+
+    #[test]
+    fn a_waiting_database_does_not_block_an_independent_database() {
+        let (_first_directory, first_path) = database();
+        let (_second_directory, second_path) = database();
+        let mut first = Connection::open(&first_path).unwrap();
+        let holding = immediate(&mut first).unwrap();
+        let line = registered_line(&first_path);
+        let blocked = writer(first_path.clone(), 1, TEST_WAIT);
+        await_waiters(&line, 1);
+        writer(second_path.clone(), 2, Duration::ZERO)
+            .join()
             .unwrap()
-            .collect::<Result<_, _>>()
             .unwrap();
-        assert_eq!(written, (0..6).collect::<Vec<_>>());
+        assert_eq!(written(&Connection::open(second_path).unwrap()), [2]);
+        assert_eq!(line.state.lock().unwrap().waiting.len(), 1);
+        holding.commit().unwrap();
+        blocked.join().unwrap().unwrap();
+        assert_eq!(written(&first), [1]);
     }
 
     #[test]

@@ -6,12 +6,19 @@ useDefault = true
 [[allowlists]]
 description = "Public schema identity keys, not authentication credentials"
 condition = "AND"
-paths = ['''(^|/)(fixtures/[^/]+|examples/reports)/model-identities\.json$''']
+paths = ['''(^|/)(fixtures/[^/]+|examples/reports|examples/notifications)/model-identities\.json$''']
 regexTarget = "line"
 regexes = [
   '''^\s*"key": "[a-f0-9]{32}",?$''',
   '''^\s*"identity": \{\s*"key": "[a-f0-9]{32}", "prefix": "[a-z]+"\s*\},?$''',
 ]
+
+[[allowlists]]
+description = "Public nominal identity rows in the Notifications model ledger"
+condition = "AND"
+paths = ['''(^|/)examples/notifications/model-identities\.json$''']
+regexTarget = "line"
+regexes = ['''^\s*\{ "identity": \{ "key": "[a-f0-9]{32}", "prefix": "[a-z]+" \}, "table": "[a-z_]+", "roc_type": "Models\.[A-Za-z]+", "retired": (true|false) \},?$''']
 
 [[allowlists]]
 description = "Public schema identity keys embedded in admission fixtures"

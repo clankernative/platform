@@ -1,0 +1,57 @@
+{
+  "installation": "exampleco",
+  "environment": "production",
+  "identity": {"scheme": "google_iap", "hosted_domain": "example.com"},
+  "security_shell": {"origin": "https://security.tools.example.com", "iap_audience": "/projects/123456789012/global/backendServices/987654322"},
+  "oauth_shell_transport": {"service_account": "shell@example-tools.iam.gserviceaccount.com"},
+  "oauth_runtime": {
+    "version": 1,
+    "shell": {"project": "example-tools", "backend_service": "shell-backend", "url_map": "shell-map", "https_proxy": "shell-proxy", "forwarding_rule": "shell-rule", "kubernetes_service": "day2-security/security-shell"},
+    "apps": {"example_app": {"service_account": "app-native@example-tools.iam.gserviceaccount.com", "accounts": {"calendar": {"kind": "iap_subject"}}}}
+  },
+  "oauth_clients": {
+    "version": 1,
+    "reauthentication": {"client_id": "123-reauth.apps.googleusercontent.com", "credential": "reauth"},
+    "registrations": {"calendar_client": {"client": {"client_id": "123-calendar.apps.googleusercontent.com", "credential": "calendar"}, "canary_subject": "112233", "canary_tenant": "example.com"}}
+  },
+  "apps": {
+    "example_app": {
+      "artifact": "artifacts/9ef287e05cb53f593b35c140140e83306e8c487cca417ff9f23f58568340b6bb",
+      "readers": ["qa@example.com"],
+      "writers": ["qa@example.com"],
+      "authority": {"version": 1, "admins": [], "operations": {"example.list": {"actors": ["qa@example.com"], "mode": {"kind": "read"}, "models": {}}}},
+      "runtime": {"kind": "linux_sqlite_single_v1", "resources": {"memory_mib": 512, "cpu_millis": 1000, "process_limit": 1024, "process_limit_enforced_by": "pod", "http_concurrency": 4, "shutdown_seconds": 30}},
+      "edge": {"origin": "https://example.test.example.com", "iap_audience": "/projects/123456789012/global/backendServices/987654321"},
+      "oauth_connections": {
+        "calendar": {
+          "namespace": {"installation": "exampleco", "environment": "production", "app": "example_app", "binding_generation": 1},
+          "requirement": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "profile": {"id": "google_calendar_mapped_v1", "revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+          "registration": {"id": "calendar_client", "revision": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+          "custody": {"id": "custody", "revision": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},
+          "security_shell": {"id": "shell", "revision": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},
+          "account_binding": {"id": "account", "revision": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"},
+          "shell_attestation": {"id": "attestation", "revision": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"},
+          "product_return": {"id": "return", "revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+          "custody_verifier_secret": "verifier",
+          "custody_encryption_secret": "encryption",
+          "shell_attestation_secret": "attestation"
+        }
+      }
+    }
+  },
+  "control": {
+    "version": 1,
+    "state_directory": "/srv/day2/.state/control",
+    "operators": ["operator@example.com"],
+    "sources": {"example_source": {"kind": "remote_git", "host": "git.example.com", "namespace": "apps", "repository": "example"}},
+    "apps": {"example_app": {"source": "example_source"}},
+    "secrets": {
+      "attestation": {"kind": "gcp_version", "project_number": 123456789012, "secret": "shell_attestation", "version": 1},
+      "reauth": {"kind": "gcp_version", "project_number": 123456789012, "secret": "google_reauth", "version": 3},
+      "calendar": {"kind": "gcp_version", "project_number": 123456789012, "secret": "google_calendar", "version": 7},
+      "verifier": {"kind": "gcp_version", "project_number": 123456789012, "secret": "custody_verifier", "version": 9},
+      "encryption": {"kind": "gcp_version", "project_number": 123456789012, "secret": "custody_encryption", "version": 11}
+    }
+  }
+}

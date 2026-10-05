@@ -84,7 +84,7 @@ jobs:
     timeout-minutes: 20
     strategy:
       matrix:
-        stack: [cluster, app-edge, security-shell-edge, day2-app, qualification-runner]
+        stack: [cluster, app-edge, security-shell-edge, security-shell, day2-app, qualification-runner]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:

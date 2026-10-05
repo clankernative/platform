@@ -90,6 +90,9 @@ impl TestCampaign {
 
 pub fn execute(root: &Path, recipe: &str) -> Result<()> {
     let scope = recipe_scope(recipe)?;
+    architecture::check(root)?;
+    architecture_dependencies::check(root)?;
+    architecture_proofs::check(root)?;
     let snapshot = verification_snapshot(root, recipe)?;
     let runner = workflows::build(root)?;
     let mut fixtures: BTreeMap<String, PathBuf> = BTreeMap::new();
@@ -168,6 +171,9 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
             }
             "verify-lint" => {
                 ensure!(parameters.is_empty(), "lint accepts no overrides");
+                architecture::check(root)?;
+                architecture_dependencies::check(root)?;
+                architecture_proofs::check(root)?;
                 run(
                     root,
                     Command::new("cargo").args([
@@ -199,10 +205,10 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
                         println!("Reusing verified {fixture} fixture: {}", artifact.display());
                         artifact
                     }
-                    Ok(None) => build_fixture(root, fixture)?,
+                    Ok(None) => build_fixture(root, fixture, &fixtures)?,
                     Err(error) => {
                         eprintln!("Ignoring invalid cached {fixture} fixture: {error:#}");
-                        build_fixture(root, fixture)?
+                        build_fixture(root, fixture, &fixtures)?
                     }
                 };
                 let loaded = day2::artifact::LoadedArtifact::load(&artifact)?;
@@ -239,8 +245,69 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
     Ok(())
 }
 
-fn build_fixture(root: &Path, fixture: &str) -> Result<PathBuf> {
+fn build_fixture(
+    root: &Path,
+    fixture: &str,
+    fixtures: &BTreeMap<String, PathBuf>,
+) -> Result<PathBuf> {
     match fixture {
+        "app-ownership" => build(root, &root.join("examples/app-ownership")),
+        "notifications" => {
+            let peer = fixtures
+                .get("app-ownership")
+                .context("build ownership before notifications")?;
+            let inputs = tempfile::tempdir()?;
+            let instance = inputs.path().join("instance.json");
+            let lock = inputs.path().join("imports.json");
+            fs::write(
+                &instance,
+                serde_json::to_vec(
+                    &json!({"installation":"notifications_fixture","environment":"test","apps":{"app_ownership":{"artifact":peer,"readers":["alice"],"writers":["operator"]}}}),
+                )?,
+            )?;
+            let catalog = day2::instance_catalog::CandidateCatalog::from_instance_file(&instance)?;
+            fs::write(
+                &lock,
+                serde_json::to_vec(&catalog.pin(&["app_ownership.check".into()])?)?,
+            )?;
+            build_recipe(
+                root,
+                &root.join("examples/notifications"),
+                None,
+                None,
+                Some(&BuildImportContext { instance, lock }),
+            )
+        }
+        "stock-ledger" => build(root, &root.join("fixtures/stock-ledger")),
+        "request-desk" => {
+            let peer = fixtures
+                .get("stock-ledger")
+                .context("build stock ledger before request desk")?;
+            let inputs = tempfile::tempdir()?;
+            let instance = inputs.path().join("instance.json");
+            let lock = inputs.path().join("imports.json");
+            fs::write(
+                &instance,
+                serde_json::to_vec(
+                    &json!({"installation":"delegation_fixture","environment":"test","apps":{"stock_ledger":{"artifact":peer,"readers":["alice"],"writers":["alice"]}}}),
+                )?,
+            )?;
+            let catalog = day2::instance_catalog::CandidateCatalog::from_instance_file(&instance)?;
+            fs::write(
+                &lock,
+                serde_json::to_vec(&catalog.pin(&[
+                    "stock_ledger.available".into(),
+                    "stock_ledger.reserve".into(),
+                ])?)?,
+            )?;
+            build_recipe(
+                root,
+                &root.join("fixtures/request-desk"),
+                None,
+                None,
+                Some(&BuildImportContext { instance, lock }),
+            )
+        }
         "reports" => build(root, &root.join("examples/reports")),
         "reports-probe" => build_with_overrides(
             root,
@@ -254,7 +321,6 @@ fn build_fixture(root: &Path, fixture: &str) -> Result<PathBuf> {
         ),
         "relational" => build(root, &root.join("fixtures/relational-conformance")),
         "collection" => build(root, &root.join("fixtures/collection-conformance")),
-        "delegation" => build(root, &root.join("fixtures/delegation-conformance")),
         "credential-metadata" => {
             build(root, &root.join("fixtures/credential-metadata-conformance"))
         }
@@ -262,6 +328,41 @@ fn build_fixture(root: &Path, fixture: &str) -> Result<PathBuf> {
             root,
             &root.join("fixtures/connection-declaration-conformance"),
         ),
+        "oauth-calendar" => build(root, &root.join("fixtures/oauth-calendar-canary")),
+        "delegation-peer" => build_with_overrides(
+            root,
+            &root.join("fixtures/delegation-conformance"),
+            Some(&root.join("fixtures/delegation-peer")),
+        ),
+        "delegation" => {
+            let peer = fixtures
+                .get("delegation-peer")
+                .context("build delegation peer before caller")?;
+            let inputs = tempfile::tempdir()?;
+            let instance = inputs.path().join("instance.json");
+            let lock = inputs.path().join("imports.json");
+            fs::write(
+                &instance,
+                serde_json::to_vec(&json!({
+                    "installation":"delegation_fixture","environment":"test",
+                    "apps":{"peer_identity":{"artifact":peer,"readers":["alice"],"writers":["alice"]}}
+                }))?,
+            )?;
+            let catalog = day2::instance_catalog::CandidateCatalog::from_instance_file(&instance)?;
+            fs::write(
+                &lock,
+                serde_json::to_vec(
+                    &catalog.pin(&["peer_identity.who".into(), "peer_identity.record".into()])?,
+                )?,
+            )?;
+            build_recipe(
+                root,
+                &root.join("fixtures/delegation-conformance"),
+                None,
+                None,
+                Some(&BuildImportContext { instance, lock }),
+            )
+        }
         "redirect" => build(root, &root.join("fixtures/redirect-conformance")),
         "relational-next" => build_migration_fixture(root),
         "owned" => build(root, &root.join("fixtures/row-authority-web-conformance")),
@@ -269,6 +370,41 @@ fn build_fixture(root: &Path, fixture: &str) -> Result<PathBuf> {
         "owned-probe" => build_row_authority_adversaries(root),
         _ => bail!("unknown fixture"),
     }
+}
+
+pub fn build_delegation(root: &Path) -> Result<()> {
+    build_delegation_recipe(root, "build-delegation", "delegation-fixtures.json")
+}
+
+pub fn build_delegation_business(root: &Path) -> Result<()> {
+    build_delegation_recipe(
+        root,
+        "build-delegation-business",
+        "delegation-business-fixtures.json",
+    )
+}
+
+fn build_delegation_recipe(root: &Path, recipe: &str, output: &str) -> Result<()> {
+    let runner = workflows::build(root)?;
+    let mut fixtures = BTreeMap::new();
+    day2::automation::run(&runner, &[recipe], |request| {
+        ensure!(
+            request.action == "verify-build",
+            "unexpected delegation build action"
+        );
+        let parameters: BTreeMap<String, String> = request.decode()?;
+        ensure!(parameters.len() == 1, "invalid delegation build parameter");
+        let fixture = parameters.get("fixture").context("missing fixture")?;
+        let artifact = build_fixture(root, fixture, &fixtures)?;
+        println!("{fixture} artifact: {}", artifact.display());
+        fixtures.insert(fixture.clone(), artifact.clone());
+        Ok(json!({"artifact":artifact}))
+    })?;
+    fs::write(
+        root.join("artifacts").join(output),
+        serde_json::to_vec_pretty(&fixtures)?,
+    )?;
+    Ok(())
 }
 
 fn recipe_scope(recipe: &str) -> Result<&'static str> {
@@ -288,6 +424,8 @@ fn verification_snapshot(root: &Path, recipe: &str) -> Result<String> {
         ("cli", root.join("cli")),
         ("fixtures", root.join("fixtures")),
         ("infra-config", root.join("infra")),
+        ("apps/app-ownership", root.join("examples/app-ownership")),
+        ("apps/notifications", root.join("examples/notifications")),
     ];
     if ["verify-fast", "verify-reports", "verify"].contains(&recipe) {
         sources.push(("apps/reports", root.join("examples/reports")));
@@ -419,6 +557,30 @@ fn cached_fixture(root: &Path, artifact: &str) -> Result<Option<PathBuf>> {
     Ok(Some(directory))
 }
 
+pub(super) fn linux_delegation_tests(root: &Path) -> Result<()> {
+    ensure!(cfg!(target_os = "linux"), "native Linux test host required");
+    let mut fixtures = BTreeMap::new();
+    for (fixture, variable) in [
+        ("delegation", "DAY2_TEST_DELEGATION_ARTIFACT"),
+        ("delegation-peer", "DAY2_TEST_DELEGATION_PEER_ARTIFACT"),
+        ("request-desk", "DAY2_TEST_REQUEST_DESK_ARTIFACT"),
+        ("app-ownership", "DAY2_TEST_APP_OWNERSHIP_ARTIFACT"),
+        ("notifications", "DAY2_TEST_NOTIFICATIONS_ARTIFACT"),
+        ("stock-ledger", "DAY2_TEST_STOCK_LEDGER_ARTIFACT"),
+    ] {
+        let path = PathBuf::from(std::env::var_os(variable).context(variable)?);
+        let artifact = day2::artifact::LoadedArtifact::load(&path)?;
+        artifact.require_current_api()?;
+        fixtures.insert(fixture.to_owned(), artifact.directory().to_owned());
+    }
+    tests(
+        root,
+        "linux-delegation",
+        &fixtures,
+        std::time::Duration::from_secs(1800),
+    )
+}
+
 pub(super) fn linux_tests(root: &Path, suite: &str, artifact: &Path, probe: &Path) -> Result<()> {
     ensure!(cfg!(target_os = "linux"), "native Linux test host required");
     ensure!(
@@ -453,6 +615,7 @@ fn tests(
         "libraries" | "fast-libraries" => &["--workspace", "--exclude", "day2-roc-worker", "--lib"],
         "linux-sandbox" => &["-p", "day2-sandbox", "--test", "isolation"],
         "linux-worker" => &["-p", "day2", "--test", "linux_worker"],
+        "linux-delegation" => &["-p", "day2-control", "--test", "release_execution"],
         "linux-http" => &[
             "-p",
             "day2",
@@ -561,6 +724,8 @@ fn tests(
             "-p",
             "day2-capabilities",
             "-p",
+            "day2-kernel",
+            "-p",
             "durable-temporal",
         ],
         // Select the same package graph as `workspace-runtime`, but execute the
@@ -581,6 +746,8 @@ fn tests(
             "-p",
             "day2-capabilities",
             "-p",
+            "day2-kernel",
+            "-p",
             "durable-temporal",
             "--test",
             "app_inference",
@@ -590,6 +757,8 @@ fn tests(
             "day2-control",
             "-p",
             "day2-capabilities",
+            "-p",
+            "day2-kernel",
             "-p",
             "durable-temporal",
         ],
@@ -669,7 +838,11 @@ fn tests(
             "managed_credentials::issuance::tests::personal_issuance_uses_the_confirmed_subject_and_missing_readiness_denies",
             "managed_credentials::issuance::tests::hostile_issue_rejects_changed_label_family_principal_and_second_mutation",
             "managed_credentials::issuance::tests::expired_confirmation_prevents_issuance_but_completed_receipt_is_recoverable",
+            "managed_credentials::issuance::tests::native_lifecycle_is_atomic_terminal_and_recovers_after_reopen",
+            "managed_credentials::issuance::tests::native_lifecycle_rejects_changed_target_and_personal_subject",
             "oauth::security_shell::tests::credential_browser_issues_native_product_commands_and_protects_delivery",
+            "oauth::security_shell::tests::credential_browser_rotates_revokes_and_fences_accepted_work",
+            "oauth::security_shell::tests::credential_api_admits_only_current_tokens_and_rechecks_durable_execution",
             "oauth::security_shell::tests::credential_browser_requires_fresh_auth_and_current_readiness",
             "oauth::security_shell::tests::credential_app_navigation_only_freezes_canonical_intent",
         ] {
@@ -687,11 +860,17 @@ fn tests(
             "credential-metadata",
             "DAY2_TEST_CREDENTIAL_METADATA_ARTIFACT",
         ),
+        ("delegation-peer", "DAY2_TEST_DELEGATION_PEER_ARTIFACT"),
+        ("stock-ledger", "DAY2_TEST_STOCK_LEDGER_ARTIFACT"),
+        ("request-desk", "DAY2_TEST_REQUEST_DESK_ARTIFACT"),
         ("redirect", "DAY2_TEST_REDIRECT_ARTIFACT"),
+        ("app-ownership", "DAY2_TEST_APP_OWNERSHIP_ARTIFACT"),
+        ("notifications", "DAY2_TEST_NOTIFICATIONS_ARTIFACT"),
         (
             "connection-declaration",
             "DAY2_TEST_CONNECTION_DECLARATION_ARTIFACT",
         ),
+        ("oauth-calendar", "DAY2_TEST_OAUTH_CALENDAR_ARTIFACT"),
         ("relational-next", "DAY2_TEST_RELATIONAL_NEXT_ARTIFACT"),
         ("http", "DAY2_TEST_HTTP_ARTIFACT"),
         ("owned", "DAY2_TEST_OWNED_ARTIFACT"),
@@ -790,6 +969,9 @@ fn receipt(
         let redirect = artifact("redirect")?;
         let credential_metadata = artifact("credential-metadata")?;
         let connection_declaration = artifact("connection-declaration")?;
+        let oauth_calendar = artifact("oauth-calendar")?;
+        let app_ownership = artifact("app-ownership")?;
+        let notifications = artifact("notifications")?;
         let baseline = artifact("relational")?;
         let collection = artifact("collection")?;
         let next = artifact("relational-next")?;
@@ -806,6 +988,8 @@ fn receipt(
             "redirect":artifact_id(&redirect),
             "credential_metadata":artifact_id(&credential_metadata),
             "connection_declaration":artifact_id(&connection_declaration),
+            "oauth_calendar":artifact_id(&oauth_calendar),
+            "app_ownership":artifact_id(&app_ownership), "notifications":artifact_id(&notifications),
             "collection":artifact_id(&collection),
             "owned":artifact_id(&owned), "owned_probe":artifact_id(&owned_probe),
             "reports":artifact_id(&reports), "reports_probe":artifact_id(&reports_probe),
@@ -820,7 +1004,7 @@ fn receipt(
                 "artifact_format":day2::artifact::CURRENT_FORMAT,
                 "registry":"compiler-derived exact command/query handler records",
                 "context":"opaque; transport and generated factories sealed by admission",
-                "pagination":{"items_per_page":100,"aggregate_output_items":1000,"bare_list_outputs":"rejected"},
+                "pagination":{"items_per_page":day2::output_schema::MAX_PAGE_ITEMS,"aggregate_output_items":day2::output_schema::MAX_TOTAL_COLLECTION_ITEMS,"bare_list_outputs":"rejected"},
                 "selection":{"find":"zero-or-one visible row; ambiguous matches rejected","predicates":"typed equality, LIKE, AND and OR; SQL before limits","ordering":"declared fields with stable ID tie-breaker"},
                 "uniqueness":{"schema":"single and compound keys","writes":"atomic SQLite enforcement on insert and update","migration":"additive, transactional and duplicate-rejecting"},
                 "backup":"complete copied-state structural validation independent of the bounded app-property snapshot; reviewed local provider stores retained; cross-store coherence requires quiesced managed work",
@@ -924,6 +1108,12 @@ fn required_steps(scope: &str) -> Result<&'static [&'static str]> {
             "build-delegation",
             "build-credential-metadata",
             "build-connection-declaration",
+            "build-oauth-calendar",
+            "build-delegation-peer",
+            "build-stock-ledger",
+            "build-request-desk",
+            "build-app-ownership",
+            "build-notifications",
             "build-redirect",
             "build-relational",
             "build-collection",
@@ -1023,6 +1213,7 @@ mod tests {
             "build-delegation",
             "build-credential-metadata",
             "build-connection-declaration",
+            "build-oauth-calendar",
             "build-redirect",
             "build-relational",
             "build-collection",

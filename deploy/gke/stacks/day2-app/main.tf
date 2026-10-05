@@ -50,7 +50,7 @@ locals {
   # Shape: platform/crates/day2/src/artifact.rs (Instance, AppBinding, Edge,
   # IdentityProvider) and day2-capabilities/src/runtime.rs (RuntimeProfile).
   # Every struct denies unknown fields; do not add keys here.
-  instance = merge({
+  base_instance = merge({
     installation = var.installation
     environment  = var.environment
     identity = {
@@ -95,6 +95,11 @@ locals {
     }
     oauth_shell_transport = { service_account = local.shell_service_account }
   })
+  instance = merge(local.base_instance, local.oauth_metadata, {
+    apps = {
+      (var.app_id) = merge(local.base_instance.apps[var.app_id], var.oauth_instance_json == null ? {} : { oauth_connections = local.oauth_connections })
+    }
+  })
   instance_json = jsonencode(local.instance)
 
   selector_labels = {
@@ -118,6 +123,7 @@ locals {
 }
 
 resource "kubernetes_config_map_v1" "instance" {
+  depends_on = [terraform_data.oauth_admission]
   metadata {
     name      = "${local.workload_name}-instance"
     namespace = var.namespace
@@ -187,10 +193,12 @@ resource "kubernetes_config_map_v1" "instance" {
 }
 
 resource "kubernetes_stateful_set_v1" "day2" {
+  depends_on = [terraform_data.release_admission]
   metadata {
-    name      = local.workload_name
-    namespace = var.namespace
-    labels    = local.pod_labels
+    name        = local.workload_name
+    namespace   = var.namespace
+    labels      = local.pod_labels
+    annotations = merge(local.app_call_annotations, var.release_managed ? { "day2.dev/artifact" = local.release_artifact } : {}, local.release_annotations)
   }
 
   spec {
@@ -213,11 +221,15 @@ resource "kubernetes_stateful_set_v1" "day2" {
       metadata {
         labels = local.pod_labels
         annotations = merge({
+          "day2.dev/installation" = var.installation
+          "day2.dev/environment"  = var.environment
+          "day2.dev/app"          = var.app_id
+          "day2.dev/artifact"     = "sha256:${var.artifact_id}"
           # subPath mounts do not follow ConfigMap updates; roll the pod instead.
           "day2.dev/instance-sha256" = sha256(local.instance_json)
           }, local.has_credentials ? {
           "day2.dev/credentials-sha256" = sha256(local.provisioning_plan_json)
-        } : {})
+        } : {}, var.app_calls == null ? {} : { "day2.dev/app-calls-sha256" = sha256(jsonencode(local.app_call_config)) }, local.release_template_annotations)
       }
 
       spec {
@@ -297,6 +309,40 @@ resource "kubernetes_stateful_set_v1" "day2" {
 
         # See credentials.tf. BusyBox install sets the owner before the mode,
         # so changing the mode of the now-10001-owned file needs CAP_FOWNER.
+        dynamic "init_container" {
+          for_each = var.app_calls == null ? [] : [true]
+          content {
+            name    = "app-call-key-files"
+            image   = var.state_ownership_image
+            command = ["/busybox/install", "-o", "10001", "-g", "10001", "-m", "0400", "-t", "${local.app_call_dir}/keys", "${local.app_call_dir}/sources/issuer", "${local.app_call_dir}/sources/workload"]
+            security_context {
+              run_as_non_root            = false
+              run_as_user                = 0
+              run_as_group               = 0
+              allow_privilege_escalation = false
+              read_only_root_filesystem  = true
+              capabilities {
+                drop = ["ALL"]
+                add  = ["CHOWN", "FOWNER"]
+              }
+              seccomp_profile { type = "RuntimeDefault" }
+            }
+            resources {
+              requests = { cpu = "50m", memory = "32Mi", ephemeral-storage = "16Mi" }
+              limits   = { cpu = "100m", memory = "32Mi", ephemeral-storage = "16Mi" }
+            }
+            volume_mount {
+              name       = "app-call-key-sources"
+              mount_path = "${local.app_call_dir}/sources"
+              read_only  = true
+            }
+            volume_mount {
+              name       = "app-call-keys"
+              mount_path = "${local.app_call_dir}/keys"
+            }
+          }
+        }
+
         dynamic "init_container" {
           for_each = local.has_credentials ? [true] : []
 
@@ -432,10 +478,27 @@ resource "kubernetes_stateful_set_v1" "day2" {
 
         container {
           name              = "day2"
-          image             = var.image
+          image             = local.release_image
           image_pull_policy = "IfNotPresent"
           command           = ["/usr/local/bin/day2-serve"]
-          args              = [local.instance_path, var.app_id, "--edge"]
+          args              = concat([local.instance_path, var.app_id, "--edge"], var.app_calls == null ? [] : ["--app-calls", "${local.app_call_dir}/host.json"])
+          env {
+            name  = "DAY2_EXPECTED_ARTIFACT"
+            value = local.release_artifact
+          }
+          dynamic "volume_mount" {
+            for_each = var.app_calls == null ? {} : {
+              host      = { name = "app-call-config", path = "${local.app_call_dir}/host.json", sub_path = "host.json" }
+              selection = { name = "app-call-selection", path = "${local.app_call_dir}/selection", sub_path = null }
+              keys      = { name = "app-call-keys", path = "${local.app_call_dir}/keys", sub_path = null }
+            }
+            content {
+              name       = volume_mount.value.name
+              mount_path = volume_mount.value.path
+              sub_path   = volume_mount.value.sub_path
+              read_only  = true
+            }
+          }
 
           port {
             name           = "http"
@@ -524,7 +587,7 @@ resource "kubernetes_stateful_set_v1" "day2" {
           name = "instance"
 
           config_map {
-            name         = kubernetes_config_map_v1.instance.metadata[0].name
+            name         = local.release_instance
             default_mode = "0444"
 
             items {
@@ -548,6 +611,41 @@ resource "kubernetes_stateful_set_v1" "day2" {
           empty_dir {
             medium     = "Memory"
             size_limit = var.tmp_size_limit
+          }
+        }
+        dynamic "volume" {
+          for_each = var.app_calls == null ? {} : {
+            config    = { name = "app-call-config", config_map = kubernetes_config_map_v1.app_calls[0].metadata[0].name }
+            selection = { name = "app-call-selection", config_map = var.app_calls.serving_snapshot_config_map }
+          }
+          content {
+            name = volume.value.name
+            config_map {
+              name         = volume.value.config_map
+              default_mode = "0444"
+              optional     = volume.key == "selection"
+            }
+          }
+        }
+        dynamic "volume" {
+          for_each = var.app_calls == null ? [] : [true]
+          content {
+            name = "app-call-key-sources"
+            csi {
+              driver            = "secrets-store-gke.csi.k8s.io"
+              read_only         = true
+              volume_attributes = { secretProviderClass = kubernetes_manifest.app_call_keys[0].manifest.metadata.name }
+            }
+          }
+        }
+        dynamic "volume" {
+          for_each = var.app_calls == null ? [] : [true]
+          content {
+            name = "app-call-keys"
+            empty_dir {
+              medium     = "Memory"
+              size_limit = "1Mi"
+            }
           }
         }
 

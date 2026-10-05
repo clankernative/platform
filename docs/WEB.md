@@ -206,7 +206,7 @@ interpreting it as a direct request. Production SSO/gateway authentication remai
 outside this loopback slice.
 
 Roc reads the effective actor through `context.actor()` and the verified
-requester/rule through `context.acting()`. `Delegate.query` inherits the effective
+requester/rule through `context.acting()`. Generated imported queries inherit the effective
 actor; the callee independently authorizes it and sees the immediate calling
 application through `context.caller()` and `context.acting()`. Admission,
 execution, replay and mandatory audit preserve these identities. The audit event
@@ -436,9 +436,11 @@ provider or network. Artifact JSON is bounded to 16 MiB, the worker to 128 MiB,
 checked compiler types to 16 MiB, and the completed export to 4 MiB. Unknown
 artifact/schema shapes and invalid examples fail the export. Roc enum output
 shapes are not part of the current codec; unsupported unions are rejected during
-build/admission. View type names are included only when they can be derived
-honestly from the artifact's checked type metadata; otherwise they are `null`
-and `viewTypes` is empty.
+build/admission. The current exporter inlines output schemas but does not derive
+named view types: `viewType` is always `null` and `viewTypes` is empty.
+Schedules describe declared cadence, not observed execution times. Whole-minute
+intervals retain their minutes/hours/daily representation; other intervals use
+`{"milliseconds": interval_ms}` without rounding.
 
 Build the app through the normal workflow first. The build prints the selected
 artifact directory (`artifacts/<artifact-digest>`); pass that exact directory to

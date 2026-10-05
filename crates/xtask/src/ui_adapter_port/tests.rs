@@ -69,7 +69,7 @@ fn pin_verifies_protocol_target_and_executable_bytes() {
     let temp = tempfile::tempdir().unwrap();
     let executable = temp.path().join("adapter");
     fs::write(&executable, b"verified executable bytes").unwrap();
-    let pin = Pin {
+    let mut pin = Pin {
         schema_version: 1,
         package: "@clanker/vanilla".into(),
         adapter_protocol: 1,
@@ -83,6 +83,15 @@ fn pin_verifies_protocol_target_and_executable_bytes() {
         )]),
     };
     assert!(pin_digest(&pin, &executable).is_ok());
+    pin.adapter_protocol = 2;
+    assert!(pin_digest(&pin, &executable).is_err());
+    pin.adapter_protocol = 1;
+    pin.runtime_abi = 2;
+    assert!(pin_digest(&pin, &executable).is_err());
+    pin.runtime_abi = 1;
+    let target = pin.targets.remove(target_key().unwrap()).unwrap();
+    assert!(pin_digest(&pin, &executable).is_err());
+    pin.targets.insert(target_key().unwrap().to_owned(), target);
     fs::write(&executable, b"tampered").unwrap();
     assert!(pin_digest(&pin, &executable).is_err());
 }
@@ -111,21 +120,25 @@ fn captured_ui_symlink_is_rejected_before_child_execution() {
 }
 
 #[test]
-fn response_protocol_requires_final_abi_fields_and_rejects_unknown_fields() {
+fn response_envelope_requires_fields_and_rejects_unknown_fields() {
     let valid = serde_json::json!({
         "schemaVersion":1,"ok":true,"command":"expand","diagnostics":[],
         "data":{"schemaVersion":1,"runtimeAbi":1,"templateEngine":"minijinja-2.12.0","packageDigest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","templates":{"pages/index.html":"<main />"},"bindings":[],"entrypoints":[],"resources":[],"inputs":[],"consumedInputs":[]}
     });
     assert!(serde_json::from_value::<Envelope>(valid.clone()).is_ok());
-    let mut wrong = valid.clone();
-    wrong["data"]["runtimeAbi"] = 2.into();
-    assert_ne!(
-        serde_json::from_value::<Envelope>(wrong)
-            .unwrap()
-            .data
-            .runtime_abi,
-        1
-    );
+    for required in [
+        "runtimeAbi",
+        "templateEngine",
+        "entrypoints",
+        "consumedInputs",
+    ] {
+        let mut missing = valid.clone();
+        missing["data"].as_object_mut().unwrap().remove(required);
+        assert!(
+            serde_json::from_value::<Envelope>(missing).is_err(),
+            "{required}"
+        );
+    }
     let mut unknown = valid;
     unknown["data"]["future"] = true.into();
     assert!(serde_json::from_value::<Envelope>(unknown).is_err());
@@ -144,7 +157,7 @@ fn generic_entrypoint_loader_is_sorted_and_uses_only_declared_relative_modules()
 
 #[cfg(unix)]
 #[test]
-fn subprocess_timeout_kills_only_the_adapter_child() {
+fn subprocess_timeout_is_reported() {
     use std::os::unix::fs::PermissionsExt;
     let temp = tempfile::tempdir().unwrap();
     let executable = temp.path().join("adapter");
@@ -161,7 +174,7 @@ fn subprocess_timeout_kills_only_the_adapter_child() {
 }
 
 #[test]
-fn resource_policy_rejects_non_ui_paths_and_unknown_kinds() {
+fn resource_policy_rejects_non_ui_paths() {
     let lock = Lock {
         schema_version: 1,
         package: "p".into(),

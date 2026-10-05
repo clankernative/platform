@@ -9,7 +9,14 @@ use anyhow::{Context, Result, ensure};
 use std::{num::NonZeroU16, path::PathBuf, time::Duration};
 
 fn run() -> Result<()> {
-    let arguments: Vec<_> = std::env::args_os().skip(1).collect();
+    let mut arguments: Vec<_> = std::env::args_os().skip(1).collect();
+    let app_calls = if arguments.len() == 5 && arguments[3] == "--app-calls" {
+        let path = PathBuf::from(arguments.pop().context("app call configuration")?);
+        arguments.pop();
+        Some(path)
+    } else {
+        None
+    };
     let usage = "usage: day2-serve INSTANCE APP --edge\n       day2-serve INSTANCE APP --development-auth ACTOR --published-port PORT";
     ensure!(arguments.len() >= 3, "{usage}");
     let instance = PathBuf::from(&arguments[0]);
@@ -18,6 +25,7 @@ fn run() -> Result<()> {
     let access = if arguments.len() == 3 && arguments[2] == "--edge" {
         day2::deployment::Access::Edge
     } else {
+        ensure!(app_calls.is_none(), "app calls require edge authentication");
         ensure!(
             arguments.len() == 6
                 && arguments[2] == "--development-auth"
@@ -42,7 +50,15 @@ fn run() -> Result<()> {
         .worker_threads(2)
         .enable_all()
         .build()?;
-    let result = runtime.block_on(day2::deployment::serve(&instance, app, access));
+    let result = runtime.block_on(day2::deployment::serve_with(
+        &instance,
+        app,
+        access,
+        move |runtime| match app_calls {
+            Some(path) => day2_control::app_host::configure(runtime, &path),
+            None => Ok(runtime),
+        },
+    ));
     runtime.shutdown_timeout(Duration::from_secs(1));
     result
 }

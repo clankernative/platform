@@ -211,13 +211,238 @@ with the host's bounded concurrency, body deadline and shutdown admission guard.
 The shell workload is never issued an app human session. The OAuth route prefix
 is reserved even when no receiver is selected.
 
-The ordinary `day2-serve` entry point still refuses nonempty OAuth selections.
-The native Google composition is available, but its live fact source, canary
-workload and renewal path still need to be wired into the qualified launcher.
+The ordinary `day2-serve INSTANCE APP --edge` entry point now composes the native
+Google host when the installation selects `oauth_runtime`. This happens after
+kernel, artifact and current authority admission. A nonempty OAuth selection
+without that typed catalog or an explicitly supplied native provider still fails
+startup. The canary workload and renewal path require their separate launcher.
 Missing provider code or readiness cannot
 be enabled through an instance boolean, a CLI flag or merely configuring keys.
 Static startup qualification still does not establish external readiness;
 every approval lookup and settlement retains its current readiness checks.
+Issuer identifiers retain their exact reviewed spelling, including Google's
+`https://accounts.google.com` value without a trailing slash. URL parsing may
+add a slash internally, but pins and comparisons never normalize that protocol
+identifier. Authorization, token and callback endpoints remain canonical URLs.
+See [Google's OpenID Connect contract](https://developers.google.com/identity/openid-connect/openid-connect).
+
+### Independent native facts
+
+`oauth_runtime` is a shared `day2-capabilities` instance contract. Keep it in the
+company's instance repository alongside `security_shell`, `oauth_clients`, and
+the existing exact-version secret catalog. It contains no URL, credentials,
+qualification digest, receipt, or readiness boolean. For example:
+
+```json
+{
+  "version": 1,
+  "shell": {
+    "project": "company-tools",
+    "backend_service": "selected-gke-shell-backend",
+    "url_map": "selected-gke-shell-url-map",
+    "https_proxy": "selected-gke-shell-https-proxy",
+    "forwarding_rule": "selected-gke-shell-https-forwarding-rule",
+    "kubernetes_service": "tools/security-shell"
+  },
+  "apps": {
+    "workspace": {
+      "service_account": "app@company-tools.iam.gserviceaccount.com",
+      "accounts": {
+        "calendar": {
+          "kind": "external_accounts",
+          "allowed_tenants": ["example.com"],
+          "allowed_subjects": null
+        }
+      }
+    }
+  }
+}
+```
+
+`accounts` keys are the app's declared connection registration names. Every
+selected connection must have exactly one policy matching its admitted
+requirement. `external_accounts` supplies a nonempty tenant ceiling and an
+optional nonempty immutable-subject ceiling for the existing fresh external
+approval flow. `iap_subject` selects the reviewed Google IAP subject mapping for
+a mapped-human requirement. It does not create a mapped connect attempt; that
+dispatch remains follow-up work. Installation Google accounts are not reviewed.
+
+Run `day2 oauth-setup INSTANCE` after selecting these resource names and real
+Google clients. This read-only command admits selected artifacts and emits
+desired shell, account-mapping, attestation and registration pins, connection
+bindings, and exact callback URLs. Review and save the emitted bindings in the
+instance repository. It does not write files, contact Google, retrieve secrets,
+or issue readiness. Changing the shell selection changes its native profile
+revision and dependent callback/attestation/registration pins.
+
+Setup accepts syntactically valid desired bindings whose derived revisions are
+initial or stale. It admits the selected artifact bytes, finds each registered
+requirement, and derives the requirement, reviewed Google profile, custody,
+security origin, account mapping, attestation and registration revisions before
+performing strict qualification. The selected profile **ID** must still match
+the app's declared account policy. Installation/environment/app scope, binding
+generation, registration ID, secret names and numeric versions, key binding IDs,
+and approved product-return selection remain operator selections. A missing
+declaration, wrong profile ID, unknown JSON field or overlapping secret role
+fails setup. Serving constructors always require exact derived pins.
+
+The output includes an `instance` document with the recomputed bindings and
+all other selections preserved. Review it before saving it as the installation
+snapshot. Running setup against that snapshot is idempotent. Recompute and
+register the exact callback after any selection change; the old callback must
+never stand in for the new binding. Client IDs and their exact secret references
+are needed to derive it; no placeholder ID establishes a real registration.
+
+[`fixtures/oauth-calendar-canary`](../fixtures/oauth-calendar-canary/README.md)
+provides a complete, minimal registration target. It declares company-account
+Calendar event reads and exposes only an intent-inspection query. Its native
+build and SQLite/setup checks are part of the full verification campaign; they
+do not perform the Google sandbox campaign or Calendar business dispatch.
+
+The fact source starts empty. A current verified human must first match the
+pending attempt's owner and the app database's immutable IAP subject binding.
+Only then can the host obtain a native owner lease, valid for at most 120
+seconds by both wall and monotonic clocks. Restoring a principal row cannot
+create that lease. Every facts lookup rechecks the durable subject binding;
+the preview also continues to bind the immutable subject.
+
+For each selected connection, a native facts lease lasts at most 60 seconds
+from the start of its checks, using both clocks. Failed renewal removes the old
+lease. The host reads the selected Compute project, backend and URL map through
+the fixed Google API endpoint. It checks the numeric project/backend identity
+against the selected IAP audience, enabled IAP, the GKE namespace/service
+description, and an isolated exact-host URL map whose default and every path
+route select that backend. Wildcard hosts, redirects, header overrides and
+advanced routing shapes are refused. The HTTPS proxy must select that map and
+the global TCP/443 forwarding rule must select that proxy. The TLS connection's
+actual peer IP must match the forwarding rule's address. Backend, URL map,
+proxy and forwarding rule reads must agree again after the TLS probe. These checks use the
+[Compute backend service](https://docs.cloud.google.com/compute/docs/reference/rest/v1/backendServices)
+and [URL map](https://docs.cloud.google.com/compute/docs/reference/rest/v1/urlMaps)
+contracts, together with the
+[HTTPS proxy](https://docs.cloud.google.com/compute/docs/reference/rest/v1/targetHttpsProxies)
+and [global forwarding rule](https://docs.cloud.google.com/compute/docs/reference/rest/v1/globalForwardingRules).
+
+The TLS probe uses the selected `security_shell.origin`, system certificate
+roots, no credentials and no redirects. An IAP login or denial can establish
+TLS reachability; this probe does not establish shell process health or check
+every DNS answer. Shell workload admission and least-privilege IAM policy still require
+deployment qualification. A successful secret read proves availability to the
+running workload, not that its IAM policy has no other grants.
+
+Each facts renewal reads all three selected numeric key versions and checks
+their actual binding, version and purpose. Approval additionally retrieves its
+three key leases on every lookup and rechecks readiness after retrieval. Every
+cloud token request first verifies the selected app service-account email at
+the fixed metadata endpoint, following Google's
+[metadata contract](https://docs.cloud.google.com/compute/docs/metadata/predefined-metadata-keys).
+No ADC, environment-selected credentials or process credential file is used.
+The app workload also needs read access for the selected Compute project,
+backend, URL map, HTTPS proxy and global forwarding rule. Keep these read
+permissions and named-secret access in the instance's reviewed IAM deployment;
+the host neither adds grants nor falls back to operator credentials.
+
+Runtime selection changes fail closed against the fact source's pinned catalog.
+Restart the app host to compose a new fact source after changing that catalog;
+native receipts and facts are never persisted or carried into the restart.
+The native source supplies expected registration metadata only behind the
+existing `GoogleReadiness` gate: a signed fresh live canary publication remains
+required independently.
+
+### Dedicated shell launcher
+
+`day2-security-shell INSTANCE` starts a separate stateless Linux listener on
+port 8080. Its only argument is the instance path. The selected
+`oauth_runtime.shell_resources` supplies the existing shared resource bounds:
+
+```json
+"shell_resources": {
+  "memory_mib": 512,
+  "cpu_millis": 500,
+  "process_limit": 1024,
+  "process_limit_enforced_by": "pod",
+  "http_concurrency": 4,
+  "shutdown_seconds": 30
+}
+```
+
+These are deployment bounds, not readiness evidence. The optional field keeps
+older app-host catalogs compatible; the dedicated launcher requires it. The
+launcher checks the private cgroup-v2 limits, regular instance and addressed
+artifact paths, read-only installation and workflow mounts, admitted artifacts,
+exact selected registration pins and the pinned native Roc recipe runner before
+binding HTTP. It opens no app database and creates no app runtime or principal
+session. A writable mount anywhere beneath the installation, including an app
+state directory, prevents startup. The GKE pod PID bound is still an operator
+declaration until separately observed on the actual node pool.
+
+The shell selects `oauth_shell_transport.service_account` for every metadata
+token request, including edge reads, keyless IAM signing, client-secret reads
+and attestation-key reads. Each token acquisition first checks the actual
+metadata service-account email. App custody keys are absent from the shell key
+provider. Its client catalog must exactly cover the admitted selected registrations.
+The client/attestation selections must also be disjoint from custody
+**secret containers**, even at different versions: this reviewed edge uses
+unconditional secret-level grants, which cover every version in that container.
+Version-specific IAM conditions are not part of this profile. See [Google's Secret Manager access control](https://docs.cloud.google.com/secret-manager/docs/access-control).
+
+Desired target pins are assembled at startup with an empty native registration
+registry. After IAP human verification, every OAuth dispatch requires the
+independent native edge guard. Its empty-at-start lease checks the same selected
+Compute resources and actual TLS peer as the app source and expires after at
+most 60 seconds by both clocks. Failed renewal discards the old lease. The final
+canary callback checks that guard again after provider probes and before signing
+and publishing the receipt. The shell registry supplies no app readiness facts;
+the destination app independently verifies publication and live facts.
+
+Browser responses use `Referrer-Policy: strict-origin`: HTTPS form submissions
+retain their exact Origin, while referrers omit paths and callback queries.
+`no-referrer` would make a navigation POST send `Origin: null`, which the shell
+refuses. Every form remains restricted by `form-action 'self'`. For a native
+absolute HTTPS 303 destination, the HTTP layer returns a no-store HTML handoff
+with an escaped refresh target and Continue link; navigation starts from that
+document. This supports Google authorization and owning-app returns without
+allowing off-origin form targets. Relative 303 responses and native workflow
+protocols are unchanged. The HTTP regression checks cover these response and
+request envelopes; a live browser campaign is still required for qualification.
+
+`/health/live` and `/health/ready` are bounded, unauthenticated process probes with
+no-store responses. Readiness reports completed static startup admission and
+whether the listener accepts work; it does not report Google registration,
+secret availability or installation qualification. Keeping probes separate from
+external checks lets an unqualified installation start its listener and run the
+explicit authenticated qualification flow. See [Kubernetes probe semantics](https://kubernetes.io/docs/concepts/workloads/pods/probes/).
+
+HTTP admission rejects excess concurrency, bounds bodies to 4096 bytes and body
+waits to three seconds. Capacity remains held through an unabortable native
+operation even after browser disconnect. SIGTERM stops admission first, makes
+readiness fail, and drains HTTP plus outstanding native dispatch within the
+selected grace. Restart loses shell sessions, canary attempts and local receipts;
+it cannot restore readiness. No automatic campaign retry or renewal is added.
+
+The [security-shell deployment root](../deploy/gke/stacks/security-shell/main.tf)
+consumes the existing installation edge contract. It checks the exact origin,
+numeric IAP audience, dedicated workload identity, namespace/service and declared
+secret-container grants against the instance. The root rejects missing edge
+resolution, extra secret grants, custody-container sharing and floating images.
+It creates one Deployment with Recreate strategy, non-root execution, a read-only
+root, no host privileges, no mounted service-account token and no app PVC or
+secret volume. Only the regular read-only instance and bounded temporary scratch
+are mounted. The image contains the selected admitted Linux artifacts and pinned
+workflow distribution; callbacks and company domains continue to come from the
+instance's existing edges.
+
+The edge root adds a custom role containing only `resourcemanager.projects.get`
+and four Compute reads: backend services, URL maps, HTTPS proxies and forwarding
+rules. Resource Manager supplies the project number for the IAP audience;
+Compute's project `id` is a separate resource identifier and cannot supply it.
+The native guard checks the selected project ID and active lifecycle state before
+comparing the audience. Confirm `cloudresourcemanager.googleapis.com` is enabled
+in that project before rolling out these hosts; a permission grant alone does
+not enable the API. This planned grant and the published secret list are
+desired policy, not an audit of all effective inherited IAM grants. Actual
+workload, frontend, namespace isolation and least-privilege policy qualification
+remain necessary before claiming installation readiness.
 
 The same reserved channel also accepts native registration publications. A
 publication is signed with the exact selected shell-attestation key and carries
@@ -309,8 +534,8 @@ operator-authored digest cannot create a live receipt.
 
 `GoogleReadiness` checks the selected registration, profile, requirement,
 generation and security shell before consulting the independent live
-`OutboundReadiness` source. That source must still establish shell, custody and
-account-mapping/approval readiness for the exact owner. `Providers::google`
+`OutboundReadiness` source. The selected GKE source independently checks the
+shell edge, custody availability and current owner/policy. `Providers::google`
 combines this gate with the reviewed catalog. A Google probe does not qualify
 those other services. The host must arrange renewal before expiry; this slice
 introduces neither a background renewal loop nor an app refresh job.
@@ -374,17 +599,31 @@ same native campaign and Roc recipe but cannot qualify a Google client.
 
 ## Remaining runtime work
 
-The next runtime slice must supply independently live shell/custody/account facts,
-start the separately qualified shell workload and wire connect attempt creation.
-Registration publication to app hosts is now composed, but it cannot start the
-ordinary app launcher without those other live facts. The real Google web clients and
+The dedicated shell launcher and deployment root are now available. The app
+deployment also consumes a canonical single-app selection via
+`day2-app.oauth_instance_json`, preserving the shared OAuth contracts and exact
+secret references. `app-edge.oauth_runtime` supplies the one annotated workload
+identity, named custody/attestation container grants and the native guard's five
+Compute reads; an existing app-call identity is reused. Both roots bind the same
+installation shell contract, with company URLs retained in the private instance
+repo. See [native OAuth app deployment](../deploy/gke/README.md#native-oauth-app-deployment).
+These declarations do not audit all effective inherited IAM privileges.
+Use the [installation IAM audit procedure](OAUTH-IAM-AUDIT.md) before reporting
+workload isolation; an API selection or successful secret read is not that evidence.
+
+The next runtime slice must qualify the actual deployed frontend/workload/secret
+policies and wire connect attempt creation.
+Independent app facts and registration publication are now composed in the
+ordinary qualified edge launcher. The real Google web clients and
 their exact secret versions remain required; their instance contract and native
 exact-version loader are available. The edge contract now
 publishes a dedicated keyless signer and supports backend access; these plans
 must still be applied and their live workload/secret policies qualified.
-App-host IAM separately needs its custody and verification keys.
+App-host IAM has a reviewed deployment path for its custody and verification
+keys; it must still be applied and qualified on the actual workload.
 
-This layer does not start a shell workload, create a Google web client, establish
-live installation readiness or enable OAuth on an installation. Live registration
+This layer provides the guarded shell entrypoint; it does not deploy a live workload,
+create a Google web client, establish
+complete installation readiness or enable OAuth on an installation. Live registration
 qualification requires the real client and deployed canary callback. Calendar
 business dispatch and the connect/use/refresh canary remain follow-up work.

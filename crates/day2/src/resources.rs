@@ -488,7 +488,13 @@ pub(crate) fn authorize(
 ) -> Result<ResourceUse> {
     let value: serde_json::Value = crate::json::decode(instruction.data.as_bytes())?;
     let issued = if value.get("contract").is_some() {
-        ensure!(action == Action::DelegateQuery, Failure::ResourceForbidden);
+        ensure!(
+            matches!(
+                action,
+                Action::DelegateQuery | Action::DelegateSend | Action::DelegateStatus
+            ),
+            Failure::ResourceForbidden
+        );
         let imported: ImportedQuery = crate::json::decode(instruction.data.as_bytes())?;
         let package = runtime
             .artifact()
@@ -499,7 +505,12 @@ pub(crate) fn authorize(
             .ok_or(Failure::ResourceForbidden)?;
         ensure!(
             package.digest == imported.contract.digest
-                && package.operation.kind == crate::operation_contract::Kind::Query,
+                && package.operation.kind
+                    == if action == Action::DelegateQuery {
+                        crate::operation_contract::Kind::Query
+                    } else {
+                        crate::operation_contract::Kind::Command
+                    },
             Failure::ResourceForbidden
         );
         let (app, _) = imported
@@ -527,7 +538,7 @@ pub(crate) fn authorize(
                 ResourceTarget::AppOperation { app: target, operation, .. }
                     if target == app && operation == &imported.contract.operation
             ) && grant.provider == day2_capabilities::resources::Provider::LocalDelegation
-                && grant.actions.contains(&Action::DelegateQuery)
+                && grant.actions.contains(&action)
         });
         let (binding, grant) = matches.next().ok_or(Failure::ResourceForbidden)?;
         ensure!(matches.next().is_none(), Failure::ResourceForbidden);

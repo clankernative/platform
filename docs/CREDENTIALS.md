@@ -2,8 +2,9 @@
 
 This document records the implemented foundation for
 `proposals/app-identity/03-CREDENTIALS.md`. The implementation is staged. No
-managed credential can currently be verified at API ingress. Fixed-grant
-client/personal issuance runs through a host-confirmed interactive command.
+managed credential is enabled by default. Fixed-grant client/personal issuance
+runs through a host-confirmed interactive command. Managed bearer admission
+uses an explicitly selected host verifier and the ordinary operation runtime.
 The isolated security shell supplies fresh confirmation, protected POST reveal
 and acknowledgement. An ordinary app session starts navigation only.
 
@@ -15,8 +16,8 @@ or selectable grants over canonical `Api.write(Commands.<name>)` and
 `Api.read(Reads.<name>)` targets. The family constructor fixes the profile in
 the checked compiler type. The app supplies a stable ID and a bounded lifetime
 in seconds; registration names remain separate from IDs. Generated metadata reads
-and fixed client/personal `issue` are available. Rotation/revocation methods and
-selectable lifecycle inputs remain absent.
+and fixed client/personal `issue`, `rotate` and `revoke` are available. Selectable
+lifecycle inputs remain absent.
 
 The normal build reflects registered families into the artifact and recompares
 them with the native worker at artifact load. It rejects duplicate IDs,
@@ -43,8 +44,7 @@ candidate without those receipts. Missing bindings, changed policies, enlarged
 child authority and provider/resource authority fail qualification. This is
 static release evidence; the interactive issuance adapter also requires current
 confirmation and a ready host authority before a declared family can issue.
-Credential-authenticated ingress remains absent. Imported
-operation credential paths remain unsupported until they have selected
+Imported operation credential paths remain unsupported until they have selected
 permission contracts and step-level enforcement.
 
 Activation now resolves each family binding, management policy and approved
@@ -86,6 +86,48 @@ portable public `Issued`, `Summary`, `Inspection`, cursor, management snapshot
 and outcome schemas have no secret field. Their Rust types are contract sketches
 until their generated Roc API and codecs use them. Metadata now has its own
 native-checked family-specific API over these private readers.
+
+## Managed API admission
+
+`Authorization: Bearer d2c1.…` can call an existing canonical operation at
+`/_day2/credentials/api/<operation>`. This channel uses the same input codec,
+method, idempotency rules, operation policy and business runtime as the human
+API. This slice supports fixed client and personal families. It refuses cookies,
+browser origins, CSRF, impersonation and IAP headers.
+It cannot issue credentials or invoke interactive management commands. A root
+must be marked `credential_ready` and covered by the token's frozen grant.
+
+Client keys authenticate as `client/<family-id>/<stable-id>`, never as their
+human creator. An operator may grant the explicit
+`credential_client:<family-id>` membership selector in readers, writers and
+operation actors. A personal key resolves its canonical subject through the
+current selected human-account mapping and the immutable IAP subject binding;
+it then receives that person's current ordinary permissions.
+
+Authentication checks the active family contract, namespace, audience, approved
+authority, current version, token MAC, security epoch, expiry and frozen operation
+closure. It loads only an exact-version verifier key, with no decryption key.
+The admission writer rechecks the token and current epoch before accepting it.
+Malformed, unknown, wrong, expired, rotated and revoked tokens share
+`credential_rejected`; missing current readiness returns unavailable.
+
+Acceptance atomically records secret-free credential provenance and the frozen
+ceiling. Central authority checks revalidate this evidence before execution and
+commit. Local child commands inherit the root and the exact closure path;
+they receive no broader sibling or root permissions. Missing evidence denies
+execution. Revocation, expiry, retired verifier versions, changed personal
+mapping or a security-epoch change cannot be bypassed by reopening the database
+and resuming an accepted invocation. Receipt polling at
+`/_day2/credentials/api/invocations/<id>` requires the same live credential
+version and root. Tokens never enter inputs, observations, receipts or traces.
+
+The GKE `app-edge` stack has an opt-in `credential_api = true` backend routing
+only `/_day2/credentials/api/*` to host authentication. The human and default
+backends retain IAP. This is deployment composition, not live qualification:
+`Runtime::load` still installs no credential authority, and a short-lived
+`SelectedAuthority` snapshot is not an external epoch/clock or identity adapter.
+Those adapters, separated shell transport and a deployed consumer canary remain
+required before claiming this channel ready for an installation.
 
 ## Private per-app state
 
@@ -213,10 +255,10 @@ separate management endpoint; apps register their own ordinary queries.
 The private `verify_ingress` selector checks the current head, lineage and
 version state, namespace, family contract, security epoch, expiry, authenticated
 material identity, verifier and immutable operation ceiling. A malformed,
-unknown, rotated or revoked token yields no identity. It is not wired to an API
-route or dispatcher yet. The host must still establish current instance binding,
-key readiness, audience, principal policy and resource authorization before
-accepting an ingress invocation.
+unknown, rotated or revoked token yields no identity. The managed API admission
+adapter wraps this selector and establishes the current instance binding, key
+readiness, audience and principal policy before accepting an invocation.
+Resource authorization remains unsupported in this slice.
 
 `authorize_reveal` serializes an available delivery check and an authorization
 record in SQLite. Only a known successful commit produces a process-local,
@@ -229,13 +271,57 @@ The current `VerifiedHumanPost` remains an internal input constructed only after
 those checks. Reveal authorization also checks issue, version expiry, grant expiry
 and delivery expiry times.
 
+### Generated rotation and revocation
+
+Fixed client/personal families also expose `rotate(context, { expected })` and
+`revoke(context, { lineage })` as local `Tx` instructions. `RotationOutcome` is
+`Rotated(Issued)` or `Conflict`; `RevocationOutcome` is `Revoked` or
+`AlreadyRevoked`, each carrying only the public lineage and terminal revision.
+Containing interactive commands declare exactly one `Credential.rotate_access`
+or `revoke_access` action and may commit ordinary local product writes with it.
+The declaration constructors and raw lifecycle instructions are sealed in both
+compiler admission profiles. A credential cannot call these interactive commands.
+
+`credential_rotation(lineage_path, head_path, revision_path)` binds distinct
+canonical text lineage/head fields and a U64 revision field in the command's
+checked input contract. `credential_revocation(lineage_path)` binds the terminal
+target. `Credentials.<family>.snapshot_from_parts` decodes these public values
+into a nominal family snapshot; it checks shape only. The host derives the
+security intent from these exact paths and displays the action, lineage and
+precondition on the protected origin. An instruction with substituted values,
+another family/action, an actor override or a second lifecycle mutation fails.
+
+The initial management adapter supports current `Creator` predicates only;
+group management remains unavailable until its live resolver qualifies. Rotation
+also requires the exact selected namespace/family contract, current atomic
+replacement profile, an unretired lineage epoch and still-admitted frozen grant.
+Personal rotation requires the confirmed canonical human to equal the stored
+personal subject. Principal, audience, grant and lineage remain unchanged.
+An expired head may rotate while its independently bounded underlying grant is
+valid. Rotation cannot extend that grant's original deadline or add roots.
+
+The product writer checks the expected head/revision and unique predecessor
+constraint, creates one successor and closes the predecessor's delivery in the
+same transaction as product writes. A losing rotation returns `Conflict` and
+has no delivery. Revocation terminally closes every version/delivery and records
+its public outcome in the same transaction. Same-invocation recovery returns the
+committed public outcome; a newly confirmed revoke of a terminal lineage returns
+`AlreadyRevoked` with the existing revision.
+
+The protected shell resolves replacement delivery only from the successful
+rotation receipt and applies the same recipient/session/epoch checks, POST-only
+reveal and acknowledgement as issuance. GET never contains a secret. Revocation
+and conflict offer finish without reveal. Retrying an ordinary public receipt
+does not restore a delivery permit. Accepted bearer work retains its original
+version and is fenced after rotation/revocation, including after database reopen.
+
 ### Protected browser actions
 
 The build generates typed `SecurityActions.<command>` descriptors from the
 registered command codecs and `ProductReturns.<page>` from admitted app pages.
 Both constructors are sealed in normal/restricted admission. The descriptors are
 navigation data; the protected navigation adapter accepts only the registered
-interactive fixed-family issuance profile. A descriptor for another ordinary
+interactive fixed-family lifecycle profiles. A descriptor for another ordinary
 command grants no authority and is refused by that adapter.
 
 ```roc
@@ -298,24 +384,27 @@ terminal revocation, reveal closure ordering, reopen and an independent 32-case
 SQLite transition model. The model checks state outcomes, not cryptographic
 strength or browser isolation.
 
-Before end-to-end credential use, complete the following gates from the proposal:
+Before qualifying a deployed credential installation, complete these remaining
+gates from the proposal:
 
 1. Generate and native-typecheck the complete family-specific Roc API and
    security actions; bind the derived authority manifest at admission, and add
    selected provider/resource/import contracts. Prove the interactive context and
    negative compiler fixtures with the pinned compiler. Client/personal
    declarations, generated metadata reads and fixed-grant interactive issuance
-   and protected browser confirmation/reveal are present. Resource, selectable and
-   impersonation issuance plus generated lifecycle management remain incomplete.
-2. Complete selected-instance principal/context compatibility across child,
-   delegated and provider paths. Resolve actual key/custody readiness and
+   and protected browser confirmation/reveal, rotation and revocation are present.
+   Resource, selectable and impersonation issuance/lifecycle remain incomplete.
+2. Complete selected-instance principal/context compatibility across delegated
+   and provider paths. Local child commands now inherit path-bound credential
+   evidence. Resolve actual key/custody readiness and
    current management/metadata policy. The catalog-managed release path now
    checks exact local family bindings and approved authority; uncatalogued
    activation requires a verified credential-free artifact.
-3. Add credential ingress verification and mandatory propagated identity and
-   immutable ceiling checks to the dispatcher. Complete group/resource metadata
-   visibility. The recipient-specific fixed client/personal security shell and
-   protected HTTP response sink are present.
+3. Qualify the managed API channel with selected live adapters and the deployed
+   shell/app transport. Token verification, current ordinary policy and frozen
+   invocation ceilings are present for bounded local client/personal roots.
+   Complete group/resource metadata visibility. The recipient-specific local
+   security shell and protected HTTP response sink are present.
 4. Share the role-specific vault commit boundary with OAuth; add callback,
    provider and worker sinks without a generic token getter. Add external
    non-rollback security epoch readiness, clock high-water and exact-key restore

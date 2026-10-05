@@ -3,6 +3,7 @@ package
 		Workflow,
 		LocalDev,
 		Build,
+		Delegation,
 		Check,
 		Ci,
 		Verify,
@@ -12,6 +13,7 @@ package
 		ProviderConformance,
 		OAuthRegistration,
 		Release,
+		GkeRelease,
 		SecretRetirement,
 	]
 	{

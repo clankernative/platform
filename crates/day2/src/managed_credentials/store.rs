@@ -86,6 +86,13 @@ pub(crate) fn install_schema(db: &Connection) -> Result<()> {
             version TEXT REFERENCES day2_credential_versions(id),
             PRIMARY KEY(namespace, invocation, instruction_slot)
         ) STRICT;
+        CREATE TABLE IF NOT EXISTS day2_credential_revocations (
+            namespace TEXT NOT NULL, invocation TEXT NOT NULL, instruction_slot INTEGER NOT NULL,
+            request_digest TEXT NOT NULL, outcome TEXT NOT NULL,
+            PRIMARY KEY(namespace, invocation, instruction_slot),
+            FOREIGN KEY(namespace, invocation, instruction_slot)
+                REFERENCES day2_credential_receipts(namespace, invocation, instruction_slot)
+        ) STRICT;
         CREATE TABLE IF NOT EXISTS day2_credential_reveals (
             attempt TEXT PRIMARY KEY,
             version TEXT NOT NULL REFERENCES day2_credential_versions(id),
@@ -454,7 +461,7 @@ pub(crate) fn stage_rotation(
         reveal_until,
     } = intent;
     validate_id(invocation)?;
-    validate_id(recipient)?;
+    crate::authority::valid_actor(recipient)?;
     validate_id(session)?;
     let namespace = namespace_key(&expected.lineage.namespace)?;
     let (
@@ -924,7 +931,7 @@ pub(crate) struct VerifiedIngress {
 /// corruption and unavailable exact key versions are errors, not denials.
 pub(crate) fn verify_ingress(
     db: &Connection,
-    lease: &KeyLease,
+    lease: &impl AsRef<super::crypto::VerifierLease>,
     current: IngressVerification<'_>,
     token: &str,
 ) -> Result<Option<VerifiedIngress>> {
@@ -1252,7 +1259,7 @@ pub(crate) fn issued_version(
         JOIN day2_invocations i ON i.id=r.invocation
         JOIN day2_credential_versions v ON v.id=r.version AND v.lineage=r.lineage
         JOIN day2_credential_lineages l ON l.id=v.lineage AND l.namespace=r.namespace
-        WHERE r.namespace=?1 AND r.invocation=?2 AND r.action='issue' AND i.status='success'
+        WHERE r.namespace=?1 AND r.invocation=?2 AND r.action IN ('issue','rotate') AND i.status='success'
           AND l.family=?3 AND r.family_contract=?4 AND l.family_contract=r.family_contract LIMIT 2",
     )?;
     let versions = statement
@@ -1880,6 +1887,65 @@ mod tests {
                 post(rotated.version.as_ref().unwrap(), "after-revoke")
             )?
             .is_none()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_sqlite_rotations_create_exactly_one_successor() -> Result<()> {
+        let (directory, mut db) = database()?;
+        let first = committed_issue(&mut db)?;
+        let expected = snapshot(&first);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let mut threads = Vec::new();
+        for id in ["race-1", "race-2"] {
+            let path = directory.path().join("app.sqlite");
+            let expected = expected.clone();
+            let barrier = barrier.clone();
+            threads.push(std::thread::spawn(move || -> Result<bool> {
+                let mut connection = Connection::open(path)?;
+                connection.busy_timeout(std::time::Duration::from_secs(10))?;
+                barrier.wait();
+                let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                let result = stage_rotation(
+                    &tx,
+                    &lease(),
+                    &expected,
+                    RotationIntent {
+                        invocation: id,
+                        instruction_slot: 0,
+                        recipient: "issuer/human-1",
+                        session: "session-1",
+                        issued_at: 1_200,
+                        expires_at: 2_100,
+                        reveal_until: 1_400,
+                    },
+                )?;
+                let rotated = matches!(result, RotationResult::Rotated(_));
+                tx.commit()?;
+                Ok(rotated)
+            }));
+        }
+        let outcomes = threads
+            .into_iter()
+            .map(|thread| thread.join().expect("rotation thread"))
+            .collect::<Result<Vec<_>>>()?;
+        assert_eq!(outcomes.iter().filter(|success| **success).count(), 1);
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM day2_credential_versions WHERE predecessor IS NOT NULL",
+                [],
+                |row| row.get::<_, i64>(0)
+            )?,
+            1
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM day2_credential_receipts WHERE action='rotate'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )?,
+            1
         );
         Ok(())
     }

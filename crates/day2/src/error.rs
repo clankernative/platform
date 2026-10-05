@@ -38,6 +38,9 @@ macro_rules! failures {
 
 failures! {
     SignInRequired => ("sign_in_required", Authentication),
+    CredentialRejected => ("credential_rejected", Authentication),
+    CredentialUnavailable => ("credential_unavailable", Unavailable),
+    CredentialAuthorityChanged => ("credential_authority_changed", Forbidden),
     // The front door's signed assertion was missing, malformed, forged, expired,
     // or addressed to another application. One code for all of them: a caller
     // probing the edge learns that the assertion failed, not which check did.
@@ -80,6 +83,8 @@ failures! {
     AuthorityPolicyChanged => ("authority_policy_changed", Conflict),
     PreparationAuthorityChanged => ("preparation_authority_changed", Forbidden),
     EffectAuthorityChanged => ("effect_authority_changed", Forbidden),
+    EffectReconciliationPending => ("effect_reconciliation_pending", Conflict),
+    EffectHorizonExceeded => ("effect_horizon_exceeded", Forbidden),
     ContinuationAuthorityChanged => ("continuation_authority_changed", Forbidden),
     InstallationChanged => ("installation_changed", Conflict),
     BrandingBindingChanged => ("branding_binding_changed", Conflict),

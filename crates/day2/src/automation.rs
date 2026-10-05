@@ -30,6 +30,10 @@ pub const SOURCES: &[(&str, &[u8])] = &[
         include_bytes!("../../../ops/Capability.roc"),
     ),
     ("ops/Build.roc", include_bytes!("../../../ops/Build.roc")),
+    (
+        "ops/Delegation.roc",
+        include_bytes!("../../../ops/Delegation.roc"),
+    ),
     ("ops/Check.roc", include_bytes!("../../../ops/Check.roc")),
     (
         "ops/LocalDev.roc",
@@ -67,6 +71,10 @@ pub const SOURCES: &[(&str, &[u8])] = &[
     (
         "ops/Release.roc",
         include_bytes!("../../../ops/Release.roc"),
+    ),
+    (
+        "ops/GkeRelease.roc",
+        include_bytes!("../../../ops/GkeRelease.roc"),
     ),
     (
         "ops/SecretRetirement.roc",

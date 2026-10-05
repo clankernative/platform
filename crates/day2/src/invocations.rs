@@ -90,6 +90,14 @@ fn status_as(
         crate::error::Failure::ArtifactBindingChanged
     );
     let authority = crate::authority_state::authorize_in(&connection, runtime, &operation, actor)?;
+    crate::managed_credentials::ingress::require(
+        &connection,
+        runtime,
+        id,
+        &operation,
+        actor,
+        &authority,
+    )?;
     if let Some(authenticated) = authenticated {
         let rule = authority.policy()?.may_act_as(
             authenticated,
@@ -252,6 +260,14 @@ pub(crate) fn request(
     connection.execute("INSERT INTO day2_invocations(id,operation,actor,input,artifact,now,status,trigger) VALUES(?1,?2,?3,?4,?5,?6,'pending',?7)", params![id, envelope.command, origin.context.actor, serde_json::to_string(&input)?, runtime.artifact().id(), origin.context.now, crate::audit::Trigger::CommandRequest.as_str()])?;
     crate::authority_state::pin_invocation(connection, &id, &authority.stamp)?;
     crate::resources::inherit_root(connection, &id, &origin.context.invocation_id)?;
+    crate::managed_credentials::ingress::inherit(
+        connection,
+        runtime,
+        &origin.context.invocation_id,
+        &id,
+        &envelope.command,
+        &authority,
+    )?;
     crate::resources::capture_root_budgets(connection, &id, &envelope.command, &authority)?;
     let parent_seed: Vec<u8> = connection.query_row(
         "SELECT seed FROM day2_id_seeds WHERE invocation=?1",
@@ -404,10 +420,11 @@ pub fn drain(runtime: &Runtime, budget: usize) -> Result<Vec<Invocation>> {
             .filter(|operation| operation.kind == "command")
             .map(|operation| operation.name.clone())
             .collect();
-        let next: Option<(String,String,String)> = connection.query_row("SELECT i.id,COALESCE(r.parent,''),i.operation FROM day2_invocations i LEFT JOIN day2_command_requests r ON i.id=r.id WHERE i.status='pending' AND i.artifact=?1 AND NOT EXISTS(SELECT 1 FROM day2_authority_blocks b WHERE b.invocation=i.id) AND i.operation IN (SELECT value FROM json_each(?2)) AND i.id NOT IN (SELECT value FROM json_each(?3)) ORDER BY i.rowid LIMIT 1", params![runtime.artifact().id(),serde_json::to_string(&commands)?,serde_json::to_string(&interrupted)?], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional()?;
+        let next: Option<(String,String,String)> = connection.query_row("SELECT i.id,COALESCE(r.parent,''),i.operation FROM day2_invocations i LEFT JOIN day2_command_requests r ON i.id=r.id WHERE i.status='pending' AND i.artifact=?1 AND NOT EXISTS(SELECT 1 FROM day2_authority_blocks b WHERE b.invocation=i.id) AND i.operation IN (SELECT value FROM json_each(?2)) AND i.id NOT IN (SELECT value FROM json_each(?3)) AND NOT EXISTS(SELECT 1 FROM day2_external_effects e JOIN day2_external_retries q ON q.effect=e.identity WHERE e.invocation=i.id AND e.observation IS NULL AND q.due_ms>?4) ORDER BY i.rowid LIMIT 1", params![runtime.artifact().id(),serde_json::to_string(&commands)?,serde_json::to_string(&interrupted)?,runtime.host().now_ms()?], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional()?;
         let Some((id, parent, operation)) = next else {
             break;
         };
+        let continuing = crate::execution::phase(&connection, &id)?.is_some();
         drop(connection);
         let outcome = match runtime.execute(&id, store::Fault::None) {
             Ok(outcome) => outcome,
@@ -425,6 +442,10 @@ pub fn drain(runtime: &Runtime, budget: usize) -> Result<Vec<Invocation>> {
                 status: outcome.status,
                 error: outcome.error,
             });
+        } else if continuing {
+            // A waiting continuation must not monopolize this tick. A newly
+            // committed effect boundary is ready to continue in this tick.
+            interrupted.push(id);
         }
     }
     if let Some(error) = first_error {

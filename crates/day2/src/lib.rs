@@ -22,6 +22,7 @@ pub mod credential_authority;
 pub mod credential_codegen;
 pub mod credential_declaration;
 pub mod delegation;
+pub mod delegation_commands;
 pub mod delegation_wire;
 pub mod deployment;
 pub mod development;
@@ -97,3 +98,5 @@ pub fn digest(bytes: &[u8]) -> String {
     format!("sha256:{:x}", Sha256::digest(bytes))
 }
 mod codegen;
+
+mod structural_proofs;

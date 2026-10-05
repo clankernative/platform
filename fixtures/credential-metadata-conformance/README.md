@@ -5,8 +5,12 @@ readers. Each query declares `Credential.metadata_access(KeyFamilies.clients)`.
 The host inherits the accepted invocation principal, selects current activated
 family authority, and applies bounded creator visibility before pagination.
 
-The client and personal declarations share one credential-ready local root.
-The fixture has no issue, rotate, revoke, reveal, or credential ingress path.
-Build verification uses empty metadata and disposable static authority pins;
-it provides no key provider or production credential readiness. Runtime tests
-seed metadata rows independently and exercise native, replay, and HTTP paths.
+The fixed client and personal declarations share a credential-ready query and
+product write. Interactive create commands issue a key and write a public
+product registration atomically. Fixed-family rotate and revoke commands use
+canonical input selectors for the confirmed lineage/head/revision and commit
+public product receipts with the transition. Native host tests exercise protected
+confirmation and replacement delivery, ordinary bearer reads/writes, concurrent
+rotations, rollback, lost-response/reopen recovery and terminal revocation fencing.
+Build verification uses disposable authority and keys; it provides no deployed
+provider readiness. Metadata tests also seed rows independently.

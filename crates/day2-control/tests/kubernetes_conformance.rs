@@ -3,7 +3,8 @@ use anyhow::Result;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use day2_control::{
     kubernetes_conformance::{
-        GkeKubernetesProbe, GkeTarget, ObservationOrigin, PhysicalQuiescence, QuiescenceBlocker,
+        GkeKubernetesProbe, GkeServingBinding, GkeTarget, ObservationOrigin, PhysicalQuiescence,
+        QuiescenceBlocker,
     },
     secrets::{AccessToken, AccessTokenProvider},
     source::SourceError,
@@ -33,6 +34,104 @@ impl AccessTokenProvider for Tokens {
     fn access_token(&self) -> std::result::Result<AccessToken, SourceError> {
         AccessToken::new(TOKEN.into())
     }
+}
+
+#[test]
+fn serving_probe_authenticates_the_ready_app_artifact_and_workload() -> Result<()> {
+    let artifact = day2_control::Digest::new(b"serving-artifact");
+    let image = format!("registry.example/app@sha256:{}", "1".repeat(64));
+    let annotations = json!({"day2.dev/installation":"alpha","day2.dev/environment":"production","day2.dev/app":"reports","day2.dev/artifact":artifact});
+    let statefulset = json!({"apiVersion":"apps/v1","kind":"StatefulSet","metadata":metadata("day2-reports","controller-uid"),
+        "spec":{"replicas":1,"template":{"metadata":{"annotations":annotations},"spec":{"serviceAccountName":"runtime","containers":[{"name":"day2","image":image}]}}},
+        "status":{"observedGeneration":1,"readyReplicas":1,"updatedReplicas":1,"currentRevision":"rev-one","updateRevision":"rev-one"}});
+    let mut pod_metadata = metadata("day2-reports-0", "pod-uid");
+    pod_metadata["ownerReferences"] = json!([{"name":"day2-reports","uid":"controller-uid","kind":"StatefulSet","controller":true}]);
+    pod_metadata["annotations"] = annotations;
+    pod_metadata["labels"] = json!({"controller-revision-hash":"rev-one"});
+    let pod = json!({"metadata":pod_metadata,"spec":{"serviceAccountName":"runtime","containers":[{"name":"day2","image":image,"env":[{"name":"DAY2_EXPECTED_ARTIFACT","value":artifact}]}]},
+        "status":{"phase":"Running","containerStatuses":[{"name":"day2","ready":true,"started":true,"imageID":image,"state":{"running":{}}}]}});
+    let mut account = metadata("runtime", "account-uid");
+    account["annotations"] =
+        json!({"iam.gke.io/gcp-service-account":"reports@project.iam.gserviceaccount.com"});
+    let controller_path = "/apis/apps/v1/namespaces/disposable/statefulsets/day2-reports";
+    let pod_path = "/api/v1/namespaces/disposable/pods/day2-reports-0";
+    let account_path = "/api/v1/namespaces/disposable/serviceaccounts/runtime";
+    let mut replies = routes();
+    replies.insert(controller_path.into(), Reply::json(statefulset.clone()));
+    replies.insert(pod_path.into(), Reply::json(pod.clone()));
+    replies.insert(
+        account_path.into(),
+        Reply::json(json!({"metadata":account})),
+    );
+    let fixture = Fixture::new(replies);
+    let binding = GkeServingBinding {
+        target: serde_json::from_value(
+            json!({"company":"alpha","environment":"production","app":"reports"}),
+        )?,
+        project_number: 12345.try_into()?,
+        location: "us-central1".into(),
+        cluster: "probe".into(),
+        namespace: "disposable".into(),
+        workload: "day2-reports".into(),
+        workload_email: "reports@project.iam.gserviceaccount.com".into(),
+        deployment: day2_control::BindingRef::pin(
+            "reports-deployment".to_owned().try_into()?,
+            &"gke-fixture",
+        )?,
+    };
+    let probe =
+        GkeKubernetesProbe::transport_fixture(&fixture.endpoint, &fixture.endpoint, &Tokens)?;
+    let observed = probe.inspect_serving(&binding)?;
+    assert_eq!(observed.artifact, artifact);
+    assert_eq!(observed.incarnation.controller.as_str(), "controller-uid");
+    assert_eq!(observed.incarnation.generation.as_str(), "1");
+    assert!(fixture.requests.lock().unwrap().iter().all(|request| {
+        request
+            .to_ascii_lowercase()
+            .contains(&format!("authorization: bearer {TOKEN}"))
+    }));
+    for variant in 0..7 {
+        let mut changed = pod.clone();
+        match variant {
+            0 => {
+                changed["metadata"]["annotations"]["day2.dev/artifact"] =
+                    json!(day2_control::Digest::new(b"wrong-artifact"))
+            }
+            1 => changed["metadata"]["ownerReferences"][0]["uid"] = json!("other-controller"),
+            2 => changed["status"]["containerStatuses"][0]["ready"] = json!(false),
+            3 => changed["metadata"]["labels"]["controller-revision-hash"] = json!("old-revision"),
+            4 => changed["spec"]["containers"][0]["env"] = json!([]),
+            5 => changed["status"]["containerStatuses"][0]["imageID"] = json!("other-image"),
+            _ => {
+                let other = format!("registry.example/app@sha256:{}", "2".repeat(64));
+                changed["spec"]["containers"][0]["image"] = json!(other);
+                changed["status"]["containerStatuses"][0]["imageID"] = json!(other);
+            }
+        }
+        fixture
+            .routes
+            .lock()
+            .unwrap()
+            .insert(pod_path.into(), Reply::json(changed));
+        assert!(
+            probe.inspect_serving(&binding).is_err(),
+            "variant {variant}"
+        );
+    }
+    fixture
+        .routes
+        .lock()
+        .unwrap()
+        .insert(pod_path.into(), Reply::json(pod));
+    let mut changed = statefulset;
+    changed["status"]["observedGeneration"] = json!(0);
+    fixture
+        .routes
+        .lock()
+        .unwrap()
+        .insert(controller_path.into(), Reply::json(changed));
+    assert!(probe.inspect_serving(&binding).is_err());
+    Ok(())
 }
 
 fn target() -> GkeTarget {

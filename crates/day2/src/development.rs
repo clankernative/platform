@@ -25,6 +25,7 @@ const MAX_STEPS: usize = 128;
 /// The target and schema pin also authorize the caller's simulated read.
 #[derive(Clone, Debug)]
 pub struct ImportedQueryFixture {
+    pub kind: crate::operation_contract::Kind,
     pub app: String,
     pub operation: String,
     pub schema_digest: String,
@@ -41,9 +42,6 @@ pub fn imported_query_fixtures(
     let parent = instance_path.parent().context("instance directory")?;
     let mut fixtures = Vec::new();
     for (operation, package) in &imports.operations {
-        if package.operation.kind != crate::operation_contract::Kind::Query {
-            continue;
-        }
         let app = instance
             .apps
             .keys()
@@ -71,6 +69,7 @@ pub fn imported_query_fixtures(
             .get(operation)
             .context("imported query definition missing")?;
         fixtures.push(ImportedQueryFixture {
+            kind: package.operation.kind.clone(),
             app: app.clone(),
             operation: operation.clone(),
             schema_digest: crate::delegation::schema_digest_for_artifact(&artifact, operation)?,
@@ -1189,6 +1188,91 @@ fn resource_fixture_for_artifact_with_imports(
         catalog.budgets.extend(people.budgets);
         attachments.extend(people_attachments);
     }
+    // This slot is an explicit Notifications development fixture. It never
+    // synthesizes a production grant or selects a real workspace/channel.
+    if artifact
+        .contract()
+        .operations
+        .iter()
+        .any(|operation| operation.name == "notifications.publish")
+    {
+        let resource = VersionRef {
+            id: "notification_channel".into(),
+            revision: 1,
+        };
+        catalog.connections.insert(
+            resource.id.clone(),
+            ConnectionDefinition {
+                revision: 1,
+                provider: Provider::Slack,
+                live: Some(day2_capabilities::integrations::LiveConnection::Slack {
+                    credential_ref: VersionRef {
+                        id: "synthetic-slack-bot".into(),
+                        revision: 1,
+                    },
+                    workspace_id: "T0SYNTHETIC".into(),
+                    signing_secret_ref: None,
+                }),
+            },
+        );
+        catalog.resources.insert(
+            resource.id.clone(),
+            ResourceDefinition {
+                revision: 1,
+                connection: resource.clone(),
+                target: ResourceTarget::SlackChannel {
+                    channel: day2_capabilities::integrations::SlackChannel {
+                        channel_id: "C0SYNTHETIC".into(),
+                    },
+                },
+            },
+        );
+        for operation_name in ["notifications.set_enabled", "notifications.publish"] {
+            let Some(operation) = policy.operations.get(operation_name) else {
+                continue;
+            };
+            if operation.actors.is_empty() {
+                continue;
+            }
+            let reusable = ReusablePolicy {
+                revision: 1,
+                owner: "local-fixture-operator".into(),
+                delegates: BTreeSet::new(),
+                actors: operation.actors.clone(),
+                allowed_apps: BTreeSet::from([app.into()]),
+                max_duration_seconds: None,
+                slots: BTreeMap::from([(
+                    "notification_channel".into(),
+                    PolicySlot {
+                        kind: ResourceKind::SlackChannel,
+                        allowed_resources: BTreeSet::from([resource.clone()]),
+                        actions: BTreeSet::from([Action::SlackPost]),
+                        limits: Limits {
+                            max_request_bytes: 16_384,
+                            max_response_bytes: 16_384,
+                            max_calls_per_invocation: 2,
+                        },
+                        budgets: vec![],
+                    },
+                )]),
+            };
+            let policy_id = format!(
+                "fixture_{}",
+                &crate::digest(&serde_json::to_vec(&reusable)?)[7..31]
+            );
+            catalog.policies.insert(policy_id.clone(), reusable);
+            attachments.push(Attachment {
+                policy: VersionRef {
+                    id: policy_id,
+                    revision: 1,
+                },
+                operation: operation_name.into(),
+                bindings: BTreeMap::from([("notification_channel".into(), resource.clone())]),
+                actors: None,
+                expires_at_ms: None,
+            });
+        }
+    }
     if !imports.is_empty() {
         catalog.connections.insert(
             "imported_queries".into(),
@@ -1227,7 +1311,18 @@ fn resource_fixture_for_artifact_with_imports(
             );
         }
         for (operation_name, operation) in &policy.operations {
-            if operation.actors.is_empty() || !operation.observations.contains("app.query.v1") {
+            let actions: BTreeSet<_> = [
+                Action::DelegateQuery,
+                Action::DelegateSend,
+                Action::DelegateStatus,
+            ]
+            .into_iter()
+            .filter(|action| {
+                operation.observations.contains(action.capability())
+                    || operation.effects.contains(action.capability())
+            })
+            .collect();
+            if operation.actors.is_empty() || actions.is_empty() {
                 continue;
             }
             let bindings: BTreeMap<_, _> = imported_resources
@@ -1250,7 +1345,7 @@ fn resource_fixture_for_artifact_with_imports(
                         PolicySlot {
                             kind: ResourceKind::AppOperation,
                             allowed_resources: BTreeSet::from([resource.clone()]),
-                            actions: BTreeSet::from([Action::DelegateQuery]),
+                            actions: actions.clone(),
                             limits: Limits {
                                 max_request_bytes: 16_384,
                                 max_response_bytes: 65_536,
@@ -1288,35 +1383,6 @@ fn resource_fixture_for_artifact_with_imports(
                 expires_at_ms: None,
             });
         }
-    }
-    // An exact disposable peer for the request-identity conformance query.
-    // The native HTTP suite supplies a real callee and its actual schema pin.
-    // Keep this outside local_resource_fixture: provider helpers also call that
-    // function to initialize empty catalogs, which must remain empty.
-    if artifact.contract().namespace == "delegation"
-        && let Some(operation) = policy.operations.get("delegation.forward")
-        && !operation.actors.is_empty()
-        && operation.observations.contains("app.query.v1")
-    {
-        use serde_json::json;
-        let peer: day2_capabilities::resources::Catalog = serde_json::from_value(json!({
-            "version":1,
-            "connections":{"delegation":{"revision":1,"provider":"local_delegation"}},
-            "resources":{"delegation":{"revision":1,"connection":{"id":"delegation","revision":1},
-                "target":{"kind":"app_operation","app":"fixture_peer","operation":"fixture.query",
-                    "schema_digest":crate::digest(b"disposable-delegation-conformance-peer")}}},
-            "policies":{"conformance_peer":{"revision":1,"owner":"local-fixture-operator",
-                "actors":operation.actors,"allowed_apps":[app],
-                "slots":{"delegation":{"kind":"app_operation","allowed_resources":[{"id":"delegation","revision":1}],
-                    "actions":["delegate_query"],"limits":{"max_request_bytes":16384,"max_response_bytes":65536,"max_calls_per_invocation":4},"budgets":[]}}}},
-            "budgets":{}
-        }))?;
-        catalog.connections.extend(peer.connections);
-        catalog.resources.extend(peer.resources);
-        catalog.policies.extend(peer.policies);
-        attachments.push(serde_json::from_value(json!({
-                    "policy":{"id":"conformance_peer","revision":1},"operation":"delegation.forward",
-                    "bindings":{"delegation":{"id":"delegation","revision":1}}}))?);
     }
     catalog.validate()?;
     Ok((catalog, attachments))
@@ -1427,6 +1493,7 @@ fn create_for_with_imports(
         security_shell: None,
         oauth_shell_transport: None,
         oauth_clients: None,
+        oauth_runtime: None,
         apps: BTreeMap::from([(
             "app".into(),
             AppBinding {
@@ -1512,6 +1579,9 @@ fn create_for_with_imports(
     let scope = runtime.scope().to_owned();
     let mut worlds = disposable_provider_worlds();
     for import in imports {
+        if import.kind != crate::operation_contract::Kind::Query {
+            continue;
+        }
         let key = crate::integrations::simulated::DelegationWorld::key(
             &import.app,
             &import.operation,
@@ -1635,13 +1705,9 @@ fn disposable_provider_worlds() -> crate::integrations::simulated::SimulatedFixt
     };
     SimulatedFixture {
         slack_webhook: crate::integrations::simulated::slack_webhook_fixture(),
-        // Exact disposable peer, not a fallback for arbitrary delegated reads.
-        // Native request-identity conformance installs and calls a real callee.
         delegation: DelegationWorld {
-            reads: BTreeMap::from([(
-                DelegationWorld::key("fixture_peer", "fixture.query", "{}"),
-                "{}".into(),
-            )]),
+            reads: BTreeMap::new(),
+            accepted: BTreeMap::new(),
         },
         // One finished job and one still running, so a watcher has both the
         // case it closes and the case it leaves open.
@@ -1694,7 +1760,7 @@ fn disposable_provider_worlds() -> crate::integrations::simulated::SimulatedFixt
         object_store: ObjectStoreWorld::default(),
         slack: SlackWorld {
             workspace_id: "T0SYNTHETIC".into(),
-            channels: BTreeMap::new(),
+            channels: BTreeMap::from([("C0SYNTHETIC".into(), SlackChannelWorld::default())]),
             sequence: 0,
         },
         snowflake: SnowflakeWorld {

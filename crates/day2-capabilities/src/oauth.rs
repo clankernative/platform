@@ -117,6 +117,216 @@ pub struct ShellTransport {
     pub service_account: String,
 }
 
+/// Installation selection for the native GKE readiness adapter. These are
+/// resource selectors and account ceilings, never evidence or a ready flag.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeCatalog {
+    pub version: u32,
+    pub shell: GcpShellSelection,
+    /// Bounds for the separate stateless, single-replica Linux shell launcher.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell_resources: Option<crate::runtime::Resources>,
+    pub apps: BTreeMap<Name, RuntimeApp>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GcpShellSelection {
+    pub project: String,
+    pub backend_service: String,
+    pub url_map: String,
+    pub https_proxy: String,
+    pub forwarding_rule: String,
+    /// Exact Kubernetes namespace/service recorded by the GKE ingress controller.
+    pub kubernetes_service: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeApp {
+    pub service_account: String,
+    /// Keys are the app's declared connection registration names.
+    pub accounts: BTreeMap<Name, GoogleAccountPolicy>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum GoogleAccountPolicy {
+    IapSubject,
+    ExternalAccounts {
+        allowed_tenants: BTreeSet<String>,
+        allowed_subjects: Option<BTreeSet<String>>,
+    },
+}
+
+impl RuntimeCatalog {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.version == 1,
+            "unsupported OAuth runtime catalog version"
+        );
+        if let Some(resources) = &self.shell_resources {
+            resources.validate()?;
+        }
+        ensure!(
+            !self.apps.is_empty() && self.apps.len() <= 128,
+            "OAuth runtime app budget"
+        );
+        let shell = &self.shell;
+        ShellTransport {
+            service_account: format!("readiness@{}.iam.gserviceaccount.com", shell.project),
+        }
+        .validate()?;
+        for resource in [
+            &shell.backend_service,
+            &shell.url_map,
+            &shell.https_proxy,
+            &shell.forwarding_rule,
+        ] {
+            ensure!(
+                (1..=63).contains(&resource.len())
+                    && resource.as_bytes()[0].is_ascii_lowercase()
+                    && resource
+                        .as_bytes()
+                        .last()
+                        .is_some_and(u8::is_ascii_alphanumeric)
+                    && resource
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'),
+                "invalid OAuth Compute resource selector"
+            );
+        }
+        let parts: Vec<_> = shell.kubernetes_service.split('/').collect();
+        ensure!(
+            parts.len() == 2,
+            "invalid OAuth Kubernetes service selector"
+        );
+        for part in parts {
+            ensure!(
+                !part.is_empty()
+                    && part.len() <= 63
+                    && part
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+                    && part.as_bytes()[0].is_ascii_alphanumeric()
+                    && part
+                        .as_bytes()
+                        .last()
+                        .is_some_and(u8::is_ascii_alphanumeric),
+                "invalid OAuth Kubernetes service selector"
+            );
+        }
+        for app in self.apps.values() {
+            ShellTransport {
+                service_account: app.service_account.clone(),
+            }
+            .validate()?;
+            ensure!(
+                !app.accounts.is_empty() && app.accounts.len() <= 64,
+                "OAuth runtime account budget"
+            );
+            for policy in app.accounts.values() {
+                if let GoogleAccountPolicy::ExternalAccounts {
+                    allowed_tenants,
+                    allowed_subjects,
+                } = policy
+                {
+                    ensure!(
+                        !allowed_tenants.is_empty()
+                            && allowed_tenants.len() <= 64
+                            && allowed_subjects
+                                .as_ref()
+                                .is_none_or(|s| !s.is_empty() && s.len() <= 64),
+                        "OAuth external account ceiling budget"
+                    );
+                    for tenant in allowed_tenants {
+                        crate::host_name(tenant)?;
+                    }
+                    for subject in allowed_subjects.iter().flatten() {
+                        ensure!(
+                            !subject.is_empty()
+                                && subject.len() <= 256
+                                && subject.bytes().all(|b| b.is_ascii_graphic()),
+                            "invalid OAuth external account subject"
+                        );
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod runtime_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn runtime_selection_is_closed_bounded_and_contains_only_desired_selectors() -> Result<()> {
+        let value = json!({"version":1,"shell":{"project":"company-tools","backend_service":"shell-backend","url_map":"shell-map","https_proxy":"shell-proxy","forwarding_rule":"shell-https","kubernetes_service":"tools/security-shell"},
+            "apps":{"workspace":{"service_account":"app@company-tools.iam.gserviceaccount.com","accounts":{"calendar":{"kind":"external_accounts","allowed_tenants":["example.com"],"allowed_subjects":["immutable-google-subject"]}}}}});
+        serde_json::from_value::<RuntimeCatalog>(value.clone())?.validate()?;
+        let mut bounded = value.clone();
+        bounded["shell_resources"] = json!({"memory_mib":512,"cpu_millis":500,"process_limit":1024,
+            "process_limit_enforced_by":"pod","http_concurrency":4,"shutdown_seconds":30});
+        let selected: RuntimeCatalog = serde_json::from_value(bounded.clone())?;
+        selected.validate()?;
+        assert_eq!(serde_json::to_value(selected)?, bounded);
+        for field in ["ready", "replicas", "database", "command"] {
+            let mut wrong = bounded.clone();
+            wrong["shell_resources"][field] = json!(true);
+            assert!(serde_json::from_value::<RuntimeCatalog>(wrong).is_err());
+        }
+        bounded["shell_resources"]["http_concurrency"] = json!(33);
+        assert!(serde_json::from_value::<RuntimeCatalog>(bounded).is_err());
+        for field in ["ready", "origin", "qualification", "receipt", "secret"] {
+            let mut wrong = value.clone();
+            wrong[field] = json!(true);
+            assert!(serde_json::from_value::<RuntimeCatalog>(wrong).is_err());
+        }
+        for (field, substitution) in [
+            ("project", "other/../project"),
+            ("backend_service", "https://attacker.example"),
+            ("url_map", "map?redirect=1"),
+            ("https_proxy", "../proxy"),
+            ("forwarding_rule", "https-rule/other"),
+            ("kubernetes_service", "tools/app/extra"),
+        ] {
+            let mut wrong = value.clone();
+            wrong["shell"][field] = json!(substitution);
+            assert!(
+                serde_json::from_value::<RuntimeCatalog>(wrong)?
+                    .validate()
+                    .is_err()
+            );
+        }
+        let mut wrong = value.clone();
+        wrong["apps"]["workspace"]["accounts"]["calendar"]["allowed_tenants"] = json!([]);
+        assert!(
+            serde_json::from_value::<RuntimeCatalog>(wrong)?
+                .validate()
+                .is_err()
+        );
+        let mut wrong = value.clone();
+        wrong["apps"]["workspace"]["accounts"]["calendar"]["allowed_subjects"] = json!([]);
+        assert!(
+            serde_json::from_value::<RuntimeCatalog>(wrong)?
+                .validate()
+                .is_err()
+        );
+        let mut wrong = value;
+        wrong["apps"]["workspace"]["service_account"] = json!("operator@example.com");
+        assert!(
+            serde_json::from_value::<RuntimeCatalog>(wrong)?
+                .validate()
+                .is_err()
+        );
+        Ok(())
+    }
+}
+
 /// Desired client metadata only. Secret bytes and qualification receipts are
 /// never part of the installation document. Addresses come from selected edges.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -716,7 +926,14 @@ impl GrantCeiling {
         audience: ResourceAudienceRef,
         roots: BTreeMap<String, OperationAuthorityContract>,
     ) -> Result<Self> {
-        identifier(&subject)?;
+        // Canonical identity-provider subjects are opaque principal identities,
+        // e.g. IAP's accounts.google.com:<id>, not operation identifiers.
+        ensure!(
+            !subject.is_empty()
+                && subject.len() <= 256
+                && subject.bytes().all(|byte| byte.is_ascii_graphic()),
+            "invalid grant principal"
+        );
         ensure!(
             !roots.is_empty() && roots.len() <= 256,
             "invalid grant root budget"

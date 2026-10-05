@@ -194,10 +194,36 @@ fn approval_with(
     artifact_override: Option<&Digest>,
 ) -> ReleaseApproval {
     let plan = plan(company, revision);
-    let (artifact, evidence) = succeed_with(journal, &plan, credential_presence, artifact_override);
-    let policy = authority(&plan).policy;
+    approval_for(
+        journal,
+        &target(company),
+        &plan,
+        generation,
+        credential_presence,
+        artifact_override,
+    )
+}
+
+pub fn approval_for(
+    journal: &mut Journal,
+    target: &ReleaseTarget,
+    plan: &BuildPlan,
+    generation: u64,
+    credential_presence: CredentialPresence,
+    artifact_override: Option<&Digest>,
+) -> ReleaseApproval {
+    let company = target.company.as_str();
+    let revision: u8 = plan
+        .request
+        .as_str()
+        .strip_prefix("build-")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let (artifact, evidence) = succeed_with(journal, plan, credential_presence, artifact_override);
+    let policy = authority(plan).policy;
     let approval = ReleaseApproval {
-        target: target(company),
+        target: target.clone(),
         request: name(&format!("release-{revision}")),
         expected_generation: generation,
         build_execution: plan.execution_id().unwrap(),
@@ -205,7 +231,7 @@ fn approval_with(
         evidence,
         git: GitApproval {
             source: plan.profile.source.clone(),
-            commit: plan.commit,
+            commit: plan.commit.clone(),
             policy,
             receipt: Digest::of(&(company, revision, "reviewed-merge")).unwrap(),
             actor: actor("reviewer"),

@@ -3,6 +3,7 @@
 //! Roc owns probe order. Every native step is one-shot, bounded and redacted.
 
 use super::{admission, approval_keys, google, profiles};
+use crate::oauth::effects::{self, Client, Instant, Response};
 use anyhow::{Context, Result, ensure};
 use day2_capabilities::{
     BindingRef, Digest, Name, SecretProvider,
@@ -10,17 +11,14 @@ use day2_capabilities::{
         ConnectionRequirement, ConnectionSlotKey, OutboundConnectionBinding, ProviderCallbackRef,
     },
 };
-use reqwest::{
-    blocking::{Client, Response},
-    header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue},
-};
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     io::Read,
     path::Path,
     sync::{Arc, RwLock},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 use url::Url;
 
@@ -57,6 +55,11 @@ pub(crate) struct ClientSelection {
 }
 
 impl Target {
+    #[cfg(test)]
+    pub(in crate::oauth) fn reviewed(&self) -> &profiles::ReviewedBrowserCodeProfile {
+        &self.reviewed
+    }
+
     pub(super) fn publication_matches(&self, registration: &Name, namespace: &str) -> bool {
         self.registration == *registration && self.namespace == namespace
     }
@@ -157,7 +160,7 @@ impl Target {
             .collect()
     }
 
-    fn registration_evidence(&self) -> Result<profiles::ProviderRegistrationEvidence> {
+    pub(super) fn registration_evidence(&self) -> Result<profiles::ProviderRegistrationEvidence> {
         // Stable across renewed probes; clock and secret/token bytes never
         // participate. A receipt is still issuable only after the live campaign.
         let confirmation = Digest::of(&(
@@ -270,8 +273,8 @@ impl Authorization {
         purpose: Purpose,
         session: Digest,
     ) -> Result<(Self, String)> {
-        let state = crate::web_security::random()?;
-        let verifier = crate::web_security::random()?;
+        let state = effects::random()?;
+        let verifier = effects::random()?;
         let mut authorization = Url::parse(google::AUTHORIZATION)?;
         authorization.query_pairs_mut().extend_pairs([
             ("client_id", target.client_id.as_str()),
@@ -888,8 +891,7 @@ impl Session {
                     Some(raw.as_slice()) == self.secret.as_ref().map(|value| value.as_bytes()),
                     "Google client credential changed"
                 );
-                let checked_at =
-                    i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())?;
+                let checked_at = effects::wall_time()?;
                 self.receipt = Some(Receipt {
                     registration: self.target.registration_evidence()?,
                     target: self.target_identity()?,
@@ -953,7 +955,7 @@ impl Receipt {
         &self.registration
     }
 
-    fn fresh(&self, now: i64) -> bool {
+    pub(in crate::oauth) fn fresh(&self, now: i64) -> bool {
         now >= self.checked_at
             && now - self.checked_at < VALID_SECONDS
             && Instant::now() < self.deadline
@@ -992,7 +994,13 @@ impl GoogleReadiness {
             && previous.checked_at >= receipt.checked_at
         {
             if previous.checked_at == receipt.checked_at {
-                previous.deadline = previous.deadline.min(receipt.deadline);
+                ensure!(
+                    previous.deadline.partial_cmp(&receipt.deadline).is_some(),
+                    "OAuth receipt clock domain mismatch"
+                );
+                if receipt.deadline < previous.deadline {
+                    previous.deadline = receipt.deadline;
+                }
             }
             return Ok(());
         }
@@ -1013,6 +1021,14 @@ impl GoogleReadiness {
 pub(super) mod publication;
 
 impl admission::OutboundReadiness for GoogleReadiness {
+    fn selected_runtime(&self) -> Result<Option<Digest>> {
+        self.facts.selected_runtime()
+    }
+
+    fn observe_identity(&self, identity: &crate::iap::Verified, now: i64) -> Result<()> {
+        self.facts.observe_identity(identity, now)
+    }
+
     fn current(
         &self,
         binding: &OutboundConnectionBinding,

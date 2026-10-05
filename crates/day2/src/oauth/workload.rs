@@ -33,7 +33,15 @@ pub(crate) struct IapWorkload {
 
 impl IapWorkload {
     pub(crate) fn from_gke_instance(instance: &Instance) -> Result<Self> {
-        Self::from_instance(instance, Arc::new(GkeMetadataAccessTokens::new()?))
+        let account = &instance
+            .oauth_shell_transport
+            .as_ref()
+            .context("OAuth shell transport missing")?
+            .service_account;
+        Self::from_instance(
+            instance,
+            Arc::new(GkeMetadataAccessTokens::selected(account)?),
+        )
     }
 
     fn from_instance(instance: &Instance, tokens: Arc<dyn AccessTokenSource>) -> Result<Self> {

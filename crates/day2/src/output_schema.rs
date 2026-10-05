@@ -6,7 +6,8 @@ use std::collections::{BTreeMap, BTreeSet};
 pub const MAX_DEPTH: usize = 16;
 pub const MAX_LIST_ITEMS: usize = 1_000;
 pub const MAX_PAGE_ITEMS: usize = 100;
-pub const MAX_TOTAL_COLLECTION_ITEMS: usize = 1_000;
+// Nested envelopes count their outer items as well as their children.
+pub const MAX_TOTAL_COLLECTION_ITEMS: usize = 1_024;
 pub const MAX_JSON_BYTES: usize = 512 * 1_024;
 const MAX_SCHEMA_NODES: usize = 1_024;
 const MAX_VALUE_NODES: usize = 16_384;
