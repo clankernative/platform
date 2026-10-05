@@ -187,7 +187,12 @@ impl QualificationFailure {
 
 impl std::fmt::Display for QualificationFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "OAuth qualification failed at {}: {}", self.stage(), self.observation)
+        write!(
+            formatter,
+            "OAuth qualification failed at {}: {}",
+            self.stage(),
+            self.observation
+        )
     }
 }
 
@@ -579,24 +584,25 @@ impl Wire {
             .form(form)
             .send()
             .map_err(|_| ObservationFailure::Network)?;
-        self.adapter.tokens(
-            &body(response)?,
-            catalog::TokenContext {
-                reviewed: &target.reviewed,
-                permission: &target.permission,
-                client_id: &target.client_id,
-                subject: &target.canary_subject,
-            },
-            refresh,
-            self,
-        )
-        .map_err(|error| {
-            if error.downcast_ref::<ObservationFailure>().is_some() {
-                error
-            } else {
-                ObservationFailure::Contract.into()
-            }
-        })
+        self.adapter
+            .tokens(
+                &body(response)?,
+                catalog::TokenContext {
+                    reviewed: &target.reviewed,
+                    permission: &target.permission,
+                    client_id: &target.client_id,
+                    subject: &target.canary_subject,
+                },
+                refresh,
+                self,
+            )
+            .map_err(|error| {
+                if error.downcast_ref::<ObservationFailure>().is_some() {
+                    error
+                } else {
+                    ObservationFailure::Contract.into()
+                }
+            })
     }
 
     pub(super) fn token_info(&self, access: &str) -> Result<Vec<u8>> {
@@ -637,8 +643,7 @@ impl Wire {
             #[serde(rename = "error_uri")]
             _uri: Option<String>,
         }
-        let denial: Denial = crate::json::decode(&raw)
-            .map_err(|_| ObservationFailure::Response)?;
+        let denial: Denial = crate::json::decode(&raw).map_err(|_| ObservationFailure::Response)?;
         let classified = match purpose {
             Purpose::RejectPkce => denial.error == "invalid_grant",
             Purpose::RejectCredential => {
@@ -676,12 +681,13 @@ impl Wire {
             .header(AUTHORIZATION, authorization)
             .send()
             .map_err(|_| ObservationFailure::Network)?;
-        self.adapter.account(
-            &body(response)?,
-            &target.canary_subject,
-            &target.canary_tenant,
-        )
-        .map_err(|_| ObservationFailure::Contract.into())
+        self.adapter
+            .account(
+                &body(response)?,
+                &target.canary_subject,
+                &target.canary_tenant,
+            )
+            .map_err(|_| ObservationFailure::Contract.into())
     }
 
     #[cfg(test)]
@@ -1108,7 +1114,9 @@ impl Session {
         let mut failure = None;
         let result = crate::automation::run(&runner, &["oauth-registration"], |request| {
             let result = self.call(request);
-            if failure.is_none() && let Err(error) = &result {
+            if failure.is_none()
+                && let Err(error) = &result
+            {
                 failure = error.downcast_ref::<QualificationFailure>().copied();
             }
             result

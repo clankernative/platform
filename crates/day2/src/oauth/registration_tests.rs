@@ -621,17 +621,41 @@ fn missing_client_secret_denial_is_specific_to_google_and_its_negative_probe() -
     }
 
     let mut denials = vec![
-        (401, json!({"error":"invalid_request","error_description":"client_secret is missing."})),
+        (
+            401,
+            json!({"error":"invalid_request","error_description":"client_secret is missing."}),
+        ),
         (400, json!({"error":"invalid_request"})),
-        (400, json!({"error":"invalid_request","error_description":"code is missing."})),
-        (400, json!({"error":"invalid_request","error_description":format!("client_secret is missing. {SECRET_CANARY}")})),
-        (400, json!({"error":"invalid_request","error_description":SECRET_CANARY})),
-        (400, json!({"error":"invalid_grant","error_description":"client_secret is missing."})),
-        (400, json!({"error":"invalid_request","error_description":"client_secret is missing.","access_token":ACCESS_CANARY})),
+        (
+            400,
+            json!({"error":"invalid_request","error_description":"code is missing."}),
+        ),
+        (
+            400,
+            json!({"error":"invalid_request","error_description":format!("client_secret is missing. {SECRET_CANARY}")}),
+        ),
+        (
+            400,
+            json!({"error":"invalid_request","error_description":SECRET_CANARY}),
+        ),
+        (
+            400,
+            json!({"error":"invalid_grant","error_description":"client_secret is missing."}),
+        ),
+        (
+            400,
+            json!({"error":"invalid_request","error_description":"client_secret is missing.","access_token":ACCESS_CANARY}),
+        ),
     ];
-    for adapter in [catalog::Adapter::GoogleCalendar, catalog::Adapter::GitlabProjects] {
+    for adapter in [
+        catalog::Adapter::GoogleCalendar,
+        catalog::Adapter::GitlabProjects,
+    ] {
         if adapter == catalog::Adapter::GitlabProjects {
-            denials.push((400, json!({"error":"invalid_request","error_description":"client_secret is missing."})));
+            denials.push((
+                400,
+                json!({"error":"invalid_request","error_description":"client_secret is missing."}),
+            ));
         }
         for (status, denial) in &denials {
             let (target, mut replies, index) = match adapter {
@@ -647,7 +671,13 @@ fn missing_client_secret_denial_is_specific_to_google_and_its_negative_probe() -
             let error = selected.call(request(ACTIONS[3])).unwrap_err();
             let diagnostic = error.downcast_ref::<QualificationFailure>().unwrap();
             assert_eq!(diagnostic.stage(), "reject_missing_client_credential");
-            for private in [CODE_CANARY, SECRET_CANARY, ACCESS_CANARY, REFRESH_CANARY, "client_secret is missing."] {
+            for private in [
+                CODE_CANARY,
+                SECRET_CANARY,
+                ACCESS_CANARY,
+                REFRESH_CANARY,
+                "client_secret is missing.",
+            ] {
                 assert!(!format!("{error:#}").contains(private));
             }
             let count = server.requests.lock().unwrap().len();
@@ -660,12 +690,22 @@ fn missing_client_secret_denial_is_specific_to_google_and_its_negative_probe() -
         }
     }
     let mut replies = responses();
-    replies[1] = (400, json!({"error":"invalid_request","error_description":"client_secret is missing."}).to_string());
+    replies[1] = (
+        400,
+        json!({"error":"invalid_request","error_description":"client_secret is missing."})
+            .to_string(),
+    );
     let server = Server::new(replies)?;
     let mut selected = session(fixture()?.target, &server)?;
     selected.call(request(ACTIONS[0]))?;
     let error = selected.call(request(ACTIONS[1])).unwrap_err();
-    assert_eq!(error.downcast_ref::<QualificationFailure>().unwrap().stage(), "reject_incorrect_pkce");
+    assert_eq!(
+        error
+            .downcast_ref::<QualificationFailure>()
+            .unwrap()
+            .stage(),
+        "reject_incorrect_pkce"
+    );
     assert!(selected.finish().is_err());
     assert_eq!(server.requests.lock().unwrap().len(), 2);
     Ok(())
@@ -780,7 +820,9 @@ fn google_errors_response_loss_wrong_account_scopes_and_rotation_never_seal_or_r
 
 #[test]
 fn qualification_diagnostics_discard_untrusted_error_chains() {
-    let raw = format!("https://provider.example/token?code={CODE_CANARY} secret={SECRET_CANARY} access={ACCESS_CANARY} refresh={REFRESH_CANARY}");
+    let raw = format!(
+        "https://provider.example/token?code={CODE_CANARY} secret={SECRET_CANARY} access={ACCESS_CANARY} refresh={REFRESH_CANARY}"
+    );
     let error = QualificationFailure::at(
         QualificationStage::Publication,
         anyhow::anyhow!(raw).context("untrusted upstream diagnostic"),
@@ -798,7 +840,10 @@ fn qualification_diagnostics_discard_untrusted_error_chains() {
 #[test]
 fn failed_native_workflow_preserves_the_observed_qualification_stage() -> Result<()> {
     let mut replies = responses();
-    replies[2] = (400, json!({"error":"invalid_grant", "error_description":SECRET_CANARY}).to_string());
+    replies[2] = (
+        400,
+        json!({"error":"invalid_grant", "error_description":SECRET_CANARY}).to_string(),
+    );
     let server = Server::new(replies)?;
     let session = session(fixture()?.target, &server)?;
     let error = session

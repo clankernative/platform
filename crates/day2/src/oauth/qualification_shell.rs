@@ -206,29 +206,36 @@ impl Canaries {
         now: i64,
     ) -> Result<Response> {
         self.route(
-            Request { method, path, query, headers, body },
+            Request {
+                method,
+                path,
+                query,
+                headers,
+                body,
+            },
             identity,
             now,
         )
-            .map_err(|error| {
-                QualificationFailure::at(
-                    if path.starts_with(CALLBACK) {
-                        QualificationStage::Callback
-                    } else {
-                        QualificationStage::Setup
-                    },
-                    error,
-                )
-            })
+        .map_err(|error| {
+            QualificationFailure::at(
+                if path.starts_with(CALLBACK) {
+                    QualificationStage::Callback
+                } else {
+                    QualificationStage::Setup
+                },
+                error,
+            )
+        })
     }
 
-    fn route(
-        &self,
-        request: Request<'_>,
-        identity: &iap::Verified,
-        now: i64,
-    ) -> Result<Response> {
-        let Request { method, path, query, headers, body } = request;
+    fn route(&self, request: Request<'_>, identity: &iap::Verified, now: i64) -> Result<Response> {
+        let Request {
+            method,
+            path,
+            query,
+            headers,
+            body,
+        } = request;
         if path.starts_with(CALLBACK) {
             ensure!(
                 *method == Method::GET && body.is_empty(),
