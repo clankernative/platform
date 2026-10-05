@@ -9,12 +9,12 @@ use std::sync::Arc;
 pub(crate) struct Providers {
     pub catalog: admission::ReviewedCatalog,
     pub readiness: Arc<dyn admission::OutboundReadiness>,
-    pub registrations: Option<Arc<super::registration::GoogleReadiness>>,
+    pub registrations: Option<Arc<super::registration::ProviderReadiness>>,
 }
 
 impl Providers {
     pub(crate) fn from_gke_runtime(runtime: &Runtime) -> Result<Self> {
-        let catalog = super::google::catalog()?;
+        let catalog = super::catalog::reviewed()?;
         let selected = admission::QualifiedConnections::from_runtime(runtime, &catalog)?;
         let config = selected
             .instance()
@@ -34,14 +34,14 @@ impl Providers {
             runtime.db().to_path_buf(),
             tokens,
         )?);
-        Self::google(Arc::new(super::registration::GoogleReadiness::new(facts)))
+        Self::reviewed(Arc::new(super::registration::ProviderReadiness::new(facts)))
     }
 
     /// Publishing reviewed code does not populate registration readiness. A
     /// native qualification session must supply fresh non-serializable receipts.
-    pub(crate) fn google(readiness: Arc<super::registration::GoogleReadiness>) -> Result<Self> {
+    pub(crate) fn reviewed(readiness: Arc<super::registration::ProviderReadiness>) -> Result<Self> {
         Ok(Self {
-            catalog: super::google::catalog()?,
+            catalog: super::catalog::reviewed()?,
             readiness: readiness.clone(),
             registrations: Some(readiness),
         })
@@ -50,7 +50,7 @@ impl Providers {
 
 struct Registrations {
     authority: Arc<admission::ArtifactApprovalAuthority>,
-    readiness: Arc<super::registration::GoogleReadiness>,
+    readiness: Arc<super::registration::ProviderReadiness>,
 }
 
 impl shell_transport::RegistrationSink for Registrations {

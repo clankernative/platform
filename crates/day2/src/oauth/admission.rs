@@ -38,6 +38,21 @@ pub(crate) struct ReviewedCatalog {
 }
 
 impl ReviewedCatalog {
+    pub(super) fn current(
+        &self,
+        requirement: &ConnectionRequirement,
+        id: &Name,
+    ) -> Result<(
+        profiles::ReviewedBrowserCodeProfile,
+        ProviderPermissionContract,
+    )> {
+        let entry = self
+            .entries
+            .get(id.as_str())
+            .context("OAuth profile is not reviewed")?;
+        self.resolve(requirement, &entry.profile.protocol.identity().binding)
+    }
+
     #[cfg(test)]
     pub(super) fn entries(&self) -> impl Iterator<Item = &ReviewedAccess> {
         self.entries.values()
@@ -464,12 +479,8 @@ impl QualifiedConnections {
                     .context("OAuth selected requirement is not declared")?
                     .requirement;
                 let mut binding = selected_binding.clone();
-                let reviewed = super::google::reviewed(&requirement.account_policy)?;
-                ensure!(
-                    binding.profile.id == reviewed.profile.protocol.identity().binding.id,
-                    "OAuth setup profile does not match declared account policy"
-                );
-                binding.profile = reviewed.profile.protocol.identity().binding.clone();
+                let (reviewed, _) = super::catalog::current(requirement, &binding.profile)?;
+                binding.profile = reviewed.protocol.identity().binding.clone();
                 binding.requirement = requirement.nominal_identity()?;
                 binding.security_shell = shell.origin.clone();
                 let secrets = &instance
@@ -495,7 +506,7 @@ impl QualifiedConnections {
                         binding.account_binding.revision = mapping.clone()
                     }
                     AccountBindingPolicy::InstallationAccount => {
-                        anyhow::bail!("Google installation accounts are not reviewed")
+                        anyhow::bail!("installation accounts are not reviewed by this host")
                     }
                 }
                 prepared.insert((app.clone(), name.clone()), binding);
@@ -509,12 +520,12 @@ impl QualifiedConnections {
                 .oauth_connections
                 .insert(name, binding);
         }
-        Self::qualify(&instance, artifacts, &super::google::catalog()?)
+        Self::qualify(&instance, artifacts, &super::catalog::reviewed()?)
     }
 
     /// Requirements come from admitted artifacts, clients from the existing
     /// instance document, and shell qualification from the native live source.
-    pub(crate) fn google_targets(
+    pub(crate) fn registration_targets(
         &self,
         shell: &profiles::SecurityShellEvidence,
     ) -> Result<Vec<super::registration::Target>> {
@@ -542,21 +553,30 @@ impl QualifiedConnections {
                     .registrations
                     .get(&selected.binding.registration.id)
                     .context("OAuth registration client missing")?;
-                ensure!(
-                    client.canary_tenant == identity.hosted_domain,
-                    "OAuth canary must use the shell's verified tenant"
-                );
+                let canary = client.canary();
+                let provider = client.client();
+                let adapter = super::catalog::Adapter::selected(&selected.reviewed)?;
+                adapter.validate_client(&provider)?;
+                if matches!(
+                    client,
+                    day2_capabilities::oauth::RegistrationClient::LegacyGoogle(_)
+                ) {
+                    ensure!(
+                        canary.provider_tenant == identity.hosted_domain,
+                        "Google canary must use the shell's verified tenant"
+                    );
+                }
                 let target = super::registration::Target::new(
                     &selected.requirement,
+                    &selected.binding.profile,
                     instance_identity(&self.instance)?,
                     binding_namespace(&selected.binding)?,
                     shell.clone(),
                     super::registration::ClientSelection {
                         registration: selected.binding.registration.id.clone(),
-                        client_id: client.client.client_id.clone(),
-                        secret: control.secrets[&client.client.credential].clone(),
-                        canary_subject: client.canary_subject.clone(),
-                        canary_tenant: client.canary_tenant.clone(),
+                        secret: control.secrets[provider.credential()].clone(),
+                        client: provider,
+                        canary,
                     },
                 )?;
                 ensure!(
@@ -595,7 +615,7 @@ impl QualifiedConnections {
         }
         let (app, candidate) = found.context("registration publication selection retired")?;
         let target = self
-            .google_targets(shell)?
+            .registration_targets(shell)?
             .into_iter()
             .find(|target| target.publication_matches(&registration.id, namespace))
             .context("registration publication target missing")?;
@@ -645,13 +665,33 @@ impl QualifiedConnections {
                     "OAuth selected requirement contract changed"
                 );
                 let (reviewed, permission) = catalog.resolve(&requirement, &binding.profile)?;
-                let google =
-                    super::google::reviewed(&requirement.account_policy).is_ok_and(|entry| {
-                        entry.profile.protocol.identity().binding == binding.profile
-                    });
+                // Abstract catalog admission is separate from executability.
+                // A selected native runtime/client must have a reviewed wire
+                // adapter; failure cannot skip provider/account validation.
+                let native = match super::catalog::Adapter::selected(&reviewed) {
+                    Ok(adapter) => Some(adapter),
+                    Err(error)
+                        if instance.oauth_runtime.is_some() || instance.oauth_clients.is_some() =>
+                    {
+                        return Err(error);
+                    }
+                    Err(_) => None,
+                };
+                if let Some(adapter) = native
+                    && let Some(runtime) = &instance.oauth_runtime
+                {
+                    let policy = runtime
+                        .apps
+                        .get(&Name::try_from(app.clone())?)
+                        .context("OAuth runtime app missing")?
+                        .accounts
+                        .get(&Name::try_from(name.clone())?)
+                        .context("OAuth runtime account policy missing")?;
+                    adapter.validate_account(&requirement, policy)?;
+                }
                 ensure!(
-                    !google || instance.oauth_clients.is_some(),
-                    "OAuth Google client selection missing"
+                    native.is_none() || instance.oauth_clients.is_some(),
+                    "OAuth provider client selection missing"
                 );
                 let client_credential = instance
                     .oauth_clients
@@ -661,7 +701,11 @@ impl QualifiedConnections {
                             .registrations
                             .get(&binding.registration.id)
                             .context("OAuth registration client missing")?;
-                        super::clients::selected_credential(&instance, &client.client)
+                        let client = client.client();
+                        if let Some(adapter) = native {
+                            adapter.validate_client(&client)?;
+                        }
+                        super::clients::selected_provider_credential(&instance, &client)
                     })
                     .transpose()?;
                 let control = instance
@@ -927,7 +971,7 @@ impl ArtifactApprovalAuthority {
         proof: &super::registration::publication::Publication,
         app: &str,
         identity: &crate::iap::Verified,
-        readiness: &super::registration::GoogleReadiness,
+        readiness: &super::registration::ProviderReadiness,
         now: i64,
     ) -> Result<()> {
         let state = self
@@ -1157,8 +1201,7 @@ pub(super) mod tests {
         }
     }
 
-    pub(in crate::oauth) fn publication_fixture()
-    -> Result<(QualifiedConnections, profiles::SecurityShellEvidence)> {
+    fn reviewed_google_fixture() -> Result<Fixture> {
         let mut fixture = fixture(AccountBindingPolicy::ExplicitExternalAccount)?;
         fixture.catalog = super::super::google::catalog()?;
         let profile =
@@ -1177,6 +1220,12 @@ pub(super) mod tests {
             .get_mut("calendar")
             .unwrap()
             .profile = profile;
+        Ok(fixture)
+    }
+
+    pub(in crate::oauth) fn publication_fixture()
+    -> Result<(QualifiedConnections, profiles::SecurityShellEvidence)> {
+        let mut fixture = reviewed_google_fixture()?;
         let control = fixture.instance.control.as_mut().unwrap();
         control.secrets.insert(name("reauth_client"), serde_json::from_value(json!({"kind":"gcp_version","project_number":12345,"secret":"google_reauth","version":3}))?);
         control.secrets.insert(name("calendar_client"), serde_json::from_value(json!({"kind":"gcp_version","project_number":12345,"secret":"google_client_secret","version":7}))?);
@@ -1187,7 +1236,7 @@ pub(super) mod tests {
         }))?);
         let target = fixture
             .qualify()?
-            .google_targets(&fixture.evidence.shell)?
+            .registration_targets(&fixture.evidence.shell)?
             .remove(0);
         fixture
             .instance
@@ -1200,6 +1249,233 @@ pub(super) mod tests {
             .registration =
             serde_json::from_value(target.setup_description()?["registration_selection"].clone())?;
         Ok((fixture.qualify()?, fixture.evidence.shell))
+    }
+
+    /// Two companies use the same app declaration and platform code. Only the
+    /// existing shared instance selectors choose clients and account ceilings.
+    fn gitlab_instance(
+        company: &str,
+        client_id: &str,
+        allowed: &[&str],
+    ) -> Result<(Instance, BTreeMap<String, LoadedArtifact>)> {
+        let mut baseline = fixture(AccountBindingPolicy::ExplicitExternalAccount)?;
+        let mut instance = live::tests::selected()?.instance;
+        instance.installation = company.into();
+        instance.oauth_clients = Some(serde_json::from_value(json!({
+            "version":2,"reauthentication":{"client_id":"123-reauth.apps.googleusercontent.com","credential":"reauth_client"},
+            "registrations":{"calendar_registration":{"client":{"kind":"gitlab","client_id":client_id,"credential":"calendar_client"},
+                "canary":{"qualification_subject":"accounts.google.com:qualification-human","provider_subject":"42","provider_tenant":"gitlab.com"}}}
+        }))?);
+        instance
+            .oauth_runtime
+            .as_mut()
+            .unwrap()
+            .apps
+            .get_mut(&name("workspace"))
+            .unwrap()
+            .accounts
+            .insert(
+                name("calendar"),
+                day2_capabilities::oauth::ProviderAccountPolicy::ExternalAccounts {
+                    allowed_tenants: BTreeSet::from(["gitlab.com".into()]),
+                    allowed_subjects: Some(allowed.iter().map(|s| (*s).to_owned()).collect()),
+                },
+            );
+        let mut contract = baseline.artifacts["workspace"].contract().clone();
+        let requirement = &mut contract.connection_declarations[0].requirement;
+        requirement.capability = super::super::gitlab::CAPABILITY.into();
+        requirement.actions = BTreeSet::from(["list_projects".into()]);
+        requirement.account_policy = AccountBindingPolicy::ExplicitExternalAccount;
+        let binding = instance
+            .apps
+            .get_mut("workspace")
+            .unwrap()
+            .oauth_connections
+            .get_mut("calendar")
+            .unwrap();
+        binding.namespace.installation = name(company);
+        binding.profile = super::super::gitlab::reviewed()?
+            .profile
+            .protocol
+            .identity()
+            .binding
+            .clone();
+        baseline.artifacts.insert(
+            "workspace".into(),
+            LoadedArtifact::from_contract_for_tests(
+                "synthetic-artifact".into(),
+                std::path::PathBuf::from("/fixture/workspace"),
+                contract,
+            ),
+        );
+        Ok((instance, baseline.artifacts))
+    }
+
+    #[test]
+    fn companies_select_provider_clients_and_policies_without_kernel_changes() -> Result<()> {
+        let mut companies = Vec::new();
+        for (company, client, ceiling) in [
+            ("company_a", "a".repeat(64), vec!["42"]),
+            ("company_b", "b".repeat(64), vec!["42", "43"]),
+        ] {
+            let (instance, artifacts) = gitlab_instance(company, &client, &ceiling)?;
+            let mut selected = QualifiedConnections::prepare_instance(instance, &artifacts)?;
+            live::setup_selected(&mut selected)?;
+            let shell = live::shell_selection(&selected.instance)?;
+            let target = selected.registration_targets(&shell)?.remove(0);
+            let description = target.description();
+            assert_eq!(description["client_id"], client);
+            assert_eq!(description["scopes"], json!(["read_api", "read_user"]));
+            assert_eq!(
+                description["refresh_recovery"],
+                "reauthorize_on_uncertainty"
+            );
+            assert!(description.get("access_type").is_none());
+            let catalog = super::super::catalog::reviewed()?;
+            QualifiedConnections::qualify(&selected.instance, &artifacts, &catalog)?;
+            // Setup is reproducible and cannot synthesize a native live receipt.
+            let mut repeat =
+                QualifiedConnections::prepare_instance(selected.instance.clone(), &artifacts)?;
+            assert_eq!(
+                live::setup_selected(&mut repeat)?,
+                live::setup_selected(&mut selected)?
+            );
+            // Exercise the signed publication path with the provider account
+            // distinct from the selected shell qualification human.
+            let world = super::super::simulation::World::new(20);
+            let mut responses = super::super::registration::tests::gitlab_responses();
+            for index in [3, 6, 9] {
+                let mut body: serde_json::Value = serde_json::from_str(&responses[index].1)?;
+                body["application"]["uid"] = json!(client);
+                responses[index].1 = body.to_string();
+            }
+            world.script(responses, None);
+            super::super::effects::scope(world, || -> Result<()> {
+                let codes = super::super::simulation::registration_codes(&target)?;
+                let mut campaign = super::super::registration::Session::new(
+                    target.clone(),
+                    codes,
+                    Arc::new(super::super::registration::tests::TokensSource(
+                        AtomicUsize::new(0),
+                    )),
+                )?;
+                for action in super::super::simulation::REGISTRATION_ACTIONS {
+                    campaign.call(crate::automation::Request {
+                        protocol: 1,
+                        action: action.into(),
+                        input: "{}".into(),
+                    })?;
+                }
+                let receipt = campaign.finish()?;
+                let keys = super::super::registration::publication::tests::Keys::default();
+                let proof =
+                    super::super::registration::publication::attest(&receipt, &selected, &keys, 5)?;
+                let human = crate::iap::Verified {
+                    email: "human@example.com".into(),
+                    subject: "accounts.google.com:qualification-human".into(),
+                };
+                super::super::registration::publication::verify(
+                    &proof,
+                    "workspace",
+                    &human,
+                    &selected,
+                    &keys,
+                    5,
+                )?;
+                let substituted = crate::iap::Verified {
+                    email: human.email.clone(),
+                    subject: "accounts.google.com:42".into(),
+                };
+                assert!(
+                    super::super::registration::publication::verify(
+                        &proof,
+                        "workspace",
+                        &substituted,
+                        &selected,
+                        &keys,
+                        5
+                    )
+                    .is_err()
+                );
+                let mut other = selected.instance.clone();
+                other.installation = "other_company".into();
+                other
+                    .apps
+                    .get_mut("workspace")
+                    .unwrap()
+                    .oauth_connections
+                    .get_mut("calendar")
+                    .unwrap()
+                    .namespace
+                    .installation = name("other_company");
+                let mut other = QualifiedConnections::prepare_instance(other, &artifacts)?;
+                live::setup_selected(&mut other)?;
+                let prior = keys.calls();
+                assert!(
+                    super::super::registration::publication::verify(
+                        &proof,
+                        "workspace",
+                        &human,
+                        &other,
+                        &keys,
+                        5
+                    )
+                    .is_err()
+                );
+                assert_eq!(
+                    keys.calls(),
+                    prior,
+                    "company substitution must fail before key acquisition"
+                );
+                Ok(())
+            })?;
+            let mut wrong = selected.instance.clone();
+            let value = &mut wrong.oauth_clients.as_mut().unwrap().registrations;
+            value.insert(name("calendar_registration"), serde_json::from_value(json!({"client":{"kind":"google",
+                "client_id":"12345-fixture.apps.googleusercontent.com","credential":"calendar_client"},
+                "canary":{"qualification_subject":"accounts.google.com:qualification-human","provider_subject":"42","provider_tenant":"gitlab.com"}}))?);
+            assert!(QualifiedConnections::qualify(&wrong, &artifacts, &catalog).is_err());
+            let mut wrong = selected.instance.clone();
+            wrong
+                .apps
+                .get_mut("workspace")
+                .unwrap()
+                .oauth_connections
+                .get_mut("calendar")
+                .unwrap()
+                .profile =
+                super::super::google::reviewed(&AccountBindingPolicy::ExplicitExternalAccount)?
+                    .profile
+                    .protocol
+                    .identity()
+                    .binding
+                    .clone();
+            assert!(QualifiedConnections::qualify(&wrong, &artifacts, &catalog).is_err());
+            companies.push((selected, target));
+        }
+        assert_ne!(
+            companies[0].1.description()["client_credential"],
+            companies[1].1.description()["client_credential"]
+        );
+        assert_ne!(
+            companies[0].1.description()["callback_url"],
+            companies[1].1.description()["callback_url"]
+        );
+        // A company B registration cannot be substituted into company A even
+        // though both use the same reviewed profile and provider account.
+        let first_shell = live::shell_selection(&companies[0].0.instance)?;
+        let other = companies[1].1.registration_evidence()?;
+        assert!(
+            companies[0]
+                .0
+                .registration_publication(
+                    &other.registration,
+                    &binding_namespace(&companies[1].0.entries.values().next().unwrap().binding)?,
+                    &first_shell
+                )
+                .is_err()
+        );
+        Ok(())
     }
 
     #[test]
@@ -1288,7 +1564,7 @@ pub(super) mod tests {
                 "canary_subject":"112233","canary_tenant":"example.com"}}
         }))?);
         let selected = fixture.qualify()?;
-        let targets = selected.google_targets(&fixture.evidence.shell)?;
+        let targets = selected.registration_targets(&fixture.evidence.shell)?;
         assert_eq!(targets.len(), 1);
         let setup = targets[0].setup_description()?;
         assert_eq!(
@@ -1321,11 +1597,13 @@ pub(super) mod tests {
         );
         let mut shell = fixture.evidence.shell.clone();
         shell.origin_url = "https://security.other-company.example/".into();
-        assert!(selected.google_targets(&shell).is_err());
+        assert!(selected.registration_targets(&shell).is_err());
         let old_credential = setup["client_credential"].clone();
         fixture.instance.control.as_mut().unwrap().secrets.insert(name("calendar_client"),
             serde_json::from_value(json!({"kind":"gcp_version","project_number":12345,"secret":"google_calendar","version":4}))?);
-        let changed = fixture.qualify()?.google_targets(&fixture.evidence.shell)?;
+        let changed = fixture
+            .qualify()?
+            .registration_targets(&fixture.evidence.shell)?;
         assert_ne!(
             changed[0].setup_description()?["client_credential"],
             old_credential
@@ -1340,7 +1618,7 @@ pub(super) mod tests {
         );
         shell = fixture.evidence.shell.clone();
         shell.qualification = Digest::of(&"substituted qualification")?;
-        assert!(selected.google_targets(&shell).is_err());
+        assert!(selected.registration_targets(&shell).is_err());
         let shared =
             fixture.instance.control.as_ref().unwrap().secrets[&name("attestation")].clone();
         fixture
@@ -1356,7 +1634,7 @@ pub(super) mod tests {
 
     #[test]
     fn app_projection_keeps_its_client_and_control_refs_without_sibling_artifacts() -> Result<()> {
-        let mut fixture = fixture(AccountBindingPolicy::ExplicitExternalAccount)?;
+        let mut fixture = reviewed_google_fixture()?;
         let sibling = fixture.instance.apps["workspace"].clone();
         let mut sibling = sibling;
         sibling.oauth_connections.clear();

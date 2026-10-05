@@ -58,6 +58,11 @@ const SEALED: &[(&str, &str, &str)] = &[
         "4c3316dd010c2c67cd4331fb2b7cd397dd054cdd7cec2abd776e97cbf66adfe4",
     ),
     (
+        "GitlabProjects.roc",
+        "",
+        "99e92a091091b6f9e197f296eac6eb22723a487f7a2957829f81febc75f6b2b6",
+    ),
+    (
         "SecurityAction.roc",
         "define",
         "141a28a1825246247d4ef2ccfd7d3a17054c555a723cf3fc0dbb0b17600a1856",

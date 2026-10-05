@@ -329,6 +329,7 @@ fn build_fixture(
             &root.join("fixtures/connection-declaration-conformance"),
         ),
         "oauth-calendar" => build(root, &root.join("fixtures/oauth-calendar-canary")),
+        "oauth-gitlab" => build(root, &root.join("fixtures/oauth-gitlab-canary")),
         "delegation-peer" => build_with_overrides(
             root,
             &root.join("fixtures/delegation-conformance"),
@@ -871,6 +872,7 @@ fn tests(
             "DAY2_TEST_CONNECTION_DECLARATION_ARTIFACT",
         ),
         ("oauth-calendar", "DAY2_TEST_OAUTH_CALENDAR_ARTIFACT"),
+        ("oauth-gitlab", "DAY2_TEST_OAUTH_GITLAB_ARTIFACT"),
         ("relational-next", "DAY2_TEST_RELATIONAL_NEXT_ARTIFACT"),
         ("http", "DAY2_TEST_HTTP_ARTIFACT"),
         ("owned", "DAY2_TEST_OWNED_ARTIFACT"),
@@ -970,6 +972,7 @@ fn receipt(
         let credential_metadata = artifact("credential-metadata")?;
         let connection_declaration = artifact("connection-declaration")?;
         let oauth_calendar = artifact("oauth-calendar")?;
+        let oauth_gitlab = artifact("oauth-gitlab")?;
         let app_ownership = artifact("app-ownership")?;
         let notifications = artifact("notifications")?;
         let baseline = artifact("relational")?;
@@ -989,6 +992,7 @@ fn receipt(
             "credential_metadata":artifact_id(&credential_metadata),
             "connection_declaration":artifact_id(&connection_declaration),
             "oauth_calendar":artifact_id(&oauth_calendar),
+            "oauth_gitlab":artifact_id(&oauth_gitlab),
             "app_ownership":artifact_id(&app_ownership), "notifications":artifact_id(&notifications),
             "collection":artifact_id(&collection),
             "owned":artifact_id(&owned), "owned_probe":artifact_id(&owned_probe),
@@ -1109,6 +1113,7 @@ fn required_steps(scope: &str) -> Result<&'static [&'static str]> {
             "build-credential-metadata",
             "build-connection-declaration",
             "build-oauth-calendar",
+            "build-oauth-gitlab",
             "build-delegation-peer",
             "build-stock-ledger",
             "build-request-desk",
@@ -1214,6 +1219,7 @@ mod tests {
             "build-credential-metadata",
             "build-connection-declaration",
             "build-oauth-calendar",
+            "build-oauth-gitlab",
             "build-redirect",
             "build-relational",
             "build-collection",

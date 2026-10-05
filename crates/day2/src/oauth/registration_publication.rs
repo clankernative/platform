@@ -187,7 +187,7 @@ pub(in crate::oauth) fn verify(
             && claim.requirement == target.permission.requirement
             && claim.logical_id == target.logical_id
             && claim.key_version == reference.version
-            && identity.subject == format!("accounts.google.com:{}", target.canary_subject),
+            && identity.subject == target.qualification_subject,
         "registration publication does not match selected canary or binding"
     );
     let signature = URL_SAFE_NO_PAD.decode(&proof.mac)?;
@@ -231,7 +231,7 @@ pub(in crate::oauth) fn verify(
 #[cfg(test)]
 pub(in crate::oauth) mod tests {
     use super::super::{
-        GoogleReadiness,
+        ProviderReadiness,
         tests::{Server, campaign, responses, session},
     };
     use super::*;
@@ -248,7 +248,7 @@ pub(in crate::oauth) mod tests {
 
     pub(in crate::oauth) fn fixture() -> Result<(admission::QualifiedConnections, Receipt)> {
         let (selected, shell) = admission::tests::publication_fixture()?;
-        let target = selected.google_targets(&shell)?.remove(0);
+        let target = selected.registration_targets(&shell)?.remove(0);
         let server = Server::new(responses())?;
         let mut native = session(target, &server)?;
         campaign(&mut native)?;
@@ -299,7 +299,7 @@ pub(in crate::oauth) mod tests {
                 world.script(responses(), None);
                 effects::scope(world.clone(), || {
                     let (selected, shell) = admission::tests::publication_fixture()?;
-                    let target = selected.google_targets(&shell)?.remove(0);
+                    let target = selected.registration_targets(&shell)?.remove(0);
                     let codes = crate::oauth::simulation::registration_codes(&target)?;
                     let mut native = registration::Session::new(
                         target,
@@ -486,7 +486,7 @@ pub(in crate::oauth) mod tests {
             evidence,
             available: AtomicBool::new(false),
         });
-        let readiness = GoogleReadiness::new(facts.clone());
+        let readiness = ProviderReadiness::new(facts.clone());
         readiness.publish(verify(
             &proof,
             "workspace",
@@ -516,7 +516,7 @@ pub(in crate::oauth) mod tests {
         )?)?;
         assert!(readiness.current(binding, &fixture.slot, now)?.is_none());
         assert!(
-            GoogleReadiness::new(facts)
+            ProviderReadiness::new(facts)
                 .current(binding, &fixture.slot, now)?
                 .is_none()
         );
