@@ -379,7 +379,10 @@ pub(in crate::oauth) fn responses() -> Vec<(u16, String)> {
         (200, secret_response()),
         (400, json!({"error":"invalid_grant"})),
         (200, token_response(false)),
-        (401, json!({"error":"invalid_client"})),
+        (
+            400,
+            json!({"error":"invalid_request","error_description":"client_secret is missing."}),
+        ),
         (200, token_response(false)),
         (200, account_response()),
         (200, token_response(true)),
@@ -598,6 +601,73 @@ fn live_wire_campaign_pins_client_callback_pkce_account_refresh_and_secret_versi
                 .contains(&format!("authorization: bearer {ACCESS_CANARY}"))
         );
     }
+    Ok(())
+}
+
+#[test]
+fn missing_client_secret_denial_is_specific_to_google_and_its_negative_probe() -> Result<()> {
+    for body in [
+        json!({"error":"invalid_client"}),
+        json!({"error":"unauthorized_client"}),
+        json!({"error":"invalid_request","error_description":"client_secret is missing."}),
+    ] {
+        let mut replies = responses();
+        replies[3] = (400, body.to_string());
+        let server = Server::new(replies)?;
+        let mut selected = session(fixture()?.target, &server)?;
+        campaign(&mut selected)?;
+        selected.finish()?;
+        assert_eq!(server.requests.lock().unwrap().len(), 9);
+    }
+
+    let mut denials = vec![
+        (401, json!({"error":"invalid_request","error_description":"client_secret is missing."})),
+        (400, json!({"error":"invalid_request"})),
+        (400, json!({"error":"invalid_request","error_description":"code is missing."})),
+        (400, json!({"error":"invalid_request","error_description":format!("client_secret is missing. {SECRET_CANARY}")})),
+        (400, json!({"error":"invalid_request","error_description":SECRET_CANARY})),
+        (400, json!({"error":"invalid_grant","error_description":"client_secret is missing."})),
+        (400, json!({"error":"invalid_request","error_description":"client_secret is missing.","access_token":ACCESS_CANARY})),
+    ];
+    for adapter in [catalog::Adapter::GoogleCalendar, catalog::Adapter::GitlabProjects] {
+        if adapter == catalog::Adapter::GitlabProjects {
+            denials.push((400, json!({"error":"invalid_request","error_description":"client_secret is missing."})));
+        }
+        for (status, denial) in &denials {
+            let (target, mut replies, index) = match adapter {
+                catalog::Adapter::GoogleCalendar => (fixture()?.target, responses(), 3),
+                catalog::Adapter::GitlabProjects => (gitlab_target()?, gitlab_responses(), 4),
+            };
+            replies[index] = (*status, denial.to_string());
+            let server = Server::new(replies)?;
+            let mut selected = session(target, &server)?;
+            for action in &ACTIONS[..3] {
+                selected.call(request(action))?;
+            }
+            let error = selected.call(request(ACTIONS[3])).unwrap_err();
+            let diagnostic = error.downcast_ref::<QualificationFailure>().unwrap();
+            assert_eq!(diagnostic.stage(), "reject_missing_client_credential");
+            for private in [CODE_CANARY, SECRET_CANARY, ACCESS_CANARY, REFRESH_CANARY, "client_secret is missing."] {
+                assert!(!format!("{error:#}").contains(private));
+            }
+            let count = server.requests.lock().unwrap().len();
+            assert_eq!(count, index + 1);
+            for action in ACTIONS {
+                assert!(selected.call(request(action)).is_err());
+            }
+            assert_eq!(server.requests.lock().unwrap().len(), count);
+            assert!(selected.finish().is_err());
+        }
+    }
+    let mut replies = responses();
+    replies[1] = (400, json!({"error":"invalid_request","error_description":"client_secret is missing."}).to_string());
+    let server = Server::new(replies)?;
+    let mut selected = session(fixture()?.target, &server)?;
+    selected.call(request(ACTIONS[0]))?;
+    let error = selected.call(request(ACTIONS[1])).unwrap_err();
+    assert_eq!(error.downcast_ref::<QualificationFailure>().unwrap().stage(), "reject_incorrect_pkce");
+    assert!(selected.finish().is_err());
+    assert_eq!(server.requests.lock().unwrap().len(), 2);
     Ok(())
 }
 

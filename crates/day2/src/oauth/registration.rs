@@ -633,7 +633,7 @@ impl Wire {
         struct Denial {
             error: String,
             #[serde(rename = "error_description")]
-            _description: Option<String>,
+            description: Option<String>,
             #[serde(rename = "error_uri")]
             _uri: Option<String>,
         }
@@ -641,10 +641,16 @@ impl Wire {
             .map_err(|_| ObservationFailure::Response)?;
         let classified = match purpose {
             Purpose::RejectPkce => denial.error == "invalid_grant",
-            Purpose::RejectCredential => matches!(
-                denial.error.as_str(),
-                "invalid_client" | "unauthorized_client"
-            ),
+            Purpose::RejectCredential => {
+                matches!(denial.error.as_str(), "invalid_client" | "unauthorized_client")
+                    // Google's confidential web client rejects an omitted
+                    // secret with this specific invalid_request response.
+                    // Other invalid requests do not prove client authentication.
+                    || (self.adapter == catalog::Adapter::GoogleCalendar
+                        && status == 400
+                        && denial.error == "invalid_request"
+                        && denial.description.as_deref() == Some("client_secret is missing."))
+            }
             Purpose::Positive => false,
         };
         if !classified {
