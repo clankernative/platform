@@ -659,7 +659,7 @@ fn glob_names(prefix: &str) -> &'static [&'static str] {
     match prefix {
         "std" => &["time", "env", "fs", "path", "thread", "process", "net"],
         "std::time" => &["SystemTime", "Instant"],
-        "std::path" => &["Path", "PathBuf", "Components", "Iter"],
+        "std::path" => &["Path", "PathBuf", "Components", "Iter", "absolute"],
         "time" => &["OffsetDateTime", "UtcDateTime"],
         "rustix" => &["time", "fs"],
         "rustix::fs" => &["open"],
@@ -2085,10 +2085,9 @@ impl<'a> Scanner<'a> {
                 if call.args.len() == 1 && value_wrapper_target(&origin) {
                     return self.origin(&call.args[0]);
                 }
-                // The actual Path UFCS operation has the same known PathBuf
-                // result as dot-call canonicalize. Do not lose later methods
-                // merely because the authored call uses the associated path.
-                if origin == "std::path::Path::canonicalize" {
+                // The selected free function has an actual PathBuf result;
+                // current-directory access is still inventoried at this call.
+                if origin == "std::path::absolute" {
                     return Some("std::path::PathBuf".to_owned());
                 }
                 if let Some((owner, method)) = origin.rsplit_once("::") {
@@ -2216,6 +2215,7 @@ impl<'a> Scanner<'a> {
             Expr::Call(call)
                 if self.origin(&call.func).is_some_and(|target| {
                     matches!(target.as_str(), "rand::rng" | "rand::thread_rng")
+                        || target == "std::path::absolute"
                         || target.starts_with("ureq::")
                             && matches!(
                                 target.rsplit("::").next(),
@@ -3591,8 +3591,17 @@ fn path_projection_type(target: &str) -> bool {
     matches!(target, "std::path::Components" | "std::path::Iter")
 }
 
+fn path_filesystem_method(method: &str) -> bool {
+    matches!(method,
+        "exists" | "try_exists" | "is_file" | "is_dir" | "is_symlink"
+            | "metadata" | "symlink_metadata" | "canonicalize" | "read_link" | "read_dir")
+}
+
 fn path_method_result(owner: &str, method: &str) -> Option<&'static str> {
     match method {
+        "canonicalize" | "read_link" if path_receiver_type(owner) => Some("std::path::PathBuf"),
+        "metadata" | "symlink_metadata" if path_receiver_type(owner) => Some("std::fs::Metadata"),
+        "read_dir" if path_receiver_type(owner) => Some("std::fs::ReadDir"),
         "components" if path_receiver_type(owner) => Some("std::path::Components"),
         "iter" if path_receiver_type(owner) => Some("std::path::Iter"),
         "as_path" if path_projection_type(owner) => Some("std::path::Path"),
@@ -3609,6 +3618,7 @@ fn ambient_receiver_type(target: &str) -> bool {
         target,
         "std::fs::File"
             | "std::fs::OpenOptions"
+            | "std::fs::ReadDir"
             | "tokio::fs::File"
             | "tokio::fs::OpenOptions"
             | "std::process::Command"
@@ -3648,9 +3658,9 @@ fn receiver_returns_data(origin: &str, method: &str) -> bool {
     // propagation. Other methods of an already known handle conservatively
     // retain it: this includes builders, open/clone and unmodeled transforms,
     // and is not a claim that every such result has the same Rust output type.
-    // canonicalize performs a filesystem read and returns another path. A
-    // later exists/canonicalize must retain its known receiver provenance.
-    if path_receiver_type(origin) && method == "canonicalize" {
+    // Only exact known return carriers retain receiver provenance. Completed
+    // Metadata/bool values must not inherit Path's filesystem predicates.
+    if path_method_result(origin, method).is_some_and(ambient_receiver_type) {
         return false;
     }
     // These exact Path projections return pure scalar/string DATA,
@@ -3786,6 +3796,7 @@ fn ambient_binding(target: &str) -> bool {
                 | "std::path::PathBuf"
                 | "std::path::Components"
                 | "std::path::Iter"
+                | "std::path::absolute"
                 | "rustix::fs"
                 | "rustix::fs::open"
         )
@@ -3893,11 +3904,12 @@ fn hazard(target: &str) -> Option<&'static str> {
     if target.starts_with("std::fs::") || target.starts_with("tokio::fs::") {
         return Some("filesystem");
     }
-    if matches!(
-        target,
-        "std::path::Path::exists" | "std::path::Path::canonicalize" | "rustix::fs::open"
-    ) {
+    if target == "rustix::fs::open"
+        || target.rsplit_once("::").is_some_and(|(owner, method)| owner == "std::path::Path" && path_filesystem_method(method)) {
         return Some("filesystem");
+    }
+    if target == "std::path::absolute" {
+        return Some("environment");
     }
     if matches!(
         target,
@@ -3984,7 +3996,7 @@ fn hazard(target: &str) -> Option<&'static str> {
 }
 
 fn method_hazard(origin: &str, method: &str) -> Option<&'static str> {
-    if path_receiver_type(origin) && matches!(method, "exists" | "canonicalize") {
+    if path_receiver_type(origin) && path_filesystem_method(method) {
         return Some("filesystem");
     }
     if matches!(
@@ -4284,6 +4296,44 @@ mod tests {
         let findings = scan("fn f(path: &std::path::Path) { let resolve = std::path::Path::canonicalize; let next = resolve(path).unwrap(); next.exists(); }");
         assert_eq!(findings.iter().filter(|finding| finding.target == "std::path::Path::canonicalize").map(|finding| finding.count).sum::<usize>(), 2, "{findings:?}");
         assert_eq!(findings.iter().filter(|finding| finding.target == "std::path::Path::exists").map(|finding| finding.count).sum::<usize>(), 1, "{findings:?}");
+        // Literal expected vocabulary is independent of the production helper.
+        // Rust1.98.1 path.rs forwards each method to a real filesystem read.
+        for method in ["exists", "try_exists", "is_file", "is_dir", "is_symlink",
+            "metadata", "symlink_metadata", "canonicalize", "read_link", "read_dir"] {
+            let target = format!("std::path::Path::{method}");
+            for source in [
+                format!("fn f(path: &std::path::Path) {{ std::path::Path::{method}(path); }}"),
+                format!("use std::path::Path as Location; fn f(path: &Location) {{ path.{method}(); }}"),
+                format!("fn f(path: &r#std::r#path::r#Path) {{ path.r#{method}(); }}"),
+                format!("fn f() {{ std::path::PathBuf::from(\"a\").{method}(); }}"),
+            ] {
+                let findings = scan(&source);
+                assert_eq!(findings.len(), 1, "{source}: {findings:?}");
+                assert_eq!(findings[0].target, target, "{source}: {findings:?}");
+                assert_eq!(findings[0].kind, "filesystem");
+                assert_eq!(findings[0].count, 1);
+            }
+        }
+        for source in [
+            "fn f(path: &std::path::Path) { let next = path.read_link().unwrap(); next.exists(); }",
+            "fn f(path: &std::path::Path) { let next = std::path::Path::read_link(path).unwrap(); next.exists(); }",
+            "use std::path::Path as Location; fn f(path: &Location) { let next = Location::read_link(path).unwrap(); next.exists(); }",
+        ] {
+            let findings = scan(source);
+            assert_eq!(findings.len(), 2, "{source}: {findings:?}");
+            assert!(findings.iter().all(|finding| finding.count == 1), "{source}: {findings:?}");
+            assert_eq!(findings.iter().map(|finding| finding.target.as_str()).collect::<BTreeSet<_>>(), BTreeSet::from(["std::path::Path::read_link", "std::path::Path::exists"]), "{source}: {findings:?}");
+        }
+        for source in [
+            "fn f() { let next = std::path::absolute(\"relative\").unwrap(); next.exists(); }",
+            "use std::path::absolute as resolve; fn f() { let next = resolve(\"relative\").unwrap(); next.exists(); }",
+            "fn f() { let next = r#std::r#path::r#absolute(\"relative\").unwrap(); next.r#exists(); }",
+        ] {
+            let findings = scan(source);
+            assert_eq!(findings.len(), 2, "{source}: {findings:?}");
+            assert!(findings.iter().any(|finding| finding.target == "std::path::absolute" && finding.kind == "environment" && finding.count == 1), "{source}: {findings:?}");
+            assert!(findings.iter().any(|finding| finding.target == "std::path::Path::exists" && finding.kind == "filesystem" && finding.count == 1), "{source}: {findings:?}");
+        }
         for source in [
             "fn f(path: &std::path::Path) { path.components().as_path().exists(); }",
             "fn f(path: &std::path::Path) { std::path::Path::components(path).as_path().exists(); }",
@@ -4321,8 +4371,9 @@ mod tests {
             "use super::Location; fn f(path: &Location) { path.canonicalize(); }",
             "fn f(path: &std::path::Path) { super::Location::exists(path); }",
             "use super::read_input; fn f() { read_input(\"a\", flags(), mode()); }",
+            "use super::resolve; fn f() { resolve(\"relative\"); }",
         ] {
-            let directory = fixture("use std::path::Path as Location; use rustix::fs::open as read_input; mod child;");
+            let directory = fixture("use std::path::Path as Location; use std::path::absolute as resolve; use rustix::fs::open as read_input; mod child;");
             fs::write(directory.path().join("crates/fixture/src/child.rs"), child).unwrap();
             let error = inventory(directory.path()).unwrap_err().to_string();
             assert!(error.contains("unresolved parent ambient imports"), "{child}: {error}");
@@ -4338,6 +4389,8 @@ mod tests {
             "fn f() { #[cfg(unix)] let path = std::path::Path::new(\"a\").canonicalize().unwrap(); path.exists(); }",
             "fn f(path: &std::path::Path) { #[cfg(unix)] let parts = path.components(); parts.as_path().exists(); }",
             "fn f(path: &std::path::Path) { #[cfg(unix)] let parts = std::path::Path::iter(path); parts.as_path().exists(); }",
+            "fn f() { #[cfg(unix)] let path = std::path::absolute(\"relative\").unwrap(); path.exists(); }",
+            "fn f(path: &std::path::Path) { #[cfg(unix)] let entries = path.read_dir().unwrap(); entries.next(); }",
         ] {
             let error = inventory(fixture(source).path()).unwrap_err().to_string();
             assert!(error.contains("conditional ambient local bindings"), "{source}: {error}");
@@ -4393,6 +4446,29 @@ mod tests {
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert_eq!(findings[0].target, "std::path::Path::exists");
         assert_eq!(findings[0].count, 1);
+        for method in ["metadata", "symlink_metadata"] {
+            for source in [
+                format!("fn f(path: &std::path::Path) {{ let facts = path.{method}().unwrap(); facts.is_file(); facts.is_dir(); facts.is_symlink(); }}"),
+                format!("fn f(path: &std::path::Path) {{ let facts = std::path::Path::{method}(path).unwrap(); facts.is_file(); facts.is_dir(); facts.is_symlink(); }}"),
+                format!("fn f(path: &std::path::Path) {{ #[cfg(unix)] let facts = path.{method}().unwrap(); facts.is_file(); }}"),
+            ] {
+                let findings = scan(&source);
+                assert_eq!(findings.len(), 1, "{source}: {findings:?}");
+                assert_eq!(findings[0].target, format!("std::path::Path::{method}"), "{source}: {findings:?}");
+                assert_eq!(findings[0].count, 1);
+            }
+        }
+        // ReadDir is a known non-Path output, not a guessed Path receiver.
+        // This does not model arbitrary Iterator adapters or per-entry returns.
+        for source in [
+            "fn f(path: &std::path::Path) { let entries = path.read_dir().unwrap(); entries.size_hint(); }",
+            "fn f(path: &std::path::Path) { let entries = std::path::Path::read_dir(path).unwrap(); entries.size_hint(); }",
+        ] {
+            let findings = scan(source);
+            assert_eq!(findings.len(), 1, "{source}: {findings:?}");
+            assert_eq!(findings[0].target, "std::path::Path::read_dir");
+            assert_eq!(findings[0].count, 1);
+        }
     }
 
     #[test]
@@ -4417,6 +4493,22 @@ mod tests {
             let error = check(directory.path()).unwrap_err().to_string();
             assert!(error.contains("unreviewed filesystem") && error.contains(target), "{source}: {error}");
         }
+        for method in ["exists", "try_exists", "is_file", "is_dir", "is_symlink",
+            "metadata", "symlink_metadata", "canonicalize", "read_link", "read_dir"] {
+            let directory = fixture("pub fn pure(value: &str) -> usize { value.len() }");
+            let rules = reviewed(&inventory(directory.path()).unwrap());
+            fs::write(directory.path().join(RULES_FILE), serde_json::to_vec(&rules).unwrap()).unwrap();
+            let source = format!("pub fn filesystem_fact(path: &std::path::Path) {{ path.{method}(); }}");
+            fs::write(directory.path().join("crates/fixture/src/lib.rs"), &source).unwrap();
+            let error = check(directory.path()).unwrap_err().to_string();
+            assert!(error.contains("unreviewed filesystem") && error.contains(&format!("std::path::Path::{method}")), "{source}: {error}");
+        }
+        let directory = fixture("pub fn pure(value: &str) -> usize { value.len() }");
+        let rules = reviewed(&inventory(directory.path()).unwrap());
+        fs::write(directory.path().join(RULES_FILE), serde_json::to_vec(&rules).unwrap()).unwrap();
+        fs::write(directory.path().join("crates/fixture/src/lib.rs"), "pub fn current_directory_fact() { std::path::absolute(\"relative\"); }").unwrap();
+        let error = check(directory.path()).unwrap_err().to_string();
+        assert!(error.contains("unreviewed environment") && error.contains("std::path::absolute"), "{error}");
     }
 
     fn scan_syntax(syntax: syn::File) -> Vec<Finding> {
