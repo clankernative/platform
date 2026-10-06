@@ -2,6 +2,11 @@
 //! linker search path; Linux system inputs come from the reviewed build image.
 use super::*;
 use serde_json::Value;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 /// The historical macOS backport's semantic base. No official pin selects it.
 const SEMANTIC_VERSION: &str = "nightly-2026-09-05-b195f5b";

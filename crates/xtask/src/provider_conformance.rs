@@ -3,10 +3,11 @@ use super::*;
 use day2_control::provider_conformance::{FileToken, LiveProbe, Profile, Session};
 use serde::Serialize;
 use std::{
-    fs::{File, OpenOptions},
+    fs::{self, File, OpenOptions},
     io::{Read, Write},
     num::NonZeroU64,
     os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
+    path::{Path, PathBuf},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };

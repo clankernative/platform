@@ -1,6 +1,10 @@
 //! CLI adapter only. The private Roc recipe owns campaign iteration and order.
 use super::*;
 use day2_control::simulation_campaign::{self, Session};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 pub fn session(root: &Path, seed: u64, cases: u32) -> Result<Session> {
     ensure!(

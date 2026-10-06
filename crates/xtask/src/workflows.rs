@@ -1,6 +1,11 @@
 //! Bootstrap only: compile the private Roc runner using the pinned compiler.
 //! Source hashes prevent an old executable silently running a new recipe.
 use super::*;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 pub fn build(root: &Path) -> Result<PathBuf> {
     let executable = root.join("target/debug/day2-workflows");

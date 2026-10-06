@@ -1,7 +1,12 @@
 //! The host owns long-lived transport; each query evaluation remains bounded.
 use super::*;
 use crate::{authority_state::AuthorityStamp, error::Failure, web_templates};
-use std::time::Instant;
+use axum::{
+    body::Body,
+    http::{HeaderMap, StatusCode, header},
+    response::Response,
+};
+use std::time::{Duration, Instant};
 use std::{
     pin::Pin,
     task::{Context as TaskContext, Poll},
