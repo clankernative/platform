@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use day2_control::{
     BindingRef, BuildPlan, Digest, GitOid, Name,
     contracts::BuildProfile,
@@ -643,15 +643,28 @@ fn concurrent_openers_upgrade_once_without_losing_rows_or_receipts() -> Result<(
             let barrier = barrier.clone();
             std::thread::spawn(move || -> Result<()> {
                 barrier.wait();
-                let mut journal = Journal::open(&path)?;
-                journal.dispatched(&id, "workflow", "later-run")?;
-                assert_eq!(journal.event_count(&id)?, 1);
+                let mut journal = Journal::open(&path).context("concurrent upgrade opener")?;
+                journal
+                    .dispatched(&id, "workflow", "later-run")
+                    .context("concurrent upgrade dispatch receipt")?;
+                assert_eq!(
+                    journal
+                        .event_count(&id)
+                        .context("concurrent upgrade event count")?,
+                    1
+                );
                 Ok(())
             })
         })
         .collect::<Vec<_>>();
-    for worker in workers {
-        worker.join().unwrap()?;
+    // Join every opener even when one fails, so the captured failure cannot
+    // leave another thread using storage after this case returns.
+    let outcomes = workers
+        .into_iter()
+        .map(|worker| worker.join())
+        .collect::<Vec<_>>();
+    for outcome in outcomes {
+        outcome.unwrap()?;
     }
     assert_eq!(version(&Connection::open(&path)?)?, 3);
     let mut journal = Journal::open(&path)?;

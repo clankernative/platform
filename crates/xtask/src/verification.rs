@@ -548,7 +548,7 @@ fn cached_fixture(root: &Path, artifact: &str) -> Result<Option<PathBuf>> {
     let loaded = day2::artifact::LoadedArtifact::load(&directory)?;
     ensure!(loaded.id() == artifact, "cached artifact identity changed");
     let evidence: serde_json::Value =
-        day2::json::decode(&fs::read(directory.join("verification.json"))?)?;
+        day2::json::decode_evidence(&fs::read(directory.join("verification.json"))?)?;
     ensure!(
         evidence["artifact"] == loaded.id()
             && evidence["verification_complete"] == true

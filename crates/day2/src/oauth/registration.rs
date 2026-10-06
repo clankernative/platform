@@ -25,6 +25,179 @@ use url::Url;
 const MAX_RESPONSE: usize = 32 * 1024;
 const VALID_SECONDS: i64 = 300;
 
+/// Closed operator diagnostics, never provider bodies or an arbitrary error chain.
+/// These facts explain a refusal; they cannot establish registration readiness.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::oauth) enum QualificationStage {
+    Setup,
+    Callback,
+    CredentialLoad,
+    RejectPkce,
+    VerifyPkce,
+    RejectCredential,
+    Exchange,
+    Account,
+    Refresh,
+    RefreshedAccount,
+    CredentialRecheck,
+    Workflow,
+    Selection,
+    ShellReadiness,
+    Publication,
+    Receipt,
+}
+
+impl QualificationStage {
+    pub(in crate::oauth) fn code(self) -> &'static str {
+        match self {
+            Self::Setup => "campaign_setup",
+            Self::Callback => "callback_validation",
+            Self::CredentialLoad => "client_credential_load",
+            Self::RejectPkce => "reject_incorrect_pkce",
+            Self::VerifyPkce => "verify_correct_pkce",
+            Self::RejectCredential => "reject_missing_client_credential",
+            Self::Exchange => "authorization_code_exchange",
+            Self::Account => "account_identity",
+            Self::Refresh => "token_refresh",
+            Self::RefreshedAccount => "refreshed_account_identity",
+            Self::CredentialRecheck => "client_credential_recheck",
+            Self::Workflow => "native_workflow",
+            Self::Selection => "current_selection",
+            Self::ShellReadiness => "shell_readiness",
+            Self::Publication => "owning_app_publication",
+            Self::Receipt => "registration_receipt",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ObservationFailure {
+    Refused,
+    Network,
+    Response,
+    ProviderStatus(u16, ProviderDenial),
+    Contract,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProviderDenial {
+    InvalidGrant,
+    InvalidClient,
+    InvalidRequest,
+    UnauthorizedClient,
+    InvalidScope,
+    AccessDenied,
+    AdminPolicy,
+    Other,
+}
+
+impl ProviderDenial {
+    fn from_code(code: &str) -> Self {
+        match code {
+            "invalid_grant" => Self::InvalidGrant,
+            "invalid_client" => Self::InvalidClient,
+            "invalid_request" => Self::InvalidRequest,
+            "unauthorized_client" => Self::UnauthorizedClient,
+            "invalid_scope" => Self::InvalidScope,
+            "access_denied" => Self::AccessDenied,
+            "admin_policy_enforced" => Self::AdminPolicy,
+            _ => Self::Other,
+        }
+    }
+
+    fn code(self) -> &'static str {
+        match self {
+            Self::InvalidGrant => "invalid_grant",
+            Self::InvalidClient => "invalid_client",
+            Self::InvalidRequest => "invalid_request",
+            Self::UnauthorizedClient => "unauthorized_client",
+            Self::InvalidScope => "invalid_scope",
+            Self::AccessDenied => "access_denied",
+            Self::AdminPolicy => "admin_policy_enforced",
+            Self::Other => "other",
+        }
+    }
+}
+
+impl ObservationFailure {
+    fn provider(response: Response) -> Self {
+        let status = response.status().as_u16();
+        #[derive(Deserialize)]
+        struct DenialCode {
+            error: String,
+        }
+        let denial = if status >= 400 {
+            bounded_body(response)
+                .ok()
+                .and_then(|bytes| crate::json::decode::<DenialCode>(&bytes).ok())
+                .map(|denial| ProviderDenial::from_code(&denial.error))
+                .unwrap_or(ProviderDenial::Other)
+        } else {
+            ProviderDenial::Other
+        };
+        Self::ProviderStatus(status, denial)
+    }
+}
+
+impl std::fmt::Display for ObservationFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Refused => formatter.write_str("refused"),
+            Self::Network => formatter.write_str("network_unavailable"),
+            Self::Response => formatter.write_str("invalid_provider_response"),
+            Self::ProviderStatus(status, denial) => {
+                write!(formatter, "provider_http_{status}_{}", denial.code())
+            }
+            Self::Contract => formatter.write_str("provider_contract_mismatch"),
+        }
+    }
+}
+
+impl std::error::Error for ObservationFailure {}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::oauth) struct QualificationFailure {
+    stage: QualificationStage,
+    observation: ObservationFailure,
+}
+
+impl QualificationFailure {
+    pub(in crate::oauth) fn at(stage: QualificationStage, error: anyhow::Error) -> anyhow::Error {
+        if let Some(failure) = error.downcast_ref::<Self>() {
+            return (*failure).into();
+        }
+        Self {
+            stage,
+            observation: error
+                .downcast_ref::<ObservationFailure>()
+                .copied()
+                .unwrap_or(ObservationFailure::Refused),
+        }
+        .into()
+    }
+
+    pub(in crate::oauth) fn stage(&self) -> &'static str {
+        self.stage.code()
+    }
+
+    pub(in crate::oauth) fn outcome(&self) -> String {
+        self.observation.to_string()
+    }
+}
+
+impl std::fmt::Display for QualificationFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "OAuth qualification failed at {}: {}",
+            self.stage(),
+            self.observation
+        )
+    }
+}
+
+impl std::error::Error for QualificationFailure {}
+
 /// Public metadata for one exact registration canary. It cannot assert that a
 /// redirect is registered or that any key, shell, account mapping or host is ready.
 #[derive(Clone)]
@@ -410,18 +583,26 @@ impl Wire {
             .post(self.token.clone())
             .form(form)
             .send()
-            .map_err(|_| anyhow::anyhow!("Provider token observation unavailable; do not retry"))?;
-        self.adapter.tokens(
-            &body(response)?,
-            catalog::TokenContext {
-                reviewed: &target.reviewed,
-                permission: &target.permission,
-                client_id: &target.client_id,
-                subject: &target.canary_subject,
-            },
-            refresh,
-            self,
-        )
+            .map_err(|_| ObservationFailure::Network)?;
+        self.adapter
+            .tokens(
+                &body(response)?,
+                catalog::TokenContext {
+                    reviewed: &target.reviewed,
+                    permission: &target.permission,
+                    client_id: &target.client_id,
+                    subject: &target.canary_subject,
+                },
+                refresh,
+                self,
+            )
+            .map_err(|error| {
+                if error.downcast_ref::<ObservationFailure>().is_some() {
+                    error
+                } else {
+                    ObservationFailure::Contract.into()
+                }
+            })
     }
 
     pub(super) fn token_info(&self, access: &str) -> Result<Vec<u8>> {
@@ -432,7 +613,7 @@ impl Wire {
             .get(self.adapter.token_info(&self.token)?)
             .header(AUTHORIZATION, authorization)
             .send()
-            .map_err(|_| anyhow::anyhow!("provider token evidence unavailable; do not retry"))?;
+            .map_err(|_| ObservationFailure::Network)?;
         body(info)
     }
 
@@ -442,39 +623,48 @@ impl Wire {
             .post(self.token.clone())
             .form(form)
             .send()
-            .map_err(|_| anyhow::anyhow!("Provider negative canary unavailable; do not retry"))?;
+            .map_err(|_| ObservationFailure::Network)?;
         let allowed_status = match purpose {
             Purpose::RejectPkce => response.status().as_u16() == 400,
             Purpose::RejectCredential => matches!(response.status().as_u16(), 400 | 401),
             Purpose::Positive => false,
         };
-        ensure!(
-            allowed_status,
-            "Provider accepted or failed to classify a negative canary"
-        );
-        let raw = bounded_body(response)?;
+        if !allowed_status {
+            return Err(ObservationFailure::provider(response).into());
+        }
+        let status = response.status().as_u16();
+        let raw = bounded_body(response).map_err(|_| ObservationFailure::Response)?;
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Denial {
             error: String,
             #[serde(rename = "error_description")]
-            _description: Option<String>,
+            description: Option<String>,
             #[serde(rename = "error_uri")]
             _uri: Option<String>,
         }
-        let denial: Denial = crate::json::decode(&raw)
-            .map_err(|_| anyhow::anyhow!("invalid provider negative canary"))?;
-        ensure!(
-            match purpose {
-                Purpose::RejectPkce => denial.error == "invalid_grant",
-                Purpose::RejectCredential => matches!(
-                    denial.error.as_str(),
-                    "invalid_client" | "unauthorized_client"
-                ),
-                Purpose::Positive => false,
-            },
-            "Provider negative canary did not establish the required obligation"
-        );
+        let denial: Denial = crate::json::decode(&raw).map_err(|_| ObservationFailure::Response)?;
+        let classified = match purpose {
+            Purpose::RejectPkce => denial.error == "invalid_grant",
+            Purpose::RejectCredential => {
+                matches!(denial.error.as_str(), "invalid_client" | "unauthorized_client")
+                    // Google's confidential web client rejects an omitted
+                    // secret with this specific invalid_request response.
+                    // Other invalid requests do not prove client authentication.
+                    || (self.adapter == catalog::Adapter::GoogleCalendar
+                        && status == 400
+                        && denial.error == "invalid_request"
+                        && denial.description.as_deref() == Some("client_secret is missing."))
+            }
+            Purpose::Positive => false,
+        };
+        if !classified {
+            return Err(ObservationFailure::ProviderStatus(
+                status,
+                ProviderDenial::from_code(&denial.error),
+            )
+            .into());
+        }
         Ok(())
     }
 
@@ -490,12 +680,14 @@ impl Wire {
             .get(self.userinfo.clone())
             .header(AUTHORIZATION, authorization)
             .send()
-            .map_err(|_| anyhow::anyhow!("Provider account observation unavailable"))?;
-        self.adapter.account(
-            &body(response)?,
-            &target.canary_subject,
-            &target.canary_tenant,
-        )
+            .map_err(|_| ObservationFailure::Network)?;
+        self.adapter
+            .account(
+                &body(response)?,
+                &target.canary_subject,
+                &target.canary_tenant,
+            )
+            .map_err(|_| ObservationFailure::Contract.into())
     }
 
     #[cfg(test)]
@@ -516,11 +708,10 @@ impl Wire {
 }
 
 fn body(response: Response) -> Result<Vec<u8>> {
-    ensure!(
-        response.status().as_u16() == 200,
-        "Provider qualification rejected; do not retry"
-    );
-    bounded_body(response)
+    if response.status().as_u16() != 200 {
+        return Err(ObservationFailure::provider(response).into());
+    }
+    bounded_body(response).map_err(|_| ObservationFailure::Response.into())
 }
 
 fn bounded_body(response: Response) -> Result<Vec<u8>> {
@@ -560,6 +751,23 @@ enum Step {
     Seal,
     Complete,
     Failed,
+}
+
+impl Step {
+    fn diagnostic(self) -> QualificationStage {
+        match self {
+            Self::Open => QualificationStage::CredentialLoad,
+            Self::RejectPkce => QualificationStage::RejectPkce,
+            Self::VerifyPkce => QualificationStage::VerifyPkce,
+            Self::RejectCredential => QualificationStage::RejectCredential,
+            Self::Exchange => QualificationStage::Exchange,
+            Self::Account => QualificationStage::Account,
+            Self::Refresh => QualificationStage::Refresh,
+            Self::RefreshedAccount => QualificationStage::RefreshedAccount,
+            Self::Seal => QualificationStage::CredentialRecheck,
+            Self::Complete | Self::Failed => QualificationStage::Workflow,
+        }
+    }
 }
 
 pub(crate) struct Session {
@@ -642,6 +850,7 @@ impl Session {
         &mut self,
         request: crate::automation::Request,
     ) -> Result<serde_json::Value> {
+        let stage = self.step.diagnostic();
         let result = self.step(request);
         if result.is_err() {
             self.step = Step::Failed;
@@ -650,9 +859,7 @@ impl Session {
             self.tokens = None;
             self.receipt = None;
         }
-        result.map_err(|_| {
-            anyhow::anyhow!("Provider registration qualification failed; start a new canary")
-        })
+        result.map_err(|error| QualificationFailure::at(stage, error))
     }
 
     fn step(&mut self, request: crate::automation::Request) -> Result<serde_json::Value> {
@@ -900,11 +1107,26 @@ impl Session {
     }
 
     pub(crate) fn run(mut self, runner: &Path) -> Result<Receipt> {
-        let runner = crate::automation::checked_runner(runner)?;
-        crate::automation::run(&runner, &["oauth-registration"], |request| {
-            self.call(request)
+        let runner = crate::automation::checked_runner(runner)
+            .map_err(|error| QualificationFailure::at(QualificationStage::Workflow, error))?;
+        // The Roc transport carries text, not native error types. Keep only the
+        // closed diagnostic locally so that workflow failure cannot erase it.
+        let mut failure = None;
+        let result = crate::automation::run(&runner, &["oauth-registration"], |request| {
+            let result = self.call(request);
+            if failure.is_none()
+                && let Err(error) = &result
+            {
+                failure = error.downcast_ref::<QualificationFailure>().copied();
+            }
+            result
+        });
+        result.map_err(|error| match failure {
+            Some(failure) => failure.into(),
+            None => QualificationFailure::at(QualificationStage::Workflow, error),
         })?;
         self.finish()
+            .map_err(|error| QualificationFailure::at(QualificationStage::Receipt, error))
     }
 }
 

@@ -409,17 +409,27 @@ impl Journal {
     }
 
     pub fn open(path: &Path) -> Result<Self> {
-        let mut connection = Connection::open(path)?;
-        connection.busy_timeout(Duration::from_secs(5))?;
-        connection.execute_batch(
-            "PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;",
-        )?;
-        bounded_control_admission(&mut connection, initialize_control_schema)?;
+        let mut connection = Connection::open(path).context("open writable control journal")?;
+        connection
+            .busy_timeout(Duration::from_secs(5))
+            .context("set writable control journal busy timeout")?;
+        day2::write_queue::configure_journal(&mut connection)
+            .context("configure writable control journal")?;
+        bounded_control_admission(&mut connection, initialize_control_schema)
+            .context("admit writable control journal schema")?;
         let mut journal = Self { connection };
-        journal.initialize_release_schema()?;
-        journal.initialize_release_execution_schema()?;
-        journal.initialize_runtime_secret_schema()?;
-        journal.initialize_secret_retirement_schema()?;
+        journal
+            .initialize_release_schema()
+            .context("initialize control release schema")?;
+        journal
+            .initialize_release_execution_schema()
+            .context("initialize control release execution schema")?;
+        journal
+            .initialize_runtime_secret_schema()
+            .context("initialize control runtime secret schema")?;
+        journal
+            .initialize_secret_retirement_schema()
+            .context("initialize control secret retirement schema")?;
         Ok(journal)
     }
 

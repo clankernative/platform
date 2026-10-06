@@ -596,6 +596,7 @@ fn legacy_evidence_schema_is_never_promoted_to_qualified_proof() {
         Journal::open(&path)
             .err()
             .unwrap()
+            .root_cause()
             .to_string()
             .contains("explicit evidence migration required")
     );
@@ -1143,6 +1144,7 @@ fn existing_approvals_without_consumer_registry_require_explicit_migration() {
         .expect("untracked legacy release must fail closed");
     assert!(
         error
+            .root_cause()
             .to_string()
             .contains("explicit runtime secret consumer migration"),
         "{error:#}"
