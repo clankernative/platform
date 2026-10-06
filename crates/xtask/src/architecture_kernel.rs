@@ -3,6 +3,7 @@
 //! macro expansion, and transitive dependency effects still require review.
 
 use anyhow::{Context, Result, bail, ensure};
+use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -132,6 +133,10 @@ fn admit_clippy_diagnostic(bytes: &[u8]) -> Result<()> {
 
 fn clippy_command(root: &Path, packages: &[StrictCrate<'_>]) -> Result<Command> {
     let config = root.join("architecture").canonicalize()?;
+    let target = strict_target_dir(
+        config.parent().context("strict compiler workspace")?,
+        packages,
+    );
     let mut command = Command::new("cargo");
     command.current_dir(root).env("CLIPPY_CONF_DIR", config);
     command.args([
@@ -143,12 +148,30 @@ fn clippy_command(root: &Path, packages: &[StrictCrate<'_>]) -> Result<Command> 
         "--lib",
         "--no-deps",
     ]);
+    command.arg("--target-dir").arg(target);
     for package in packages {
         command.args(["-p", package.name]);
     }
     pin_lint_flags(&mut command);
     command.args(["--", "--cap-lints=forbid", "-Dwarnings"]);
     Ok(command)
+}
+
+fn strict_target_dir(root: &Path, packages: &[StrictCrate<'_>]) -> PathBuf {
+    // Clippy's --no-deps changes linting according to CARGO_PRIMARY_PACKAGE,
+    // which is not a source dependency in cached dependency-only compilations.
+    // Keep those artifacts separate from any different primary package set.
+    // Names have already passed the bounded, unique inventory check above.
+    let names: BTreeSet<_> = packages.iter().map(|package| package.name).collect();
+    let mut digest = Sha256::new();
+    digest.update(b"day2-strict-clippy-selection-v1\0");
+    for name in names {
+        digest.update((name.len() as u64).to_le_bytes());
+        digest.update(name.as_bytes());
+    }
+    root.join("target")
+        .join("strict-clippy")
+        .join(format!("{:x}", digest.finalize()))
 }
 
 fn pin_lint_flags(command: &mut Command) {
@@ -668,6 +691,30 @@ mod tests {
     }
 
     #[test]
+    fn strict_target_partition_pins_exact_primary_selection() {
+        let root = Path::new("workspace");
+        let partition = |names: &[&str]| {
+            let packages: Vec<_> = names
+                .iter()
+                .map(|name| StrictCrate {
+                    name,
+                    source: "src/lib.rs",
+                    kernel: false,
+                })
+                .collect();
+            strict_target_dir(root, &packages)
+        };
+        let full = partition(&["boundary-fixture", "boundary-contract"]);
+        assert_eq!(full, partition(&["boundary-contract", "boundary-fixture"]));
+        assert_ne!(full, partition(&["boundary-fixture"]));
+        assert_ne!(full, partition(&["boundary-fixture", "different-contract"]));
+        assert_ne!(partition(&["ab", "c"]), partition(&["a", "bc"]));
+        assert!(full.starts_with(root.join("target/strict-clippy")));
+        let digest = full.file_name().unwrap().to_str().unwrap();
+        assert!(digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    }
+
+    #[test]
     fn real_clippy_rejects_typed_path_effects_through_strict_contract_dependency() -> Result<()> {
         let fixture = path_contract_fixture()?;
         let packages = [
@@ -845,18 +892,37 @@ mod tests {
         }
         // Selecting the entire strict graph also refuses the contract's native
         // handle exposure, independently of whether a caller advances it.
-        fs::write(
-            fixture.path().join("src/lib.rs"),
-            format!(
-                "#![no_std]\n{ATTRIBUTES}pub fn pure() -> bool {{ boundary_contract::pure() }}"
-            ),
-        )?;
-        let rejection = check(fixture.path(), &packages).unwrap_err().to_string();
-        ensure!(
-            rejection.contains("clippy::disallowed_types")
-                && rejection.contains("std::fs::ReadDir"),
-            "strict contract exported a directory iterator: {rejection}"
-        );
+        // Repeat the role transition without rewriting the contract: an
+        // unlinted dependency artifact cannot satisfy later primary linting.
+        for round in 0..2 {
+            fs::write(
+                fixture.path().join("src/lib.rs"),
+                format!(
+                    "#![no_std]\n{ATTRIBUTES}pub fn pure() -> bool {{ boundary_contract::pure() }}"
+                ),
+            )?;
+            let rejection = check(fixture.path(), &packages).unwrap_err().to_string();
+            ensure!(
+                rejection.contains("clippy::disallowed_types")
+                    && rejection.contains("std::fs::ReadDir"),
+                "strict contract exported a directory iterator in round {round}: {rejection}"
+            );
+            if round == 0 {
+                fs::write(
+                    fixture.path().join("src/lib.rs"),
+                    format!(
+                        "#![no_std]\n{ATTRIBUTES}pub fn advance(entries: &mut boundary_contract::Directory) -> bool {{ entries.next().is_some() }}"
+                    ),
+                )?;
+                let rejection = check(fixture.path(), &packages[..1]).unwrap_err().to_string();
+                ensure!(
+                    rejection.contains("clippy::disallowed_types")
+                        && rejection.contains("std::fs::ReadDir")
+                        && rejection.contains(" --> src/lib.rs:"),
+                    "wrong repeated caller-only directory rejection: {rejection}"
+                );
+            }
+        }
         // A wholly inferred handle acquired via a reexport is rejected at its
         // already-banned acquisition. This is a method-lint control, not an
         // inferred-type guarantee; known advancement is also source-scanned.
