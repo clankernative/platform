@@ -462,6 +462,50 @@ fn created_origin_does_not_refresh_cas_or_override_current_operator_authority() 
     Ok(())
 }
 
+#[test]
+fn legacy_pages_exclude_tombstones_before_counting_visible_rows() -> Result<()> {
+    let db = Connection::open_in_memory()?;
+    let schema = fixture(&db)?;
+    db.execute_batch(
+        "INSERT INTO children(id,version,created_at,owner,status,deleted_at) VALUES \
+        (1,2,0,'alice','pending',100),(2,1,0,'alice','pending',0), \
+        (3,1,0,'alice','pending',0),(4,1,0,'bob','pending',0)",
+    )?;
+    let current = request("current");
+    let page = |after| -> Result<Value> {
+        let instruction = Instruction {
+            kind: "page".into(),
+            model: "children".into(),
+            after,
+            limit: 1,
+            ..Instruction::default()
+        };
+        Ok(serde_json::from_str(&effect(
+            &db,
+            &schema,
+            "installation-a",
+            &current,
+            &instruction,
+            &policy()?,
+            "change",
+        )?)?)
+    };
+    let first = page(Id::default())?;
+    assert_eq!(first["items"].as_array().context("first page")?.len(), 1);
+    assert_eq!(first["items"][0]["id"], 2);
+    assert_eq!(first["has_more"], true);
+    assert_eq!(first["next_after"], 2);
+    let second = page(Id::Legacy(2))?;
+    assert_eq!(second["items"].as_array().context("second page")?.len(), 1);
+    assert_eq!(second["items"][0]["id"], 3);
+    assert_eq!(second["has_more"], false);
+    assert_eq!(second["next_after"], 3);
+    let last = page(Id::Legacy(3))?;
+    assert!(last["items"].as_array().context("last page")?.is_empty());
+    assert_eq!(last["has_more"], false);
+    Ok(())
+}
+
 /// Deletion is a state the row is in, not a row that stopped existing.
 ///
 /// The whole point of the platform's stance is that an application cannot lose
@@ -512,6 +556,18 @@ fn a_soft_deleted_row_leaves_every_read_until_a_restore_brings_it_back() -> Resu
         result
     };
 
+    let page = Instruction {
+        kind: "page".into(),
+        model: "children".into(),
+        limit: 1,
+        ..Instruction::default()
+    };
+    let live_page: Value = serde_json::from_str(&run(&mut current, &page)?)?;
+    assert_eq!(
+        live_page["items"].as_array().context("page items")?.len(),
+        1
+    );
+
     // Declaring the delete is enough to declare the undo, and an operation
     // that declared neither cannot reach either.
     let declared = declaration("soft_delete", "children", false);
@@ -551,6 +607,14 @@ fn a_soft_deleted_row_leaves_every_read_until_a_restore_brings_it_back() -> Resu
         |r| r.get(0),
     )?;
     assert_eq!(live, 0, "the row is still live in the table");
+    let deleted_page: Value = serde_json::from_str(&run(&mut current, &page)?)?;
+    assert!(
+        deleted_page["items"]
+            .as_array()
+            .context("page items")?
+            .is_empty()
+    );
+    assert_eq!(deleted_page["has_more"], false);
     // And an update cannot resurrect it as a side effect of editing it.
     assert_eq!(
         crate::error::observation_code(
@@ -574,6 +638,14 @@ fn a_soft_deleted_row_leaves_every_read_until_a_restore_brings_it_back() -> Resu
         "the restored row is not the row that was deleted"
     );
     assert_eq!(get(&db, "children", record, row.id)?, restored);
+    let restored_page: Value = serde_json::from_str(&run(&mut current, &page)?)?;
+    assert_eq!(
+        restored_page["items"]
+            .as_array()
+            .context("page items")?
+            .len(),
+        1
+    );
     assert_eq!(
         run(&mut current, &change("restore", 3))
             .unwrap_err()
