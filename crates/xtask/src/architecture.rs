@@ -2643,9 +2643,14 @@ impl<'a> Scanner<'a> {
                 for (index, element) in pattern.elems.iter().enumerate() {
                     trailing_unknown |= matches!(element, Pat::Rest(_));
                     if let Some(fields) = fields {
-                        let field_origin = (!trailing_unknown)
-                            .then(|| fields.get(&index.to_string()))
-                            .flatten();
+                        // A rest pattern does not identify the later field's
+                        // position. Do not erase already recorded native
+                        // uncertainty or guess tail arity/element types.
+                        let field_origin = if trailing_unknown {
+                            fields.values().any(|origin| read_dir_lineage(origin)).then_some(READ_DIR_UNMODELED)
+                        } else {
+                            fields.get(&index.to_string()).map(String::as_str)
+                        };
                         let field_kind =
                             if field_origin.is_some_and(|origin| ambient_receiver_type(origin)) {
                                 ValueKind::Receiver
@@ -2654,7 +2659,7 @@ impl<'a> Scanner<'a> {
                             };
                         self.pattern_bindings(
                             element,
-                            field_origin.map(String::as_str),
+                            field_origin,
                             field_kind,
                             output,
                         );
@@ -5042,6 +5047,8 @@ mod tests {
             "fn f(value: &mut [std::fs::ReadDir]) { if let [entries] = value { entries.next(); } }",
             "fn f(value: &mut [std::fs::ReadDir; 1]) { value[0].next(); }",
             "fn f(value: &mut (std::fs::ReadDir, u32)) { value.0.next(); }",
+            "struct Holder(u32, std::fs::ReadDir); fn f(value: Holder) { let Holder(.., mut entries) = value; entries.next(); }",
+            "struct Holder(u32, std::fs::ReadDir); fn f(Holder(.., mut entries): Holder) { entries.next(); }",
             "fn f(entries: core::result::Result<(), std::fs::ReadDir>) { if let Err(mut entries) = entries { entries.next(); } }",
             "fn f(a: std::fs::ReadDir, b: std::fs::ReadDir) { let mut out = a.fold(b, |acc, _| acc); out.next(); }",
             "fn f(a: std::fs::ReadDir, b: std::fs::ReadDir) { let mut out = core::iter::Iterator::fold(a, b, |acc, _| acc); out.next(); }",
@@ -5078,6 +5085,8 @@ mod tests {
             "fn f(value: [u32; 1]) { let [number] = value; helper(number); }",
             "fn f(value: &[u32]) { if let [number] = value { helper(number); } }",
             "fn f(value: &mut [u32; 1]) { helper(value[0]); }",
+            "struct Holder(u32, u32); fn f(value: Holder) { let Holder(.., number) = value; helper(number); }",
+            "struct Holder(u32, u32); fn f(Holder(.., number): Holder) { helper(number); }",
             "mod opaque { pub type Client = (); } fn f(value: &mut [u32; 1]) { let selected = &mut value[0]; { use opaque::Client as selected; helper(selected); } }",
             "struct Sink; fn f(sink: Sink) { sink.chain([0]); sink.zip([0]); }",
             "fn f(entries: std::fs::ReadDir) { std::fs::ReadDir::size_hint(&entries); }",
