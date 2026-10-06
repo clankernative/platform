@@ -2212,7 +2212,9 @@ impl<'a> Scanner<'a> {
                     .get(&origin)
                     .and_then(|fields| fields.get(&name))
                     .cloned()
+                    .or_else(|| read_dir_unmodeled_projection(Some(&origin)).map(str::to_owned))
             }
+            Expr::Index(index) => read_dir_unmodeled_projection(self.origin(&index.expr).as_deref()).map(str::to_owned),
             Expr::Try(value) => self.origin(&value.expr).map(|origin| {
                 if matches!(origin.as_str(), READ_DIR_RESULT | READ_DIR_OPTION) {
                     READ_DIR_HANDLE.to_owned()
@@ -2657,7 +2659,9 @@ impl<'a> Scanner<'a> {
                             output,
                         );
                     } else {
-                        self.pattern_bindings(element, origin, kind, output);
+                        let projected = read_dir_unmodeled_projection(origin);
+                        let kind = if projected.is_some() { ValueKind::Receiver } else { kind };
+                        self.pattern_bindings(element, projected.or(origin), kind, output);
                     }
                 }
             }
@@ -2666,7 +2670,8 @@ impl<'a> Scanner<'a> {
                     let field_origin = origin
                         .and_then(|origin| self.fields.get(origin))
                         .and_then(|fields| fields.get(&member_name(&field.member)))
-                        .cloned();
+                        .cloned()
+                        .or_else(|| read_dir_unmodeled_projection(origin).map(str::to_owned));
                     let kind = if field_origin.as_deref().is_some_and(ambient_receiver_type) {
                         ValueKind::Receiver
                     } else {
@@ -2775,7 +2780,13 @@ impl<'a> Scanner<'a> {
                 self.expression_bindings(&pattern.elems[0], &expression.args[0], output);
             }
             // An opaque aggregate's origin does not describe each component.
-            (Pat::Tuple(_) | Pat::Slice(_), _) => output.push((pattern, None, ValueKind::Data)),
+            // It also cannot prove extracted native container fields are DATA.
+            // Keep only a refusal marker, without guessing element types.
+            (Pat::Tuple(_) | Pat::Slice(_), _) => {
+                let origin = read_dir_unmodeled_projection(self.origin(expression).as_deref()).map(str::to_owned);
+                let kind = if origin.is_some() { ValueKind::Receiver } else { ValueKind::Data };
+                output.push((pattern, origin, kind));
+            }
             _ => output.push((
                 pattern,
                 self.origin(expression),
@@ -3909,6 +3920,13 @@ fn read_dir_lineage(origin: &str) -> bool {
     matches!(origin, READ_DIR_HANDLE | READ_DIR_RESULT | READ_DIR_OPTION | READ_DIR_UNMODELED)
 }
 
+fn read_dir_unmodeled_projection(origin: Option<&str>) -> Option<&'static str> {
+    // Without an exact registered field or supported variant projection, a
+    // known native container cannot produce a fresh DATA exemption. This is
+    // retained uncertainty, not generic substitution or element inference.
+    origin.filter(|origin| read_dir_lineage(origin)).map(|_| READ_DIR_UNMODELED)
+}
+
 fn read_dir_projection_result(owner: &str, method: &str) -> Option<&'static str> {
     // Only the exact known wrapper shape gets a standard projection. A bare
     // ReadDir extension trait with the same method spelling is still refused.
@@ -5006,9 +5024,24 @@ mod tests {
         }
         for source in [
             "struct Wrap<T> { inner: T } fn f(entries: Wrap<std::fs::ReadDir>) { entries.drain(); }",
+            "struct Wrap<T> { inner: T } fn f(value: Wrap<std::fs::ReadDir>) { let Wrap { inner: mut entries } = value; entries.next(); }",
+            "struct Wrap<T> { inner: T } fn f(Wrap { inner: mut entries }: Wrap<std::fs::ReadDir>) { entries.next(); }",
+            "struct Wrap<T> { inner: T } fn f(value: Wrap<std::fs::ReadDir>) { let Wrap { inner } = value; helper(inner); }",
+            "struct Wrap<T> { inner: T } fn f(mut value: Wrap<std::fs::ReadDir>) { let Wrap { ref mut inner } = value; inner.next(); }",
+            "struct Wrap<T> { inner: T, flag: bool } fn f(value: Wrap<std::fs::ReadDir>) { let Wrap { inner, .. } = value; helper(inner); }",
+            "struct Wrap<T> { inner: T } fn f(mut value: Wrap<std::fs::ReadDir>) { value.inner.next(); }",
+            "struct Wrap<T> { inner: T } fn f(value: Wrap<std::fs::ReadDir>) { helper(value.inner); }",
             "fn f(entries: [std::fs::ReadDir; 1]) { drain(entries); }",
             "fn f(entries: (std::fs::ReadDir,)) { drain(entries); }",
             "fn f(entries: &[std::fs::ReadDir]) { drain(entries); }",
+            "fn f(value: (std::fs::ReadDir,)) { let (mut entries,) = value; entries.next(); }",
+            "fn f(value: (std::fs::ReadDir, u32)) { let (mut entries, _) = value; entries.next(); }",
+            "fn f((mut entries, _): (std::fs::ReadDir, u32)) { entries.next(); }",
+            "fn f(value: [std::fs::ReadDir; 1]) { let [mut entries] = value; entries.next(); }",
+            "fn f([mut entries]: [std::fs::ReadDir; 1]) { entries.next(); }",
+            "fn f(value: &mut [std::fs::ReadDir]) { if let [entries] = value { entries.next(); } }",
+            "fn f(value: &mut [std::fs::ReadDir; 1]) { value[0].next(); }",
+            "fn f(value: &mut (std::fs::ReadDir, u32)) { value.0.next(); }",
             "fn f(entries: core::result::Result<(), std::fs::ReadDir>) { if let Err(mut entries) = entries { entries.next(); } }",
             "fn f(a: std::fs::ReadDir, b: std::fs::ReadDir) { let mut out = a.fold(b, |acc, _| acc); out.next(); }",
             "fn f(a: std::fs::ReadDir, b: std::fs::ReadDir) { let mut out = core::iter::Iterator::fold(a, b, |acc, _| acc); out.next(); }",
@@ -5035,11 +5068,30 @@ mod tests {
         }
         for source in [
             "struct Wrap<T> { inner: T } fn f(entries: Wrap<u32>) { entries.drain(); }",
+            "struct Wrap<T> { inner: T } fn f(value: Wrap<u32>) { let Wrap { inner: number } = value; helper(number); }",
+            "struct Wrap<T> { inner: T } fn f(Wrap { inner: number }: Wrap<u32>) { helper(number); }",
+            "struct Wrap<T> { inner: T } fn f(mut value: Wrap<u32>) { let Wrap { ref mut inner } = value; helper(inner); }",
+            "struct Wrap<T> { inner: T, flag: bool } fn f(value: Wrap<u32>) { let Wrap { inner, .. } = value; helper(inner); }",
+            "struct Wrap<T> { inner: T } fn f(value: Wrap<u32>) { helper(value.inner); }",
             "fn f(entries: [u32; 1], tuple: (u32,), slice: &[u32]) { helper(entries); helper(tuple); helper(slice); }",
+            "fn f(value: (u32, u32)) { let (number, _) = value; helper(number); }",
+            "fn f(value: [u32; 1]) { let [number] = value; helper(number); }",
+            "fn f(value: &[u32]) { if let [number] = value { helper(number); } }",
+            "fn f(value: &mut [u32; 1]) { helper(value[0]); }",
             "struct Sink; fn f(sink: Sink) { sink.chain([0]); sink.zip([0]); }",
             "fn f(entries: std::fs::ReadDir) { std::fs::ReadDir::size_hint(&entries); }",
         ] {
             assert!(scan(source).is_empty(), "{source}");
+        }
+        for source in [
+            "struct Holder { entries: std::fs::ReadDir, count: u32 } fn f(value: Holder) { let Holder { entries: mut selected, count } = value; selected.next(); helper(count); }",
+            "struct Holder { entries: std::fs::ReadDir } fn f(Holder { entries: mut selected }: Holder) { selected.next(); }",
+            "struct Holder { entries: std::fs::ReadDir } fn f(mut value: Holder) { let Holder { ref mut entries } = value; entries.next(); }",
+        ] {
+            let findings = scan(source);
+            assert_eq!(findings.len(), 1, "{source}: {findings:?}");
+            assert_eq!(findings[0].target, "std::fs::ReadDir::next", "{source}: {findings:?}");
+            assert_eq!(findings[0].count, 1);
         }
         for source in [
             "fn f(path: &std::path::Path) { helper(path.components()); helper(path.iter()); }",
