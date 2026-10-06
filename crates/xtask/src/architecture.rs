@@ -1495,6 +1495,10 @@ struct Scanner<'a> {
     value_floors: Vec<usize>,
     fields: BTreeMap<String, BTreeMap<String, String>>,
     self_type: Option<String>,
+    #[cfg(test)]
+    origin_steps: std::cell::Cell<usize>,
+    #[cfg(test)]
+    origin_step_limit: Option<usize>,
 }
 
 impl<'a> Scanner<'a> {
@@ -1526,6 +1530,10 @@ impl<'a> Scanner<'a> {
             value_floors: vec![0],
             fields: BTreeMap::new(),
             self_type: None,
+            #[cfg(test)]
+            origin_steps: std::cell::Cell::new(0),
+            #[cfg(test)]
+            origin_step_limit: None,
         };
         if source == "crates/day2/src/web_security.rs" {
             scanner.aliases[0].insert("random".to_owned(), "day2::web_security::random".to_owned());
@@ -2215,6 +2223,13 @@ impl<'a> Scanner<'a> {
     }
 
     fn origin(&self, expr: &Expr) -> Option<String> {
+        #[cfg(test)] {
+            let steps = self.origin_steps.get().saturating_add(1);
+            self.origin_steps.set(steps);
+            if let Some(limit) = self.origin_step_limit {
+                assert!(steps <= limit, "origin traversal repeated a subtree: {steps} > {limit}");
+            }
+        }
         match expr {
             Expr::Path(path) => {
                 if path_is_ident(&path.path, "self") {
@@ -2297,13 +2312,16 @@ impl<'a> Scanner<'a> {
             }
             Expr::MethodCall(call) => {
                 let method = identifier_name(&call.method);
-                if let Some(result) = self
-                    .origin(&call.receiver)
-                    .and_then(|owner| read_dir_projection_result(&owner, &method))
+                // Resolve the receiver once. Repeating this recursive query in
+                // each classification branch multiplies ordinary chain work.
+                let receiver = self.origin(&call.receiver);
+                if let Some(result) = receiver
+                    .as_deref()
+                    .and_then(|owner| read_dir_projection_result(owner, &method))
                 {
                     return Some(result.to_owned());
                 }
-                if self.read_dir_method_lineage(call) {
+                if receiver.as_deref() == Some(READ_DIR_HANDLE) {
                     // This provenance denotes the known underlying directory
                     // iterator, not the concrete Rust type of an adaptor.
                     return if read_dir_lazy_method(&method) {
@@ -2311,11 +2329,11 @@ impl<'a> Scanner<'a> {
                     } else if read_dir_consuming_method(&method) || method == "size_hint" {
                         None
                     } else {
-                        self.origin(&call.receiver)
+                        receiver
                     };
                 }
-                self.origin(&call.receiver).map(|origin| {
-                    path_method_result(&origin, &identifier_name(&call.method))
+                receiver.map(|origin| {
+                    path_method_result(&origin, &method)
                         .map(str::to_owned)
                         .unwrap_or(origin)
                 })
@@ -5327,6 +5345,24 @@ mod tests {
             assert_eq!(findings[0].target, "std::path::Path::read_dir");
             assert_eq!(findings[0].count, 1);
         }
+    }
+
+    #[test]
+    fn method_origin_visits_each_receiver_subtree_once() {
+        let length = 32;
+        let expression = format!("std::path::PathBuf::from(\"root\"){}", ".join(\"child\")".repeat(length));
+        let syntax: Expr = syn::parse_str(&expression).unwrap();
+        let mut findings = BTreeMap::new();
+        let ambient = BTreeSet::new();
+        let mut scanner = Scanner::new("crates/fixture/src/lib.rs", &mut findings, &ambient);
+        scanner.origin_step_limit = Some(length + 4);
+        assert_eq!(scanner.origin(&syntax).as_deref(), Some("std::path::PathBuf"));
+        assert!(scanner.origin_steps.get() <= length + 4);
+        let source = format!("fn f() {{ {expression}.canonicalize().unwrap().exists(); }}");
+        let findings = scan(&source);
+        let counts = findings.iter().map(|finding| (finding.target.as_str(), finding.count)).collect::<BTreeMap<_, _>>();
+        assert_eq!(counts, BTreeMap::from([("std::path::Path::canonicalize", 1usize), ("std::path::Path::exists", 1)]), "{findings:?}");
+        assert!(scan(&format!("fn f() {{ helper({expression}.is_absolute()); }}")).is_empty());
     }
 
     #[test]
