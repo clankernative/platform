@@ -1,7 +1,10 @@
 //! IAP-authenticated, one-use browser routing for the private qualification
 //! campaign. No callback, form or instance boolean can manufacture a receipt.
 
-use super::{Authorization, Codes, ProviderReadiness, Purpose, Receipt, Session, Target};
+use super::{
+    Authorization, Codes, ProviderReadiness, Purpose, QualificationFailure, QualificationStage,
+    Receipt, Session, Target,
+};
 use crate::oauth::effects::{self, Instant};
 use crate::{iap, oauth::approval_keys::AccessTokenSource};
 use anyhow::{Context, Result, ensure};
@@ -42,13 +45,23 @@ struct NativeCampaign {
 
 impl Campaign for NativeCampaign {
     fn run(&self, target: Target, codes: Codes) -> Result<Receipt> {
-        Session::new(target, codes, self.tokens.clone())?.run(&self.runner)
+        Session::new(target, codes, self.tokens.clone())
+            .map_err(|error| QualificationFailure::at(QualificationStage::Setup, error))?
+            .run(&self.runner)
     }
 }
 
 enum Stage {
     Form(String),
     Authorization(Authorization),
+}
+
+struct Request<'a> {
+    method: &'a Method,
+    path: &'a str,
+    query: Option<&'a str>,
+    headers: &'a HeaderMap,
+    body: &'a [u8],
 }
 
 struct Pending {
@@ -192,6 +205,37 @@ impl Canaries {
         identity: &iap::Verified,
         now: i64,
     ) -> Result<Response> {
+        self.route(
+            Request {
+                method,
+                path,
+                query,
+                headers,
+                body,
+            },
+            identity,
+            now,
+        )
+        .map_err(|error| {
+            QualificationFailure::at(
+                if path.starts_with(CALLBACK) {
+                    QualificationStage::Callback
+                } else {
+                    QualificationStage::Setup
+                },
+                error,
+            )
+        })
+    }
+
+    fn route(&self, request: Request<'_>, identity: &iap::Verified, now: i64) -> Result<Response> {
+        let Request {
+            method,
+            path,
+            query,
+            headers,
+            body,
+        } = request;
         if path.starts_with(CALLBACK) {
             ensure!(
                 *method == Method::GET && body.is_empty(),
@@ -410,22 +454,27 @@ impl Canaries {
         let receipt = self
             .campaign
             .run(pending.target, codes)
-            .map_err(|_| anyhow::anyhow!("qualification failed; start a new canary"))?;
+            .map_err(|error| QualificationFailure::at(QualificationStage::Workflow, error))?;
         let state = self
             .state
             .lock()
             .map_err(|_| anyhow::anyhow!("registration routing unavailable"))?;
-        ensure!(
-            state.generation == pending.generation
-                && pending.started.elapsed() < Duration::from_secs(SECONDS as u64),
-            "completed canary selection expired or retired"
-        );
+        if state.generation != pending.generation
+            || pending.started.elapsed() >= Duration::from_secs(SECONDS as u64)
+        {
+            return Err(QualificationFailure::at(
+                QualificationStage::Selection,
+                anyhow::anyhow!("completed canary selection expired or retired"),
+            ));
+        }
         if let Some(publisher) = &self.publisher {
-            publisher.publish(&receipt, headers, now).map_err(|_| {
-                anyhow::anyhow!("registration publication unavailable; start a new canary")
+            publisher.publish(&receipt, headers, now).map_err(|error| {
+                QualificationFailure::at(QualificationStage::Publication, error)
             })?;
         }
-        self.readiness.publish(receipt)?;
+        self.readiness
+            .publish(receipt)
+            .map_err(|error| QualificationFailure::at(QualificationStage::Receipt, error))?;
         let markup = html! { (DOCTYPE) html lang="en" { head { meta charset="utf-8"; title { "Qualification completed" } }
             body { h1 { "Qualification completed" } p { "The native registration receipt is valid for five minutes. Independent shell, custody and account readiness are still required." } }
         }};
