@@ -86,6 +86,51 @@ fn native_session_preserves_data_and_port_recovers_failed_candidate_and_stops_cl
     let first = call(&mut session, "local-status", json!({}))?;
     assert_eq!(first["actor"], options.actor);
     assert_eq!(first["state"], "ready");
+    let contracts_path = PathBuf::from(
+        first["contracts"]["path"]
+            .as_str()
+            .context("contracts path")?,
+    );
+    let contracts_bytes = fs::read(&contracts_path)?;
+    assert_eq!(first["contracts"]["artifact"], first["artifact"]);
+    assert_eq!(
+        first["contracts"]["sha256"],
+        day2::digest(&contracts_bytes)[7..]
+    );
+    let contracts: Value = serde_json::from_slice(&contracts_bytes)?;
+    assert_eq!(contracts["artifact"], first["artifact"]);
+    assert_eq!(contracts["queries"]["reports.list"]["api"]["method"], "GET");
+    assert_eq!(
+        contracts["commands"]["reports.submit"]["api"]["method"],
+        "POST"
+    );
+    assert_eq!(
+        contracts["commands"]["reports.submit"]["inputSchema"]["properties"]["title"]["kind"],
+        "string"
+    );
+    assert_eq!(
+        contracts["commands"]["reports.revise"]["edit"]["version_field"],
+        "expected_version"
+    );
+    assert_eq!(contracts["routes"]["reports"]["query"], "reports.list");
+    assert_eq!(contracts["schedules"]["sweep"]["command"], "reports.sweep");
+    assert!(
+        contracts["forms"]
+            .as_array()
+            .context("exported forms")?
+            .iter()
+            .any(|form| {
+                form["command"] == "reports.submit"
+                    && form["fields"]
+                        .as_array()
+                        .is_some_and(|fields| fields.iter().any(|field| field["name"] == "title"))
+            })
+    );
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(
+        fs::metadata(&contracts_path)?.permissions().mode() & 0o777,
+        0o600
+    );
     let instance = PathBuf::from(first["instance"].as_str().context("instance")?);
     let runtime = Runtime::load(&instance, "app")?;
     let snapshot = runtime.inspect()?;
@@ -173,6 +218,30 @@ fn native_session_preserves_data_and_port_recovers_failed_candidate_and_stops_cl
     call(&mut resumed, "local-shutdown", json!({}))?;
     drop(resumed);
     assert_eq!(stopper.join().expect("stop thread")?["stopping"], true);
+    Ok(())
+}
+
+#[test]
+fn contract_export_failure_removes_stale_file_and_does_not_block_serving() -> Result<()> {
+    let (_directory, platform, options) = setup()?;
+    let artifact = artifact()?;
+    let mut session = Session::resolve(&platform, options)?;
+    call(&mut session, "local-prepare", json!({}))?;
+    call(&mut session, "local-open", json!({"artifact":artifact}))?;
+    call(&mut session, "local-properties", json!({}))?;
+    let contracts_path = Path::new(&session.options.directory).join("app-contracts.json");
+    fs::write(&contracts_path, b"stale contract")?;
+    let metadata_path = artifact.join("artifact.json");
+    let original_metadata = fs::read(&metadata_path)?;
+    fs::write(&metadata_path, b"invalid artifact")?;
+    call(&mut session, "local-activate", json!({}))?;
+    fs::write(&metadata_path, original_metadata)?;
+    let status = call(&mut session, "local-status", json!({}))?;
+    assert_eq!(status["state"], "ready");
+    assert_eq!(status["contracts"]["artifact"], status["artifact"]);
+    assert!(status["contracts"]["error"].is_string());
+    assert!(!contracts_path.exists());
+    call(&mut session, "local-shutdown", json!({}))?;
     Ok(())
 }
 
