@@ -206,7 +206,8 @@ impl Host {
         let initial = format!(
             "{}{}",
             subscription.regions.values().cloned().collect::<String>(),
-            ::maud::html! { div id="day2-live-status" role="status" aria-live="polite" {} }.into_string()
+            ::maud::html! { div id="day2-live-status" role="status" aria-live="polite" {} }
+                .into_string()
         );
         sender
             .try_send(elements(&initial, "outer"))

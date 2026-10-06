@@ -29,7 +29,9 @@ use std::{
     io::Read,
     path::Path,
 };
-use syn::{Item, Type, Visibility, ext::IdentExt, punctuated::Punctuated, token::Comma, visit::Visit};
+use syn::{
+    Item, Type, Visibility, ext::IdentExt, punctuated::Punctuated, token::Comma, visit::Visit,
+};
 
 const POLICY: &str = "architecture-proofs.json";
 const MAX_BYTES: usize = 4 * 1024 * 1024;
@@ -576,7 +578,10 @@ fn owning_items(
     let mut registered = BTreeSet::new();
     for (source, syntax) in &sources {
         ensure!(
-            syntax.attrs.iter().all(|attr| path_is_ident(attr.path(), "doc")),
+            syntax
+                .attrs
+                .iter()
+                .all(|attr| path_is_ident(attr.path(), "doc")),
             "owning sources must compile unconditionally"
         );
         // Out-of-line modules nested in an inline/local scope are deliberately
@@ -746,7 +751,8 @@ fn canonical_owning_bindings(selected: &str, items: &[Item], ancestor_depth: usi
                     self.canonical_imports += 1;
                 }
                 syn::UseTree::Rename(rename)
-                    if ident_is(&rename.ident, self.selected) || ident_is(&rename.rename, self.selected) =>
+                    if ident_is(&rename.ident, self.selected)
+                        || ident_is(&rename.rename, self.selected) =>
                 {
                     self.failure = Some("proof child cannot alias its owning type");
                 }
@@ -799,10 +805,9 @@ fn canonical_owning_bindings(selected: &str, items: &[Item], ancestor_depth: usi
                 Item::Struct(item) if ident_is(&item.ident, self.selected) => {
                     if self.ancestor_depth != 0 || self.item_depth != 0 {
                         self.failure = Some("proof child cannot substitute an owning definition");
-                    } else if attrs
-                        .iter()
-                        .any(|attr| path_is_ident(attr.path(), "cfg") || path_is_ident(attr.path(), "cfg_attr"))
-                    {
+                    } else if attrs.iter().any(|attr| {
+                        path_is_ident(attr.path(), "cfg") || path_is_ident(attr.path(), "cfg_attr")
+                    }) {
                         self.failure = Some("owning proof definition must be unconditional");
                     }
                     syn::visit::visit_item_struct(self, item);
@@ -835,7 +840,8 @@ fn canonical_owning_bindings(selected: &str, items: &[Item], ancestor_depth: usi
                     self.failure = Some("proof type cannot be shadowed")
                 }
                 Item::Impl(item) => {
-                    let own = type_name(&item.self_ty).as_deref() == Some(semantic_name(self.selected));
+                    let own =
+                        type_name(&item.self_ty).as_deref() == Some(semantic_name(self.selected));
                     if own
                         && (self.item_depth != 0
                             || !matches!(item.self_ty.as_ref(), Type::Path(ty)
@@ -1384,7 +1390,8 @@ fn owning_api_finding(root: &Path, proof: &Proof) -> Result<OwningApiFinding> {
     for item in &items {
         if let Item::Impl(implementation) = item
             && implementation.trait_.is_none()
-            && type_name(&implementation.self_ty).as_deref() == Some(semantic_name(&proof.type_name))
+            && type_name(&implementation.self_ty).as_deref()
+                == Some(semantic_name(&proof.type_name))
         {
             for item in &implementation.items {
                 if let syn::ImplItem::Fn(function) = item {
@@ -1564,12 +1571,16 @@ fn buffer_source_finding(
         "buffer requires an explicit reviewed Serde codec"
     );
     ensure!(
-        definition.fields.iter().all(|field| field
-            .attrs
+        definition
+            .fields
             .iter()
-            .all(
-                |attribute| path_is_ident(attribute.path(), "doc") || path_is_ident(attribute.path(), "serde")
-            )),
+            .all(|field| field.attrs.iter().all(|attribute| path_is_ident(
+                attribute.path(),
+                "doc"
+            ) || path_is_ident(
+                attribute.path(),
+                "serde"
+            ))),
         "buffer field attributes require explicit review"
     );
     let destructor_fingerprint = destructor_source_fingerprint(selected, &syntax.items)?
@@ -1854,7 +1865,8 @@ fn contains_proof(ty: &Type, proof: &str, self_is_proof: bool) -> bool {
     impl<'ast> Visit<'ast> for Finder<'_> {
         fn visit_type_path(&mut self, ty: &'ast syn::TypePath) {
             if ty.path.segments.last().is_some_and(|segment| {
-                ident_is(&segment.ident, self.proof) || (self.self_is_proof && ident_is(&segment.ident, "Self"))
+                ident_is(&segment.ident, self.proof)
+                    || (self.self_is_proof && ident_is(&segment.ident, "Self"))
             }) {
                 self.found = true;
             }
@@ -1880,7 +1892,8 @@ fn constructs_proof(block: &syn::Block, proof: &str, self_is_proof: bool, tuple:
     impl Finder<'_> {
         fn matches(&self, path: &syn::Path) -> bool {
             path.segments.last().is_some_and(|segment| {
-                ident_is(&segment.ident, self.proof) || (self.self_is_proof && ident_is(&segment.ident, "Self"))
+                ident_is(&segment.ident, self.proof)
+                    || (self.self_is_proof && ident_is(&segment.ident, "Self"))
             })
         }
     }
@@ -1907,7 +1920,9 @@ fn constructs_proof(block: &syn::Block, proof: &str, self_is_proof: bool, tuple:
 fn test_only(attributes: &[syn::Attribute]) -> bool {
     attributes.iter().any(|attribute| {
         path_is_ident(attribute.path(), "cfg")
-            && attribute.parse_args::<syn::Path>().ok()
+            && attribute
+                .parse_args::<syn::Path>()
+                .ok()
                 .is_some_and(|path| path_is_ident(&path, "test"))
     })
 }
@@ -2002,7 +2017,8 @@ fn inspect_factories(
                     {
                         inspect_function(
                             Some(owner.clone()),
-                            type_name(&implementation.self_ty).as_deref() == Some(semantic_name(&proof.type_name)),
+                            type_name(&implementation.self_ty).as_deref()
+                                == Some(semantic_name(&proof.type_name)),
                             &function.vis,
                             &function.sig,
                             &function.block,
@@ -2066,8 +2082,8 @@ fn inspect_material_uses(
             }
             Item::Impl(implementation) if !test_only(&implementation.attrs) => {
                 let owner = implementation.self_ty.to_token_stream().to_string();
-                let self_is_material =
-                    type_name(&implementation.self_ty).as_deref() == Some(semantic_name(&proof.type_name));
+                let self_is_material = type_name(&implementation.self_ty).as_deref()
+                    == Some(semantic_name(&proof.type_name));
                 // The only admitted material trait impl is an exactly pinned
                 // destructor; inventory other owners' trait methods normally.
                 if implementation.trait_.is_some() && self_is_material {
@@ -2161,7 +2177,8 @@ fn inspect_proof_syntax(selected: &str, items: &[Item]) -> Result<()> {
                 }
                 Item::Impl(implementation)
                     if implementation.trait_.is_none()
-                        && type_name(&implementation.self_ty).as_deref() == Some(semantic_name(self.selected))
+                        && type_name(&implementation.self_ty).as_deref()
+                            == Some(semantic_name(self.selected))
                         && implementation.items.iter().any(|item| {
                             matches!(item, syn::ImplItem::Macro(invocation)
                                 if !test_only(&invocation.attrs))
@@ -2468,7 +2485,11 @@ fn inspect(proof: &Proof, items: &[Item]) -> Result<()> {
                 found_methods.insert(name.clone()),
                 "ambiguous proof method {name}"
             );
-            if !proof.consuming_methods.iter().any(|method| semantic_name(method) == name) {
+            if !proof
+                .consuming_methods
+                .iter()
+                .any(|method| semantic_name(method) == name)
+            {
                 continue;
             }
             let receiver = function
@@ -2596,18 +2617,44 @@ mod tests {
 
     #[test]
     fn raw_proof_owners_factories_inputs_aliases_and_traits_cannot_escape_review() -> Result<()> {
-        let base = "struct Claim; pub struct Permit { claim: Claim } impl Permit { pub fn send(self) {} }";
+        let base =
+            "struct Claim; pub struct Permit { claim: Claim } impl Permit { pub fn send(self) {} }";
         inspect(&proof(Kind::Consuming), &syn::parse_file(base)?.items)?;
         for owner in ["Permit", "r#Permit"] {
             for (addition, category) in [
-                (format!("impl {owner} {{ pub fn raw(&self) -> &Claim {{ &self.claim }} }}"), "unreviewed proof method"),
-                (format!("fn forge(claim: Claim) -> {owner} {{ {owner} {{ claim }} }}"), "unreviewed proof factory"),
-                (format!("fn erased(claim: Claim) -> Box<dyn std::any::Any> {{ Box::new({owner} {{ claim }}) }}"), "unreviewed proof factory"),
-                (format!("fn borrowed(permit: &{owner}) {{}}"), "unreviewed nonmaterial proof use"),
-                (format!("fn bounded<T: AsRef<{owner}>>(permit: T) {{}}"), "unreviewed nonmaterial proof use"),
-                (format!("impl std::ops::Deref for {owner} {{ type Target = Claim; fn deref(&self) -> &Claim {{ &self.claim }} }}"), "cannot gain a manual trait implementation"),
+                (
+                    format!("impl {owner} {{ pub fn raw(&self) -> &Claim {{ &self.claim }} }}"),
+                    "unreviewed proof method",
+                ),
+                (
+                    format!("fn forge(claim: Claim) -> {owner} {{ {owner} {{ claim }} }}"),
+                    "unreviewed proof factory",
+                ),
+                (
+                    format!(
+                        "fn erased(claim: Claim) -> Box<dyn std::any::Any> {{ Box::new({owner} {{ claim }}) }}"
+                    ),
+                    "unreviewed proof factory",
+                ),
+                (
+                    format!("fn borrowed(permit: &{owner}) {{}}"),
+                    "unreviewed nonmaterial proof use",
+                ),
+                (
+                    format!("fn bounded<T: AsRef<{owner}>>(permit: T) {{}}"),
+                    "unreviewed nonmaterial proof use",
+                ),
+                (
+                    format!(
+                        "impl std::ops::Deref for {owner} {{ type Target = Claim; fn deref(&self) -> &Claim {{ &self.claim }} }}"
+                    ),
+                    "cannot gain a manual trait implementation",
+                ),
                 (format!("type Alias = {owner};"), "proof aliases require"),
-                (format!("use self::{owner} as Alias;"), "proof import aliases require"),
+                (
+                    format!("use self::{owner} as Alias;"),
+                    "proof import aliases require",
+                ),
             ] {
                 let source = syn::parse_file(&format!("{base} {addition}"))?;
                 let error = inspect(&proof(Kind::Consuming), &source.items)
@@ -2623,7 +2670,9 @@ mod tests {
             .methods
             .push("pub fn forge(claim: Claim) -> Self".into());
         for owner in ["Permit", "r#Permit"] {
-            let source = syn::parse_file(&format!("{base} impl {owner} {{ pub fn forge(claim: Claim) -> Self {{ Self {{ claim }} }} }}"))?;
+            let source = syn::parse_file(&format!(
+                "{base} impl {owner} {{ pub fn forge(claim: Claim) -> Self {{ Self {{ claim }} }} }}"
+            ))?;
             ensure!(
                 inspect(&reviewed, &source.items)
                     .unwrap_err()
@@ -2652,23 +2701,44 @@ mod tests {
 
     #[test]
     fn raw_identity_recognition_preserves_exact_reviewed_signatures_and_data() -> Result<()> {
-        let source = syn::parse_file("struct Claim; struct r#Data { r#claim: Claim } impl r#Data { fn new(claim: Claim) -> Self { Self { claim } } } pub struct r#Permit { r#claim: Claim } impl r#Permit { pub fn r#send(self) {} pub fn prepare(claim: Claim) -> Self { Self { claim } } }")?;
+        let source = syn::parse_file(
+            "struct Claim; struct r#Data { r#claim: Claim } impl r#Data { fn new(claim: Claim) -> Self { Self { claim } } } pub struct r#Permit { r#claim: Claim } impl r#Permit { pub fn r#send(self) {} pub fn prepare(claim: Claim) -> Self { Self { claim } } }",
+        )?;
         let mut reviewed = proof(Kind::Consuming);
-        reviewed.methods = vec!["pub fn r#send(self)".into(), "pub fn prepare(claim: Claim) -> Self".into()];
+        reviewed.methods = vec![
+            "pub fn r#send(self)".into(),
+            "pub fn prepare(claim: Claim) -> Self".into(),
+        ];
         reviewed.factories.push(Factory {
-            owner: Some("r#Permit".into()), signature: reviewed.methods[1].clone(),
+            owner: Some("r#Permit".into()),
+            signature: reviewed.methods[1].clone(),
         });
         inspect(&reviewed, &source.items)?;
         // Semantic identity does not erase the raw owner or member spelling
         // from the exact source API catalog.
         reviewed.factories[0].owner = Some("Permit".into());
-        ensure!(inspect(&reviewed, &source.items).unwrap_err().to_string().contains("unreviewed proof factory"));
+        ensure!(
+            inspect(&reviewed, &source.items)
+                .unwrap_err()
+                .to_string()
+                .contains("unreviewed proof factory")
+        );
         reviewed.factories[0].owner = Some("r#Permit".into());
         reviewed.methods[0] = "pub fn send(self)".into();
-        ensure!(inspect(&reviewed, &source.items).unwrap_err().to_string().contains("unreviewed proof method"));
+        ensure!(
+            inspect(&reviewed, &source.items)
+                .unwrap_err()
+                .to_string()
+                .contains("unreviewed proof method")
+        );
         let mut duplicate = proof(Kind::Consuming);
         duplicate.methods.push("pub fn r#send(self)".into());
-        ensure!(reviewed_methods(&duplicate).unwrap_err().to_string().contains("duplicate reviewed proof method"));
+        ensure!(
+            reviewed_methods(&duplicate)
+                .unwrap_err()
+                .to_string()
+                .contains("duplicate reviewed proof method")
+        );
         Ok(())
     }
 
@@ -2682,12 +2752,25 @@ mod tests {
             "trait r#Drop { fn drop(&mut self); }",
         ] {
             let source = syn::parse_file(&format!("{DROP_BASE} {alias} {REVIEWED_DROP}"))?;
-            let actual = source.items.iter().find_map(|item| match item {
-                Item::Impl(item) if item.trait_.is_some() => Some(item.to_token_stream().to_string()),
-                _ => None,
-            }).context("fixture destructor")?;
-            ensure!(actual == syn::parse_str::<syn::ItemImpl>(REVIEWED_DROP)?.to_token_stream().to_string());
-            let error = destructor_fingerprint(&reviewed, &source.items).unwrap_err().to_string();
+            let actual = source
+                .items
+                .iter()
+                .find_map(|item| match item {
+                    Item::Impl(item) if item.trait_.is_some() => {
+                        Some(item.to_token_stream().to_string())
+                    }
+                    _ => None,
+                })
+                .context("fixture destructor")?;
+            ensure!(
+                actual
+                    == syn::parse_str::<syn::ItemImpl>(REVIEWED_DROP)?
+                        .to_token_stream()
+                        .to_string()
+            );
+            let error = destructor_fingerprint(&reviewed, &source.items)
+                .unwrap_err()
+                .to_string();
             ensure!(error.contains("cannot be shadowed"), "{alias}: {error}");
         }
         for source in [
@@ -2695,22 +2778,35 @@ mod tests {
             "mod r#core { pub mod ops { pub trait Drop { fn drop(&mut self); } } } impl core::ops::Drop for Permit { fn drop(&mut self) { self.claim.fill(0); } }",
         ] {
             let parsed = syn::parse_file(&format!("{DROP_BASE} {source}"))?;
-            ensure!(destructor_fingerprint(&reviewed, &parsed.items).unwrap_err().to_string().contains("cannot be shadowed"));
+            ensure!(
+                destructor_fingerprint(&reviewed, &parsed.items)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("cannot be shadowed")
+            );
         }
         Ok(())
     }
 
     #[test]
     fn genuine_raw_standard_destructor_retains_exact_ast_pin() -> Result<()> {
-        let source = syn::parse_file("pub struct r#Permit { claim: Vec<u8> } impl r#Permit { pub fn send(self) {} } impl ::r#std::ops::r#Drop for r#Permit { fn r#drop(&mut self) { self.claim.fill(0); } }")?;
+        let source = syn::parse_file(
+            "pub struct r#Permit { claim: Vec<u8> } impl r#Permit { pub fn send(self) {} } impl ::r#std::ops::r#Drop for r#Permit { fn r#drop(&mut self) { self.claim.fill(0); } }",
+        )?;
         let mut reviewed = proof(Kind::Consuming);
-        let actual = destructor_fingerprint(&reviewed, &source.items)?.context("raw native destructor")?;
+        let actual =
+            destructor_fingerprint(&reviewed, &source.items)?.context("raw native destructor")?;
         ensure!(actual != drop_proof().destructor.context("normal fixture pin")?);
         reviewed.destructor = Some(actual);
         inspect(&reviewed, &source.items)?;
         let mut normal_pin = proof(Kind::Consuming);
         normal_pin.destructor = drop_proof().destructor;
-        ensure!(inspect(&normal_pin, &source.items).unwrap_err().to_string().contains("destructor changed"));
+        ensure!(
+            inspect(&normal_pin, &source.items)
+                .unwrap_err()
+                .to_string()
+                .contains("destructor changed")
+        );
         Ok(())
     }
 
@@ -4877,7 +4973,8 @@ mod owning_children_tests {
     }
 
     #[test]
-    fn owning_catalog_refuses_cycles_unrelated_parents_duplicates_and_budget_overflow() -> Result<()> {
+    fn owning_catalog_refuses_cycles_unrelated_parents_duplicates_and_budget_overflow() -> Result<()>
+    {
         let owner = "crates/example/src/proofs.rs";
         let first = "crates/example/src/proofs/first.rs";
         let second = "crates/example/src/proofs/second.rs";

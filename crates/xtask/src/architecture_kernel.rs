@@ -833,7 +833,9 @@ mod tests {
             // Only the actual no_std caller is a lint target in this phase.
             // The contract is compiled as a dependency, so its reexport cannot
             // substitute for a caller's semantic ReadDir type diagnostic.
-            let rejection = check(fixture.path(), &packages[..1]).unwrap_err().to_string();
+            let rejection = check(fixture.path(), &packages[..1])
+                .unwrap_err()
+                .to_string();
             ensure!(
                 rejection.contains("clippy::disallowed_types")
                     && rejection.contains("std::fs::ReadDir")
@@ -872,7 +874,9 @@ mod tests {
                     "#![no_std]\n{ATTRIBUTES}pub fn pure() -> bool {{ boundary_contract::pure() }}\n{body}"
                 ),
             )?;
-            let rejection = check(fixture.path(), &packages[..1]).unwrap_err().to_string();
+            let rejection = check(fixture.path(), &packages[..1])
+                .unwrap_err()
+                .to_string();
             ensure!(
                 rejection.contains("clippy::disallowed_methods")
                     && rejection.contains("std::fs::read_dir")
