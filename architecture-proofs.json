@@ -13,6 +13,9 @@
       "methods": ["fn perform(self, runtime: &Runtime) -> Result<Performed>"],
       "factories": [
         {"owner": null, "signature": "pub(crate) fn admit_dispatch(runtime: &Runtime, work: &Work) -> Result<DispatchPermit>"}
+      ],
+      "proof_uses": [
+        {"owner": null, "signature": "pub(crate) fn perform(runtime: &Runtime, permit: DispatchPermit) -> Result<Performed>"}
       ]
     },
     {
@@ -25,6 +28,13 @@
         {"owner": "Journal", "signature": "pub fn approve_release(&mut self, approval: &ReleaseApproval) -> Result<ApprovedRelease>"},
         {"owner": "Journal", "signature": "pub fn load_approved_release(&self, id: &Digest) -> Result<ApprovedRelease>"},
         {"owner": "Journal", "signature": "pub(crate) fn recover_approved_release_in(tx: &Transaction<'_>, id: &Digest) -> Result<ApprovedRelease>"}
+      ],
+      "proof_uses": [
+        {"owner": "Journal", "signature": "fn stop_release(&mut self, release: &ApprovedRelease, actor: &OperatorActor, status: &str) -> Result<()>"},
+        {"owner": "Journal", "signature": "pub(crate) fn prepare_release_in(tx: &Transaction<'_>, approved: &ApprovedRelease) -> Result<ReadyRelease>"},
+        {"owner": "Journal", "signature": "pub fn cancel_release(&mut self, release: &ApprovedRelease, actor: &OperatorActor) -> Result<()>"},
+        {"owner": "Journal", "signature": "pub fn prepare_release(&mut self, approved: &ApprovedRelease) -> Result<ReadyRelease>"},
+        {"owner": "Journal", "signature": "pub fn revoke_release(&mut self, release: &ApprovedRelease, actor: &OperatorActor) -> Result<()>"}
       ]
     },
     {
@@ -37,6 +47,10 @@
         {"owner": "Journal", "signature": "pub fn prepare_release(&mut self, approved: &ApprovedRelease) -> Result<ReadyRelease>"},
         {"owner": "Journal", "signature": "pub(crate) fn prepare_release_in(tx: &Transaction<'_>, approved: &ApprovedRelease) -> Result<ReadyRelease>"},
         {"owner": "Journal", "signature": "pub(crate) fn recover_ready_release_in(tx: &Transaction<'_>, id: &Digest, release: &Digest) -> Result<ReadyRelease>"}
+      ],
+      "proof_uses": [
+        {"owner": "Journal", "signature": "pub(crate) fn activate_release_in_checked(tx: &Transaction<'_>, ready: &ReadyRelease, catalog: Option<&crate::release_catalog::ReleaseCatalogCandidate>) -> Result<ActivationReceipt>"},
+        {"owner": "Journal", "signature": "pub fn activate_release(&mut self, ready: &ReadyRelease) -> Result<ActivationReceipt>"}
       ]
     },
     {
