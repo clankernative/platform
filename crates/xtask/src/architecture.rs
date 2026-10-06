@@ -8,6 +8,11 @@
 //! external reexports, type aliases and macro expansion remain limitations.
 //! Only unconditional imports/declarations disambiguate inherited names across
 //! alternate targets. These refusals cannot be authorized by effect allowances.
+//! Known ReadDir acquisition/parameter lineage has a finite consumer/adaptor
+//! boundary. Unmodeled explicit calls receiving it refuse; only exact standard
+//! Result/Option acquisition projections are pure. Nested/custom containers,
+//! per-entry values, callback captures and arbitrary return types are not a
+//! containment or general Rust output-resolution claim.
 
 use anyhow::{Context, Result, bail, ensure};
 use quote::ToTokens;
@@ -32,6 +37,12 @@ const MAX_FINDINGS: usize = 100_000;
 const MAX_DIRECTORY_DEPTH: usize = 32;
 const MAX_ALIAS_ROUNDS: usize = 32;
 const MAX_PARENT_EFFECT_DIAGNOSTICS: usize = 32;
+const READ_DIR_HANDLE: &str = "std::fs::ReadDir";
+const READ_DIR_RESULT: &str = "std::io::Result<std::fs::ReadDir>";
+const READ_DIR_OPTION: &str = "std::option::Option<std::fs::ReadDir>";
+// A refusal marker for a syntactically known native handle in an unsupported
+// container, never a fourth admitted wrapper kind or a guessed concrete type.
+const READ_DIR_UNMODELED: &str = "<unmodeled ReadDir container>";
 
 fn identifier_name(identifier: &syn::Ident) -> String {
     use syn::ext::IdentExt;
@@ -1275,6 +1286,12 @@ fn canonical_import_namespace(target: &str) -> Option<DeclarationNamespace> {
                 | "std::env"
                 | "std::fs"
                 | "std::path"
+                | "std::iter"
+                | "core::iter"
+                | "std::iter::Iterator"
+                | "core::iter::Iterator"
+                | "std::iter::IntoIterator"
+                | "core::iter::IntoIterator"
                 | "std::thread"
                 | "std::process"
                 | "std::net"
@@ -1419,6 +1436,7 @@ struct Scanner<'a> {
     ambient_names: &'a BTreeSet<String>,
     unresolved_parent_effects: BTreeSet<String>,
     conditional_effect_bindings: BTreeSet<String>,
+    read_dir_ambiguities: BTreeSet<String>,
     values: Vec<BTreeMap<String, String>>,
     bindings: Vec<BTreeSet<String>>,
     // Receiver provenance can survive a call result (File/Command methods),
@@ -1455,6 +1473,7 @@ impl<'a> Scanner<'a> {
             ambient_names,
             unresolved_parent_effects: BTreeSet::new(),
             conditional_effect_bindings: BTreeSet::new(),
+            read_dir_ambiguities: BTreeSet::new(),
             values: vec![BTreeMap::new()],
             bindings: vec![BTreeSet::new()],
             value_kinds: vec![BTreeMap::new()],
@@ -1495,6 +1514,12 @@ impl<'a> Scanner<'a> {
                 .cloned()
                 .collect::<Vec<_>>()
                 .join(", ")
+        );
+        ensure!(
+            self.read_dir_ambiguities.is_empty(),
+            "unresolved ReadDir handoffs or iterator calls in {} (a supported canonical operation is required): {}",
+            self.source,
+            self.read_dir_ambiguities.iter().cloned().collect::<Vec<_>>().join(", ")
         );
         Ok(())
     }
@@ -2038,15 +2063,37 @@ impl<'a> Scanner<'a> {
         match ty {
             Type::Path(path) => {
                 let last = path.path.segments.last()?;
-                if matches!(
+                let resolved = self.resolve(&path.path);
+                if (matches!(
                     identifier_name(&last.ident).as_str(),
                     "Option" | "Result" | "Box" | "Arc" | "Rc" | "Mutex" | "RwLock"
-                ) && let syn::PathArguments::AngleBracketed(arguments) = &last.arguments
+                ) || matches!(resolved.as_str(), "std::result::Result" | "core::result::Result" | "std::io::Result" | "std::option::Option" | "core::option::Option"))
+                    && let syn::PathArguments::AngleBracketed(arguments) = &last.arguments
                     && let Some(syn::GenericArgument::Type(inner)) = arguments.args.first()
                 {
-                    return self.type_origin(inner);
+                    let inner = self.type_origin(inner);
+                    if inner.as_deref().is_some_and(read_dir_lineage) {
+                        return Some(if inner.as_deref() == Some(READ_DIR_HANDLE) {
+                            let first = identifier_name(&path.path.segments.first()?.ident);
+                            if self.declaration_scope(&first, PathNamespace::Type).is_some()
+                                || self.alias_has_flag(&first, &self.parent_aliases, &mut BTreeSet::new(), MAX_ALIAS_ROUNDS)
+                                || self.alias_has_flag(&first, &self.conditional_aliases, &mut BTreeSet::new(), MAX_ALIAS_ROUNDS)
+                            {
+                                READ_DIR_UNMODELED
+                            } else {
+                                match resolved.as_str() {
+                                    "std::result::Result" | "core::result::Result" | "std::io::Result" => READ_DIR_RESULT,
+                                    "std::option::Option" | "core::option::Option" => READ_DIR_OPTION,
+                                    _ => READ_DIR_UNMODELED,
+                                }
+                            }
+                        } else {
+                            READ_DIR_UNMODELED
+                        }.to_owned());
+                    }
+                    return inner;
                 }
-                Some(self.resolve(&path.path))
+                Some(resolved)
             }
             Type::Reference(reference) => self.type_origin(&reference.elem),
             Type::Paren(paren) => self.type_origin(&paren.elem),
@@ -2081,14 +2128,31 @@ impl<'a> Scanner<'a> {
                     .cloned()
                     .or(Some(name))
             }
-            Expr::Call(call) => self.origin(&call.func).and_then(|origin| {
+            Expr::Call(call) => {
+                if let Some(method) = self.read_dir_call_method(call) {
+                    return if read_dir_lazy_method(&method) {
+                        Some("std::fs::ReadDir".to_owned())
+                    } else {
+                        None
+                    };
+                }
+                self.origin(&call.func).and_then(|origin| {
                 if call.args.len() == 1 && value_wrapper_target(&origin) {
-                    return self.origin(&call.args[0]);
+                    let inner = self.origin(&call.args[0]);
+                    if inner.as_deref().is_some_and(read_dir_lineage) {
+                        return Some(if inner.as_deref() == Some(READ_DIR_HANDLE) {
+                            if origin.rsplit("::").next() == Some("Some") { READ_DIR_OPTION } else { READ_DIR_RESULT }
+                        } else { READ_DIR_UNMODELED }.to_owned());
+                    }
+                    return inner;
                 }
                 // The selected free function has an actual PathBuf result;
                 // current-directory access is still inventoried at this call.
                 if origin == "std::path::absolute" {
                     return Some("std::path::PathBuf".to_owned());
+                }
+                if origin == "std::fs::read_dir" {
+                    return Some(READ_DIR_RESULT.to_owned());
                 }
                 if let Some((owner, method)) = origin.rsplit_once("::") {
                     if let Some(result) = path_method_result(owner, method) {
@@ -2106,12 +2170,30 @@ impl<'a> Scanner<'a> {
                 } else {
                     Some(origin)
                 }
-            }),
-            Expr::MethodCall(call) => self.origin(&call.receiver).map(|origin| {
+                })
+            },
+            Expr::MethodCall(call) => {
+                let method = identifier_name(&call.method);
+                if let Some(result) = self.origin(&call.receiver).and_then(|owner| read_dir_projection_result(&owner, &method)) {
+                    return Some(result.to_owned());
+                }
+                if self.read_dir_method_lineage(call) {
+                    // This provenance denotes the known underlying directory
+                    // iterator, not the concrete Rust type of an adaptor.
+                    return if read_dir_lazy_method(&method) {
+                        Some("std::fs::ReadDir".to_owned())
+                    } else if read_dir_consuming_method(&method) || method == "size_hint" {
+                        None
+                    } else {
+                        self.origin(&call.receiver)
+                    };
+                }
+                self.origin(&call.receiver).map(|origin| {
                 path_method_result(&origin, &identifier_name(&call.method))
                     .map(str::to_owned)
                     .unwrap_or(origin)
-            }),
+                })
+            },
             Expr::Field(field) => {
                 let origin = self.origin(&field.base)?;
                 let name = member_name(&field.member);
@@ -2120,7 +2202,11 @@ impl<'a> Scanner<'a> {
                     .and_then(|fields| fields.get(&name))
                     .cloned()
             }
-            Expr::Try(value) => self.origin(&value.expr),
+            Expr::Try(value) => self.origin(&value.expr).map(|origin| {
+                if matches!(origin.as_str(), READ_DIR_RESULT | READ_DIR_OPTION) {
+                    READ_DIR_HANDLE.to_owned()
+                } else { origin }
+            }),
             Expr::Await(value) => self.origin(&value.base),
             Expr::Paren(value) => self.origin(&value.expr),
             Expr::Group(value) => self.origin(&value.expr),
@@ -2135,6 +2221,87 @@ impl<'a> Scanner<'a> {
                 .or_else(|| self.origin(&value.expr)),
             _ => None,
         }
+    }
+
+    fn read_dir_method_lineage(&self, call: &syn::ExprMethodCall) -> bool {
+        self.origin(&call.receiver).as_deref() == Some(READ_DIR_HANDLE)
+            || read_dir_second_iterator_method(&identifier_name(&call.method))
+                && call.args.first().is_some_and(|argument| {
+                    self.origin(argument).as_deref() == Some(READ_DIR_HANDLE)
+                })
+    }
+
+    fn read_dir_call_candidate(&self, call: &syn::ExprCall) -> Option<(String, String)> {
+        let target = self.origin(&call.func)?;
+        let (owner, method) = target.rsplit_once("::")?;
+        if (read_dir_consuming_method(method) || read_dir_lazy_method(method) || method == "size_hint")
+            && (call.args.first().is_some_and(|argument| {
+                self.origin(argument).as_deref() == Some(READ_DIR_HANDLE)
+            }) || read_dir_second_iterator_method(method)
+                && call.args.iter().nth(1).is_some_and(|argument| {
+                    self.origin(argument).as_deref() == Some(READ_DIR_HANDLE)
+                }))
+        {
+            Some((owner.to_owned(), method.to_owned()))
+        } else {
+            None
+        }
+    }
+
+    fn refuse_read_dir_handoff(&mut self, target: &str) {
+        if self.read_dir_ambiguities.len() == MAX_PARENT_EFFECT_DIAGNOSTICS {
+            return;
+        }
+        let context = if self.context.is_empty() { "<module>".to_owned() } else { self.context.join("::") };
+        self.read_dir_ambiguities.insert(format!("{context}: {}", target.chars().take(256).collect::<String>()));
+    }
+
+    fn read_dir_call_method(&self, call: &syn::ExprCall) -> Option<String> {
+        let (owner, method) = self.read_dir_call_candidate(call)?;
+        let selected = match owner.as_str() {
+            "std::fs::ReadDir" => true,
+            "std::iter::Iterator" | "core::iter::Iterator" => {
+                !read_dir_peek_method(&method) && method != "into_iter"
+            }
+            "std::iter::IntoIterator" | "core::iter::IntoIterator" => method == "into_iter",
+            "std::iter::Peekable" | "core::iter::Peekable" => read_dir_peek_method(&method),
+            _ => false,
+        };
+        // A stored generic trait-function reference does not retain the lexical
+        // import provenance of its producer. Require a directly qualified path
+        // or an unconditional same-source canonical named trait alias instead.
+        let Expr::Path(path) = call.func.as_ref() else { return None; };
+        let first = identifier_name(&path.path.segments.first()?.ident);
+        let exact = owner == "std::fs::ReadDir" || path.path.segments.len() > 1;
+        if selected && exact
+            && !parent_import(&path_name(&path.path))
+            && self.declaration_scope(&first, PathNamespace::Type).is_none()
+            && !self.alias_has_flag(&first, &self.parent_aliases, &mut BTreeSet::new(), MAX_ALIAS_ROUNDS)
+            && !self.alias_has_flag(&first, &self.conditional_aliases, &mut BTreeSet::new(), MAX_ALIAS_ROUNDS)
+        {
+            Some(method)
+        } else {
+            None
+        }
+    }
+
+    fn read_dir_constructor(&self, call: &syn::ExprCall) -> bool {
+        if call.args.len() != 1 || self.origin(&call.args[0]).as_deref() != Some(READ_DIR_HANDLE) {
+            return false;
+        }
+        let Some(target) = self.origin(&call.func) else { return false; };
+        if !matches!(target.as_str(),
+            "std::option::Option::Some" | "core::option::Option::Some"
+                | "std::result::Result::Ok" | "core::result::Result::Ok") {
+            return false;
+        }
+        let Expr::Path(path) = call.func.as_ref() else { return false; };
+        let Some(first) = path.path.segments.first() else { return false; };
+        let first = identifier_name(&first.ident);
+        path.path.segments.len() > 1 && !parent_import(&path_name(&path.path))
+            && self.declaration_scope(&first, PathNamespace::Type).is_none()
+            && !self.alias_has_flag(&first, &self.parent_aliases, &mut BTreeSet::new(), MAX_ALIAS_ROUNDS)
+            && !self.alias_has_flag(&first, &self.conditional_aliases, &mut BTreeSet::new(), MAX_ALIAS_ROUNDS)
     }
 
     fn parameters(&mut self, signature: &syn::Signature) {
@@ -2213,9 +2380,21 @@ impl<'a> Scanner<'a> {
                 self.expression_kind(&call.args[0])
             }
             Expr::Call(call)
+                if self.read_dir_call_method(call).is_some_and(|method| read_dir_lazy_method(&method)) =>
+            {
+                ValueKind::Receiver
+            }
+            Expr::MethodCall(call)
+                if self.read_dir_method_lineage(call)
+                    && read_dir_lazy_method(&identifier_name(&call.method)) =>
+            {
+                ValueKind::Receiver
+            }
+            Expr::Call(call)
                 if self.origin(&call.func).is_some_and(|target| {
                     matches!(target.as_str(), "rand::rng" | "rand::thread_rng")
                         || target == "std::path::absolute"
+                        || target == "std::fs::read_dir"
                         || target.starts_with("ureq::")
                             && matches!(
                                 target.rsplit("::").next(),
@@ -3049,6 +3228,13 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
         for attribute in &expression.attrs {
             self.visit_attribute(attribute);
         }
+        let origin = self.origin(&expression.expr);
+        if origin.as_deref() == Some(READ_DIR_HANDLE) {
+            // One authored implicit consumption site, not an iteration count.
+            self.record("filesystem", "std::fs::ReadDir::next", expression);
+        } else if origin.as_deref().is_some_and(read_dir_lineage) {
+            self.refuse_read_dir_handoff("for-loop over an unextracted native container");
+        }
         self.visit_expr(&expression.expr);
         self.visit_pat(&expression.pat);
         self.push_values();
@@ -3121,7 +3307,19 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
 
     fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
         let mut suppress_direct_reference = false;
-        if let Some(target) = self.origin(&call.func)
+        if call.args.iter().any(|argument| self.origin(argument).as_deref().is_some_and(read_dir_lineage))
+            && self.read_dir_call_method(call).is_none()
+            && !self.read_dir_constructor(call)
+        {
+            let target = self.origin(&call.func).unwrap_or_else(|| "<computed callee>".to_owned());
+            self.refuse_read_dir_handoff(&target);
+        }
+        if let Some(method) = self.read_dir_call_method(call)
+            && read_dir_consuming_method(&method)
+        {
+            self.record("filesystem", &format!("std::fs::ReadDir::{method}"), call);
+            suppress_direct_reference = true;
+        } else if let Some(target) = self.origin(&call.func)
             && let Some(kind) = hazard(&target)
         {
             self.record(kind, &target, call);
@@ -3141,7 +3339,19 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
 
     fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
         let method = identifier_name(&call.method);
-        if let Some(origin) = self.origin(&call.receiver) {
+        let receiver = self.origin(&call.receiver);
+        if receiver.as_deref().and_then(|owner| read_dir_projection_result(owner, &method)).is_some() {
+            // Only an actual known acquisition wrapper gets this pure projection.
+        } else if self.read_dir_method_lineage(call) {
+            if read_dir_consuming_method(&method) {
+                self.record("filesystem", &format!("std::fs::ReadDir::{method}"), call);
+            } else if !read_dir_lazy_method(&method) && method != "size_hint" {
+                self.refuse_read_dir_handoff(&method);
+            }
+        } else if receiver.as_deref().is_some_and(read_dir_lineage)
+            || call.args.iter().any(|argument| self.origin(argument).as_deref().is_some_and(read_dir_lineage)) {
+            self.refuse_read_dir_handoff(&method);
+        } else if let Some(origin) = self.origin(&call.receiver) {
             if let Some(kind) = method_hazard(&origin, &method) {
                 // PathBuf reaches these actual Path methods through Deref.
                 // Preserve the authored call AST while naming the canonical
@@ -3601,7 +3811,7 @@ fn path_method_result(owner: &str, method: &str) -> Option<&'static str> {
     match method {
         "canonicalize" | "read_link" if path_receiver_type(owner) => Some("std::path::PathBuf"),
         "metadata" | "symlink_metadata" if path_receiver_type(owner) => Some("std::fs::Metadata"),
-        "read_dir" if path_receiver_type(owner) => Some("std::fs::ReadDir"),
+        "read_dir" if path_receiver_type(owner) => Some(READ_DIR_RESULT),
         "components" if path_receiver_type(owner) => Some("std::path::Components"),
         "iter" if path_receiver_type(owner) => Some("std::path::Iter"),
         "as_path" if path_projection_type(owner) => Some("std::path::Path"),
@@ -3609,16 +3819,62 @@ fn path_method_result(owner: &str, method: &str) -> Option<&'static str> {
     }
 }
 
+fn read_dir_peek_method(method: &str) -> bool {
+    matches!(method, "peek" | "peek_mut" | "next_if" | "next_if_eq" | "next_if_map" | "next_if_map_mut")
+}
+
+fn read_dir_consuming_method(method: &str) -> bool {
+    // Stable Iterator consumers in the pinned standard library. The fact is
+    // emitted only for retained ReadDir lineage, never arbitrary iterators.
+    read_dir_peek_method(method) || matches!(method,
+        "next" | "nth" | "last" | "count" | "collect" | "fold" | "try_fold"
+            | "for_each" | "try_for_each" | "find" | "find_map" | "position"
+            | "all" | "any" | "reduce" | "min" | "max" | "min_by" | "max_by"
+            | "min_by_key" | "max_by_key" | "partition" | "unzip" | "sum" | "product"
+            | "cmp" | "partial_cmp" | "eq" | "ne" | "lt" | "le" | "gt" | "ge"
+            | "is_sorted" | "is_sorted_by" | "is_sorted_by_key")
+}
+
+fn read_dir_lazy_method(method: &str) -> bool {
+    // These construct/borrow adaptors without requesting the next entry.
+    // Their lineage is only the known underlying ReadDir; no concrete generic
+    // adaptor type or captured callback/per-entry output is inferred.
+    matches!(method,
+        "into_iter" | "by_ref" | "step_by" | "chain" | "zip" | "map" | "filter"
+            | "filter_map" | "enumerate" | "peekable" | "skip_while" | "take_while"
+            | "map_while" | "skip" | "take" | "scan" | "flat_map" | "flatten"
+            | "fuse" | "inspect" | "copied" | "cloned" | "cycle")
+}
+
+fn read_dir_lineage(origin: &str) -> bool {
+    matches!(origin, READ_DIR_HANDLE | READ_DIR_RESULT | READ_DIR_OPTION | READ_DIR_UNMODELED)
+}
+
+fn read_dir_projection_result(owner: &str, method: &str) -> Option<&'static str> {
+    // Only the exact known wrapper shape gets a standard projection. A bare
+    // ReadDir extension trait with the same method spelling is still refused.
+    if matches!(owner, READ_DIR_RESULT | READ_DIR_OPTION) {
+        match method {
+            "unwrap" | "expect" => Some(READ_DIR_HANDLE),
+            "as_ref" | "as_mut" => Some(if owner == READ_DIR_RESULT { READ_DIR_RESULT } else { READ_DIR_OPTION }),
+            _ => None,
+        }
+    } else { None }
+}
+
+fn read_dir_second_iterator_method(method: &str) -> bool {
+    matches!(method, "chain" | "zip" | "cmp" | "partial_cmp" | "eq" | "ne" | "lt" | "le" | "gt" | "ge")
+}
+
 fn ambient_receiver_type(target: &str) -> bool {
     // Known receivers only, including pure paths with filesystem methods:
     // Metadata, read buffers, PIDs, UUIDs and raw clock samples are not receivers
     // merely because their factory is ambient. This is not general Rust
     // output-type or wrapper resolution.
-    path_receiver_type(target) || path_projection_type(target) || matches!(
+    path_receiver_type(target) || path_projection_type(target) || read_dir_lineage(target) || matches!(
         target,
         "std::fs::File"
             | "std::fs::OpenOptions"
-            | "std::fs::ReadDir"
             | "tokio::fs::File"
             | "tokio::fs::OpenOptions"
             | "std::process::Command"
@@ -3662,6 +3918,17 @@ fn receiver_returns_data(origin: &str, method: &str) -> bool {
     // Metadata/bool values must not inherit Path's filesystem predicates.
     if path_method_result(origin, method).is_some_and(ambient_receiver_type) {
         return false;
+    }
+    if read_dir_projection_result(origin, method).is_some() {
+        return false;
+    }
+    if origin == READ_DIR_HANDLE {
+        if read_dir_lazy_method(method) {
+            return false;
+        }
+        if read_dir_consuming_method(method) || method == "size_hint" {
+            return true;
+        }
     }
     // These exact Path projections return pure scalar/string DATA,
     // not another path. Conditional DATA bindings must not be mistaken for
@@ -3821,6 +4088,13 @@ fn ambient_import_target(target: &str, names: &BTreeSet<String>) -> bool {
 }
 
 fn hazard(target: &str) -> Option<&'static str> {
+    if let Some(method) = target.strip_prefix("std::fs::ReadDir::")
+        && (read_dir_lazy_method(method) || method == "size_hint")
+    {
+        // The old std::fs namespace rule is conservative, but these exact
+        // methods only construct adaptors or query a bound, not OS entries.
+        return None;
+    }
     if matches!(
         target,
         "web_security::random" | "crate::web_security::random" | "day2::web_security::random"
@@ -4469,6 +4743,180 @@ mod tests {
             assert_eq!(findings[0].target, "std::path::Path::read_dir");
             assert_eq!(findings[0].count, 1);
         }
+    }
+
+    #[test]
+    fn known_read_dir_consumption_keeps_io_and_lazy_path_iterators_stay_pure() {
+        // Source controls, not a compiler claim about arbitrary Iterator bounds.
+        // Comparisons/order consumers use mapped integer entries where needed.
+        for (operation, expression) in [
+            ("next", "entries.next()"), ("nth", "entries.nth(1)"),
+            ("last", "entries.last()"), ("count", "entries.count()"),
+            ("collect", "entries.collect::<Vec<_>>()"),
+            ("fold", "entries.fold(0, |n, _| n + 1)"),
+            ("try_fold", "entries.try_fold(0, |n, _| Ok::<_, ()>(n + 1))"),
+            ("for_each", "entries.for_each(|_| {})"),
+            ("try_for_each", "entries.try_for_each(|_| Ok::<_, ()>(()))"),
+            ("find", "entries.find(|_| true)"),
+            ("find_map", "entries.find_map(|_| Some(0))"),
+            ("position", "entries.position(|_| true)"),
+            ("all", "entries.all(|_| true)"), ("any", "entries.any(|_| true)"),
+            ("reduce", "entries.reduce(|first, _| first)"),
+            ("min", "entries.map(|_| 0).min()"), ("max", "entries.map(|_| 0).max()"),
+            ("min_by", "entries.min_by(|_, _| std::cmp::Ordering::Equal)"),
+            ("max_by", "entries.max_by(|_, _| std::cmp::Ordering::Equal)"),
+            ("min_by_key", "entries.min_by_key(|_| 0)"),
+            ("max_by_key", "entries.max_by_key(|_| 0)"),
+            ("partition", "entries.partition::<Vec<_>, _>(|_| true)"),
+            ("unzip", "entries.map(|_| (0, 0)).unzip::<_, _, Vec<_>, Vec<_>>()"),
+            ("sum", "entries.map(|_| 0u32).sum::<u32>()"),
+            ("product", "entries.map(|_| 1u32).product::<u32>()"),
+            ("cmp", "entries.map(|_| 0).cmp([0])"),
+            ("partial_cmp", "entries.map(|_| 0).partial_cmp([0])"),
+            ("eq", "entries.map(|_| 0).eq([0])"), ("ne", "entries.map(|_| 0).ne([0])"),
+            ("lt", "entries.map(|_| 0).lt([0])"), ("le", "entries.map(|_| 0).le([0])"),
+            ("gt", "entries.map(|_| 0).gt([0])"), ("ge", "entries.map(|_| 0).ge([0])"),
+            ("is_sorted", "entries.map(|_| 0).is_sorted()"),
+            ("is_sorted_by", "entries.is_sorted_by(|_, _| true)"),
+            ("is_sorted_by_key", "entries.is_sorted_by_key(|_| 0)"),
+            ("peek", "entries.peekable().peek()"),
+            ("peek_mut", "entries.peekable().peek_mut()"),
+            ("next_if", "entries.peekable().next_if(|_| true)"),
+            ("next_if_eq", "entries.map(|_| 0).peekable().next_if_eq(&0)"),
+            ("next_if_map", "entries.peekable().next_if_map(|entry| Ok::<_, std::io::Result<std::fs::DirEntry>>(entry))"),
+            ("next_if_map_mut", "entries.peekable().next_if_map_mut(|_| Some(0))"),
+        ] {
+            let source = format!("fn f(path: &std::path::Path) {{ let mut entries = path.read_dir().unwrap(); {expression}; }}");
+            let findings = scan(&source);
+            let counts = findings.iter().map(|finding| (finding.target.clone(), finding.count)).collect::<BTreeMap<_, _>>();
+            assert_eq!(counts, BTreeMap::from([("std::path::Path::read_dir".to_owned(), 1), (format!("std::fs::ReadDir::{operation}"), 1)]), "{source}: {findings:?}");
+        }
+        for source in [
+            "fn f() { let mut entries = std::fs::read_dir(\".\").unwrap(); entries.next(); }",
+            "use std::fs::read_dir as selected; fn f() { let mut entries = selected(\".\").unwrap(); entries.next(); }",
+            "use r#std::r#fs::r#read_dir as r#selected; fn f() { let mut r#entries = r#selected(\".\").unwrap(); r#entries.r#next(); }",
+        ] {
+            let findings = scan(source);
+            assert_eq!(findings.len(), 2, "{source}: {findings:?}");
+            assert!(findings.iter().any(|finding| finding.target == "std::fs::read_dir" && finding.count == 1));
+            assert!(findings.iter().any(|finding| finding.target == "std::fs::ReadDir::next" && finding.count == 1));
+        }
+        for source in [
+            "fn f(mut entries: std::fs::ReadDir) { core::iter::Iterator::next(&mut entries); }",
+            "use std::iter::Iterator as Advance; fn f(mut entries: std::fs::ReadDir) { Advance::next(&mut entries); }",
+            "fn f(mut entries: std::fs::ReadDir) { <std::fs::ReadDir as core::iter::Iterator>::next(&mut entries); }",
+            "fn f(mut entries: std::fs::ReadDir) { std::fs::ReadDir::next(&mut entries); }",
+            "fn f(mut entries: r#std::r#fs::r#ReadDir) { r#core::r#iter::r#Iterator::r#next(&mut entries); }",
+            "fn f(entries: std::fs::ReadDir) { core::iter::IntoIterator::into_iter(entries).next(); }",
+            "fn f(entries: std::fs::ReadDir) { core::iter::Iterator::map(entries, |entry| entry).next(); }",
+            "fn f(entries: std::fs::ReadDir) { core::iter::Iterator::chain(core::iter::empty(), entries).next(); }",
+            "fn f(entries: std::fs::ReadDir) { core::iter::Iterator::zip(core::iter::repeat(()), entries).next(); }",
+            "fn f(entries: std::fs::ReadDir) { core::iter::empty().chain(entries).next(); }",
+            "fn f(entries: std::fs::ReadDir) { core::iter::repeat(()).zip(entries).next(); }",
+            "fn f(mut entries: std::fs::ReadDir) { entries.by_ref().filter(|_| true).take(1).next(); }",
+            "fn f(entries: std::io::Result<std::fs::ReadDir>) { entries.unwrap().next(); }",
+            "fn f(entries: core::option::Option<std::fs::ReadDir>) { entries.expect(\"directory\").next(); }",
+            "fn f(mut entries: std::io::Result<std::fs::ReadDir>) { entries.as_mut().unwrap().next(); }",
+            "use std::io::Result as Outcome; fn f(entries: Outcome<std::fs::ReadDir>) { entries.unwrap().next(); }",
+            "fn f(entries: std::fs::ReadDir) { let wrapped = core::option::Option::Some(entries); wrapped.unwrap().next(); }",
+            "fn f(entries: std::fs::ReadDir) { let wrapped: core::result::Result<_, ()> = core::result::Result::Ok(entries); wrapped.unwrap().next(); }",
+        ] {
+            let findings = scan(source);
+            assert_eq!(findings.len(), 1, "{source}: {findings:?}");
+            assert_eq!(findings[0].target, "std::fs::ReadDir::next", "{source}: {findings:?}");
+            assert_eq!(findings[0].count, 1);
+        }
+        for source in [
+            "fn f(entries: std::fs::ReadDir) { for entry in entries {} }",
+            "fn f(entries: std::fs::ReadDir) { for entry in entries.filter(|_| true) {} }",
+            "fn f(entries: std::fs::ReadDir) { for entry in core::iter::empty().chain(entries) {} }",
+        ] {
+            let findings = scan(source);
+            assert_eq!(findings.len(), 1, "{source}: {findings:?}");
+            assert_eq!(findings[0].target, "std::fs::ReadDir::next");
+            assert_eq!(findings[0].count, 1);
+        }
+        for source in [
+            "fn f(entries: std::fs::ReadDir) { entries.map(|entry| entry); }",
+            "fn f(entries: std::fs::ReadDir) { entries.size_hint(); }",
+            "fn f(entries: std::io::Result<std::fs::ReadDir>) { entries.as_ref().unwrap().size_hint(); }",
+            "fn f(entries: std::fs::ReadDir) { core::iter::Iterator::size_hint(&entries); }",
+            "fn f(entries: std::fs::ReadDir) { core::iter::IntoIterator::into_iter(entries); }",
+            "fn f(mut entries: std::fs::ReadDir) { entries.next().into_iter().count(); }",
+            "fn f(entries: std::fs::ReadDir) { entries.collect::<Vec<_>>().into_iter().count(); }",
+        ] {
+            let findings = scan(source);
+            let expected = if source.contains("entries.next()") || source.contains("entries.collect") { 1 } else { 0 };
+            assert_eq!(findings.len(), expected, "{source}: {findings:?}");
+            if expected == 1 { assert_eq!(findings[0].count, 1); }
+        }
+        for source in [
+            "fn f(path: &std::path::Path) { path.components().count(); path.iter().next(); for part in path.components() {} }",
+            "fn f() { core::iter::Iterator::next(&mut [0].iter()); for value in [0] {} }",
+            "fn f(mut entries: std::fs::ReadDir) { entries.next().unwrap().unwrap().file_name(); }",
+        ] {
+            let findings = scan(source);
+            let expected = usize::from(source.contains("entries.next()"));
+            assert_eq!(findings.len(), expected, "{source}: {findings:?}");
+        }
+        let normal = scan("fn f(mut entries: std::fs::ReadDir) { entries.next(); }");
+        let raw = scan("fn f(mut r#entries: r#std::r#fs::r#ReadDir) { r#entries.r#next(); }");
+        assert_eq!(normal[0].target, raw[0].target);
+        assert_ne!(normal[0].fingerprint, raw[0].fingerprint);
+        for source in [
+            "fn f(entries: &mut std::fs::ReadDir) { Iterator::next(entries); }",
+            "fn f(entries: std::fs::ReadDir) { for entry in IntoIterator::into_iter(entries) {} }",
+            "fn f(mut entries: std::fs::ReadDir) { let advance = core::iter::Iterator::next; advance(&mut entries); }",
+            "use super::Iterator; fn f(entries: &mut std::fs::ReadDir) { Iterator::next(entries); }",
+            "#[cfg(unix)] use core::iter::Iterator as Selected; fn f(entries: &mut std::fs::ReadDir) { Selected::next(entries); }",
+            "trait Iterator { fn next(entries: &mut std::fs::ReadDir); } fn f(entries: &mut std::fs::ReadDir) { Iterator::next(entries); }",
+            "use core::iter::Iterator as Selected; fn f(entries: &mut std::fs::ReadDir) { trait Selected { fn next(entries: &mut std::fs::ReadDir); } Selected::next(entries); }",
+            "fn f(entries: std::fs::ReadDir) { consume(entries); }",
+            "fn f(entries: std::fs::ReadDir) { Vec::<_>::from_iter(entries); }",
+            "fn f(entries: std::fs::ReadDir) { std::vec::Vec::<_>::from_iter(entries); }",
+            "fn f(entries: std::fs::ReadDir) { core::iter::FromIterator::from_iter(entries); }",
+            "fn f(entries: std::fs::ReadDir) { let mut data = Vec::new(); data.extend(entries); }",
+            "fn f(entries: std::fs::ReadDir) { entries.custom_operation(); }",
+            "fn f(entries: std::fs::ReadDir) { (|value: std::fs::ReadDir| value)(entries); }",
+            "fn f(entries: std::fs::ReadDir) { custom(entries.map(|entry| entry)); }",
+            "trait Access { fn unwrap(self) -> usize; } impl Access for std::fs::ReadDir { fn unwrap(self) -> usize { self.count() } } fn f(entries: std::fs::ReadDir) { entries.unwrap(); }",
+            "trait Access { fn expect(self, message: &str) -> usize; } impl Access for std::fs::ReadDir { fn expect(self, message: &str) -> usize { self.count() } } fn f(entries: std::fs::ReadDir) { entries.expect(\"x\"); }",
+            "trait Access { fn as_ref(&mut self) -> bool; } impl Access for std::fs::ReadDir { fn as_ref(&mut self) -> bool { self.next().is_some() } } fn f(mut entries: std::fs::ReadDir) { entries.as_ref(); }",
+            "trait Access { fn as_mut(&mut self) -> bool; } impl Access for std::fs::ReadDir { fn as_mut(&mut self) -> bool { self.next().is_some() } } fn f(mut entries: std::fs::ReadDir) { entries.as_mut(); }",
+            "struct Result<T> { inner: T } impl<T> Result<T> { fn unwrap(self) -> T { self.inner } } fn f(entries: Result<std::fs::ReadDir>) { entries.unwrap(); }",
+            "fn f(entries: std::io::Result<std::fs::ReadDir>) { for entry in entries {} }",
+            "fn f(entries: std::io::Result<core::option::Option<std::fs::ReadDir>>) { entries.unwrap().unwrap().next(); }",
+            "fn f(entries: std::fs::ReadDir) { Some(entries); }",
+            "fn f(entries: std::fs::ReadDir) { Ok::<_, ()>(entries); }",
+            "fn Some(entries: std::fs::ReadDir) -> usize { entries.count() } fn f(entries: std::fs::ReadDir) { Some(entries); }",
+        ] {
+            let directory = fixture(source);
+            let error = inventory(directory.path()).unwrap_err().to_string();
+            assert!(error.contains("unresolved ReadDir handoffs or iterator calls"), "{source}: {error}");
+        }
+        assert!(scan("trait Iterator { fn next(value: u32); } fn f() { Iterator::next(7); }").is_empty());
+        for source in [
+            "fn f() -> std::io::Result<()> { let mut entries = std::fs::read_dir(\".\")?; entries.next(); Ok(()) }",
+            "fn f(path: &std::path::Path) { let mut entries = path.read_dir().expect(\"directory\"); entries.next(); }",
+        ] {
+            let findings = scan(source);
+            assert_eq!(findings.len(), 2, "{source}: {findings:?}");
+            assert!(findings.iter().any(|finding| finding.target == "std::fs::ReadDir::next" && finding.count == 1));
+        }
+        for source in [
+            "fn f(path: &std::path::Path) { helper(path.components()); helper(path.iter()); }",
+            "fn f(mut entries: std::fs::ReadDir) { helper(entries.next()); }",
+            "fn f(entries: std::fs::ReadDir) { helper(entries.count()); }",
+            "fn f(entries: std::fs::ReadDir) { let data = entries.collect::<Vec<_>>(); helper(data); }",
+            "fn f(entries: std::fs::ReadDir) { let hint = entries.size_hint(); helper(hint); }",
+        ] {
+            let findings = scan(source);
+            let expected = usize::from(source.contains("entries.next()") || source.contains("entries.count()") || source.contains("entries.collect"));
+            assert_eq!(findings.len(), expected, "{source}: {findings:?}");
+        }
+        let directory = fixture("pub fn f(entries: std::fs::ReadDir) { for entry in entries {} }");
+        let error = check(directory.path()).unwrap_err().to_string();
+        assert!(error.contains("unreviewed filesystem") && error.contains("std::fs::ReadDir::next"), "{error}");
     }
 
     #[test]
