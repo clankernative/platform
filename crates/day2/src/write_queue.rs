@@ -443,6 +443,9 @@ mod tests {
     {
         let mut connection = Connection::open_in_memory().unwrap();
         connection
+            .pragma_update(None, "foreign_keys", false)
+            .unwrap();
+        connection
             .execute_batch(
                 "CREATE TABLE log(writer INTEGER NOT NULL); BEGIN; INSERT INTO log VALUES (1)",
             )
@@ -504,6 +507,9 @@ mod tests {
         let holding = immediate(&mut first).unwrap();
         let rejected = std::thread::spawn(move || {
             let mut connection = Connection::open(path).unwrap();
+            connection
+                .pragma_update(None, "foreign_keys", false)
+                .unwrap();
             let error = bounded(Duration::ZERO, || configure_journal(&mut connection)).unwrap_err();
             let foreign_keys = connection
                 .pragma_query_value(None, "foreign_keys", |row| row.get::<_, i64>(0))
