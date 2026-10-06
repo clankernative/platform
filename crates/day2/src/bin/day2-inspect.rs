@@ -85,7 +85,11 @@ fn tmp_usage(inodes: bool) -> Result<()> {
 
 fn tmp_files() -> Result<()> {
     let mut count = 0;
-    for entry in fs::read_dir("/tmp").context("list /tmp")? {
+    let entries: fs::ReadDir = match fs::read_dir("/tmp") {
+        Ok(entries) => entries,
+        Err(error) => return Err(error).context("list /tmp"),
+    };
+    for entry in entries {
         let entry = entry?;
         // Not following symlinks: a link is not a file this container stored.
         let metadata = fs::symlink_metadata(entry.path())?;
