@@ -33,6 +33,28 @@ const MAX_DIRECTORY_DEPTH: usize = 32;
 const MAX_ALIAS_ROUNDS: usize = 32;
 const MAX_PARENT_EFFECT_DIAGNOSTICS: usize = 32;
 
+fn identifier_name(identifier: &syn::Ident) -> String {
+    use syn::ext::IdentExt;
+    // r# is Rust lexical quoting, not a distinct identifier. Normalize only
+    // semantic keys/targets; original AST tokens still fingerprint the source.
+    identifier.unraw().to_string()
+}
+
+fn path_name(path: &syn::Path) -> String {
+    path.segments.iter().map(|segment| identifier_name(&segment.ident)).collect::<Vec<_>>().join("::")
+}
+
+fn path_is_ident(path: &syn::Path, expected: &str) -> bool {
+    path.get_ident().is_some_and(|identifier| identifier_name(identifier) == expected)
+}
+
+fn member_name(member: &syn::Member) -> String {
+    match member {
+        syn::Member::Named(identifier) => identifier_name(identifier),
+        syn::Member::Unnamed(index) => index.index.to_string(),
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Finding {
@@ -405,7 +427,7 @@ fn test_only_sources(parsed: &BTreeMap<String, syn::File>) -> BTreeSet<String> {
             }
 
             fn visit_macro(&mut self, invocation: &'ast syn::Macro) {
-                if invocation.path.is_ident("include")
+                if path_is_ident(&invocation.path, "include")
                     && let Ok(literal) = invocation.parse_body::<syn::LitStr>()
                 {
                     let candidate = normalize_source_path(
@@ -483,14 +505,14 @@ fn module_edges(
             module_edges(
                 source,
                 items,
-                &directory.join(module.ident.to_string()),
+                &directory.join(identifier_name(&module.ident)),
                 test,
                 parsed,
                 edges,
             );
         } else {
             let explicit = module.attrs.iter().find_map(|attribute| {
-                if !attribute.path().is_ident("path") {
+                if !path_is_ident(attribute.path(), "path") {
                     return None;
                 }
                 let Meta::NameValue(value) = &attribute.meta else {
@@ -513,8 +535,8 @@ fn module_edges(
                 ]
             } else {
                 vec![
-                    directory.join(format!("{}.rs", module.ident)),
-                    directory.join(module.ident.to_string()).join("mod.rs"),
+                    directory.join(format!("{}.rs", identifier_name(&module.ident))),
+                    directory.join(identifier_name(&module.ident)).join("mod.rs"),
                 ]
             };
             for candidate in candidates {
@@ -566,7 +588,7 @@ fn item_attributes(item: &Item) -> &[Attribute] {
 // A false result must hold with test disabled for every unknown configuration.
 fn cfg_value(meta: &Meta) -> Option<bool> {
     match meta {
-        Meta::Path(path) if path.is_ident("test") => Some(false),
+        Meta::Path(path) if path_is_ident(path, "test") => Some(false),
         Meta::List(list) => {
             let nested = list
                 .parse_args_with(
@@ -574,7 +596,7 @@ fn cfg_value(meta: &Meta) -> Option<bool> {
                 )
                 .ok()?;
             let values: Vec<_> = nested.iter().map(cfg_value).collect();
-            if list.path.is_ident("all") {
+            if path_is_ident(&list.path, "all") {
                 if values.contains(&Some(false)) {
                     Some(false)
                 } else if values.iter().all(|value| *value == Some(true)) {
@@ -582,7 +604,7 @@ fn cfg_value(meta: &Meta) -> Option<bool> {
                 } else {
                     None
                 }
-            } else if list.path.is_ident("any") {
+            } else if path_is_ident(&list.path, "any") {
                 if values.contains(&Some(true)) {
                     Some(true)
                 } else if values.iter().all(|value| *value == Some(false)) {
@@ -590,7 +612,7 @@ fn cfg_value(meta: &Meta) -> Option<bool> {
                 } else {
                     None
                 }
-            } else if list.path.is_ident("not") && values.len() == 1 {
+            } else if path_is_ident(&list.path, "not") && values.len() == 1 {
                 values[0].map(|value| !value)
             } else {
                 None
@@ -602,12 +624,12 @@ fn cfg_value(meta: &Meta) -> Option<bool> {
 
 fn definitely_test_only(attributes: &[Attribute]) -> bool {
     attributes.iter().any(|attribute| {
-        if attribute.path().is_ident("cfg") {
+        if path_is_ident(attribute.path(), "cfg") {
             attribute
                 .parse_args::<Meta>()
                 .ok()
                 .is_some_and(|meta| cfg_value(&meta) == Some(false))
-        } else if attribute.path().is_ident("cfg_attr") {
+        } else if path_is_ident(attribute.path(), "cfg_attr") {
             attribute
                 .parse_args_with(
                     syn::punctuated::Punctuated::<Meta, syn::Token![,]>::parse_terminated,
@@ -620,7 +642,7 @@ fn definitely_test_only(attributes: &[Attribute]) -> bool {
                         .is_some_and(|condition| cfg_value(condition) == Some(true))
                         && values.any(|meta| {
                             let Meta::List(list) = meta else { return false };
-                            list.path.is_ident("cfg")
+                            path_is_ident(&list.path, "cfg")
                                 && list
                                     .parse_args::<Meta>()
                                     .ok()
@@ -713,26 +735,26 @@ fn import_names(tree: &UseTree, prefix: &str, output: &mut Vec<(String, String)>
         }
     };
     match tree {
-        UseTree::Path(path) => import_names(&path.tree, &join(&path.ident.to_string()), output),
+        UseTree::Path(path) => import_names(&path.tree, &join(&identifier_name(&path.ident)), output),
         UseTree::Name(name) => {
             let target = if name.ident == "self" {
                 prefix.to_owned()
             } else {
-                join(&name.ident.to_string())
+                join(&identifier_name(&name.ident))
             };
             let alias = if name.ident == "self" {
                 prefix.rsplit("::").next().unwrap_or(prefix).to_owned()
             } else {
-                name.ident.to_string()
+                identifier_name(&name.ident)
             };
             output.push((alias, target));
         }
         UseTree::Rename(rename) => output.push((
-            rename.rename.to_string(),
+            identifier_name(&rename.rename),
             if rename.ident == "self" {
                 prefix.to_owned()
             } else {
-                join(&rename.ident.to_string())
+                join(&identifier_name(&rename.ident))
             },
         )),
         UseTree::Group(group) => {
@@ -783,7 +805,7 @@ fn ambient_import_names(
             Type::Path(ty) => {
                 let last = ty.path.segments.last()?;
                 if matches!(
-                    last.ident.to_string().as_str(),
+                    identifier_name(&last.ident).as_str(),
                     "Option" | "Result" | "Box" | "Arc" | "Rc" | "Mutex" | "RwLock"
                 ) && let syn::PathArguments::AngleBracketed(arguments) = &last.arguments
                     && let Some(syn::GenericArgument::Type(inner)) = arguments.args.first()
@@ -794,7 +816,7 @@ fn ambient_import_names(
                     .path
                     .segments
                     .iter()
-                    .map(|segment| segment.ident.to_string())
+                    .map(|segment| identifier_name(&segment.ident))
                     .collect::<Vec<_>>()
                     .join("::");
                 ambient_receiver_type(&target).then_some(target)
@@ -809,7 +831,7 @@ fn ambient_import_names(
                 path.path
                     .segments
                     .iter()
-                    .map(|segment| segment.ident.to_string())
+                    .map(|segment| identifier_name(&segment.ident))
                     .collect::<Vec<_>>()
                     .join("::"),
             ],
@@ -862,7 +884,7 @@ fn ambient_import_names(
                     return false;
                 };
                 if matches!(
-                    last.ident.to_string().as_str(),
+                    identifier_name(&last.ident).as_str(),
                     "Option" | "Result" | "Box" | "Arc" | "Rc" | "Mutex" | "RwLock"
                 ) && let syn::PathArguments::AngleBracketed(arguments) = &last.arguments
                 {
@@ -871,7 +893,7 @@ fn ambient_import_names(
                         _ => false,
                     });
                 }
-                aliases.contains(&last.ident.to_string())
+                aliases.contains(&identifier_name(&last.ident))
             }
             _ => false,
         }
@@ -914,7 +936,7 @@ fn ambient_import_names(
         struct Names(BTreeSet<String>);
         impl<'ast> Visit<'ast> for Names {
             fn visit_pat_ident(&mut self, pattern: &'ast syn::PatIdent) {
-                self.0.insert(pattern.ident.to_string());
+                self.0.insert(identifier_name(&pattern.ident));
                 visit::visit_pat_ident(self, pattern);
             }
         }
@@ -943,7 +965,7 @@ fn ambient_import_names(
         }
 
         fn visit_item_type(&mut self, item: &'ast syn::ItemType) {
-            self.0.push((item.ident.to_string(), (*item.ty).clone()));
+            self.0.push((identifier_name(&item.ident), (*item.ty).clone()));
         }
 
         fn visit_expr(&mut self, expression: &'ast Expr) {
@@ -965,16 +987,16 @@ fn ambient_import_names(
             // effect-free. Parent imports must refuse it; no factory or local
             // return-flow resolution is inferred from its signature.
             if callback_type(ty, &self.2) && unknown_callback_initializer(expression) {
-                self.3.insert(name.to_string());
+                self.3.insert(identifier_name(name));
             }
             // Keep reference edges until import and constant aliases have been
             // composed. A nominal type does not prove DATA, but a DATA terminal
             // must not become ambient merely because its import name is broad.
             match alias_type(ty) {
-                Some(declared) if !declared.is_empty() => self.0.push((name.to_string(), declared)),
+                Some(declared) if !declared.is_empty() => self.0.push((identifier_name(name), declared)),
                 _ => {
                     for target in reference_paths(expression) {
-                        self.1.push((name.to_string(), target));
+                        self.1.push((identifier_name(name), target));
                     }
                 }
             }
@@ -999,7 +1021,7 @@ fn ambient_import_names(
 
         fn visit_item_extern_crate(&mut self, item: &'ast syn::ItemExternCrate) {
             if let Some((_, alias)) = &item.rename {
-                self.0.push((alias.to_string(), item.ident.to_string()));
+                self.0.push((identifier_name(alias), identifier_name(&item.ident)));
             }
         }
 
@@ -1340,7 +1362,7 @@ fn declarations<'a>(
             };
             // A named-field struct, type alias, trait or module does not
             // shadow an imported value with the same spelling in Rust.
-            Some((ident.to_string(), namespace))
+            Some((identifier_name(ident), namespace))
         })
         .fold(BTreeMap::new(), |mut names, (name, declared)| {
             // A type-only declaration may coexist with a genuine value
@@ -1359,13 +1381,13 @@ fn declarations<'a>(
 
 fn unconditional_scope(attributes: &[Attribute]) -> bool {
     attributes.iter().all(|attribute| {
-        if attribute.path().is_ident("cfg") {
+        if path_is_ident(attribute.path(), "cfg") {
             attribute
                 .parse_args::<Meta>()
                 .ok()
                 .is_some_and(|meta| cfg_value(&meta) == Some(true))
         } else {
-            !attribute.path().is_ident("cfg_attr")
+            !path_is_ident(attribute.path(), "cfg_attr")
         }
     })
 }
@@ -1812,7 +1834,7 @@ impl<'a> Scanner<'a> {
 
     fn canonical_html_macro(&self, invocation: &syn::Macro) -> bool {
         let path = &invocation.path;
-        let name = path.segments.iter().map(|segment| segment.ident.to_string()).collect::<Vec<_>>().join("::");
+        let name = path.segments.iter().map(|segment| identifier_name(&segment.ident)).collect::<Vec<_>>().join("::");
         // Absolute qualified invocation avoids Rust's inherited textual macro
         // precedence. Inventory separately refuses conflicting extern bindings.
         path.leading_colon.is_some() && name == "maud::html"
@@ -1853,7 +1875,7 @@ impl<'a> Scanner<'a> {
         let names: Vec<_> = path
             .segments
             .iter()
-            .map(|segment| segment.ident.to_string())
+            .map(|segment| identifier_name(&segment.ident))
             .collect();
         self.resolve_name(&names.join("::"))
     }
@@ -1903,18 +1925,18 @@ impl<'a> Scanner<'a> {
         };
         match tree {
             UseTree::Path(path) => {
-                self.use_tree(&path.tree, &join(&path.ident.to_string()), review)
+                self.use_tree(&path.tree, &join(&identifier_name(&path.ident)), review)
             }
             UseTree::Name(name) => {
                 let target = if name.ident == "self" {
                     prefix.to_owned()
                 } else {
-                    join(&name.ident.to_string())
+                    join(&identifier_name(&name.ident))
                 };
                 let alias = if name.ident == "self" {
                     prefix.rsplit("::").next().unwrap_or(prefix).to_owned()
                 } else {
-                    name.ident.to_string()
+                    identifier_name(&name.ident)
                 };
                 self.import_provenance(&alias, &target);
                 let target = self.resolve_name(&target);
@@ -1927,11 +1949,11 @@ impl<'a> Scanner<'a> {
                 let raw_target = if rename.ident == "self" {
                     prefix.to_owned()
                 } else {
-                    join(&rename.ident.to_string())
+                    join(&identifier_name(&rename.ident))
                 };
-                self.import_provenance(&rename.rename.to_string(), &raw_target);
+                self.import_provenance(&identifier_name(&rename.rename), &raw_target);
                 let target = self.resolve_name(&raw_target);
-                self.bind_alias(rename.rename.to_string(), target.clone(), tree);
+                self.bind_alias(identifier_name(&rename.rename), target.clone(), tree);
                 if review && ambient_binding(&target) {
                     self.record("effect-reexport", &target, tree);
                 }
@@ -1983,13 +2005,13 @@ impl<'a> Scanner<'a> {
                     field
                         .ident
                         .as_ref()
-                        .map(ToString::to_string)
+                        .map(identifier_name)
                         .unwrap_or_else(|| index.to_string()),
                     origin,
                 );
             }
         }
-        let name = structure.ident.to_string();
+        let name = identifier_name(&structure.ident);
         if let Some(previous) = self.fields.get(&name).cloned()
             && previous != fields
             && previous
@@ -2014,7 +2036,7 @@ impl<'a> Scanner<'a> {
             Type::Path(path) => {
                 let last = path.path.segments.last()?;
                 if matches!(
-                    last.ident.to_string().as_str(),
+                    identifier_name(&last.ident).as_str(),
                     "Option" | "Result" | "Box" | "Arc" | "Rc" | "Mutex" | "RwLock"
                 ) && let syn::PathArguments::AngleBracketed(arguments) = &last.arguments
                     && let Some(syn::GenericArgument::Type(inner)) = arguments.args.first()
@@ -2032,20 +2054,20 @@ impl<'a> Scanner<'a> {
     fn origin(&self, expr: &Expr) -> Option<String> {
         match expr {
             Expr::Path(path) => {
-                if path.path.is_ident("self") {
+                if path_is_ident(&path.path, "self") {
                     return self.self_type.clone();
                 }
                 if path.path.segments.len() == 1
                     && let Some(origin) =
-                        self.value_origin(&path.path.segments[0].ident.to_string())
+                        self.value_origin(&identifier_name(&path.path.segments[0].ident))
                 {
                     return origin;
                 }
                 if path.path.segments.len() == 1
                     && self
-                        .value_declaration_shadows_alias(&path.path.segments[0].ident.to_string())
+                        .value_declaration_shadows_alias(&identifier_name(&path.path.segments[0].ident))
                 {
-                    return Some(path.path.segments[0].ident.to_string());
+                    return Some(identifier_name(&path.path.segments[0].ident));
                 }
                 let name = self.resolve(&path.path);
                 self.values
@@ -2074,7 +2096,7 @@ impl<'a> Scanner<'a> {
             Expr::MethodCall(call) => self.origin(&call.receiver),
             Expr::Field(field) => {
                 let origin = self.origin(&field.base)?;
-                let name = field.member.to_token_stream().to_string();
+                let name = member_name(&field.member);
                 self.fields
                     .get(&origin)
                     .and_then(|fields| fields.get(&name))
@@ -2142,7 +2164,7 @@ impl<'a> Scanner<'a> {
     fn expression_kind(&self, expression: &Expr) -> ValueKind {
         match expression {
             Expr::Path(path) if path.path.segments.len() == 1 => self
-                .value_kind(&path.path.segments[0].ident.to_string())
+                .value_kind(&identifier_name(&path.path.segments[0].ident))
                 .unwrap_or(ValueKind::Reference),
             Expr::Path(_) => ValueKind::Reference,
             Expr::Paren(wrapper) => self.expression_kind(&wrapper.expr),
@@ -2198,7 +2220,7 @@ impl<'a> Scanner<'a> {
             Expr::MethodCall(call)
                 if self.expression_kind(&call.receiver) == ValueKind::Receiver
                     && self.origin(&call.receiver).is_some_and(|origin| {
-                        !receiver_returns_data(&origin, &call.method.to_string())
+                        !receiver_returns_data(&origin, &identifier_name(&call.method))
                     }) =>
             {
                 ValueKind::Receiver
@@ -2274,7 +2296,7 @@ impl<'a> Scanner<'a> {
                 for field in &pattern.fields {
                     let field_origin = origin
                         .and_then(|origin| self.fields.get(origin))
-                        .and_then(|fields| fields.get(&field.member.to_token_stream().to_string()))
+                        .and_then(|fields| fields.get(&member_name(&field.member)))
                         .cloned();
                     self.reject_conditional_tuple_rest(&field.pat, field_origin.as_deref());
                 }
@@ -2321,7 +2343,7 @@ impl<'a> Scanner<'a> {
         let mut resolved = Vec::new();
         self.pattern_bindings(pattern, origin, kind, &mut resolved);
         for (ident, origin, kind) in resolved {
-            let name = ident.to_string();
+            let name = identifier_name(ident);
             self.bindings.last_mut().unwrap().insert(name.clone());
             self.values.last_mut().unwrap().remove(&name);
             self.value_kinds
@@ -2394,7 +2416,7 @@ impl<'a> Scanner<'a> {
                 for field in &pattern.fields {
                     let field_origin = origin
                         .and_then(|origin| self.fields.get(origin))
-                        .and_then(|fields| fields.get(&field.member.to_token_stream().to_string()))
+                        .and_then(|fields| fields.get(&member_name(&field.member)))
                         .cloned();
                     let kind = if field_origin.as_deref().is_some_and(ambient_receiver_type) {
                         ValueKind::Receiver
@@ -2630,7 +2652,7 @@ impl<'a> Scanner<'a> {
                     .path
                     .segments
                     .iter()
-                    .map(|segment| segment.ident.to_string())
+                    .map(|segment| identifier_name(&segment.ident))
                     .collect::<Vec<_>>()
                     .join("::");
                 if path.path.segments.len() == 1 {
@@ -2646,10 +2668,10 @@ impl<'a> Scanner<'a> {
                     },
                 );
                 if path.path.segments.len() == 1
-                    && self.value_origin(&path.path.segments[0].ident.to_string()) == Some(None)
+                    && self.value_origin(&identifier_name(&path.path.segments[0].ident)) == Some(None)
                 {
                     self.parent_effect_path_checked(
-                        &path.path.segments[0].ident.to_string(),
+                        &identifier_name(&path.path.segments[0].ident),
                         true,
                         PathNamespace::Value,
                     );
@@ -2729,7 +2751,7 @@ impl<'a> Scanner<'a> {
                 if self.origin(expression).is_none() {
                     if let syn::Member::Named(member) = &field.member {
                         self.parent_effect_path_checked(
-                            &member.to_string(),
+                            &identifier_name(member),
                             true,
                             PathNamespace::Value,
                         );
@@ -2768,7 +2790,7 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
                 && !definitely_test_only(&item.attrs)
                 && let Some((_, alias)) = &item.rename
             {
-                self.bind_alias(alias.to_string(), item.ident.to_string(), item);
+                self.bind_alias(identifier_name(alias), identifier_name(&item.ident), item);
             }
         }
         for item in &file.items {
@@ -2819,7 +2841,7 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
                     && !definitely_test_only(&item.attrs)
                     && let Some((_, alias)) = &item.rename
                 {
-                    self.bind_alias(alias.to_string(), item.ident.to_string(), item);
+                    self.bind_alias(identifier_name(alias), identifier_name(&item.ident), item);
                 }
             }
             for item in items {
@@ -2861,7 +2883,7 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
     }
 
     fn visit_item_const(&mut self, constant: &'ast syn::ItemConst) {
-        let name = constant.ident.to_string();
+        let name = identifier_name(&constant.ident);
         let declared = self
             .type_origin(&constant.ty)
             .filter(|origin| ambient_receiver_type(origin));
@@ -2890,7 +2912,7 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
     }
 
     fn visit_item_static(&mut self, constant: &'ast syn::ItemStatic) {
-        let name = constant.ident.to_string();
+        let name = identifier_name(&constant.ident);
         let declared = self
             .type_origin(&constant.ty)
             .filter(|origin| ambient_receiver_type(origin));
@@ -3033,7 +3055,7 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
             &path
                 .segments
                 .iter()
-                .map(|segment| segment.ident.to_string())
+                .map(|segment| identifier_name(&segment.ident))
                 .collect::<Vec<_>>()
                 .join("::"),
         );
@@ -3045,7 +3067,7 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
             .path
             .segments
             .iter()
-            .map(|segment| segment.ident.to_string())
+            .map(|segment| identifier_name(&segment.ident))
             .collect::<Vec<_>>()
             .join("::");
         self.parent_effect_path_checked(&name, false, PathNamespace::Type);
@@ -3057,7 +3079,7 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
             .path
             .segments
             .iter()
-            .map(|segment| segment.ident.to_string())
+            .map(|segment| identifier_name(&segment.ident))
             .collect::<Vec<_>>()
             .join("::");
         self.parent_effect_path_checked(
@@ -3099,7 +3121,7 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
     }
 
     fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
-        let method = call.method.to_string();
+        let method = identifier_name(&call.method);
         if let Some(origin) = self.origin(&call.receiver) {
             let target = format!("{origin}::{method}");
             if let Some(kind) = method_hazard(&origin, &method) {
@@ -3130,9 +3152,9 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
                 UseTree::Path(path) => globs(
                     &path.tree,
                     if prefix.is_empty() {
-                        path.ident.to_string()
+                        identifier_name(&path.ident)
                     } else {
-                        format!("{prefix}::{}", path.ident)
+                        format!("{prefix}::{}", identifier_name(&path.ident))
                     },
                     output,
                 ),
@@ -3161,7 +3183,7 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
             self.aliases
                 .last_mut()
                 .unwrap()
-                .insert(alias.to_string(), item.ident.to_string());
+                .insert(identifier_name(alias), identifier_name(&item.ident));
         }
         visit::visit_item_extern_crate(self, item);
     }
@@ -3171,17 +3193,17 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
         if matches!(target.as_str(), "tokio::main" | "tokio::test") {
             self.record("scheduling-attribute", &target, attribute);
         }
-        if attribute.path().is_ident("path") {
+        if path_is_ident(attribute.path(), "path") {
             self.record("source-indirection", "module-path", attribute);
         }
-        if attribute.path().is_ident("allow") || attribute.path().is_ident("expect") {
+        if path_is_ident(attribute.path(), "allow") || path_is_ident(attribute.path(), "expect") {
             self.record(
                 "lint-suppression",
-                &attribute.path().to_token_stream().to_string(),
+                &path_name(attribute.path()),
                 attribute,
             );
         }
-        if attribute.path().is_ident("cfg_attr")
+        if path_is_ident(attribute.path(), "cfg_attr")
             && let Ok(metas) = attribute.parse_args_with(
                 syn::punctuated::Punctuated::<Meta, syn::Token![,]>::parse_terminated,
             )
@@ -3191,10 +3213,10 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
                     .first()
                     .is_none_or(|condition| cfg_value(condition) != Some(false))
             }) {
-                if meta.path().is_ident("allow") || meta.path().is_ident("expect") {
+                if path_is_ident(meta.path(), "allow") || path_is_ident(meta.path(), "expect") {
                     self.record(
                         "lint-suppression",
-                        &meta.path().to_token_stream().to_string(),
+                        &path_name(meta.path()),
                         meta,
                     );
                 }
@@ -3302,7 +3324,7 @@ impl Scanner<'_> {
                 self.macro_tokens(group.stream());
             }
             if let proc_macro2::TokenTree::Ident(first) = &tokens[index] {
-                let mut name = first.to_string();
+                let mut name = identifier_name(first);
                 let mut end = index + 1;
                 while end + 2 < tokens.len() {
                     let (
@@ -3317,7 +3339,7 @@ impl Scanner<'_> {
                         break;
                     }
                     name.push_str("::");
-                    name.push_str(&next.to_string());
+                    name.push_str(&identifier_name(next));
                     end += 3;
                 }
                 // Recover bounded call/postfix expressions inside JSON and
@@ -4114,6 +4136,219 @@ mod tests {
         fs::create_dir_all(directory.path().join("crates/fixture/src")).unwrap();
         fs::write(directory.path().join("crates/fixture/src/lib.rs"), source).unwrap();
         directory
+    }
+
+    #[test]
+    fn raw_paths_keep_canonical_targets_and_authored_fingerprints() {
+        let findings = scan(r#"
+            fn f() {
+                std::time::Instant::r#now();
+                r#std::r#time::r#Instant::now();
+                r#tokio::time::r#sleep(std::time::Duration::ZERO);
+                time::OffsetDateTime::r#now_utc();
+                chrono::r#Utc::r#now();
+                uuid::r#Uuid::r#new_v4();
+                r#std::r#process::r#id();
+            }
+        "#);
+        let mut actual = BTreeMap::new();
+        for finding in &findings {
+            *actual.entry((finding.kind.as_str(), finding.target.as_str())).or_insert(0usize) += finding.count;
+        }
+        assert_eq!(actual, BTreeMap::from([
+            (("clock", "std::time::Instant::now"), 2usize),
+            (("timer", "tokio::time::sleep"), 1),
+            (("clock", "time::OffsetDateTime::now_utc"), 1),
+            (("clock", "chrono::Utc::now"), 1),
+            (("entropy", "uuid::Uuid::new_v4"), 1),
+            (("process", "std::process::id"), 1),
+        ]), "{findings:?}");
+
+        let ordinary = scan("fn f() { std::time::Instant::now(); }");
+        let quoted = scan("fn f() { std::time::Instant::r#now(); }");
+        assert_eq!(ordinary.len(), 1);
+        assert_eq!(quoted.len(), 1);
+        assert_eq!(ordinary[0].target, quoted[0].target);
+        assert_eq!(ordinary[0].kind, quoted[0].kind);
+        assert_eq!(ordinary[0].count, quoted[0].count);
+        assert_ne!(ordinary[0].fingerprint, quoted[0].fingerprint);
+
+        let findings = scan(r#"fn f() {
+            opaque!(value => r#std::r#process::r#id());
+            json!({"when": r#std::time::Instant::r#now()});
+        }"#);
+        let actual: BTreeMap<_, _> = findings.iter().map(|finding| (finding.target.as_str(), finding.count)).collect();
+        assert_eq!(actual, BTreeMap::from([("std::process::id", 1usize), ("std::time::Instant::now", 1)]), "{findings:?}");
+
+        let findings = scan(r#"use super::*; fn f() {
+            ::r#maud::r#html! { div id="literal" data-id=(std::process::r#id()) {} }
+        }"#);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].target, "std::process::id");
+        assert_eq!(findings[0].count, 1);
+    }
+
+    #[test]
+    fn raw_imports_bindings_and_members_share_rust_identity() {
+        let findings = scan(r#"
+            use r#std::{r#time::r#Instant as r#Clock, r#fs::r#File as r#Disk};
+            struct r#Holder { r#file: Disk }
+            fn f(holder: &Holder) {
+                Clock::r#now();
+                holder.file.r#metadata();
+                let r#read = r#std::fs::r#read;
+                read("a"); r#read("b");
+            }
+        "#);
+        let mut actual = BTreeMap::new();
+        for finding in &findings {
+            *actual.entry(finding.target.as_str()).or_insert(0usize) += finding.count;
+        }
+        assert_eq!(actual, BTreeMap::from([
+            ("std::time::Instant::now", 1usize),
+            ("std::fs::File::metadata", 1),
+            ("std::fs::read", 3),
+        ]), "{findings:?}");
+
+        let findings = scan("extern crate r#getrandom as r#entropy;
+            fn f() { entropy::r#fill(&mut [0; 8]); }");
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].target, "getrandom::fill");
+        assert_eq!(findings[0].count, 1);
+
+        let findings = scan("const CLOCK: fn() -> std::time::Instant = std::time::Instant::now;
+            mod child { use super::*; fn r#CLOCK() {} type CLOCK = u32; fn f() { CLOCK(); } }");
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].target, "std::time::Instant::now");
+        assert_eq!(findings[0].context, "CLOCK");
+
+        for source in [
+            r#"use std::fs::read;
+                fn f() -> Result<(), E> {
+                    let r#read = std::fs::r#read("a")?;
+                    json!({"a": read, "b": r#read}); Ok(())
+                }"#,
+            r#"use std::process::r#id;
+                fn f() {
+                    let r#id = 7;
+                    { use std::process::id; id(); }
+                    json!({"id": id});
+                }"#,
+            r#"fn f() {
+                    let r#Client = std::time::Instant::r#now;
+                    { use reqwest::r#Client; Client(); }
+                }"#,
+        ] {
+            let findings = scan(source);
+            let (target, expected) = if source.contains("fs::") {
+                ("std::fs::read", 1usize)
+            } else if source.contains("process::") {
+                ("std::process::id", 1)
+            } else {
+                ("std::time::Instant::now", 2)
+            };
+            assert_eq!(findings.iter().map(|finding| finding.count).sum::<usize>(), expected, "{source}: {findings:?}");
+            assert!(findings.iter().all(|finding| finding.target == target), "{source}: {findings:?}");
+        }
+
+        for source in [
+            r#"use std::fs::metadata as r#metadata;
+                struct r#Data { r#random: u8, r#metadata: u8 }
+                fn f(d: Data) {
+                    json!({"a": d.random, "b": d.r#metadata});
+                    let r#id = 7; json!({"id": id});
+                }"#,
+            r#"fn f(input: &str) {
+                time::r#Date::r#parse(input, FORMAT);
+                time::OffsetDateTime::r#parse(input, &time::format_description::well_known::Rfc3339);
+            }"#,
+        ] {
+            assert!(scan(source).is_empty(), "{source}");
+        }
+    }
+
+    #[test]
+    fn raw_parent_and_conditional_names_preserve_closed_refusal() {
+        for source in [
+            "use super::*; fn f() { r#id(); }",
+            "use super::*; fn f() { let (r#id, _) = helper(); opaque!(value => id()); }",
+            "use super::*; #[r#cfg(unix)] use std::time::Instant as r#CLOCK;
+                #[cfg(not(unix))] use crate::pure::CLOCK; fn f() { CLOCK::r#now(); }",
+        ] {
+            let error = match inventory(fixture(source).path()) {
+                Err(error) => error.to_string(),
+                Ok(actual) => panic!("raw identifier bypassed closed parent checks: {source}: {actual:?}"),
+            };
+            assert!(error.contains("unresolved parent ambient imports"), "{source}: {error}");
+        }
+        for source in [
+            "fn f() { super::r#id(); }",
+            "use super::r#CLOCK; fn f() { CLOCK::r#now(); }",
+            "use super::r#CLOCK; fn r#CLOCK() {} fn f() { CLOCK::r#now(); }",
+        ] {
+            let directory = fixture("use std::time::Instant as r#CLOCK; mod child;");
+            fs::write(directory.path().join("crates/fixture/src/child.rs"), source).unwrap();
+            let error = match inventory(directory.path()) {
+                Err(error) => error.to_string(),
+                Ok(actual) => panic!("raw parent alias bypassed closed checks: {source}: {actual:?}"),
+            };
+            assert!(error.contains("unresolved parent ambient imports"), "{source}: {error}");
+        }
+        let source = "use super::r#CLOCK; fn f() { CLOCK(); }";
+        let directory = fixture("type r#Clock = fn() -> std::time::Instant;
+            const r#FIRST: Clock = std::time::Instant::r#now;
+            const CLOCK: r#Clock = FIRST; mod child;");
+        fs::write(directory.path().join("crates/fixture/src/child.rs"), source).unwrap();
+        let error = match inventory(directory.path()) {
+            Err(error) => error.to_string(),
+            Ok(actual) => panic!("raw constant alias bypassed closed checks: {source}: {actual:?}"),
+        };
+        assert!(error.contains("unresolved parent ambient imports"), "{source}: {error}");
+        for source in [
+            "fn f() -> Result<(), E> {
+                #[r#cfg(unix)] let r#file = std::fs::r#File::r#open(\"a\")?;
+                file.r#metadata(); Ok(())
+            }",
+            "fn f() {
+                #[r#cfg_attr(unix, r#allow(dead_code))]
+                let r#spawn = std::process::r#Command::r#new(\"a\");
+                spawn.r#spawn();
+            }",
+        ] {
+            let error = match inventory(fixture(source).path()) {
+                Err(error) => error.to_string(),
+                Ok(actual) => panic!("raw conditional owner bypassed refusal: {source}: {actual:?}"),
+            };
+            assert!(error.contains("conditional ambient local bindings"), "{source}: {error}");
+        }
+    }
+
+    #[test]
+    fn raw_cfg_and_module_names_preserve_the_production_graph() {
+        let directory = fixture("#[r#cfg(r#test)] mod r#tests; fn production() {}");
+        fs::write(directory.path().join("crates/fixture/src/tests.rs"),
+            "extern crate custom as maud; fn fixture() { std::time::Instant::now(); }").unwrap();
+        let actual = inventory(directory.path()).unwrap();
+        assert_eq!(actual.sources, vec!["crates/fixture/src/lib.rs", "crates/fixture/src/tests.rs"]);
+        assert!(actual.findings.is_empty(), "{actual:?}");
+
+        let findings = scan(r#"
+            #[r#cfg(r#test)] fn fixture() { std::time::Instant::r#now(); }
+            #[r#cfg_attr(r#not(r#test), r#cfg(r#test))]
+            fn also_fixture() { std::process::r#id(); }
+            fn production() {
+                #[r#cfg(r#test)] { std::time::Instant::r#now(); }
+            }
+        "#);
+        assert!(findings.is_empty(), "{findings:?}");
+
+        let findings = scan(r#"
+            #[r#allow(dead_code)] fn first() {}
+            #[r#cfg_attr(r#not(r#test), r#expect(dead_code))] fn second() {}
+        "#);
+        assert_eq!(findings.len(), 2, "{findings:?}");
+        assert!(findings.iter().all(|finding| finding.kind == "lint-suppression" && finding.count == 1), "{findings:?}");
+        assert_eq!(findings.iter().map(|finding| finding.target.as_str()).collect::<BTreeSet<_>>(), BTreeSet::from(["allow", "expect"]));
     }
 
     fn reviewed(inventory: &Inventory) -> Rules {
