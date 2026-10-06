@@ -716,6 +716,34 @@ mod tests {
                 );
             }
         }
+        // An allowed dependency can return path DATA into an actual no_std
+        // caller. Inferred methods there still require compiler enforcement.
+        for producer in [
+            "pub fn selected() -> &'static std::path::Path { std::path::Path::new(\".\") }",
+            "pub fn selected() -> std::path::PathBuf { std::path::PathBuf::from(\".\") }",
+        ] {
+            fs::write(&contract, format!("{ATTRIBUTES}{producer}"))?;
+            for (method, result) in [("exists", ""), ("canonicalize", ".is_ok()")] {
+                fs::write(
+                    fixture.path().join("src/lib.rs"),
+                    format!(
+                        "#![no_std]\n{ATTRIBUTES}pub fn pure() -> bool {{ boundary_contract::selected().{method}(){result} }}"
+                    ),
+                )?;
+                let rejection = check(fixture.path(), &packages).unwrap_err().to_string();
+                ensure!(
+                    rejection.contains("clippy::disallowed_methods")
+                        && rejection.contains(&format!("std::path::Path::{method}")),
+                    "wrong no_std returned-path rejection: {rejection}"
+                );
+            }
+        }
+        fs::write(
+            fixture.path().join("src/lib.rs"),
+            format!(
+                "#![no_std]\n{ATTRIBUTES}pub fn pure() -> bool {{ boundary_contract::pure() }}"
+            ),
+        )?;
         for level in ["allow", "expect"] {
             fs::write(
                 &contract,
