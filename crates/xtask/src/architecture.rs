@@ -3625,6 +3625,17 @@ fn receiver_returns_data(origin: &str, method: &str) -> bool {
     if path_receiver_type(origin) && method == "canonicalize" {
         return false;
     }
+    // These exact Path projections return pure scalar/string/iterator DATA,
+    // not another path. Conditional DATA bindings must not be mistaken for
+    // conditional receiver origins. Unknown transforms still retain the
+    // known receiver conservatively; this is a finite standard API boundary.
+    if path_receiver_type(origin) && matches!(method,
+        "is_absolute" | "is_relative" | "has_root" | "starts_with" | "ends_with"
+            | "components" | "iter" | "as_os_str" | "to_str" | "to_string_lossy"
+            | "display" | "file_name" | "file_stem" | "extension")
+    {
+        return true;
+    }
     if matches!(origin, "std::fs::OpenOptions" | "tokio::fs::OpenOptions")
         && matches!(method, "read" | "write")
     {
@@ -4274,6 +4285,13 @@ mod tests {
                 path.to_str(); owned.as_path(); PathBuf::from(value).file_name();
                 let path = PathBuf::new(); path.as_os_str();
                 rustix::fs::Mode::empty();
+            }
+            fn conditional_data(path: &Path) {
+                #[cfg(unix)] let absolute = path.is_absolute();
+                #[cfg(unix)] let parts = path.components();
+                #[cfg(unix)] let text = path.to_str();
+                #[cfg(unix)] let name = path.file_name();
+                #[cfg(unix)] let label = path.display();
             }
             struct Data { exists: bool, canonicalize: String }
             fn metadata(data: Data) { json!({"exists": data.exists, "canonicalize": data.canonicalize}); }
