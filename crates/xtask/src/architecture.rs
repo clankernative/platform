@@ -657,10 +657,12 @@ fn definitely_test_only(attributes: &[Attribute]) -> bool {
 
 fn glob_names(prefix: &str) -> &'static [&'static str] {
     match prefix {
-        "std" => &["time", "env", "fs", "thread", "process", "net"],
+        "std" => &["time", "env", "fs", "path", "thread", "process", "net"],
         "std::time" => &["SystemTime", "Instant"],
+        "std::path" => &["Path", "PathBuf"],
         "time" => &["OffsetDateTime", "UtcDateTime"],
-        "rustix" => &["time"],
+        "rustix" => &["time", "fs"],
+        "rustix::fs" => &["open"],
         "rustix::time" => &[
             "clock_gettime",
             "clock_gettime_dynamic",
@@ -1272,6 +1274,7 @@ fn canonical_import_namespace(target: &str) -> Option<DeclarationNamespace> {
                 | "std::time"
                 | "std::env"
                 | "std::fs"
+                | "std::path"
                 | "std::thread"
                 | "std::process"
                 | "std::net"
@@ -2087,6 +2090,7 @@ impl<'a> Scanner<'a> {
                     || origin.ends_with("::open")
                     || origin.ends_with("::create")
                     || origin.ends_with("::now")
+                    || origin == "std::path::PathBuf::from"
                 {
                     Some(origin.rsplit_once("::").unwrap().0.to_owned())
                 } else {
@@ -3123,8 +3127,16 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
     fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
         let method = identifier_name(&call.method);
         if let Some(origin) = self.origin(&call.receiver) {
-            let target = format!("{origin}::{method}");
             if let Some(kind) = method_hazard(&origin, &method) {
+                // PathBuf reaches these actual Path methods through Deref.
+                // Preserve the authored call AST while naming the canonical
+                // operation, without inferring arbitrary method output types.
+                let owner = if path_receiver_type(&origin) {
+                    "std::path::Path"
+                } else {
+                    &origin
+                };
+                let target = format!("{owner}::{method}");
                 self.record(kind, &target, call);
             }
         }
@@ -3556,11 +3568,16 @@ impl syn::parse::Parse for HtmlAttributeLabels {
     }
 }
 
+fn path_receiver_type(target: &str) -> bool {
+    matches!(target, "std::path::Path" | "std::path::PathBuf")
+}
+
 fn ambient_receiver_type(target: &str) -> bool {
-    // Known handle types only: filesystem Metadata, read buffers, PIDs, UUIDs
-    // and raw clock samples are not receivers merely because their factory is
-    // ambient. This is not general Rust output-type or wrapper resolution.
-    matches!(
+    // Known receivers only, including pure paths with filesystem methods:
+    // Metadata, read buffers, PIDs, UUIDs and raw clock samples are not receivers
+    // merely because their factory is ambient. This is not general Rust
+    // output-type or wrapper resolution.
+    path_receiver_type(target) || matches!(
         target,
         "std::fs::File"
             | "std::fs::OpenOptions"
@@ -3603,6 +3620,11 @@ fn receiver_returns_data(origin: &str, method: &str) -> bool {
     // propagation. Other methods of an already known handle conservatively
     // retain it: this includes builders, open/clone and unmodeled transforms,
     // and is not a claim that every such result has the same Rust output type.
+    // canonicalize performs a filesystem read and returns another path. A
+    // later exists/canonicalize must retain its known receiver provenance.
+    if path_receiver_type(origin) && method == "canonicalize" {
+        return false;
+    }
     if matches!(origin, "std::fs::OpenOptions" | "tokio::fs::OpenOptions")
         && matches!(method, "read" | "write")
     {
@@ -3714,6 +3736,11 @@ fn ambient_binding(target: &str) -> bool {
                 | "chrono::Utc"
                 | "chrono::Local"
                 | "uuid::Uuid"
+                | "std::path"
+                | "std::path::Path"
+                | "std::path::PathBuf"
+                | "rustix::fs"
+                | "rustix::fs::open"
         )
 }
 
@@ -3821,6 +3848,12 @@ fn hazard(target: &str) -> Option<&'static str> {
     }
     if matches!(
         target,
+        "std::path::Path::exists" | "std::path::Path::canonicalize" | "rustix::fs::open"
+    ) {
+        return Some("filesystem");
+    }
+    if matches!(
+        target,
         "tempfile::tempdir"
             | "tempfile::tempdir_in"
             | "tempfile::tempfile"
@@ -3904,6 +3937,9 @@ fn hazard(target: &str) -> Option<&'static str> {
 }
 
 fn method_hazard(origin: &str, method: &str) -> Option<&'static str> {
+    if path_receiver_type(origin) && matches!(method, "exists" | "canonicalize") {
+        return Some("filesystem");
+    }
     if matches!(
         origin,
         "std::time::SystemTime" | "std::time::Instant" | "tokio::time::Instant"
@@ -4118,6 +4154,170 @@ mod tests {
 
     fn scan(source: &str) -> Vec<Finding> {
         scan_syntax(syn::parse_file(source).unwrap())
+    }
+
+    #[test]
+    fn path_and_rustix_calls_keep_exact_targets_and_authored_fingerprints() {
+        let findings = scan(r#"
+            use std::path::{Path as InputPath, PathBuf as OwnedPath};
+            fn direct(path: &std::path::Path) {
+                std::path::Path::exists(path);
+                std::path::Path::canonicalize(path);
+            }
+            fn typed(path: &InputPath, buffer: OwnedPath) {
+                path.exists(); buffer.canonicalize();
+            }
+            fn constructed(value: &str) {
+                let path = InputPath::new(value); path.exists();
+                let owned = OwnedPath::from(value); owned.canonicalize();
+                let next = owned.canonicalize().unwrap(); next.exists();
+            }
+            fn callbacks(path: &InputPath) {
+                let check = InputPath::exists; check(path); check(path);
+            }
+            struct Holder { path: OwnedPath }
+            fn field(holder: Holder) { holder.path.exists(); }
+            fn unix(value: &str) {
+                rustix::fs::open(value, rustix::fs::OFlags::RDONLY, rustix::fs::Mode::empty());
+            }
+            fn nested(value: &str) {
+                std::fs::File::from(rustix::fs::open(value,
+                    rustix::fs::OFlags::RDONLY, rustix::fs::Mode::empty()).unwrap());
+            }
+        "#);
+        let mut actual = BTreeMap::new();
+        for finding in &findings {
+            assert_eq!(finding.kind, "filesystem", "{findings:?}");
+            *actual.entry((finding.context.as_str(), finding.target.as_str())).or_insert(0usize) += finding.count;
+        }
+        assert_eq!(actual, BTreeMap::from([
+            (("direct", "std::path::Path::exists"), 1),
+            (("direct", "std::path::Path::canonicalize"), 1),
+            (("typed", "std::path::Path::exists"), 1),
+            (("typed", "std::path::Path::canonicalize"), 1),
+            (("constructed", "std::path::Path::exists"), 2),
+            (("constructed", "std::path::Path::canonicalize"), 2),
+            (("callbacks", "std::path::Path::exists"), 3),
+            (("field", "std::path::Path::exists"), 1),
+            (("unix", "rustix::fs::open"), 1),
+            (("nested", "rustix::fs::open"), 1),
+            (("nested", "std::fs::File::from"), 1),
+        ]), "{findings:?}");
+
+        let normal = scan("fn f(path: &std::path::Path) { path.exists(); }");
+        let spaced = scan("fn f(path: &std::path::Path) { /* same call */ path . exists ( ) ; }");
+        let raw = scan("fn f(path: &r#std::path::r#Path) { path.r#exists(); }");
+        assert_eq!(normal.len(), 1, "{normal:?}");
+        assert_eq!(spaced.len(), 1, "{spaced:?}");
+        assert_eq!(raw.len(), 1, "{raw:?}");
+        assert_eq!(normal[0].target, raw[0].target);
+        assert_eq!(normal[0].fingerprint, spaced[0].fingerprint);
+        assert_ne!(normal[0].fingerprint, raw[0].fingerprint);
+        let normal = scan("fn f() { rustix::fs::open(\"a\", flags(), mode()); }");
+        let raw = scan("fn f() { r#rustix::r#fs::r#open(\"a\", flags(), mode()); }");
+        assert_eq!(normal.len(), 1, "{normal:?}");
+        assert_eq!(raw.len(), 1, "{raw:?}");
+        assert_eq!(normal[0].target, raw[0].target);
+        assert_ne!(normal[0].fingerprint, raw[0].fingerprint);
+    }
+
+    #[test]
+    fn path_and_rustix_aliases_preserve_closed_provenance() {
+        for source in [
+            "use std::path::*; fn f(path: &Path) { path.exists(); }",
+            "use std::path as paths; fn f(path: &paths::Path) { path.exists(); }",
+            "use std::path::r#Path as r#Location; fn f(path: &Location) { path.r#exists(); }",
+        ] {
+            let findings = scan(source);
+            assert_eq!(findings.iter().filter(|finding| finding.target == "std::path::Path::exists").map(|finding| finding.count).sum::<usize>(), 1, "{source}: {findings:?}");
+        }
+        for source in [
+            "use rustix::fs::open as read_input; fn f() { read_input(\"a\", flags(), mode()); }",
+            "use rustix::fs::*; fn f() { open(\"a\", flags(), mode()); }",
+            "use rustix::fs as disk; fn f() { disk::open(\"a\", flags(), mode()); }",
+        ] {
+            let findings = scan(source);
+            assert_eq!(findings.iter().filter(|finding| finding.target == "rustix::fs::open").map(|finding| finding.count).sum::<usize>(), 1, "{source}: {findings:?}");
+        }
+        for child in [
+            "use super::*; fn f(path: &Location) { path.exists(); }",
+            "use super::Location; fn f(path: &Location) { path.canonicalize(); }",
+            "fn f(path: &std::path::Path) { super::Location::exists(path); }",
+            "use super::read_input; fn f() { read_input(\"a\", flags(), mode()); }",
+        ] {
+            let directory = fixture("use std::path::Path as Location; use rustix::fs::open as read_input; mod child;");
+            fs::write(directory.path().join("crates/fixture/src/child.rs"), child).unwrap();
+            let error = inventory(directory.path()).unwrap_err().to_string();
+            assert!(error.contains("unresolved parent ambient imports"), "{child}: {error}");
+        }
+        let findings = scan("#[cfg(unix)] use std::path::Path as Location;
+            #[cfg(windows)] use fixture::Pure as Location;
+            fn f(path: &Location) { path.exists(); }");
+        assert!(findings.iter().any(|finding| finding.kind == "effect-alias-conflict"), "{findings:?}");
+        assert!(findings.iter().any(|finding| finding.target == "std::path::Path::exists"), "{findings:?}");
+        for source in [
+            "fn f() { #[cfg(unix)] let path = std::path::Path::new(\"a\"); path.exists(); }",
+            "fn f() { #[cfg(unix)] let path: std::path::PathBuf = std::path::PathBuf::from(\"a\"); path.exists(); }",
+            "fn f() { #[cfg(unix)] let path = std::path::Path::new(\"a\").canonicalize().unwrap(); path.exists(); }",
+        ] {
+            let error = inventory(fixture(source).path()).unwrap_err().to_string();
+            assert!(error.contains("conditional ambient local bindings"), "{source}: {error}");
+        }
+    }
+
+    #[test]
+    fn pure_paths_and_completed_path_data_remain_effect_free() {
+        let findings = scan(r#"
+            use std::path::{Path, PathBuf};
+            fn pure(value: &str, path: &Path, owned: PathBuf) {
+                Path::new(value).is_absolute(); path.components(); path.join("child");
+                path.to_str(); owned.as_path(); PathBuf::from(value).file_name();
+                let path = PathBuf::new(); path.as_os_str();
+                rustix::fs::Mode::empty();
+            }
+            struct Data { exists: bool, canonicalize: String }
+            fn metadata(data: Data) { json!({"exists": data.exists, "canonicalize": data.canonicalize}); }
+            #[cfg(test)] fn only_fixture(path: &Path) { path.exists(); path.canonicalize(); }
+        "#);
+        assert!(findings.is_empty(), "{findings:?}");
+        let findings = scan(r#"
+            fn f(path: &std::path::Path) {
+                #[cfg(unix)] let exists = path.exists();
+                let exists = path.exists(); json!({"exists": exists});
+                exists.then_some(7);
+                let path: std::path::PathBuf = {
+                    #[cfg(unix)] { std::path::PathBuf::from("a") }
+                    #[cfg(not(unix))] { std::path::PathBuf::new() }
+                };
+                path.exists();
+            }
+        "#);
+        assert!(findings.iter().all(|finding| finding.target == "std::path::Path::exists"), "{findings:?}");
+        assert_eq!(findings.iter().map(|finding| finding.count).sum::<usize>(), 3, "{findings:?}");
+    }
+
+    #[test]
+    fn new_path_effects_refuse_an_empty_reviewed_contract_surface() {
+        // These are the actual strict-contract counterexample source shapes.
+        // The strict dependency guard rejects any collected finding; this
+        // fixture additionally proves ordinary reviewed-empty source admission
+        // refuses them. It does not replace an actual compiler/Clippy canary.
+        for (source, target) in [
+            ("pub fn path_present(value: &str) -> bool { std::path::Path::new(value).exists() }", "std::path::Path::exists"),
+            ("pub fn resolve(value: &str) -> std::io::Result<std::path::PathBuf> { std::path::Path::new(value).canonicalize() }", "std::path::Path::canonicalize"),
+            ("pub fn open_input(value: &str) -> rustix::io::Result<rustix::fd::OwnedFd> { rustix::fs::open(value, rustix::fs::OFlags::RDONLY, rustix::fs::Mode::empty()) }", "rustix::fs::open"),
+        ] {
+            let directory = fixture("pub fn pure(value: &str) -> usize { value.len() }");
+            let rules = reviewed(&inventory(directory.path()).unwrap());
+            assert!(rules.allowances.is_empty());
+            fs::write(directory.path().join(RULES_FILE), serde_json::to_vec(&rules).unwrap()).unwrap();
+            fs::write(directory.path().join("crates/fixture/src/lib.rs"), source).unwrap();
+            let actual = inventory(directory.path()).unwrap();
+            assert_eq!(actual.findings.len(), 1, "{source}: {actual:?}");
+            assert_eq!(actual.findings[0].target, target, "{source}: {actual:?}");
+            let error = check(directory.path()).unwrap_err().to_string();
+            assert!(error.contains("unreviewed filesystem") && error.contains(target), "{source}: {error}");
+        }
     }
 
     fn scan_syntax(syntax: syn::File) -> Vec<Finding> {
