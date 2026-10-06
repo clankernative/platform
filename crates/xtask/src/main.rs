@@ -22,7 +22,7 @@ mod linux_runtime_qualification;
 mod native_toolchain;
 mod provider_conformance;
 mod tooling;
-mod ui_adapter_port;
+mod ui_assembly;
 mod verification;
 mod workflows;
 

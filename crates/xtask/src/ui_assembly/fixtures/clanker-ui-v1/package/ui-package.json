@@ -1,0 +1,1 @@
+{"schemaVersion": 1, "name": "@clanker/native-protocol-proof", "version": "1.0.0", "summary": "Recorded assembly protocol test, not a release package", "theme": "theme/default.css", "resources": ["icons.json", "components/button/fragment.html"]}

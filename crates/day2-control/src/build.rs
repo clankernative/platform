@@ -1,5 +1,8 @@
 //! Fixed local build recipe. The trusted runner is an operator capability, not app input.
 
+mod ui_assembly;
+use ui_assembly::{UiAssemblyInputs, validate_ui_activation};
+
 use crate::{
     BindingRef, BuildPlan, Digest, Name,
     kernel::{CredentialPresence, VerificationEvidence},
@@ -29,6 +32,7 @@ pub fn recipe_digest() -> Digest {
         &[
             RECIPE.as_bytes(),
             include_bytes!("build.rs"),
+            include_bytes!("build/ui_assembly.rs"),
             include_bytes!("simulation_campaign.rs"),
             day2::automation::source_digest().as_bytes(),
         ]
@@ -223,6 +227,7 @@ pub struct TrustedRunner {
     system_ssl: Option<InputFile>,
     rust: PinnedTree,
     registry: PinnedTree,
+    ui_assembly: Option<UiAssemblyInputs>,
 }
 
 pub struct BuildRequest {
@@ -404,19 +409,30 @@ impl TrustedRunner {
             },
             rust,
             registry,
+            ui_assembly: None,
         })
     }
 
+    /// Attach an explicitly approved UI provider and opaque package snapshot.
+    pub fn with_ui_assembly(
+        mut self,
+        configuration: &day2_capabilities::UiAssemblyProvider,
+    ) -> Result<Self> {
+        self.ui_assembly = Some(UiAssemblyInputs::capture(configuration)?);
+        Ok(self)
+    }
+
     pub fn binding(&self) -> Result<BindingRef> {
-        BindingRef::pin(
-            self.identity.clone(),
-            &json!({
+        let mut identity = json!({
             "recipe":recipe_digest(), "executable":self.executable_pin, "workflow":self.workflow_pin, "supervisor":self.supervisor_pin, "system_ssl":self.system_ssl,
-                "simulation":crate::simulation::implementation_digest()?,
-                "rust":self.rust.digest(), "registry":self.registry.digest(),
-                "containment":"macos-arm64-local-sandbox-v1", "system_tools":"trusted-host-OS-and-Xcode"
-            }),
-        )
+            "simulation":crate::simulation::implementation_digest()?,
+            "rust":self.rust.digest(), "registry":self.registry.digest(),
+            "containment":"macos-arm64-local-sandbox-v1", "system_tools":"trusted-host-OS-and-Xcode"
+        });
+        if let Some(ui) = &self.ui_assembly {
+            identity["ui_assembly"] = ui.binding_identity()?;
+        }
+        BindingRef::pin(self.identity.clone(), &identity)
     }
 
     pub fn validate_request(
@@ -441,6 +457,7 @@ impl TrustedRunner {
             request.plan.profile.builder == self.binding()?,
             "trusted builder binding changed"
         );
+        validate_ui_activation(&request.source, self.ui_assembly.as_ref())?;
         Ok(())
     }
 
@@ -537,12 +554,20 @@ impl TrustedRunner {
     }
 
     fn input_manifest(&self, request: &BuildRequest, platform: &PlatformInputs) -> Result<Vec<u8>> {
-        Ok(serde_json::to_vec_pretty(&json!({
+        let mut manifest = json!({
             "source_commit":request.source.commit(),
             "source":request.source.files().iter().map(|(path,bytes)| (path,Digest::new(bytes))).collect::<BTreeMap<_,_>>(),
             "platform":platform.files(), "runner":self.executable_pin, "workflow":self.workflow_pin, "supervisor":self.supervisor_pin, "system_ssl":self.system_ssl,
             "rust":self.rust.files(), "cargo_registry":self.registry.files()
-        }))?)
+        });
+        if validate_ui_activation(&request.source, self.ui_assembly.as_ref())? {
+            manifest["ui_assembly"] = self
+                .ui_assembly
+                .as_ref()
+                .context("UI capability disappeared")?
+                .input_manifest()?;
+        }
+        Ok(serde_json::to_vec_pretty(&manifest)?)
     }
 
     fn run_recipe(
@@ -607,6 +632,12 @@ impl TrustedRunner {
                     ensure!(!materialized, "CI inputs already materialized");
                     platform.materialize(job)?;
                     request.source.materialize(&job.join("app"))?;
+                    if validate_ui_activation(&request.source, self.ui_assembly.as_ref())? {
+                        self.ui_assembly
+                            .as_ref()
+                            .context("UI capability disappeared")?
+                            .materialize(job)?;
+                    }
                     self.rust.materialize(&job.join("rust"))?;
                     private_directory(&job.join("cargo"))?;
                     self.registry.materialize(&job.join("cargo/registry"))?;
@@ -652,6 +683,12 @@ impl TrustedRunner {
                         .stdin(Stdio::null())
                         .stdout(log.try_clone()?)
                         .stderr(log);
+                    if validate_ui_activation(&request.source, self.ui_assembly.as_ref())? {
+                        command.env(
+                            "DAY2_UI_PROVIDER_PIN_JSON",
+                            job.join("ui-provider/pin.json"),
+                        );
+                    }
                     let outcome = run_bounded(&mut command, &child_log);
                     let (log, oversized) = read_log(&child_log)?;
                     fs::write(result.join("build.log"), log)?;

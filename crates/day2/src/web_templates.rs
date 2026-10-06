@@ -260,6 +260,17 @@ struct Analysis<'a> {
     repeated_live_forms: bool,
 }
 
+fn integer_literal(value: &minijinja::Value) -> bool {
+    let raw = value.to_string();
+    value.kind() == minijinja::value::ValueKind::Number
+        && raw
+            .strip_prefix('-')
+            .unwrap_or(&raw)
+            .bytes()
+            .all(|b| b.is_ascii_digit())
+        && !raw.is_empty()
+}
+
 fn scalar(shape: &Type) -> bool {
     matches!(
         shape,
@@ -354,35 +365,181 @@ impl Analysis<'_> {
                     bail!("template_function_not_admitted")
                 };
                 match function.id {
-                    "cui_button_variant" | "cui_button_size" => {
-                        let [ast::CallArg::Pos(argument)] = call.args.as_slice() else {
-                            bail!("template_cui_button_enum_arity")
+                    "ui_text" => {
+                        let [
+                            ast::CallArg::Pos(value),
+                            ast::CallArg::Pos(E::Const(policy)),
+                            ast::CallArg::Pos(E::Const(minimum)),
+                            ast::CallArg::Pos(E::Const(maximum)),
+                        ] = call.args.as_slice()
+                        else {
+                            bail!("template_ui_text_arguments")
                         };
+                        let policy = policy
+                            .value
+                            .as_str()
+                            .context("template_ui_text_policy_literal")?;
                         ensure!(
-                            matches!(argument, E::Var(_) | E::GetAttr(_))
-                                && matches!(
-                                    self.expression(argument, context)?,
-                                    Type::Integer | Type::Unsigned(_)
-                                ),
-                            "template_cui_button_enum_requires_integer_field"
+                            matches!(policy, "nonblank" | "plain" | "multiline"),
+                            "template_ui_text_policy"
+                        );
+                        ensure!(
+                            matches!(value, E::Const(_) | E::Var(_) | E::GetAttr(_)),
+                            "template_ui_text_value_operand"
+                        );
+                        let value_type = self.expression(value, context)?;
+                        ensure!(
+                            scalar(&value_type) || matches!(value_type, Type::Unsigned(_)),
+                            "template_ui_text_value_type"
+                        );
+                        let min = minimum
+                            .value
+                            .as_i64()
+                            .context("template_ui_text_minimum_literal")?;
+                        let max = maximum
+                            .value
+                            .as_i64()
+                            .context("template_ui_text_maximum_literal")?;
+                        ensure!(
+                            min >= 0 && max >= 0 && (max == 0 || max >= min),
+                            "template_ui_text_grapheme_bounds"
                         );
                         Ok(Type::String)
                     }
-                    "cui_token" => {
+                    "ui_key" => {
                         let [ast::CallArg::Pos(value)] = call.args.as_slice() else {
-                            bail!("template_cui_token_arity")
+                            bail!("template_ui_key_arguments")
                         };
                         ensure!(
                             matches!(value, E::Var(_) | E::GetAttr(_))
                                 && matches!(
                                     self.expression(value, context)?,
-                                    Type::String
-                                        | Type::Integer
-                                        | Type::Unsigned(_)
-                                        | Type::ModelReference { .. }
+                                    Type::String | Type::Integer | Type::Unsigned(_)
                                 ),
-                            "template_cui_token_requires_string_integer_or_reference_field"
+                            "template_ui_key_field_required"
                         );
+                        Ok(Type::String)
+                    }
+                    "ui_integer" => {
+                        let [
+                            ast::CallArg::Pos(value),
+                            ast::CallArg::Pos(E::Const(minimum)),
+                            ast::CallArg::Pos(E::Const(maximum)),
+                        ] = call.args.as_slice()
+                        else {
+                            bail!("template_ui_integer_arguments")
+                        };
+                        ensure!(
+                            matches!(value, E::Var(_) | E::GetAttr(_))
+                                && matches!(
+                                    self.expression(value, context)?,
+                                    Type::Integer | Type::Unsigned(_)
+                                ),
+                            "template_ui_integer_field_required"
+                        );
+                        ensure!(
+                            integer_literal(&minimum.value) && integer_literal(&maximum.value),
+                            "template_ui_integer_bounds_literal"
+                        );
+                        ensure!(
+                            crate::ui_values::compare_number_literals(
+                                &minimum.value.to_string(),
+                                &maximum.value.to_string()
+                            )? <= 0,
+                            "template_ui_integer_bounds_order"
+                        );
+                        Ok(Type::String)
+                    }
+                    "ui_number" => {
+                        let [
+                            ast::CallArg::Pos(value),
+                            ast::CallArg::Pos(minimum),
+                            ast::CallArg::Pos(maximum),
+                            ast::CallArg::Pos(E::Const(exclusive)),
+                        ] = call.args.as_slice()
+                        else {
+                            bail!("template_ui_number_arguments")
+                        };
+                        ensure!(
+                            matches!(value, E::Var(_) | E::GetAttr(_))
+                                && matches!(
+                                    self.expression(value, context)?,
+                                    Type::Integer | Type::Unsigned(_) | Type::String
+                                ),
+                            "template_ui_number_field_required"
+                        );
+                        for bound in [minimum, maximum] {
+                            match bound {
+                                E::Const(value) if value.value.is_none() => {}
+                                E::Const(value) => ensure!(
+                                    crate::ui_values::valid_number_literal(
+                                        &value.value.to_string()
+                                    ),
+                                    "template_ui_number_bound_literal"
+                                ),
+                                E::Var(_) | E::GetAttr(_) => ensure!(
+                                    matches!(
+                                        self.expression(bound, context)?,
+                                        Type::Integer | Type::Unsigned(_)
+                                    ),
+                                    "template_ui_number_bound_type"
+                                ),
+                                _ => bail!("template_ui_number_bound_type"),
+                            }
+                        }
+                        if let (E::Const(min), E::Const(max)) = (minimum, maximum)
+                            && !min.value.is_none()
+                            && !max.value.is_none()
+                        {
+                            ensure!(
+                                crate::ui_values::compare_number_literals(
+                                    &min.value.to_string(),
+                                    &max.value.to_string()
+                                )? <= 0,
+                                "template_ui_number_bounds_order"
+                            );
+                        }
+                        ensure!(
+                            exclusive.value.kind() == minijinja::value::ValueKind::Bool,
+                            "template_ui_number_exclusive_literal"
+                        );
+                        Ok(Type::String)
+                    }
+                    "ui_compare" => {
+                        let [ast::CallArg::Pos(left), ast::CallArg::Pos(right)] =
+                            call.args.as_slice()
+                        else {
+                            bail!("template_ui_compare_arguments")
+                        };
+                        for operand in [left, right] {
+                            ensure!(
+                                matches!(operand, E::Var(_) | E::GetAttr(_))
+                                    && matches!(
+                                        self.expression(operand, context)?,
+                                        Type::Integer | Type::Unsigned(_)
+                                    ),
+                                "template_ui_compare_operand_type"
+                            );
+                        }
+                        Ok(Type::Integer)
+                    }
+                    "ui_image" => {
+                        let [ast::CallArg::Pos(value)] = call.args.as_slice() else {
+                            bail!("template_ui_image_arguments")
+                        };
+                        ensure!(
+                            matches!(value, E::Var(_) | E::GetAttr(_) | E::Const(_))
+                                && self.expression(value, context)? == Type::String,
+                            "template_ui_image_string_required"
+                        );
+                        if let E::Const(literal) = value {
+                            crate::ui_values::validate_remote_image_source(
+                                literal
+                                    .value
+                                    .as_str()
+                                    .context("template_ui_image_literal")?,
+                            )?;
+                        }
                         Ok(Type::String)
                     }
                     "asset" => {
@@ -398,55 +555,6 @@ impl Analysis<'_> {
                             "template_unknown_asset: {key}"
                         );
                         Ok(Type::String)
-                    }
-                    "cui_text" | "cui_initials" | "cui_plain" | "cui_field_text" => {
-                        let [ast::CallArg::Pos(value)] = call.args.as_slice() else {
-                            bail!("template_ui_helper_arity")
-                        };
-                        ensure!(
-                            matches!(value, E::Const(_) | E::Var(_) | E::GetAttr(_)) && {
-                                let shape = self.expression(value, context)?;
-                                shape == Type::String
-                                    || (function.id == "cui_text"
-                                        && (scalar(&shape) || matches!(shape, Type::Unsigned(_))))
-                            },
-                            "template_ui_helper_scalar_or_string_required"
-                        );
-                        Ok(Type::String)
-                    }
-                    "cui_image" => {
-                        let [ast::CallArg::Pos(value)] = call.args.as_slice() else {
-                            bail!("template_ui_helper_arity")
-                        };
-                        ensure!(
-                            matches!(value, E::Const(_) | E::Var(_) | E::GetAttr(_))
-                                && self.expression(value, context)? == Type::String,
-                            "template_ui_helper_string_required"
-                        );
-                        if let E::Const(literal) = value
-                            && let Some(literal) = literal.value.as_str()
-                        {
-                            crate::web_ui_values::validate_remote_image_source(literal)
-                                .context("template_cui_image_literal_invalid")?;
-                        }
-                        Ok(Type::String)
-                    }
-                    "cui_progress_value" | "cui_progress_maximum" | "cui_progress_complete" => {
-                        let [ast::CallArg::Pos(value), ast::CallArg::Pos(maximum)] =
-                            call.args.as_slice()
-                        else {
-                            bail!("template_ui_helper_arity")
-                        };
-                        ensure!(
-                            checked_integer_expression(value, context, self)
-                                && checked_integer_expression(maximum, context, self),
-                            "template_progress_integer_required"
-                        );
-                        Ok(if function.id == "cui_progress_complete" {
-                            Type::Boolean
-                        } else {
-                            Type::String
-                        })
                     }
                     _ => bail!("template_function_not_admitted"),
                 }
@@ -578,7 +686,7 @@ impl Analysis<'_> {
                         shape,
                         asset: !navigation && matches!(&emit.expr, E::Call(call) if matches!(&call.expr, E::Var(var) if var.id == "asset")),
                         navigation,
-                        image: matches!(&emit.expr, E::Call(call) if matches!(&call.expr, E::Var(var) if var.id == "cui_image")),
+                        image: matches!(&emit.expr, E::Call(call) if matches!(&call.expr, E::Var(var) if var.id == "ui_image")),
                         literal: match &emit.expr {
                             E::Const(value) => value.value.as_str().map(str::to_owned),
                             _ => None,
@@ -614,18 +722,13 @@ impl Analysis<'_> {
                 ensure!(
                     ![
                         "loop",
-                        "cui_button_variant",
-                        "cui_button_size",
-                        "asset",
-                        "cui_text",
-                        "cui_token",
-                        "cui_initials",
-                        "cui_plain",
-                        "cui_field_text",
-                        "cui_image",
-                        "cui_progress_value",
-                        "cui_progress_maximum",
-                        "cui_progress_complete"
+                        "ui_text",
+                        "ui_key",
+                        "ui_integer",
+                        "ui_number",
+                        "ui_compare",
+                        "ui_image",
+                        "asset"
                     ]
                     .contains(&target.id)
                         && (self.routes.is_none() || !["routes", "platform"].contains(&target.id))
@@ -690,26 +793,6 @@ impl Analysis<'_> {
     }
 }
 
-fn checked_integer_expression(
-    expr: &ast::Expr<'_>,
-    context: &Type,
-    analysis: &Analysis<'_>,
-) -> bool {
-    match expr {
-        ast::Expr::Const(value) => crate::web_ui_values::numeric_literal(
-            &value
-                .value
-                .as_str()
-                .map(str::to_owned)
-                .unwrap_or_else(|| value.value.to_string()),
-        ),
-        ast::Expr::Var(_) | ast::Expr::GetAttr(_) => analysis
-            .expression(expr, context)
-            .is_ok_and(|shape| matches!(shape, Type::Integer | Type::Unsigned(_))),
-        _ => false,
-    }
-}
-
 fn combine(left: Vec<String>, right: Vec<String>) -> Result<Vec<String>> {
     ensure!(
         left.len().saturating_mul(right.len()) <= MAX_VARIANTS,
@@ -738,18 +821,13 @@ fn analyze<'a>(
     if let Type::Record(fields) = context {
         ensure!(
             ![
-                "cui_button_variant",
-                "cui_button_size",
-                "asset",
-                "cui_text",
-                "cui_token",
-                "cui_initials",
-                "cui_plain",
-                "cui_field_text",
-                "cui_image",
-                "cui_progress_value",
-                "cui_progress_maximum",
-                "cui_progress_complete"
+                "ui_text",
+                "ui_key",
+                "ui_integer",
+                "ui_number",
+                "ui_compare",
+                "ui_image",
+                "asset"
             ]
             .iter()
             .any(|name| fields.contains_key(*name)),
@@ -1104,19 +1182,59 @@ fn check_html_policy(
                         .flat_map(BTreeMap::iter)
                         .filter(|(marker, _)| value_text.contains(marker.as_str()))
                         .collect();
+                    if [
+                        "data-ui-choice-set",
+                        "data-ui-choice-value",
+                        "data-ui-placeholder",
+                        "data-ui-navigation",
+                        "data-ui-navigation-minimum-items",
+                        "data-ui-navigation-current-last",
+                        "data-ui-navigation-ancestor-links",
+                    ]
+                    .contains(&attr)
+                    {
+                        ensure!(markers.is_empty(), "template_ui_constraint_must_be_literal");
+                        match attr {
+                            "data-ui-choice-set" => ensure!(
+                                tag_name == "select" && value_text == "true",
+                                "template_ui_choice_set_target_or_value"
+                            ),
+                            "data-ui-choice-value" => {
+                                ensure!(tag_name == "select", "template_ui_choice_value_target")
+                            }
+                            "data-ui-placeholder" => ensure!(
+                                tag_name == "option" && value_text.is_empty(),
+                                "template_ui_placeholder_target_or_value"
+                            ),
+                            "data-ui-navigation" => ensure!(
+                                tag_name == "nav" && value_text == "true",
+                                "template_ui_navigation_target_or_value"
+                            ),
+                            "data-ui-navigation-minimum-items" => ensure!(
+                                tag_name == "nav" && value_text.parse::<usize>().is_ok(),
+                                "template_ui_navigation_minimum_literal"
+                            ),
+                            "data-ui-navigation-current-last"
+                            | "data-ui-navigation-ancestor-links" => ensure!(
+                                tag_name == "nav" && matches!(value_text, "true" | "false"),
+                                "template_ui_navigation_constraint_literal"
+                            ),
+                            _ => unreachable!(),
+                        }
+                    }
                     if matches!(
                         attr,
-                        "data-cui-selected-flag" | "data-cui-checked-flag" | "data-cui-hidden-flag"
+                        "data-ui-selected-flag" | "data-ui-checked-flag" | "data-ui-hidden-flag"
                     ) {
                         ensure!(
                             match attr {
-                                "data-cui-selected-flag" => tag_name == "option",
-                                "data-cui-checked-flag" =>
+                                "data-ui-selected-flag" => tag_name == "option",
+                                "data-ui-checked-flag" =>
                                     tag_name == "input"
                                         && tag.attributes.iter().any(|(key, value)| key.as_slice()
                                             == b"type"
                                             && matches!(value.as_slice(), b"checkbox" | b"radio")),
-                                "data-cui-hidden-flag" => matches!(tag_name, "fieldset" | "div"),
+                                "data-ui-hidden-flag" => matches!(tag_name, "fieldset" | "div"),
                                 _ => false,
                             },
                             "template_boolean_attribute_target"
@@ -1140,7 +1258,7 @@ fn check_html_policy(
                             markers.len() == 1
                                 && (markers[0].1.asset || markers[0].1.image)
                                 && value_text == markers[0].0,
-                            "template_image_src_requires_asset_or_cui_image_helper"
+                            "template_image_src_requires_asset_or_ui_image_helper"
                         );
                     }
                     if routed
@@ -1170,7 +1288,7 @@ fn check_html_policy(
                         if binding.image {
                             ensure!(
                                 tag_name == "img" && attr == "src" && value_text == marker.as_str(),
-                                "template_cui_image_requires_exact_img_src"
+                                "template_ui_image_requires_exact_img_src"
                             );
                         }
                         if binding.navigation {
@@ -1228,7 +1346,7 @@ fn check_html_policy(
                         if attr == "src" {
                             ensure!(
                                 (binding.asset || binding.image) && value_text == marker.as_str(),
-                                "template_image_src_requires_asset_or_cui_image_helper"
+                                "template_image_src_requires_asset_or_ui_image_helper"
                             );
                         }
                         seen.insert(marker.to_string());
@@ -1255,7 +1373,7 @@ fn check_html_policy(
                         );
                         ensure!(
                             !dynamic[marker].image,
-                            "template_cui_image_requires_exact_img_src"
+                            "template_ui_image_requires_exact_img_src"
                         );
                         seen.insert(marker.clone());
                     }
@@ -1392,7 +1510,8 @@ fn validate_attribute(
                 && (interpolated
                     || value.starts_with("/assets/app/")
                     || value.starts_with("/assets/instance/")
-                    || (allow_remote_images && crate::web_ui_values::image(value).is_ok())),
+                    || (allow_remote_images
+                        && crate::ui_values::validate_remote_image_source(value).is_ok())),
             "template_image_src_requires_asset_helper"
         );
     }
@@ -1578,7 +1697,10 @@ fn validate_forms(
             // Run validation again without swallowing errors (the set above only
             // distinguishes an admitted repeated carrier from ordinary scalars).
             for (field, group) in &groups {
-                crate::web_forms::native_field(group, &input.fields[*field])?;
+                let kind = input.fields.get(*field).with_context(|| {
+                    format!("template_unknown_command_field: {command}.{field}")
+                })?;
+                crate::web_forms::native_field(group, kind)?;
             }
             for control in &controls {
                 let (field, key) = crate::web_forms::split_control(&control.name);
@@ -1688,7 +1810,7 @@ fn install_formatter(environment: &mut Environment<'_>, emissions: Arc<Mutex<Emi
     environment.set_formatter(move |output, state, value| {
         let start = emissions.lock().map_err(template_error)?.bytes;
         let navigation = value.downcast_object_ref::<Navigation>();
-        let image = value.downcast_object_ref::<crate::web_ui_values::ImageSource>();
+        let image = value.downcast_object_ref::<crate::ui_values::ImageSource>();
         if let Some(value) = navigation {
             minijinja::escape_formatter(output, state, &minijinja::Value::from(value.0.as_str()))?;
         } else if let Some(value) = image {
@@ -1747,12 +1869,12 @@ fn check_image_emissions(markup: &str, emissions: &[Emission]) -> Result<()> {
             if remote {
                 ensure!(
                     exact.is_some_and(|(_, emission)| emission.image),
-                    "template_remote_image_requires_cui_image_helper"
+                    "template_remote_image_requires_ui_image_helper"
                 );
             }
             ensure!(
                 !relevant.iter().any(|(_, emission)| emission.image) || exact.is_some(),
-                "template_cui_image_requires_exact_img_src"
+                "template_ui_image_requires_exact_img_src"
             );
             if let Some((index, _)) = exact {
                 used.insert(index);
@@ -1764,17 +1886,17 @@ fn check_image_emissions(markup: &str, emissions: &[Emission]) -> Result<()> {
             .iter()
             .enumerate()
             .all(|(i, e)| !e.image || used.contains(&i)),
-        "template_cui_image_requires_exact_img_src"
+        "template_ui_image_requires_exact_img_src"
     );
     Ok(())
 }
 
 pub fn validate_remote_image_source(value: &str) -> Result<()> {
-    crate::web_ui_values::validate_remote_image_source(value)
+    crate::ui_values::validate_remote_image_source(value)
 }
 
 pub fn remote_image_origins(markup: &str) -> Result<Vec<String>> {
-    crate::web_ui_values::remote_image_origins(markup)
+    crate::ui_values::remote_image_origins(markup)
 }
 
 struct BoundedOutput(Vec<u8>, Option<Arc<Mutex<Emissions>>>);
@@ -1802,18 +1924,13 @@ fn validate_runtime_context_names(context: &serde_json::Value, routed: bool) -> 
     if let Some(fields) = context.as_object() {
         ensure!(
             ![
-                "cui_button_variant",
-                "cui_button_size",
-                "asset",
-                "cui_text",
-                "cui_token",
-                "cui_initials",
-                "cui_plain",
-                "cui_field_text",
-                "cui_image",
-                "cui_progress_value",
-                "cui_progress_maximum",
-                "cui_progress_complete"
+                "ui_text",
+                "ui_key",
+                "ui_integer",
+                "ui_number",
+                "ui_compare",
+                "ui_image",
+                "asset"
             ]
             .iter()
             .any(|name| fields.contains_key(*name))
@@ -1858,8 +1975,8 @@ pub fn render(
     } else {
         markup
     };
-    crate::web_ui_values::validate_selects(&markup)?;
-    crate::web_ui_values::validate_navigation(&markup)?;
+    crate::ui_values::validate_selects(&markup)?;
+    crate::ui_values::validate_navigation(&markup)?;
     Ok(markup)
 }
 
@@ -1880,7 +1997,45 @@ fn environment<'a>(
             )
         })
     });
-    clanker_ui_runtime::install(&mut environment);
+    environment.add_function(
+        "ui_text",
+        |value: minijinja::Value, policy: String, minimum: u64, maximum: u64| {
+            crate::ui_values::ui_text(&value, &policy, minimum, maximum).map_err(template_error)
+        },
+    );
+    environment.add_function("ui_key", |value: minijinja::Value| {
+        crate::ui_values::ui_key(&value).map_err(template_error)
+    });
+    environment.add_function(
+        "ui_integer",
+        |value: minijinja::Value, minimum: minijinja::Value, maximum: minijinja::Value| {
+            crate::ui_values::ui_integer(&value, &minimum.to_string(), &maximum.to_string())
+                .map_err(template_error)
+        },
+    );
+    environment.add_function(
+        "ui_number",
+        |value: minijinja::Value,
+         minimum: minijinja::Value,
+         maximum: minijinja::Value,
+         exclusive: bool| {
+            let min = (!minimum.is_none()).then(|| minimum.to_string());
+            let max = (!maximum.is_none()).then(|| maximum.to_string());
+            crate::ui_values::ui_number(&value, min.as_deref(), max.as_deref(), exclusive)
+                .map_err(template_error)
+        },
+    );
+    environment.add_function(
+        "ui_compare",
+        |left: minijinja::Value, right: minijinja::Value| {
+            crate::ui_values::ui_compare(&left, &right).map_err(template_error)
+        },
+    );
+    environment.add_function("ui_image", |value: minijinja::Value| {
+        crate::ui_values::ui_image(&value)
+            .map(minijinja::Value::from_object)
+            .map_err(template_error)
+    });
     environment.add_function("asset", move |key: String| {
         asset_urls.get(&key).cloned().ok_or_else(|| {
             minijinja::Error::new(
@@ -1994,8 +2149,8 @@ pub fn render_routed(
     } else {
         markup
     };
-    crate::web_ui_values::validate_selects(&markup)?;
-    crate::web_ui_values::validate_navigation(&markup)?;
+    crate::ui_values::validate_selects(&markup)?;
+    crate::ui_values::validate_navigation(&markup)?;
     Ok(markup)
 }
 
@@ -2126,8 +2281,33 @@ mod tests {
     }
 
     #[test]
+    fn generic_ui_helpers_render_checked_values_without_component_callbacks() {
+        let sources = BTreeMap::from([("pages/helpers.html".into(), "{{ ui_text(name, 'nonblank', 2, 2) }}|{{ ui_integer(count, 0, 9007199254740994) }}|{{ ui_number(count, none, none, false) }}|{{ ui_compare(count, real) }}".into())]);
+        let env = environment(&sources, BTreeMap::new()).unwrap();
+        let rendered = env
+            .get_template("pages/helpers.html")
+            .unwrap()
+            .render(serde_json::json!({
+                "name": "A👩‍🚀", "count": 9007199254740993u64, "real": 9007199254740992.0
+            }))
+            .unwrap();
+        assert_eq!(rendered, "A👩‍🚀|9007199254740993|9007199254740993|1");
+        let rejected = BTreeMap::from([(
+            "pages/bad.html".into(),
+            "{{ ui_integer(value, 0, 10) }}".into(),
+        )]);
+        let env = environment(&rejected, BTreeMap::new()).unwrap();
+        assert!(
+            env.get_template("pages/bad.html")
+                .unwrap()
+                .render(serde_json::json!({"value": 1.5}))
+                .is_err()
+        );
+    }
+
+    #[test]
     fn boolean_control_flags_are_checked_without_structural_branching() {
-        let sources = BTreeMap::from([("pages/controls.html".into(), "<select><option value=\"0\" data-cui-selected-flag=\"{{ not ready }}\">Zero</option><option value=\"1\" data-cui-selected-flag=\"{{ ready }}\">One</option></select><input type=\"checkbox\" data-cui-checked-flag=\"{{ ready }}\"><fieldset data-cui-hidden-flag=\"{{ not ready }}\"></fieldset>".into())]);
+        let sources = BTreeMap::from([("pages/controls.html".into(), "<select><option value=\"0\" data-ui-selected-flag=\"{{ not ready }}\">Zero</option><option value=\"1\" data-ui-selected-flag=\"{{ ready }}\">One</option></select><input type=\"checkbox\" data-ui-checked-flag=\"{{ ready }}\"><fieldset data-ui-hidden-flag=\"{{ not ready }}\"></fieldset>".into())]);
         let context = Type::Record(BTreeMap::from([("ready".into(), Type::Boolean)]));
         let assets = assets::Catalog::new();
         let (_, variants) =
@@ -2290,7 +2470,7 @@ mod tests {
                 "#target"
             };
             let source = format!(
-                "<select id=\"preference\"><option value=\"1\" data-cui-selected-flag=\"{{{{ enabled }}}}\">One</option><option value=\"0\" data-cui-selected-flag=\"{{{{ not enabled }}}}\">Zero</option></select><input type=\"checkbox\" data-cui-checked-flag=\"{{{{ enabled }}}}\"><a href=\"{href}\">Docs</a><div id=\"target\"></div><img src=\"{{{{ cui_image(photo) }}}}\" alt=\"Photo\">"
+                "<select id=\"preference\"><option value=\"1\" data-ui-selected-flag=\"{{{{ enabled }}}}\">One</option><option value=\"0\" data-ui-selected-flag=\"{{{{ not enabled }}}}\">Zero</option></select><input type=\"checkbox\" data-ui-checked-flag=\"{{{{ enabled }}}}\"><a href=\"{href}\">Docs</a><div id=\"target\"></div><img src=\"{{{{ ui_image(photo) }}}}\" alt=\"Photo\">"
             );
             fs::write(source_directory.join(path), &source).unwrap();
             let catalog = package(&source_directory, &artifact_directory).unwrap();
@@ -2310,8 +2490,8 @@ mod tests {
                     render(&artifact_directory, &catalog, path, data, BTreeMap::new())
                 }
                 .unwrap();
-                assert!(!rendered.contains("data-cui-selected-flag"));
-                assert!(!rendered.contains("data-cui-checked-flag"));
+                assert!(!rendered.contains("data-ui-selected-flag"));
+                assert!(!rendered.contains("data-ui-checked-flag"));
                 let html = Html::parse_fragment(&rendered);
                 let selected = html
                     .select(&Selector::parse("option[selected]").unwrap())
@@ -2331,7 +2511,7 @@ mod tests {
                 for unsafe_source in [
                     source.replace("{{ platform.docs() }}", "/docs"),
                     source.replace(
-                        "{{ cui_image(photo) }}",
+                        "{{ ui_image(photo) }}",
                         "https://cdn.example.test/photo.png",
                     ),
                 ] {
@@ -2363,7 +2543,7 @@ mod tests {
                 false,
             ),
             (
-                "<div id=\"photos\" data-live><img src=\"{{ cui_image(photo) }}\" alt=\"\"></div>",
+                "<div id=\"photos\" data-live><img src=\"{{ ui_image(photo) }}\" alt=\"\"></div>",
                 true,
             ),
         ] {
@@ -2429,7 +2609,7 @@ mod tests {
     }
 
     #[test]
-    fn cui_helpers_have_narrow_ast_admission_and_image_provenance() {
+    fn generic_ui_helpers_have_narrow_ast_admission_and_image_provenance() {
         let context = Type::Record(BTreeMap::from([
             ("photo".into(), Type::String),
             ("count".into(), Type::Integer),
@@ -2457,32 +2637,30 @@ mod tests {
             )
             .map(|_| ())
         };
-        assert!(admit("<img src=\"{{ cui_image(photo) }}\" alt=\"Photo\">").is_ok());
+        assert!(admit("<img src=\"{{ ui_image(photo) }}\" alt=\"Photo\">").is_ok());
         assert!(
-            admit("<img src=\"{{ cui_image('https://cdn.example.test/a.png') }}\" alt=\"Photo\">")
+            admit("<img src=\"{{ ui_image('https://cdn.example.test/a.png') }}\" alt=\"Photo\">")
                 .is_ok()
         );
         assert!(
-            admit("<img src=\"{{ cui_image('http://cdn.example.test/a.png') }}\" alt=\"Photo\">")
+            admit("<img src=\"{{ ui_image('http://cdn.example.test/a.png') }}\" alt=\"Photo\">")
                 .is_err()
         );
-        assert!(admit("<p>{{ cui_image(photo) }}</p>").is_err());
-        assert!(
-            admit("<p>{{ cui_plain(text_value) }}{{ cui_field_text(text_value) }}</p>").is_ok()
-        );
-        assert!(admit("<img src=\"{{ cui_text(photo) }}\" alt=\"Photo\">").is_err());
-        assert!(admit("<p>{{ cui_text(count) }}</p>").is_ok());
-        assert!(admit("<p id=\"row-{{ cui_token(photo) }}\">{{ cui_token(count) }}</p>").is_ok());
-        assert!(admit("<p>{{ cui_token(count + 1) }}</p>").is_err());
-        assert!(
-            admit("<p id=\"row-{{ cui_token(reference) }}\">{{ cui_token(ordinal) }}</p>").is_ok()
-        );
+        assert!(admit("<p>{{ ui_image(photo) }}</p>").is_err());
+        assert!(admit("<p>{{ ui_text(text_value, 'nonblank', 0, 30) }}</p>").is_ok());
+        assert!(admit("<p>{{ ui_integer(count, 0, 10) }}</p>").is_ok());
+        assert!(admit("<p>{{ ui_key(ordinal) }}</p>").is_ok());
+        assert!(admit("<p>{{ ui_compare(count, ordinal) }}</p>").is_ok());
+        assert!(admit("<p>{{ ui_number(count, none, 10, false) }}</p>").is_ok());
+        assert!(admit("<p>{{ ui_text(photo, 'unknown', 0, 0) }}</p>").is_err());
+        assert!(admit("<p>{{ ui_integer(text_value, 0, 10) }}</p>").is_err());
+        assert!(admit("<p>{{ ui_key(count + 1) }}</p>").is_err());
         let boolean_context = Type::Record(BTreeMap::from([("enabled".into(), Type::Boolean)]));
         assert!(
             analyze(
                 &BTreeMap::from([(
                     "pages/test.html".into(),
-                    "<p>{{ cui_token(enabled) }}</p>".into()
+                    "<p>{{ ui_key(enabled) }}</p>".into()
                 )]),
                 "pages/test.html",
                 &boolean_context,
@@ -2491,13 +2669,21 @@ mod tests {
             )
             .is_err()
         );
-        assert!(admit("<p>{{ cui_plain(count) }}</p>").is_err());
-        assert!(admit("<p>{{ cui_initials(count) }}</p>").is_err());
-        assert!(admit("<p>{{ cui_text(input) }}</p>").is_err());
-        assert!(admit("<p>{{ cui_progress_value(count, '9007199254740993') }}</p>").is_ok());
-        assert!(admit("<p>{{ cui_progress_value(text_value, 10) }}</p>").is_err());
+        assert!(admit("<p>{{ ui_text(input, 'plain', 0, 0) }}</p>").is_err());
+        assert!(admit("<p>{{ ui_number(text_value, none, 10, false) }}</p>").is_ok());
         assert!(admit("<p>{{ unknown_builtin(photo) }}</p>").is_err());
-        for helper in ["cui_text", "cui_token", "cui_plain", "cui_field_text"] {
+        assert!(
+            admit("<div data-cui-component=opaque data-cui-state=producer-owned>Opaque</div>")
+                .is_ok()
+        );
+        for helper in [
+            "ui_text",
+            "ui_key",
+            "ui_integer",
+            "ui_number",
+            "ui_compare",
+            "ui_image",
+        ] {
             let shadowed = Type::Record(BTreeMap::from([(helper.into(), Type::String)]));
             assert!(
                 analyze(
@@ -2513,12 +2699,12 @@ mod tests {
                 .is_err()
             );
         }
-        let shadowed = Type::Record(BTreeMap::from([("cui_text".into(), Type::String)]));
+        let shadowed = Type::Record(BTreeMap::from([("ui_text".into(), Type::String)]));
         assert!(
             analyze(
                 &BTreeMap::from([(
                     "pages/test.html".into(),
-                    "<p>{{ cui_text('ok') }}</p>".into()
+                    "<p>{{ ui_text('ok', 'plain', 0, 0) }}</p>".into()
                 )]),
                 "pages/test.html",
                 &shadowed,
@@ -2592,10 +2778,12 @@ mod tests {
     #[test]
     fn runtime_context_cannot_shadow_helper_or_routing_names() {
         for name in [
-            "cui_plain",
-            "cui_field_text",
-            "cui_image",
-            "cui_token",
+            "ui_text",
+            "ui_key",
+            "ui_integer",
+            "ui_number",
+            "ui_compare",
+            "ui_image",
             "asset",
         ] {
             let context = serde_json::Value::Object(serde_json::Map::from_iter([(
@@ -2627,7 +2815,15 @@ mod tests {
             "items".into(),
             Type::List(Box::new(Type::String)),
         )]));
-        for helper in ["asset", "cui_token", "cui_plain", "cui_field_text"] {
+        for helper in [
+            "asset",
+            "ui_text",
+            "ui_key",
+            "ui_integer",
+            "ui_number",
+            "ui_compare",
+            "ui_image",
+        ] {
             let sources = BTreeMap::from([(
                 "pages/links.html".into(),
                 format!("{{% for {helper} in items %}}<p>{{{{ {helper} }}}}</p>{{% endfor %}}"),

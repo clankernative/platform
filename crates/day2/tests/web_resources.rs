@@ -68,11 +68,11 @@ fn native_modules_keep_relative_paths_and_are_deterministic() -> Result<()> {
 }
 
 #[test]
-fn native_ui_lock_is_not_a_browser_resource() -> Result<()> {
+fn ui_assembly_lock_is_not_a_browser_resource() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let ui = directory.path().join("ui");
     write(&ui, "app.css", "body { color: black; }")?;
-    write(&ui, "clanker-ui.lock.json", "{\"schemaVersion\":1}")?;
+    write(&ui, "ui.lock.json", "{\"schemaVersion\":1}")?;
     let catalog = web_resources::package(&ui, &directory.path().join("out"))?;
     assert_eq!(catalog.len(), 1);
     assert!(catalog.contains_key("app.css"));

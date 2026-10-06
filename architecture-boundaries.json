@@ -37,16 +37,6 @@
           "local_path": null
         },
         {
-          "name": "clanker-ui-runtime",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
-          "features": [],
-          "default_features": true,
-          "optional": false,
-          "local_path": "vendor/clanker-ui-runtime"
-        },
-        {
           "name": "cookie",
           "kind": "normal",
           "target": null,
@@ -456,6 +446,16 @@
         },
         {
           "name": "tokio-stream",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "unicode-segmentation",
           "kind": "normal",
           "target": null,
           "rename": null,

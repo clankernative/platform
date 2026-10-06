@@ -598,13 +598,41 @@ remote, computed, escaping and missing module imports; no npm, Node server or
 app build scripts run. The complete source graph and resource hashes are bound
 to the app artifact and verified again on load/serve. HTML templates and their
 include graph are separately admitted, hashed and rendered on the server;
-they are not browser module entrypoints. A general company library
-catalog is not implemented yet; Datastar is a fixed platform dependency.
+they are not browser module entrypoints. Datastar is a fixed platform dependency.
+
+### Optional UI assembly
+
+An app opts into a build-time provider with `ui/ui.lock.json`. Without that lock,
+Native preserves its ordinary build/render path and does not look up or invoke a
+provider. An operator separately selects a trusted, SHA-256-pinned executable via
+`DAY2_UI_PROVIDER_PIN_JSON`; an app lock cannot authorize execution. This trusts
+the local executable; a private snapshot, cleared environment and process limits
+are not a hostile-code sandbox.
+
+Native captures the generic locked input manifest, invokes `assemble --request`
+in a private snapshot, then independently admits and stages the returned
+HTML/CSS/modules/fonts. It does not interpret component manifests, select CSS
+variants, load provider rendering code, or run a provider while serving pages.
+The app retains its models, commands, routes, validation and state. Native retains
+transport, signed forms, resource provenance, CSP and runtime value checks.
+
+Assembly protocol 2 uses Minijinja 2.12.0 and generic binding ABI 2. ABI 1 and
+component-specific `cui_*` callbacks are incompatible; there is no silent fallback
+or automatic lock/pin migration. The producer's [protocol contract](https://github.com/clankernative/clanker-ui/blob/main/docs/native-assembly-protocol.md)
+defines the wire envelope and closed `ui_*` capabilities. Provider component
+markers are opaque; generic choice/navigation assertions and boolean attributes
+remain host-enforced. The bundle contains only schema/runtime metadata, templates,
+resources, locked inputs and consumed-input claims. `ui/ui-package.js`, when
+provided, is an ordinary module resource whose import contents are preserved
+exactly and admitted with the other resources. Operator pins are currently explicit
+local overrides, not a published portable install flow.
 
 CSS is parsed with cssparser. Layout, custom properties and responsive media
-queries are allowed. This first asset pipeline does not admit CSS `@import`,
-external fonts/images or non-fragment URL references. HTML images use checked
-`{{ asset('name') }}` references to the admitted app image catalog.
+queries are allowed. CSS `@import` and external CSS font/image URLs are rejected;
+local WOFF2 fonts require admitted resource closure. HTML images use checked
+`{{ asset('name') }}` references to the admitted app image catalog. A generic
+`ui_image` capability also checks credential-free HTTPS image sources and retains
+host-owned provenance and CSP checks; it does not fetch an image.
 Browser JS is ordinary native code, not a capability sandbox. CSP restricts script
 sources to the admitted app resource prefix and pinned platform Datastar file;
 `unsafe-eval` is necessary for Datastar expressions. Import admission is dependency

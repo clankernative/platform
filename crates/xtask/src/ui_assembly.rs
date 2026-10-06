@@ -1,9 +1,9 @@
-//! Opt-in build-time bridge to the released Clanker UI CLI.
+//! Optional provider-neutral UI assembly capability.
 //!
-//! Release blocker: a portable signed/default adapter pin is not yet published. Until then,
-//! execution requires the explicit local-development DAY2_UI_ADAPTER_PIN_JSON override.
+//! The host owns locked capture, admission and staging. Providers own expansion.
+//! Execution requires an operator-trusted executable pin; an app lock grants no authority.
 use anyhow::{Context, Result, anyhow, bail, ensure};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -15,6 +15,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod port;
+use port::{AssemblyFailure, ProcessAssembler, UiAssembler};
+
 const MAX_FILE: usize = 1_048_576;
 const MAX_FILES: usize = 512;
 const MAX_INPUTS: usize = 4096;
@@ -22,26 +25,49 @@ const MAX_UI_FILE: usize = 8 * 1024 * 1024;
 const MAX_TOTAL: usize = 32 * 1024 * 1024;
 const MAX_STDOUT: usize = 32 * 1024 * 1024;
 const MAX_STDERR: usize = 1024 * 1024;
-const PACKAGE_KEY: &str = "native-ui/package";
-const LOCK: &str = "ui/clanker-ui.lock.json";
+const PACKAGE_KEY: &str = "ui/package";
+const LOCK: &str = "ui/ui.lock.json";
 
-#[derive(Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Lock {
     schema_version: u32,
-    package: String,
+    provider: String,
+    package: LockedPackage,
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LockedPackage {
+    name: String,
     version: String,
     path: String,
     digest: String,
+    inputs: Vec<Input>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Pin {
     schema_version: u32,
-    package: String,
-    adapter_protocol: u32,
-    runtime_abi: u32,
+    provider: String,
+    assembly_protocol: u32,
+    binding_abi: u32,
     targets: BTreeMap<String, TargetPin>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AssemblyRequest {
+    schema_version: u32,
+    assembly_protocol: u32,
+    provider: String,
+    target: AssemblyTarget,
+    package: LockedPackage,
+    ui: String,
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AssemblyTarget {
+    binding_abi: u32,
+    template_engine: String,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -49,7 +75,7 @@ struct TargetPin {
     executable: String,
     digest: String,
 }
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Envelope {
     schema_version: u32,
@@ -58,7 +84,7 @@ struct Envelope {
     data: Bundle,
     diagnostics: Vec<serde_json::Value>,
 }
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Bundle {
     schema_version: u32,
@@ -66,22 +92,11 @@ struct Bundle {
     template_engine: String,
     package_digest: String,
     templates: BTreeMap<String, String>,
-    bindings: Vec<Binding>,
-    entrypoints: Vec<String>,
     resources: Vec<Resource>,
     inputs: Vec<Input>,
     consumed_inputs: Vec<String>,
 }
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Binding {
-    template: String,
-    field_path: String,
-    expected_kind: String,
-    component: String,
-    attribute: String,
-}
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Resource {
     path: String,
@@ -91,7 +106,7 @@ struct Resource {
     bytes: usize,
     kind: String,
 }
-#[derive(Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Input {
     path: String,
@@ -137,7 +152,7 @@ fn checked(root: &Path, rel: &str) -> Result<Vec<u8>> {
         "invalid/oversized input: {}",
         p.display()
     );
-    let b = fs::read(&p)?;
+    let b = day2::assets::read_regular(&p, MAX_FILE as u64)?;
     ensure!(
         b.len() <= MAX_FILE,
         "input grew beyond file limit: {}",
@@ -146,20 +161,36 @@ fn checked(root: &Path, rel: &str) -> Result<Vec<u8>> {
     Ok(b)
 }
 fn parse_lock(path: &Path) -> Result<Lock> {
-    let m = fs::symlink_metadata(path).context("read captured Clanker UI lock")?;
+    let m = fs::symlink_metadata(path).context("read captured UI lock")?;
     ensure!(
         m.is_file() && !m.file_type().is_symlink() && m.len() <= MAX_FILE as u64,
-        "invalid captured Clanker UI lock"
+        "invalid captured UI lock"
     );
-    let lock: Lock = serde_json::from_slice(&fs::read(path)?)?;
+    let lock: Lock = serde_json::from_slice(&day2::assets::read_regular(path, MAX_FILE as u64)?)?;
     ensure!(
         lock.schema_version == 1
-            && !lock.package.trim().is_empty()
-            && !lock.version.trim().is_empty(),
-        "unsupported Clanker UI lock"
+            && !lock.provider.is_empty()
+            && lock.provider.len() <= 128
+            && lock
+                .provider
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || b"-_.".contains(&c))
+            && !lock.package.name.trim().is_empty()
+            && !lock.package.version.trim().is_empty(),
+        "unsupported UI lock"
     );
-    ensure!(safe_lock_path(&lock.path), "invalid package lock path");
-    ensure!(valid_digest(&lock.digest), "invalid package digest in lock");
+    ensure!(
+        safe_lock_path(&lock.package.path),
+        "invalid package lock path"
+    );
+    ensure!(
+        valid_digest(&lock.package.digest),
+        "invalid package digest in lock"
+    );
+    ensure!(
+        manifest_digest(&lock.package.inputs)? == lock.package.digest,
+        "locked input manifest digest mismatch"
+    );
     Ok(lock)
 }
 fn safe_lock_path(s: &str) -> bool {
@@ -194,7 +225,7 @@ fn package_root(app: &Path, lock: &Lock) -> Result<PathBuf> {
         ui_meta.is_dir() && !ui_meta.file_type().is_symlink(),
         "app UI root must be a real directory"
     );
-    let lexical = ui_root.join(&lock.path);
+    let lexical = ui_root.join(&lock.package.path);
     let root = lexical
         .canonicalize()
         .context("canonicalize locked package")?;
@@ -209,7 +240,7 @@ fn package_root(app: &Path, lock: &Lock) -> Result<PathBuf> {
     );
     // Reject symlinks in every traversed lexical package path component.
     let mut cursor = ui_root;
-    for part in Path::new(&lock.path).components() {
+    for part in Path::new(&lock.package.path).components() {
         match part {
             Component::ParentDir => {
                 cursor.pop();
@@ -226,99 +257,72 @@ fn package_root(app: &Path, lock: &Lock) -> Result<PathBuf> {
     Ok(root)
 }
 
-// Reproduce the CLI's LocalPackage locked asset closure before trusting a process or its output.
-fn package_inputs(root: &Path) -> Result<BTreeMap<String, Vec<u8>>> {
-    let manifest_bytes = checked(root, "ui-package.json")?;
-    let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes)?;
+/// A manifest is a content-addressed input closure, not a provider package schema.
+fn manifest_digest(inputs: &[Input]) -> Result<String> {
     ensure!(
-        manifest["schemaVersion"] == 1 && manifest["theme"].is_string(),
-        "invalid package manifest"
+        !inputs.is_empty() && inputs.len() <= MAX_INPUTS,
+        "locked input count budget"
     );
-    let mut names = BTreeSet::from([
-        "ui-package.json".to_owned(),
-        manifest["theme"].as_str().unwrap().to_owned(),
-    ]);
-    if let Some(resources) = manifest["resources"].as_array() {
-        for name in resources {
-            names.insert(
-                name.as_str()
-                    .ok_or_else(|| anyhow!("invalid package resource"))?
-                    .to_owned(),
-            );
-        }
-    } else if !manifest.get("resources").is_none() {
-        bail!("invalid package resources");
-    }
-    let components = root.join("components");
-    let meta = fs::symlink_metadata(&components).context("package has no components directory")?;
-    ensure!(
-        meta.is_dir() && !meta.file_type().is_symlink(),
-        "invalid package components directory"
-    );
-    let mut dirs = fs::read_dir(&components)?.collect::<std::io::Result<Vec<_>>>()?;
-    ensure!(
-        dirs.len() <= 500,
-        "package component directory budget exceeded"
-    );
-    dirs.sort_by_key(|e| e.file_name());
-    for e in dirs {
-        ensure!(!e.file_type()?.is_symlink(), "component symlink forbidden");
-        if !e.file_type()?.is_dir() {
-            continue;
-        }
-        let name = e
-            .file_name()
-            .into_string()
-            .map_err(|_| anyhow!("invalid component name"))?;
-        let rel = format!("components/{name}/component.json");
-        let p = root.join(&rel);
-        if fs::symlink_metadata(&p).is_err() {
-            continue;
-        }
-        let b = checked(root, &rel)?;
-        let c: serde_json::Value = serde_json::from_slice(&b)?;
-        names.insert(rel);
-        if c["status"] == "ready" {
-            for prop in ["template", "styles"] {
-                names.insert(
-                    c["assets"][prop]
-                        .as_str()
-                        .ok_or_else(|| anyhow!("invalid component asset"))?
-                        .to_owned(),
-                );
-            }
-            for val in c["assets"]["scripts"]
-                .as_array()
-                .ok_or_else(|| anyhow!("invalid component scripts"))?
-            {
-                names.insert(
-                    val.as_str()
-                        .ok_or_else(|| anyhow!("invalid component script"))?
-                        .to_owned(),
-                );
-            }
-            for val in c["fixtures"]
-                .as_array()
-                .ok_or_else(|| anyhow!("invalid component fixtures"))?
-            {
-                names.insert(
-                    val.as_str()
-                        .ok_or_else(|| anyhow!("invalid component fixture"))?
-                        .to_owned(),
-                );
-            }
-        }
-    }
-    ensure!(names.len() <= MAX_INPUTS, "package file budget exceeded");
-    let mut inputs = BTreeMap::new();
+    let mut sorted = inputs.iter().collect::<Vec<_>>();
+    sorted.sort_by(|a, b| a.path.cmp(&b.path));
+    let mut names = BTreeSet::new();
     let mut total = 0usize;
-    for name in names {
-        let b = checked(root, &name)?;
-        total += b.len();
-        ensure!(total <= MAX_TOTAL, "package byte budget exceeded");
-        inputs.insert(name, b);
+    let mut digest = Sha256::new();
+    for input in sorted {
+        ensure!(
+            safe_rel(&input.path)
+                && input.path.len() <= 512
+                && input.path.split('/').count() <= 8
+                && input.bytes <= MAX_FILE
+                && valid_digest(&input.digest),
+            "invalid locked input"
+        );
+        ensure!(
+            names.insert(input.path.to_ascii_lowercase()),
+            "duplicate/case-colliding locked input"
+        );
+        total = total
+            .checked_add(input.bytes)
+            .context("locked byte count overflow")?;
+        ensure!(total <= MAX_TOTAL, "locked package byte budget");
+        digest.update(input.path.as_bytes());
+        digest.update([0]);
+        digest.update(input.bytes.to_string().as_bytes());
+        digest.update([0]);
+        digest.update(input.digest.as_bytes());
+        digest.update(b"\n");
     }
-    Ok(inputs)
+    Ok(format!("sha256:{:x}", digest.finalize()))
+}
+
+fn package_inputs(root: &Path, package: &LockedPackage) -> Result<BTreeMap<String, Vec<u8>>> {
+    ensure!(
+        manifest_digest(&package.inputs)? == package.digest,
+        "locked input manifest mismatch"
+    );
+    package
+        .inputs
+        .iter()
+        .map(|input| {
+            let bytes = checked(root, &input.path)?;
+            ensure!(
+                bytes.len() == input.bytes && sha(&bytes) == input.digest,
+                "locked input changed: {}",
+                input.path
+            );
+            Ok((input.path.clone(), bytes))
+        })
+        .collect()
+}
+
+fn capture_package(inputs: &BTreeMap<String, Vec<u8>>, target: &Path) -> Result<()> {
+    fs::create_dir(target)?;
+    for (path, bytes) in inputs {
+        let output = target.join(path);
+        fs::create_dir_all(output.parent().context("locked input parent")?)?;
+        fs::write(output, bytes)?;
+    }
+    Ok(())
 }
 fn target_key() -> Result<&'static str> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
@@ -331,7 +335,7 @@ fn target_key() -> Result<&'static str> {
 }
 fn pin_digest(pin: &Pin, path: &Path) -> Result<(Vec<u8>, String)> {
     ensure!(
-        pin.schema_version == 1 && pin.adapter_protocol == 1 && pin.runtime_abi == 1,
+        pin.schema_version == 1 && pin.assembly_protocol == 2 && pin.binding_abi == 2,
         "unsupported UI adapter pin protocol/runtime ABI"
     );
     let target = pin
@@ -347,7 +351,7 @@ fn pin_digest(pin: &Pin, path: &Path) -> Result<(Vec<u8>, String)> {
         meta.is_file() && !meta.file_type().is_symlink() && meta.len() <= MAX_FILE as u64 * 64,
         "invalid UI adapter executable"
     );
-    let bytes = fs::read(path)?;
+    let bytes = day2::assets::read_regular(path, MAX_FILE as u64 * 64)?;
     ensure!(
         sha(&bytes) == target.digest,
         "UI adapter executable digest mismatch"
@@ -372,8 +376,8 @@ pub fn expand(
     if !lock_present(captured)? {
         return Ok(());
     }
-    let pin = std::env::var_os("DAY2_UI_ADAPTER_PIN_JSON").context(
-        "Clanker UI adapter is opt-in: set DAY2_UI_ADAPTER_PIN_JSON to an explicit local pin",
+    let pin = std::env::var_os("DAY2_UI_PROVIDER_PIN_JSON").context(
+        "UI assembly is opt-in: set DAY2_UI_PROVIDER_PIN_JSON to an operator-trusted executable pin",
     )?;
     expand_with_pin(app_source, captured, hashes, Path::new(&pin))
 }
@@ -393,24 +397,7 @@ pub fn expand_with_pin(
     }
     let lock = parse_lock(&lock_path)?;
     let root = package_root(app_source, &lock)?;
-    let manifest: serde_json::Value = serde_json::from_slice(&checked(&root, "ui-package.json")?)?;
-    ensure!(
-        manifest["name"] == lock.package && manifest["version"] == lock.version,
-        "locked package identity/version mismatch"
-    );
-    let actual_inputs = package_inputs(&root)?;
-    let mut merkle = Sha256::new();
-    for (p, b) in &actual_inputs {
-        merkle.update((p.len() as u64).to_be_bytes());
-        merkle.update(p.as_bytes());
-        merkle.update((b.len() as u64).to_be_bytes());
-        merkle.update(b);
-    }
-    let actual_package_digest = format!("sha256:{:x}", merkle.finalize());
-    ensure!(
-        actual_package_digest == lock.digest,
-        "locked package digest mismatch"
-    );
+    let actual_inputs = package_inputs(&root, &lock.package)?;
     let pin_meta = fs::symlink_metadata(pin_path).context("inspect explicit UI adapter pin")?;
     ensure!(
         pin_meta.is_file()
@@ -418,15 +405,16 @@ pub fn expand_with_pin(
             && pin_meta.len() <= MAX_FILE as u64,
         "invalid/oversized UI adapter pin"
     );
-    let pin_bytes = fs::read(pin_path).context("read explicit UI adapter pin")?;
+    let pin_bytes = day2::assets::read_regular(pin_path, MAX_FILE as u64)
+        .context("read explicit UI adapter pin")?;
     ensure!(
         pin_bytes.len() <= MAX_FILE,
         "UI adapter pin grew beyond limit"
     );
     let pin: Pin = serde_json::from_slice(&pin_bytes).context("parse strict UI adapter pin")?;
     ensure!(
-        pin.package == lock.package,
-        "UI adapter pin package mismatch"
+        pin.provider == lock.provider,
+        "UI provider pin identity mismatch"
     );
     let target = pin
         .targets
@@ -459,21 +447,57 @@ pub fn expand_with_pin(
     }
     let private_ui = temp.path().join("ui");
     copy_tree_checked(&captured.join("ui"), &private_ui)?;
-    let private_lock = temp.path().join("clanker-ui.lock.json");
-    let private_package_path = relative_path(temp.path(), &root)?;
-    let call_lock = serde_json::json!({"schemaVersion":1,"package":lock.package,"version":lock.version,"path":private_package_path,"digest":lock.digest});
-    fs::write(&private_lock, serde_json::to_vec(&call_lock)?)?;
-    let output = run_adapter(&private_exe, &private_lock, &private_ui)?;
-    let env: Envelope =
-        serde_json::from_slice(&output).context("parse strict UI adapter envelope")?;
+    let private_package = temp.path().join("package");
+    capture_package(&actual_inputs, &private_package)?;
+    let mut request_package = lock.package.clone();
+    request_package.path = private_package
+        .to_str()
+        .context("private package path is not UTF-8")?
+        .into();
+    let request = AssemblyRequest {
+        schema_version: 1,
+        assembly_protocol: 2,
+        provider: lock.provider.clone(),
+        target: AssemblyTarget {
+            binding_abi: 2,
+            template_engine: "minijinja-2.12.0".into(),
+        },
+        package: request_package,
+        ui: private_ui
+            .to_str()
+            .context("private UI path is not UTF-8")?
+            .into(),
+    };
+    let adapter = ProcessAssembler {
+        executable: &private_exe,
+        timeout: Duration::from_secs(60),
+    };
+    assemble_and_stage(&adapter, &request, &lock, &actual_inputs, captured, hashes)?;
+    hashes.insert("ui-provider/executable".into(), exe_digest);
+    Ok(())
+}
+
+/// Application boundary shared by production and deterministic port simulations.
+/// Simulation replaces the external provider only; admission/staging is real.
+fn assemble_and_stage(
+    adapter: &dyn UiAssembler,
+    request: &AssemblyRequest,
+    lock: &Lock,
+    actual_inputs: &BTreeMap<String, Vec<u8>>,
+    captured: &Path,
+    hashes: &mut BTreeMap<String, String>,
+) -> Result<()> {
+    let env = adapter.assemble(request)?;
     ensure!(
-        env.schema_version == 1 && env.ok && env.command == "expand" && env.diagnostics.is_empty(),
-        "invalid UI adapter envelope"
+        env.schema_version == 1
+            && env.ok
+            && env.command == "assemble"
+            && env.diagnostics.is_empty(),
+        "invalid UI assembly outcome"
     );
-    validate_bundle(&env.data, &lock, &actual_inputs, captured, hashes)?;
-    apply_bundle(&env.data, &actual_inputs, captured)?;
-    hashes.insert(PACKAGE_KEY.into(), lock.digest.clone());
-    hashes.insert("ui-adapter/executable".into(), exe_digest);
+    validate_bundle(&env.data, lock, actual_inputs, captured, hashes)?;
+    apply_bundle(&env.data, actual_inputs, captured)?;
+    hashes.insert(PACKAGE_KEY.into(), lock.package.digest.clone());
     for input in &env.data.inputs {
         if input.path.starts_with("ui/") {
             hashes.insert(
@@ -488,28 +512,9 @@ pub fn expand_with_pin(
     for r in &env.data.resources {
         hashes.insert(format!("app/{}", r.path), r.digest.clone());
     }
-    if !env.data.entrypoints.is_empty() {
-        let loader = entrypoint_loader(&env.data.entrypoints)?;
-        hashes.insert("app/ui/ui-package.js".into(), sha(loader.as_bytes()));
-    }
     Ok(())
 }
 
-fn relative_path(from: &Path, to: &Path) -> Result<PathBuf> {
-    let a = from.canonicalize()?;
-    let b = to.canonicalize()?;
-    let ac = a.components().collect::<Vec<_>>();
-    let bc = b.components().collect::<Vec<_>>();
-    let common = ac.iter().zip(&bc).take_while(|(x, y)| x == y).count();
-    let mut out = PathBuf::new();
-    for _ in common..ac.len() {
-        out.push("..");
-    }
-    for c in &bc[common..] {
-        out.push(c.as_os_str());
-    }
-    Ok(out)
-}
 fn copy_tree_checked(source: &Path, target: &Path) -> Result<()> {
     let meta = fs::symlink_metadata(source).context("captured UI directory missing")?;
     ensure!(
@@ -538,7 +543,7 @@ fn copy_tree_checked(source: &Path, target: &Path) -> Result<()> {
                     meta.is_file() && meta.len() <= MAX_UI_FILE as u64,
                     "captured UI file exceeds limit"
                 );
-                let b = fs::read(e.path())?;
+                let b = day2::assets::read_regular(&e.path(), MAX_UI_FILE as u64)?;
                 ensure!(b.len() <= MAX_UI_FILE, "captured UI file grew beyond limit");
                 total += b.len();
                 ensure!(total <= MAX_TOTAL, "captured UI byte budget exceeded");
@@ -548,21 +553,16 @@ fn copy_tree_checked(source: &Path, target: &Path) -> Result<()> {
     }
     Ok(())
 }
-fn run_adapter(exe: &Path, lock: &Path, ui: &Path) -> Result<Vec<u8>> {
-    run_adapter_with_timeout(exe, lock, ui, Duration::from_secs(60))
-}
 fn run_adapter_with_timeout(
     exe: &Path,
-    lock: &Path,
+    request: &Path,
     ui: &Path,
     timeout: Duration,
 ) -> Result<Vec<u8>> {
     let mut cmd = Command::new(exe);
-    cmd.arg("expand")
-        .arg("--lock")
-        .arg(lock)
-        .arg("--ui")
-        .arg(ui)
+    cmd.arg("assemble")
+        .arg("--request")
+        .arg(request)
         .current_dir(ui)
         .env_clear()
         .stdin(Stdio::null())
@@ -582,34 +582,39 @@ fn run_adapter_with_timeout(
         b
     });
     let start = Instant::now();
+    let mut status = None;
     loop {
-        if let Some(status) = child.try_wait()? {
+        if status.is_none() {
+            status = child.try_wait()?;
+        }
+        // A provider descendant may keep inherited pipes open after the direct child exits.
+        // The same deadline must cover output draining; joining early would bypass it.
+        if let Some(status) = status
+            && out_thread.is_finished()
+            && err_thread.is_finished()
+        {
             let out = out_thread
                 .join()
                 .map_err(|_| anyhow!("adapter stdout reader failed"))?;
             let err = err_thread
                 .join()
                 .map_err(|_| anyhow!("adapter stderr reader failed"))?;
-            ensure!(
-                out.len() <= MAX_STDOUT && err.len() <= MAX_STDERR,
-                "UI adapter output limit exceeded"
-            );
-            ensure!(
-                status.success(),
-                "UI adapter failed: {}",
-                adapter_failure(&out, &err)
-            );
+            if out.len() > MAX_STDOUT || err.len() > MAX_STDERR {
+                return Err(
+                    AssemblyFailure::InvalidResponse("output budget exceeded".into()).into(),
+                );
+            }
+            if !status.success() {
+                return Err(AssemblyFailure::ProviderRejected(adapter_failure(&out, &err)).into());
+            }
             return Ok(out);
         }
         if start.elapsed() > timeout {
-            child.kill()?;
+            let _ = child.kill();
             let _ = child.wait();
-            let _ = out_thread.join();
-            let _ = err_thread.join();
-            bail!(
-                "UI adapter exceeded {} second timeout",
-                timeout.as_secs_f64()
-            );
+            // Never block on inherited pipes at this point. Their readers retain bounded
+            // buffers; operator-approved provider execution is not hostile-code containment.
+            return Err(AssemblyFailure::Timeout.into());
         }
         thread::sleep(Duration::from_millis(20));
     }
@@ -653,9 +658,9 @@ fn validate_bundle(
 ) -> Result<()> {
     ensure!(
         b.schema_version == 1
-            && b.runtime_abi == 1
+            && b.runtime_abi == 2
             && b.template_engine == "minijinja-2.12.0"
-            && b.package_digest == lock.digest,
+            && b.package_digest == lock.package.digest,
         "UI adapter package digest/schema/runtime ABI/template engine mismatch"
     );
     let mut inputmap = BTreeMap::new();
@@ -695,6 +700,30 @@ fn validate_bundle(
         );
     }
     let template_names = b.templates.keys().cloned().collect::<BTreeSet<_>>();
+    let mut output_names = BTreeSet::new();
+    for path in b
+        .templates
+        .keys()
+        .map(|path| format!("ui/{path}"))
+        .chain(b.resources.iter().map(|resource| resource.path.clone()))
+    {
+        ensure!(
+            path.to_ascii_lowercase() != LOCK,
+            "UI lock is not a provider output"
+        );
+        ensure!(
+            output_names.insert(path.to_ascii_lowercase()),
+            "case-colliding UI outputs"
+        );
+    }
+    for path in &output_names {
+        for ancestor in path.match_indices('/').map(|(offset, _)| &path[..offset]) {
+            ensure!(
+                !output_names.contains(ancestor),
+                "overlapping UI output paths"
+            );
+        }
+    }
     ensure!(b.templates.len() <= MAX_FILES, "invalid template set");
     let expanded_bytes = b
         .templates
@@ -705,7 +734,6 @@ fn validate_bundle(
         expanded_bytes <= MAX_TOTAL,
         "expanded template byte budget exceeded"
     );
-    ensure!(b.bindings.len() <= 8192, "binding count exceeded");
     for (p, html) in &b.templates {
         ensure!(
             safe_rel(p)
@@ -718,27 +746,9 @@ fn validate_bundle(
             inputmap.contains_key(&format!("ui/{p}")),
             "template source was not captured: {p}"
         );
-        ensure!(!html.contains("<cui-"), "unexpanded component declaration");
-    }
-    for bind in &b.bindings {
-        ensure!(
-            template_names.contains(&bind.template)
-                && bind.field_path.split('.').all(|part| !part.is_empty()
-                    && part
-                        .bytes()
-                        .all(|x| x.is_ascii_lowercase() || x.is_ascii_digit() || x == b'_'))
-                && bind
-                    .component
-                    .bytes()
-                    .all(|x| x.is_ascii_lowercase() || x.is_ascii_digit() || x == b'-')
-                && bind
-                    .attribute
-                    .bytes()
-                    .all(|x| x.is_ascii_lowercase() || x.is_ascii_digit() || x == b'-')
-                && ["string", "enum", "boolean", "number", "integer", "list"]
-                    .contains(&bind.expected_kind.as_str()),
-            "invalid binding manifest"
-        );
+        // These are symbolic templates, not rendered HTML. Ordinary Native
+        // template/type/form admission follows staging; rendered-HTML checks
+        // cannot run here without rejecting valid route/asset expressions.
     }
     let mut outs = BTreeSet::new();
     ensure!(b.resources.len() <= MAX_FILES, "resource count exceeded");
@@ -782,40 +792,6 @@ fn validate_bundle(
         resource_total = resource_total.saturating_add(bytes.len());
         ensure!(resource_total <= MAX_TOTAL, "resource byte budget exceeded");
     }
-    ensure!(
-        b.entrypoints.len() <= MAX_FILES,
-        "module entrypoint count exceeded"
-    );
-    let mut entrypoints = BTreeSet::new();
-    for entrypoint in &b.entrypoints {
-        ensure!(
-            safe_rel(entrypoint) && entrypoint.starts_with("ui/") && entrypoint.ends_with(".js"),
-            "invalid module entrypoint"
-        );
-        ensure!(
-            entrypoints.insert(entrypoint),
-            "duplicate module entrypoint"
-        );
-        ensure!(
-            b.resources
-                .iter()
-                .any(|r| r.path == *entrypoint && r.kind == "module"),
-            "entrypoint is not a declared module resource"
-        );
-    }
-    if !entrypoints.is_empty() {
-        ensure!(
-            !outs.contains("ui/ui-package.js"),
-            "generated module loader resource collision"
-        );
-        let loader = entrypoint_loader(&b.entrypoints)?;
-        ensure!(
-            loader.len() <= MAX_FILE,
-            "module loader exceeds file budget"
-        );
-        resource_total = resource_total.saturating_add(loader.len());
-        ensure!(resource_total <= MAX_TOTAL, "resource byte budget exceeded");
-    }
     for a in &outs {
         for c in &outs {
             if a != c {
@@ -840,7 +816,10 @@ fn validate_bundle(
     let mut consumed = BTreeSet::new();
     for p in &b.consumed_inputs {
         ensure!(
-            p.starts_with("ui/") && inputmap.contains_key(p) && consumed.insert(p.clone()),
+            p.starts_with("ui/")
+                && p.to_ascii_lowercase() != LOCK
+                && inputmap.contains_key(p)
+                && consumed.insert(p.clone()),
             "invalid/duplicate consumed input"
         );
     }
@@ -869,7 +848,7 @@ fn validate_bundle(
                 continue;
             }
             ensure!(ty.is_file(), "special captured UI source forbidden");
-            if rel == "clanker-ui.lock.json" {
+            if rel == "ui.lock.json" {
                 continue;
             }
             if (rel.starts_with("pages/") || rel.starts_with("components/"))
@@ -899,28 +878,6 @@ fn validate_bundle(
         }
     }
     Ok(())
-}
-fn entrypoint_loader(entries: &[String]) -> Result<String> {
-    let mut entries = entries.iter().collect::<Vec<_>>();
-    entries.sort();
-    ensure!(
-        entries.windows(2).all(|w| w[0] != w[1]),
-        "duplicate module entrypoint"
-    );
-    let mut loader = String::new();
-    for entry in entries {
-        ensure!(
-            safe_rel(entry) && entry.starts_with("ui/") && entry.ends_with(".js"),
-            "invalid module entrypoint"
-        );
-        let relative = entry
-            .strip_prefix("ui/")
-            .context("entrypoint outside UI output root")?;
-        loader.push_str("import './");
-        loader.push_str(relative);
-        loader.push_str("';\n");
-    }
-    Ok(loader)
 }
 fn check_output_path(root: &Path, relative: &str) -> Result<()> {
     ensure!(safe_rel(relative), "unsafe output path: {relative}");
@@ -971,12 +928,6 @@ fn apply_bundle(b: &Bundle, package: &BTreeMap<String, Vec<u8>>, captured: &Path
                 .clone()
         };
         writes.insert(r.path.clone(), bytes);
-    }
-    if !b.entrypoints.is_empty() {
-        writes.insert(
-            "ui/ui-package.js".into(),
-            entrypoint_loader(&b.entrypoints)?.into_bytes(),
-        );
     }
     // Validate every target/collision before the first mutation.
     for (path, bytes) in &writes {
@@ -1041,9 +992,17 @@ fn apply_bundle(b: &Bundle, package: &BTreeMap<String, Vec<u8>>, captured: &Path
 }
 
 #[cfg(test)]
-#[path = "ui_adapter_port/tests.rs"]
+#[path = "ui_assembly/tests.rs"]
 mod isolatedtests;
 
 #[cfg(test)]
-#[path = "ui_adapter_port/manifest_tests.rs"]
+#[path = "ui_assembly/manifest_tests.rs"]
 mod manifest_tests;
+
+#[cfg(test)]
+#[path = "ui_assembly/port_tests.rs"]
+mod port_tests;
+
+#[cfg(test)]
+#[path = "ui_assembly/recorded_tests.rs"]
+mod recorded_tests;

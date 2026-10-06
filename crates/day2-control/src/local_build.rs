@@ -53,6 +53,7 @@ impl PreparedBuild {
             xtask,
             rust,
             registry,
+            ui_assembly,
         } = configuration
             .builders
             .get(builder)
@@ -63,6 +64,11 @@ impl PreparedBuild {
             Path::new(rust),
             Path::new(registry),
         )?;
+        let runner = if let Some(ui_assembly) = ui_assembly {
+            runner.with_ui_assembly(ui_assembly)?
+        } else {
+            runner
+        };
         let platform = PlatformInputs::capture(Path::new(platform_root), Path::new(toolchains))?;
         let DurabilityProvider::TemporalLocal {
             endpoint,

@@ -79,6 +79,7 @@ pub mod security_admission;
 pub mod simulation;
 pub mod simulations;
 pub mod store;
+pub(crate) mod ui_values;
 pub mod web;
 mod web_api;
 mod web_assets;
@@ -87,7 +88,6 @@ mod web_html;
 pub mod web_resources;
 mod web_security;
 pub mod web_templates;
-pub(crate) mod web_ui_values;
 pub mod worker;
 pub mod write_queue;
 

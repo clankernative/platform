@@ -1,0 +1,5 @@
+{
+  "variant": "primary",
+  "buttonLabel": "Save changes",
+  "expectedHtml": "<button class=\"cui-button cui-button--primary\" type=\"button\">Save changes</button>\n"
+}

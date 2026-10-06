@@ -59,7 +59,7 @@ fn prepare(
     if let Some(overrides) = overrides {
         snapshot(overrides, &captured, &mut hashes, "app")?;
     }
-    ui_adapter_port::expand(app, &captured, &mut hashes)?;
+    ui_assembly::expand(app, &captured, &mut hashes)?;
     let modules = day2::app_sources::stage(&captured, &stage.join("app"))?;
     fs::write(
         stage.join("app-modules.json"),

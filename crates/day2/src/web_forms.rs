@@ -46,9 +46,9 @@ fn remove_attr(document: &mut Html, id: NodeId, name: &str) -> Result<()> {
 pub(crate) fn materialize_control_flags(document: &mut Html) -> Result<bool> {
     let mut changed = false;
     for (marker, attribute) in [
-        ("data-cui-selected-flag", "selected"),
-        ("data-cui-checked-flag", "checked"),
-        ("data-cui-hidden-flag", "hidden"),
+        ("data-ui-selected-flag", "selected"),
+        ("data-ui-checked-flag", "checked"),
+        ("data-ui-hidden-flag", "hidden"),
     ] {
         let nodes: Vec<_> = document
             .tree
@@ -74,11 +74,11 @@ pub(crate) fn materialize_control_flags(document: &mut Html) -> Result<bool> {
                     "hidden" => matches!(tag.as_str(), "fieldset" | "div"),
                     _ => false,
                 },
-                "cui_boolean_attribute_target"
+                "ui_boolean_attribute_target"
             );
             ensure!(
                 matches!(value.as_str(), "true" | "false"),
-                "cui_boolean_attribute_value"
+                "ui_boolean_attribute_value"
             );
             remove_attr(document, id, attribute)?;
             if value == "true" {
@@ -994,7 +994,7 @@ mod query_form_tests {
     #[test]
     fn boolean_control_flags_preserve_choices_and_select_exactly_one() {
         let mut document = Html::parse_fragment(
-            r#"<div data-cui-component="select-field" data-cui-selected="2"><select><option value="1" selected data-cui-selected-flag="false">One</option><option value="2" data-cui-selected-flag="true">Two</option><option value="3" data-cui-selected-flag="false">Three</option></select></div><input type="checkbox" checked data-cui-checked-flag="false"><fieldset data-cui-hidden-flag="true"><legend>Specimen options</legend></fieldset>"#,
+            r#"<select data-ui-choice-set="true" data-ui-choice-value="2"><option value="1" selected data-ui-selected-flag="false">One</option><option value="2" data-ui-selected-flag="true">Two</option><option value="3" data-ui-selected-flag="false">Three</option></select><input type="checkbox" checked data-ui-checked-flag="false"><fieldset data-ui-hidden-flag="true"><legend>Specimen options</legend></fieldset>"#,
         );
         assert!(materialize_control_flags(&mut document).unwrap());
         let markup = document.root_element().inner_html();
@@ -1021,11 +1021,11 @@ mod query_form_tests {
                 .is_some()
         );
         assert!(!markup.contains("-flag="));
-        crate::web_ui_values::validate_selects(&markup).unwrap();
+        crate::ui_values::validate_selects(&markup).unwrap();
         for bad in [
-            r#"<option data-cui-selected-flag="yes">Bad</option>"#,
-            r#"<input type="text" data-cui-checked-flag="true">"#,
-            r#"<form data-cui-hidden-flag="true"></form>"#,
+            r#"<option data-ui-selected-flag="yes">Bad</option>"#,
+            r#"<input type="text" data-ui-checked-flag="true">"#,
+            r#"<form data-ui-hidden-flag="true"></form>"#,
         ] {
             assert!(materialize_control_flags(&mut Html::parse_fragment(bad)).is_err());
         }

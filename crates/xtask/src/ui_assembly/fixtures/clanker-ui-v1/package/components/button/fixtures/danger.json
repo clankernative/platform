@@ -1,0 +1,5 @@
+{
+  "variant": "danger",
+  "buttonLabel": "Delete",
+  "expectedHtml": "<button class=\"cui-button cui-button--danger\" type=\"button\">Delete</button>\n"
+}

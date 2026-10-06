@@ -1,0 +1,253 @@
+{
+  "schemaVersion": 1,
+  "name": "button",
+  "status": "ready",
+  "target": "native-html",
+  "category": "actions",
+  "summary": "Native action, submit, or link with typed label, variant, size, state, and optional decorative icon.",
+  "keywords": [
+    "button",
+    "submit",
+    "link",
+    "action",
+    "control",
+    "save"
+  ],
+  "agent": {
+    "useWhen": "In a Native app template, declare <cui-button kind=\"submit\" label=\"Save\" /> inside an app-owned command form. Use kind=\"action\" for app-owned browser behavior or kind=\"link\" with a safe href or named route for navigation. Choose variant, size, icon, and optional busy/disabled states without copying component HTML or CSS.",
+    "avoidWhen": "Use a separate form contract for fields; a submit button alone does not authorize or bind a command.",
+    "composeWith": []
+  },
+  "contract": {
+    "role": "button",
+    "variants": [
+      "primary",
+      "secondary",
+      "danger",
+      "quiet"
+    ],
+    "requiredFields": [],
+    "invariants": [
+      "Configuration selects kind, appearance, icon and literal destination; labels and checked busy/disabled page bindings are app-owned presentation inputs.",
+      "The component owns no Datastar signals or persistent state. Output is a native button activation, form submission, or admitted navigation; the app owns handlers, commands, routes and authorization.",
+      "The component has no mount/unmount lifecycle or browser module; a server patch replaces presentation, not app behavior.",
+      "A visible nonblank label names the action; an icon is decorative.",
+      "Action buttons do not submit; submit buttons belong inside an admitted command form.",
+      "Links have safe destinations; disabled links have no href.",
+      "Busy controls show a replacement label, expose aria-busy, and cannot activate."
+    ]
+  },
+  "tokens": [
+    "--cui-button-compact-height",
+    "--cui-button-compact-padding",
+    "--cui-button-compact-quiet-inline-margin",
+    "--cui-button-compact-size",
+    "--cui-button-danger-background",
+    "--cui-button-danger-border",
+    "--cui-button-danger-hover-background",
+    "--cui-button-danger-text",
+    "--cui-button-disabled-opacity",
+    "--cui-button-focus-offset",
+    "--cui-button-focus-ring",
+    "--cui-button-focus-width",
+    "--cui-button-gap",
+    "--cui-button-height",
+    "--cui-button-padding",
+    "--cui-button-primary-background",
+    "--cui-button-primary-border",
+    "--cui-button-primary-hover-background",
+    "--cui-button-primary-text",
+    "--cui-button-quiet-background",
+    "--cui-button-quiet-border",
+    "--cui-button-quiet-hover-background",
+    "--cui-button-quiet-inline-margin",
+    "--cui-button-quiet-text",
+    "--cui-button-radius",
+    "--cui-button-secondary-background",
+    "--cui-button-secondary-border",
+    "--cui-button-secondary-hover-background",
+    "--cui-button-secondary-text",
+    "--cui-button-shadow",
+    "--cui-button-size",
+    "--cui-button-weight",
+    "--cui-icon-small",
+    "--cui-motion",
+    "--cui-surface",
+    "--cui-text"
+  ],
+  "tokenDescriptions": [
+    {
+      "name": "--cui-button-compact-height",
+      "role": "sizing",
+      "purpose": "Controls height for button."
+    },
+    {
+      "name": "--cui-button-compact-padding",
+      "role": "spacing",
+      "purpose": "Controls inner padding for button."
+    },
+    {
+      "name": "--cui-button-compact-quiet-inline-margin",
+      "role": "spacing",
+      "purpose": "Controls inline margin for compact quiet button."
+    },
+    {
+      "name": "--cui-button-compact-size",
+      "role": "sizing",
+      "purpose": "Controls size for button."
+    },
+    {
+      "name": "--cui-button-danger-background",
+      "role": "background",
+      "purpose": "Controls background color for danger state button."
+    },
+    {
+      "name": "--cui-button-danger-border",
+      "role": "border",
+      "purpose": "Controls border color for danger state button."
+    },
+    {
+      "name": "--cui-button-danger-hover-background",
+      "role": "background",
+      "purpose": "Controls background color for danger state hover state button."
+    },
+    {
+      "name": "--cui-button-danger-text",
+      "role": "text",
+      "purpose": "Controls text color for danger state button."
+    },
+    {
+      "name": "--cui-button-disabled-opacity",
+      "role": "opacity",
+      "purpose": "Controls opacity for button."
+    },
+    {
+      "name": "--cui-button-focus-offset",
+      "role": "focus",
+      "purpose": "Controls focus outline offset for button."
+    },
+    {
+      "name": "--cui-button-focus-ring",
+      "role": "focus",
+      "purpose": "Controls focus ring color for  button."
+    },
+    {
+      "name": "--cui-button-focus-width",
+      "role": "focus",
+      "purpose": "Controls focus outline width for button."
+    },
+    {
+      "name": "--cui-button-gap",
+      "role": "spacing",
+      "purpose": "Controls spacing between elements for button."
+    },
+    {
+      "name": "--cui-button-height",
+      "role": "sizing",
+      "purpose": "Controls height for button."
+    },
+    {
+      "name": "--cui-button-padding",
+      "role": "spacing",
+      "purpose": "Controls inner padding for button."
+    },
+    {
+      "name": "--cui-button-primary-background",
+      "role": "background",
+      "purpose": "Controls background color for primary state button."
+    },
+    {
+      "name": "--cui-button-primary-border",
+      "role": "border",
+      "purpose": "Controls border color for primary state button."
+    },
+    {
+      "name": "--cui-button-primary-hover-background",
+      "role": "background",
+      "purpose": "Controls background color for primary state hover state button."
+    },
+    {
+      "name": "--cui-button-primary-text",
+      "role": "text",
+      "purpose": "Controls text color for primary state button."
+    },
+    {
+      "name": "--cui-button-quiet-background",
+      "role": "background",
+      "purpose": "Controls background color for quiet button."
+    },
+    {
+      "name": "--cui-button-quiet-border",
+      "role": "border",
+      "purpose": "Controls border color for quiet button."
+    },
+    {
+      "name": "--cui-button-quiet-hover-background",
+      "role": "background",
+      "purpose": "Controls background color for quiet hover state button."
+    },
+    {
+      "name": "--cui-button-quiet-inline-margin",
+      "role": "spacing",
+      "purpose": "Controls inline margin for quiet button."
+    },
+    {
+      "name": "--cui-button-quiet-text",
+      "role": "text",
+      "purpose": "Controls text color for quiet button."
+    },
+    {
+      "name": "--cui-button-radius",
+      "role": "radius",
+      "purpose": "Controls corner radius for button."
+    },
+    {
+      "name": "--cui-button-secondary-background",
+      "role": "background",
+      "purpose": "Controls background color for secondary state button."
+    },
+    {
+      "name": "--cui-button-secondary-border",
+      "role": "border",
+      "purpose": "Controls border color for secondary state button."
+    },
+    {
+      "name": "--cui-button-secondary-hover-background",
+      "role": "background",
+      "purpose": "Controls background color for secondary state hover state button."
+    },
+    {
+      "name": "--cui-button-secondary-text",
+      "role": "text",
+      "purpose": "Controls text color for secondary state button."
+    },
+    {
+      "name": "--cui-button-shadow",
+      "role": "shadow",
+      "purpose": "Controls shadow for button."
+    },
+    {
+      "name": "--cui-button-size",
+      "role": "sizing",
+      "purpose": "Controls size for button."
+    },
+    {
+      "name": "--cui-button-weight",
+      "role": "typography",
+      "purpose": "Controls font weight for button."
+    }
+  ],
+  "dependencies": [],
+  "assets": {
+    "template": "components/button/template.html",
+    "styles": "components/button/styles.css",
+    "scripts": []
+  },
+  "fixtures": [
+    "components/button/fixtures/primary.json",
+    "components/button/fixtures/secondary.json",
+    "components/button/fixtures/danger.json",
+    "components/button/fixtures/quiet.json",
+    "components/button/fixtures/escaped.json"
+  ]
+}

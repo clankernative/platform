@@ -291,16 +291,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "clanker-ui-runtime"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "minijinja",
- "unicode-segmentation",
- "url",
-]
-
-[[package]]
 name = "compact_str"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -504,7 +494,6 @@ dependencies = [
  "anyhow",
  "axum",
  "base64 0.22.1",
- "clanker-ui-runtime",
  "cookie",
  "crc32c",
  "cssparser",
@@ -541,6 +530,7 @@ dependencies = [
  "time",
  "tokio",
  "tokio-stream",
+ "unicode-segmentation",
  "url",
 ]
 

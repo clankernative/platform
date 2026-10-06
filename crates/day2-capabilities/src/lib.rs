@@ -13,6 +13,9 @@ pub mod registry;
 pub mod resources;
 pub mod runtime;
 
+#[cfg(test)]
+mod tests;
+
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -201,7 +204,25 @@ pub enum BuildProvider {
         xtask: String,
         rust: String,
         registry: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ui_assembly: Option<UiAssemblyProvider>,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UiAssemblyProvider {
+    pub provider_pin: String,
+    pub package_root: String,
+    pub package_key: Name,
+}
+impl UiAssemblyProvider {
+    fn validate(&self) -> Result<()> {
+        absolute_file(&self.provider_pin)?;
+        absolute_directory(&self.package_root)?;
+        Name::try_from(self.package_key.as_str().to_owned())?;
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -290,9 +311,13 @@ impl InstallationControl {
                 xtask,
                 rust,
                 registry,
+                ui_assembly,
             } = provider;
             for directory in [platform_root, toolchains, xtask, rust, registry] {
                 absolute_directory(directory)?;
+            }
+            if let Some(ui) = ui_assembly {
+                ui.validate()?;
             }
         }
         for provider in self.runtimes.values() {
@@ -444,6 +469,20 @@ fn path_segment(value: &str) -> bool {
         && value
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+}
+
+fn absolute_file(value: &str) -> Result<()> {
+    let path = Path::new(value);
+    ensure!(
+        path.is_absolute()
+            && path.components().count() > 1
+            && value.len() <= 4096
+            && !value.contains('\0')
+            && !value.contains("//")
+            && !value.split('/').any(|part| part == "." || part == ".."),
+        "expected normalized absolute operator file"
+    );
+    Ok(())
 }
 
 fn absolute_directory(value: &str) -> Result<()> {
