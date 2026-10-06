@@ -640,6 +640,102 @@ mod tests {
         Ok(directory)
     }
 
+    fn path_contract_fixture() -> Result<tempfile::TempDir> {
+        let directory = fixture()?;
+        fs::create_dir(directory.path().join("contract"))?;
+        fs::create_dir(directory.path().join("contract/src"))?;
+        fs::write(
+            directory.path().join("Cargo.toml"),
+            "[package]\nname = \"boundary-fixture\"\nversion = \"0.0.0\"\nedition = \"2024\"\n[workspace]\nmembers = [\"contract\"]\n[dependencies]\nboundary-contract = { path = \"contract\" }\n",
+        )?;
+        fs::write(
+            directory.path().join("contract/Cargo.toml"),
+            "[package]\nname = \"boundary-contract\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+        )?;
+        fs::write(
+            directory.path().join("Cargo.lock"),
+            "version = 4\n\n[[package]]\nname = \"boundary-contract\"\nversion = \"0.0.0\"\n\n[[package]]\nname = \"boundary-fixture\"\nversion = \"0.0.0\"\ndependencies = [\"boundary-contract\"]\n",
+        )?;
+        // The kernel really compiles as no_std while linking a reviewed strict
+        // std contract. Source no_std alone cannot prevent dependency effects.
+        fs::write(
+            directory.path().join("src/lib.rs"),
+            format!(
+                "#![no_std]\n{ATTRIBUTES}pub fn pure() -> bool {{ boundary_contract::pure() }}"
+            ),
+        )?;
+        Ok(directory)
+    }
+
+    #[test]
+    fn real_clippy_rejects_typed_path_effects_through_strict_contract_dependency() -> Result<()> {
+        let fixture = path_contract_fixture()?;
+        let packages = [
+            StrictCrate {
+                name: "boundary-fixture",
+                source: "src/lib.rs",
+                kernel: true,
+            },
+            StrictCrate {
+                name: "boundary-contract",
+                source: "contract/src/lib.rs",
+                kernel: false,
+            },
+        ];
+        let contract = fixture.path().join("contract/src/lib.rs");
+        let pure = "pub fn pure() -> bool { let joined = std::path::Path::new(\"data\").join(\"child\"); joined.is_absolute() || joined.components().count() == 2 }";
+        fs::write(&contract, format!("{ATTRIBUTES}{pure}"))?;
+        check(fixture.path(), &packages)?;
+        for (method, result) in [("exists", ""), ("canonicalize", ".is_ok()")] {
+            for body in [
+                format!(
+                    "pub fn pure() -> bool {{ std::path::Path::new(\".\").{method}(){result} }}"
+                ),
+                format!(
+                    "use std::path::Path as Selected; pub fn pure() -> bool {{ Selected::new(\".\").{method}(){result} }}"
+                ),
+                format!(
+                    "use r#std::r#path::r#Path as r#Selected; pub fn pure() -> bool {{ r#Selected::r#new(\".\").r#{method}(){result} }}"
+                ),
+                format!(
+                    "pub fn pure() -> bool {{ std::path::PathBuf::from(\".\").{method}(){result} }}"
+                ),
+                format!(
+                    "fn selected() -> &'static std::path::Path {{ std::path::Path::new(\".\") }} pub fn pure() -> bool {{ selected().{method}(){result} }}"
+                ),
+                format!(
+                    "fn selected() -> std::path::PathBuf {{ std::path::PathBuf::from(\".\") }} pub fn pure() -> bool {{ selected().{method}(){result} }}"
+                ),
+            ] {
+                fs::write(&contract, format!("{ATTRIBUTES}{body}"))?;
+                let rejection = check(fixture.path(), &packages).unwrap_err().to_string();
+                ensure!(
+                    rejection.contains("clippy::disallowed_methods")
+                        && rejection.contains(&format!("std::path::Path::{method}")),
+                    "wrong typed-path rejection for {body}: {rejection}"
+                );
+            }
+        }
+        for level in ["allow", "expect"] {
+            fs::write(
+                &contract,
+                format!(
+                    "{ATTRIBUTES}#[{level}(clippy::disallowed_methods)] pub fn pure() -> bool {{ std::path::Path::new(\".\").exists() }}"
+                ),
+            )?;
+            let rejection = check(fixture.path(), &packages).unwrap_err().to_string();
+            ensure!(
+                rejection.contains("E0453"),
+                "strict contract suppressed a forbid: {rejection}"
+            );
+        }
+        // Both policy-selected targets retain forbid and the same pinned
+        // compiler flags. Restoring data-only paths must still compile.
+        fs::write(&contract, format!("{ATTRIBUTES}{pure}"))?;
+        check(fixture.path(), &packages)?;
+        Ok(())
+    }
+
     #[test]
     fn rejects_escaped_paths_and_oversized_or_deep_sources() -> Result<()> {
         let fixture = fixture()?;

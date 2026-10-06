@@ -13,6 +13,8 @@ disallowed-methods = [
   { path = "std::env::current_exe", reason = "Decision kernels take explicit facts and effects belong to admitted adapters" },
   { path = "std::env::temp_dir", reason = "Decision kernels take explicit facts and effects belong to admitted adapters" },
   { path = "std::env::set_current_dir", reason = "Decision kernels take explicit facts and effects belong to admitted adapters" },
+  { path = "std::path::Path::exists", reason = "Filesystem observations belong to admitted adapters; path data remains pure" },
+  { path = "std::path::Path::canonicalize", reason = "Filesystem observations belong to admitted adapters; path data remains pure" },
   { path = "std::fs::read", reason = "Decision kernels take explicit facts and effects belong to admitted adapters" },
   { path = "std::fs::read_to_string", reason = "Decision kernels take explicit facts and effects belong to admitted adapters" },
   { path = "std::fs::read_dir", reason = "Decision kernels take explicit facts and effects belong to admitted adapters" },
