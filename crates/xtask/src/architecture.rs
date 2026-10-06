@@ -1229,18 +1229,21 @@ fn ambient_import_names(
     );
     let mut names = BTreeSet::from(["DirBuilder".to_owned()]);
     names.extend(imports.3.iter().cloned());
-    names.extend(imports.1.iter().filter_map(|(name, _)| {
-        origins
-            .get(name)
-            .is_some_and(|targets| {
-                targets.iter().any(|target| {
-                    hazard(target).is_some()
-                        || ambient_receiver_type(target)
-                        || imports.3.contains(target)
+    names.extend(
+        imports
+            .1
+            .iter()
+            .filter(|&(name, _)| {
+                origins.get(name).is_some_and(|targets| {
+                    targets.iter().any(|target| {
+                        hazard(target).is_some()
+                            || ambient_receiver_type(target)
+                            || imports.3.contains(target)
+                    })
                 })
             })
-            .then(|| name.clone())
-    }));
+            .map(|(name, _)| name.clone()),
+    );
     for prefix in [
         "std",
         "std::time",
@@ -2296,10 +2299,10 @@ impl<'a> Scanner<'a> {
                     if origin == "std::fs::read_dir" {
                         return Some(READ_DIR_RESULT.to_owned());
                     }
-                    if let Some((owner, method)) = origin.rsplit_once("::") {
-                        if let Some(result) = path_method_result(owner, method) {
-                            return Some(result.to_owned());
-                        }
+                    if let Some((owner, method)) = origin.rsplit_once("::")
+                        && let Some(result) = path_method_result(owner, method)
+                    {
+                        return Some(result.to_owned());
                     }
                     if origin.ends_with("::new")
                         || origin.ends_with("::builder")
@@ -2889,7 +2892,7 @@ impl<'a> Scanner<'a> {
                             fields.get(&index.to_string()).map(String::as_str)
                         };
                         let field_kind =
-                            if field_origin.is_some_and(|origin| ambient_receiver_type(origin)) {
+                            if field_origin.is_some_and(ambient_receiver_type) {
                                 ValueKind::Receiver
                             } else {
                                 ValueKind::Data
@@ -3683,19 +3686,19 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
             })
         {
             self.refuse_read_dir_handoff(&method);
-        } else if let Some(origin) = self.origin(&call.receiver) {
-            if let Some(kind) = method_hazard(&origin, &method) {
-                // PathBuf reaches these actual Path methods through Deref.
-                // Preserve the authored call AST while naming the canonical
-                // operation, without inferring arbitrary method output types.
-                let owner = if path_receiver_type(&origin) {
-                    "std::path::Path"
-                } else {
-                    &origin
-                };
-                let target = format!("{owner}::{method}");
-                self.record(kind, &target, call);
-            }
+        } else if let Some(origin) = self.origin(&call.receiver)
+            && let Some(kind) = method_hazard(&origin, &method)
+        {
+            // PathBuf reaches these actual Path methods through Deref.
+            // Preserve the authored call AST while naming the canonical
+            // operation, without inferring arbitrary method output types.
+            let owner = if path_receiver_type(&origin) {
+                "std::path::Path"
+            } else {
+                &origin
+            };
+            let target = format!("{owner}::{method}");
+            self.record(kind, &target, call);
         }
         if matches!(
             method.as_str(),
