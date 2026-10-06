@@ -682,11 +682,26 @@ mod tests {
                 kernel: false,
             },
         ];
+        // Stable standard APIs available before the pinned Rust 1.98.1. PathBuf
+        // reaches the same Path definitions through Deref; only lexical path
+        // operations remain outside this effect-method vocabulary.
+        const METHODS: [(&str, &str); 10] = [
+            ("exists", ""),
+            ("try_exists", ".is_ok()"),
+            ("is_file", ""),
+            ("is_dir", ""),
+            ("is_symlink", ""),
+            ("metadata", ".is_ok()"),
+            ("symlink_metadata", ".is_ok()"),
+            ("canonicalize", ".is_ok()"),
+            ("read_link", ".is_ok()"),
+            ("read_dir", ".is_ok()"),
+        ];
         let contract = fixture.path().join("contract/src/lib.rs");
         let pure = "pub fn pure() -> bool { let joined = std::path::Path::new(\"data\").join(\"child\"); joined.is_absolute() || joined.components().count() == 2 }";
         fs::write(&contract, format!("{ATTRIBUTES}{pure}"))?;
         check(fixture.path(), &packages)?;
-        for (method, result) in [("exists", ""), ("canonicalize", ".is_ok()")] {
+        for (method, result) in METHODS {
             for body in [
                 format!(
                     "pub fn pure() -> bool {{ std::path::Path::new(\".\").{method}(){result} }}"
@@ -716,6 +731,24 @@ mod tests {
                 );
             }
         }
+        // absolute is lexical with respect to file entries, but can consult
+        // ambient cwd. It is a free standard function, not a Path method.
+        for body in [
+            "pub fn pure() -> bool { std::path::absolute(\".\").is_ok() }",
+            "use std::path::absolute as selected; pub fn pure() -> bool { selected(\".\").is_ok() }",
+            "use r#std::r#path::r#absolute as r#selected; pub fn pure() -> bool { r#selected(\".\").is_ok() }",
+            "pub fn pure() -> bool { std::path::absolute(std::path::PathBuf::from(\".\")).is_ok() }",
+            "fn selected() -> &'static std::path::Path { std::path::Path::new(\".\") } pub fn pure() -> bool { std::path::absolute(selected()).is_ok() }",
+            "fn selected() -> std::path::PathBuf { std::path::PathBuf::from(\".\") } pub fn pure() -> bool { std::path::absolute(selected()).is_ok() }",
+        ] {
+            fs::write(&contract, format!("{ATTRIBUTES}{body}"))?;
+            let rejection = check(fixture.path(), &packages).unwrap_err().to_string();
+            ensure!(
+                rejection.contains("clippy::disallowed_methods")
+                    && rejection.contains("std::path::absolute"),
+                "wrong absolute-path rejection for {body}: {rejection}"
+            );
+        }
         // An allowed dependency can return path DATA into an actual no_std
         // caller. Inferred methods there still require compiler enforcement.
         for producer in [
@@ -723,7 +756,7 @@ mod tests {
             "pub fn selected() -> std::path::PathBuf { std::path::PathBuf::from(\".\") }",
         ] {
             fs::write(&contract, format!("{ATTRIBUTES}{producer}"))?;
-            for (method, result) in [("exists", ""), ("canonicalize", ".is_ok()")] {
+            for (method, result) in METHODS {
                 fs::write(
                     fixture.path().join("src/lib.rs"),
                     format!(
@@ -737,6 +770,22 @@ mod tests {
                     "wrong no_std returned-path rejection: {rejection}"
                 );
             }
+            fs::write(
+                &contract,
+                format!("{ATTRIBUTES}pub use std::path::absolute; {producer}"),
+            )?;
+            fs::write(
+                fixture.path().join("src/lib.rs"),
+                format!(
+                    "#![no_std]\n{ATTRIBUTES}pub fn pure() -> bool {{ boundary_contract::absolute(boundary_contract::selected()).is_ok() }}"
+                ),
+            )?;
+            let rejection = check(fixture.path(), &packages).unwrap_err().to_string();
+            ensure!(
+                rejection.contains("clippy::disallowed_methods")
+                    && rejection.contains("std::path::absolute"),
+                "wrong no_std absolute-path rejection: {rejection}"
+            );
         }
         fs::write(
             fixture.path().join("src/lib.rs"),
