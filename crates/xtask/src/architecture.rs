@@ -2085,6 +2085,12 @@ impl<'a> Scanner<'a> {
                 if call.args.len() == 1 && value_wrapper_target(&origin) {
                     return self.origin(&call.args[0]);
                 }
+                // The actual Path UFCS operation has the same known PathBuf
+                // result as dot-call canonicalize. Do not lose later methods
+                // merely because the authored call uses the associated path.
+                if origin == "std::path::Path::canonicalize" {
+                    return Some("std::path::PathBuf".to_owned());
+                }
                 if origin.ends_with("::new")
                     || origin.ends_with("::builder")
                     || origin.ends_with("::open")
@@ -4186,6 +4192,9 @@ mod tests {
             fn callbacks(path: &InputPath) {
                 let check = InputPath::exists; check(path); check(path);
             }
+            fn ufcs_return(path: &InputPath) {
+                let next = InputPath::canonicalize(path).unwrap(); next.exists();
+            }
             struct Holder { path: OwnedPath }
             fn field(holder: Holder) { holder.path.exists(); }
             fn unix(value: &str) {
@@ -4209,6 +4218,8 @@ mod tests {
             (("constructed", "std::path::Path::exists"), 2),
             (("constructed", "std::path::Path::canonicalize"), 2),
             (("callbacks", "std::path::Path::exists"), 3),
+            (("ufcs_return", "std::path::Path::canonicalize"), 1),
+            (("ufcs_return", "std::path::Path::exists"), 1),
             (("field", "std::path::Path::exists"), 1),
             (("unix", "rustix::fs::open"), 1),
             (("nested", "rustix::fs::open"), 1),
@@ -4230,6 +4241,19 @@ mod tests {
         assert_eq!(raw.len(), 1, "{raw:?}");
         assert_eq!(normal[0].target, raw[0].target);
         assert_ne!(normal[0].fingerprint, raw[0].fingerprint);
+        for source in [
+            "fn f(path: &std::path::Path) { let next = std::path::Path::canonicalize(path).unwrap(); next.exists(); }",
+            "use std::path::Path as Location; fn f(path: &Location) { let next = Location::canonicalize(path).unwrap(); next.exists(); }",
+            "fn f(path: &r#std::path::r#Path) { let next = r#std::path::r#Path::r#canonicalize(path).unwrap(); next.r#exists(); }",
+        ] {
+            let findings = scan(source);
+            assert_eq!(findings.len(), 2, "{source}: {findings:?}");
+            assert!(findings.iter().all(|finding| finding.count == 1 && finding.kind == "filesystem"), "{source}: {findings:?}");
+            assert_eq!(findings.iter().map(|finding| finding.target.as_str()).collect::<BTreeSet<_>>(), BTreeSet::from(["std::path::Path::canonicalize", "std::path::Path::exists"]), "{source}: {findings:?}");
+        }
+        let findings = scan("fn f(path: &std::path::Path) { let resolve = std::path::Path::canonicalize; let next = resolve(path).unwrap(); next.exists(); }");
+        assert_eq!(findings.iter().filter(|finding| finding.target == "std::path::Path::canonicalize").map(|finding| finding.count).sum::<usize>(), 2, "{findings:?}");
+        assert_eq!(findings.iter().filter(|finding| finding.target == "std::path::Path::exists").map(|finding| finding.count).sum::<usize>(), 1, "{findings:?}");
     }
 
     #[test]
