@@ -414,54 +414,6 @@ recovery of accepted work. Upgrade requires draining accepted invocations and
 pending invocations, then explicit migration and activation. Company authority is
 still required for execution; loading a legacy artifact grants no permission.
 
-## App Contract Export
-
-`xtask app-contracts` projects the admitted public app surface from a built
-artifact as bounded, deterministic JSON. In addition to the existing query and
-route data, `commands` describes each command's typed contracts, usage, errors,
-example, internal status, HTTP API and edit binding; query entries include their
-GET API path. `forms` lists command forms and their named controls from admitted
-templates (including components), `schedules` records declared command cadence
-and missed-occurrence policy, and `redirects` lists redirect paths and commands.
-These additions preserve schema version 1 and all existing keys. Internal
-commands have `api: null`. Queries are first-class: one
-query appears once even when multiple routes use it, with every route name
-listed. Each route includes its own path, template, live flag, query defaults,
-and exact template `contextKey`; shared platform-supplied template values such
-as `company` are listed separately. Query schemas use explicit `kind` tags,
-field descriptions, and the admitted typed examples. Ref and RowVersion retain
-their scalar type tags; collection wrappers expose their item shape. The export
-reads the artifact only; it does not start the worker or access a database,
-provider or network. Artifact JSON is bounded to 16 MiB, the worker to 128 MiB,
-checked compiler types to 16 MiB, and the completed export to 4 MiB. Unknown
-artifact/schema shapes and invalid examples fail the export. Roc enum output
-shapes are not part of the current codec; unsupported unions are rejected during
-build/admission. The current exporter inlines output schemas but does not derive
-named view types: `viewType` is always `null` and `viewTypes` is empty.
-Schedules describe declared cadence, not observed execution times. Whole-minute
-intervals retain their minutes/hours/daily representation; other intervals use
-`{"milliseconds": interval_ms}` without rounding.
-
-Build the app through the normal workflow first. The build prints the selected
-artifact directory (`artifacts/<artifact-digest>`); pass that exact directory to
-the exporter. Native local-dev sessions also generate this same export as
-`app-contracts.json` in the session directory after every successfully served
-build; `--status` reports the file path, artifact digest and SHA-256. For example:
-
-```console
-cargo run --locked -p xtask -- build /path/to/clanker-ui-gallery
-cargo run --locked -p xtask -- app-contracts artifacts/ARTIFACT_DIGEST
-cargo run --locked -p xtask -- app-contracts artifacts/ARTIFACT_DIGEST --output app-contracts.json
-```
-
-The build runs the pinned Roc compiler and required application verification;
-the export itself only reads the artifact and emits JSON. Each query's
-`inputSchema` and `outputSchema` are the read contract consumed by the design
-tool. Route `contextKey` names the template variable under which that
-query result is bound (for example, `home` for `{{ home.title }}`). Shared
-context schemas list platform values such as the independently supplied
-`company` branding.
-
 ## Redirect Routes
 
 A redirect route is a GET path that runs one of the app's commands and answers

@@ -8,7 +8,6 @@ use std::{
     process::Command,
 };
 
-mod app_contracts;
 mod architecture;
 mod architecture_dependencies;
 mod architecture_kernel;
@@ -246,7 +245,6 @@ fn main() -> Result<()> {
         "linux-provision-inspect",
     ]
     .contains(&action.as_str())
-        || action == "app-contracts"
     {
         None
     } else {
@@ -451,23 +449,6 @@ fn main() -> Result<()> {
                 Some(root.parent().context("isolated workspace parent")?),
                 None,
             )?;
-        }
-        "app-contracts" => {
-            let artifact =
-                PathBuf::from(args.next().context(
-                    "usage: xtask app-contracts ARTIFACT_DIRECTORY [--output JSON_FILE]",
-                )?);
-            let output = match args.next() {
-                None => None,
-                Some(flag) if flag == "--output" => Some(PathBuf::from(
-                    args.next().context("missing JSON output path")?,
-                )),
-                Some(_) => {
-                    bail!("usage: xtask app-contracts ARTIFACT_DIRECTORY [--output JSON_FILE]")
-                }
-            };
-            ensure!(args.next().is_none(), "unexpected app-contracts argument");
-            app_contracts::export_file(&artifact, output.as_deref())?;
         }
         "build" => {
             let app = args
