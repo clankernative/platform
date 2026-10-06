@@ -2891,12 +2891,11 @@ impl<'a> Scanner<'a> {
                         } else {
                             fields.get(&index.to_string()).map(String::as_str)
                         };
-                        let field_kind =
-                            if field_origin.is_some_and(ambient_receiver_type) {
-                                ValueKind::Receiver
-                            } else {
-                                ValueKind::Data
-                            };
+                        let field_kind = if field_origin.is_some_and(ambient_receiver_type) {
+                            ValueKind::Receiver
+                        } else {
+                            ValueKind::Data
+                        };
                         self.pattern_bindings(element, field_origin, field_kind, output);
                     } else {
                         let projected = read_dir_unmodeled_projection(origin);
