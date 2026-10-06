@@ -1820,7 +1820,8 @@ struct Active {
     outcome: crate::protocol::Outcome,
     before: Value,
     checks: BTreeSet<String>,
-    initial: Value,
+    application_initial: Value,
+    application_after: Value,
     obligation: bool,
 }
 
@@ -1895,7 +1896,7 @@ impl Campaign {
             "dev-properties" => {
                 properties::require(
                     self.runtime.artifact(),
-                    &self.runtime.inspect()?,
+                    &self.runtime.application_snapshot()?,
                     &evidence_dir,
                 )?;
                 if let Some(active) = self.active.as_mut() {
@@ -2019,7 +2020,7 @@ impl Campaign {
                         self.runtime.artifact(),
                         "input",
                         &sample.operation,
-                        &self.runtime.inspect()?,
+                        &self.runtime.application_snapshot()?,
                         &json!({}),
                         &Value::Null,
                         sample.seed.parse()?,
@@ -2071,7 +2072,7 @@ impl Campaign {
                         now,
                     )?;
                 }
-                let initial = self.runtime.inspect()?;
+                let application_initial = self.runtime.application_snapshot()?;
                 self.prepared = false;
                 // Internal definitions also have mandatory app-owned verification.
                 // Only this artifact-bound campaign can admit those generated samples.
@@ -2119,7 +2120,8 @@ impl Campaign {
                     outcome,
                     before: self.runtime.inspect()?,
                     checks: BTreeSet::new(),
-                    initial,
+                    application_initial,
+                    application_after: self.runtime.application_snapshot()?,
                     obligation,
                 });
             }
@@ -2130,8 +2132,8 @@ impl Campaign {
                         self.runtime.artifact(),
                         "check",
                         &active.step.operation,
-                        &active.before,
-                        &active.initial,
+                        &active.application_after,
+                        &active.application_initial,
                         &active.outcome.result,
                         0,
                     )?;
@@ -2157,11 +2159,12 @@ impl Campaign {
                             let verification_key = error.verification_key(target);
                             for index in 0..self.evidence.requested_cases_per_generator {
                                 let before = self.runtime.inspect()?;
+                                let application_before = self.runtime.application_snapshot()?;
                                 let input = verification(
                                     self.runtime.artifact(),
                                     "error-input",
                                     &verification_key,
-                                    &before,
+                                    &application_before,
                                     &json!({}),
                                     &Value::Null,
                                     self.evidence.seed.parse::<u64>()?.wrapping_add(index),
@@ -2212,7 +2215,7 @@ impl Campaign {
                                 );
                                 properties::require(
                                     self.runtime.artifact(),
-                                    &before,
+                                    &application_before,
                                     &evidence_dir,
                                 )?;
                                 *self
