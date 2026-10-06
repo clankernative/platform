@@ -5715,7 +5715,19 @@ mod tests {
             );
             assert_eq!(findings.len(), expected, "{source}: {findings:?}");
         }
-        let directory = fixture("pub fn f(entries: std::fs::ReadDir) { for entry in entries {} }");
+        let directory = fixture("pub fn pure(value: &str) -> usize { value.len() }");
+        let rules = reviewed(&inventory(directory.path()).unwrap());
+        assert!(rules.allowances.is_empty());
+        fs::write(
+            directory.path().join(RULES_FILE),
+            serde_json::to_vec(&rules).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("crates/fixture/src/lib.rs"),
+            "pub fn f(entries: std::fs::ReadDir) { for entry in entries {} }",
+        )
+        .unwrap();
         let error = check(directory.path()).unwrap_err().to_string();
         assert!(
             error.contains("unreviewed filesystem") && error.contains("std::fs::ReadDir::next"),
