@@ -16,8 +16,7 @@
 //! live and must answer the same conformance suite.
 
 use super::{
-    AdapterError, CredentialResolver, Credentials, Transport, TransportError, WireResponse,
-    slack,
+    AdapterError, CredentialResolver, Credentials, Transport, TransportError, WireResponse, slack,
 };
 use crate::integrations::transport::{Method, WireRequest};
 use anyhow::{Context, Result, bail, ensure};
