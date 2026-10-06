@@ -1,7 +1,7 @@
 //! Persisted command phases and dependent external effects. App transactions and
 //! provider calls never share a database transaction or a distributed commit.
 use crate::{
-    protocol::*,
+    protocol::{Boundary, Instruction, Observation, Phase, Reply, Response, Step, Trace},
     store::{self, Fault, Runtime},
 };
 use anyhow::{Context as _, Result, bail, ensure};
