@@ -57,6 +57,7 @@ disallowed-types = [
   { path = "std::time::Instant", reason = "Decision kernels take explicit facts and effects belong to admitted adapters" },
   { path = "std::fs::File", reason = "Decision kernels take explicit facts and effects belong to admitted adapters" },
   { path = "std::fs::OpenOptions", reason = "Decision kernels take explicit facts and effects belong to admitted adapters" },
+  { path = "std::fs::ReadDir", reason = "Directory iterator advancement observes the filesystem and belongs to admitted adapters" },
   { path = "std::process::Command", reason = "Decision kernels take explicit facts and effects belong to admitted adapters" },
   { path = "std::process::Child", reason = "Decision kernels take explicit facts and effects belong to admitted adapters" },
   { path = "std::net::TcpListener", reason = "Decision kernels take explicit facts and effects belong to admitted adapters" },

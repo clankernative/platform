@@ -793,6 +793,112 @@ mod tests {
                 "#![no_std]\n{ATTRIBUTES}pub fn pure() -> bool {{ boundary_contract::pure() }}"
             ),
         )?;
+        // ReadDir is an OS iterator, unlike pure Path/Components/Iter data.
+        // The type lint covers explicit signatures and named reexports; it
+        // does not inspect every inferred local expression's type.
+        for body in [
+            "pub fn advance(entries: &mut std::fs::ReadDir) -> bool { entries.next().is_some() }",
+            "use std::fs::ReadDir as Directory; pub fn advance(entries: &mut Directory) -> bool { entries.next().is_some() }",
+            "use r#std::r#fs::r#ReadDir as r#Directory; pub fn advance(entries: &mut r#Directory) -> bool { entries.r#next().is_some() }",
+            "pub use std::fs::ReadDir;",
+            "pub use std::fs::ReadDir as Directory;",
+            "pub type Directory = std::fs::ReadDir;",
+        ] {
+            fs::write(&contract, format!("{ATTRIBUTES}{pure}\n{body}"))?;
+            let rejection = check(fixture.path(), &packages).unwrap_err().to_string();
+            ensure!(
+                rejection.contains("clippy::disallowed_types")
+                    && rejection.contains("std::fs::ReadDir"),
+                "wrong directory-iterator type rejection for {body}: {rejection}"
+            );
+        }
+        fs::write(
+            &contract,
+            format!("{ATTRIBUTES}{pure}\npub use std::fs::ReadDir as Directory;"),
+        )?;
+        for body in [
+            "pub fn advance(entries: &mut boundary_contract::Directory) -> bool { entries.next().is_some() }",
+            "use boundary_contract::Directory as Entries; pub fn advance(entries: &mut Entries) -> bool { entries.next().is_some() }",
+            "pub fn advance(entries: &mut boundary_contract::r#Directory) -> bool { entries.r#next().is_some() }",
+            "pub fn advance(entries: &mut boundary_contract::Directory) -> bool { core::iter::Iterator::next(entries).is_some() }",
+            "pub fn advance(entries: boundary_contract::Directory) -> usize { entries.count() }",
+            "pub fn advance(entries: boundary_contract::Directory) -> usize { let mut count = 0; for _ in entries { count += 1; } count }",
+        ] {
+            fs::write(
+                fixture.path().join("src/lib.rs"),
+                format!(
+                    "#![no_std]\n{ATTRIBUTES}pub fn pure() -> bool {{ boundary_contract::pure() }}\n{body}"
+                ),
+            )?;
+            // Only the actual no_std caller is a lint target in this phase.
+            // The contract is compiled as a dependency, so its reexport cannot
+            // substitute for a caller's semantic ReadDir type diagnostic.
+            let rejection = check(fixture.path(), &packages[..1]).unwrap_err().to_string();
+            ensure!(
+                rejection.contains("clippy::disallowed_types")
+                    && rejection.contains("std::fs::ReadDir")
+                    && rejection.contains(" --> src/lib.rs:"),
+                "wrong no_std supplied-directory rejection for {body}: {rejection}"
+            );
+        }
+        // Selecting the entire strict graph also refuses the contract's native
+        // handle exposure, independently of whether a caller advances it.
+        fs::write(
+            fixture.path().join("src/lib.rs"),
+            format!(
+                "#![no_std]\n{ATTRIBUTES}pub fn pure() -> bool {{ boundary_contract::pure() }}"
+            ),
+        )?;
+        let rejection = check(fixture.path(), &packages).unwrap_err().to_string();
+        ensure!(
+            rejection.contains("clippy::disallowed_types")
+                && rejection.contains("std::fs::ReadDir"),
+            "strict contract exported a directory iterator: {rejection}"
+        );
+        // A wholly inferred handle acquired via a reexport is rejected at its
+        // already-banned acquisition. This is a method-lint control, not an
+        // inferred-type guarantee; known advancement is also source-scanned.
+        fs::write(
+            &contract,
+            format!("{ATTRIBUTES}{pure}\npub use std::fs::read_dir as selected;"),
+        )?;
+        for body in [
+            "pub fn advance() -> bool { let mut entries = boundary_contract::selected(\".\").unwrap(); entries.next().is_some() }",
+            "pub fn advance() -> usize { let entries = boundary_contract::selected(\".\").unwrap(); let mut count = 0; for _ in entries { count += 1; } count }",
+        ] {
+            fs::write(
+                fixture.path().join("src/lib.rs"),
+                format!(
+                    "#![no_std]\n{ATTRIBUTES}pub fn pure() -> bool {{ boundary_contract::pure() }}\n{body}"
+                ),
+            )?;
+            let rejection = check(fixture.path(), &packages[..1]).unwrap_err().to_string();
+            ensure!(
+                rejection.contains("clippy::disallowed_methods")
+                    && rejection.contains("std::fs::read_dir")
+                    && rejection.contains(" --> src/lib.rs:"),
+                "wrong inferred-directory acquisition rejection for {body}: {rejection}"
+            );
+        }
+        fs::write(
+            fixture.path().join("src/lib.rs"),
+            format!(
+                "#![no_std]\n{ATTRIBUTES}pub fn pure() -> bool {{ boundary_contract::pure() }}"
+            ),
+        )?;
+        for level in ["allow", "expect"] {
+            fs::write(
+                &contract,
+                format!(
+                    "{ATTRIBUTES}{pure}\n#[{level}(clippy::disallowed_types)] pub fn advance(entries: &mut std::fs::ReadDir) -> bool {{ entries.next().is_some() }}"
+                ),
+            )?;
+            let rejection = check(fixture.path(), &packages).unwrap_err().to_string();
+            ensure!(
+                rejection.contains("E0453"),
+                "strict contract suppressed its type forbid: {rejection}"
+            );
+        }
         for level in ["allow", "expect"] {
             fs::write(
                 &contract,
