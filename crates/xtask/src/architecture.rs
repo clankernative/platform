@@ -2472,7 +2472,7 @@ impl<'a> Scanner<'a> {
             {
                 ValueKind::Receiver
             }
-            Expr::Field(_)
+            Expr::Field(_) | Expr::Index(_)
                 if self
                     .origin(expression)
                     .as_deref()
@@ -5078,11 +5078,16 @@ mod tests {
             "fn f(value: [u32; 1]) { let [number] = value; helper(number); }",
             "fn f(value: &[u32]) { if let [number] = value { helper(number); } }",
             "fn f(value: &mut [u32; 1]) { helper(value[0]); }",
+            "mod opaque { pub type Client = (); } fn f(value: &mut [u32; 1]) { let selected = &mut value[0]; { use opaque::Client as selected; helper(selected); } }",
             "struct Sink; fn f(sink: Sink) { sink.chain([0]); sink.zip([0]); }",
             "fn f(entries: std::fs::ReadDir) { std::fs::ReadDir::size_hint(&entries); }",
         ] {
             assert!(scan(source).is_empty(), "{source}");
         }
+        let source = "mod opaque { pub type Client = (); } fn f(value: &mut [std::fs::ReadDir; 1]) { let selected = &mut value[0]; { use opaque::Client as selected; selected.next(); } }";
+        let directory = fixture(source);
+        let error = inventory(directory.path()).unwrap_err().to_string();
+        assert!(error.contains("unresolved parent ambient imports") && error.contains("selected"), "{source}: {error}");
         for source in [
             "struct Holder { entries: std::fs::ReadDir, count: u32 } fn f(value: Holder) { let Holder { entries: mut selected, count } = value; selected.next(); helper(count); }",
             "struct Holder { entries: std::fs::ReadDir } fn f(Holder { entries: mut selected }: Holder) { selected.next(); }",
