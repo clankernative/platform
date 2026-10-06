@@ -413,15 +413,8 @@ impl Journal {
         connection
             .busy_timeout(Duration::from_secs(5))
             .context("set writable control journal busy timeout")?;
-        connection
-            .execute_batch("PRAGMA foreign_keys = ON")
-            .context("configure control journal foreign keys")?;
-        connection
-            .execute_batch("PRAGMA journal_mode = WAL")
-            .context("configure control journal WAL")?;
-        connection
-            .execute_batch("PRAGMA synchronous = FULL")
-            .context("configure control journal synchronous mode")?;
+        day2::write_queue::configure_journal(&mut connection)
+            .context("configure writable control journal")?;
         bounded_control_admission(&mut connection, initialize_control_schema)
             .context("admit writable control journal schema")?;
         let mut journal = Self { connection };
