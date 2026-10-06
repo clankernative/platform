@@ -659,7 +659,7 @@ fn glob_names(prefix: &str) -> &'static [&'static str] {
     match prefix {
         "std" => &["time", "env", "fs", "path", "thread", "process", "net"],
         "std::time" => &["SystemTime", "Instant"],
-        "std::path" => &["Path", "PathBuf"],
+        "std::path" => &["Path", "PathBuf", "Components", "Iter"],
         "time" => &["OffsetDateTime", "UtcDateTime"],
         "rustix" => &["time", "fs"],
         "rustix::fs" => &["open"],
@@ -2091,6 +2091,11 @@ impl<'a> Scanner<'a> {
                 if origin == "std::path::Path::canonicalize" {
                     return Some("std::path::PathBuf".to_owned());
                 }
+                if let Some((owner, method)) = origin.rsplit_once("::") {
+                    if let Some(result) = path_method_result(owner, method) {
+                        return Some(result.to_owned());
+                    }
+                }
                 if origin.ends_with("::new")
                     || origin.ends_with("::builder")
                     || origin.ends_with("::open")
@@ -2103,7 +2108,11 @@ impl<'a> Scanner<'a> {
                     Some(origin)
                 }
             }),
-            Expr::MethodCall(call) => self.origin(&call.receiver),
+            Expr::MethodCall(call) => self.origin(&call.receiver).map(|origin| {
+                path_method_result(&origin, &identifier_name(&call.method))
+                    .map(str::to_owned)
+                    .unwrap_or(origin)
+            }),
             Expr::Field(field) => {
                 let origin = self.origin(&field.base)?;
                 let name = member_name(&field.member);
@@ -3578,12 +3587,25 @@ fn path_receiver_type(target: &str) -> bool {
     matches!(target, "std::path::Path" | "std::path::PathBuf")
 }
 
+fn path_projection_type(target: &str) -> bool {
+    matches!(target, "std::path::Components" | "std::path::Iter")
+}
+
+fn path_method_result(owner: &str, method: &str) -> Option<&'static str> {
+    match method {
+        "components" if path_receiver_type(owner) => Some("std::path::Components"),
+        "iter" if path_receiver_type(owner) => Some("std::path::Iter"),
+        "as_path" if path_projection_type(owner) => Some("std::path::Path"),
+        _ => None,
+    }
+}
+
 fn ambient_receiver_type(target: &str) -> bool {
     // Known receivers only, including pure paths with filesystem methods:
     // Metadata, read buffers, PIDs, UUIDs and raw clock samples are not receivers
     // merely because their factory is ambient. This is not general Rust
     // output-type or wrapper resolution.
-    path_receiver_type(target) || matches!(
+    path_receiver_type(target) || path_projection_type(target) || matches!(
         target,
         "std::fs::File"
             | "std::fs::OpenOptions"
@@ -3631,15 +3653,21 @@ fn receiver_returns_data(origin: &str, method: &str) -> bool {
     if path_receiver_type(origin) && method == "canonicalize" {
         return false;
     }
-    // These exact Path projections return pure scalar/string/iterator DATA,
+    // These exact Path projections return pure scalar/string DATA,
     // not another path. Conditional DATA bindings must not be mistaken for
     // conditional receiver origins. Unknown transforms still retain the
     // known receiver conservatively; this is a finite standard API boundary.
     if path_receiver_type(origin) && matches!(method,
         "is_absolute" | "is_relative" | "has_root" | "starts_with" | "ends_with"
-            | "components" | "iter" | "as_os_str" | "to_str" | "to_string_lossy"
+            | "as_os_str" | "to_str" | "to_string_lossy"
             | "display" | "file_name" | "file_stem" | "extension")
     {
+        return true;
+    }
+    // Components/Iter retain a path through as_path; only their exact scalar
+    // and element outputs are DATA. Arbitrary iterator transforms are not an
+    // output-type resolver and retain the known receiver conservatively.
+    if path_projection_type(origin) && matches!(method, "next" | "nth" | "last" | "count" | "size_hint") {
         return true;
     }
     if matches!(origin, "std::fs::OpenOptions" | "tokio::fs::OpenOptions")
@@ -3756,6 +3784,8 @@ fn ambient_binding(target: &str) -> bool {
                 | "std::path"
                 | "std::path::Path"
                 | "std::path::PathBuf"
+                | "std::path::Components"
+                | "std::path::Iter"
                 | "rustix::fs"
                 | "rustix::fs::open"
         )
@@ -4254,6 +4284,18 @@ mod tests {
         let findings = scan("fn f(path: &std::path::Path) { let resolve = std::path::Path::canonicalize; let next = resolve(path).unwrap(); next.exists(); }");
         assert_eq!(findings.iter().filter(|finding| finding.target == "std::path::Path::canonicalize").map(|finding| finding.count).sum::<usize>(), 2, "{findings:?}");
         assert_eq!(findings.iter().filter(|finding| finding.target == "std::path::Path::exists").map(|finding| finding.count).sum::<usize>(), 1, "{findings:?}");
+        for source in [
+            "fn f(path: &std::path::Path) { path.components().as_path().exists(); }",
+            "fn f(path: &std::path::Path) { std::path::Path::components(path).as_path().exists(); }",
+            "use std::path::{Path as Location, Components as Parts}; fn f(path: &Location) { let parts = Location::components(path); Parts::as_path(&parts).exists(); }",
+            "fn f(path: &r#std::path::r#Path) { r#std::path::r#Path::r#iter(path).r#as_path().r#exists(); }",
+            "fn f(parts: &std::path::Iter<'_>) { std::path::Iter::as_path(parts).exists(); }",
+        ] {
+            let findings = scan(source);
+            assert_eq!(findings.len(), 1, "{source}: {findings:?}");
+            assert_eq!(findings[0].target, "std::path::Path::exists", "{source}: {findings:?}");
+            assert_eq!(findings[0].count, 1, "{source}: {findings:?}");
+        }
     }
 
     #[test]
@@ -4294,6 +4336,8 @@ mod tests {
             "fn f() { #[cfg(unix)] let path = std::path::Path::new(\"a\"); path.exists(); }",
             "fn f() { #[cfg(unix)] let path: std::path::PathBuf = std::path::PathBuf::from(\"a\"); path.exists(); }",
             "fn f() { #[cfg(unix)] let path = std::path::Path::new(\"a\").canonicalize().unwrap(); path.exists(); }",
+            "fn f(path: &std::path::Path) { #[cfg(unix)] let parts = path.components(); parts.as_path().exists(); }",
+            "fn f(path: &std::path::Path) { #[cfg(unix)] let parts = std::path::Path::iter(path); parts.as_path().exists(); }",
         ] {
             let error = inventory(fixture(source).path()).unwrap_err().to_string();
             assert!(error.contains("conditional ambient local bindings"), "{source}: {error}");
@@ -4312,7 +4356,8 @@ mod tests {
             }
             fn conditional_data(path: &Path) {
                 #[cfg(unix)] let absolute = path.is_absolute();
-                #[cfg(unix)] let parts = path.components();
+                #[cfg(unix)] let count = path.components().count();
+                #[cfg(unix)] let hint = path.iter().size_hint();
                 #[cfg(unix)] let text = path.to_str();
                 #[cfg(unix)] let name = path.file_name();
                 #[cfg(unix)] let label = path.display();
@@ -4336,6 +4381,18 @@ mod tests {
         "#);
         assert!(findings.iter().all(|finding| finding.target == "std::path::Path::exists"), "{findings:?}");
         assert_eq!(findings.iter().map(|finding| finding.count).sum::<usize>(), 3, "{findings:?}");
+        let findings = scan(r#"
+            fn f(path: &std::path::Path) {
+                let parts: std::path::Components<'_> = {
+                    #[cfg(unix)] { path.components() }
+                    #[cfg(not(unix))] { path.components() }
+                };
+                parts.as_path().exists();
+            }
+        "#);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].target, "std::path::Path::exists");
+        assert_eq!(findings[0].count, 1);
     }
 
     #[test]
