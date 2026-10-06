@@ -1004,5 +1004,5 @@ mod manifest_tests;
 mod port_tests;
 
 #[cfg(test)]
-#[path = "ui_assembly/recorded_tests.rs"]
-mod recorded_tests;
+#[path = "ui_assembly/external_tests.rs"]
+mod external_tests;

@@ -356,10 +356,10 @@
     "crates/xtask/src/provider_conformance.rs",
     "crates/xtask/src/tooling.rs",
     "crates/xtask/src/ui_assembly.rs",
+    "crates/xtask/src/ui_assembly/external_tests.rs",
     "crates/xtask/src/ui_assembly/manifest_tests.rs",
     "crates/xtask/src/ui_assembly/port.rs",
     "crates/xtask/src/ui_assembly/port_tests.rs",
-    "crates/xtask/src/ui_assembly/recorded_tests.rs",
     "crates/xtask/src/ui_assembly/tests.rs",
     "crates/xtask/src/verification.rs",
     "crates/xtask/src/workflows.rs"

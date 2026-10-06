@@ -1,5 +1,0 @@
-{
-  "variant": "quiet",
-  "buttonLabel": "Dismiss",
-  "expectedHtml": "<button class=\"cui-button cui-button--quiet\" type=\"button\">Dismiss</button>\n"
-}
