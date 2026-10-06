@@ -8103,11 +8103,11 @@ mod tests {
         };
         for statement in &mut function.block.stmts {
             if let syn::Stmt::Expr(Expr::Call(call), _) = statement {
-                call.func = Box::new(Expr::Group(syn::ExprGroup {
+                *call.func = Expr::Group(syn::ExprGroup {
                     attrs: Vec::new(),
                     group_token: Default::default(),
                     expr: call.func.clone(),
-                }));
+                });
             }
         }
         let findings = scan_syntax(syntax);
