@@ -914,7 +914,9 @@ mod tests {
                         "#![no_std]\n{ATTRIBUTES}pub fn advance(entries: &mut boundary_contract::Directory) -> bool {{ entries.next().is_some() }}"
                     ),
                 )?;
-                let rejection = check(fixture.path(), &packages[..1]).unwrap_err().to_string();
+                let rejection = check(fixture.path(), &packages[..1])
+                    .unwrap_err()
+                    .to_string();
                 ensure!(
                     rejection.contains("clippy::disallowed_types")
                         && rejection.contains("std::fs::ReadDir")

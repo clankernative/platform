@@ -2223,11 +2223,15 @@ impl<'a> Scanner<'a> {
     }
 
     fn origin(&self, expr: &Expr) -> Option<String> {
-        #[cfg(test)] {
+        #[cfg(test)]
+        {
             let steps = self.origin_steps.get().saturating_add(1);
             self.origin_steps.set(steps);
             if let Some(limit) = self.origin_step_limit {
-                assert!(steps <= limit, "origin traversal repeated a subtree: {steps} > {limit}");
+                assert!(
+                    steps <= limit,
+                    "origin traversal repeated a subtree: {steps} > {limit}"
+                );
             }
         }
         match expr {
@@ -5350,18 +5354,34 @@ mod tests {
     #[test]
     fn method_origin_visits_each_receiver_subtree_once() {
         let length = 32;
-        let expression = format!("std::path::PathBuf::from(\"root\"){}", ".join(\"child\")".repeat(length));
+        let expression = format!(
+            "std::path::PathBuf::from(\"root\"){}",
+            ".join(\"child\")".repeat(length)
+        );
         let syntax: Expr = syn::parse_str(&expression).unwrap();
         let mut findings = BTreeMap::new();
         let ambient = BTreeSet::new();
         let mut scanner = Scanner::new("crates/fixture/src/lib.rs", &mut findings, &ambient);
         scanner.origin_step_limit = Some(length + 4);
-        assert_eq!(scanner.origin(&syntax).as_deref(), Some("std::path::PathBuf"));
+        assert_eq!(
+            scanner.origin(&syntax).as_deref(),
+            Some("std::path::PathBuf")
+        );
         assert!(scanner.origin_steps.get() <= length + 4);
         let source = format!("fn f() {{ {expression}.canonicalize().unwrap().exists(); }}");
         let findings = scan(&source);
-        let counts = findings.iter().map(|finding| (finding.target.as_str(), finding.count)).collect::<BTreeMap<_, _>>();
-        assert_eq!(counts, BTreeMap::from([("std::path::Path::canonicalize", 1usize), ("std::path::Path::exists", 1)]), "{findings:?}");
+        let counts = findings
+            .iter()
+            .map(|finding| (finding.target.as_str(), finding.count))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            counts,
+            BTreeMap::from([
+                ("std::path::Path::canonicalize", 1usize),
+                ("std::path::Path::exists", 1)
+            ]),
+            "{findings:?}"
+        );
         assert!(scan(&format!("fn f() {{ helper({expression}.is_absolute()); }}")).is_empty());
     }
 
