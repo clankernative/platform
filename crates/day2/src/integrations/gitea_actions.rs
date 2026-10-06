@@ -1,9 +1,8 @@
 //! Gitea 1.27 Actions reads, scoped to one operator-approved organization.
 //! No caller-selected origin, owner, arbitrary path, or workflow mutation.
 
-use super::{
-    AdapterError, Method, PreparedCall, ResponseProfile, WireResponse, transport::WireRequest,
-};
+use super::{AdapterError, PreparedCall, ResponseProfile, WireResponse};
+use crate::integrations::transport::{Method, WireRequest};
 use day2_capabilities::{integrations::LiveConnection, resources::Action};
 use serde::Deserialize;
 use serde_json::{Value, json};

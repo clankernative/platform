@@ -11,7 +11,8 @@
 //! can contain whatever a build printed — tokens, customer data, source — so
 //! letting an application name the repository would make the grant meaningless.
 
-use super::{AdapterError, PreparedCall, ResponseProfile, transport::WireRequest};
+use super::{AdapterError, PreparedCall, ResponseProfile};
+use crate::integrations::transport::{Method, WireRequest};
 use day2_capabilities::{integrations::LiveConnection, resources::Action};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -65,7 +66,7 @@ pub(super) fn prepare(
             url,
             body: vec![],
             headers: vec![("accept", "application/vnd.github+json".into())],
-            method: super::Method::Get,
+            method: Method::Get,
         },
         response,
         response_limit: 0,

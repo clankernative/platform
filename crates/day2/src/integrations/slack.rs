@@ -1,7 +1,8 @@
 //! https://docs.slack.dev/reference/methods/chat.postMessage/
 //! https://docs.slack.dev/reference/methods/conversations.history/
 
-use super::{AdapterError, PreparedCall, ResponseProfile, transport::WireRequest};
+use super::{AdapterError, PreparedCall, ResponseProfile};
+use crate::integrations::transport::{Method, WireRequest};
 use day2_capabilities::{
     integrations::{LiveConnection, SlackChannel},
     resources::Action,
@@ -53,7 +54,7 @@ pub(super) fn prepare(
                     url: format!("{HISTORY}?{query}"),
                     body: vec![],
                     headers: vec![],
-                    method: super::Method::Get,
+                    method: Method::Get,
                 },
                 ResponseProfile::SlackRead {
                     channel: channel.channel_id.clone(),
