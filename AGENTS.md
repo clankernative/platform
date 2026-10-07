@@ -18,6 +18,15 @@ tooling exists on the machine, so it may be shell. Keep it to installing and
 starting what the VM needs; anything after boot is an ops recipe. This is a local
 spike, not production admission. Never change the sibling day2 workspace.
 
+Nothing built on this platform has production users or external API consumers
+yet. Do not add legacy paths, compatibility shims, deprecation periods, dual
+reads or writes, data migrations or staged cutovers for platform APIs, schemas,
+artifact formats or app contracts. Change the code and every caller in place,
+and delete what it replaces. Deployed canaries and test installations are
+disposable: tear them down and redeploy instead of migrating their state.
+GoLinks' persisted links are the one exception; preserve them. This rule
+overrides any migration, compatibility or cutover section in a proposal.
+
 Persistent models are nominal Roc records. Derive relationships and indexed
 selections from checked Ref(Model) fields, never from naming guesses. Keep one
 copy of app/domain modules; generated Data and Inputs belong beside them in the
