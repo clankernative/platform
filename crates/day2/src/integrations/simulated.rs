@@ -16,9 +16,9 @@
 //! live and must answer the same conformance suite.
 
 use super::{
-    AdapterError, CredentialResolver, Credentials, Transport, TransportError, WireRequest,
-    WireResponse, slack,
+    AdapterError, CredentialResolver, Credentials, Transport, TransportError, WireResponse, slack,
 };
+use crate::integrations::transport::{Method, WireRequest};
 use anyhow::{Context, Result, bail, ensure};
 use day2_capabilities::{integrations::LiveConnection, resources::Provider};
 use rusqlite::{OptionalExtension, params};
@@ -1272,7 +1272,7 @@ fn serve_object_store(
         metadata,
     };
     Ok(Ok(match request.method {
-        super::Method::Head => match state.world.objects.get(&key) {
+        Method::Head => match state.world.objects.get(&key) {
             Some(object) => response(
                 200,
                 vec![
@@ -1284,7 +1284,7 @@ fn serve_object_store(
         },
         // Idempotent, as S3 is: removing a key that was never there is the same
         // answer as removing one that was.
-        super::Method::Delete => {
+        Method::Delete => {
             state.world.objects.remove(&key);
             response(204, vec![])
         }

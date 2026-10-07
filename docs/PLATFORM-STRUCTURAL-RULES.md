@@ -156,6 +156,54 @@ name resolution, expand arbitrary dependency macros or prove purity through
 unknown helpers. Dependency boundaries, restricted APIs and Clippy restrictions
 provide complementary enforcement. It is not hostile-code containment.
 
+The ambient-effect guard also distinguishes pure path manipulation from the ten
+reviewed `Path` filesystem methods, ambient `std::path::absolute`, and
+`rustix::fs::open`. It tracks known `ReadDir` acquisition and parameters through
+the admitted standard `Result` and `Option` projections. Known advancement and
+terminal consumers are inventoried as filesystem I/O, including a syntactic
+`for` loop; admitted pure and lazy transfers preserve lineage.
+Unsupported explicit handle transfers and containers refuse rather than losing
+that lineage. Pure `Path::join`, path components and ordinary data iterators
+introduce no filesystem finding under an admitted unconditional owning binding;
+conditional owning bindings can still refuse under the finite source convention.
+Raw identifiers use their semantic names for classification while the original
+tokens remain part of each fingerprint.
+
+Known ambient names inherited through a parent or local wildcard require an
+unconditional canonical import in the consuming source. The guard separates
+type and value declarations, so a same-named type alias cannot conceal an
+imported effect callback. Existing host children name the same nominal std,
+Axum and protocol types that their parents supplied; their operation bodies and
+recipes are unchanged. This finite source convention does not resolve every
+Rust reexport, helper output, callback capture, hidden container or expanded
+macro. Conservative `OpenOptions` lineage labels may describe operations on
+the returned `File` or `Take<File>`; they are catalog keys, not compiler type
+definitions.
+
+Strict contract/kernel Clippy rules additionally reject the selected filesystem
+methods and explicit `ReadDir` types and named imports. That type lint does not
+ban every inferred local type; the method rules reject known acquisition paths.
+Compiler fixtures exercise aliases, raw paths, explicit and inferred acquisition,
+cross-crate exports, advancement, and attempted lint suppression. Strict compiler
+outputs are partitioned by the canonical configuration root and sorted,
+length-framed set of primary packages, because Clippy's `--no-deps` selection
+can change which crates it checks even when source bytes are unchanged. This
+partition does not establish whole-host cache validity or a cache disk quota.
+
+The current native inventory delta identifies 367 additional exact records and
+four stale records requiring individual review and an explicit policy supplement.
+Each policy addition has its own owner, purpose, removal condition and actual
+limits; no module gains a filesystem or process exemption. These records
+include existing operator tooling with unbounded directory walks or direct
+subprocess captures. Resource and template entry limits checked after
+`ReadDir::collect` do not bound the initial enumeration or allocation. Metadata
+checks followed by whole-file reads elsewhere do not bound growth during a read.
+The selected credential-provisioning readers' final-component `NOFOLLOW` and
+same-descriptor byte limits do not prove all-ancestor containment or eliminate
+pathname races. These are retained debts,
+not completed bounded-execution obligations. Native inventory observations and
+manual source review do not replace policy validation or the final full gate.
+
 ## Proof and durable state rules
 
 Authority-bearing values have private constructors and fields. Dispatch/reveal
@@ -198,6 +246,26 @@ macros, resolve arbitrary external aliases or certify all authority types.
 Changing an admitted factory's body still requires domain review and behavioral
 tests; private fields and a method inventory alone cannot establish its issuer's
 authority. Protected operations retain independent current-fact validation.
+
+The configured proof guard also checks syntactically visible proof inputs,
+including references, against exact consumer signatures. Eight existing release
+and dispatch consumer signatures are reviewed alongside the seven existing proof
+definitions; no new authority type is introduced. Unreviewed known construction,
+including construction under an erased return type, refuses. Block-local proof
+aliases, const/static proof values and macro-generated inherent APIs refuse.
+An admitted destructor requires its exact owning implementation fingerprint.
+Optional closed owning-child catalogs check
+every selected production child and registration; without that opt-in catalog,
+arbitrary out-of-line consumers remain outside the owning-source inventory.
+
+Parsed wire buffers have a separate optional catalog for their whole struct and
+destructor fingerprints. They are separately classified parsed data, with only
+their reviewed Serde derives permitted; these pins do not grant authority or
+replace proof-factory admission. These checks detect changes to reviewed
+destructor code; they do not prove secure erasure of every plaintext
+copy. The proof-source reader consumes at most four MiB plus one lookahead byte
+on its opened regular descriptor, refusing excess. It does not establish
+`NOFOLLOW`, pathname/descriptor identity or a coherent multi-file snapshot.
 
 Proofs bind the exact installation, app, operation, artifact, binding, account,
 generation and epoch required for their action. Persisted facts do not become

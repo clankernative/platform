@@ -227,7 +227,7 @@ fn main() -> Result<()> {
             .join("../..")
             .canonicalize()?
     };
-    // These closed native helpers read addressed artifacts or write only their
+    // These closed native helpers read source evidence or addressed artifacts, or write only their
     // explicit new package output. They run as unprivileged tooling users and
     // do not need writable access to the platform's build workspace.
     let _lock = if [
@@ -237,6 +237,7 @@ fn main() -> Result<()> {
         "linux-strict-denial",
         "linux-provision-package",
         "linux-provision-inspect",
+        "architecture-proof-candidate-inventory",
     ]
     .contains(&action.as_str())
     {
@@ -281,6 +282,23 @@ fn main() -> Result<()> {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&architecture_proofs::trait_check_inventory(&root)?)?
+            );
+        }
+        "architecture-proof-candidate-inventory" => {
+            let descriptor =
+                PathBuf::from(args.next().context(
+                    "usage: xtask architecture-proof-candidate-inventory DESCRIPTOR_JSON",
+                )?);
+            ensure!(
+                args.next().is_none(),
+                "usage: xtask architecture-proof-candidate-inventory DESCRIPTOR_JSON"
+            );
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&architecture_proofs::candidate_inventory(
+                    &root,
+                    &descriptor
+                )?)?
             );
         }
         "architecture-dependencies" => {

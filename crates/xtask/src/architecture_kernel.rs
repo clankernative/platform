@@ -3,6 +3,7 @@
 //! macro expansion, and transitive dependency effects still require review.
 
 use anyhow::{Context, Result, bail, ensure};
+use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -132,6 +133,10 @@ fn admit_clippy_diagnostic(bytes: &[u8]) -> Result<()> {
 
 fn clippy_command(root: &Path, packages: &[StrictCrate<'_>]) -> Result<Command> {
     let config = root.join("architecture").canonicalize()?;
+    let target = strict_target_dir(
+        config.parent().context("strict compiler workspace")?,
+        packages,
+    );
     let mut command = Command::new("cargo");
     command.current_dir(root).env("CLIPPY_CONF_DIR", config);
     command.args([
@@ -143,12 +148,30 @@ fn clippy_command(root: &Path, packages: &[StrictCrate<'_>]) -> Result<Command> 
         "--lib",
         "--no-deps",
     ]);
+    command.arg("--target-dir").arg(target);
     for package in packages {
         command.args(["-p", package.name]);
     }
     pin_lint_flags(&mut command);
     command.args(["--", "--cap-lints=forbid", "-Dwarnings"]);
     Ok(command)
+}
+
+fn strict_target_dir(root: &Path, packages: &[StrictCrate<'_>]) -> PathBuf {
+    // Clippy's --no-deps changes linting according to CARGO_PRIMARY_PACKAGE,
+    // which is not a source dependency in cached dependency-only compilations.
+    // Keep those artifacts separate from any different primary package set.
+    // Names have already passed the bounded, unique inventory check above.
+    let names: BTreeSet<_> = packages.iter().map(|package| package.name).collect();
+    let mut digest = Sha256::new();
+    digest.update(b"day2-strict-clippy-selection-v1\0");
+    for name in names {
+        digest.update((name.len() as u64).to_le_bytes());
+        digest.update(name.as_bytes());
+    }
+    root.join("target")
+        .join("strict-clippy")
+        .join(format!("{:x}", digest.finalize()))
 }
 
 fn pin_lint_flags(command: &mut Command) {
@@ -638,6 +661,334 @@ mod tests {
             "version = 4\n\n[[package]]\nname = \"boundary-fixture\"\nversion = \"0.0.0\"\n",
         )?;
         Ok(directory)
+    }
+
+    fn path_contract_fixture() -> Result<tempfile::TempDir> {
+        let directory = fixture()?;
+        fs::create_dir(directory.path().join("contract"))?;
+        fs::create_dir(directory.path().join("contract/src"))?;
+        fs::write(
+            directory.path().join("Cargo.toml"),
+            "[package]\nname = \"boundary-fixture\"\nversion = \"0.0.0\"\nedition = \"2024\"\n[workspace]\nmembers = [\"contract\"]\n[dependencies]\nboundary-contract = { path = \"contract\" }\n",
+        )?;
+        fs::write(
+            directory.path().join("contract/Cargo.toml"),
+            "[package]\nname = \"boundary-contract\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+        )?;
+        fs::write(
+            directory.path().join("Cargo.lock"),
+            "version = 4\n\n[[package]]\nname = \"boundary-contract\"\nversion = \"0.0.0\"\n\n[[package]]\nname = \"boundary-fixture\"\nversion = \"0.0.0\"\ndependencies = [\"boundary-contract\"]\n",
+        )?;
+        // The kernel really compiles as no_std while linking a reviewed strict
+        // std contract. Source no_std alone cannot prevent dependency effects.
+        fs::write(
+            directory.path().join("src/lib.rs"),
+            format!(
+                "#![no_std]\n{ATTRIBUTES}pub fn pure() -> bool {{ boundary_contract::pure() }}"
+            ),
+        )?;
+        Ok(directory)
+    }
+
+    #[test]
+    fn strict_target_partition_pins_exact_primary_selection() {
+        let root = Path::new("workspace");
+        let partition = |names: &[&str]| {
+            let packages: Vec<_> = names
+                .iter()
+                .map(|name| StrictCrate {
+                    name,
+                    source: "src/lib.rs",
+                    kernel: false,
+                })
+                .collect();
+            strict_target_dir(root, &packages)
+        };
+        let full = partition(&["boundary-fixture", "boundary-contract"]);
+        assert_eq!(full, partition(&["boundary-contract", "boundary-fixture"]));
+        assert_ne!(full, partition(&["boundary-fixture"]));
+        assert_ne!(full, partition(&["boundary-fixture", "different-contract"]));
+        assert_ne!(partition(&["ab", "c"]), partition(&["a", "bc"]));
+        assert!(full.starts_with(root.join("target/strict-clippy")));
+        let digest = full.file_name().unwrap().to_str().unwrap();
+        assert!(digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn real_clippy_rejects_typed_path_effects_through_strict_contract_dependency() -> Result<()> {
+        let fixture = path_contract_fixture()?;
+        let packages = [
+            StrictCrate {
+                name: "boundary-fixture",
+                source: "src/lib.rs",
+                kernel: true,
+            },
+            StrictCrate {
+                name: "boundary-contract",
+                source: "contract/src/lib.rs",
+                kernel: false,
+            },
+        ];
+        // Stable standard APIs available before the pinned Rust 1.98.1. PathBuf
+        // reaches the same Path definitions through Deref; only lexical path
+        // operations remain outside this effect-method vocabulary.
+        const METHODS: [(&str, &str); 10] = [
+            ("exists", ""),
+            ("try_exists", ".is_ok()"),
+            ("is_file", ""),
+            ("is_dir", ""),
+            ("is_symlink", ""),
+            ("metadata", ".is_ok()"),
+            ("symlink_metadata", ".is_ok()"),
+            ("canonicalize", ".is_ok()"),
+            ("read_link", ".is_ok()"),
+            ("read_dir", ".is_ok()"),
+        ];
+        let contract = fixture.path().join("contract/src/lib.rs");
+        let pure = "pub fn pure() -> bool { let joined = std::path::Path::new(\"data\").join(\"child\"); joined.is_absolute() || joined.components().count() == 2 }";
+        fs::write(&contract, format!("{ATTRIBUTES}{pure}"))?;
+        check(fixture.path(), &packages)?;
+        for (method, result) in METHODS {
+            for body in [
+                format!(
+                    "pub fn pure() -> bool {{ std::path::Path::new(\".\").{method}(){result} }}"
+                ),
+                format!(
+                    "use std::path::Path as Selected; pub fn pure() -> bool {{ Selected::new(\".\").{method}(){result} }}"
+                ),
+                format!(
+                    "use r#std::r#path::r#Path as r#Selected; pub fn pure() -> bool {{ r#Selected::r#new(\".\").r#{method}(){result} }}"
+                ),
+                format!(
+                    "pub fn pure() -> bool {{ std::path::PathBuf::from(\".\").{method}(){result} }}"
+                ),
+                format!(
+                    "fn selected() -> &'static std::path::Path {{ std::path::Path::new(\".\") }} pub fn pure() -> bool {{ selected().{method}(){result} }}"
+                ),
+                format!(
+                    "fn selected() -> std::path::PathBuf {{ std::path::PathBuf::from(\".\") }} pub fn pure() -> bool {{ selected().{method}(){result} }}"
+                ),
+            ] {
+                fs::write(&contract, format!("{ATTRIBUTES}{body}"))?;
+                let rejection = check(fixture.path(), &packages).unwrap_err().to_string();
+                ensure!(
+                    rejection.contains("clippy::disallowed_methods")
+                        && rejection.contains(&format!("std::path::Path::{method}")),
+                    "wrong typed-path rejection for {body}: {rejection}"
+                );
+            }
+        }
+        // absolute is lexical with respect to file entries, but can consult
+        // ambient cwd. It is a free standard function, not a Path method.
+        for body in [
+            "pub fn pure() -> bool { std::path::absolute(\".\").is_ok() }",
+            "use std::path::absolute as selected; pub fn pure() -> bool { selected(\".\").is_ok() }",
+            "use r#std::r#path::r#absolute as r#selected; pub fn pure() -> bool { r#selected(\".\").is_ok() }",
+            "pub fn pure() -> bool { std::path::absolute(std::path::PathBuf::from(\".\")).is_ok() }",
+            "fn selected() -> &'static std::path::Path { std::path::Path::new(\".\") } pub fn pure() -> bool { std::path::absolute(selected()).is_ok() }",
+            "fn selected() -> std::path::PathBuf { std::path::PathBuf::from(\".\") } pub fn pure() -> bool { std::path::absolute(selected()).is_ok() }",
+        ] {
+            fs::write(&contract, format!("{ATTRIBUTES}{body}"))?;
+            let rejection = check(fixture.path(), &packages).unwrap_err().to_string();
+            ensure!(
+                rejection.contains("clippy::disallowed_methods")
+                    && rejection.contains("std::path::absolute"),
+                "wrong absolute-path rejection for {body}: {rejection}"
+            );
+        }
+        // An allowed dependency can return path DATA into an actual no_std
+        // caller. Inferred methods there still require compiler enforcement.
+        for producer in [
+            "pub fn selected() -> &'static std::path::Path { std::path::Path::new(\".\") }",
+            "pub fn selected() -> std::path::PathBuf { std::path::PathBuf::from(\".\") }",
+        ] {
+            fs::write(&contract, format!("{ATTRIBUTES}{producer}"))?;
+            for (method, result) in METHODS {
+                fs::write(
+                    fixture.path().join("src/lib.rs"),
+                    format!(
+                        "#![no_std]\n{ATTRIBUTES}pub fn pure() -> bool {{ boundary_contract::selected().{method}(){result} }}"
+                    ),
+                )?;
+                let rejection = check(fixture.path(), &packages).unwrap_err().to_string();
+                ensure!(
+                    rejection.contains("clippy::disallowed_methods")
+                        && rejection.contains(&format!("std::path::Path::{method}")),
+                    "wrong no_std returned-path rejection: {rejection}"
+                );
+            }
+            fs::write(
+                &contract,
+                format!("{ATTRIBUTES}pub use std::path::absolute; {producer}"),
+            )?;
+            fs::write(
+                fixture.path().join("src/lib.rs"),
+                format!(
+                    "#![no_std]\n{ATTRIBUTES}pub fn pure() -> bool {{ boundary_contract::absolute(boundary_contract::selected()).is_ok() }}"
+                ),
+            )?;
+            let rejection = check(fixture.path(), &packages).unwrap_err().to_string();
+            ensure!(
+                rejection.contains("clippy::disallowed_methods")
+                    && rejection.contains("std::path::absolute"),
+                "wrong no_std absolute-path rejection: {rejection}"
+            );
+        }
+        fs::write(
+            fixture.path().join("src/lib.rs"),
+            format!(
+                "#![no_std]\n{ATTRIBUTES}pub fn pure() -> bool {{ boundary_contract::pure() }}"
+            ),
+        )?;
+        // ReadDir is an OS iterator, unlike pure Path/Components/Iter data.
+        // The type lint covers explicit signatures and named reexports; it
+        // does not inspect every inferred local expression's type.
+        for body in [
+            "pub fn advance(entries: &mut std::fs::ReadDir) -> bool { entries.next().is_some() }",
+            "use std::fs::ReadDir as Directory; pub fn advance(entries: &mut Directory) -> bool { entries.next().is_some() }",
+            "use r#std::r#fs::r#ReadDir as r#Directory; pub fn advance(entries: &mut r#Directory) -> bool { entries.r#next().is_some() }",
+            "pub use std::fs::ReadDir;",
+            "pub use std::fs::ReadDir as Directory;",
+            "pub type Directory = std::fs::ReadDir;",
+        ] {
+            fs::write(&contract, format!("{ATTRIBUTES}{pure}\n{body}"))?;
+            let rejection = check(fixture.path(), &packages).unwrap_err().to_string();
+            ensure!(
+                rejection.contains("clippy::disallowed_types")
+                    && rejection.contains("std::fs::ReadDir"),
+                "wrong directory-iterator type rejection for {body}: {rejection}"
+            );
+        }
+        fs::write(
+            &contract,
+            format!("{ATTRIBUTES}{pure}\npub use std::fs::ReadDir as Directory;"),
+        )?;
+        for body in [
+            "pub fn advance(entries: &mut boundary_contract::Directory) -> bool { entries.next().is_some() }",
+            "use boundary_contract::Directory as Entries; pub fn advance(entries: &mut Entries) -> bool { entries.next().is_some() }",
+            "pub fn advance(entries: &mut boundary_contract::r#Directory) -> bool { entries.r#next().is_some() }",
+            "pub fn advance(entries: &mut boundary_contract::Directory) -> bool { core::iter::Iterator::next(entries).is_some() }",
+            "pub fn advance(entries: boundary_contract::Directory) -> usize { entries.count() }",
+            "pub fn advance(entries: boundary_contract::Directory) -> usize { let mut count = 0; for _ in entries { count += 1; } count }",
+        ] {
+            fs::write(
+                fixture.path().join("src/lib.rs"),
+                format!(
+                    "#![no_std]\n{ATTRIBUTES}pub fn pure() -> bool {{ boundary_contract::pure() }}\n{body}"
+                ),
+            )?;
+            // Only the actual no_std caller is a lint target in this phase.
+            // The contract is compiled as a dependency, so its reexport cannot
+            // substitute for a caller's semantic ReadDir type diagnostic.
+            let rejection = check(fixture.path(), &packages[..1])
+                .unwrap_err()
+                .to_string();
+            ensure!(
+                rejection.contains("clippy::disallowed_types")
+                    && rejection.contains("std::fs::ReadDir")
+                    && rejection.contains(" --> src/lib.rs:"),
+                "wrong no_std supplied-directory rejection for {body}: {rejection}"
+            );
+        }
+        // Selecting the entire strict graph also refuses the contract's native
+        // handle exposure, independently of whether a caller advances it.
+        // Repeat the role transition without rewriting the contract: an
+        // unlinted dependency artifact cannot satisfy later primary linting.
+        for round in 0..2 {
+            fs::write(
+                fixture.path().join("src/lib.rs"),
+                format!(
+                    "#![no_std]\n{ATTRIBUTES}pub fn pure() -> bool {{ boundary_contract::pure() }}"
+                ),
+            )?;
+            let rejection = check(fixture.path(), &packages).unwrap_err().to_string();
+            ensure!(
+                rejection.contains("clippy::disallowed_types")
+                    && rejection.contains("std::fs::ReadDir"),
+                "strict contract exported a directory iterator in round {round}: {rejection}"
+            );
+            if round == 0 {
+                fs::write(
+                    fixture.path().join("src/lib.rs"),
+                    format!(
+                        "#![no_std]\n{ATTRIBUTES}pub fn advance(entries: &mut boundary_contract::Directory) -> bool {{ entries.next().is_some() }}"
+                    ),
+                )?;
+                let rejection = check(fixture.path(), &packages[..1])
+                    .unwrap_err()
+                    .to_string();
+                ensure!(
+                    rejection.contains("clippy::disallowed_types")
+                        && rejection.contains("std::fs::ReadDir")
+                        && rejection.contains(" --> src/lib.rs:"),
+                    "wrong repeated caller-only directory rejection: {rejection}"
+                );
+            }
+        }
+        // A wholly inferred handle acquired via a reexport is rejected at its
+        // already-banned acquisition. This is a method-lint control, not an
+        // inferred-type guarantee; known advancement is also source-scanned.
+        fs::write(
+            &contract,
+            format!("{ATTRIBUTES}{pure}\npub use std::fs::read_dir as selected;"),
+        )?;
+        for body in [
+            "pub fn advance() -> bool { let mut entries = boundary_contract::selected(\".\").unwrap(); entries.next().is_some() }",
+            "pub fn advance() -> usize { let entries = boundary_contract::selected(\".\").unwrap(); let mut count = 0; for _ in entries { count += 1; } count }",
+        ] {
+            fs::write(
+                fixture.path().join("src/lib.rs"),
+                format!(
+                    "#![no_std]\n{ATTRIBUTES}pub fn pure() -> bool {{ boundary_contract::pure() }}\n{body}"
+                ),
+            )?;
+            let rejection = check(fixture.path(), &packages[..1])
+                .unwrap_err()
+                .to_string();
+            ensure!(
+                rejection.contains("clippy::disallowed_methods")
+                    && rejection.contains("std::fs::read_dir")
+                    && rejection.contains(" --> src/lib.rs:"),
+                "wrong inferred-directory acquisition rejection for {body}: {rejection}"
+            );
+        }
+        fs::write(
+            fixture.path().join("src/lib.rs"),
+            format!(
+                "#![no_std]\n{ATTRIBUTES}pub fn pure() -> bool {{ boundary_contract::pure() }}"
+            ),
+        )?;
+        for level in ["allow", "expect"] {
+            fs::write(
+                &contract,
+                format!(
+                    "{ATTRIBUTES}{pure}\n#[{level}(clippy::disallowed_types)] pub fn advance(entries: &mut std::fs::ReadDir) -> bool {{ entries.next().is_some() }}"
+                ),
+            )?;
+            let rejection = check(fixture.path(), &packages).unwrap_err().to_string();
+            ensure!(
+                rejection.contains("E0453"),
+                "strict contract suppressed its type forbid: {rejection}"
+            );
+        }
+        for level in ["allow", "expect"] {
+            fs::write(
+                &contract,
+                format!(
+                    "{ATTRIBUTES}#[{level}(clippy::disallowed_methods)] pub fn pure() -> bool {{ std::path::Path::new(\".\").exists() }}"
+                ),
+            )?;
+            let rejection = check(fixture.path(), &packages).unwrap_err().to_string();
+            ensure!(
+                rejection.contains("E0453"),
+                "strict contract suppressed a forbid: {rejection}"
+            );
+        }
+        // Both policy-selected targets retain forbid and the same pinned
+        // compiler flags. Restoring data-only paths must still compile.
+        fs::write(&contract, format!("{ATTRIBUTES}{pure}"))?;
+        check(fixture.path(), &packages)?;
+        Ok(())
     }
 
     #[test]

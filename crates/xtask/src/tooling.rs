@@ -1,5 +1,10 @@
 //! Maintainer configuration and distribution metadata, never app capabilities.
 use super::*;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 pub fn public_files(root: &Path) -> Result<Vec<PathBuf>> {
     let output = Command::new("git")

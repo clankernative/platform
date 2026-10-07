@@ -6,7 +6,10 @@ use day2_capabilities::{InstallationControl, integrations::LiveConnection, resou
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeSet,
+    fs,
+    io::Read,
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    path::{Path, PathBuf},
 };
 
 const ROOT: &str = "/srv/day2";

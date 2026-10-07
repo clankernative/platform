@@ -2,7 +2,11 @@ use crate::{
     artifact::{Instance, LoadedArtifact},
     authority::{Change, Policy, RowFilter},
     identity::Id,
-    protocol::*,
+    protocol::{
+        Boundary, Completion, Context, Database, ExecutionGuard, Instruction, Observation, Outcome,
+        Phase, Reply, Request, Response, Row, SelectionOrder, SelectionPlan, SelectionPredicate,
+        Step, Trace, Write, valid_selection_cursor,
+    },
     schema::{Kind, Record, Schema},
     worker::Worker,
 };

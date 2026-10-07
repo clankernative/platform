@@ -1,7 +1,12 @@
 //! The host owns long-lived transport; each query evaluation remains bounded.
 use super::*;
 use crate::{authority_state::AuthorityStamp, error::Failure, web_templates};
-use std::time::Instant;
+use axum::{
+    body::Body,
+    http::{HeaderMap, StatusCode, header},
+    response::Response,
+};
+use std::time::{Duration, Instant};
 use std::{
     pin::Pin,
     task::{Context as TaskContext, Poll},
@@ -96,7 +101,7 @@ struct Subscription {
 impl Host {
     pub(super) fn live_initializer(&self, name: &str, input: &Value) -> Result<Markup> {
         if !self.runtime.artifact().page(name)?.live {
-            return Ok(html! {});
+            return Ok(::maud::html! {});
         }
         let page_url = view::page_url(&self.runtime, name, input)?;
         let query = url::form_urlencoded::Serializer::new(String::new())
@@ -110,7 +115,7 @@ impl Host {
             "@get({}, {{filterSignals: {{include: /^$/}}, requestCancellation: 'cleanup'}})",
             serde_json::to_string(&url)?
         );
-        Ok(html! {
+        Ok(::maud::html! {
             div id="day2-live" data-live-url=(url) data-init=(expression) {
                 div id="day2-live-status" role="status" aria-live="polite" {}
             }
@@ -206,7 +211,8 @@ impl Host {
         let initial = format!(
             "{}{}",
             subscription.regions.values().cloned().collect::<String>(),
-            html! { div id="day2-live-status" role="status" aria-live="polite" {} }.into_string()
+            ::maud::html! { div id="day2-live-status" role="status" aria-live="polite" {} }
+                .into_string()
         );
         sender
             .try_send(elements(&initial, "outer"))
@@ -337,9 +343,9 @@ impl Subscription {
                     ) {
                         let mut cleared = String::new();
                         for id in self.regions.keys() {
-                            cleared.push_str(&html! { div id=(id) {} }.into_string());
+                            cleared.push_str(&::maud::html! { div id=(id) {} }.into_string());
                         }
-                        cleared.push_str(&html! { div id="day2-live-status" role="status" { "Live updates stopped. " a href="/" { "Reload to continue." } } }.into_string());
+                        cleared.push_str(&::maud::html! { div id="day2-live-status" role="status" { "Live updates stopped. " a href="/" { "Reload to continue." } } }.into_string());
                         let _ = terminal.send(elements(&cleared, "outer"));
                     }
                     break;
@@ -389,7 +395,7 @@ pub(super) fn command_patch(
         .select(&scraper::Selector::parse("#day2-command-status").expect("static selector"))
         .next()
         .context("command notice")?;
-    let content = html! { div id="day2-command-status"
+    let content = ::maud::html! { div id="day2-command-status"
         data-day2-invocation=(invocation) data-day2-operation=(&ticket.operation)
         data-day2-status=(match status {
             StatusCode::OK => "success",
