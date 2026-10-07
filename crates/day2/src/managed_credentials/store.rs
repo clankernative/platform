@@ -2011,16 +2011,27 @@ mod tests {
     }
 
     fn database_snapshot(db: &Connection) -> Result<DatabaseSnapshot> {
-        let objects = db.prepare("SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name")?
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
+        let objects = db
+            .prepare("SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name")?
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?
             .collect::<rusqlite::Result<Vec<SchemaObject>>>()?;
         let mut tables = Vec::new();
         for (kind, name, _, _) in &objects {
-            if kind != "table" { continue; }
+            if kind != "table" {
+                continue;
+            }
             let quoted = name.replace('"', "\"\"");
-            let mut statement = db.prepare(&format!("SELECT * FROM \"{quoted}\" ORDER BY rowid"))?;
+            let mut statement =
+                db.prepare(&format!("SELECT * FROM \"{quoted}\" ORDER BY rowid"))?;
             let count = statement.column_count();
-            let values = statement.query_map([], |row| (0..count).map(|index| row.get(index)).collect::<rusqlite::Result<Vec<rusqlite::types::Value>>>())?
+            let values = statement
+                .query_map([], |row| {
+                    (0..count)
+                        .map(|index| row.get(index))
+                        .collect::<rusqlite::Result<Vec<rusqlite::types::Value>>>()
+                })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             tables.push((name.clone(), values));
         }
@@ -2030,8 +2041,11 @@ mod tests {
     // Model a corrupted restored snapshot with the complete current guard
     // catalog intact. This fixture-only mutation is never an installer repair.
     fn corrupt_current_snapshot(db: &Connection, sql: &str) -> Result<()> {
-        let guards = db.prepare("SELECT name,sql FROM sqlite_master WHERE type='trigger'")?
-            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+        let guards = db
+            .prepare("SELECT name,sql FROM sqlite_master WHERE type='trigger'")?
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         db.execute_batch("PRAGMA foreign_keys=OFF; PRAGMA ignore_check_constraints=ON")?;
         for (name, _) in &guards {
@@ -2113,19 +2127,40 @@ mod tests {
             assert_eq!(database_snapshot(&db)?, before);
         }
         for (corrupt, refusal) in [
-            ("UPDATE day2_credential_schema_version SET version=1", "schema version"),
-            ("UPDATE day2_credential_schema_version SET version=99", "schema version"),
-            ("DELETE FROM day2_credential_schema_version", "schema version"),
-            ("INSERT INTO day2_credential_schema_version VALUES(1)", "schema version"),
-            ("DROP TRIGGER day2_credential_material_shape_UPDATE_v2", "invariant guard"),
-            ("DROP TRIGGER day2_credential_material_shape_UPDATE_v2; CREATE TRIGGER day2_credential_material_shape_UPDATE_v2 AFTER UPDATE ON day2_credential_material BEGIN SELECT 1; END", "invariant guard"),
+            (
+                "UPDATE day2_credential_schema_version SET version=1",
+                "schema version",
+            ),
+            (
+                "UPDATE day2_credential_schema_version SET version=99",
+                "schema version",
+            ),
+            (
+                "DELETE FROM day2_credential_schema_version",
+                "schema version",
+            ),
+            (
+                "INSERT INTO day2_credential_schema_version VALUES(1)",
+                "schema version",
+            ),
+            (
+                "DROP TRIGGER day2_credential_material_shape_UPDATE_v2",
+                "invariant guard",
+            ),
+            (
+                "DROP TRIGGER day2_credential_material_shape_UPDATE_v2; CREATE TRIGGER day2_credential_material_shape_UPDATE_v2 AFTER UPDATE ON day2_credential_material BEGIN SELECT 1; END",
+                "invariant guard",
+            ),
             ("DROP TABLE day2_credential_material", "table shape"),
         ] {
             let db = current_database()?;
             db.execute_batch(corrupt)?;
             let before = database_snapshot(&db)?;
             let error = install_schema(&db).unwrap_err();
-            assert!(format!("{error:#}").contains(refusal), "{corrupt}: {error:#}");
+            assert!(
+                format!("{error:#}").contains(refusal),
+                "{corrupt}: {error:#}"
+            );
             assert_eq!(database_snapshot(&db)?, before);
         }
         for (partial, refusal) in [
@@ -2180,7 +2215,10 @@ mod tests {
             let before = database_snapshot(&db)?;
             let error = install_schema(&db).unwrap_err();
             let message = format!("{error:#}");
-            assert!(!message.contains("schema version") && !message.contains("invariant guard"), "{corrupt}: {message}");
+            assert!(
+                !message.contains("schema version") && !message.contains("invariant guard"),
+                "{corrupt}: {message}"
+            );
             assert_eq!(database_snapshot(&db)?, before);
             assert_eq!(
                 db.query_row(
@@ -2245,7 +2283,8 @@ mod tests {
         let mut current = current_database()?;
         let original = committed_issue(&mut current)?;
         let before = database_snapshot(&current)?;
-        let error = admit_with_limits(&current, 1_000_000, 16_384, 512, install_schema).unwrap_err();
+        let error =
+            admit_with_limits(&current, 1_000_000, 16_384, 512, install_schema).unwrap_err();
         assert!(format!("{error:#}").contains("materialization budget"));
         assert_eq!(
             current.query_row(
@@ -2356,7 +2395,14 @@ mod tests {
         install_schema(&tx)?;
         assert!(!tx.is_autocommit());
         tx.rollback()?;
-        assert_eq!(db.query_row("SELECT count(*) FROM sqlite_master WHERE name GLOB 'day2_credential_*'", [], |row| row.get::<_, i64>(0))?, 0);
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name GLOB 'day2_credential_*'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )?,
+            0
+        );
         Ok(())
     }
 

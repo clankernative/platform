@@ -778,9 +778,21 @@ mod tests {
             let db = Connection::open_in_memory().unwrap();
             super::super::connect::install_schema(&db).unwrap();
             super::super::connect::install_schema(&db).unwrap();
-            db.execute("UPDATE oauth_custody_schema_version SET version=?1", [version]).unwrap();
+            db.execute(
+                "UPDATE oauth_custody_schema_version SET version=?1",
+                [version],
+            )
+            .unwrap();
             assert!(super::super::connect::install_schema(&db).is_err());
-            assert_eq!(db.query_row("SELECT version FROM oauth_custody_schema_version", [], |row| row.get::<_, i64>(0)).unwrap(), version);
+            assert_eq!(
+                db.query_row(
+                    "SELECT version FROM oauth_custody_schema_version",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+                version
+            );
         }
     }
 }

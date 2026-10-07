@@ -359,7 +359,10 @@ fn install_current_in(
         for (_, sql) in &guards {
             db.execute_batch(sql)?;
         }
-        db.execute(&format!("INSERT INTO {version_table} VALUES (?1)"), [current])?;
+        db.execute(
+            &format!("INSERT INTO {version_table} VALUES (?1)"),
+            [current],
+        )?;
     }
     // This branch is validation only for every existing unit, including an
     // empty/old version table or missing guards. Never repair or restamp it.
@@ -610,9 +613,17 @@ mod tests {
             db.query_row(SCAN, [], |row| row.get::<_, i64>(0))?;
             db.query_row(SCAN, [], |row| row.get::<_, i64>(0))?;
             Ok(())
-        }).unwrap_err();
+        })
+        .unwrap_err();
         assert!(format!("{error:#}").contains("VM-step budget exhausted"));
-        assert_eq!(db.query_row("SELECT count(*) FROM sqlite_master WHERE name GLOB 'oauth_*'", [], |row| row.get::<_, i64>(0))?, 0);
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name GLOB 'oauth_*'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )?,
+            0
+        );
         super::super::store::install_schema(&db)?;
         Ok(())
     }
@@ -848,16 +859,27 @@ mod tests {
     }
 
     fn snapshot(db: &Connection) -> Result<Snapshot> {
-        let objects = db.prepare("SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name")?
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
+        let objects = db
+            .prepare("SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name")?
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?
             .collect::<rusqlite::Result<Vec<SchemaObject>>>()?;
         let mut tables = Vec::new();
         for (kind, name, _, _) in &objects {
-            if kind != "table" { continue; }
+            if kind != "table" {
+                continue;
+            }
             let quoted = name.replace('"', "\"\"");
-            let mut statement = db.prepare(&format!("SELECT * FROM \"{quoted}\" ORDER BY rowid"))?;
+            let mut statement =
+                db.prepare(&format!("SELECT * FROM \"{quoted}\" ORDER BY rowid"))?;
             let count = statement.column_count();
-            let values = statement.query_map([], |row| (0..count).map(|index| row.get(index)).collect::<rusqlite::Result<Vec<rusqlite::types::Value>>>())?
+            let values = statement
+                .query_map([], |row| {
+                    (0..count)
+                        .map(|index| row.get(index))
+                        .collect::<rusqlite::Result<Vec<rusqlite::types::Value>>>()
+                })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             tables.push((name.clone(), values));
         }
@@ -874,8 +896,11 @@ mod tests {
     }
 
     fn corrupt_current_snapshot(db: &Connection, sql: &str) -> Result<()> {
-        let guards = db.prepare("SELECT name,sql FROM sqlite_master WHERE type='trigger'")?
-            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+        let guards = db
+            .prepare("SELECT name,sql FROM sqlite_master WHERE type='trigger'")?
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         db.execute_batch("PRAGMA foreign_keys=OFF; PRAGMA ignore_check_constraints=ON")?;
         for (name, _) in &guards {
@@ -895,8 +920,19 @@ mod tests {
         let before = snapshot(&db)?;
         super::super::connect::install_schema(&db)?;
         assert_eq!(snapshot(&db)?, before);
-        assert_eq!(db.query_row("SELECT version FROM oauth_schema_version", [], |row| row.get::<_, i64>(0))?, 2);
-        assert_eq!(db.query_row("SELECT version FROM oauth_connect_schema_version", [], |row| row.get::<_, i64>(0))?, 2);
+        assert_eq!(
+            db.query_row("SELECT version FROM oauth_schema_version", [], |row| row
+                .get::<_, i64>(0))?,
+            2
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT version FROM oauth_connect_schema_version",
+                [],
+                |row| row.get::<_, i64>(0)
+            )?,
+            2
+        );
         super::super::connect::install_schema(&db)?;
         for sql in [
             "UPDATE oauth_refresh_attempts SET receipt='half' WHERE state='ready'",
@@ -924,10 +960,25 @@ mod tests {
             let before = snapshot(&db)?;
             let error = super::super::connect::install_schema(&db).unwrap_err();
             let message = format!("{error:#}");
-            assert!(message.contains("invalid durable OAuth state") || message.contains("orphaned durable credential state"), "{corrupt}: {message}");
+            assert!(
+                message.contains("invalid durable OAuth state")
+                    || message.contains("orphaned durable credential state"),
+                "{corrupt}: {message}"
+            );
             assert_eq!(snapshot(&db)?, before);
-            assert_eq!(db.query_row("SELECT version FROM oauth_schema_version", [], |row| row.get::<_, i64>(0))?, 2);
-            assert_eq!(db.query_row("SELECT version FROM oauth_connect_schema_version", [], |row| row.get::<_, i64>(0))?, 2);
+            assert_eq!(
+                db.query_row("SELECT version FROM oauth_schema_version", [], |row| row
+                    .get::<_, i64>(0))?,
+                2
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT version FROM oauth_connect_schema_version",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )?,
+                2
+            );
             assert!(db.is_autocommit());
         }
         Ok(())
@@ -941,32 +992,86 @@ mod tests {
         assert!(db.execute_batch("INSERT INTO oauth_private_tokens VALUES('ref','slot',1,'account','identity','key',zeroblob(11),zeroblob(16))").is_err());
         assert!(db.execute_batch("INSERT INTO oauth_private_tokens VALUES('ref','slot',1,'account','identity','key',zeroblob(12),zeroblob(15))").is_err());
         db.execute_batch("INSERT INTO oauth_private_tokens VALUES('ref','slot',1,'account','identity','key',zeroblob(12),zeroblob(16))")?;
-        assert!(db.execute_batch("UPDATE oauth_private_tokens SET nonce='not_a_blob!'").is_err());
+        assert!(
+            db.execute_batch("UPDATE oauth_private_tokens SET nonce='not_a_blob!'")
+                .is_err()
+        );
         Ok(())
     }
 
     #[test]
     fn existing_units_require_one_current_marker_and_complete_objects() -> Result<()> {
         for (corrupt, refusal, owner) in [
-            ("UPDATE oauth_schema_version SET version=1", "schema version", "oauth_schema_version"),
-            ("UPDATE oauth_schema_version SET version=99", "schema version", "oauth_schema_version"),
-            ("DELETE FROM oauth_schema_version", "schema version", "oauth_schema_version"),
-            ("INSERT INTO oauth_schema_version VALUES(1)", "schema version", "oauth_schema_version"),
-            ("DROP TABLE oauth_refresh_attempts", "table shape", "oauth_refresh_attempts"),
-            ("DROP TRIGGER oauth_refresh_attempts_shape_INSERT_v2", "invariant guard", "oauth_refresh_attempts"),
-            ("DROP TRIGGER oauth_refresh_attempts_shape_INSERT_v2; CREATE TRIGGER oauth_refresh_attempts_shape_INSERT_v2 AFTER INSERT ON oauth_refresh_attempts BEGIN SELECT 1; END", "invariant guard", "oauth_refresh_attempts"),
-            ("CREATE TRIGGER unexpected AFTER INSERT ON oauth_refresh_attempts BEGIN SELECT 1; END", "schema object", "unexpected"),
-            ("CREATE TABLE unrelated(value INTEGER); CREATE TRIGGER oauth_refresh_attempts_shape_INSERT_v1 AFTER INSERT ON unrelated BEGIN SELECT 1; END", "schema object", "oauth_refresh_attempts_shape_INSERT_v1"),
-            ("DROP TABLE oauth_callback_bindings", "table shape", "oauth_callback_bindings"),
-            ("DELETE FROM oauth_callback_schema_version", "schema version", "oauth_callback_schema_version"),
-            ("UPDATE oauth_callback_schema_version SET version=1", "schema version", "oauth_callback_schema_version"),
+            (
+                "UPDATE oauth_schema_version SET version=1",
+                "schema version",
+                "oauth_schema_version",
+            ),
+            (
+                "UPDATE oauth_schema_version SET version=99",
+                "schema version",
+                "oauth_schema_version",
+            ),
+            (
+                "DELETE FROM oauth_schema_version",
+                "schema version",
+                "oauth_schema_version",
+            ),
+            (
+                "INSERT INTO oauth_schema_version VALUES(1)",
+                "schema version",
+                "oauth_schema_version",
+            ),
+            (
+                "DROP TABLE oauth_refresh_attempts",
+                "table shape",
+                "oauth_refresh_attempts",
+            ),
+            (
+                "DROP TRIGGER oauth_refresh_attempts_shape_INSERT_v2",
+                "invariant guard",
+                "oauth_refresh_attempts",
+            ),
+            (
+                "DROP TRIGGER oauth_refresh_attempts_shape_INSERT_v2; CREATE TRIGGER oauth_refresh_attempts_shape_INSERT_v2 AFTER INSERT ON oauth_refresh_attempts BEGIN SELECT 1; END",
+                "invariant guard",
+                "oauth_refresh_attempts",
+            ),
+            (
+                "CREATE TRIGGER unexpected AFTER INSERT ON oauth_refresh_attempts BEGIN SELECT 1; END",
+                "schema object",
+                "unexpected",
+            ),
+            (
+                "CREATE TABLE unrelated(value INTEGER); CREATE TRIGGER oauth_refresh_attempts_shape_INSERT_v1 AFTER INSERT ON unrelated BEGIN SELECT 1; END",
+                "schema object",
+                "oauth_refresh_attempts_shape_INSERT_v1",
+            ),
+            (
+                "DROP TABLE oauth_callback_bindings",
+                "table shape",
+                "oauth_callback_bindings",
+            ),
+            (
+                "DELETE FROM oauth_callback_schema_version",
+                "schema version",
+                "oauth_callback_schema_version",
+            ),
+            (
+                "UPDATE oauth_callback_schema_version SET version=1",
+                "schema version",
+                "oauth_callback_schema_version",
+            ),
         ] {
             let db = current_connect()?;
             db.execute_batch(corrupt)?;
             let before = snapshot(&db)?;
             let error = super::super::connect::install_schema(&db).unwrap_err();
             let message = format!("{error:#}");
-            assert!(message.contains(refusal) && message.contains(owner), "{corrupt}: {message}");
+            assert!(
+                message.contains(refusal) && message.contains(owner),
+                "{corrupt}: {message}"
+            );
             assert_eq!(snapshot(&db)?, before, "repaired {corrupt}");
         }
         // A lone owner object is partial, not an empty unit to complete.
@@ -979,7 +1084,10 @@ mod tests {
             let db = Connection::open_in_memory()?;
             db.execute_batch(ddl)?;
             let before = snapshot(&db)?;
-            assert!(super::super::connect::install_schema(&db).is_err(), "accepted {ddl}");
+            assert!(
+                super::super::connect::install_schema(&db).is_err(),
+                "accepted {ddl}"
+            );
             assert_eq!(snapshot(&db)?, before, "completed {ddl}");
         }
         Ok(())
@@ -997,20 +1105,33 @@ mod tests {
             for operation in ["old", "empty", "multiple"] {
                 let db = current_connect()?;
                 super::super::inbound::install_schema(&db)?;
-                let current: i64 = db.query_row(&format!("SELECT version FROM {table}"), [], |row| row.get(0))?;
+                let current: i64 =
+                    db.query_row(&format!("SELECT version FROM {table}"), [], |row| {
+                        row.get(0)
+                    })?;
                 match operation {
-                    "old" => { db.execute(&format!("UPDATE {table} SET version=?1"), [current - 1])?; },
-                    "empty" => { db.execute(&format!("DELETE FROM {table}"), [])?; },
-                    "multiple" => { db.execute(&format!("INSERT INTO {table} VALUES(?1)"), [current + 1])?; },
+                    "old" => {
+                        db.execute(&format!("UPDATE {table} SET version=?1"), [current - 1])?;
+                    }
+                    "empty" => {
+                        db.execute(&format!("DELETE FROM {table}"), [])?;
+                    }
+                    "multiple" => {
+                        db.execute(&format!("INSERT INTO {table} VALUES(?1)"), [current + 1])?;
+                    }
                     _ => unreachable!(),
                 }
                 let before = snapshot(&db)?;
                 let error = admit(&db, |db| {
                     super::super::connect::install_schema(db)?;
                     super::super::inbound::install_schema(db)
-                }).unwrap_err();
+                })
+                .unwrap_err();
                 let message = format!("{error:#}");
-                assert!(message.contains("schema version") && message.contains(table.as_str()), "{table} {operation}: {message}");
+                assert!(
+                    message.contains("schema version") && message.contains(table.as_str()),
+                    "{table} {operation}: {message}"
+                );
                 assert_eq!(snapshot(&db)?, before);
             }
         }
@@ -1020,27 +1141,74 @@ mod tests {
     #[test]
     fn current_layout_substitutions_reach_shape_refusal() -> Result<()> {
         for (table, old, new, refusal) in [
-            ("oauth_connection_slots", "profile TEXT NOT NULL", "profile BLOB NOT NULL", "table shape"),
-            ("oauth_refresh_attempts", "UNIQUE(slot, generation, base_version)", "CHECK(generation > 0)", "table constraints"),
-            ("oauth_refresh_attempts", "REFERENCES oauth_connection_slots(slot)", "", "table shape"),
-            ("oauth_schema_version", "version INTEGER PRIMARY KEY", "version INTEGER", "table shape"),
-            ("oauth_schema_version", "version INTEGER PRIMARY KEY", "version INTEGER PRIMARY KEY, hidden INTEGER GENERATED ALWAYS AS (version + 1)", "table shape"),
-            ("oauth_refresh_attempts", "next_version INTEGER,", "next_version INTEGER, hidden INTEGER GENERATED ALWAYS AS (generation + 1),", "table shape"),
-            ("oauth_callback_bindings", "binding TEXT NOT NULL", "binding BLOB NOT NULL", "table shape"),
-            ("oauth_exchange_bindings", "REFERENCES oauth_connect_attempts(attempt)", "", "table shape"),
+            (
+                "oauth_connection_slots",
+                "profile TEXT NOT NULL",
+                "profile BLOB NOT NULL",
+                "table shape",
+            ),
+            (
+                "oauth_refresh_attempts",
+                "UNIQUE(slot, generation, base_version)",
+                "CHECK(generation > 0)",
+                "table constraints",
+            ),
+            (
+                "oauth_refresh_attempts",
+                "REFERENCES oauth_connection_slots(slot)",
+                "",
+                "table shape",
+            ),
+            (
+                "oauth_schema_version",
+                "version INTEGER PRIMARY KEY",
+                "version INTEGER",
+                "table shape",
+            ),
+            (
+                "oauth_schema_version",
+                "version INTEGER PRIMARY KEY",
+                "version INTEGER PRIMARY KEY, hidden INTEGER GENERATED ALWAYS AS (version + 1)",
+                "table shape",
+            ),
+            (
+                "oauth_refresh_attempts",
+                "next_version INTEGER,",
+                "next_version INTEGER, hidden INTEGER GENERATED ALWAYS AS (generation + 1),",
+                "table shape",
+            ),
+            (
+                "oauth_callback_bindings",
+                "binding TEXT NOT NULL",
+                "binding BLOB NOT NULL",
+                "table shape",
+            ),
+            (
+                "oauth_exchange_bindings",
+                "REFERENCES oauth_connect_attempts(attempt)",
+                "",
+                "table shape",
+            ),
         ] {
             let db = current_connect()?;
-            let definition = admit(&db, |db| schema_sql(db, "table", table))?.context("current fixture table")?;
+            let definition = admit(&db, |db| schema_sql(db, "table", table))?
+                .context("current fixture table")?;
             assert!(definition.contains(old), "missing mutation operand: {old}");
             db.execute_batch("PRAGMA foreign_keys=OFF")?;
-            db.execute_batch(&format!("DROP TABLE {table}; {}", definition.replace(old, new)))?;
+            db.execute_batch(&format!(
+                "DROP TABLE {table}; {}",
+                definition.replace(old, new)
+            ))?;
             if table == "oauth_schema_version" {
                 db.execute("INSERT INTO oauth_schema_version(version) VALUES(2)", [])?;
             }
             let before = snapshot(&db)?;
             let error = super::super::connect::install_schema(&db).unwrap_err();
             let message = format!("{error:#}");
-            assert!(message.contains(refusal) && message.contains(table), "{table}: {message}");
+            assert!(
+                message.contains(refusal) && message.contains(table),
+                "{table}: {message}"
+            );
             assert_eq!(snapshot(&db)?, before);
         }
         Ok(())
@@ -1053,13 +1221,25 @@ mod tests {
             db.execute(&format!("INSERT INTO {table} VALUES('connect','{{}}')"), [])?;
             super::super::connect::install_schema(&db)?;
             for binding in ["", "broken", "null", "[]", "1"] {
-                assert!(db.execute(&format!("UPDATE {table} SET binding=?1"), [binding]).is_err());
+                assert!(
+                    db.execute(&format!("UPDATE {table} SET binding=?1"), [binding])
+                        .is_err()
+                );
             }
-            assert!(db.execute(&format!("INSERT INTO {table} VALUES('missing-parent','{{}}')"), []).is_err());
+            assert!(
+                db.execute(
+                    &format!("INSERT INTO {table} VALUES('missing-parent','{{}}')"),
+                    []
+                )
+                .is_err()
+            );
             corrupt_current_snapshot(&db, &format!("UPDATE {table} SET binding='null'"))?;
             let before = snapshot(&db)?;
             let error = super::super::connect::install_schema(&db).unwrap_err();
-            assert!(format!("{error:#}").contains("invalid durable OAuth state"), "{table}: {error:#}");
+            assert!(
+                format!("{error:#}").contains("invalid durable OAuth state"),
+                "{table}: {error:#}"
+            );
             assert_eq!(snapshot(&db)?, before);
         }
         Ok(())
@@ -1078,10 +1258,21 @@ mod tests {
         super::super::connect::install_schema(&db)?;
         {
             let tx = db.transaction()?;
-            tx.execute("UPDATE oauth_connection_slots SET account='replacement'", [])?;
-            assert!(tx.execute("UPDATE oauth_refresh_attempts SET receipt='half'", []).is_err());
+            tx.execute(
+                "UPDATE oauth_connection_slots SET account='replacement'",
+                [],
+            )?;
+            assert!(
+                tx.execute("UPDATE oauth_refresh_attempts SET receipt='half'", [])
+                    .is_err()
+            );
         }
-        assert_eq!(db.query_row("SELECT account FROM oauth_connection_slots", [], |row| row.get::<_, String>(0))?, "account");
+        assert_eq!(
+            db.query_row("SELECT account FROM oauth_connection_slots", [], |row| {
+                row.get::<_, String>(0)
+            })?,
+            "account"
+        );
         assert!(db.execute_batch("INSERT INTO oauth_refresh_attempts VALUES('new','slot',1,2,1,'profile','account','affinity','ready',NULL,'half')").is_err());
         Ok(())
     }
