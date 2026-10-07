@@ -616,7 +616,17 @@ fn tests(
     budget: std::time::Duration,
 ) -> Result<()> {
     let arguments: &[&str] = match suite {
-        "libraries" | "fast-libraries" => &["--workspace", "--exclude", "day2-roc-worker", "--lib"],
+        "libraries" => &["--workspace", "--exclude", "day2-roc-worker", "--lib"],
+        // The compile-fail checks drive the Roc compiler for about a minute;
+        // workspace-runtime and libraries keep them in the full gates.
+        "fast-libraries" => &[
+            "--workspace",
+            "--exclude",
+            "day2-roc-worker",
+            "--exclude",
+            "day2-cli-checks",
+            "--lib",
+        ],
         "linux-sandbox" => &["-p", "day2-sandbox", "--test", "isolation"],
         "linux-worker" => &["-p", "day2", "--test", "linux_worker"],
         "linux-delegation" => &["-p", "day2-control", "--test", "release_execution"],
@@ -803,13 +813,18 @@ fn tests(
             .env("DAY2_TEST_BUILD_RUST", rust)
             .env("DAY2_TEST_BUILD_REGISTRY", cargo_cache.join("registry"));
     }
-    command
-        .arg(if suite == "parallel-runtime" {
-            "--test-threads=4"
-        } else {
-            "--test-threads=1"
-        })
-        .env("DAY2_TEST_TOFU_CONFIG", root.join(".cache/tofu.json"));
+    // Library unit tests own their temporary state, so the fast gate uses
+    // libtest's default parallelism; runtime campaigns stay serial.
+    match suite {
+        "parallel-runtime" => {
+            command.arg("--test-threads=4");
+        }
+        "fast-libraries" => {}
+        _ => {
+            command.arg("--test-threads=1");
+        }
+    }
+    command.env("DAY2_TEST_TOFU_CONFIG", root.join(".cache/tofu.json"));
     if suite == "workspace-runtime" {
         // These cases run in the explicitly bounded parallel campaign. Exact
         // names make this coverage-safe: a renamed or new test stops matching
@@ -830,6 +845,9 @@ fn tests(
             "delegation::delegation_capability_tests::the_grant_decides_what_may_be_called_and_the_request_decides_who_calls_it",
             "--skip",
             "tests::reports_discovery_accepts_current_contract_and_hides_internal_commands",
+            // A complete simulation campaign (~48s); the full gates run it.
+            "--skip",
+            "simulation_campaign::tests::completed_campaign_pins_coverage_and_trace_association",
         ]);
     }
     // Native issuance cases require the credential fixture. They run in the
