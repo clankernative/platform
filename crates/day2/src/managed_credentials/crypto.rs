@@ -5,7 +5,6 @@
 use anyhow::{Result, ensure};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use day2_capabilities::credentials::Namespace;
-use getrandom::fill;
 use ring::{aead, hmac};
 use serde::{Deserialize, Serialize};
 
@@ -174,9 +173,9 @@ pub(crate) fn prepare_managed(
     let mut selector_bytes = [0u8; SELECTOR_BYTES];
     let mut secret_bytes = [0u8; SECRET_BYTES];
     let mut nonce = [0u8; NONCE_BYTES];
-    fill(&mut selector_bytes).map_err(|_| anyhow::anyhow!("credential entropy unavailable"))?;
-    fill(&mut secret_bytes).map_err(|_| anyhow::anyhow!("credential entropy unavailable"))?;
-    fill(&mut nonce).map_err(|_| anyhow::anyhow!("credential entropy unavailable"))?;
+    super::effects::fill_secret(&mut selector_bytes)?;
+    super::effects::fill_secret(&mut secret_bytes)?;
+    super::effects::fill_secret(&mut nonce)?;
     let selector = URL_SAFE_NO_PAD.encode(selector_bytes);
     let token = format!(
         "{PREFIX}.{selector}.{}",

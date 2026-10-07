@@ -53,6 +53,7 @@ struct Notice<'a> {
 struct Host {
     oauth: Option<Arc<crate::oauth::shell_transport::AppApprovalReceiver>>,
     runtime: Runtime,
+    credential_effects: crate::managed_credentials::effects::Captured,
     routes: Option<crate::routing::Catalog>,
     redirects: crate::redirects::Catalog,
     api: crate::openapi::Catalog,
@@ -351,6 +352,7 @@ impl LocalServer {
         };
         let host = Arc::new(Host {
             oauth: None,
+            credential_effects: crate::managed_credentials::effects::capture(),
             api,
             routes: (runtime.artifact().contract().format >= 7)
                 .then(|| crate::routing::Catalog::from_artifact(runtime.artifact().contract()))
@@ -578,6 +580,13 @@ fn health_response(method: &Method, ready: bool) -> Response {
 }
 
 async fn handle(State(host): State<Arc<Host>>, request: Request) -> Response {
+    host.credential_effects
+        .clone()
+        .run_async(handle_inner(host, request))
+        .await
+}
+
+async fn handle_inner(host: Arc<Host>, request: Request) -> Response {
     if host.health_endpoints && matches!(request.uri().path(), "/health/live" | "/health/ready") {
         let ready =
             request.uri().path() == "/health/live" || host.admitting.load(Ordering::Acquire);
@@ -644,15 +653,27 @@ async fn handle(State(host): State<Arc<Host>>, request: Request) -> Response {
     } else {
         65_536
     };
-    let body =
-        match tokio::time::timeout(Duration::from_secs(3), to_bytes(body, maximum_body)).await {
-            Ok(Ok(body)) => Ok(body),
-            Ok(Err(_)) => Err(StatusCode::PAYLOAD_TOO_LARGE),
-            Err(_) => Err(StatusCode::REQUEST_TIMEOUT),
-        };
-    let response = tokio::task::spawn_blocking(move || {
+    let body = match crate::managed_credentials::effects::timeout(
+        Duration::from_secs(3),
+        to_bytes(body, maximum_body),
+    )
+    .await
+    {
+        Ok(Ok(body)) => Ok(body),
+        Ok(Err(_)) => Err(StatusCode::PAYLOAD_TOO_LARGE),
+        Err(_) => Err(StatusCode::REQUEST_TIMEOUT),
+    };
+    let response = crate::managed_credentials::effects::spawn_blocking(move || {
         let _permit = permit;
-        let at = now()?;
+        let at = if parts
+            .uri
+            .path()
+            .starts_with(crate::managed_credentials::ingress::PREFIX)
+        {
+            crate::managed_credentials::effects::wall_time()?
+        } else {
+            now()?
+        };
         let category = match parts.uri.path() {
             "/actions" => "command",
             "/login" => "sign_in",

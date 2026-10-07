@@ -371,7 +371,10 @@ pub(crate) fn open(path: &Path) -> Result<Connection> {
     let ticks = Arc::new(AtomicUsize::new(0));
     connection.progress_handler(
         1_000,
-        Some(move || ticks.fetch_add(1, Ordering::Relaxed) > 10_000),
+        Some(move || {
+            let runtime_exhausted = ticks.fetch_add(1, Ordering::Relaxed) > 10_000;
+            crate::oauth::schema::admission_step(1_000) || runtime_exhausted
+        }),
     )?;
     Ok(connection)
 }
@@ -632,8 +635,13 @@ impl Runtime {
         crate::execution::upgrade(&tx)?;
         upgrade_selection_cursors(&tx)?;
         crate::authority_state::upgrade(&tx)?;
-        crate::managed_credentials::store::install_schema(&tx)?;
-        crate::managed_credentials::issuance::install(&tx)?;
+        crate::oauth::schema::admit_with_runtime_hook(&tx, |db| {
+            crate::managed_credentials::store::install_schema(db)?;
+            crate::managed_credentials::issuance::install(db)?;
+            // Newly installed peers are admitted under the same cumulative
+            // counter before the writer may publish their initialized shape.
+            crate::managed_credentials::store::install_schema(db)
+        })?;
         tx.commit()?;
         Ok(())
     }

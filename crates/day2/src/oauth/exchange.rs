@@ -166,6 +166,10 @@ pub(crate) fn prepare_authorization(
 }
 
 pub(super) fn install_schema(db: &Connection) -> Result<()> {
+    super::schema::admit(db, install_schema_in)
+}
+
+fn install_schema_in(db: &Connection) -> Result<()> {
     let ddl = "CREATE TABLE IF NOT EXISTS oauth_exchange_schema_version (
             version INTEGER PRIMARY KEY
         );
@@ -173,11 +177,9 @@ pub(super) fn install_schema(db: &Connection) -> Result<()> {
             attempt TEXT PRIMARY KEY REFERENCES oauth_connect_attempts(attempt),
             binding TEXT NOT NULL
         );";
-    db.execute_batch(ddl)?;
-    super::schema::upgrade(
+    super::schema::install_current(
         db,
         "oauth_exchange_schema_version",
-        &[1, 2],
         2,
         ddl,
         &[super::schema::Invariant {

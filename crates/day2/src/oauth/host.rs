@@ -117,7 +117,8 @@ pub(crate) fn app_receiver(
         Arc::new(tokens),
     )?);
     runtime.initialize()?;
-    connect::install_schema(&crate::store::open(runtime.db())?)?;
+    let db = crate::store::open(runtime.db())?;
+    super::schema::admit_with_runtime_hook(&db, connect::install_schema)?;
     let backend = Arc::new(approval_registry::StoredAppApprovals::new(
         runtime.app().into(),
         runtime.db().to_path_buf(),

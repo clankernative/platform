@@ -52,6 +52,10 @@ pub struct ReplacementReceipt {
 }
 
 pub fn install_schema(db: &Connection) -> Result<()> {
+    super::schema::admit(db, install_schema_in)
+}
+
+fn install_schema_in(db: &Connection) -> Result<()> {
     let ddl = "PRAGMA foreign_keys = ON;
         CREATE TABLE IF NOT EXISTS oauth_schema_version (
             version INTEGER PRIMARY KEY
@@ -85,8 +89,7 @@ pub fn install_schema(db: &Connection) -> Result<()> {
             CHECK((state = 'replacement_committed') = (receipt IS NOT NULL)),
             UNIQUE(slot, generation, base_version)
         );";
-    db.execute_batch(ddl)?;
-    super::schema::upgrade(db, "oauth_schema_version", &[1, 2], 2, ddl, &[
+    super::schema::install_current(db, "oauth_schema_version", 2, ddl, &[
         super::schema::Invariant { table: "oauth_connection_slots", predicate:
             "generation > 0 AND token_version > 0 AND security_epoch > 0 AND
              length(slot) > 0 AND length(profile) > 0 AND length(account) > 0 AND length(affinity) > 0 AND

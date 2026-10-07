@@ -42,6 +42,31 @@ pub(crate) fn scope<T>(hooks: std::sync::Arc<dyn Hooks>, run: impl FnOnce() -> T
     run()
 }
 
+/// Native task capture is empty in serving binaries. Test captures retain the
+/// reviewed clock, entropy and HTTP ports together across async host boundaries.
+#[derive(Clone)]
+pub(crate) struct Captured {
+    #[cfg(test)]
+    hooks: Option<std::sync::Arc<dyn Hooks>>,
+}
+
+pub(crate) fn capture() -> Captured {
+    Captured {
+        #[cfg(test)]
+        hooks: HOOKS.with(|slot| slot.borrow().clone()),
+    }
+}
+
+impl Captured {
+    pub(crate) fn run<T>(self, run: impl FnOnce() -> T) -> T {
+        #[cfg(test)]
+        if let Some(hooks) = self.hooks {
+            return scope(hooks, run);
+        }
+        run()
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Instant {
     Live(std::time::Instant),
@@ -173,25 +198,18 @@ pub(super) fn random() -> Result<String> {
 
 /// Blocking work inherits the simulation environment instead of silently using
 /// live time or sockets on Tokio's blocking pool.
-pub(super) fn spawn_blocking<F, R>(run: F) -> tokio::task::JoinHandle<R>
+pub(crate) fn spawn_blocking<F, R>(run: F) -> tokio::task::JoinHandle<R>
 where
     F: FnOnce() -> R + Send + 'static,
     R: Send + 'static,
 {
-    #[cfg(test)]
-    let hooks = HOOKS.with(|slot| slot.borrow().clone());
-    tokio::task::spawn_blocking(move || {
-        #[cfg(test)]
-        if let Some(hooks) = hooks {
-            return scope(hooks, run);
-        }
-        run()
-    })
+    let captured = capture();
+    tokio::task::spawn_blocking(move || captured.run(run))
 }
 
 /// Request-body deadlines use Tokio's clock, which the simulation runtime
 /// pauses and advances independently of wall time and provider lease time.
-pub(super) async fn timeout<F: std::future::Future>(
+pub(crate) async fn timeout<F: std::future::Future>(
     duration: Duration,
     future: F,
 ) -> Result<F::Output, tokio::time::error::Elapsed> {

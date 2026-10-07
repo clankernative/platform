@@ -89,7 +89,7 @@ pub(crate) fn dispatch(
         (
             crate::openapi::query_input(record, uri.query().unwrap_or(""))
                 .context(Failure::InvalidInput)?,
-            format!("credential-query-{}", crate::web_security::random()?),
+            format!("credential-query-{}", super::effects::navigation_id()?),
         )
     } else {
         ensure!(uri.query().is_none(), Failure::InvalidInput);
@@ -169,6 +169,120 @@ pub(crate) fn install(db: &Connection) -> Result<()> {
         invocation TEXT PRIMARY KEY REFERENCES day2_invocations(id), evidence TEXT NOT NULL
     ) STRICT;",
     )?;
+    Ok(())
+}
+
+/// Admit historical rows, including revoked versions, without granting current
+/// permission. The owning store checks exact peer DDL and supplies the same
+/// cumulative SQL/materialization budget as the core credential tables.
+pub(super) fn validate_restored(db: &Connection) -> Result<()> {
+    let present: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM day2_credential_origins)",
+        [],
+        |row| row.get(0),
+    )?;
+    if !present {
+        return Ok(());
+    }
+    let mut statement = db.prepare(
+        "SELECT o.invocation,o.evidence,l.namespace,l.namespace_json,l.family,
+                l.family_contract,l.principal,l.security_epoch,l.grant_json,
+                v.id,v.lineage,v.verifier_key_version,v.security_epoch,i.operation,i.actor
+         FROM day2_credential_origins o
+         LEFT JOIN day2_invocations i ON i.id=o.invocation
+         LEFT JOIN day2_credential_versions v ON v.id=json_extract(o.evidence,'$.version')
+         LEFT JOIN day2_credential_lineages l ON l.id=v.lineage",
+    )?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        crate::oauth::schema::materialize(row)?;
+        let origin: Origin = crate::json::decode(row.get_ref(1)?.as_str()?.as_bytes())?;
+        origin.namespace.validate()?;
+        day2_capabilities::Name::try_from(origin.family.clone())?;
+        for id in [
+            row.get_ref(0)?.as_str()?,
+            &origin.lineage,
+            &origin.version,
+            &origin.verifier_version,
+            &origin.root,
+        ] {
+            stored_identifier(id)?;
+        }
+        crate::authority::valid_actor(&origin.principal)?;
+        crate::authority::valid_actor(&origin.actor)?;
+        ensure!(
+            origin.security_epoch > 0 && origin.path.len() <= 16,
+            "invalid restored credential origin epoch/path"
+        );
+        origin.ceiling.verify()?;
+        let namespace: Namespace = crate::json::decode(row.get_ref(3)?.as_str()?.as_bytes())?;
+        let ceiling: GrantCeiling = crate::json::decode(row.get_ref(8)?.as_str()?.as_bytes())?;
+        ensure!(
+            origin.namespace == namespace
+                && Digest::of(&("credential-namespace-v1", &namespace))?.as_str()
+                    == row.get_ref(2)?.as_str()?
+                && origin.family == row.get_ref(4)?.as_str()?
+                && origin.family_contract.as_str() == row.get_ref(5)?.as_str()?
+                && origin.principal == row.get_ref(6)?.as_str()?
+                && origin.security_epoch == u64::try_from(row.get::<_, i64>(7)?)?
+                && origin.ceiling == ceiling
+                && origin.ceiling.subject == origin.principal
+                && origin.version == row.get_ref(9)?.as_str()?
+                && origin.lineage == row.get_ref(10)?.as_str()?
+                && origin.verifier_version == row.get_ref(11)?.as_str()?
+                && origin.security_epoch == u64::try_from(row.get::<_, i64>(12)?)?
+                && origin.actor == row.get_ref(14)?.as_str()?,
+            "restored credential origin identity mismatch"
+        );
+        if let Some(family) = crate::authority::client_family(&origin.principal) {
+            ensure!(
+                family == origin.family && origin.actor == origin.principal,
+                "restored client credential actor mismatch"
+            );
+        } else {
+            let mut statement = db.prepare("SELECT subject FROM day2_principals WHERE email=?1")?;
+            let mut subjects = statement.query([&origin.actor])?;
+            let subject = subjects
+                .next()?
+                .context("restored credential subject mapping missing")?;
+            crate::oauth::schema::materialize(subject)?;
+            ensure!(
+                subject.get_ref(0)?.as_str()? == origin.principal,
+                "restored personal credential actor mismatch"
+            );
+        }
+        let root = origin
+            .ceiling
+            .roots
+            .get(&origin.root)
+            .context("restored credential origin root missing")?;
+        let mut closure = &root.closure;
+        let mut expected = origin.root.as_str();
+        for hop in &origin.path {
+            stored_identifier(hop)?;
+            closure = closure
+                .children
+                .get(hop)
+                .context("restored credential origin path outside ceiling")?;
+            expected = hop;
+        }
+        ensure!(
+            expected == row.get_ref(13)?.as_str()?,
+            "restored credential origin operation mismatch"
+        );
+    }
+    Ok(())
+}
+
+fn stored_identifier(value: &str) -> Result<()> {
+    ensure!(
+        !value.is_empty()
+            && value.len() <= 160
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"._-/".contains(&byte)),
+        "invalid restored credential origin identifier"
+    );
     Ok(())
 }
 

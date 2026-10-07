@@ -79,26 +79,29 @@ persisting counterexample reproduces its failure. Reduction does not silently
 update or approve a regression corpus. Runtime/setup errors retain the bounded
 semantic history but may occur before a divergent database observation exists.
 
-## Schema upgrades
+## Current schema admission
 
 Refresh, connect, callback/exchange bindings, and inbound state use schema version 2;
-custody uses version 3.
-Known legacy versions upgrade additively inside a transaction. Before stamping
-the version, admission checks the reviewed column types/nullability/keys, foreign
-keys, unique indexes, installed guard definitions, existing row storage types,
-and state predicates. Invalid legacy rows, orphaned references, substituted
-schemas or guards, and unknown versions fail closed. Tables are not rebuilt and
-foreign-key enforcement is not disabled.
+managed credentials also use version 2, and custody uses version 3.
+An entirely absent owned schema unit can be created inside the caller's
+transaction. An existing unit must already have the exact current version,
+column types/nullability/keys, foreign keys, indexes and guard definitions.
+Admission also checks bounded existing row storage types, state predicates and
+relationships. Earlier versions, partial units, missing guards, orphaned
+references and substituted schemas fail closed without repair. Admission does
+not migrate tables, restamp versions or disable foreign-key enforcement.
 
-Both new and upgraded databases reject inserts and updates containing partial
+Current databases reject inserts and updates containing partial
 refresh receipts, partial account/scope evidence, empty required identities,
 fractional counters, invalid initial/replacement generation relationships,
 receipt versions that skip the base version, self-linked refresh successors, or
 incorrect ciphertext/nonce types and bounds. Paired fields have separate
 equivalence checks: a noncommitted row cannot carry either half of a receipt,
 and an unapproved row cannot carry either half of its account evidence.
-Reopen, rejected legacy upgrades, malformed new writes, schema substitution,
-and transaction rollback have native SQLite regression coverage.
+Native SQLite cases require fresh creation and exact current reopen, refusal of
+earlier or partial schemas without mutation, malformed new-write rejection,
+schema substitution refusal and transaction rollback. Qualifying a changed
+source requires running those cases and the normal full gate.
 
 These are durable structural invariants. Semantic account identity, authority,
 current epochs, authenticated freshness, and custody authentication remain

@@ -19,7 +19,7 @@ pub mod outbound;
 pub mod profiles;
 pub mod protocol;
 pub(crate) mod registration;
-mod schema;
+pub(crate) mod schema;
 pub(crate) mod security_shell;
 pub(crate) mod shell_oidc;
 pub(crate) mod shell_transport;

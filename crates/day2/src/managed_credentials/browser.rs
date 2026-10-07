@@ -140,7 +140,7 @@ pub(crate) fn start(
         )?;
         ensure!(count < 10_000, "credential navigation capacity reached");
         let pending = Pending {
-            attempt: format!("credential-{}", crate::web_security::random()?),
+            attempt: format!("credential-{}", super::effects::navigation_id()?),
             invocation: invocation.into(),
             operation: operation.into(),
             actor: actor.into(),
@@ -174,6 +174,7 @@ pub(crate) fn start(
 pub(crate) struct Registry {
     runtimes: BTreeMap<String, Runtime>,
     origin: String,
+    effects: super::effects::Captured,
 }
 
 impl Registry {
@@ -209,11 +210,16 @@ impl Registry {
         Ok(Self {
             runtimes: selected,
             origin: edge.origin.clone(),
+            effects: super::effects::capture(),
         })
     }
 
     pub(crate) fn origin(&self) -> &str {
         &self.origin
+    }
+
+    pub(crate) fn effects(&self) -> super::effects::Captured {
+        self.effects.clone()
     }
 
     pub(crate) fn resolve(
@@ -445,7 +451,7 @@ pub(crate) fn deliver(
             version,
             recipient: identity.email.clone(),
             session: session.into(),
-            attempt: crate::web_security::random()?,
+            attempt: super::effects::navigation_id()?,
             now,
             security_epoch: epoch,
         },
