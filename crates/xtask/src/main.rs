@@ -8,6 +8,7 @@ use std::{
     process::Command,
 };
 
+mod app_contracts;
 mod architecture;
 mod architecture_dependencies;
 mod architecture_kernel;
@@ -22,6 +23,7 @@ mod linux_runtime_qualification;
 mod native_toolchain;
 mod provider_conformance;
 mod tooling;
+mod ui_assembly;
 mod verification;
 mod workflows;
 
@@ -99,8 +101,14 @@ fn snapshot(
             .into_string()
             .map_err(|_| anyhow::anyhow!("invalid filename"))?;
         // Version-control metadata is never app input: an app that lives in its
-        // own repository carries it beside its sources.
-        if [".git", ".gitignore", ".gitattributes"].contains(&name.as_str()) {
+        // own repository carries it beside its sources. `.clanker` holds design
+        // tool data (Studio fake-data scenes and canvas layout) committed with
+        // the app; it is never compiled, served or admitted. Only the app root
+        // may carry it. `.ui-dependencies` is a build-only local package root;
+        // optional UI assembly captures only its explicit locked input closure.
+        if [".git", ".gitignore", ".gitattributes"].contains(&name.as_str())
+            || (prefix == "app" && [".clanker", ".ui-dependencies"].contains(&name.as_str()))
+        {
             continue;
         }
         let kind = entry.file_type()?;
@@ -240,6 +248,7 @@ fn main() -> Result<()> {
         "architecture-proof-candidate-inventory",
     ]
     .contains(&action.as_str())
+        || action == "app-contracts"
     {
         None
     } else {
@@ -461,6 +470,23 @@ fn main() -> Result<()> {
                 Some(root.parent().context("isolated workspace parent")?),
                 None,
             )?;
+        }
+        "app-contracts" => {
+            let artifact =
+                PathBuf::from(args.next().context(
+                    "usage: xtask app-contracts ARTIFACT_DIRECTORY [--output JSON_FILE]",
+                )?);
+            let output = match args.next() {
+                None => None,
+                Some(flag) if flag == "--output" => Some(PathBuf::from(
+                    args.next().context("missing JSON output path")?,
+                )),
+                Some(_) => {
+                    bail!("usage: xtask app-contracts ARTIFACT_DIRECTORY [--output JSON_FILE]")
+                }
+            };
+            ensure!(args.next().is_none(), "unexpected app-contracts argument");
+            app_contracts::export_file(&artifact, output.as_deref())?;
         }
         "build" => {
             let app = args
@@ -1211,13 +1237,32 @@ mod tests {
         fs::write(source.join(".gitignore"), "artifacts/\n")?;
         fs::write(source.join(".gitattributes"), "* text=auto\n")?;
         fs::write(source.join("App.roc"), "App :: [].{}\n")?;
+        fs::create_dir_all(source.join(".clanker/scenes"))?;
+        fs::write(source.join(".clanker/scenes/home.json"), "{}\n")?;
+        fs::write(source.join(".clanker/canvas.json"), "{}\n")?;
         let target = directory.path().join("stage");
         let mut hashes = BTreeMap::new();
         snapshot(&source, &target, &mut hashes, "app")?;
         assert_eq!(hashes.keys().collect::<Vec<_>>(), ["app/App.roc"]);
-        for name in [".git", ".gitignore", ".gitattributes"] {
+        for name in [".git", ".gitignore", ".gitattributes", ".clanker"] {
             assert!(!target.join(name).exists(), "{name} was captured");
         }
+        // Design data is skipped only at the app root, never inside sources.
+        fs::create_dir_all(source.join("ui/.clanker"))?;
+        fs::write(source.join("ui/.clanker/x.json"), "{}\n")?;
+        fs::create_dir_all(source.join("commands/.clanker"))?;
+        fs::write(source.join("commands/.clanker/x.json"), "{}\n")?;
+        assert!(
+            snapshot(
+                &source,
+                &directory.path().join("nested"),
+                &mut BTreeMap::new(),
+                "app"
+            )
+            .is_err()
+        );
+        fs::remove_dir_all(source.join("ui"))?;
+        fs::remove_dir_all(source.join("commands"))?;
         // Any other dotfile is still refused.
         fs::write(source.join(".env"), "SECRET=1\n")?;
         assert!(

@@ -149,8 +149,14 @@ fn private(path: &Path) -> Result<()> {
 }
 
 fn atomic(path: &Path, value: &impl Serialize) -> Result<()> {
+    atomic_bytes(path, &serde_json::to_vec_pretty(value)?)
+}
+
+fn atomic_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut file = tempfile::NamedTempFile::new_in(path.parent().context("local file parent")?)?;
-    file.write_all(&serde_json::to_vec_pretty(value)?)?;
+    file.as_file()
+        .set_permissions(fs::Permissions::from_mode(0o600))?;
+    file.write_all(bytes)?;
     file.as_file().sync_all()?;
     file.persist(path)?;
     Ok(())
@@ -725,6 +731,29 @@ impl Session {
         Ok(info)
     }
 
+    fn contracts(&self, artifact_directory: &Path, artifact_id: &str) -> Value {
+        let path = self.directory.join("app-contracts.json");
+        let result = (|| -> Result<Value> {
+            if path.exists() || fs::symlink_metadata(&path).is_ok() {
+                fs::remove_file(&path).context("remove stale app contracts")?;
+            }
+            let bytes = day2::app_contracts::export_bytes(artifact_directory)?;
+            let document: Value = serde_json::from_slice(&bytes)?;
+            ensure!(
+                document["artifact"].as_str() == Some(artifact_id),
+                "exported app contract artifact differs from served artifact"
+            );
+            atomic_bytes(&path, &bytes).context("write app contracts")?;
+            let digest = day2::digest(&bytes);
+            Ok(json!({
+                "path":path,
+                "artifact":artifact_id,
+                "sha256":digest.strip_prefix("sha256:").unwrap_or(&digest),
+            }))
+        })();
+        result.unwrap_or_else(|error| json!({"error":format!("{error:#}"),"artifact":artifact_id}))
+    }
+
     fn ready(&self, info: Value) -> Result<()> {
         self.event("ready", json!({"origin":info["origin"],"artifact":info["artifact"],"instance":info["instance"]}))?;
         *self.status.lock().expect("status lock") = info.clone();
@@ -744,7 +773,7 @@ impl Session {
             .as_ref()
             .context("checked candidate required")?
             .clone();
-        let info = self.start(candidate.clone())?;
+        let mut info = self.start(candidate.clone())?;
         let current = Current {
             format: 1,
             source: self.options.source.clone().into(),
@@ -759,6 +788,8 @@ impl Session {
         self.active = self.candidate.take();
         self.checkpoint = None;
         self.campaign = None;
+        info["contracts"] =
+            self.contracts(candidate.artifact().directory(), candidate.artifact().id());
         self.ready(info)?;
         Ok(json!({}))
     }
@@ -985,12 +1016,14 @@ impl Session {
                 self.checked = false;
                 self.checkpoint = None;
                 if self.live.is_none() && !self.stopped.load(Ordering::SeqCst) {
-                    let info = self.start(
-                        self.active
-                            .as_ref()
-                            .context("previous local instance required")?
-                            .clone(),
-                    )?;
+                    let active = self
+                        .active
+                        .as_ref()
+                        .context("previous local instance required")?
+                        .clone();
+                    let mut info = self.start(active.clone())?;
+                    info["contracts"] =
+                        self.contracts(active.artifact().directory(), active.artifact().id());
                     self.ready(info)?;
                 }
                 Ok(json!({}))
@@ -1071,4 +1104,101 @@ fn source_digest(source: &Path) -> Result<String> {
     let mut files = BTreeMap::new();
     visit(source, source, &mut files, &mut 0, 0)?;
     Ok(day2::digest(&serde_json::to_vec(&files)?))
+}
+
+#[cfg(test)]
+mod contract_tests {
+    use super::*;
+
+    fn session(root: &Path) -> Result<Session> {
+        let source = root.join("source");
+        fs::create_dir(&source)?;
+        fs::write(source.join("App.roc"), "App :: [].{}\n")?;
+        Session::resolve(
+            root,
+            Options {
+                source: source.to_string_lossy().into_owned(),
+                directory: root.join("session").to_string_lossy().into_owned(),
+                action: "start".into(),
+                example: String::new(),
+                generated: 0,
+                seed: "42".into(),
+                actor: "developer".into(),
+                port: "0".into(),
+                watch: "off".into(),
+                reset: false,
+                backup: String::new(),
+                detach: false,
+                data_requested: false,
+            },
+        )
+    }
+
+    #[test]
+    fn failed_export_removes_stale_file_and_keeps_ready_status() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let session = session(root.path())?;
+        let path = session.directory.join("app-contracts.json");
+        fs::write(&path, b"stale contract")?;
+        let contracts = session.contracts(&root.path().join("missing"), "sha256:served");
+        assert_eq!(contracts["artifact"], "sha256:served");
+        assert!(contracts["error"].is_string());
+        assert!(contracts.get("path").is_none());
+        assert!(contracts.get("sha256").is_none());
+        assert!(!path.exists());
+        session
+            .ready(json!({"state":"ready", "artifact":"sha256:served", "contracts":contracts}))?;
+        let status = session.status()?;
+        assert_eq!(status["state"], "ready");
+        assert_eq!(status["contracts"]["artifact"], status["artifact"]);
+        Ok(())
+    }
+
+    #[test]
+    fn failed_export_unlinks_stale_symlink_without_touching_target() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let session = session(root.path())?;
+        let target = root.path().join("unrelated.json");
+        fs::write(&target, b"unrelated")?;
+        let path = session.directory.join("app-contracts.json");
+        std::os::unix::fs::symlink(&target, &path)?;
+        let contracts = session.contracts(&root.path().join("missing"), "sha256:served");
+        assert!(contracts["error"].is_string());
+        assert!(fs::symlink_metadata(&path).is_err());
+        assert_eq!(fs::read(target)?, b"unrelated");
+        Ok(())
+    }
+
+    #[test]
+    fn stale_cleanup_error_does_not_advertise_success() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let session = session(root.path())?;
+        let path = session.directory.join("app-contracts.json");
+        fs::create_dir(&path)?;
+        let contracts = session.contracts(&root.path().join("missing"), "sha256:served");
+        assert!(
+            contracts["error"]
+                .as_str()
+                .unwrap()
+                .contains("remove stale app contracts")
+        );
+        assert!(contracts.get("path").is_none());
+        assert!(contracts.get("sha256").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn atomic_contract_bytes_replace_with_private_regular_file() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("app-contracts.json");
+        fs::write(&path, b"stale")?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644))?;
+        atomic_bytes(&path, b"current")?;
+        assert_eq!(fs::read(&path)?, b"current");
+        let metadata = fs::symlink_metadata(&path)?;
+        assert!(metadata.file_type().is_file());
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        assert_eq!(fs::read_dir(root.path())?.count(), 1);
+        Ok(())
+    }
 }

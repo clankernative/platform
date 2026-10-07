@@ -362,6 +362,13 @@ references against the output, command and asset contracts, including included
 components and conditional branches. Undefined data and invalid rendered
 markup are rejected independently at runtime.
 
+Generic `ui_key(field)` accepts a string, integer, unsigned integer or checked
+nominal `Ref(Model)` field, including a field from a typed loop item. Constants,
+computed expressions, booleans and unknown shapes are rejected. Output decoding
+still checks the registered model prefix and canonical UUIDv7 before rendering;
+key syntax alone is not nominal validity, row existence or authorization. Runtime
+keys remain nonempty ASCII alphanumeric/underscore/hyphen values of at most 128 bytes.
+
 The supported template subset includes scalar field access, selected typed
 operators, `length`, `asset`, `if`, list `for` and literal includes, not full
 Jinja. Admission expands at most 256 structural variants and rejects larger
@@ -413,6 +420,68 @@ Formats 1 through 11 remain loadable for inspection, replay, and explicit operat
 recovery of accepted work. Upgrade requires draining accepted invocations and
 pending invocations, then explicit migration and activation. Company authority is
 still required for execution; loading a legacy artifact grants no permission.
+
+## App Contract Export
+
+`xtask app-contracts` projects the admitted public app surface from a built
+artifact as bounded, deterministic JSON. In addition to the existing query and
+route data, `commands` describes each command's typed contracts, usage, errors,
+example, internal status, HTTP API and edit binding; query entries include their
+GET API path. `forms` lists command forms and their named controls from admitted
+templates (including components), `schedules` records declared command cadence
+and missed-occurrence policy, and `redirects` lists redirect paths and commands.
+The generic document uses schema version 1. Internal commands have `api: null`.
+Every registered query appears once, including API-only queries with an empty
+`routes` list. Queries shared by multiple routes list every route name. Each route includes its own path, template, live flag, query defaults,
+and exact template `contextKey`; shared platform-supplied template values such
+as `company` are listed separately. Query schemas use explicit `kind` tags,
+field descriptions, and the admitted typed examples. Ref and RowVersion retain
+their scalar type tags; collection wrappers expose their item shape. The export
+uses the normal artifact loader, including digest/checked-type/template validation
+and pure-worker introspection that compares the compiled app contract and manifest.
+It does not invoke app commands or queries or access a database, provider or network;
+it is not an admission bypass or an authority grant. Artifact JSON is bounded to 16 MiB, the worker to 128 MiB,
+checked compiler types to 16 MiB, and the completed export to 4 MiB. Unknown
+artifact/schema shapes and invalid examples fail the export. Roc enum output
+shapes are not part of the current codec; unsupported unions are rejected during
+build/admission. The current exporter inlines output schemas but does not derive
+named view types: `viewType` is always `null` and `viewTypes` is empty.
+Schedules describe declared cadence, not observed execution times. Whole-minute
+intervals retain their minutes/hours/daily representation; other intervals use
+`{"milliseconds": interval_ms}` without rounding.
+
+`--output` requires an operator-owned parent directory with no concurrent namespace
+mutation; canonicalization is not an inode-anchored hostile-directory sandbox.
+Output inside the artifact is rejected, as are existing symlinks and non-regular
+files. The exporter writes a private `0600` temporary file in the canonical parent
+and publishes it atomically. Initially absent destinations use no-clobber publication;
+only an explicitly requested existing regular output may be replaced, after its
+identity is rechecked. Replacement never opens or truncates the old inode, so an
+output hardlink to an artifact input cannot alter the artifact's bytes or permissions.
+
+Build the app through the normal workflow first. The build prints the selected
+artifact directory (`artifacts/<artifact-digest>`); pass that exact directory to
+the exporter. Native local-dev sessions also generate this same export as
+`app-contracts.json` in the session directory after every successfully served
+build; `--status` reports the file path, artifact digest and SHA-256. Local-dev
+writes the export atomically with mode `0600`, removing stale output before each
+attempt. An export failure leaves serving available and reports only `artifact`
+and `error`, never a successful path or digest; if stale cleanup itself fails,
+consumers must not trust any remaining file. For example:
+
+```console
+cargo run --locked -p xtask -- build /path/to/clanker-ui-gallery
+cargo run --locked -p xtask -- app-contracts artifacts/ARTIFACT_DIGEST
+cargo run --locked -p xtask -- app-contracts artifacts/ARTIFACT_DIGEST --output app-contracts.json
+```
+
+The build runs the pinned Roc compiler and required application verification;
+the export validates the artifact through existing admission checks and emits JSON. Each query's
+`inputSchema` and `outputSchema` are the read contract consumed by the design
+tool. Route `contextKey` names the template variable under which that
+query result is bound (for example, `home` for `{{ home.title }}`). Shared
+context schemas list platform values such as the independently supplied
+`company` branding.
 
 ## Redirect Routes
 
@@ -598,13 +667,50 @@ remote, computed, escaping and missing module imports; no npm, Node server or
 app build scripts run. The complete source graph and resource hashes are bound
 to the app artifact and verified again on load/serve. HTML templates and their
 include graph are separately admitted, hashed and rendered on the server;
-they are not browser module entrypoints. A general company library
-catalog is not implemented yet; Datastar is a fixed platform dependency.
+they are not browser module entrypoints. Datastar is a fixed platform dependency.
+
+### Optional UI assembly
+
+An app opts into a build-time provider with `ui/ui.lock.json`. Without that lock,
+Native preserves its ordinary build/render path and does not look up or invoke a
+provider. An operator separately selects a trusted, SHA-256-pinned executable via
+`DAY2_UI_PROVIDER_PIN_JSON`; an app lock cannot authorize execution. This trusts
+the local executable; a private snapshot, cleared environment and process limits
+are not a hostile-code sandbox.
+
+Native captures the generic locked input manifest, invokes `assemble --request`
+in a private snapshot, then independently admits and stages the returned
+HTML/CSS/modules/fonts. It does not interpret component manifests, select CSS
+variants, load provider rendering code, or run a provider while serving pages.
+The app retains its models, commands, routes, validation and state. Native retains
+transport, signed forms, resource provenance, CSP and runtime value checks.
+
+Assembly protocol 2 uses Minijinja 2.12.0 and generic binding ABI 2. ABI 1 and
+component-specific `cui_*` callbacks are incompatible; there is no silent fallback
+or automatic lock/pin migration. The producer's [protocol contract](https://github.com/clankernative/clanker-ui/blob/main/docs/native-assembly-protocol.md)
+defines the wire envelope and closed `ui_*` capabilities. Provider component
+markers are opaque; generic choice/navigation assertions and boolean attributes
+remain host-enforced. The bundle contains only schema/runtime metadata, templates,
+resources, locked inputs and consumed-input claims. `ui/ui-package.js`, when
+provided, is an ordinary module resource whose import contents are preserved
+exactly and admitted with the other resources. Operator pins are currently explicit
+local overrides, not a published portable install flow.
+
+The host independently runs the exact versioned generic ABI vectors in
+`crates/day2/tests/protocol/ui-binding-abi-v2.json` for text, keys, integers, numbers, comparison
+and remote images. `ui_values::tests::generic_binding_abi_v2_matches_independent_shared_vectors`
+pins the fixture SHA-256 and case count; refresh those explicitly after reviewing
+changes against the producer's identical fixture, never derive expectations from
+host output. Integer tags preserve 64/128-bit values, and `f64_bits` preserves
+non-finite/subnormal/negative-zero inputs that JSON numbers cannot represent.
+This checks pure helper semantics, not complete artifact admission or browser safety.
 
 CSS is parsed with cssparser. Layout, custom properties and responsive media
-queries are allowed. This first asset pipeline does not admit CSS `@import`,
-external fonts/images or non-fragment URL references. HTML images use checked
-`{{ asset('name') }}` references to the admitted app image catalog.
+queries are allowed. CSS `@import` and external CSS font/image URLs are rejected;
+local WOFF2 fonts require admitted resource closure. HTML images use checked
+`{{ asset('name') }}` references to the admitted app image catalog. A generic
+`ui_image` capability also checks credential-free HTTPS image sources and retains
+host-owned provenance and CSP checks; it does not fetch an image.
 Browser JS is ordinary native code, not a capability sandbox. CSP restricts script
 sources to the admitted app resource prefix and pinned platform Datastar file;
 `unsafe-eval` is necessary for Datastar expressions. Import admission is dependency

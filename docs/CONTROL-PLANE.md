@@ -162,6 +162,19 @@ Credential/config files from Cargo home are excluded. Every copied approved inpu
 is rehashed, including the runner, supervisor, Rust toolchain and registry cache.
 The host OS and Xcode remain trusted prerequisites, not fully hermetic inputs.
 
+ClankerUI assembly is a separate opt-in operator capability on the local builder.
+An operator may pin the generic provider executable and opaque package tree; only
+an exact `ui/ui.lock.json` source activates it. The build checks the lock's
+provider and configured `../../packages/<key>` path, stages fresh private copies,
+and passes only the rewritten staged provider pin to xtask. A source without the
+lock does not stage or invoke the provider, even when the builder has an approved
+UI capability. This does not grant app-selected executable authority or change
+app runtime behavior. UI provider/package input admission remains separately
+bounded, and Linux execution is not supported. The host accepts assembly protocol 2
+with binding ABI 2; protocol 1 pins are rejected. The producer returns templates
+and ordinary resources (including any `ui/ui-package.js` module) in the same strict
+bundle. App lock schema remains 1.
+
 The local recipe checks compilation/admission, the loaded artifact, application
 examples/generators and properties, plus the mandatory control-plane simulation
 campaign. Reports is the canonical current app acceptance fixture. Full verification
