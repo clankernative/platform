@@ -57,6 +57,7 @@ struct Manifest {
     executable: Entry,
     package: Package,
     entries: Vec<Entry>,
+    legal: Vec<Entry>,
 }
 
 pub struct Session {
@@ -136,11 +137,16 @@ fn tree_digest(root: &Path) -> Result<String> {
         total: &mut usize,
     ) -> Result<()> {
         ensure!(prefix.split('/').count() <= 10, "scaffold tree depth");
-        let mut entries = fs::read_dir(root.join(prefix))?.collect::<std::io::Result<Vec<_>>>()?;
-        entries.sort_by_key(|entry| entry.file_name());
-        for entry in entries {
+        // Debit the global entry budget before collecting or descending; a
+        // hostile wide directory must not allocate an unbounded listing.
+        let mut entries = Vec::new();
+        for entry in fs::read_dir(root.join(prefix))? {
             *count += 1;
             ensure!(*count <= 8192, "scaffold tree entry budget");
+            entries.push(entry?);
+        }
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
             let path = if prefix.is_empty() {
                 entry
                     .file_name()
@@ -298,6 +304,28 @@ impl Session {
                 && manifest.entries.len() <= 4096,
             "unsupported installed bundle manifest"
         );
+        // Legal bytes are a closed, separately captured release input, never
+        // catalog resources or app-authored executable authority.
+        ensure!(
+            manifest.legal.len() == 2,
+            "unsupported bundle legal closure"
+        );
+        for (entry, path) in manifest
+            .legal
+            .iter()
+            .zip(["legal/LICENSE", "legal/NOTICES.txt"])
+        {
+            ensure!(
+                entry.path == path && entry.bytes > 0 && entry.bytes <= 1_048_576,
+                "unsafe bundle legal member or budget"
+            );
+            let bytes = regular(root, path, 1_048_576)?;
+            ensure!(
+                bytes.len() == entry.bytes && sha(&bytes) == entry.digest,
+                "bundle legal member mismatch"
+            );
+            write(&self.source, &format!(".ui-dependencies/{path}"), &bytes)?;
+        }
         let installed_pin: Value =
             day2::json::decode(&regular(root, "provider-pin.json", 1_048_576)?)?;
         ensure!(
@@ -572,6 +600,11 @@ mod tests {
     fn bundle_fixture(root: &Path, package_name: &str) -> Result<String> {
         fs::create_dir_all(root.join("bin"))?;
         fs::create_dir_all(root.join("package"))?;
+        fs::create_dir_all(root.join("legal"))?;
+        let license = b"opaque fixture project legal bytes";
+        let notices = b"opaque fixture third-party legal bytes";
+        fs::write(root.join("legal/LICENSE"), license)?;
+        fs::write(root.join("legal/NOTICES.txt"), notices)?;
         let executable = b"capture-only fixture, never executed";
         let package = b"opaque fixture package bytes";
         fs::write(root.join("bin/clanker-ui"), executable)?;
@@ -589,7 +622,11 @@ mod tests {
             "provider":"clanker-ui.native","assemblyProtocol":2,"bindingAbi":2,"templateEngine":"minijinja-2.12.0",
             "executable":{"path":"bin/clanker-ui","bytes":executable.len(),"digest":sha(executable)},
             "package":{"name":package_name,"version":"0.7.0","digest":format!("sha256:{:x}",hash.finalize())},
-            "entries":[{"path":"ui-package.json","bytes":package.len(),"digest":digest}]
+            "entries":[{"path":"ui-package.json","bytes":package.len(),"digest":digest}],
+            "legal":[
+                {"path":"legal/LICENSE","bytes":license.len(),"digest":sha(license)},
+                {"path":"legal/NOTICES.txt","bytes":notices.len(),"digest":sha(notices)}
+            ]
         });
         let bytes = serde_json::to_vec(&manifest)?;
         fs::write(root.join("manifest.json"), &bytes)?;
@@ -601,6 +638,19 @@ mod tests {
             }))?,
         )?;
         Ok(sha(&bytes))
+    }
+
+    #[test]
+    fn scaffold_tree_entry_budget_is_checked_before_listing_allocation() -> Result<()> {
+        let root = private_test_root()?;
+        for index in 0..8192 {
+            fs::write(root.path().join(format!("input-{index}")), b"x")?;
+        }
+        assert!(tree_digest(root.path()).is_ok());
+        fs::write(root.path().join("one-too-many"), b"x")?;
+        let error = tree_digest(root.path()).unwrap_err();
+        assert!(error.to_string().contains("scaffold tree entry budget"));
+        Ok(())
     }
 
     #[test]
@@ -629,6 +679,122 @@ mod tests {
         assert_eq!(session.operator_pin, Some(bundle.join("provider-pin.json")));
         assert!(session.provider_pin.as_ref().unwrap().is_file());
         assert!(!root.path().join("app").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn bundle_legal_capture_preserves_notices_without_changing_package_inputs() -> Result<()> {
+        let root = private_test_root()?;
+        let bundle = root.path().join("installed");
+        let approval = bundle_fixture(&bundle, "@clanker/vanilla")?;
+        let session = Session::begin(Options {
+            destination: root.path().join("app"),
+            name: "starter".into(),
+            ui: "clanker".into(),
+            bundle: bundle.display().to_string(),
+            bundle_sha256: approval,
+        })?;
+        for name in ["LICENSE", "NOTICES.txt"] {
+            assert_eq!(
+                fs::read(session.source.join(".ui-dependencies/legal").join(name))?,
+                fs::read(bundle.join("legal").join(name))?
+            );
+        }
+        assert!(!session.source.join("ui/legal").exists());
+        assert!(
+            !session
+                .source
+                .join(".ui-dependencies/vanilla/legal")
+                .exists()
+        );
+        let manifest: Value = day2::json::decode(&fs::read(bundle.join("manifest.json"))?)?;
+        let lock: Value = day2::json::decode(&fs::read(session.source.join("ui/ui.lock.json"))?)?;
+        assert_eq!(lock["package"]["digest"], manifest["package"]["digest"]);
+        assert_eq!(lock["package"]["inputs"], manifest["entries"]);
+        assert_eq!(lock["package"]["inputs"].as_array().unwrap().len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn bundle_legal_shape_and_byte_failures_refuse_publication() -> Result<()> {
+        let root = private_test_root()?;
+        for mutation in 0..13 {
+            let bundle = root.path().join(format!("installed-{mutation}"));
+            bundle_fixture(&bundle, "@clanker/vanilla")?;
+            let path = bundle.join("manifest.json");
+            let mut manifest: Value = day2::json::decode(&fs::read(&path)?)?;
+            match mutation {
+                0 => {
+                    manifest.as_object_mut().unwrap().remove("legal");
+                }
+                1 => manifest["legal"] = json!([]),
+                2 => {
+                    let extra = manifest["legal"][0].clone();
+                    manifest["legal"].as_array_mut().unwrap().push(extra);
+                }
+                3 => manifest["legal"].as_array_mut().unwrap().swap(0, 1),
+                4 => manifest["legal"][0]["path"] = "../LICENSE".into(),
+                5 => manifest["legal"][0]["path"] = "legal/license".into(),
+                6 => manifest["legal"][0]["bytes"] = 0.into(),
+                7 => manifest["legal"][0]["bytes"] = (1_048_576 + 1).into(),
+                8 => fs::write(bundle.join("legal/NOTICES.txt"), b"tampered")?,
+                9 => manifest["legal"][1]["digest"] = sha(b"wrong").into(),
+                10 => fs::remove_file(bundle.join("legal/LICENSE"))?,
+                11 => manifest["legal"][0]["unknown"] = true.into(),
+                12 => {
+                    manifest["legal"][1]["bytes"] = 1_048_577.into();
+                    fs::write(bundle.join("legal/NOTICES.txt"), vec![b'x'; 1_048_577])?;
+                }
+                _ => unreachable!(),
+            }
+            let bytes = serde_json::to_vec(&manifest)?;
+            fs::write(path, &bytes)?;
+            let output = root.path().join(format!("app-{mutation}"));
+            // Approve the mutated manifest so the legal guard, not an unrelated
+            // outer manifest checksum mismatch, must reject the selected input.
+            let result = Session::begin(Options {
+                destination: output.clone(),
+                name: "starter".into(),
+                ui: "clanker".into(),
+                bundle: bundle.display().to_string(),
+                bundle_sha256: sha(&bytes),
+            });
+            assert!(result.is_err(), "legal mutation {mutation} accepted");
+            assert!(!output.exists(), "legal mutation {mutation} published");
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bundle_legal_symlinks_are_refused_even_for_matching_bytes() -> Result<()> {
+        use std::os::unix::fs::symlink;
+        let root = private_test_root()?;
+        for directory in [false, true] {
+            let bundle = root.path().join(if directory { "dir" } else { "file" });
+            let approval = bundle_fixture(&bundle, "@clanker/vanilla")?;
+            if directory {
+                fs::rename(bundle.join("legal"), bundle.join("legal-real"))?;
+                symlink(bundle.join("legal-real"), bundle.join("legal"))?;
+            } else {
+                fs::rename(bundle.join("legal/LICENSE"), bundle.join("license-real"))?;
+                symlink(bundle.join("license-real"), bundle.join("legal/LICENSE"))?;
+            }
+            let output = root
+                .path()
+                .join(if directory { "app-dir" } else { "app-file" });
+            assert!(
+                Session::begin(Options {
+                    destination: output.clone(),
+                    name: "starter".into(),
+                    ui: "clanker".into(),
+                    bundle: bundle.display().to_string(),
+                    bundle_sha256: approval,
+                })
+                .is_err()
+            );
+            assert!(!output.exists());
+        }
         Ok(())
     }
 

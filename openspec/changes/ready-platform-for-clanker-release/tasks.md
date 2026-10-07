@@ -1,11 +1,11 @@
 ## 1. History and scope
 
 - [x] 1.1 Inspect current #98/#126, latest main, patch equivalence and release-schema gap; document ownership and excluded work.
-- [ ] 1.2 Prepare an isolated latest-main reconciliation and logical review layout, preserving four upstream changes and applying each equivalent integration patch once.
+- [x] 1.2 Prepare an isolated latest-main reconciliation and logical review layout, preserving four upstream changes and applying each equivalent integration patch once (fresh branch on c4aa7a2; two conflict areas reviewed; old heads retained, fresh consolidated PR authorized).
 
 ## 2. Released bundle alignment
 
-- [ ] 2.1 Test and implement mandatory bounded legal capture/retention in existing optional authoring capabilities; reject old/unknown/tampered shapes without relaxing guards or changing catalog bytes.
+- [x] 2.1 Test and implement mandatory bounded legal capture/retention in existing optional authoring capabilities; reject old/unknown/tampered shapes without relaxing guards or changing catalog bytes (red failures retained; 12 capture tests pass including 13 legal mutations, links and bounded wide-directory scan).
 - [ ] 2.2 Align exact-release installation/scaffolding docs and test no-UI/plain-HTML behavior, operator approval, dependency paths and legal retention; keep app domain code/SDKs unchanged.
 
 ## 3. Verification
