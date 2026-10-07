@@ -6,7 +6,10 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
     response::Response,
 };
-use std::{collections::BTreeSet, time::{Duration, Instant}};
+use std::{
+    collections::BTreeSet,
+    time::{Duration, Instant},
+};
 use std::{
     pin::Pin,
     task::{Context as TaskContext, Poll},
@@ -281,13 +284,18 @@ fn has_new_image_origins(document: &BTreeSet<String>, rendered: &[String]) -> bo
 }
 
 fn image_refresh_notice(needs_refresh: bool, page_url: &str) -> String {
-    html! {
-        div id="day2-live-status" role="status" aria-live="polite" {
-            @if needs_refresh {
-                "Some new images need a page refresh to load. Your draft is unchanged. "
-                a href=(page_url) { "Refresh page" }
-            }
+    // Keep branching in ordinary Rust so the bounded canonical Maud grammar
+    // can distinguish static attribute names from all evaluated expressions.
+    let content = if needs_refresh {
+        ::maud::html! {
+            "Some new images need a page refresh to load. Your draft is unchanged. "
+            a href=(page_url) { "Refresh page" }
         }
+    } else {
+        ::maud::html! {}
+    };
+    ::maud::html! {
+        div id="day2-live-status" role="status" aria-live="polite" { (content) }
     }
     .into_string()
 }
