@@ -26,8 +26,9 @@ Host :: [].{
 			values : List(Str)
 			values = Json.parse(decoded.input).map_err(|_| "invalid workflow arguments")?
 			values.first() == Ok("local-dev")
-				or (values.first() == Ok("authority") and values.drop_first(1).first() == Ok("admin"))
-					or values.first() == Ok("maintain")
+				or values.first() == Ok("app-create")
+					or (values.first() == Ok("authority") and values.drop_first(1).first() == Ok("admin"))
+						or values.first() == Ok("maintain")
 		} else Bool.False
 		if streaming {
 			# The host has already written its own error to the terminal.

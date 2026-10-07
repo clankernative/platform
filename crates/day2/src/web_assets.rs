@@ -134,6 +134,15 @@ impl Appearance {
             .then(|| self.resource_url(runtime, "app.js"))
             .transpose()
     }
+    /// Only a digest-checked package adapter can select automatic UI entries.
+    /// The generic loader imports admitted modules; it owns no component behavior.
+    pub fn component_script_url(&self, runtime: &Runtime) -> Result<Option<String>> {
+        let contract = runtime.artifact().contract();
+        (contract.sources.contains_key("ui-adapter/executable")
+            && contract.web_resources.contains_key("ui-package.js"))
+        .then(|| self.resource_url(runtime, "ui-package.js"))
+        .transpose()
+    }
     pub fn image(&self, runtime: &Runtime, key: &str, alt: &str, icon: bool) -> Result<Markup> {
         let asset = runtime
             .artifact()

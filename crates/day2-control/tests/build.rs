@@ -583,25 +583,54 @@ fn real_isolated_owned_links_build_produces_bound_evidence_and_recovers_receipt(
         &path("DAY2_TEST_BUILD_RUST")?,
         &path("DAY2_TEST_BUILD_REGISTRY")?,
     )?;
+    // Optional inputs keep this the same real recipe smoke, not a separate UI workflow.
+    let runner = if let Some(provider_pin) = std::env::var_os("DAY2_TEST_BUILD_UI_PROVIDER_PIN") {
+        runner.with_ui_assembly(&day2_capabilities::UiAssemblyProvider {
+            provider_pin: PathBuf::from(provider_pin).display().to_string(),
+            package_root: path("DAY2_TEST_BUILD_UI_PACKAGE_ROOT")?
+                .display()
+                .to_string(),
+            package_key: name("clanker-vanilla"),
+        })?
+    } else {
+        anyhow::ensure!(
+            std::env::var_os("DAY2_TEST_BUILD_UI_PACKAGE_ROOT").is_none(),
+            "a UI package requires an explicitly approved provider pin"
+        );
+        runner
+    };
     let platform = PlatformInputs::capture(&root, &root.join("../.toolchains"))?;
-    let source_tree = PinnedTree::capture(&root.join("fixtures/row-authority-web-conformance"))?;
+    let external_source = std::env::var_os("DAY2_TEST_BUILD_APP");
+    let source_root = external_source
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join("fixtures/row-authority-web-conformance"));
+    let source_commit = if external_source.is_some() {
+        GitOid::try_from(
+            std::env::var("DAY2_TEST_BUILD_APP_COMMIT")
+                .context("external app source needs its exact commit")?,
+        )?
+    } else {
+        commit('a')
+    };
+    // External sources must be a source export without repository metadata or private state.
+    let source_tree = PinnedTree::capture(&source_root)?;
     let source = SourceSnapshot::from_files(
-        commit('a'),
+        source_commit.clone(),
         source_tree
             .files()
             .keys()
-            .map(|name| {
-                Ok((
-                    name.clone(),
-                    fs::read(
-                        root.join("fixtures/row-authority-web-conformance")
-                            .join(name),
-                    )?,
-                ))
-            })
+            .map(|name| Ok((name.clone(), fs::read(source_root.join(name))?)))
             .collect::<Result<_>>()?,
     )?;
     let mut request = request(&runner, &platform)?;
+    request.plan.commit = source_commit;
+    if external_source.is_some() {
+        request.plan.app = Name::try_from(
+            std::env::var("DAY2_TEST_BUILD_APP_NAME")
+                .context("external app source needs its app name")?,
+        )?;
+    }
     request.source = source;
     let directory = EvidenceDirectory::new()?;
     let evidence = runner.execute(&request, &platform, directory.path())?;

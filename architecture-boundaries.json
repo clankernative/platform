@@ -455,6 +455,16 @@
           "local_path": null
         },
         {
+          "name": "unicode-segmentation",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
           "name": "url",
           "kind": "normal",
           "target": null,
@@ -1034,6 +1044,7 @@
           "target": null,
           "rename": null,
           "features": [
+            "fs",
             "process"
           ],
           "default_features": true,

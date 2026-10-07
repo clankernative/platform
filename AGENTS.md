@@ -36,6 +36,13 @@ Use docs/APP-LAYOUT.md for all applications, conformance apps and future app
 creation workflows. Reports is the canonical example. Each command and query owns its complete definition, contract and verification in its module;
 App.definition registers it once. Source overlays mirror the canonical paths.
 Do not introduce a global descriptions/checks inventory or a second app catalog.
+Optional first-party creation is `day2 platform app-create`, composed by
+ops/AppCreate.roc. UI-free and ordinary HTML remain first-class; Clanker uses an
+explicitly execution-approved installed vanilla bundle. Keep its locked package
+outside ui/ under .ui-dependencies/, captured only by the generic assembly port.
+No downloads, app-owned executable approval or unfinished checks belong in the
+scaffold. Preserve atomic fresh-directory publication and source revalidation;
+see docs/APP-CREATE.md.
 
 Require app-owned properties, evaluate complete consistent bounded snapshots,
 and persist failed checks for artifact-bound replay. Never silently truncate
@@ -97,9 +104,40 @@ code. No npm, package installation or app build scripts. Admit executable
 resources and their complete import graph; pin and verify all served bytes.
 Dependency admission is supply-chain governance, not a sandbox for app JS.
 
+Keep `xtask app-contracts` provider-neutral: project admitted typed operation,
+route, form and schedule contracts, not component-library or presentation guesses.
+Export every registered query, including API-only queries, deterministically under
+explicit byte budgets. Preserve normal artifact admission checks; exporter access
+never grants execution authority. CLI output must publish private temporary bytes
+atomically at the canonical destination, never truncate an existing/hardlinked inode.
+Use no-clobber publication for initially absent outputs; replace only the explicitly
+checked regular output. Output parents are operator-owned with no concurrent
+namespace mutation, not a hostile-directory sandbox. Local-dev exports are private atomic files;
+status must bind success to the served artifact and file digest or report an error
+without advertising stale output. Test failure paths in disposable private state,
+never by mutating shared admitted artifacts or full-gate fixtures. Generic binding
+ABI fixtures are versioned, identical producer/host inputs under `crates/day2/tests/protocol/`;
+review and pin exact bytes and run them independently, without deriving expected
+results from either implementation or weakening host semantics to match a producer.
+Generic `ui_key` admits only known scalar identity fields, including checked nominal
+`Ref(Model)` fields; never fabricate a string ID or infer a model from its spelling.
+Normal registry-bound prefix/UUIDv7 output validation precedes rendering. Generic
+key syntax is not nominal validity, row existence, authorization or DOM uniqueness.
+
 Generate Assets.roc from admitted images; normalize/rasterize untrusted sources
 and scope serving by installation/app/artifact. Escape dynamic HTML text and
 attributes; bind HTML form names to generated Roc command/input contracts.
 Company branding is an independent content-addressed instance input, not a
 global platform constant or a reason to rebuild the app. Never infer domain
 intent or presentation from form shape. The Roc business core remains pure.
+
+UI producers are optional build adapters, never runtime SDKs. The app-owned
+ui/ui.lock.json is the sole schema-1 provider/package manifest; legacy flat locks
+are unsupported. A lock pins data, not executable authority. Explicit dependency
+restore may acquire reviewed exact-version release bytes before a build; it must
+not choose latest, fetch during compilation or require a sibling source checkout.
+Keep the host binding ABI implementation independent of the producer and test the
+identical versioned vectors in crates/day2/tests/protocol/. Producer package
+verification, static preview, native admission and browser acceptance are distinct
+gates. Architecture drawings under docs/architecture/ui-toolchain/ record intent,
+not production qualification or a CI/deployment topology decision.

@@ -2,6 +2,7 @@ package
 	[
 		Workflow,
 		LocalDev,
+		AppCreate,
 		Build,
 		Delegation,
 		Check,

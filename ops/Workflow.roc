@@ -3,6 +3,7 @@
 import Build
 import Check
 import LocalDev
+import AppCreate
 import Backup
 import Infra
 import Authority
@@ -15,6 +16,7 @@ Workflow :: [].{
 		Build(Str),
 		Check(Str, U64, U64),
 		LocalDev(List(Str)),
+		AppCreate(List(Str)),
 		Backup(Str, Str, Str),
 		Restore(Str, Str),
 		Infra(Str, Str),
@@ -45,6 +47,7 @@ Workflow :: [].{
 			Ok(Check(source, checked_seed, checked_count))
 		}
 		["local-dev", .. as local_args] => Ok(LocalDev(local_args))
+		["app-create", .. as create_args] => Ok(AppCreate(create_args))
 		["maintain", "inspect", request_file] => Ok(Maintain("inspect", request_file))
 		["maintain", "backup", request_file] => Ok(Maintain("backup", request_file))
 		["maintain", "authority-apply", request_file] => Ok(Maintain("authority-apply", request_file))
@@ -93,7 +96,7 @@ Workflow :: [].{
 			Ok(AuthorityActivate(instance, app_name, target, operator, expected, request_id))
 		}
 		_ => Err(
-			"usage: day2 platform build SOURCE | check SOURCE [SEED CASES] | local-dev [SOURCE] [OPTIONS] | backup INSTANCE APP NEW_DIRECTORY | restore BACKUP NEW_DIRECTORY | infra plan CONFIG NEW_DIRECTORY | maintain inspect|backup|authority-apply|activate REQUEST_JSON_FILE",
+			"usage: day2 platform app-create NEW_DIRECTORY NAME [OPTIONS] | build SOURCE | check SOURCE [SEED CASES] | local-dev [SOURCE] [OPTIONS] | backup INSTANCE APP NEW_DIRECTORY | restore BACKUP NEW_DIRECTORY | infra plan CONFIG NEW_DIRECTORY | maintain inspect|backup|authority-apply|activate REQUEST_JSON_FILE",
 		)
 	}
 
@@ -106,6 +109,7 @@ Workflow :: [].{
 					"build SOURCE",
 					"check SOURCE [SEED CASES]",
 					"local-dev [SOURCE] [OPTIONS]",
+					"app-create NEW_DIRECTORY NAME [--ui none|html|clanker] [--bundle DIRECTORY --bundle-sha256 SHA256]",
 					"backup INSTANCE APP NEW_DIRECTORY",
 					"restore BACKUP NEW_DIRECTORY",
 					"infra plan CONFIG NEW_DIRECTORY",
@@ -126,6 +130,7 @@ Workflow :: [].{
 		}
 		Check(source, seed, count) => Check.run!(source, seed, count, host!)
 		LocalDev(args) => LocalDev.run!(args, host!)
+		AppCreate(args) => AppCreate.run!(args, host!)
 		Backup(instance, app_name, output) => Backup.take!(instance, app_name, output, host!)
 		Restore(backup, output) => Backup.restore!(backup, output, host!)
 		Infra(configuration, output) => Infra.run!(configuration, output, host!)

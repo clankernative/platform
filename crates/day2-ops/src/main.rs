@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 use anyhow::{Context, Result, ensure};
-use day2_ops::{backup, infra, local_dev, maintenance, process, projection};
+use day2_ops::{app_create, backup, infra, local_dev, maintenance, process, projection};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::{
@@ -40,6 +40,7 @@ struct Operations {
     infrastructure: Option<infra::Session>,
     local: Option<local_dev::Session>,
     maintenance: Option<maintenance::Session>,
+    creation: Option<app_create::Session>,
 }
 
 impl Operations {
@@ -83,6 +84,58 @@ impl Operations {
                 .effect(day2::json::decode(&raw)?);
         }
         match request.action.as_str() {
+            "app-create-answer" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Input {
+                    question: String,
+                }
+                app_create::prompt_answer(&input::<Input>(&request)?.question)
+            }
+            "app-create-begin" => {
+                ensure!(self.creation.is_none(), "one creation per workflow");
+                let session = app_create::Session::begin(input(&request)?)?;
+                let receipt = json!({"source":session.source});
+                self.creation = Some(session);
+                Ok(receipt)
+            }
+            "app-create-write" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Input {
+                    files: Vec<app_create::SourceFile>,
+                }
+                self.creation
+                    .as_mut()
+                    .context("app creation required")?
+                    .write_files(input::<Input>(&request)?.files)?;
+                Ok(json!({}))
+            }
+            "app-create-identity" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Input {
+                    table: String,
+                    roc_type: String,
+                }
+                let parameters: Input = input(&request)?;
+                self.creation
+                    .as_mut()
+                    .context("app creation required")?
+                    .identity(&parameters.table, &parameters.roc_type)?;
+                Ok(json!({}))
+            }
+            "app-create-publish" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Input {
+                    artifact: PathBuf,
+                }
+                self.creation
+                    .as_mut()
+                    .context("app creation required")?
+                    .publish(&input::<Input>(&request)?.artifact)
+            }
             "credential-provision-inputs" => {
                 #[derive(Deserialize)]
                 #[serde(deny_unknown_fields)]
@@ -355,6 +408,15 @@ impl Operations {
                     .arg("build-receipt")
                     .arg(parameters.source.canonicalize()?)
                     .arg(&receipt);
+                if let Some(creation) = self.creation.as_mut() {
+                    creation.check_build_source(&parameters.source)?;
+                    // An approved captured bundle is the only UI executable authority
+                    // in this recipe. Ordinary HTML/UI-free builds have no provider.
+                    builder.env_remove("DAY2_UI_PROVIDER_PIN_JSON");
+                    if let Some(pin) = &creation.provider_pin {
+                        builder.env("DAY2_UI_PROVIDER_PIN_JSON", pin);
+                    }
+                }
                 // Required application verification scales with the operation and
                 // obligation count, not with source size. A 26-operation app such as
                 // People Ops exceeds ten minutes on a developer machine while still
@@ -372,7 +434,15 @@ impl Operations {
                 } else {
                     process::run(&mut builder, &root, &output.join("build.log"), deadline)?;
                 }
-                Ok(serde_json::from_slice(&fs::read(receipt)?)?)
+                let result: Value = serde_json::from_slice(&fs::read(receipt)?)?;
+                if let Some(creation) = self.creation.as_mut() {
+                    creation.built(Path::new(
+                        result["artifact"]
+                            .as_str()
+                            .context("build artifact receipt")?,
+                    ))?;
+                }
+                Ok(result)
             }
             "dev-create" => {
                 #[derive(Deserialize)]
@@ -595,6 +665,7 @@ fn run(request: Request) -> Result<Value> {
         infrastructure: None,
         local: None,
         maintenance: None,
+        creation: None,
     };
     if !["workflow", "local-session"].contains(&request.action.as_str()) {
         ensure!(
@@ -624,7 +695,8 @@ fn run(request: Request) -> Result<Value> {
         || arguments.get(1).is_some_and(|arg| arg == "authority")
             && arguments.get(2).is_some_and(|arg| arg == "admin")
         // Maintenance reports progress and waits for the operator's confirmation.
-        || arguments.get(1).is_some_and(|arg| arg == "maintain");
+        || arguments.get(1).is_some_and(|arg| arg == "maintain")
+        || arguments.get(1).is_some_and(|arg| arg == "app-create");
     let args: Vec<_> = arguments.iter().map(String::as_str).collect();
     let runner = day2::automation::checked_runner(
         &std::env::current_exe()?.with_file_name("day2-workflows"),
@@ -668,7 +740,8 @@ fn main() {
             streaming = args.first().is_some_and(|value| value == "local-dev")
                 || args.first().is_some_and(|value| value == "authority")
                     && args.get(1).is_some_and(|value| value == "admin")
-                || args.first().is_some_and(|value| value == "maintain");
+                || args.first().is_some_and(|value| value == "maintain")
+                || args.first().is_some_and(|value| value == "app-create");
         }
         run(request)
     })();

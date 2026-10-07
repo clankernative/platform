@@ -21,7 +21,14 @@ needed. The platform supplies the development identity (`developer` by default).
 The foreground session watches Roc modules, UI files and assets. After a successful
 build it pauses requests and command execution, checkpoints the database, applies an admitted
 migration to a candidate copy, checks app properties, and serves that candidate on
-the same port. Refresh the browser to see the change. Compiler failures keep the
+the same port. Each successfully served build also writes `app-contracts.json` into
+the session directory. `--status` reports its path, served artifact digest and file
+SHA-256. The export is atomically replaced with mode `0600`; stale output is
+removed before attempting export. On failure, status contains only the served
+`artifact` and `error` (no successful `path` or `sha256`) without stopping the app.
+If stale cleanup fails, a remaining file is not current: consumers must use status
+and match its artifact/digest, not infer success from file existence. Refresh the
+browser to see the change. Compiler failures keep the
 working server available. Migration/property failures return to the previous
 instance. Destructive schema changes require an explicit reset or migration work;
 they do not silently discard local data. Checkpoint restore clears authentication

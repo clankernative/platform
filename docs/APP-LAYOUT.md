@@ -26,9 +26,20 @@ pages/Routes.roc                     # typed routes and template bindings
 pages/Redirects.roc                  # optional redirect routes bound to commands
 ui/pages/                           # HTML templates
 ui/app.css                          # presentation resources
+.ui-dependencies/vanilla/            # optional explicitly locked build-only package
 assets/                             # admitted images
 model-identities.json                # committed identity history
+.clanker/                            # optional design-tool data; never captured
 ```
+
+The build captures only app sources. Version-control metadata (`.git`,
+`.gitignore`, `.gitattributes`), Markdown outside `ui/` and `assets/`, and a
+root-level `.clanker/` and `.ui-dependencies/` directories are skipped.
+The latter holds build-only packages; the optional UI assembly capability captures
+only the closure explicitly named by `ui/ui.lock.json`, not its entire directory. `.clanker/` holds design-tool data,
+such as Clanker Studio fake-data scenes and canvas layout, that is committed with
+the app but never compiled, served or admitted. Any other unrecognized file,
+including a `.clanker/` below the app root, fails the build.
 
 Each operation has its own folder. The main module keeps its handler, contract,
 typed example and verification together; an adjacent `SubmitReportTypes.roc`
@@ -197,19 +208,28 @@ authority change during the call fails the read closed, even when the old
 artifact still exports the pinned contract. Simulated build verification uses
 its recorded world and does not consult a live release journal.
 
-## Future app creation
+## Optional app creation
 
-The platform's future app-creation workflow must initialize this layout and a complete
-`App.definition`. Use the canonical Reports modules as the authoring reference,
-not a fixture as a production dependency. Scaffold operation-specific request
-types, definitions, contract fields, examples and verification in the operation's folder;
-register each complete definition once. Register model identities through the
-existing identity authoring capability. Add pages, internal commands and demos only when used.
+`day2 platform app-create NEW_DIRECTORY NAME --ui none|html|clanker` executes
+`ops/AppCreate.roc`, initializes this layout and a complete `App.definition`,
+and runs the ordinary build and mandatory verification before atomic fresh-directory
+publication. Existing apps do not need scaffolding. [App creation](APP-CREATE.md)
+documents prompts, explicit installed-bundle execution approval and rollback.
 
-Scaffolding belongs in the platform's Roc operational workflow and must invoke
-the same ordinary build and required verification. A placeholder description or
-unfinished check must not gain a bypass. There is no app-creation workflow yet; this
-is its required output convention, not an additional runtime manifest.
+The starter's pure welcome query owns its request type, full contract, typed example
+and independent check. Current admission requires a nominal persistent model and
+model property, so the ownership-only `StarterRecord` is explicitly educational,
+not an inferred business domain. Replace it through the normal identity authoring
+operations and commit its identity history. Generated app and UI `AGENTS.md` explain
+these obligations; no fixture or mutable sibling app is copied as production input.
+
+UI-free and plain HTML remain first-class. Clanker is optional, defaults to the
+approved bundle's actual `@clanker/vanilla` package, and adds a supported declaration,
+app-owned theme and unchanged schema-1 lock. Its captured local package under
+`.ui-dependencies/vanilla/` is build-only input outside `ui/`, never served raw.
+Existing assembly captures the locked closure; no new resource-serving exception
+is introduced and runtime components remain uncoupled. No placeholder verification, second app catalog, arbitrary build script,
+network grant or silently selected release checksum is introduced.
 
 ## Connection intent
 
