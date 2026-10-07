@@ -2570,7 +2570,7 @@ mod tests {
             "DROP INDEX day2_credential_visible_creator; CREATE INDEX DAY2_CREDENTIAL_VISIBLE_CREATOR ON day2_credential_lineages(namespace,family,creator,id)",
             "CREATE INDEX unrelated_index ON day2_credential_lineages(label)",
             "CREATE TRIGGER unrelated_trigger AFTER INSERT ON day2_credential_reveals BEGIN SELECT 1; END",
-            "CREATE TRIGGER DAY2_CREDENTIAL_REVEALS_SHAPE_INSERT_V2 AFTER INSERT ON day2_credential_reveals BEGIN SELECT 1; END",
+            "DROP TRIGGER day2_credential_reveals_shape_INSERT_v2; CREATE TRIGGER DAY2_CREDENTIAL_REVEALS_SHAPE_INSERT_V2 AFTER INSERT ON day2_credential_reveals BEGIN SELECT 1; END",
         ] {
             let db = current_database()?;
             db.execute_batch(imported)?;
