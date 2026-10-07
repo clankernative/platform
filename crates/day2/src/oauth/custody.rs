@@ -748,8 +748,7 @@ fn install_schema_in(db: &Connection) -> Result<()> {
             identity_nonce BLOB NOT NULL,
             identity_ciphertext BLOB NOT NULL
         );";
-    db.execute_batch(ddl)?;
-    super::schema::upgrade(db, "oauth_custody_schema_version", &[1, 2, 3], 3, ddl, &[
+    super::schema::install_current(db, "oauth_custody_schema_version", 3, ddl, &[
         super::schema::Invariant { table: "oauth_private_verifiers", predicate:
             "length(reference) > 0 AND length(attempt) > 0 AND length(identity_digest) > 0 AND length(key_version) > 0 AND
              typeof(nonce) = 'blob' AND length(nonce) = 12 AND typeof(ciphertext) = 'blob' AND length(ciphertext) BETWEEN 16 AND 32784" },
@@ -774,22 +773,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn custody_schema_adds_quarantine_to_existing_version_and_rejects_unknown() {
-        let db = Connection::open_in_memory().unwrap();
-        super::super::connect::install_schema(&db).unwrap();
-        db.execute("UPDATE oauth_custody_schema_version SET version = 1", [])
-            .unwrap();
-        super::super::connect::install_schema(&db).unwrap();
-        let version: i64 = db
-            .query_row(
-                "SELECT version FROM oauth_custody_schema_version",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(version, 3);
-        db.execute("UPDATE oauth_custody_schema_version SET version = 99", [])
-            .unwrap();
-        assert!(super::super::connect::install_schema(&db).is_err());
+    fn custody_schema_reopens_current_and_refuses_other_versions() {
+        for version in [1, 2, 99] {
+            let db = Connection::open_in_memory().unwrap();
+            super::super::connect::install_schema(&db).unwrap();
+            super::super::connect::install_schema(&db).unwrap();
+            db.execute("UPDATE oauth_custody_schema_version SET version=?1", [version]).unwrap();
+            assert!(super::super::connect::install_schema(&db).is_err());
+            assert_eq!(db.query_row("SELECT version FROM oauth_custody_schema_version", [], |row| row.get::<_, i64>(0)).unwrap(), version);
+        }
     }
 }

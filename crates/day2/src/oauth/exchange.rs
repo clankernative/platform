@@ -177,11 +177,9 @@ fn install_schema_in(db: &Connection) -> Result<()> {
             attempt TEXT PRIMARY KEY REFERENCES oauth_connect_attempts(attempt),
             binding TEXT NOT NULL
         );";
-    db.execute_batch(ddl)?;
-    super::schema::upgrade(
+    super::schema::install_current(
         db,
         "oauth_exchange_schema_version",
-        &[1, 2],
         2,
         ddl,
         &[super::schema::Invariant {

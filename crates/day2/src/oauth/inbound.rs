@@ -143,8 +143,7 @@ fn install_schema_in(db: &Connection) -> Result<()> {
             roots TEXT NOT NULL,
             expires_at INTEGER NOT NULL
         );";
-    db.execute_batch(ddl)?;
-    super::schema::upgrade(db, "oauth_inbound_schema_version", &[1, 2], 2, ddl, &[
+    super::schema::install_current(db, "oauth_inbound_schema_version", 2, ddl, &[
         super::schema::Invariant { table: "oauth_inbound_grants", predicate:
             "length(id) > 0 AND length(ceiling) > 0 AND length(digest) > 0 AND epoch > 0 AND status IN ('active', 'revoked')" },
         super::schema::Invariant { table: "oauth_inbound_codes", predicate:

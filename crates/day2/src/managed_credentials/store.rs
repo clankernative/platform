@@ -137,7 +137,6 @@ fn install_schema_in(db: &Connection) -> Result<()> {
     let predicates = credential_predicates();
     let mut fresh = true;
     let mut peers = Vec::new();
-    let mut has_guards = false;
     // SQLite resolves identifiers without ASCII case distinctions. Debit raw
     // metadata before inspecting imported operands, then require the exact
     // canonical object identity supplied by the owning installers. This same
@@ -174,7 +173,6 @@ fn install_schema_in(db: &Connection) -> Result<()> {
             canonical || guard,
             "unsupported credential schema object {name}"
         );
-        has_guards |= guard;
         if kind == "table"
             && let Some(peer) = CREDENTIAL_PEER_TABLES.iter().find(|peer| **peer == name)
         {
@@ -183,49 +181,40 @@ fn install_schema_in(db: &Connection) -> Result<()> {
     }
     drop(rows);
     drop(statement);
-    if fresh {
-        db.execute_batch(CREDENTIAL_DDL)?;
+    ensure!(
+        peers.is_empty() || peers.len() == CREDENTIAL_PEER_TABLES.len(),
+        "incomplete credential peer schema unit"
+    );
+    if !fresh {
+        let mut statement = db.prepare("SELECT version FROM day2_credential_schema_version")?;
+        let mut rows = statement.query([])?;
+        let mut version = None;
+        while let Some(row) = rows.next()? {
+            schema::materialize(row)?;
+            ensure!(version.is_none(), "unsupported credential schema version");
+            version = Some(row.get::<_, i64>(0)?);
+        }
+        ensure!(version == Some(2), "unsupported credential schema version");
     }
+    let invariants: Vec<_> = predicates
+        .iter()
+        .map(|(table, predicate)| schema::Invariant { table, predicate })
+        .collect();
+    schema::install_current(
+        db,
+        "day2_credential_schema_version",
+        2,
+        CREDENTIAL_DDL,
+        &invariants,
+    )?;
     for table in CREDENTIAL_TABLES {
         schema::exact_layout(db, &expected, table)?;
     }
     for &table in &peers {
         schema::exact_layout(db, &expected, table)?;
     }
-    let mut statement = db.prepare("SELECT version FROM day2_credential_schema_version")?;
-    let mut rows = statement.query([])?;
-    let mut version = None;
-    while let Some(row) = rows.next()? {
-        schema::materialize(row)?;
-        ensure!(version.is_none(), "unsupported credential schema version");
-        version = Some(row.get::<_, i64>(0)?);
-    }
-    drop(rows);
-    drop(statement);
-    ensure!(
-        (fresh && version.is_none()) || matches!(version, Some(1 | 2)),
-        "unsupported credential schema version"
-    );
-    ensure!(
-        !has_guards || version == Some(2),
-        "unsupported credential schema guards"
-    );
     validate_credential_rows(db)?;
-    validate_credential_peers(db, &peers)?;
-    let invariants: Vec<_> = predicates
-        .iter()
-        .map(|(table, predicate)| schema::Invariant { table, predicate })
-        .collect();
-    // Reuse OAuth's same bounded shape/type/guard installer. The predicates are
-    // owned only for this call, so do not require static predicate lifetimes.
-    schema::upgrade(
-        db,
-        "day2_credential_schema_version",
-        &[1, 2],
-        2,
-        CREDENTIAL_DDL,
-        &invariants,
-    )
+    validate_credential_peers(db, &peers)
 }
 
 fn validate_credential_peers(db: &Connection, peers: &[&str]) -> Result<()> {
@@ -2006,75 +1995,71 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use tempfile::TempDir;
 
-    // Frozen v1 installer layout, independent of the current installer. Its
-    // STRICT/CHECK/index/FK declarations are part of the supported upgrade.
-    const LEGACY_CREDENTIAL_V1: &str = "
-        PRAGMA foreign_keys=ON;
-        CREATE TABLE day2_credential_schema_version(version INTEGER PRIMARY KEY) STRICT;
-        INSERT INTO day2_credential_schema_version VALUES(1);
-        CREATE TABLE day2_credential_lineages(
-            id TEXT PRIMARY KEY, namespace TEXT NOT NULL, namespace_json TEXT NOT NULL,
-            family TEXT NOT NULL, family_contract TEXT NOT NULL, principal TEXT NOT NULL,
-            creator TEXT NOT NULL, label TEXT NOT NULL CHECK(length(label) BETWEEN 1 AND 128),
-            recipient TEXT NOT NULL, session TEXT NOT NULL, grant_json TEXT NOT NULL,
-            grant_digest TEXT NOT NULL, grant_valid_until INTEGER NOT NULL,
-            security_epoch INTEGER NOT NULL CHECK(security_epoch > 0),
-            state TEXT NOT NULL CHECK(state IN ('active', 'revoked')),
-            head TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision > 0)) STRICT;
-        CREATE TABLE day2_credential_versions(
-            id TEXT PRIMARY KEY, lineage TEXT NOT NULL REFERENCES day2_credential_lineages(id),
-            predecessor TEXT UNIQUE REFERENCES day2_credential_versions(id),
-            selector TEXT NOT NULL UNIQUE, verifier BLOB NOT NULL CHECK(length(verifier) = 32),
-            verifier_key_version TEXT NOT NULL, issued_at INTEGER NOT NULL,
-            expires_at INTEGER NOT NULL CHECK(expires_at > issued_at),
-            security_epoch INTEGER NOT NULL CHECK(security_epoch > 0), grant_digest TEXT NOT NULL,
-            state TEXT NOT NULL CHECK(state IN ('active', 'superseded', 'revoked'))) STRICT;
-        CREATE TABLE day2_credential_material(
-            version TEXT PRIMARY KEY REFERENCES day2_credential_versions(id), identity_json TEXT NOT NULL,
-            material_revision INTEGER NOT NULL CHECK(material_revision > 0),
-            envelope_revision INTEGER NOT NULL CHECK(envelope_revision > 0), encryption_key_version TEXT NOT NULL,
-            nonce BLOB NOT NULL CHECK(length(nonce) = 12), ciphertext BLOB NOT NULL CHECK(length(ciphertext) BETWEEN 32 AND 512)) STRICT;
-        CREATE TABLE day2_credential_deliveries(
-            version TEXT PRIMARY KEY REFERENCES day2_credential_versions(id), recipient TEXT NOT NULL,
-            session TEXT NOT NULL, expires_at INTEGER NOT NULL,
-            state TEXT NOT NULL CHECK(state IN ('available', 'closed')), closed_reason TEXT NOT NULL DEFAULT '') STRICT;
-        CREATE TABLE day2_credential_receipts(
-            namespace TEXT NOT NULL, invocation TEXT NOT NULL,
-            instruction_slot INTEGER NOT NULL CHECK(instruction_slot >= 0), family_contract TEXT NOT NULL,
-            request_digest TEXT NOT NULL, action TEXT NOT NULL CHECK(action IN ('issue', 'rotate', 'revoke')),
-            lineage TEXT NOT NULL REFERENCES day2_credential_lineages(id), version TEXT REFERENCES day2_credential_versions(id),
-            PRIMARY KEY(namespace, invocation, instruction_slot)) STRICT;
-        CREATE TABLE day2_credential_revocations(
-            namespace TEXT NOT NULL, invocation TEXT NOT NULL, instruction_slot INTEGER NOT NULL,
-            request_digest TEXT NOT NULL, outcome TEXT NOT NULL,
-            PRIMARY KEY(namespace, invocation, instruction_slot),
-            FOREIGN KEY(namespace, invocation, instruction_slot)
-                REFERENCES day2_credential_receipts(namespace, invocation, instruction_slot)) STRICT;
-        CREATE TABLE day2_credential_reveals(
-            attempt TEXT PRIMARY KEY, version TEXT NOT NULL REFERENCES day2_credential_versions(id),
-            recipient TEXT NOT NULL, session TEXT NOT NULL, authorized_at INTEGER NOT NULL) STRICT;
-        CREATE INDEX day2_credential_visible_creator ON day2_credential_lineages(namespace, family, creator, id);
-        CREATE INDEX day2_credential_visible_principal ON day2_credential_lineages(namespace, family, principal, id);";
-
-    fn legacy_database() -> Result<Connection> {
+    fn current_database() -> Result<Connection> {
         let db = Connection::open_in_memory()?;
-        db.execute_batch(LEGACY_CREDENTIAL_V1)?;
+        install_schema(&db)?;
         Ok(db)
     }
 
+    type SchemaObject = (String, String, String, Option<String>);
+    type TableRows = (String, Vec<Vec<rusqlite::types::Value>>);
+
+    #[derive(Debug, PartialEq)]
+    struct DatabaseSnapshot {
+        objects: Vec<SchemaObject>,
+        tables: Vec<TableRows>,
+    }
+
+    fn database_snapshot(db: &Connection) -> Result<DatabaseSnapshot> {
+        let objects = db.prepare("SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name")?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
+            .collect::<rusqlite::Result<Vec<SchemaObject>>>()?;
+        let mut tables = Vec::new();
+        for (kind, name, _, _) in &objects {
+            if kind != "table" { continue; }
+            let quoted = name.replace('"', "\"\"");
+            let mut statement = db.prepare(&format!("SELECT * FROM \"{quoted}\" ORDER BY rowid"))?;
+            let count = statement.column_count();
+            let values = statement.query_map([], |row| (0..count).map(|index| row.get(index)).collect::<rusqlite::Result<Vec<rusqlite::types::Value>>>())?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            tables.push((name.clone(), values));
+        }
+        Ok(DatabaseSnapshot { objects, tables })
+    }
+
+    // Model a corrupted restored snapshot with the complete current guard
+    // catalog intact. This fixture-only mutation is never an installer repair.
+    fn corrupt_current_snapshot(db: &Connection, sql: &str) -> Result<()> {
+        let guards = db.prepare("SELECT name,sql FROM sqlite_master WHERE type='trigger'")?
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        db.execute_batch("PRAGMA foreign_keys=OFF; PRAGMA ignore_check_constraints=ON")?;
+        for (name, _) in &guards {
+            db.execute_batch(&format!("DROP TRIGGER {name}"))?;
+        }
+        db.execute_batch(sql)?;
+        for (_, guard) in guards {
+            db.execute_batch(&guard)?;
+        }
+        db.execute_batch("PRAGMA ignore_check_constraints=OFF; PRAGMA foreign_keys=ON")?;
+        Ok(())
+    }
+
     #[test]
-    fn schema_v1_upgrade_preserves_valid_issue_history_and_reopens() -> Result<()> {
+    fn schema_current_issue_history_reopens_without_mutation() -> Result<()> {
         let directory = tempfile::tempdir()?;
-        let path = directory.path().join("legacy.sqlite");
+        let path = directory.path().join("current.sqlite");
         let mut db = Connection::open(&path)?;
-        db.execute_batch(LEGACY_CREDENTIAL_V1)?;
+        install_schema(&db)?;
         let receipt = committed_issue(&mut db)?;
         let before: (String, Vec<u8>) = db.query_row(
             "SELECT identity_json,ciphertext FROM day2_credential_material",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
+        let current = database_snapshot(&db)?;
         install_schema(&db)?;
+        assert_eq!(database_snapshot(&db)?, current);
         assert_eq!(
             db.query_row(
                 "SELECT version FROM day2_credential_schema_version",
@@ -2109,37 +2094,57 @@ mod tests {
 
     #[test]
     fn schema_rejects_forged_versions_layouts_indexes_fks_and_guards() -> Result<()> {
-        for altered in [
-            LEGACY_CREDENTIAL_V1.replace("VALUES(1)","VALUES(99)"),
-            LEGACY_CREDENTIAL_V1.replace("VALUES(1)","VALUES(2)"),
-            LEGACY_CREDENTIAL_V1.replace("version INTEGER PRIMARY KEY)","version INTEGER)"),
-            LEGACY_CREDENTIAL_V1.replace(" STRICT;",";"),
-            LEGACY_CREDENTIAL_V1.replace("CHECK(length(verifier) = 32)","CHECK(length(verifier) > 0)"),
-            LEGACY_CREDENTIAL_V1.replace("REFERENCES day2_credential_versions(id)",""),
-            LEGACY_CREDENTIAL_V1.replace("(namespace, family, creator, id)","(namespace, creator, family, id)"),
-            LEGACY_CREDENTIAL_V1.replace("ON day2_credential_lineages(namespace, family, principal, id)","ON day2_credential_lineages(namespace, family, principal, id) WHERE state='active'"),
-            format!("{LEGACY_CREDENTIAL_V1} CREATE INDEX hidden_credential_index ON day2_credential_material(identity_json);"),
-            format!("{LEGACY_CREDENTIAL_V1} CREATE TRIGGER injected AFTER INSERT ON day2_credential_versions BEGIN SELECT 1; END;"),
+        for (altered, refusal) in [
+            (CREDENTIAL_DDL.replace("version INTEGER PRIMARY KEY", "version INTEGER"), "table shape"),
+            (CREDENTIAL_DDL.replace(" STRICT;", ";"), "table constraints"),
+            (CREDENTIAL_DDL.replace("CHECK(length(verifier) = 32)", "CHECK(length(verifier) > 0)"), "table constraints"),
+            (CREDENTIAL_DDL.replace("REFERENCES day2_credential_versions(id)", ""), "table shape"),
+            (CREDENTIAL_DDL.replace("(namespace, family, creator, id)", "(namespace, creator, family, id)"), "index shape"),
+            (CREDENTIAL_DDL.replace("ON day2_credential_lineages(namespace, family, principal, id)", "ON day2_credential_lineages(namespace, family, principal, id) WHERE state='active'"), "index shape"),
+            (format!("{CREDENTIAL_DDL} CREATE INDEX hidden_credential_index ON day2_credential_material(identity_json);"), "schema object"),
+            (format!("{CREDENTIAL_DDL} CREATE TRIGGER injected AFTER INSERT ON day2_credential_versions BEGIN SELECT 1; END;"), "schema object"),
         ] {
-            let db=Connection::open_in_memory()?;
+            let db = Connection::open_in_memory()?;
             db.execute_batch(&altered)?;
-            assert!(install_schema(&db).is_err(),"{altered}");
-            assert_eq!(db.query_row("SELECT count(*) FROM sqlite_master WHERE name='day2_credential_lineages_shape_INSERT_v2'",[],|row| row.get::<_,i64>(0))?,0);
+            db.execute("INSERT INTO day2_credential_schema_version VALUES(2)", [])?;
+            let before = database_snapshot(&db)?;
+            let error = install_schema(&db).unwrap_err();
+            assert!(format!("{error:#}").contains(refusal), "{altered}: {error:#}");
+            assert_eq!(database_snapshot(&db)?, before);
         }
-        let db = legacy_database()?;
-        install_schema(&db)?;
-        db.execute_batch("DROP TRIGGER day2_credential_material_shape_UPDATE_v2")?;
-        assert!(install_schema(&db).is_err());
-        assert_eq!(db.query_row("SELECT count(*) FROM sqlite_master WHERE name='day2_credential_material_shape_UPDATE_v2'",[],|row| row.get::<_,i64>(0))?,0);
-        let db = legacy_database()?;
-        install_schema(&db)?;
-        db.execute_batch("DROP TRIGGER day2_credential_material_shape_UPDATE_v2; CREATE TRIGGER day2_credential_material_shape_UPDATE_v2 AFTER UPDATE ON day2_credential_material BEGIN SELECT 1; END")?;
-        assert!(install_schema(&db).is_err());
+        for (corrupt, refusal) in [
+            ("UPDATE day2_credential_schema_version SET version=1", "schema version"),
+            ("UPDATE day2_credential_schema_version SET version=99", "schema version"),
+            ("DELETE FROM day2_credential_schema_version", "schema version"),
+            ("INSERT INTO day2_credential_schema_version VALUES(1)", "schema version"),
+            ("DROP TRIGGER day2_credential_material_shape_UPDATE_v2", "invariant guard"),
+            ("DROP TRIGGER day2_credential_material_shape_UPDATE_v2; CREATE TRIGGER day2_credential_material_shape_UPDATE_v2 AFTER UPDATE ON day2_credential_material BEGIN SELECT 1; END", "invariant guard"),
+            ("DROP TABLE day2_credential_material", "table shape"),
+        ] {
+            let db = current_database()?;
+            db.execute_batch(corrupt)?;
+            let before = database_snapshot(&db)?;
+            let error = install_schema(&db).unwrap_err();
+            assert!(format!("{error:#}").contains(refusal), "{corrupt}: {error:#}");
+            assert_eq!(database_snapshot(&db)?, before);
+        }
+        for (partial, refusal) in [
+            ("CREATE TABLE day2_credential_schema_version(version INTEGER PRIMARY KEY) STRICT; INSERT INTO day2_credential_schema_version VALUES(2)".to_owned(), "table shape"),
+            (CREDENTIAL_DDL.to_owned(), "schema version"),
+            (format!("{CREDENTIAL_DDL} INSERT INTO day2_credential_schema_version VALUES(2)"), "invariant guard"),
+        ] {
+            let db = Connection::open_in_memory()?;
+            db.execute_batch(&partial)?;
+            let before = database_snapshot(&db)?;
+            let error = install_schema(&db).unwrap_err();
+            assert!(format!("{error:#}").contains(refusal), "{partial}: {error:#}");
+            assert_eq!(database_snapshot(&db)?, before);
+        }
         Ok(())
     }
 
     #[test]
-    fn schema_rejects_malformed_imports_and_keeps_legacy_version() -> Result<()> {
+    fn schema_rejects_malformed_current_imports_without_repair() -> Result<()> {
         for corrupt in [
             "UPDATE day2_credential_lineages SET family='bad family'",
             "UPDATE day2_credential_lineages SET principal='domain:example.com'",
@@ -2169,18 +2174,21 @@ mod tests {
             "INSERT INTO day2_credential_reveals SELECT 'attempt',id,'different','session-1',1100 FROM day2_credential_versions",
             "INSERT INTO day2_credential_reveals SELECT 'attempt',id,'issuer/human-1','session-1',1300 FROM day2_credential_versions",
         ] {
-            let mut db = legacy_database()?;
+            let mut db = current_database()?;
             committed_issue(&mut db)?;
-            db.execute_batch("PRAGMA foreign_keys=OFF; PRAGMA ignore_check_constraints=ON")?;
-            db.execute_batch(corrupt)?;
-            assert!(install_schema(&db).is_err(), "accepted {corrupt}");
+            corrupt_current_snapshot(&db, corrupt)?;
+            let before = database_snapshot(&db)?;
+            let error = install_schema(&db).unwrap_err();
+            let message = format!("{error:#}");
+            assert!(!message.contains("schema version") && !message.contains("invariant guard"), "{corrupt}: {message}");
+            assert_eq!(database_snapshot(&db)?, before);
             assert_eq!(
                 db.query_row(
                     "SELECT version FROM day2_credential_schema_version",
                     [],
                     |row| row.get::<_, i64>(0)
                 )?,
-                1
+                2
             );
             assert_eq!(
                 db.query_row(
@@ -2188,7 +2196,7 @@ mod tests {
                     [],
                     |row| row.get::<_, i64>(0)
                 )?,
-                0
+                i64::try_from(credential_predicates().len() * 2)?
             );
         }
         Ok(())
@@ -2222,7 +2230,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_budget_refusal_rolls_back_fresh_creation_and_legacy_upgrade() -> Result<()> {
+    fn schema_budget_refusal_rolls_back_fresh_creation_and_preserves_current_rows() -> Result<()> {
         use crate::oauth::schema::admit_with_limits;
         let fresh = Connection::open_in_memory()?;
         assert!(admit_with_limits(&fresh, 1000, 16_384, 8 * 1_048_576, install_schema).is_err());
@@ -2234,32 +2242,34 @@ mod tests {
             )?,
             0
         );
-        let mut legacy = legacy_database()?;
-        let original = committed_issue(&mut legacy)?;
-        let error = admit_with_limits(&legacy, 1_000_000, 16_384, 512, install_schema).unwrap_err();
+        let mut current = current_database()?;
+        let original = committed_issue(&mut current)?;
+        let before = database_snapshot(&current)?;
+        let error = admit_with_limits(&current, 1_000_000, 16_384, 512, install_schema).unwrap_err();
         assert!(format!("{error:#}").contains("materialization budget"));
         assert_eq!(
-            legacy.query_row(
+            current.query_row(
                 "SELECT version FROM day2_credential_schema_version",
                 [],
                 |row| row.get::<_, i64>(0)
             )?,
-            1
+            2
         );
         assert_eq!(
-            legacy.query_row("SELECT head FROM day2_credential_lineages", [], |row| {
+            current.query_row("SELECT head FROM day2_credential_lineages", [], |row| {
                 row.get::<_, String>(0)
             })?,
             original.version.unwrap()
         );
-        install_schema(&legacy)?;
+        assert_eq!(database_snapshot(&current)?, before);
+        install_schema(&current)?;
         Ok(())
     }
 
     #[test]
     fn schema_history_keeps_historical_reveal_binding_after_rotation_and_revocation() -> Result<()>
     {
-        let mut db = legacy_database()?;
+        let mut db = current_database()?;
         let first = committed_issue(&mut db)?;
         let permit = authorize_reveal(
             &mut db,
@@ -2340,27 +2350,13 @@ mod tests {
 
     #[test]
     fn schema_installation_preserves_the_callers_transaction() -> Result<()> {
-        let mut db = legacy_database()?;
+        let mut db = Connection::open_in_memory()?;
+        db.pragma_update(None, "foreign_keys", true)?;
         let tx = db.transaction()?;
         install_schema(&tx)?;
         assert!(!tx.is_autocommit());
         tx.rollback()?;
-        assert_eq!(
-            db.query_row(
-                "SELECT version FROM day2_credential_schema_version",
-                [],
-                |row| row.get::<_, i64>(0)
-            )?,
-            1
-        );
-        assert_eq!(
-            db.query_row(
-                "SELECT count(*) FROM sqlite_master WHERE type='trigger'",
-                [],
-                |row| row.get::<_, i64>(0)
-            )?,
-            0
-        );
+        assert_eq!(db.query_row("SELECT count(*) FROM sqlite_master WHERE name GLOB 'day2_credential_*'", [], |row| row.get::<_, i64>(0))?, 0);
         Ok(())
     }
 
@@ -2387,7 +2383,7 @@ mod tests {
 
     #[test]
     fn combined_oauth_and_credential_admission_rolls_back_as_one_scope() -> Result<()> {
-        let db = legacy_database()?;
+        let db = current_database()?;
         db.execute("UPDATE day2_credential_schema_version SET version=99", [])?;
         assert!(
             crate::oauth::schema::admit(&db, |db| {
@@ -2416,8 +2412,35 @@ mod tests {
     }
 
     #[test]
+    fn schema_refuses_partial_peer_units_before_runtime_creation() -> Result<()> {
+        for retained in 1u8..7 {
+            let db = current_database()?;
+            db.execute_batch("CREATE TABLE day2_invocations(id TEXT PRIMARY KEY)")?;
+            super::super::issuance::install(&db)?;
+            for (index, table) in CREDENTIAL_PEER_TABLES.iter().enumerate() {
+                if retained & (1 << index) == 0 {
+                    db.execute_batch(&format!("DROP TABLE {table}"))?;
+                }
+            }
+            let before = database_snapshot(&db)?;
+            let error = crate::oauth::schema::admit(&db, |db| {
+                install_schema(db)?;
+                super::super::issuance::install(db)?;
+                install_schema(db)
+            })
+            .unwrap_err();
+            assert!(
+                format!("{error:#}").contains("incomplete credential peer schema unit"),
+                "retained peer mask {retained}: {error:#}"
+            );
+            assert_eq!(database_snapshot(&db)?, before);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn schema_recognizes_exact_peer_tables_and_rejects_substituted_peer_layouts() -> Result<()> {
-        let db = legacy_database()?;
+        let db = current_database()?;
         db.execute_batch("CREATE TABLE day2_invocations(id TEXT PRIMARY KEY)")?;
         super::super::issuance::install(&db)?;
         install_schema(&db)?;
@@ -2428,7 +2451,7 @@ mod tests {
             "DROP TABLE day2_credential_origins; CREATE TABLE day2_credential_origins(invocation TEXT PRIMARY KEY,evidence TEXT NOT NULL) STRICT",
             "CREATE TABLE day2_credential_unknown(value TEXT)",
         ] {
-            let candidate = legacy_database()?;
+            let candidate = current_database()?;
             candidate.execute_batch("CREATE TABLE day2_invocations(id TEXT PRIMARY KEY)")?;
             super::super::issuance::install(&candidate)?;
             candidate.execute_batch(substitution)?;
@@ -2442,7 +2465,7 @@ mod tests {
                     [],
                     |row| row.get::<_, i64>(0)
                 )?,
-                1
+                2
             );
         }
         Ok(())
@@ -2465,7 +2488,7 @@ mod tests {
                 "INSERT INTO day2_invocations VALUES('invocation'); INSERT INTO DAY2_CREDENTIAL_ORIGINS VALUES('invocation','{}')",
             ),
         ] {
-            let db = legacy_database()?;
+            let db = current_database()?;
             db.execute_batch("CREATE TABLE day2_invocations(id TEXT PRIMARY KEY)")?;
             super::super::issuance::install(&db)?;
             let uppercase = table.to_ascii_uppercase();
@@ -2501,7 +2524,7 @@ mod tests {
                     [],
                     |row| row.get::<_, i64>(0)
                 )?,
-                1
+                2
             );
             assert_eq!(
                 db.query_row(
@@ -2509,14 +2532,14 @@ mod tests {
                     [],
                     |row| row.get::<_, i64>(0)
                 )?,
-                0
+                i64::try_from(credential_predicates().len() * 2)?
             );
         }
         Ok(())
     }
 
     #[test]
-    fn schema_rejects_case_substituted_owned_objects_before_creating_or_upgrading_core()
+    fn schema_rejects_case_substituted_owned_objects_before_creating_or_admitting_core()
     -> Result<()> {
         for imported in [
             "CREATE TABLE DAY2_CREDENTIAL_BROWSER(invocation TEXT PRIMARY KEY,attempt TEXT NOT NULL UNIQUE,intent TEXT NOT NULL,expires_at INTEGER NOT NULL) STRICT",
@@ -2549,7 +2572,7 @@ mod tests {
             "CREATE TRIGGER unrelated_trigger AFTER INSERT ON day2_credential_reveals BEGIN SELECT 1; END",
             "CREATE TRIGGER DAY2_CREDENTIAL_REVEALS_SHAPE_INSERT_V2 AFTER INSERT ON day2_credential_reveals BEGIN SELECT 1; END",
         ] {
-            let db = legacy_database()?;
+            let db = current_database()?;
             db.execute_batch(imported)?;
             let error = install_schema(&db).unwrap_err();
             assert!(
@@ -2562,7 +2585,7 @@ mod tests {
                     [],
                     |row| row.get::<_, i64>(0)
                 )?,
-                1
+                2
             );
         }
         Ok(())
@@ -2604,7 +2627,7 @@ mod tests {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("canonical-peers.sqlite");
         let db = Connection::open(&path)?;
-        db.execute_batch(LEGACY_CREDENTIAL_V1)?;
+        install_schema(&db)?;
         db.execute_batch("CREATE TABLE day2_invocations(id TEXT PRIMARY KEY)")?;
         crate::oauth::schema::admit(&db, |db| {
             install_schema(db)?;
@@ -2648,7 +2671,7 @@ mod tests {
                 "INSERT INTO day2_invocations VALUES('invocation'); INSERT INTO day2_credential_origins VALUES('invocation','{}')",
             ),
         ] {
-            let db = legacy_database()?;
+            let db = current_database()?;
             db.execute_batch("CREATE TABLE day2_invocations(id TEXT PRIMARY KEY)")?;
             super::super::issuance::install(&db)?;
             db.execute_batch(corrupt)?;
@@ -2659,7 +2682,7 @@ mod tests {
                     [],
                     |row| row.get::<_, i64>(0)
                 )?,
-                1
+                2
             );
             assert_eq!(
                 db.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row
@@ -2671,7 +2694,7 @@ mod tests {
     }
 
     fn restored_peer_database() -> Result<Connection> {
-        let db = legacy_database()?;
+        let db = current_database()?;
         db.execute_batch(
             "CREATE TABLE day2_invocations(id TEXT PRIMARY KEY, operation TEXT, actor TEXT)",
         )?;
@@ -2779,7 +2802,7 @@ mod tests {
                     [],
                     |row| row.get::<_, i64>(0)
                 )?,
-                1
+                2
             );
             assert_eq!(
                 candidate.query_row(
@@ -2809,7 +2832,7 @@ mod tests {
                 [],
                 |row| row.get::<_, i64>(0)
             )?,
-            1
+            2
         );
         assert_eq!(
             usize::try_from(db.query_row(
@@ -2859,7 +2882,7 @@ mod tests {
                     [],
                     |row| row.get::<_, i64>(0)
                 )?,
-                1
+                2
             );
             assert_eq!(
                 db.query_row(&format!("SELECT {column} FROM {table}"), [], |row| row
@@ -2976,7 +2999,7 @@ mod tests {
                     [],
                     |row| row.get::<_, i64>(0)
                 )?,
-                1
+                2
             );
             assert_eq!(
                 db.query_row(

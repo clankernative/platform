@@ -176,9 +176,6 @@ fn install_schema_in(db: &Connection) -> Result<()> {
     let ddl = "CREATE TABLE IF NOT EXISTS oauth_connect_schema_version (
             version INTEGER PRIMARY KEY
         );
-        CREATE TABLE IF NOT EXISTS oauth_callback_schema_version (
-            version INTEGER PRIMARY KEY
-        );
         CREATE TABLE IF NOT EXISTS oauth_connect_attempts (
             attempt TEXT PRIMARY KEY,
             slot TEXT NOT NULL,
@@ -204,13 +201,8 @@ fn install_schema_in(db: &Connection) -> Result<()> {
                   'exchange_uncertain')) = (code_ref IS NOT NULL)),
             CHECK((state IN ('awaiting_account_approval', 'activated')) = (account IS NOT NULL)),
             CHECK((state IN ('awaiting_account_approval', 'activated')) = (scope_evidence IS NOT NULL))
-        );
-        CREATE TABLE IF NOT EXISTS oauth_callback_bindings (
-            attempt TEXT PRIMARY KEY REFERENCES oauth_connect_attempts(attempt),
-            binding TEXT NOT NULL
         );";
-    db.execute_batch(ddl)?;
-    super::schema::upgrade(db, "oauth_connect_schema_version", &[1, 2], 2, ddl, &[
+    super::schema::install_current(db, "oauth_connect_schema_version", 2, ddl, &[
         super::schema::Invariant { table: "oauth_connect_attempts", predicate:
             "expected_epoch > 0 AND proposed_generation > 0 AND
              ((expected_generation IS NULL AND proposed_generation = 1) OR
@@ -225,12 +217,18 @@ fn install_schema_in(db: &Connection) -> Result<()> {
              (code_ref IS NULL OR length(code_ref) > 0) AND (account IS NULL OR length(account) > 0) AND
              (scope_evidence IS NULL OR length(scope_evidence) > 0)" },
     ])?;
-    super::schema::upgrade(
+    let callback_ddl = "CREATE TABLE IF NOT EXISTS oauth_callback_schema_version (
+            version INTEGER PRIMARY KEY
+        );
+        CREATE TABLE IF NOT EXISTS oauth_callback_bindings (
+            attempt TEXT PRIMARY KEY REFERENCES oauth_connect_attempts(attempt),
+            binding TEXT NOT NULL
+        );";
+    super::schema::install_current(
         db,
         "oauth_callback_schema_version",
-        &[1, 2],
         2,
-        ddl,
+        callback_ddl,
         &[super::schema::Invariant {
             table: "oauth_callback_bindings",
             predicate: "length(attempt) > 0 AND length(binding) > 0 AND json_valid(binding) AND json_type(binding) = 'object'",
