@@ -18,7 +18,9 @@ const MAX_BUNDLE_BYTES: u64 = 512 * 1024 * 1024;
 
 #[path = "packaging_credentials.rs"]
 mod credentials;
-pub use credentials::{CredentialSource, Provisioning, provisioning_inputs};
+pub use credentials::{
+    CredentialSource, Provisioning, credential_path, provisioning_inputs, reference_key,
+};
 
 fn image_digest(value: &str) -> Result<()> {
     crate::assets::hash_part(value)?;

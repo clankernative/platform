@@ -56,12 +56,15 @@ pub(super) struct Prepared {
     pub service: Value,
 }
 
-fn reference_key(reference: &VersionRef) -> Result<String> {
+/// The hex SHA-256 of a credential reference's compact JSON: its mounted file name
+/// and secret projection path.
+pub fn reference_key(reference: &VersionRef) -> Result<String> {
     reference.validate()?;
     Ok(crate::assets::hash_part(&crate::digest(&serde_json::to_vec(reference)?))?.into())
 }
 
-fn target(reference: &VersionRef) -> Result<String> {
+/// Where a reference's secret is mounted in tooling and runtime.
+pub fn credential_path(reference: &VersionRef) -> Result<String> {
     Ok(format!(
         "/run/day2/credentials/{}",
         reference_key(reference)?
@@ -87,11 +90,7 @@ fn secret_digest(path: &Path) -> Result<String> {
     );
     let mut bytes = Vec::new();
     file.take(16_385).read_to_end(&mut bytes)?;
-    ensure!(bytes.len() <= 16_384, "credential_source_budget");
-    let token = String::from_utf8(bytes).context("credential_source_encoding")?;
-    let token = token.trim_end_matches(['\r', '\n']);
-    crate::integrations::Credentials::bearer(token.to_owned())?;
-    Ok(crate::digest(token.as_bytes()))
+    crate::integration_host::credential_fingerprint(&bytes)
 }
 
 fn input_bytes(path: &Path) -> Result<Vec<u8>> {
@@ -263,7 +262,7 @@ fn prepare_connections(
             !source_file.chars().any(char::is_control),
             "invalid_credential_source_path"
         );
-        let destination = target(&source.credential_ref)?;
+        let destination = credential_path(&source.credential_ref)?;
         let file = format!("credential-{key}.json");
         let input = serde_json::to_vec_pretty(&crate::integration_host::Mount {
             connection: secret.connection,
@@ -397,7 +396,7 @@ pub fn provisioning_inputs(
         ensure!(
             pin.file == format!("credential-{key}.json")
                 && required.remove(&key).as_ref() == Some(&secret)
-                && mount.credential_file == Path::new(&target(secret.credential_ref())?),
+                && mount.credential_file == Path::new(&credential_path(secret.credential_ref())?),
             "provisioning_connection_changed"
         );
         ensure!(
