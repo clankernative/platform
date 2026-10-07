@@ -14,11 +14,12 @@ panic = "abort"
 # Tests exercise real workers, real SQLite and generated campaigns, so their cost
 # is platform CPU rather than compilation. Unoptimized hashing and JSON decoding
 # dominated the campaign suites: People Ops' four-cycle campaign ran 1301s at
-# opt-level 0 and 130s here, with identical assertions. `test` inherits this, and
-# dependencies build with `dev`, so both the platform and sha2/serde_json are
-# optimized. Debug assertions and overflow checks are deliberately left enabled.
+# opt-level 0 and 130s here, with identical assertions. `test` inherits this.
+# Dependencies such as sha2 and serde_json build once at opt-level 2; workspace
+# crates rebuild on every edit, so they use opt-level 1 to keep recompiles short.
+# Debug assertions and overflow checks are deliberately left enabled.
 [profile.dev]
-opt-level = 2
+opt-level = 1
 # Debug info, not code, dominated the build tree: 70.6 GB across 238,661 object
 # files, because macOS leaves unpacked per-codegen-unit debug info behind and
 # nothing collects it. Line tables keep file and line numbers in panics and
@@ -26,3 +27,6 @@ opt-level = 2
 # ask for them with CARGO_PROFILE_DEV_DEBUG=true.
 debug = "line-tables-only"
 split-debuginfo = "packed"
+
+[profile.dev.package."*"]
+opt-level = 2
