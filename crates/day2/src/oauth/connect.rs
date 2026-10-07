@@ -168,6 +168,10 @@ impl LegacyExchangeDispatchPermit {
 }
 
 pub fn install_schema(db: &Connection) -> Result<()> {
+    super::schema::admit(db, install_schema_in)
+}
+
+fn install_schema_in(db: &Connection) -> Result<()> {
     super::store::install_schema(db)?;
     let ddl = "CREATE TABLE IF NOT EXISTS oauth_connect_schema_version (
             version INTEGER PRIMARY KEY

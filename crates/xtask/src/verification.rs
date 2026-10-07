@@ -856,6 +856,8 @@ fn tests(
     // full gate and make new/renamed cases fail rather than silently disappear.
     if !fixtures.contains_key("credential-metadata") {
         for test in [
+            "managed_credentials::simulation::actual_credential_http_inherits_ports_and_replays_exact_ids",
+            "managed_credentials::store::tests::schema_native_runtime_initialization_reopens_with_installed_peers",
             "managed_credentials::issuance::tests::native_issuance_rolls_back_and_recovers_the_same_public_receipt",
             "managed_credentials::issuance::tests::personal_issuance_uses_the_confirmed_subject_and_missing_readiness_denies",
             "managed_credentials::issuance::tests::hostile_issue_rejects_changed_label_family_principal_and_second_mutation",

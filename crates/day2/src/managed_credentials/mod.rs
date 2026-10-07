@@ -2,11 +2,17 @@
 pub(crate) mod authority;
 pub(crate) mod browser;
 pub(crate) mod crypto;
+pub(crate) mod effects;
 pub(crate) mod ingress;
 pub(crate) mod issuance;
 pub(crate) mod lifecycle;
 pub(crate) mod store;
 pub(crate) mod verification;
+
+#[cfg(test)]
+mod effects_guard;
+#[cfg(test)]
+mod simulation;
 
 use crate::{
     authority_state::{self, ActiveAuthority},
@@ -17,12 +23,8 @@ use anyhow::{Context, Result, ensure};
 use day2_capabilities::credentials::{
     CollectionPage, Inspection, LineageRef, ListFailure, ListRequest, ManifestFamily, Summary,
 };
-use std::time::{SystemTime, UNIX_EPOCH};
-
 fn session_time() -> Result<i64> {
-    Ok(i64::try_from(
-        SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
-    )?)
+    effects::wall_time()
 }
 
 /// Use only the current activated selection and authenticated session. The

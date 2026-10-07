@@ -92,10 +92,8 @@ pub(crate) fn install(runtime: Runtime) -> Result<Runtime> {
     );
     let mut verifier = [0u8; 32];
     let mut encryption = [0u8; 32];
-    getrandom::fill(&mut verifier)
-        .map_err(|_| anyhow::anyhow!("verification entropy unavailable"))?;
-    getrandom::fill(&mut encryption)
-        .map_err(|_| anyhow::anyhow!("verification entropy unavailable"))?;
+    super::effects::fill_secret(&mut verifier)?;
+    super::effects::fill_secret(&mut encryption)?;
     Ok(
         runtime.with_credential_authority(Arc::new(DisposableAuthority {
             verifier,

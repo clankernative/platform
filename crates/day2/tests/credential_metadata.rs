@@ -13,6 +13,7 @@ use reqwest::{StatusCode, blocking::Client, redirect::Policy};
 use rusqlite::params;
 use scraper::{Html, Selector};
 use serde_json::{Value, json};
+use sha2::{Digest as _, Sha256};
 use std::{collections::BTreeMap, fs, path::PathBuf, sync::mpsc, thread, time::Duration};
 
 #[path = "support/compiler.rs"]
@@ -21,6 +22,15 @@ mod compiler;
 struct World {
     _directory: tempfile::TempDir,
     runtime: Runtime,
+}
+
+/// Canonical public fixture data, never a generated credential or entropy port.
+fn metadata_selector(id: &str) -> String {
+    let bytes = Sha256::digest(format!("credential-metadata-selector-v1:{id}"));
+    base64::Engine::encode(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+        &bytes[..16],
+    )
 }
 
 #[test]
@@ -111,6 +121,10 @@ impl World {
         world.seed("client_keys", "b", "alice@example.com")?;
         world.seed("client_keys", "c", "bob@example.com")?;
         world.seed("personal_keys", "d", "alice@example.com")?;
+        world
+            .runtime
+            .initialize()
+            .context("validate complete credential metadata fixture")?;
         Ok(world)
     }
 
@@ -136,15 +150,75 @@ impl World {
             binding.audience.clone(),
             manifest.roots.clone(),
         )?;
+        let namespace = Digest::of(&("credential-namespace-v1", &binding.namespace))?;
+        let version = format!("version-{id}");
+        let identity = json!({
+            "namespace": binding.namespace,
+            "family": family,
+            "lineage": id,
+            "version": version,
+            "recipient": "PRIVATE_RECIPIENT",
+            "security_epoch": 1,
+            "material_revision": 1,
+        });
+        let request_digest = Digest::of(&(
+            "credential-metadata-fixture-issue-v1",
+            &namespace,
+            family,
+            id,
+            creator,
+        ))?;
         let mut db = rusqlite::Connection::open(self.runtime.db())?;
         let tx = db.transaction()?;
         tx.execute("INSERT INTO day2_credential_lineages VALUES(?1,?2,?3,?4,?5,?10,?6,'Test key','PRIVATE_RECIPIENT','PRIVATE_SESSION',?7,?8,4000,1,'active',?9,1)",
-            params![id, Digest::of(&("credential-namespace-v1", &binding.namespace))?.as_str(), serde_json::to_string(&binding.namespace)?, family, manifest.contract.as_str(), creator, serde_json::to_string(&ceiling)?, ceiling.digest.as_str(), format!("version-{id}"), ceiling.subject])?;
+            params![id, namespace.as_str(), serde_json::to_string(&binding.namespace)?, family, manifest.contract.as_str(), creator, serde_json::to_string(&ceiling)?, ceiling.digest.as_str(), version, ceiling.subject])
+            .context("seed credential metadata lineage")?;
         tx.execute("INSERT INTO day2_credential_versions VALUES(?1,?2,NULL,?3,?4,'PRIVATE_VERIFIER_KEY',100,3700,1,?5,'active')",
-            params![format!("version-{id}"), id, format!("PRIVATE_SELECTOR_{id}"), [8u8;32].as_slice(), ceiling.digest.as_str()])?;
-        tx.execute("INSERT INTO day2_credential_material VALUES(?1,'PRIVATE_VAULT_IDENTITY',1,1,'PRIVATE_ENCRYPTION_KEY',?2,?3)",
-            params![format!("version-{id}"), [0u8;12].as_slice(), [9u8;32].as_slice()])?;
-        tx.commit()?;
+            params![version, id, metadata_selector(id), [8u8;32].as_slice(), ceiling.digest.as_str()])
+            .context("seed credential metadata version")?;
+        tx.execute(
+            "INSERT INTO day2_credential_material VALUES(?1,?2,1,1,'PRIVATE_ENCRYPTION_KEY',?3,?4)",
+            params![
+                version,
+                serde_json::to_string(&identity)?,
+                [0u8; 12].as_slice(),
+                [9u8; 32].as_slice()
+            ],
+        )
+        .context("seed credential metadata material identity")?;
+        tx.execute("INSERT INTO day2_credential_deliveries VALUES(?1,'PRIVATE_RECIPIENT','PRIVATE_SESSION',3700,'available','')",
+            params![version])
+            .context("seed credential metadata delivery")?;
+        tx.execute(
+            "INSERT INTO day2_credential_receipts VALUES(?1,?2,0,?3,?4,'issue',?5,?6)",
+            params![
+                namespace.as_str(),
+                format!("metadata-seed-{id}"),
+                manifest.contract.as_str(),
+                request_digest.as_str(),
+                id,
+                version
+            ],
+        )
+        .context("seed credential metadata issue receipt")?;
+        tx.commit().context("commit credential metadata fixture")?;
+        Ok(())
+    }
+
+    fn assert_private_trace(&self, invocation: &str) -> Result<()> {
+        let trace = serde_json::to_string(&self.runtime.trace(invocation)?)?;
+        self.assert_private_metadata(&trace)
+    }
+
+    fn assert_private_metadata(&self, encoded: &str) -> Result<()> {
+        assert!(!encoded.contains("PRIVATE_"));
+        assert!(!encoded.contains("d2c1."));
+        let db = rusqlite::Connection::open(self.runtime.db())?;
+        let mut statement = db.prepare("SELECT selector FROM day2_credential_versions")?;
+        for selector in statement.query_map([], |row| row.get::<_, String>(0))? {
+            let selector = selector?;
+            assert!(!encoded.contains(selector.as_str()));
+        }
         Ok(())
     }
 
@@ -255,9 +329,7 @@ fn native_family_reads_page_inspect_hide_foreign_lineages_and_replay_safe_metada
         )?
         .result;
     assert_eq!(foreign["status"], "not_visible");
-    let trace = serde_json::to_string(&world.runtime.trace("first")?)?;
-    assert!(!trace.contains("PRIVATE_"));
-    assert!(!trace.contains("d2c1."));
+    world.assert_private_trace("first")?;
     for after in [
         "cm1_personal_bad",
         "cm1_clients_",
@@ -275,11 +347,44 @@ fn native_family_reads_page_inspect_hide_foreign_lineages_and_replay_safe_metada
             "invalid_cursor"
         );
     }
-    // A damaged stored grant yields Unavailable without exposing private state.
-    rusqlite::Connection::open(world.runtime.db())?.execute(
-        "UPDATE day2_credential_lineages SET grant_digest='sha256:broken' WHERE id='a'",
+    let db = rusqlite::Connection::open(world.runtime.db())?;
+    let original: String = db.query_row(
+        "SELECT grant_digest FROM day2_credential_lineages WHERE id='a'",
         [],
+        |row| row.get(0),
     )?;
+    // Malformed data is rejected by the row guard before serving can read it.
+    let error = db
+        .execute(
+            "UPDATE day2_credential_lineages SET grant_digest='sha256:broken' WHERE id='a'",
+            [],
+        )
+        .unwrap_err();
+    assert!(matches!(error, rusqlite::Error::SqliteFailure(code, _)
+        if code.code == rusqlite::ErrorCode::ConstraintViolation
+            && code.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_TRIGGER));
+    let unchanged: String = db.query_row(
+        "SELECT grant_digest FROM day2_credential_lineages WHERE id='a'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(unchanged, original);
+    // A well-formed but different grant reaches the original semantic refusal.
+    let foreign = Digest::of(&"foreign-metadata-grant")?;
+    assert_ne!(foreign.as_str(), original);
+    assert_eq!(
+        db.execute(
+            "UPDATE day2_credential_lineages SET grant_digest=?1 WHERE id='a'",
+            [foreign.as_str()],
+        )?,
+        1
+    );
+    let stored: String = db.query_row(
+        "SELECT grant_digest FROM day2_credential_lineages WHERE id='a'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(stored, foreign.as_str());
     assert_eq!(
         world
             .invoke(
@@ -320,8 +425,7 @@ fn oversized_metadata_page_returns_a_closed_failure_without_truncation() -> Resu
     assert_eq!(output["page"]["items"], json!([]));
     assert_eq!(output["page"]["has_more"], false);
     assert_eq!(output["page"]["next_after"], "");
-    let trace = serde_json::to_string(&world.runtime.trace("bounded-page")?)?;
-    assert!(!trace.contains("PRIVATE_"));
+    world.assert_private_trace("bounded-page")?;
     Ok(())
 }
 
@@ -475,7 +579,7 @@ fn http_session_principal_controls_the_generated_metadata_query() -> Result<()> 
         assert_eq!(page["page"]["items"].as_array().unwrap().len(), 1);
         assert_eq!(page["page"]["items"][0]["principal"], "bob");
         assert_eq!(page["page"]["items"][0]["version"], "version-c");
-        assert!(!body.contains("PRIVATE_"));
+        world.assert_private_metadata(&body)?;
         assert_eq!(
             client
                 .get(format!(

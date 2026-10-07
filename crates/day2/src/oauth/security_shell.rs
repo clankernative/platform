@@ -485,6 +485,23 @@ impl SecurityShell {
         permit: OwnedSemaphorePermit,
         admission: Arc<AtomicBool>,
     ) -> Response {
+        let captured = self
+            .credentials
+            .as_ref()
+            .map_or_else(crate::managed_credentials::effects::capture, |registry| {
+                registry.effects()
+            });
+        captured
+            .run_async(self.handle_scoped(request, permit, admission))
+            .await
+    }
+
+    async fn handle_scoped(
+        self: Arc<Self>,
+        request: Request,
+        permit: OwnedSemaphorePermit,
+        admission: Arc<AtomicBool>,
+    ) -> Response {
         let (parts, body) = request.into_parts();
         let body = match effects::timeout(Duration::from_secs(3), to_bytes(body, 4096)).await {
             Ok(Ok(body)) => body,
@@ -499,7 +516,7 @@ impl SecurityShell {
         let path = parts.uri.path().to_owned();
         let query = parts.uri.query().map(str::to_owned);
         let headers = parts.headers;
-        let response = effects::spawn_blocking(move || {
+        let response = crate::managed_credentials::effects::spawn_blocking(move || {
             // A disconnected browser cannot release capacity while its native
             // provider operation is still running and cannot be cancelled.
             let _permit = permit;
@@ -2725,10 +2742,47 @@ mod tests {
                 [id],
                 |row| row.get(0),
             )?;
-            db.execute(
-                "UPDATE day2_credential_receipts SET family_contract='foreign' WHERE invocation=?1",
-                [id],
-            )?;
+            let malformed_contract = db
+                .execute(
+                    "UPDATE day2_credential_receipts SET family_contract='foreign' WHERE invocation=?1",
+                    [id],
+                )
+                .unwrap_err();
+            assert_eq!(
+                malformed_contract.sqlite_error_code(),
+                Some(rusqlite::ErrorCode::ConstraintViolation)
+            );
+            assert_eq!(
+                malformed_contract
+                    .sqlite_error()
+                    .map(|error| error.extended_code),
+                Some(rusqlite::ffi::SQLITE_CONSTRAINT_TRIGGER)
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT family_contract FROM day2_credential_receipts WHERE invocation=?1",
+                    [id],
+                    |row| row.get::<_, String>(0),
+                )?,
+                contract
+            );
+            let foreign_contract = Digest::of(&"foreign-credential-family-contract")?;
+            assert_ne!(foreign_contract.as_str(), contract);
+            assert_eq!(
+                db.execute(
+                    "UPDATE day2_credential_receipts SET family_contract=?1 WHERE invocation=?2",
+                    rusqlite::params![foreign_contract.as_str(), id],
+                )?,
+                1
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT family_contract FROM day2_credential_receipts WHERE invocation=?1",
+                    [id],
+                    |row| row.get::<_, String>(0),
+                )?,
+                foreign_contract.as_str()
+            );
             assert!(
                 shell
                     .dispatch(&Method::POST, &path, None, &headers, &reveal, at)

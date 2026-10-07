@@ -95,6 +95,10 @@ pub struct RefreshExchange {
 }
 
 pub fn install_schema(db: &Connection) -> Result<()> {
+    super::schema::admit(db, install_schema_in)
+}
+
+fn install_schema_in(db: &Connection) -> Result<()> {
     let ddl = "PRAGMA foreign_keys = ON;
         CREATE TABLE IF NOT EXISTS oauth_inbound_schema_version (
             version INTEGER PRIMARY KEY

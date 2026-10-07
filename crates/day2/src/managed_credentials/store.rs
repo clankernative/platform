@@ -16,13 +16,10 @@ use day2_capabilities::{
     },
     oauth::{GrantCeiling, OperationAuthorityContract},
 };
-use getrandom::fill;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 
-pub(crate) fn install_schema(db: &Connection) -> Result<()> {
-    db.execute_batch(
-        "PRAGMA foreign_keys = ON;
+const CREDENTIAL_DDL: &str = "
         CREATE TABLE IF NOT EXISTS day2_credential_schema_version (
             version INTEGER PRIMARY KEY
         ) STRICT;
@@ -103,18 +100,666 @@ pub(crate) fn install_schema(db: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS day2_credential_visible_creator
             ON day2_credential_lineages(namespace, family, creator, id);
         CREATE INDEX IF NOT EXISTS day2_credential_visible_principal
-            ON day2_credential_lineages(namespace, family, principal, id);",
-    )?;
+            ON day2_credential_lineages(namespace, family, principal, id);";
+
+const CREDENTIAL_TABLES: &[&str] = &[
+    "day2_credential_schema_version",
+    "day2_credential_lineages",
+    "day2_credential_versions",
+    "day2_credential_material",
+    "day2_credential_deliveries",
+    "day2_credential_receipts",
+    "day2_credential_revocations",
+    "day2_credential_reveals",
+];
+
+const CREDENTIAL_PEER_TABLES: &[&str] = &[
+    "day2_credential_browser",
+    "day2_credential_confirmations",
+    "day2_credential_origins",
+];
+
+/// Raw connections grant this installer ownership of a temporary progress
+/// callback. Runtime connections must enter `admit_with_runtime_hook` first;
+/// nested admission preserves their existing callback and cumulative counter.
+pub(crate) fn install_schema(db: &Connection) -> Result<()> {
+    crate::oauth::schema::admit(db, install_schema_in)
+}
+
+fn install_schema_in(db: &Connection) -> Result<()> {
+    use crate::oauth::schema;
+    let expected = Connection::open_in_memory()?;
+    expected.execute_batch(CREDENTIAL_DDL)?;
+    // These sibling installers are the authoritative definitions, not a second
+    // schema catalog. Their tables may be absent before a standalone store is
+    // attached to the ordinary runtime, but any present object must be exact.
+    super::issuance::install(&expected)?;
+    let predicates = credential_predicates();
+    let mut fresh = true;
+    let mut peers = Vec::new();
+    let mut has_guards = false;
+    // SQLite resolves identifiers without ASCII case distinctions. Debit raw
+    // metadata before inspecting imported operands, then require the exact
+    // canonical object identity supplied by the owning installers. This same
+    // scan determines freshness and optional peers before target DDL can run.
+    let mut statement = db.prepare("SELECT type,name,tbl_name FROM sqlite_master")?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        schema::materialize(row)?;
+        let kind = row.get_ref(0)?.as_str()?;
+        let name = row.get_ref(1)?.as_str()?;
+        let table = row.get_ref(2)?.as_str()?;
+        let owned = |value: &str| {
+            value
+                .get(.."day2_credential_".len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("day2_credential_"))
+        };
+        if !owned(name) && !owned(table) {
+            continue;
+        }
+        fresh = false;
+        let canonical: bool = expected.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type=?1 AND name=?2 AND tbl_name=?3)",
+            [kind, name, table],
+            |row| row.get(0),
+        )?;
+        let guard = kind == "trigger"
+            && predicates.iter().any(|(owner, _)| {
+                table == *owner
+                    && ["INSERT", "UPDATE"]
+                        .iter()
+                        .any(|operation| name == format!("{owner}_shape_{operation}_v2"))
+            });
+        ensure!(
+            canonical || guard,
+            "unsupported credential schema object {name}"
+        );
+        has_guards |= guard;
+        if kind == "table"
+            && let Some(peer) = CREDENTIAL_PEER_TABLES.iter().find(|peer| **peer == name)
+        {
+            peers.push(*peer);
+        }
+    }
+    drop(rows);
+    drop(statement);
+    if fresh {
+        db.execute_batch(CREDENTIAL_DDL)?;
+    }
+    for table in CREDENTIAL_TABLES {
+        schema::exact_layout(db, &expected, table)?;
+    }
+    for &table in &peers {
+        schema::exact_layout(db, &expected, table)?;
+    }
     let mut statement = db.prepare("SELECT version FROM day2_credential_schema_version")?;
-    let versions = statement
-        .query_map([], |row| row.get::<_, i64>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut rows = statement.query([])?;
+    let mut version = None;
+    while let Some(row) = rows.next()? {
+        schema::materialize(row)?;
+        ensure!(version.is_none(), "unsupported credential schema version");
+        version = Some(row.get::<_, i64>(0)?);
+    }
+    drop(rows);
+    drop(statement);
     ensure!(
-        versions.is_empty() || versions == [1],
+        (fresh && version.is_none()) || matches!(version, Some(1 | 2)),
         "unsupported credential schema version"
     );
-    if versions.is_empty() {
-        db.execute("INSERT INTO day2_credential_schema_version VALUES (1)", [])?;
+    ensure!(
+        !has_guards || version == Some(2),
+        "unsupported credential schema guards"
+    );
+    validate_credential_rows(db)?;
+    validate_credential_peers(db, &peers)?;
+    let invariants: Vec<_> = predicates
+        .iter()
+        .map(|(table, predicate)| schema::Invariant { table, predicate })
+        .collect();
+    // Reuse OAuth's same bounded shape/type/guard installer. The predicates are
+    // owned only for this call, so do not require static predicate lifetimes.
+    schema::upgrade(
+        db,
+        "day2_credential_schema_version",
+        &[1, 2],
+        2,
+        CREDENTIAL_DDL,
+        &invariants,
+    )
+}
+
+fn validate_credential_peers(db: &Connection, peers: &[&str]) -> Result<()> {
+    use crate::oauth::schema::materialize;
+    let mut pending = std::collections::BTreeMap::new();
+    if peers.contains(&"day2_credential_browser") {
+        let mut statement =
+            db.prepare("SELECT invocation,attempt,intent,expires_at FROM day2_credential_browser")?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            materialize(row)?;
+            let navigation: super::browser::Pending =
+                crate::json::decode(row.get_ref(2)?.as_str()?.as_bytes())?;
+            ensure!(
+                navigation.invocation == row.get_ref(0)?.as_str()?
+                    && navigation.attempt == row.get_ref(1)?.as_str()?
+                    && navigation.created_at >= 0
+                    && navigation.expires_at == row.get::<_, i64>(3)?
+                    && navigation.expires_at.checked_sub(navigation.created_at) == Some(300),
+                "invalid restored credential navigation identity or time"
+            );
+            for value in [
+                &navigation.invocation,
+                &navigation.attempt,
+                &navigation.operation,
+                &navigation.family,
+            ] {
+                validate_id(value)?;
+            }
+            crate::authority::valid_actor(&navigation.actor)?;
+            Digest::try_from(navigation.artifact.clone())?;
+            Digest::try_from(navigation.authority.epoch.clone())?;
+            ensure!(
+                navigation.authority.revision > 0 && navigation.input.is_object(),
+                "invalid restored credential navigation authority or input"
+            );
+            if let Some(page) = &navigation.product_return {
+                validate_id(page)?;
+            }
+            validate_restored_intent(&navigation.intent, &navigation.family)?;
+            pending.insert(navigation.invocation.clone(), navigation);
+        }
+    }
+    if peers.contains(&"day2_credential_confirmations") {
+        let mut statement =
+            db.prepare("SELECT invocation,confirmation FROM day2_credential_confirmations")?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            materialize(row)?;
+            let confirmation: super::issuance::Confirmation =
+                crate::json::decode(row.get_ref(1)?.as_str()?.as_bytes())?;
+            ensure!(
+                confirmation.invocation == row.get_ref(0)?.as_str()?,
+                "invalid restored credential confirmation identity"
+            );
+            for value in [
+                &confirmation.invocation,
+                &confirmation.operation,
+                &confirmation.session,
+                &confirmation.family,
+            ] {
+                validate_id(value)?;
+            }
+            crate::authority::valid_actor(&confirmation.actor)?;
+            ensure!(
+                !confirmation.subject.is_empty()
+                    && confirmation.subject.len() <= 256
+                    && confirmation
+                        .subject
+                        .bytes()
+                        .all(|byte| byte.is_ascii_graphic()),
+                "invalid restored credential confirmation subject"
+            );
+            Digest::try_from(confirmation.artifact.clone())?;
+            Digest::try_from(confirmation.authority.epoch.clone())?;
+            ensure!(
+                confirmation.security_epoch > 0
+                    && confirmation.authority.revision > 0
+                    && confirmation.input.is_object()
+                    && confirmation.authenticated_at >= 0
+                    && confirmation.authenticated_at <= confirmation.approved_at
+                    && confirmation.approved_at < confirmation.expires_at
+                    && confirmation
+                        .expires_at
+                        .checked_sub(confirmation.authenticated_at)
+                        .is_some_and(|seconds| seconds <= 300),
+                "invalid restored credential confirmation authority or time"
+            );
+            validate_restored_intent(&confirmation.intent, &confirmation.family)?;
+            if let Some(navigation) = pending.get(&confirmation.invocation) {
+                ensure!(
+                    confirmation.operation == navigation.operation
+                        && confirmation.actor == navigation.actor
+                        && confirmation.input == navigation.input
+                        && confirmation.family == navigation.family
+                        && confirmation.intent == navigation.intent
+                        && confirmation.artifact == navigation.artifact
+                        && confirmation.authority == navigation.authority
+                        && confirmation.binding == navigation.binding
+                        && confirmation.authenticated_at > navigation.created_at
+                        && confirmation.expires_at <= navigation.expires_at,
+                    "restored credential confirmation changed navigation intent"
+                );
+            }
+        }
+    }
+    if peers.contains(&"day2_credential_origins") {
+        super::ingress::validate_restored(db)?;
+    }
+    Ok(())
+}
+
+fn validate_restored_intent(intent: &super::lifecycle::Intent, family: &str) -> Result<()> {
+    use super::lifecycle::Intent;
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    let reference = |value: &str| -> Result<()> {
+        ensure!(
+            value.len() <= 2048
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte)),
+            "invalid restored credential lineage reference"
+        );
+        let encoded = value
+            .strip_prefix("cr1_")
+            .context("invalid restored credential lineage reference")?;
+        // References carry a source registration alias, not the durable family
+        // ID. Historical aliases may contain underscores and may have changed
+        // compatibly. Examine only the at-most-48-byte identifier prefix; do not
+        // infer its boundary from the current artifact or the stored family ID.
+        for (offset, byte) in encoded.bytes().take(49).enumerate() {
+            if byte != b'_' {
+                continue;
+            }
+            let registration = &encoded[..offset];
+            if crate::schema::identifier(registration).is_err() {
+                continue;
+            }
+            let candidate = || -> Result<()> {
+                let decoded: LineageRef =
+                    crate::json::decode(&URL_SAFE_NO_PAD.decode(&encoded[offset + 1..])?)?;
+                decoded.namespace.validate()?;
+                validate_id(&decoded.id)?;
+                ensure!(
+                    decoded.family.as_str() == family
+                        && super::encode_ref(registration, &decoded)? == value,
+                    "noncanonical restored credential lineage reference"
+                );
+                Ok(())
+            };
+            if candidate().is_ok() {
+                return Ok(());
+            }
+        }
+        anyhow::bail!("invalid restored credential lineage reference")
+    };
+    match intent {
+        Intent::Issue { label } => ensure!(
+            !label.trim().is_empty() && label.len() <= 128 && !label.chars().any(char::is_control),
+            "invalid restored credential label"
+        ),
+        Intent::Rotate {
+            lineage,
+            head,
+            revision,
+        } => {
+            reference(lineage)?;
+            validate_id(head)?;
+            ensure!(
+                *revision > 0 && *revision <= i64::MAX as u64,
+                "invalid restored credential rotation revision"
+            );
+        }
+        Intent::Revoke { lineage } => reference(lineage)?,
+    }
+    Ok(())
+}
+
+fn credential_predicates() -> Vec<(&'static str, String)> {
+    let id = |column: &str| {
+        format!(
+            "length(CAST({column} AS BLOB)) BETWEEN 1 AND 160 AND {column} NOT GLOB '*[^a-zA-Z0-9._/-]*'"
+        )
+    };
+    let digest = |column: &str| {
+        format!(
+            "length({column}) = 71 AND substr({column},1,7) = 'sha256:' AND substr({column},8) NOT GLOB '*[^0-9a-f]*'"
+        )
+    };
+    let clean = |column: &str| {
+        format!(
+            "instr({column},char(0)) = 0 AND {column} NOT GLOB '*[' || char(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,127,128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,146,147,148,149,150,151,152,153,154,155,156,157,158,159) || ']*'"
+        )
+    };
+    let trimmed = |column: &str| {
+        format!(
+            "trim({column},char(9,10,11,12,13,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288))"
+        )
+    };
+    let actor = |column: &str| {
+        format!(
+            "length(CAST({column} AS BLOB)) BETWEEN 1 AND 256 AND {} = {column} AND substr({column},1,7) != 'domain:' AND substr({column},1,18) != 'credential_client:' AND {}",
+            trimmed(column),
+            clean(column)
+        )
+    };
+    let json = |column: &str| {
+        format!(
+            "length(CAST({column} AS BLOB)) BETWEEN 2 AND 1048576 AND json_valid({column}) AND json_type({column}) = 'object'"
+        )
+    };
+    vec![
+        (
+            "day2_credential_lineages",
+            format!(
+                "{} AND {} AND {} AND {} AND {} AND {} AND {} AND {} AND {} AND {} AND {} AND {} AND length(CAST(label AS BLOB)) BETWEEN 1 AND 128 AND length({}) > 0 AND {} AND security_epoch > 0 AND revision > 0 AND state IN ('active','revoked')",
+                id("id"),
+                digest("namespace"),
+                json("namespace_json"),
+                id("family"),
+                digest("family_contract"),
+                actor("principal"),
+                actor("creator"),
+                actor("recipient"),
+                id("session"),
+                json("grant_json"),
+                digest("grant_digest"),
+                id("head"),
+                trimmed("label"),
+                clean("label")
+            ),
+        ),
+        (
+            "day2_credential_versions",
+            format!(
+                "{} AND {} AND (predecessor IS NULL OR ({} AND predecessor != id)) AND {} AND length(selector)=22 AND selector NOT GLOB '*[^a-zA-Z0-9_-]*' AND substr(selector,22,1) IN ('A','Q','g','w') AND {} AND {} AND length(verifier)=32 AND expires_at > issued_at AND security_epoch > 0 AND state IN ('active','superseded','revoked')",
+                id("id"),
+                id("lineage"),
+                id("predecessor"),
+                id("selector"),
+                id("verifier_key_version"),
+                digest("grant_digest")
+            ),
+        ),
+        (
+            "day2_credential_material",
+            format!(
+                "{} AND {} AND {} AND material_revision > 0 AND envelope_revision > 0 AND length(nonce)=12 AND length(ciphertext) BETWEEN 32 AND 512",
+                id("version"),
+                json("identity_json"),
+                id("encryption_key_version")
+            ),
+        ),
+        (
+            "day2_credential_deliveries",
+            format!(
+                "{} AND {} AND {} AND ((state='available' AND closed_reason='') OR (state='closed' AND closed_reason IN ('acknowledged','expired','session_end','epoch_advance','rotation','revoked')))",
+                id("version"),
+                actor("recipient"),
+                id("session")
+            ),
+        ),
+        (
+            "day2_credential_receipts",
+            format!(
+                "{} AND {} AND {} AND {} AND {} AND instruction_slot BETWEEN 0 AND 4294967295 AND ((action IN ('issue','rotate') AND version IS NOT NULL AND {}) OR (action='revoke' AND version IS NULL))",
+                digest("namespace"),
+                id("invocation"),
+                digest("family_contract"),
+                digest("request_digest"),
+                id("lineage"),
+                id("version")
+            ),
+        ),
+        (
+            "day2_credential_revocations",
+            format!(
+                "{} AND {} AND {} AND {} AND instruction_slot BETWEEN 0 AND 4294967295",
+                digest("namespace"),
+                id("invocation"),
+                digest("request_digest"),
+                json("outcome")
+            ),
+        ),
+        (
+            "day2_credential_reveals",
+            format!(
+                "{} AND {} AND {} AND {}",
+                id("attempt"),
+                id("version"),
+                actor("recipient"),
+                id("session")
+            ),
+        ),
+    ]
+}
+
+struct RestoredLineage {
+    namespace: Namespace,
+    family: String,
+    head: String,
+    revision: i64,
+    revoked: bool,
+}
+
+/// These checks apply to a completed/restored database, not to intermediate
+/// rows in the caller's issue/rotation/revocation transaction. All SELECT work
+/// shares the admission VM budget and every decoded row is charged first.
+fn validate_credential_rows(db: &Connection) -> Result<()> {
+    use crate::oauth::schema::materialize;
+    use std::collections::{BTreeMap, BTreeSet};
+    for (table, predicate) in credential_predicates() {
+        let invalid: bool = db.query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE NOT COALESCE(({predicate}),0))"),
+            [],
+            |row| row.get(0),
+        )?;
+        ensure!(!invalid, "invalid restored credential shape in {table}");
+    }
+    // Include every version, not merely active heads. Historical material and
+    // deliveries remain bound to the recipient/session of that version.
+    let invalid: bool = db.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM day2_credential_lineages l
+            LEFT JOIN day2_credential_versions h ON h.id=l.head
+            LEFT JOIN day2_credential_deliveries d ON d.version=h.id
+            WHERE h.id IS NULL OR h.lineage!=l.id OR
+                (l.state='active' AND h.state!='active') OR
+                (l.state='revoked' AND h.state!='revoked') OR
+                d.recipient!=l.recipient OR d.session!=l.session
+        ) OR EXISTS(
+            SELECT 1 FROM day2_credential_versions v
+            JOIN day2_credential_lineages l ON l.id=v.lineage
+            LEFT JOIN day2_credential_material m ON m.version=v.id
+            LEFT JOIN day2_credential_deliveries d ON d.version=v.id
+            LEFT JOIN day2_credential_versions p ON p.id=v.predecessor
+            WHERE m.version IS NULL OR d.version IS NULL OR
+                v.security_epoch!=l.security_epoch OR v.grant_digest!=l.grant_digest OR
+                v.expires_at>l.grant_valid_until OR
+                d.expires_at<=v.issued_at OR d.expires_at>v.expires_at OR
+                (l.state='revoked' AND v.state!='revoked') OR
+                (l.state='active' AND ((v.id=l.head AND v.state!='active') OR
+                    (v.id!=l.head AND v.state!='superseded'))) OR
+                (v.state!='active' AND d.state!='closed') OR
+                (d.closed_reason='rotation' AND v.id=l.head) OR
+                (d.closed_reason='revoked' AND l.state!='revoked') OR
+                (v.predecessor IS NOT NULL AND (p.id IS NULL OR p.lineage!=v.lineage))
+        ) OR EXISTS(
+            SELECT 1 FROM day2_credential_receipts r
+            JOIN day2_credential_lineages l ON l.id=r.lineage
+            LEFT JOIN day2_credential_versions v ON v.id=r.version
+            LEFT JOIN day2_credential_revocations x ON x.namespace=r.namespace AND
+                x.invocation=r.invocation AND x.instruction_slot=r.instruction_slot
+            WHERE r.namespace!=l.namespace OR r.family_contract!=l.family_contract OR
+                (r.action IN ('issue','rotate') AND (v.id IS NULL OR v.lineage!=r.lineage)) OR
+                (r.action='issue' AND v.predecessor IS NOT NULL) OR
+                (r.action='rotate' AND v.predecessor IS NULL) OR
+                (r.action='revoke' AND (l.state!='revoked' OR x.namespace IS NULL OR x.request_digest!=r.request_digest)) OR
+                (x.namespace IS NOT NULL AND r.action!='revoke')
+        ) OR EXISTS(
+            SELECT 1 FROM day2_credential_versions v
+            WHERE (SELECT count(*) FROM day2_credential_receipts r
+                WHERE r.version=v.id AND r.action IN ('issue','rotate'))!=1
+        ) OR EXISTS(
+            SELECT 1 FROM day2_credential_reveals r
+            JOIN day2_credential_versions v ON v.id=r.version
+            JOIN day2_credential_deliveries d ON d.version=v.id
+            WHERE r.recipient!=d.recipient OR r.session!=d.session OR
+                r.authorized_at<v.issued_at OR r.authorized_at>=d.expires_at
+        )",
+        [], |row| row.get(0),
+    )?;
+    ensure!(!invalid, "invalid restored credential relationships");
+
+    let mut lineages = BTreeMap::new();
+    let mut statement = db.prepare(
+        "SELECT id,namespace,namespace_json,family,family_contract,principal,creator,label,
+                recipient,session,grant_json,grant_digest,head,revision,state
+         FROM day2_credential_lineages",
+    )?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        materialize(row)?;
+        let id: String = row.get(0)?;
+        validate_id(&id)?;
+        let namespace: Namespace = crate::json::decode(row.get_ref(2)?.as_str()?.as_bytes())?;
+        namespace.validate()?;
+        ensure!(
+            namespace_key(&namespace)? == row.get::<_, String>(1)?,
+            "restored credential namespace mismatch"
+        );
+        let family: String = row.get(3)?;
+        day2_capabilities::Name::try_from(family.clone())?;
+        Digest::try_from(row.get::<_, String>(4)?)?;
+        let principal: String = row.get(5)?;
+        for index in [5, 6, 8] {
+            crate::authority::valid_actor(row.get_ref(index)?.as_str()?)?;
+        }
+        let label = row.get_ref(7)?.as_str()?;
+        ensure!(
+            !label.trim().is_empty() && label.len() <= 128 && !label.chars().any(char::is_control),
+            "invalid restored credential label"
+        );
+        validate_id(row.get_ref(9)?.as_str()?)?;
+        let grant: GrantCeiling = crate::json::decode(row.get_ref(10)?.as_str()?.as_bytes())?;
+        grant.verify()?;
+        ensure!(
+            grant.subject == principal && grant.digest.as_str() == row.get_ref(11)?.as_str()?,
+            "restored credential grant mismatch"
+        );
+        lineages.insert(
+            id,
+            RestoredLineage {
+                namespace,
+                family,
+                head: row.get(12)?,
+                revision: row.get(13)?,
+                revoked: row.get_ref(14)?.as_str()? == "revoked",
+            },
+        );
+    }
+    drop(rows);
+    drop(statement);
+
+    let mut predecessors = BTreeMap::new();
+    let mut statement =
+        db.prepare("SELECT id,lineage,predecessor FROM day2_credential_versions")?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        materialize(row)?;
+        predecessors.insert(
+            row.get::<_, String>(0)?,
+            (row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?),
+        );
+    }
+    drop(rows);
+    drop(statement);
+    let mut visited = BTreeSet::new();
+    for (id, lineage) in &lineages {
+        let mut cursor = Some(lineage.head.as_str());
+        let mut count = 0i64;
+        while let Some(version) = cursor {
+            ensure!(
+                visited.insert(version),
+                "cyclic or shared restored credential chain"
+            );
+            let (owner, predecessor) = predecessors
+                .get(version)
+                .context("missing restored credential chain member")?;
+            ensure!(owner == id, "cross-lineage restored credential chain");
+            count += 1;
+            cursor = predecessor.as_deref();
+        }
+        ensure!(
+            lineage.revision == count + i64::from(lineage.revoked),
+            "restored credential revision mismatch"
+        );
+    }
+    ensure!(
+        visited.len() == predecessors.len(),
+        "disconnected restored credential chain"
+    );
+
+    let mut statement = db.prepare(
+        "SELECT m.identity_json,m.material_revision,v.id,v.lineage,v.security_epoch,d.recipient
+         FROM day2_credential_material m JOIN day2_credential_versions v ON v.id=m.version
+         JOIN day2_credential_deliveries d ON d.version=v.id",
+    )?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        materialize(row)?;
+        let identity: MaterialIdentity = crate::json::decode(row.get_ref(0)?.as_str()?.as_bytes())?;
+        let lineage_id: String = row.get(3)?;
+        let lineage = lineages
+            .get(&lineage_id)
+            .context("missing restored credential lineage")?;
+        ensure!(
+            identity.namespace == lineage.namespace
+                && identity.family == lineage.family
+                && identity.lineage == lineage_id
+                && identity.version == row.get_ref(2)?.as_str()?
+                && identity.security_epoch == u64::try_from(row.get::<_, i64>(4)?)?
+                && identity.material_revision == u64::try_from(row.get::<_, i64>(1)?)?
+                && identity.recipient == row.get_ref(5)?.as_str()?,
+            "restored credential material identity mismatch"
+        );
+    }
+    drop(rows);
+    drop(statement);
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct RevocationOutcome {
+        already_revoked: bool,
+        lineage: String,
+        revision: u64,
+    }
+    let mut statement = db.prepare(
+        "SELECT x.outcome,r.lineage FROM day2_credential_revocations x
+         JOIN day2_credential_receipts r ON r.namespace=x.namespace AND r.invocation=x.invocation
+            AND r.instruction_slot=x.instruction_slot",
+    )?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        materialize(row)?;
+        let outcome: RevocationOutcome = crate::json::decode(row.get_ref(0)?.as_str()?.as_bytes())?;
+        let id: String = row.get(1)?;
+        let lineage = lineages
+            .get(&id)
+            .context("missing revoked credential lineage")?;
+        let encoded = base64::Engine::encode(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+            serde_json::to_vec(&LineageRef {
+                namespace: lineage.namespace.clone(),
+                family: day2_capabilities::Name::try_from(lineage.family.clone())?,
+                id,
+            })?,
+        );
+        let suffix = format!("_{encoded}");
+        let registration = outcome
+            .lineage
+            .strip_prefix("cr1_")
+            .and_then(|rest| rest.strip_suffix(&suffix))
+            .context("restored credential revocation reference mismatch")?;
+        day2_capabilities::Name::try_from(registration.to_owned())?;
+        ensure!(
+            outcome.revision > 0
+                && outcome.revision <= u64::try_from(lineage.revision)?
+                && lineage.revoked,
+            "restored credential revocation revision mismatch"
+        );
+        // The recorded bool is historical: a later retry need not equal the
+        // currently revoked state. Deserializing it still requires a bool.
+        let _ = outcome.already_revoked;
     }
     Ok(())
 }
@@ -1327,12 +1972,7 @@ fn namespace_key(namespace: &Namespace) -> Result<String> {
 }
 
 fn random_id() -> Result<String> {
-    let mut bytes = [0u8; 16];
-    fill(&mut bytes).map_err(|_| anyhow::anyhow!("credential entropy unavailable"))?;
-    Ok(format!(
-        "c_{}",
-        base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, bytes)
-    ))
+    super::effects::record_id()
 }
 
 fn validate_id(value: &str) -> Result<()> {
@@ -1365,6 +2005,1109 @@ mod tests {
     use rusqlite::TransactionBehavior;
     use std::collections::{BTreeMap, BTreeSet};
     use tempfile::TempDir;
+
+    // Frozen v1 installer layout, independent of the current installer. Its
+    // STRICT/CHECK/index/FK declarations are part of the supported upgrade.
+    const LEGACY_CREDENTIAL_V1: &str = "
+        PRAGMA foreign_keys=ON;
+        CREATE TABLE day2_credential_schema_version(version INTEGER PRIMARY KEY) STRICT;
+        INSERT INTO day2_credential_schema_version VALUES(1);
+        CREATE TABLE day2_credential_lineages(
+            id TEXT PRIMARY KEY, namespace TEXT NOT NULL, namespace_json TEXT NOT NULL,
+            family TEXT NOT NULL, family_contract TEXT NOT NULL, principal TEXT NOT NULL,
+            creator TEXT NOT NULL, label TEXT NOT NULL CHECK(length(label) BETWEEN 1 AND 128),
+            recipient TEXT NOT NULL, session TEXT NOT NULL, grant_json TEXT NOT NULL,
+            grant_digest TEXT NOT NULL, grant_valid_until INTEGER NOT NULL,
+            security_epoch INTEGER NOT NULL CHECK(security_epoch > 0),
+            state TEXT NOT NULL CHECK(state IN ('active', 'revoked')),
+            head TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision > 0)) STRICT;
+        CREATE TABLE day2_credential_versions(
+            id TEXT PRIMARY KEY, lineage TEXT NOT NULL REFERENCES day2_credential_lineages(id),
+            predecessor TEXT UNIQUE REFERENCES day2_credential_versions(id),
+            selector TEXT NOT NULL UNIQUE, verifier BLOB NOT NULL CHECK(length(verifier) = 32),
+            verifier_key_version TEXT NOT NULL, issued_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL CHECK(expires_at > issued_at),
+            security_epoch INTEGER NOT NULL CHECK(security_epoch > 0), grant_digest TEXT NOT NULL,
+            state TEXT NOT NULL CHECK(state IN ('active', 'superseded', 'revoked'))) STRICT;
+        CREATE TABLE day2_credential_material(
+            version TEXT PRIMARY KEY REFERENCES day2_credential_versions(id), identity_json TEXT NOT NULL,
+            material_revision INTEGER NOT NULL CHECK(material_revision > 0),
+            envelope_revision INTEGER NOT NULL CHECK(envelope_revision > 0), encryption_key_version TEXT NOT NULL,
+            nonce BLOB NOT NULL CHECK(length(nonce) = 12), ciphertext BLOB NOT NULL CHECK(length(ciphertext) BETWEEN 32 AND 512)) STRICT;
+        CREATE TABLE day2_credential_deliveries(
+            version TEXT PRIMARY KEY REFERENCES day2_credential_versions(id), recipient TEXT NOT NULL,
+            session TEXT NOT NULL, expires_at INTEGER NOT NULL,
+            state TEXT NOT NULL CHECK(state IN ('available', 'closed')), closed_reason TEXT NOT NULL DEFAULT '') STRICT;
+        CREATE TABLE day2_credential_receipts(
+            namespace TEXT NOT NULL, invocation TEXT NOT NULL,
+            instruction_slot INTEGER NOT NULL CHECK(instruction_slot >= 0), family_contract TEXT NOT NULL,
+            request_digest TEXT NOT NULL, action TEXT NOT NULL CHECK(action IN ('issue', 'rotate', 'revoke')),
+            lineage TEXT NOT NULL REFERENCES day2_credential_lineages(id), version TEXT REFERENCES day2_credential_versions(id),
+            PRIMARY KEY(namespace, invocation, instruction_slot)) STRICT;
+        CREATE TABLE day2_credential_revocations(
+            namespace TEXT NOT NULL, invocation TEXT NOT NULL, instruction_slot INTEGER NOT NULL,
+            request_digest TEXT NOT NULL, outcome TEXT NOT NULL,
+            PRIMARY KEY(namespace, invocation, instruction_slot),
+            FOREIGN KEY(namespace, invocation, instruction_slot)
+                REFERENCES day2_credential_receipts(namespace, invocation, instruction_slot)) STRICT;
+        CREATE TABLE day2_credential_reveals(
+            attempt TEXT PRIMARY KEY, version TEXT NOT NULL REFERENCES day2_credential_versions(id),
+            recipient TEXT NOT NULL, session TEXT NOT NULL, authorized_at INTEGER NOT NULL) STRICT;
+        CREATE INDEX day2_credential_visible_creator ON day2_credential_lineages(namespace, family, creator, id);
+        CREATE INDEX day2_credential_visible_principal ON day2_credential_lineages(namespace, family, principal, id);";
+
+    fn legacy_database() -> Result<Connection> {
+        let db = Connection::open_in_memory()?;
+        db.execute_batch(LEGACY_CREDENTIAL_V1)?;
+        Ok(db)
+    }
+
+    #[test]
+    fn schema_v1_upgrade_preserves_valid_issue_history_and_reopens() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("legacy.sqlite");
+        let mut db = Connection::open(&path)?;
+        db.execute_batch(LEGACY_CREDENTIAL_V1)?;
+        let receipt = committed_issue(&mut db)?;
+        let before: (String, Vec<u8>) = db.query_row(
+            "SELECT identity_json,ciphertext FROM day2_credential_material",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        install_schema(&db)?;
+        assert_eq!(
+            db.query_row(
+                "SELECT version FROM day2_credential_schema_version",
+                [],
+                |row| row.get::<_, i64>(0)
+            )?,
+            2
+        );
+        assert_eq!(
+            db.query_row("SELECT head FROM day2_credential_lineages", [], |row| {
+                row.get::<_, String>(0)
+            })?,
+            receipt.version.unwrap()
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT identity_json,ciphertext FROM day2_credential_material",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+            )?,
+            before
+        );
+        drop(db);
+        let db = Connection::open(&path)?;
+        install_schema(&db)?;
+        assert_eq!(
+            db.query_row("PRAGMA foreign_keys", [], |row| row.get::<_, i64>(0))?,
+            1
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn schema_rejects_forged_versions_layouts_indexes_fks_and_guards() -> Result<()> {
+        for altered in [
+            LEGACY_CREDENTIAL_V1.replace("VALUES(1)","VALUES(99)"),
+            LEGACY_CREDENTIAL_V1.replace("VALUES(1)","VALUES(2)"),
+            LEGACY_CREDENTIAL_V1.replace("version INTEGER PRIMARY KEY)","version INTEGER)"),
+            LEGACY_CREDENTIAL_V1.replace(" STRICT;",";"),
+            LEGACY_CREDENTIAL_V1.replace("CHECK(length(verifier) = 32)","CHECK(length(verifier) > 0)"),
+            LEGACY_CREDENTIAL_V1.replace("REFERENCES day2_credential_versions(id)",""),
+            LEGACY_CREDENTIAL_V1.replace("(namespace, family, creator, id)","(namespace, creator, family, id)"),
+            LEGACY_CREDENTIAL_V1.replace("ON day2_credential_lineages(namespace, family, principal, id)","ON day2_credential_lineages(namespace, family, principal, id) WHERE state='active'"),
+            format!("{LEGACY_CREDENTIAL_V1} CREATE INDEX hidden_credential_index ON day2_credential_material(identity_json);"),
+            format!("{LEGACY_CREDENTIAL_V1} CREATE TRIGGER injected AFTER INSERT ON day2_credential_versions BEGIN SELECT 1; END;"),
+        ] {
+            let db=Connection::open_in_memory()?;
+            db.execute_batch(&altered)?;
+            assert!(install_schema(&db).is_err(),"{altered}");
+            assert_eq!(db.query_row("SELECT count(*) FROM sqlite_master WHERE name='day2_credential_lineages_shape_INSERT_v2'",[],|row| row.get::<_,i64>(0))?,0);
+        }
+        let db = legacy_database()?;
+        install_schema(&db)?;
+        db.execute_batch("DROP TRIGGER day2_credential_material_shape_UPDATE_v2")?;
+        assert!(install_schema(&db).is_err());
+        assert_eq!(db.query_row("SELECT count(*) FROM sqlite_master WHERE name='day2_credential_material_shape_UPDATE_v2'",[],|row| row.get::<_,i64>(0))?,0);
+        let db = legacy_database()?;
+        install_schema(&db)?;
+        db.execute_batch("DROP TRIGGER day2_credential_material_shape_UPDATE_v2; CREATE TRIGGER day2_credential_material_shape_UPDATE_v2 AFTER UPDATE ON day2_credential_material BEGIN SELECT 1; END")?;
+        assert!(install_schema(&db).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn schema_rejects_malformed_imports_and_keeps_legacy_version() -> Result<()> {
+        for corrupt in [
+            "UPDATE day2_credential_lineages SET family='bad family'",
+            "UPDATE day2_credential_lineages SET principal='domain:example.com'",
+            "UPDATE day2_credential_lineages SET label=char(1)",
+            "UPDATE day2_credential_lineages SET namespace_json='null'",
+            "UPDATE day2_credential_lineages SET namespace_json='{\"installation\":\"wonderly\",\"installation\":\"wonderly\",\"environment\":\"dev\",\"app\":\"transcriber\",\"binding_generation\":2}'",
+            "UPDATE day2_credential_lineages SET head='missing'",
+            "UPDATE day2_credential_lineages SET revision=5",
+            "UPDATE day2_credential_lineages SET grant_digest='sha256:0000000000000000000000000000000000000000000000000000000000000000'",
+            "UPDATE day2_credential_versions SET lineage='missing'",
+            "UPDATE day2_credential_versions SET predecessor=id",
+            "UPDATE day2_credential_versions SET selector='not-canonical'",
+            "UPDATE day2_credential_versions SET state='superseded'",
+            "UPDATE day2_credential_versions SET security_epoch=8",
+            "UPDATE day2_credential_versions SET expires_at=4000",
+            "UPDATE day2_credential_material SET identity_json='{}'",
+            "UPDATE day2_credential_material SET material_revision=2",
+            "DELETE FROM day2_credential_material",
+            "DELETE FROM day2_credential_deliveries",
+            "UPDATE day2_credential_deliveries SET recipient='different'",
+            "UPDATE day2_credential_deliveries SET expires_at=4000",
+            "UPDATE day2_credential_deliveries SET state='closed',closed_reason=''",
+            "UPDATE day2_credential_receipts SET version=NULL",
+            "UPDATE day2_credential_receipts SET action='rotate'",
+            "UPDATE day2_credential_receipts SET family_contract='sha256:0000000000000000000000000000000000000000000000000000000000000000'",
+            "DELETE FROM day2_credential_receipts",
+            "INSERT INTO day2_credential_reveals SELECT 'attempt',id,'different','session-1',1100 FROM day2_credential_versions",
+            "INSERT INTO day2_credential_reveals SELECT 'attempt',id,'issuer/human-1','session-1',1300 FROM day2_credential_versions",
+        ] {
+            let mut db = legacy_database()?;
+            committed_issue(&mut db)?;
+            db.execute_batch("PRAGMA foreign_keys=OFF; PRAGMA ignore_check_constraints=ON")?;
+            db.execute_batch(corrupt)?;
+            assert!(install_schema(&db).is_err(), "accepted {corrupt}");
+            assert_eq!(
+                db.query_row(
+                    "SELECT version FROM day2_credential_schema_version",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )?,
+                1
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE type='trigger'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )?,
+                0
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn schema_guards_reject_direct_new_malformed_rows_and_partial_fields() -> Result<()> {
+        let (_directory, mut db) = database()?;
+        committed_issue(&mut db)?;
+        for corrupt in [
+            "UPDATE day2_credential_lineages SET id=NULL",
+            "UPDATE day2_credential_lineages SET family=''",
+            "UPDATE day2_credential_lineages SET label=char(1)",
+            "UPDATE day2_credential_lineages SET label=char(160)",
+            "UPDATE day2_credential_lineages SET label='éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé'",
+            "UPDATE day2_credential_lineages SET creator='domain:example.com'",
+            "UPDATE day2_credential_lineages SET namespace_json='[]'",
+            "UPDATE day2_credential_versions SET predecessor=id",
+            "UPDATE day2_credential_versions SET selector='not-canonical'",
+            "UPDATE day2_credential_material SET identity_json='null'",
+            "UPDATE day2_credential_deliveries SET state='closed'",
+            "UPDATE day2_credential_deliveries SET closed_reason='rotation'",
+            "UPDATE day2_credential_receipts SET action='revoke'",
+            "UPDATE day2_credential_receipts SET instruction_slot=4294967296",
+            "INSERT INTO day2_credential_reveals SELECT '',id,'issuer/human-1','session-1',1100 FROM day2_credential_versions",
+        ] {
+            assert!(db.execute_batch(corrupt).is_err(), "accepted {corrupt}");
+        }
+        install_schema(&db)?;
+        Ok(())
+    }
+
+    #[test]
+    fn schema_budget_refusal_rolls_back_fresh_creation_and_legacy_upgrade() -> Result<()> {
+        use crate::oauth::schema::admit_with_limits;
+        let fresh = Connection::open_in_memory()?;
+        assert!(admit_with_limits(&fresh, 1000, 16_384, 8 * 1_048_576, install_schema).is_err());
+        assert_eq!(
+            fresh.query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name GLOB 'day2_credential_*'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )?,
+            0
+        );
+        let mut legacy = legacy_database()?;
+        let original = committed_issue(&mut legacy)?;
+        let error = admit_with_limits(&legacy, 1_000_000, 16_384, 512, install_schema).unwrap_err();
+        assert!(format!("{error:#}").contains("materialization budget"));
+        assert_eq!(
+            legacy.query_row(
+                "SELECT version FROM day2_credential_schema_version",
+                [],
+                |row| row.get::<_, i64>(0)
+            )?,
+            1
+        );
+        assert_eq!(
+            legacy.query_row("SELECT head FROM day2_credential_lineages", [], |row| {
+                row.get::<_, String>(0)
+            })?,
+            original.version.unwrap()
+        );
+        install_schema(&legacy)?;
+        Ok(())
+    }
+
+    #[test]
+    fn schema_history_keeps_historical_reveal_binding_after_rotation_and_revocation() -> Result<()>
+    {
+        let mut db = legacy_database()?;
+        let first = committed_issue(&mut db)?;
+        let permit = authorize_reveal(
+            &mut db,
+            post(first.version.as_ref().unwrap(), "historical-reveal"),
+        )?
+        .unwrap();
+        let tx = db.transaction()?;
+        let rotated = stage_rotation(
+            &tx,
+            &lease(),
+            &snapshot(&first),
+            RotationIntent {
+                invocation: "rotation-history",
+                instruction_slot: 0,
+                recipient: "issuer/human-2",
+                session: "session-2",
+                issued_at: 1200,
+                expires_at: 2100,
+                reveal_until: 1400,
+            },
+        )?;
+        assert!(matches!(rotated, RotationResult::Rotated(_)));
+        tx.commit()?;
+        install_schema(&db)?;
+        assert!(!permit.into_response_body(&lease())?.is_empty());
+        let tx = db.transaction()?;
+        assert!(stage_revoke(&tx, &namespace(), &first.lineage)?);
+        let key = namespace_key(&namespace())?;
+        let digest = Digest::of(&"historical-revoke")?;
+        let reference = super::super::encode_ref("transcription", &snapshot(&first).lineage)?;
+        let outcome = serde_json::json!({"already_revoked":false,"lineage":reference,"revision":3})
+            .to_string();
+        tx.execute("INSERT INTO day2_credential_receipts VALUES(?1,'revocation-history',0,?2,?3,'revoke',?4,NULL)",
+            params![key,family().contract.as_str(),digest.as_str(),first.lineage])?;
+        tx.execute(
+            "INSERT INTO day2_credential_revocations VALUES(?1,'revocation-history',0,?2,?3)",
+            params![key, digest.as_str(), outcome],
+        )?;
+        tx.commit()?;
+        install_schema(&db)?;
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM day2_credential_versions WHERE state='revoked'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )?,
+            2
+        );
+        db.execute("UPDATE day2_credential_revocations SET outcome='{\"already_revoked\":false,\"lineage\":\"foreign\",\"revision\":3}'",[])?;
+        assert!(install_schema(&db).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn schema_current_restored_rows_are_checked_without_repairing_them() -> Result<()> {
+        let (_directory, mut db) = database()?;
+        committed_issue(&mut db)?;
+        db.execute("UPDATE day2_credential_material SET identity_json='{}'", [])?;
+        assert!(install_schema(&db).is_err());
+        assert_eq!(
+            db.query_row(
+                "SELECT version FROM day2_credential_schema_version",
+                [],
+                |row| row.get::<_, i64>(0)
+            )?,
+            2
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT identity_json FROM day2_credential_material",
+                [],
+                |row| row.get::<_, String>(0)
+            )?,
+            "{}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn schema_installation_preserves_the_callers_transaction() -> Result<()> {
+        let mut db = legacy_database()?;
+        let tx = db.transaction()?;
+        install_schema(&tx)?;
+        assert!(!tx.is_autocommit());
+        tx.rollback()?;
+        assert_eq!(
+            db.query_row(
+                "SELECT version FROM day2_credential_schema_version",
+                [],
+                |row| row.get::<_, i64>(0)
+            )?,
+            1
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='trigger'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )?,
+            0
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn schema_refuses_caller_transaction_that_started_without_foreign_keys() -> Result<()> {
+        let mut db = Connection::open_in_memory()?;
+        db.pragma_update(None, "foreign_keys", false)?;
+        assert_eq!(
+            db.pragma_query_value(None, "foreign_keys", |row| row.get::<_, i64>(0))?,
+            0
+        );
+        db.execute_batch("CREATE TABLE caller(value INTEGER)")?;
+        let tx = db.transaction()?;
+        tx.execute("INSERT INTO caller VALUES(7)", [])?;
+        assert!(install_schema(&tx).is_err());
+        assert!(!tx.is_autocommit());
+        assert_eq!(
+            tx.query_row("SELECT value FROM caller", [], |row| row.get::<_, i64>(0))?,
+            7
+        );
+        tx.rollback()?;
+        Ok(())
+    }
+
+    #[test]
+    fn combined_oauth_and_credential_admission_rolls_back_as_one_scope() -> Result<()> {
+        let db = legacy_database()?;
+        db.execute("UPDATE day2_credential_schema_version SET version=99", [])?;
+        assert!(
+            crate::oauth::schema::admit(&db, |db| {
+                crate::oauth::connect::install_schema(db)?;
+                install_schema(db)
+            })
+            .is_err()
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name GLOB 'oauth_*'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )?,
+            0
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT version FROM day2_credential_schema_version",
+                [],
+                |row| row.get::<_, i64>(0)
+            )?,
+            99
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn schema_recognizes_exact_peer_tables_and_rejects_substituted_peer_layouts() -> Result<()> {
+        let db = legacy_database()?;
+        db.execute_batch("CREATE TABLE day2_invocations(id TEXT PRIMARY KEY)")?;
+        super::super::issuance::install(&db)?;
+        install_schema(&db)?;
+        install_schema(&db)?;
+        for substitution in [
+            "DROP INDEX day2_credential_browser_expiry; CREATE INDEX day2_credential_browser_expiry ON day2_credential_browser(attempt)",
+            "DROP TABLE day2_credential_confirmations; CREATE TABLE day2_credential_confirmations(invocation TEXT PRIMARY KEY,confirmation TEXT NOT NULL)",
+            "DROP TABLE day2_credential_origins; CREATE TABLE day2_credential_origins(invocation TEXT PRIMARY KEY,evidence TEXT NOT NULL) STRICT",
+            "CREATE TABLE day2_credential_unknown(value TEXT)",
+        ] {
+            let candidate = legacy_database()?;
+            candidate.execute_batch("CREATE TABLE day2_invocations(id TEXT PRIMARY KEY)")?;
+            super::super::issuance::install(&candidate)?;
+            candidate.execute_batch(substitution)?;
+            assert!(
+                install_schema(&candidate).is_err(),
+                "accepted {substitution}"
+            );
+            assert_eq!(
+                candidate.query_row(
+                    "SELECT version FROM day2_credential_schema_version",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )?,
+                1
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn schema_rejects_case_substituted_peers_before_runtime_installers_can_reuse_them() -> Result<()>
+    {
+        for (table, corrupt) in [
+            (
+                "day2_credential_browser",
+                "INSERT INTO DAY2_CREDENTIAL_BROWSER VALUES('invocation','attempt','{}',300)",
+            ),
+            (
+                "day2_credential_confirmations",
+                "INSERT INTO DAY2_CREDENTIAL_CONFIRMATIONS VALUES('invocation','{}')",
+            ),
+            (
+                "day2_credential_origins",
+                "INSERT INTO day2_invocations VALUES('invocation'); INSERT INTO DAY2_CREDENTIAL_ORIGINS VALUES('invocation','{}')",
+            ),
+        ] {
+            let db = legacy_database()?;
+            db.execute_batch("CREATE TABLE day2_invocations(id TEXT PRIMARY KEY)")?;
+            super::super::issuance::install(&db)?;
+            let uppercase = table.to_ascii_uppercase();
+            let definition: String = db.query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name=?1",
+                [table],
+                |row| row.get(0),
+            )?;
+            db.execute_batch(&format!(
+                "DROP TABLE {table}; {}",
+                definition.replace(table, &uppercase)
+            ))?;
+            if table == "day2_credential_browser" {
+                db.execute_batch("CREATE INDEX DAY2_CREDENTIAL_BROWSER_EXPIRY ON DAY2_CREDENTIAL_BROWSER(expires_at)")?;
+            }
+            db.execute_batch(corrupt)?;
+            // The actual sibling installers resolve the uppercase objects and
+            // do not replace them. Admission must reject before trusting them.
+            super::super::issuance::install(&db)?;
+            let error = install_schema(&db).unwrap_err();
+            assert!(
+                format!("{error:#}").contains("unsupported credential schema object"),
+                "{error:#}"
+            );
+            assert_eq!(
+                db.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row
+                    .get::<_, i64>(0))?,
+                1
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT version FROM day2_credential_schema_version",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )?,
+                1
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE type='trigger'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )?,
+                0
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn schema_rejects_case_substituted_owned_objects_before_creating_or_upgrading_core()
+    -> Result<()> {
+        for imported in [
+            "CREATE TABLE DAY2_CREDENTIAL_BROWSER(invocation TEXT PRIMARY KEY,attempt TEXT NOT NULL UNIQUE,intent TEXT NOT NULL,expires_at INTEGER NOT NULL) STRICT",
+            "CREATE TABLE DAY2_CREDENTIAL_CONFIRMATIONS(invocation TEXT PRIMARY KEY,confirmation TEXT NOT NULL) STRICT",
+            "CREATE TABLE DAY2_CREDENTIAL_ORIGINS(invocation TEXT PRIMARY KEY,evidence TEXT NOT NULL) STRICT",
+            "CREATE TABLE DAY2_CREDENTIAL_UNKNOWN(value TEXT)",
+            "CREATE VIEW DAY2_CREDENTIAL_BROWSER AS SELECT 1 AS value",
+            "CREATE VIEW day2_credential_browser AS SELECT 1 AS value",
+            "CREATE TABLE unrelated(value TEXT); CREATE TRIGGER DAY2_CREDENTIAL_UNKNOWN AFTER INSERT ON unrelated BEGIN SELECT 1; END",
+        ] {
+            let db = Connection::open_in_memory()?;
+            db.execute_batch(imported)?;
+            let before: i64 =
+                db.query_row("SELECT count(*) FROM sqlite_master", [], |row| row.get(0))?;
+            let error = install_schema(&db).unwrap_err();
+            assert!(
+                format!("{error:#}").contains("unsupported credential schema object"),
+                "accepted {imported}: {error:#}"
+            );
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM sqlite_master", [], |row| row
+                    .get::<_, i64>(0))?,
+                before
+            );
+            assert_eq!(db.query_row("SELECT count(*) FROM sqlite_master WHERE name='day2_credential_schema_version'", [], |row| row.get::<_, i64>(0))?, 0);
+        }
+        for imported in [
+            "DROP INDEX day2_credential_visible_creator; CREATE INDEX DAY2_CREDENTIAL_VISIBLE_CREATOR ON day2_credential_lineages(namespace,family,creator,id)",
+            "CREATE INDEX unrelated_index ON day2_credential_lineages(label)",
+            "CREATE TRIGGER unrelated_trigger AFTER INSERT ON day2_credential_reveals BEGIN SELECT 1; END",
+            "CREATE TRIGGER DAY2_CREDENTIAL_REVEALS_SHAPE_INSERT_V2 AFTER INSERT ON day2_credential_reveals BEGIN SELECT 1; END",
+        ] {
+            let db = legacy_database()?;
+            db.execute_batch(imported)?;
+            let error = install_schema(&db).unwrap_err();
+            assert!(
+                format!("{error:#}").contains("unsupported credential schema object"),
+                "accepted {imported}: {error:#}"
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT version FROM day2_credential_schema_version",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )?,
+                1
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn schema_raw_metadata_is_debited_before_namespace_classification() -> Result<()> {
+        for prefix in ["DAY2_CREDENTIAL_", "unrelated_"] {
+            let db = Connection::open_in_memory()?;
+            let imported = format!("{prefix}{}", "x".repeat(65_537));
+            db.execute_batch(&format!("CREATE TABLE \"{imported}\"(value TEXT)"))?;
+            let error = crate::oauth::schema::admit_with_limits(
+                &db,
+                1_000_000,
+                16_384,
+                65_536,
+                install_schema,
+            )
+            .unwrap_err();
+            assert!(
+                format!("{error:#}").contains("materialization budget"),
+                "{error:#}"
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE name=?1 AND tbl_name=?1",
+                    [&imported],
+                    |row| row.get::<_, i64>(0)
+                )?,
+                1
+            );
+            assert_eq!(db.query_row("SELECT count(*) FROM sqlite_master WHERE name='day2_credential_schema_version'", [], |row| row.get::<_, i64>(0))?, 0);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn schema_canonical_peers_survive_the_same_runtime_sequence_and_reopen() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("canonical-peers.sqlite");
+        let db = Connection::open(&path)?;
+        db.execute_batch(LEGACY_CREDENTIAL_V1)?;
+        db.execute_batch("CREATE TABLE day2_invocations(id TEXT PRIMARY KEY)")?;
+        crate::oauth::schema::admit(&db, |db| {
+            install_schema(db)?;
+            super::super::issuance::install(db)?;
+            install_schema(db)
+        })?;
+        drop(db);
+        let db = Connection::open(&path)?;
+        crate::oauth::schema::admit(&db, |db| {
+            install_schema(db)?;
+            super::super::issuance::install(db)?;
+            install_schema(db)
+        })?;
+        assert_eq!(
+            db.query_row(
+                "SELECT version FROM day2_credential_schema_version",
+                [],
+                |row| row.get::<_, i64>(0)
+            )?,
+            2
+        );
+        for peer in CREDENTIAL_PEER_TABLES {
+            assert_eq!(db.query_row("SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?1 AND tbl_name=?1", [*peer], |row| row.get::<_, i64>(0))?, 1);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn schema_rejects_malformed_peer_rows_without_deleting_history() -> Result<()> {
+        for (table, corrupt) in [
+            (
+                "day2_credential_browser",
+                "INSERT INTO day2_credential_browser VALUES('invocation','attempt','{}',300)",
+            ),
+            (
+                "day2_credential_confirmations",
+                "INSERT INTO day2_credential_confirmations VALUES('invocation','{}')",
+            ),
+            (
+                "day2_credential_origins",
+                "INSERT INTO day2_invocations VALUES('invocation'); INSERT INTO day2_credential_origins VALUES('invocation','{}')",
+            ),
+        ] {
+            let db = legacy_database()?;
+            db.execute_batch("CREATE TABLE day2_invocations(id TEXT PRIMARY KEY)")?;
+            super::super::issuance::install(&db)?;
+            db.execute_batch(corrupt)?;
+            assert!(install_schema(&db).is_err(), "accepted {corrupt}");
+            assert_eq!(
+                db.query_row(
+                    "SELECT version FROM day2_credential_schema_version",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )?,
+                1
+            );
+            assert_eq!(
+                db.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row
+                    .get::<_, i64>(0))?,
+                1
+            );
+        }
+        Ok(())
+    }
+
+    fn restored_peer_database() -> Result<Connection> {
+        let db = legacy_database()?;
+        db.execute_batch(
+            "CREATE TABLE day2_invocations(id TEXT PRIMARY KEY, operation TEXT, actor TEXT)",
+        )?;
+        super::super::issuance::install(&db)?;
+        let authority = crate::authority_state::AuthorityStamp {
+            epoch: Digest::of(&"historical-authority")?.as_str().to_owned(),
+            revision: 2,
+        };
+        let navigation = super::super::browser::Pending {
+            attempt: "attempt".into(),
+            invocation: "invocation".into(),
+            operation: "IssueCredential".into(),
+            actor: "alice@example.com".into(),
+            input: serde_json::json!({"label":"integration"}),
+            family: "client".into(),
+            intent: super::super::lifecycle::Intent::Issue {
+                label: "integration".into(),
+            },
+            artifact: Digest::of(&"historical-artifact")?.as_str().to_owned(),
+            authority: authority.clone(),
+            binding: Digest::of(&"historical-binding")?,
+            created_at: 100,
+            expires_at: 400,
+            product_return: None,
+        };
+        let confirmation = super::super::issuance::Confirmation {
+            invocation: navigation.invocation.clone(),
+            operation: navigation.operation.clone(),
+            actor: navigation.actor.clone(),
+            subject: "subject-1".into(),
+            session: "session-1".into(),
+            input: navigation.input.clone(),
+            family: navigation.family.clone(),
+            intent: navigation.intent.clone(),
+            artifact: navigation.artifact.clone(),
+            authority,
+            binding: navigation.binding.clone(),
+            security_epoch: 4,
+            authenticated_at: 101,
+            approved_at: 102,
+            expires_at: 400,
+        };
+        db.execute(
+            "INSERT INTO day2_credential_browser VALUES(?1,?2,?3,?4)",
+            params![
+                navigation.invocation,
+                navigation.attempt,
+                serde_json::to_string(&navigation)?,
+                navigation.expires_at
+            ],
+        )?;
+        db.execute(
+            "INSERT INTO day2_credential_confirmations VALUES(?1,?2)",
+            params![
+                confirmation.invocation,
+                serde_json::to_string(&confirmation)?
+            ],
+        )?;
+        Ok(db)
+    }
+
+    #[test]
+    fn schema_preserves_historical_peer_intent_and_rejects_retargeting() -> Result<()> {
+        let db = restored_peer_database()?;
+        install_schema(&db)?;
+        install_schema(&db)?;
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM day2_credential_confirmations",
+                [],
+                |row| row.get::<_, i64>(0)
+            )?,
+            1
+        );
+        for (field, value) in [
+            ("invocation", serde_json::json!("other")),
+            ("actor", serde_json::json!("bob@example.com")),
+            ("family", serde_json::json!("other")),
+            ("input", serde_json::json!({"label":"other"})),
+            ("authenticated_at", serde_json::json!(100)),
+            ("expires_at", serde_json::json!(401)),
+            ("binding", serde_json::json!(Digest::of(&"other-binding")?)),
+            ("unexpected", serde_json::json!(true)),
+        ] {
+            let candidate = restored_peer_database()?;
+            let raw: String = candidate.query_row(
+                "SELECT confirmation FROM day2_credential_confirmations",
+                [],
+                |row| row.get(0),
+            )?;
+            let mut changed: serde_json::Value = crate::json::decode(raw.as_bytes())?;
+            changed.as_object_mut().unwrap().insert(field.into(), value);
+            let changed = changed.to_string();
+            candidate.execute(
+                "UPDATE day2_credential_confirmations SET confirmation=?1",
+                [&changed],
+            )?;
+            assert!(
+                install_schema(&candidate).is_err(),
+                "accepted changed {field}"
+            );
+            assert_eq!(
+                candidate.query_row(
+                    "SELECT version FROM day2_credential_schema_version",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )?,
+                1
+            );
+            assert_eq!(
+                candidate.query_row(
+                    "SELECT confirmation FROM day2_credential_confirmations",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )?,
+                changed
+            );
+        }
+        // Confirmation evidence can outlive the disposable navigation row.
+        db.execute("DELETE FROM day2_credential_browser", [])?;
+        install_schema(&db)?;
+        Ok(())
+    }
+
+    #[test]
+    fn schema_peer_scan_refusal_is_bounded_and_preserves_imported_rows() -> Result<()> {
+        let db = restored_peer_database()?;
+        let oversized = "x".repeat(8 * 1_048_576 + 1);
+        db.execute("UPDATE day2_credential_browser SET intent=?1", [&oversized])?;
+        let error = install_schema(&db).unwrap_err();
+        assert!(format!("{error:#}").contains("materialization budget"));
+        assert_eq!(
+            db.query_row(
+                "SELECT version FROM day2_credential_schema_version",
+                [],
+                |row| row.get::<_, i64>(0)
+            )?,
+            1
+        );
+        assert_eq!(
+            usize::try_from(db.query_row(
+                "SELECT length(intent) FROM day2_credential_browser",
+                [],
+                |row| row.get::<_, i64>(0)
+            )?)?,
+            oversized.len()
+        );
+        db.execute("UPDATE day2_credential_browser SET intent='{}'", [])?;
+        assert!(install_schema(&db).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn schema_rejects_negative_historical_peer_times_without_rewriting_import() -> Result<()> {
+        for navigation in [true, false] {
+            let db = restored_peer_database()?;
+            let (table, column) = if navigation {
+                db.execute("DELETE FROM day2_credential_confirmations", [])?;
+                ("day2_credential_browser", "intent")
+            } else {
+                db.execute("DELETE FROM day2_credential_browser", [])?;
+                ("day2_credential_confirmations", "confirmation")
+            };
+            let raw: String =
+                db.query_row(&format!("SELECT {column} FROM {table}"), [], |row| {
+                    row.get(0)
+                })?;
+            let mut changed: serde_json::Value = crate::json::decode(raw.as_bytes())?;
+            if navigation {
+                changed["created_at"] = serde_json::json!(-10);
+                changed["expires_at"] = serde_json::json!(290);
+                db.execute("UPDATE day2_credential_browser SET expires_at=290", [])?;
+            } else {
+                changed["authenticated_at"] = serde_json::json!(-1);
+                changed["approved_at"] = serde_json::json!(0);
+                changed["expires_at"] = serde_json::json!(299);
+            }
+            let changed = changed.to_string();
+            db.execute(&format!("UPDATE {table} SET {column}=?1"), [&changed])?;
+            let error = install_schema(&db).unwrap_err();
+            assert!(format!("{error:#}").contains("time"));
+            assert_eq!(
+                db.query_row(
+                    "SELECT version FROM day2_credential_schema_version",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )?,
+                1
+            );
+            assert_eq!(
+                db.query_row(&format!("SELECT {column} FROM {table}"), [], |row| row
+                    .get::<_, String>(
+                    0
+                ))?,
+                changed
+            );
+        }
+        Ok(())
+    }
+
+    fn replace_peer_intent(
+        db: &Connection,
+        family: &str,
+        intent: &super::super::lifecycle::Intent,
+    ) -> Result<()> {
+        for (table, column) in [
+            ("day2_credential_browser", "intent"),
+            ("day2_credential_confirmations", "confirmation"),
+        ] {
+            let raw: String =
+                db.query_row(&format!("SELECT {column} FROM {table}"), [], |row| {
+                    row.get(0)
+                })?;
+            let mut changed: serde_json::Value = crate::json::decode(raw.as_bytes())?;
+            changed["family"] = family.into();
+            changed["intent"] = serde_json::to_value(intent)?;
+            db.execute(
+                &format!("UPDATE {table} SET {column}=?1"),
+                [changed.to_string()],
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn schema_restored_lifecycle_refs_keep_historical_alias_distinct_from_family_id() -> Result<()>
+    {
+        use super::super::lifecycle::Intent;
+        let lineage = LineageRef {
+            namespace: namespace(),
+            family: name("golinks_agent_search"),
+            id: "lineage-1".into(),
+        };
+        for registration in ["agents", "old_agent_keys"] {
+            let reference = super::super::encode_ref(registration, &lineage)?;
+            for intent in [
+                Intent::Rotate {
+                    lineage: reference.clone(),
+                    head: "version-1".into(),
+                    revision: 1,
+                },
+                Intent::Revoke {
+                    lineage: reference.clone(),
+                },
+            ] {
+                let db = restored_peer_database()?;
+                replace_peer_intent(&db, lineage.family.as_str(), &intent)?;
+                install_schema(&db)?;
+                install_schema(&db)?;
+                assert_eq!(
+                    db.query_row(
+                        "SELECT count(*) FROM day2_credential_confirmations",
+                        [],
+                        |row| row.get::<_, i64>(0)
+                    )?,
+                    1
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn schema_restored_lifecycle_refs_reject_forged_shape_family_and_noncanonical_encoding()
+    -> Result<()> {
+        use super::super::lifecycle::Intent;
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+        let lineage = LineageRef {
+            namespace: namespace(),
+            family: name("golinks_agent_search"),
+            id: "lineage-1".into(),
+        };
+        let raw = serde_json::to_string(&lineage)?;
+        let mut wrong_family = lineage.clone();
+        wrong_family.family = name("other_family");
+        let mut wrong_namespace = lineage.clone();
+        wrong_namespace.namespace.binding_generation = 0;
+        let mut wrong_id = lineage.clone();
+        wrong_id.id = "bad identifier".into();
+        let duplicate = format!("{},\"id\":\"other\"}}", raw.trim_end_matches('}'));
+        let unknown = format!("{},\"unknown\":true}}", raw.trim_end_matches('}'));
+        for reference in [
+            super::super::encode_ref("agents", &wrong_family)?,
+            super::super::encode_ref("agents", &wrong_namespace)?,
+            super::super::encode_ref("agents", &wrong_id)?,
+            super::super::encode_ref("bad_alias!", &lineage)?,
+            super::super::encode_ref(&"a".repeat(49), &lineage)?,
+            format!("cr1_agents_{}", URL_SAFE_NO_PAD.encode(duplicate)),
+            format!("cr1_agents_{}", URL_SAFE_NO_PAD.encode(unknown)),
+            format!("cr1_agents_{}=", URL_SAFE_NO_PAD.encode(raw)),
+        ] {
+            let db = restored_peer_database()?;
+            replace_peer_intent(
+                &db,
+                lineage.family.as_str(),
+                &Intent::Revoke { lineage: reference },
+            )?;
+            assert!(install_schema(&db).is_err());
+            assert_eq!(
+                db.query_row(
+                    "SELECT version FROM day2_credential_schema_version",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )?,
+                1
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM day2_credential_confirmations",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )?,
+                1
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn schema_native_runtime_initialization_reopens_with_installed_peers() -> Result<()> {
+        let artifact=std::path::PathBuf::from(std::env::var_os("DAY2_TEST_CREDENTIAL_METADATA_ARTIFACT")
+            .context("build credential-metadata-conformance and set DAY2_TEST_CREDENTIAL_METADATA_ARTIFACT")?);
+        let directory = tempfile::tempdir()?;
+        let runtime = crate::development::create_for(
+            &artifact,
+            &directory.path().join("instance"),
+            None,
+            "alice@example.com",
+        )?;
+        runtime.initialize()?;
+        let reopened = crate::store::Runtime::load(runtime.instance_path(), runtime.app())?;
+        reopened.initialize()?;
+        let db = crate::store::open(reopened.db())?;
+        assert_eq!(db.query_row("SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('day2_credential_browser','day2_credential_confirmations','day2_credential_origins')",[],|row| row.get::<_,i64>(0))?,3);
+        Ok(())
+    }
+
+    #[test]
+    fn schema_admits_historical_origin_and_rejects_identity_substitution() -> Result<()> {
+        let (_directory, mut db) = database()?;
+        db.execute_batch("CREATE TABLE day2_invocations(id TEXT PRIMARY KEY, operation TEXT NOT NULL, actor TEXT NOT NULL)")?;
+        super::super::issuance::install(&db)?;
+        let mut intent = issue("historical-origin-issue");
+        intent.principal = format!("client/transcription-client/{}", "a".repeat(64));
+        intent.ceiling = GrantCeiling::derive(
+            intent.ceiling.client,
+            intent.principal.clone(),
+            intent.ceiling.audience,
+            intent.ceiling.roots,
+        )?;
+        let namespace = intent.namespace.clone();
+        let principal = intent.principal.clone();
+        let mut origin = serde_json::json!({
+            "namespace": intent.namespace, "family": intent.family,
+            "family_contract": intent.family_contract,
+            "principal": intent.principal, "actor": intent.principal,
+            "binding": Digest::new(b"historical selected binding"), "security_epoch": intent.security_epoch,
+            "verifier_version": "verify-v1", "ceiling": intent.ceiling,
+            "root": "SubmitTranscription", "path": [],
+        });
+        let prepared = prepare_issue(&lease(), &family(), intent)?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let receipt = stage_issue(&tx, prepared)?.public_identity().clone();
+        tx.commit()?;
+        let version = receipt.version.context("fixture version")?;
+        origin["lineage"] = serde_json::json!(receipt.lineage);
+        origin["version"] = serde_json::json!(version);
+        let encoded = origin.to_string();
+        db.execute(
+            "INSERT INTO day2_invocations VALUES('historical-origin','SubmitTranscription',?1)",
+            [&principal],
+        )?;
+        db.execute(
+            "INSERT INTO day2_credential_origins VALUES('historical-origin',?1)",
+            [&encoded],
+        )?;
+        install_schema(&db)?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        assert!(stage_revoke(&tx, &namespace, &receipt.lineage)?);
+        tx.commit()?;
+        // Historical evidence remains admissible after revocation; neither its
+        // persisted epoch nor the associated ciphertext becomes current again.
+        install_schema(&db)?;
+        assert_eq!(
+            db.query_row(
+                "SELECT security_epoch FROM day2_credential_versions WHERE id=?1",
+                [&version],
+                |row| row.get::<_, i64>(0)
+            )?,
+            7
+        );
+        for (field, bad) in [
+            ("family", serde_json::json!("other-family")),
+            (
+                "family_contract",
+                serde_json::json!(Digest::new(b"other family")),
+            ),
+            ("lineage", serde_json::json!("other-lineage")),
+            ("version", serde_json::json!("missing-version")),
+            ("principal", serde_json::json!("other-principal")),
+            ("actor", serde_json::json!("bob@example.com")),
+            ("security_epoch", serde_json::json!(8)),
+            ("verifier_version", serde_json::json!("verify-v2")),
+            ("root", serde_json::json!("unapproved")),
+            ("path", serde_json::json!(["unapproved"])),
+            ("path", serde_json::json!(vec!["SubmitTranscription"; 17])),
+            ("unexpected", serde_json::json!(true)),
+        ] {
+            let mut changed = origin.clone();
+            changed[field] = bad;
+            let changed = changed.to_string();
+            db.execute("UPDATE day2_credential_origins SET evidence=?1", [&changed])?;
+            assert!(install_schema(&db).is_err(), "accepted changed {field}");
+            assert_eq!(
+                db.query_row("SELECT evidence FROM day2_credential_origins", [], |row| {
+                    row.get::<_, String>(0)
+                })?,
+                changed
+            );
+        }
+        let mut changed = origin;
+        changed["actor"] = serde_json::json!("bob@example.com");
+        db.execute(
+            "UPDATE day2_credential_origins SET evidence=?1",
+            [changed.to_string()],
+        )?;
+        db.execute("UPDATE day2_invocations SET actor='bob@example.com'", [])?;
+        assert!(
+            install_schema(&db).is_err(),
+            "matching actor substitutions retargeted a client credential"
+        );
+        db.execute("UPDATE day2_credential_origins SET evidence=?1", [&encoded])?;
+        db.execute("UPDATE day2_invocations SET actor=?1", [&principal])?;
+        install_schema(&db)?;
+        Ok(())
+    }
 
     fn name(value: &str) -> Name {
         Name::try_from(value.to_owned()).unwrap()
