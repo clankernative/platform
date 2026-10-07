@@ -171,12 +171,24 @@ fn read_secret(path: &Path) -> Result<String> {
     );
     let mut bytes = Vec::new();
     file.take(16_385).read_to_end(&mut bytes)?;
+    Ok(credential_value(&bytes)?.to_owned())
+}
+
+/// A mounted credential's value: UTF-8 without trailing newlines, within the
+/// bearer token rules. Validation never includes the value in an error.
+fn credential_value(bytes: &[u8]) -> Result<&str> {
     ensure!(bytes.len() <= 16_384, "credential_mount_budget");
-    let text = String::from_utf8(bytes).context("credential_mount_encoding")?;
-    let token = text.trim_end_matches(['\r', '\n']).to_owned();
-    // Validate without including the token in any error.
-    Credentials::bearer(token.clone())?;
+    let token = std::str::from_utf8(bytes)
+        .context("credential_mount_encoding")?
+        .trim_end_matches(['\r', '\n']);
+    Credentials::validate(token)?;
     Ok(token)
+}
+
+/// The reviewed fingerprint registration records for a credential's bytes:
+/// `sha256:` of the value without trailing newlines.
+pub fn credential_fingerprint(bytes: &[u8]) -> Result<String> {
+    Ok(crate::digest(credential_value(bytes)?.as_bytes()))
 }
 
 impl CredentialResolver for MountedCredentials {

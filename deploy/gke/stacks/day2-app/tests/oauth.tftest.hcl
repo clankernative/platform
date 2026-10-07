@@ -203,3 +203,56 @@ run "refuses_a_key_from_another_project" {
   }
   expect_failures = [terraform_data.oauth_admission]
 }
+
+# The release profile carries provider credentials but not OAuth runtime: an
+# OAuth workload stays applied by this root.
+run "release_management_refuses_oauth_runtime" {
+  command = plan
+  variables {
+    release_managed = true
+    app_calls = {
+      workload_key                = { id = "workload-1", secret_version = "projects/123/secrets/workload/versions/1" }
+      issuer_key                  = { issuer = "example-issuer", id = "issuer-1", secret_version = "projects/123/secrets/issuer/versions/1" }
+      serving_snapshot_config_map = "active-app-serving"
+      serving                     = {}
+      outgoing                    = {}
+      incoming                    = {}
+    }
+  }
+  override_data {
+    target = data.kubernetes_config_map_v1.platform_contract
+    values = { data = {
+      APP_DOMAIN                   = "example.test.example.com"
+      APP_NAMESPACE                = "app-example"
+      IAP_JWT_AUDIENCE             = "/projects/123456789012/global/backendServices/987654321"
+      APP_CALL_ISSUER_AUDIENCE     = "/projects/123456789012/global/backendServices/2"
+      APP_CALL_RECEIVER_AUDIENCE   = "/projects/123456789012/global/backendServices/3"
+      APP_CALL_WORKLOAD_EMAIL      = "app-native@example-tools.iam.gserviceaccount.com"
+      REQUIRED_SERVICE_LABEL_KEY   = "day2.dev/app"
+      REQUIRED_SERVICE_LABEL_VALUE = "example_app"
+      SERVICE_ACCOUNT_NAME         = "runtime"
+      OAUTH_APP_PROJECT            = "example-tools"
+      OAUTH_APP_SERVICE_ACCOUNT    = "app-native@example-tools.iam.gserviceaccount.com"
+      OAUTH_APP_SECRET_IDS         = "[\"custody_verifier\",\"custody_encryption\",\"shell_attestation\"]"
+      OAUTH_SHELL_NAMESPACE        = "day2-security"
+      OAUTH_SHELL_CONTRACT         = "security-shell-contract"
+    } }
+  }
+  override_data {
+    target = data.kubernetes_resource.release
+    values = { object = {
+      metadata = { name = "day2-example-app", namespace = "app-example", annotations = {} }
+      spec = { template = {
+        metadata = { annotations = {
+          "day2.dev/installation" = "exampleco", "day2.dev/environment" = "production", "day2.dev/app" = "example_app"
+          "day2.dev/artifact"     = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        } }
+        spec = {
+          containers = [{ name = "day2", image = "registry.example.com/app@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", env = [{ name = "DAY2_EXPECTED_ARTIFACT", value = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }] }]
+          volumes    = [{ name = "instance", configMap = { name = "day2-release-two" } }]
+        }
+      } }
+    } }
+  }
+  expect_failures = [terraform_data.release_admission]
+}

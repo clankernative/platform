@@ -21,10 +21,12 @@ come from a separate private instance repository; start with the
 
 Installed app-call workloads can hand software deployment to the native
 `day2-gke-release` command by enabling `release_managed` in the day2-app root.
-The root preserves released image/instance fields during infrastructure plans;
-the release command verifies deployment readback and publishes serving selectors
-automatically. See [the normal release workflow](../../docs/RELEASE-WORKFLOW.md)
-for the two-key profile, explicit operator approval and durable retry behavior.
+The root preserves released image/instance fields, including provider-credential
+registration, during infrastructure plans; the release command verifies
+deployment readback and publishes serving selectors automatically. See
+[the normal release workflow](../../docs/RELEASE-WORKFLOW.md) for the two-key
+profile with provider credentials, explicit operator approval and durable retry
+behavior.
 
 The cluster example is zonal and uses fixed non-overlapping private ranges in a
 new dedicated VPC. It is a reference deployment, not a multi-zone HA service.
@@ -642,6 +644,17 @@ against the reviewed plan, exactly as `day2 platform provision-credentials`
 does for a Compose package. It refuses a missing, extra or changed secret. To
 rotate, add a new version, advance the credential's revision in the catalog,
 and update the version and fingerprint together.
+
+A release-managed workload (`release_managed = true`) is released with its
+provider credentials by `day2-gke-release`: each release installs the
+registration metadata for its own instance and registers from its own image,
+after checking that the SecretProviderClass projects the pinned versions and
+that each matches its reviewed fingerprint. Name versions by project number
+(`projects/123456789/...`) for such a workload. Its credential set is fixed:
+this root refuses to add, remove or rotate a provider credential, or change
+`credential_operator`, while `release_managed` is enabled. Disable it, apply the
+change with the candidate image and artifact, then enable it again. See
+[the release workflow](../../docs/RELEASE-WORKFLOW.md#provider-credentials).
 
 Size the state volume for the app's invocation rate. A completed invocation keeps
 its full trace, which includes the authority it ran under, for 72 hours unless
