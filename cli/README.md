@@ -47,12 +47,9 @@ perform remote authentication. Its conservative `artifact_integrity` label remai
 `not_verified` for compatibility across legacy/current discovery responses.
 
 Platform operations return JSON receipts, with errors on stderr and a nonzero
-exit. [Optional app creation](../docs/APP-CREATE.md) prompts only on a terminal;
-use `--ui none|html|clanker` for explicit noninteractive arguments. Clanker requires
-an already-installed, separately reviewed vanilla bundle and manifest execution
-approval; app creation never installs or downloads a tool. It builds and verifies
-before atomic fresh-directory publication. `local-dev` prints a login URL,
-watches app edits and serves until Ctrl-C.
+exit. [App creation](../docs/APP-CREATE.md) supports `--ui none|html|clanker`;
+Clanker requires an installed, separately approved bundle. `local-dev` prints a
+login URL, watches app edits and serves until Ctrl-C.
 It preserves local data; `--reset` explicitly starts a fresh managed instance.
 Use `--detach`, `--status`, `--stop`, `--logs` and `--follow` for background sessions.
 `check`/`test` report reproducible evidence paths. Backup and restore preserve
