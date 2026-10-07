@@ -1,5 +1,6 @@
 //! Typed assembly outcomes separate provider behavior from capture/admission.
 use super::*;
+use std::{path::Path, time::Duration};
 
 #[derive(Clone, Debug)]
 pub(super) enum AssemblyFailure {
