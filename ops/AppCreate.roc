@@ -110,7 +110,7 @@ AppCreate :: [].{
 		operator_guidance =
 			if
 				options.ui == "clanker"
-				"\n## Reviewed operator tool configuration\n\nFuture build and local-dev require the separately reviewed installed provider-pin.json through\nDAY2_UI_PROVIDER_PIN_JSON. The creation receipt identifies its durable absolute path. Set that\noperator environment variable for your terminal/session before ordinary builds; the app lock\ndoes not authorize execution. Do not point it at an app-owned pin or a staged temporary path.\nRestore/relocate the tool separately through the reviewed bundle installer if it moves.\nThe local vanilla package in .ui-dependencies/vanilla is locked build input, never served.\n"
+				"\n## Reviewed operator tool configuration\n\nFuture build and local-dev require the separately reviewed installed provider-pin.json through\nDAY2_UI_PROVIDER_PIN_JSON. The creation receipt identifies its durable absolute path. Set that\noperator environment variable for your terminal/session before ordinary builds; the app lock\ndoes not authorize execution. Do not point it at an app-owned pin or a staged temporary path.\nRestore/relocate the tool separately through the reviewed bundle installer if it moves.\nThe local vanilla package in .ui-dependencies/vanilla is locked build input, never served.\nVerified project/third-party notices are retained separately in .ui-dependencies/legal.\nRetain them with redistributed package CSS/JS/assets; app-owned code keeps its own rights.\n"
 			else
 				""
 		core = [

@@ -90,10 +90,10 @@ fn app_creation_scaffold_variants_have_complete_registered_ownership_contracts()
                             assert!(html.contains("href=\"{{ routes.welcome() }}\""));
                             assert!(!html.contains("href=\"/\""));
                             assert!(source.join("ui/clanker-theme.css").is_file());
-                            assert!(
-                                fs::read_to_string(source.join("README.md"))?
-                                    .contains("DAY2_UI_PROVIDER_PIN_JSON")
-                            );
+                            let readme = fs::read_to_string(source.join("README.md"))?;
+                            assert!(readme.contains("DAY2_UI_PROVIDER_PIN_JSON"));
+                            assert!(readme.contains(".ui-dependencies/legal"));
+                            assert!(readme.contains("app-owned code keeps its own rights"));
                         } else {
                             assert!(!html.contains("cui-"));
                             assert!(!source.join("ui/clanker-theme.css").exists());

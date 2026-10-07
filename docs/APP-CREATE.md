@@ -50,7 +50,10 @@ input; app creation does not rebuild or assign it.
 
 ## Install identity is not execution authority
 
-Install/restore the bundle separately through the reviewed RELEASE installer.
+Install/restore [Clanker UI 0.1.0](https://github.com/clankernative/clanker-ui/releases/tag/v0.1.0)
+separately using its [installation instructions](https://github.com/clankernative/clanker-ui/blob/v0.1.0/docs/INSTALL.md).
+Use the exact qualified target and reviewed bootstrap/archive hashes; no Clanker checkout or Rust compilation is required.
+Review the **installed manifest** digest separately for `--bundle-sha256`: it is not the archive checksum.
 App creation performs **no download or installation**. This initial capability
 accepts only an explicit already-installed directory and a caller-reviewed
 `sha256:` digest of its exact `manifest.json` bytes. Supplying
@@ -64,6 +67,15 @@ transport checksum alone does not authorize execution.
 Rust validates protocol 2, binding ABI 2, Minijinja 2.12.0 and host target, captures
 bounded regular files without links, checks every captured byte/digest and package
 manifest, and recreates the provider-neutral pin for the exact private executable.
+The current manifest must include exactly the ordered `legal/LICENSE` and
+`legal/NOTICES.txt` entries. Each must be nonempty, at most 1 MiB, and match its
+captured regular-file bytes and SHA-256. Missing/unknown entries, wrong ordering,
+unsafe paths, symlinks, oversized input and tampering fail closed. The old
+unreleased no-legal shape is rejected; no alternate parser is retained.
+Creation retains these bytes at `.ui-dependencies/legal/`, separately from
+`.ui-dependencies/vanilla/`; the package digest, all catalog inputs and lock path
+remain unchanged. Keep the notices with redistributed generated CSS/JS/catalog
+assets. This does not assign a license to app-owned business code or content.
 No other bundle executable is launched. The ordinary locked build then uses that
 pin through the existing provider adapter and retains all resource/template/form
 admission and mandatory app verification. This is trusted operator tooling, not
@@ -75,6 +87,10 @@ the separately approved installed `provider-pin.json` through the existing
 approval, compiler binary or hidden persistent platform configuration. Relocating
 an app preserves its local package lock; independently relocate/restore the tool
 through the installer when needed. Plain HTML/UI-free builds need no provider.
+Existing Clanker apps need only exact installed inputs at their declared lock
+path and a separately approved operator pin, not new app scripts or domain changes.
+The released Linux executable is CLI-only (glibc 2.39+), not full Linux Native
+builder qualification; scoped creation/admission is qualified on Apple Silicon.
 
 ## Atomicity and checks
 
