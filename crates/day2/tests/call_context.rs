@@ -7,8 +7,7 @@
 //! app makes on this basis has to be reproducible, or it is not a decision the
 //! platform can stand behind.
 
-#[path = "support/commands.rs"]
-mod support;
+use crate::support::commands as support;
 use anyhow::{Context as _, Result};
 use day2::{
     invocations,

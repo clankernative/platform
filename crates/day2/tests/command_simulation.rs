@@ -1,9 +1,7 @@
 //! Seeded process-loss schedules over the real interpreter and local adapter.
 //! The reference is the product contract: one row, one analysis, one delivery.
-#[path = "support/evidence.rs"]
-mod evidence;
-#[path = "support/commands.rs"]
-mod support;
+use crate::support::commands as support;
+use crate::support::evidence;
 use anyhow::{Context, Result, ensure};
 use day2::{
     capabilities::NotificationWorld,

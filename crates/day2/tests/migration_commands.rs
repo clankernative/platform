@@ -1,5 +1,4 @@
-#[path = "support/commands.rs"]
-mod support;
+use crate::support::commands as support;
 use anyhow::Result;
 use day2::{invocations, migration, store::Fault};
 use support::World;

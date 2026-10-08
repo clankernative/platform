@@ -9,8 +9,7 @@
 //! What is still missing is the loop: nothing calls `offer` on a timer yet, so the
 //! occurrence here is offered explicitly, at a chosen instant.
 
-#[path = "support/commands.rs"]
-mod support;
+use crate::support::commands as support;
 use anyhow::{Context, Result};
 use day2::{
     invocations,

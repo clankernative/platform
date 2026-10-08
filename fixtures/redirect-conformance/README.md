@@ -31,5 +31,5 @@ without JavaScript. Full verification builds the fixture and passes it as
 
 ```text
 cargo run --locked -q -p xtask -- build fixtures/redirect-conformance
-DAY2_TEST_REDIRECT_ARTIFACT=artifacts/<printed digest> cargo test --locked -p day2 --test redirect_routes
+DAY2_TEST_REDIRECT_ARTIFACT=artifacts/<printed digest> cargo test --locked -p day2 --test day2_integration -- redirect_routes::
 ```

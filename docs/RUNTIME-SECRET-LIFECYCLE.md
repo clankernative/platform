@@ -233,9 +233,9 @@ Build the pinned private Roc runner before invoking the native test suites:
 
 ```text
 cargo run --locked -p xtask -- workflows
-cargo test --locked -p day2-control --test runtime_secret --test secret_retirement
-cargo test --locked -p day2-control --test durable_secret_retirement
-cargo test --locked -p day2-control --test simulation_retirement --test simulation_generation
+cargo test --locked -p day2-control --test control_integration -- runtime_secret:: secret_retirement::
+cargo test --locked -p day2-control --test control_integration -- durable_secret_retirement::
+cargo test --locked -p day2-control --test control_integration -- simulation_retirement:: simulation_generation::
 ```
 
 The durable test starts a disposable local Temporal server with persisted state,

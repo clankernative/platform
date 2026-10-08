@@ -13,4 +13,4 @@ The exact ordered field projection uses compact delimited tokens with delimiter-
 fixture values, keeping even 256 rows below the existing output string byte bound.
 
 Build this fixture through the existing app build recipe and set
-`DAY2_TEST_COLLECTION_ARTIFACT` for `cargo test --locked -p day2 --test collection`.
+`DAY2_TEST_COLLECTION_ARTIFACT` for `cargo test --locked -p day2 --test day2_integration -- collection::`.

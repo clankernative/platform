@@ -10,8 +10,7 @@
 //! schedule: a schedule that can run twice is worse than no schedule, because the
 //! application cannot tell.
 
-#[path = "support/commands.rs"]
-mod support;
+use crate::support::commands as support;
 use anyhow::Result;
 use day2::{
     schedules::{Missed, Schedule},

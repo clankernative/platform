@@ -16,8 +16,7 @@ use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 use std::{collections::BTreeMap, fs, path::PathBuf, sync::mpsc, thread, time::Duration};
 
-#[path = "support/compiler.rs"]
-mod compiler;
+use crate::support::compiler;
 
 struct World {
     _directory: tempfile::TempDir,
