@@ -11,9 +11,10 @@ use axum::{
     routing::any,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
+use day2_capabilities::resources::VersionRef;
 use day2_control::{
     BindingRef, Digest,
-    gke_release::{Deployment, GkeReleaseProvider},
+    gke_release::{Deployment, GkeReleaseProvider, ProviderCredential, ProviderCredentials},
     journal::Journal,
     kubernetes_conformance::GkeServingBinding,
     release::ReleaseApproval,
@@ -37,6 +38,10 @@ const NS: &str = "disposable";
 const WORKLOAD: &str = "/apis/apps/v1/namespaces/disposable/statefulsets/day2-reports";
 const CMS: &str = "/api/v1/namespaces/disposable/configmaps";
 const TOKEN: &str = "fixture-only-token";
+// day2's reference key of {"id":"alerts-webhook","revision":1}.
+const KEY: &str = "ef04e428d3b9a659ce6eaee5c890220e9ff59ac9f9b3889f2176569021744d2a";
+const CREDENTIAL: &[u8] = b"https://hooks.slack.example/synthetic-credential-never-journaled\n";
+const CREDENTIAL_VERSION: &str = "projects/12345/secrets/alerts-webhook/versions/4";
 struct Tokens;
 impl AccessTokenProvider for Tokens {
     fn access_token(&self) -> std::result::Result<AccessToken, SourceError> {
@@ -48,6 +53,8 @@ struct Cloud {
     controller: Value,
     maps: BTreeMap<String, Value>,
     versions: Vec<String>,
+    credential_versions: Vec<(String, String)>,
+    payloads: BTreeMap<String, Vec<u8>>,
     patches: usize,
     publications: usize,
     secret_denied: bool,
@@ -76,8 +83,12 @@ async fn serve(
             status = StatusCode::FORBIDDEN;
             json!({})
         } else {
-            let payload = b"synthetic-private-key-never-journaled";
-            json!({"name":path.trim_start_matches("/v1/").trim_end_matches(":access"), "payload":{"data":STANDARD.encode(payload),"dataCrc32c":crc32c::crc32c(payload).to_string()}})
+            let name = path.trim_start_matches("/v1/").trim_end_matches(":access");
+            let payload = cloud
+                .payloads
+                .get(name)
+                .map_or(&b"synthetic-private-key-never-journaled"[..], Vec::as_slice);
+            json!({"name":name, "payload":{"data":STANDARD.encode(payload),"dataCrc32c":crc32c::crc32c(payload).to_string()}})
         }
     } else if path
         == "/apis/secrets-store.csi.x-k8s.io/v1/namespaces/disposable/secretproviderclasses/keys"
@@ -85,6 +96,15 @@ async fn serve(
         json!({"spec":{"provider":"gke","parameters":{"secrets":serde_json::to_string(&json!([
             {"resourceName":cloud.versions[0],"path":"workload"},{"resourceName":cloud.versions[1],"path":"issuer"}
         ])).unwrap()}}})
+    } else if path
+        == "/apis/secrets-store.csi.x-k8s.io/v1/namespaces/disposable/secretproviderclasses/credentials"
+    {
+        let secrets: Vec<_> = cloud
+            .credential_versions
+            .iter()
+            .map(|(path, version)| json!({"resourceName":version,"path":path}))
+            .collect();
+        json!({"spec":{"provider":"gke","parameters":{"secrets":serde_json::to_string(&secrets).unwrap()}}})
     } else if path == WORKLOAD {
         if method == Method::PATCH {
             let patch: Value = serde_json::from_slice(&bytes).unwrap();
@@ -188,15 +208,55 @@ struct Fixture {
 }
 impl Fixture {
     fn new(deployment: &Deployment) -> Self {
-        let annotations = json!({"day2.dev/installation":"alpha","day2.dev/environment":"production","day2.dev/app":"reports","day2.dev/artifact":Digest::new(b"bootstrap")});
+        let mut annotations = json!({"day2.dev/installation":"alpha","day2.dev/environment":"production","day2.dev/app":"reports","day2.dev/artifact":Digest::new(b"bootstrap")});
+        let mut controller = json!({"apiVersion":"apps/v1","kind":"StatefulSet","metadata":{"name":"day2-reports","namespace":NS,"uid":"controller-uid","generation":1,"resourceVersion":"rv-1","annotations":{"day2.dev/release-managed":"true"}},"spec":{"replicas":1,"template":{"metadata":{"annotations":{}},"spec":{"serviceAccountName":"runtime","initContainers":[{"name":"state-ownership","image":"busybox@sha256:fixture","command":["/busybox/chown","10001:10001","/srv/day2/.state"]}],"containers":[{"name":"day2","image":deployment.image,"env":[{"name":"DAY2_EXPECTED_ARTIFACT","value":Digest::new(b"bootstrap")}]}],"volumes":[{"name":"instance","configMap":{"name":"bootstrap-instance"}},{"name":"keys","csi":{"driver":"secrets-store-gke.csi.k8s.io","volumeAttributes":{"secretProviderClass":"keys"}}}]}}},"status":{"observedGeneration":1,"readyReplicas":1,"updatedReplicas":1,"currentRevision":"rev-1","updateRevision":"rev-1"}});
+        let mut credential_versions = Vec::new();
+        if let Some(credentials) = &deployment.credentials {
+            // As the day2-app stack installs it, before the first release.
+            annotations["day2.dev/credentials-sha256"] = json!("bootstrap-credentials");
+            let spec = &mut controller["spec"]["template"]["spec"];
+            let mut mounts: Vec<_> = credentials
+                .metadata
+                .keys()
+                .map(|file| {
+                    let path = if file.starts_with("credential-") {
+                        format!("/srv/day2/provisioning/{file}")
+                    } else {
+                        format!("/srv/day2/{file}")
+                    };
+                    json!({"name":"credential-metadata","mountPath":path,"subPath":file,"readOnly":true})
+                })
+                .collect();
+            mounts.push(
+                json!({"name":"credentials","mountPath":"/run/day2/credentials","readOnly":true}),
+            );
+            mounts.push(json!({"name":"state","mountPath":"/srv/day2/.state"}));
+            let init = spec["initContainers"].as_array_mut().unwrap();
+            init.push(json!({"name":"credential-files","image":"busybox@sha256:fixture","command":["/busybox/install","-o","10001","-g","10001","-m","0400","-t","/run/day2/credentials",format!("/run/day2/credential-sources/{KEY}")]}));
+            init.push(json!({"name":"credential-registration","image":deployment.image,"command":["/usr/local/bin/day2-provision-credentials"],"args":["/srv/day2/operator-instance.json","reports","operator@example.com","/srv/day2/provisioning.json"],"volumeMounts":mounts}));
+            let volumes = spec["volumes"].as_array_mut().unwrap();
+            volumes.push(json!({"name":"credential-sources","csi":{"driver":"secrets-store-gke.csi.k8s.io","readOnly":true,"volumeAttributes":{"secretProviderClass":"credentials"}}}));
+            volumes.push(
+                json!({"name":"credentials","emptyDir":{"medium":"Memory","sizeLimit":"1Mi"}}),
+            );
+            volumes.push(json!({"name":"credential-metadata","configMap":{"name":"day2-reports-credentials","defaultMode":292}}));
+            credential_versions = credentials
+                .entries
+                .iter()
+                .map(|entry| (entry.key.clone(), entry.secret_version.resource_name()))
+                .collect();
+        }
+        controller["spec"]["template"]["metadata"]["annotations"] = annotations;
         let cloud = Arc::new(Mutex::new(Cloud {
-            controller: json!({"apiVersion":"apps/v1","kind":"StatefulSet","metadata":{"name":"day2-reports","namespace":NS,"uid":"controller-uid","generation":1,"resourceVersion":"rv-1","annotations":{"day2.dev/release-managed":"true"}},"spec":{"replicas":1,"template":{"metadata":{"annotations":annotations},"spec":{"serviceAccountName":"runtime","containers":[{"name":"day2","image":deployment.image,"env":[{"name":"DAY2_EXPECTED_ARTIFACT","value":Digest::new(b"bootstrap")}]}],"volumes":[{"name":"instance","configMap":{"name":"bootstrap-instance"}},{"name":"keys","csi":{"driver":"secrets-store-gke.csi.k8s.io","volumeAttributes":{"secretProviderClass":"keys"}}}]}}},"status":{"observedGeneration":1,"readyReplicas":1,"updatedReplicas":1,"currentRevision":"rev-1","updateRevision":"rev-1"}}),
+            controller,
             maps: BTreeMap::new(),
             versions: deployment
                 .secret_versions
                 .iter()
                 .map(SecretVersion::resource_name)
                 .collect(),
+            credential_versions,
+            payloads: BTreeMap::from([(CREDENTIAL_VERSION.to_owned(), CREDENTIAL.to_vec())]),
             patches: 0,
             publications: 0,
             secret_denied: false,
@@ -259,13 +319,25 @@ struct World {
 
 impl World {
     fn new() -> Result<Self> {
+        Self::build(false, |_| {})
+    }
+
+    /// A workload with one provider credential; `change` edits the candidate.
+    fn with_credentials(change: impl FnOnce(&mut Deployment)) -> Result<Self> {
+        Self::build(true, change)
+    }
+
+    fn build(credentials: bool, change: impl FnOnce(&mut Deployment)) -> Result<Self> {
         let directory = tempfile::tempdir()?;
         let journal = directory.path().join("journal.sqlite");
         let mut storage = Journal::open(&journal)?;
         configure(&mut storage, &target("alpha"), &plan("alpha", 1));
         let approval = approval(&mut storage, "alpha", 1, 0);
         storage.approve_release(&approval)?;
-        let instance = json!({"installation":"alpha","environment":"production","identity":{"scheme":"google_iap","hosted_domain":"example.com"},"apps":{"reports":{"artifact":format!("artifacts/{}",approval.artifact.as_str().trim_start_matches("sha256:")),"readers":["alice@example.com"],"writers":["alice@example.com"],"authority":{"version":1,"operations":{}},"edge":{"origin":"https://reports.example.com","iap_audience":"/projects/12345/global/backendServices/67890"}}}});
+        let mut instance = json!({"installation":"alpha","environment":"production","identity":{"scheme":"google_iap","hosted_domain":"example.com"},"apps":{"reports":{"artifact":format!("artifacts/{}",approval.artifact.as_str().trim_start_matches("sha256:")),"readers":["alice@example.com"],"writers":["alice@example.com"],"authority":{"version":1,"operations":{}},"edge":{"origin":"https://reports.example.com","iap_audience":"/projects/12345/global/backendServices/67890"}}}});
+        if credentials {
+            instance["resources"] = json!({"version":1,"connections":{"alerts":{"revision":1,"provider":"slack_webhook","live":{"provider":"slack_webhook","credential_ref":{"id":"alerts-webhook","revision":1}}}},"resources":{},"policies":{}});
+        }
         let mut deployment = Deployment {
             serving: GkeServingBinding {
                 target: approval.target.clone(),
@@ -293,7 +365,14 @@ impl World {
                 },
             ],
             serving_config_map: "serving".into(),
+            credentials: None,
         };
+        if credentials {
+            deployment.credentials = Some(provider_credentials(&operator_instance(
+                &deployment.instance,
+            )));
+        }
+        change(&mut deployment);
         deployment.serving.deployment = deployment.binding(name("deployment"))?;
         let fixture = Fixture::new(&deployment);
         let recipe = Arc::new(CompiledReleaseRecipe::installed()?);
@@ -657,4 +736,206 @@ fn roc_driver_runs_the_bounded_release_sequence_and_publishes_only_after_all_are
     assert_eq!(advances, 3);
     assert_eq!(built, json!({"builds":"succeeded"}));
     Ok(())
+}
+
+fn fingerprint() -> String {
+    day2::digest(CREDENTIAL.strip_suffix(b"\n").unwrap())
+}
+
+/// The serving instance plus the operator-only control section, as the
+/// day2-app stack renders it.
+fn operator_instance(instance: &Value) -> Value {
+    let mut operator = instance.clone();
+    operator["control"] = json!({"version":1,"state_directory":"/srv/day2/.state/operator-control","operators":["operator@example.com"],"sources":{},"apps":{}});
+    operator
+}
+
+/// Registration metadata pinned to `operator`, as the day2-app stack renders it.
+fn provider_credentials(operator: &Value) -> ProviderCredentials {
+    let fingerprint = fingerprint();
+    let input = serde_json::to_string(&json!({"connection":{"provider":"slack_webhook","credential_ref":{"id":"alerts-webhook","revision":1}},"credential_file":format!("/run/day2/credentials/{KEY}"),"expected_fingerprint":fingerprint})).unwrap();
+    let operator = serde_json::to_string(operator).unwrap();
+    let plan = serde_json::to_string(&json!({"version":1,"app":"reports","operator":"operator@example.com","instance_digest":day2::digest(operator.as_bytes()),"inputs":[{"file":format!("credential-{KEY}.json"),"digest":day2::digest(input.as_bytes()),"credential_digest":fingerprint}]})).unwrap();
+    ProviderCredentials {
+        projection: "credentials".into(),
+        operator: "operator@example.com".into(),
+        entries: vec![ProviderCredential {
+            key: KEY.into(),
+            credential_ref: VersionRef {
+                id: "alerts-webhook".into(),
+                revision: 1,
+            },
+            secret_version: SecretVersion {
+                project_number: 12345,
+                secret: "alerts-webhook".into(),
+                version: 4,
+            },
+            fingerprint,
+        }],
+        metadata: BTreeMap::from([
+            (format!("credential-{KEY}.json"), input),
+            ("operator-instance.json".into(), operator),
+            ("provisioning.json".into(), plan),
+        ]),
+    }
+}
+
+fn credentials_map(world: &World) -> Option<Value> {
+    let cloud = world.fixture.cloud.lock().unwrap();
+    let release = cloud.controller["metadata"]["annotations"]["day2.dev/release-id"].as_str()?;
+    cloud
+        .maps
+        .get(&format!("day2-release-{}-credentials", &release[7..39]))
+        .cloned()
+}
+
+/// Refused before any workload write or release-owned ConfigMap.
+fn refused(mut world: World) -> Result<()> {
+    for _ in 0..4 {
+        let _ = world.step();
+    }
+    assert_eq!(world.fixture.cloud.lock().unwrap().patches, 0);
+    assert!(world.fixture.cloud.lock().unwrap().maps.is_empty());
+    assert_ne!(world.host.inspect(&world.id)?.phase, ReleasePhase::Active);
+    Ok(())
+}
+
+#[test]
+fn provider_credentials_release_registration_from_the_released_image_and_instance() -> Result<()> {
+    let mut world = World::with_credentials(|_| {})?;
+    let before = world.fixture.cloud.lock().unwrap().controller["spec"]["template"].clone();
+    world.activate()?;
+    let cloud = world.fixture.cloud.lock().unwrap();
+    assert_eq!(cloud.patches, 1);
+    let after = cloud.controller["spec"]["template"].clone();
+    let release = after["metadata"]["annotations"]["day2.dev/release-id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let name = format!("day2-release-{}", &release[7..39]);
+    let credentials = world.deployment.credentials.as_ref().unwrap();
+    // Exactly the release-owned fields change; everything else is the stack's.
+    let mut expected = before.clone();
+    let annotations = &mut expected["metadata"]["annotations"];
+    annotations["day2.dev/artifact"] = json!(world.approval.artifact);
+    annotations["day2.dev/instance-sha256"] = json!(
+        day2::digest(serde_json::to_string(&world.deployment.instance)?.as_bytes())
+            .trim_start_matches("sha256:")
+    );
+    annotations["day2.dev/release-id"] = json!(release);
+    annotations["day2.dev/credentials-sha256"] = json!(
+        day2::digest(credentials.metadata["provisioning.json"].as_bytes())
+            .trim_start_matches("sha256:")
+    );
+    let spec = &mut expected["spec"];
+    spec["containers"][0]["image"] = json!(world.deployment.image);
+    spec["containers"][0]["env"][0]["value"] = json!(world.approval.artifact);
+    spec["volumes"][0]["configMap"]["name"] = json!(name);
+    spec["volumes"][4]["configMap"]["name"] = json!(format!("{name}-credentials"));
+    spec["initContainers"][2]["image"] = json!(world.deployment.image);
+    assert_eq!(after, expected);
+    let map = &cloud.maps[&format!("{name}-credentials")];
+    assert_eq!(map["immutable"], true);
+    assert_eq!(map["data"], serde_json::to_value(&credentials.metadata)?);
+    assert_eq!(
+        map["metadata"]["annotations"]["day2.dev/release-id"],
+        release
+    );
+    drop(cloud);
+    let dump = std::fs::read(&world.journal)?;
+    assert!(
+        !dump
+            .windows(b"synthetic-credential".len())
+            .any(|w| w == b"synthetic-credential")
+    );
+    Ok(())
+}
+
+#[test]
+fn lost_deployment_ack_reconciles_with_the_credentials_config_map_present() -> Result<()> {
+    let mut world = World::with_credentials(|_| {})?;
+    world.fixture.cloud.lock().unwrap().drop_deployment_ack = true;
+    world.activate()?;
+    assert_eq!(world.fixture.cloud.lock().unwrap().patches, 1);
+    assert!(credentials_map(&world).is_some());
+    Ok(())
+}
+
+#[test]
+fn a_credential_version_that_differs_from_its_reviewed_fingerprint_is_refused() -> Result<()> {
+    let world = World::with_credentials(|_| {})?;
+    world.fixture.cloud.lock().unwrap().payloads.insert(
+        CREDENTIAL_VERSION.into(),
+        b"another-synthetic-value".to_vec(),
+    );
+    refused(world)
+}
+
+#[test]
+fn a_credential_projection_without_the_pinned_version_is_refused() -> Result<()> {
+    let world = World::with_credentials(|_| {})?;
+    world.fixture.cloud.lock().unwrap().credential_versions[0].1 =
+        "projects/12345/secrets/alerts-webhook/versions/3".into();
+    refused(world)?;
+    let world = World::with_credentials(|_| {})?;
+    world
+        .fixture
+        .cloud
+        .lock()
+        .unwrap()
+        .credential_versions
+        .clear();
+    refused(world)
+}
+
+#[test]
+fn registration_metadata_for_another_instance_is_refused() -> Result<()> {
+    // The candidate is refused at admission, before any provider access.
+    let refusal = |change: fn(&mut Deployment)| match World::with_credentials(change) {
+        Ok(_) => panic!("inconsistent registration metadata was admitted"),
+        Err(error) => error.to_string(),
+    };
+    assert_eq!(
+        refusal(|deployment| {
+            // Consistently pinned, but registering against a different instance.
+            let mut operator = operator_instance(&deployment.instance);
+            operator["apps"]["reports"]["readers"] = json!(["mallory@example.com"]);
+            deployment.credentials = Some(provider_credentials(&operator));
+        }),
+        "gke_release_credential_instance_changed"
+    );
+    assert_eq!(
+        refusal(|deployment| {
+            let credentials = deployment.credentials.as_mut().unwrap();
+            credentials.entries[0].fingerprint = format!("sha256:{}", "0".repeat(64));
+        }),
+        "gke_release_credential_plan_changed"
+    );
+    assert_eq!(
+        refusal(|deployment| {
+            let credentials = deployment.credentials.as_mut().unwrap();
+            credentials.entries[0].key = "0".repeat(64);
+        }),
+        "gke_release_credential_scope_changed"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_workload_without_its_registration_container_is_refused() -> Result<()> {
+    let world = World::with_credentials(|_| {})?;
+    world.fixture.cloud.lock().unwrap().controller["spec"]["template"]["spec"]["initContainers"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|init| init["name"] != "credential-registration");
+    refused(world)?;
+    // Nor may a candidate without credentials leave stale registration behind.
+    let world = World::new()?;
+    world.fixture.cloud.lock().unwrap().controller["spec"]["template"]["spec"]["volumes"]
+        .as_array_mut()
+        .unwrap()
+        .push(
+            json!({"name":"credential-metadata","configMap":{"name":"day2-reports-credentials"}}),
+        );
+    refused(world)
 }

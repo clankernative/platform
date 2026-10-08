@@ -15,10 +15,18 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
+use day2_capabilities::resources::VersionRef;
 use reqwest::{Certificate, Method, StatusCode, blocking::Client};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{io::Read, net::IpAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io::Read,
+    net::IpAddr,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 use url::Url;
 
 const MAX_BYTES: u64 = 1_048_576;
@@ -26,6 +34,24 @@ const EFFECT: &str = "day2.dev/release-effect";
 const RELEASE: &str = "day2.dev/release-id";
 const REVISION: &str = "day2.dev/selection-revision";
 const SNAPSHOT: &str = "day2.dev/selection-digest";
+const CREDENTIALS_SHA256: &str = "day2.dev/credentials-sha256";
+const CSI_DRIVER: &str = "secrets-store-gke.csi.k8s.io";
+const OPERATOR_INSTANCE: &str = "operator-instance.json";
+const PROVISIONING: &str = "provisioning.json";
+// The day2-app stack's credential-files init container: copy each projected
+// version into the in-memory credential directory as a 10001-owned 0400 file.
+const CREDENTIAL_FILES: [&str; 9] = [
+    "/busybox/install",
+    "-o",
+    "10001",
+    "-g",
+    "10001",
+    "-m",
+    "0400",
+    "-t",
+    "/run/day2/credentials",
+];
+const CREDENTIAL_SOURCES: &str = "/run/day2/credential-sources";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -38,6 +64,172 @@ pub struct Deployment {
     /// Exactly [workload, issuer], matching the CSI file paths of that name.
     pub secret_versions: Vec<SecretVersion>,
     pub serving_config_map: String,
+    /// Provider credentials registered before day2-serve starts, if the app has any.
+    pub credentials: Option<ProviderCredentials>,
+}
+
+/// The infrastructure stack owns the credential SecretProviderClass and its IAM.
+/// A release pins these exact versions (through the deployment input digest),
+/// verifies them and owns the registration metadata derived from its instance.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderCredentials {
+    pub projection: String,
+    pub operator: String,
+    pub entries: Vec<ProviderCredential>,
+    /// The registration ConfigMap data exactly as the stack renders it: one
+    /// provisioning input per entry, the operator-only instance and the plan.
+    pub metadata: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderCredential {
+    /// day2's reference key: the projected path and mounted file name.
+    pub key: String,
+    pub credential_ref: VersionRef,
+    pub secret_version: SecretVersion,
+    /// `sha256:` of the reviewed value without trailing newlines.
+    pub fingerprint: String,
+}
+
+/// day2::packaging's reviewed provisioning plan.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProvisioningPlan {
+    version: u32,
+    app: String,
+    operator: String,
+    instance_digest: String,
+    inputs: Vec<ProvisioningPin>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProvisioningPin {
+    file: String,
+    digest: String,
+    credential_digest: String,
+}
+
+impl ProviderCredentials {
+    fn validate(&self, deployment: &Deployment) -> Result<()> {
+        dns(&self.projection)?;
+        ensure!(
+            self.projection != deployment.secret_projection
+                && !self.operator.trim().is_empty()
+                && self.operator.len() <= 254
+                && !self.operator.chars().any(char::is_control)
+                && !self.entries.is_empty()
+                && self.entries.len() <= 64,
+            "gke_release_credentials_invalid"
+        );
+        let mut entries = BTreeMap::new();
+        let mut versions = BTreeSet::new();
+        for entry in &self.entries {
+            entry.secret_version.validate()?;
+            ensure!(
+                entry.key == day2::packaging::reference_key(&entry.credential_ref)?
+                    && entry.fingerprint.len() == 71
+                    && entry.fingerprint.starts_with("sha256:")
+                    && entry.fingerprint[7..]
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                    && entry.secret_version.project_number
+                        == deployment.serving.project_number.get()
+                    && deployment
+                        .secret_versions
+                        .iter()
+                        .all(|version| version != &entry.secret_version)
+                    && versions.insert(entry.secret_version.resource_name())
+                    && entries
+                        .insert(format!("credential-{}.json", entry.key), entry)
+                        .is_none(),
+                "gke_release_credential_scope_changed"
+            );
+        }
+        ensure!(
+            serde_json::to_vec(&self.metadata)?.len() <= 900_000,
+            "gke_release_credential_budget"
+        );
+        ensure!(
+            self.metadata
+                .keys()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>()
+                == entries
+                    .keys()
+                    .map(String::as_str)
+                    .chain([OPERATOR_INSTANCE, PROVISIONING])
+                    .collect(),
+            "gke_release_credential_metadata_changed"
+        );
+        // The operator-only instance is the serving instance plus a control
+        // section that asserts this operator and nothing else.
+        let operator = self.metadata[OPERATOR_INSTANCE].as_bytes();
+        let parsed = day2::artifact::Instance::from_bytes(operator)?;
+        let control = parsed
+            .control
+            .as_ref()
+            .context("gke_release_credential_operator_missing")?;
+        ensure!(
+            control.operators == BTreeSet::from([self.operator.clone()])
+                && control.apps.is_empty()
+                && control.sources.is_empty()
+                && control.builders.is_empty()
+                && control.runtimes.is_empty()
+                && control.secrets.is_empty(),
+            "gke_release_credential_operator_scope_changed"
+        );
+        let mut serving: Value = day2::json::decode(operator)?;
+        serving
+            .as_object_mut()
+            .context("gke_release_credential_instance_changed")?
+            .remove("control");
+        ensure!(
+            serving == deployment.instance,
+            "gke_release_credential_instance_changed"
+        );
+        let plan: ProvisioningPlan = day2::json::decode(self.metadata[PROVISIONING].as_bytes())?;
+        ensure!(
+            plan.version == 1
+                && plan.app == deployment.serving.target.app.as_str()
+                && plan.operator == self.operator
+                && plan.instance_digest == day2::digest(operator)
+                && plan.inputs.len() == self.entries.len(),
+            "gke_release_credential_plan_changed"
+        );
+        let mut pinned = BTreeSet::new();
+        for pin in &plan.inputs {
+            let entry = entries
+                .get(&pin.file)
+                .context("gke_release_credential_plan_changed")?;
+            let input = self.metadata[&pin.file].as_bytes();
+            let mount: day2::integration_host::Mount = day2::json::decode(input)?;
+            ensure!(
+                pinned.insert(&pin.file)
+                    && pin.digest == day2::digest(input)
+                    && pin.credential_digest == entry.fingerprint
+                    && mount.expected_fingerprint.as_ref() == Some(&entry.fingerprint)
+                    && mount.credential_file
+                        == Path::new(&day2::packaging::credential_path(&entry.credential_ref)?)
+                    && mount
+                        .reference
+                        .as_ref()
+                        .unwrap_or(mount.connection.credential_ref())
+                        == &entry.credential_ref,
+                "gke_release_credential_plan_changed"
+            );
+        }
+        Ok(())
+    }
+
+    /// The pod annotation the stack stamps: the plan's hex SHA-256.
+    fn digest(&self) -> String {
+        day2::digest(self.metadata[PROVISIONING].as_bytes())
+            .trim_start_matches("sha256:")
+            .to_owned()
+    }
 }
 
 fn dns(value: &str) -> Result<()> {
@@ -102,6 +294,9 @@ impl Deployment {
         let bytes = serde_json::to_vec(&self.instance)?;
         ensure!(bytes.len() <= 900_000, "gke_release_instance_budget");
         day2::artifact::Instance::from_bytes(&bytes)?;
+        if let Some(credentials) = &self.credentials {
+            credentials.validate(self)?;
+        }
         Ok(())
     }
 
@@ -120,6 +315,9 @@ impl Deployment {
                 &self.serving.workload_email,
                 &self.secret_projection,
                 &self.serving_config_map,
+                self.credentials
+                    .as_ref()
+                    .map(|credentials| &credentials.projection),
             ),
         )
     }
@@ -390,12 +588,29 @@ impl GkeReleaseProvider {
             endpoint: self.endpoints.secrets.clone(),
             tokens: self.tokens.as_ref(),
         };
-        for version in &self.deployment.secret_versions {
+        // App-call keys are checked for integrity; provider credentials also
+        // against the reviewed fingerprint registration will require.
+        let credentials = self
+            .deployment
+            .credentials
+            .iter()
+            .flat_map(|credentials| &credentials.entries);
+        let accesses = self
+            .deployment
+            .secret_versions
+            .iter()
+            .map(|version| (version, None))
+            .chain(credentials.map(|entry| (&entry.secret_version, Some(&entry.fingerprint))));
+        for (version, fingerprint) in accesses {
             let name = version.resource_name();
             let value = api
                 .get(&format!("v1/{name}:access"))?
                 .context("gke_release_secret_unavailable")?;
             ensure!(value["name"] == name, "gke_release_secret_version_changed");
+            let checksum = value["payload"]["dataCrc32c"]
+                .as_str()
+                .context("gke_release_secret_checksum_missing")?
+                .parse::<u32>()?;
             let mut bytes = STANDARD
                 .decode(
                     value["payload"]["data"]
@@ -403,17 +618,16 @@ impl GkeReleaseProvider {
                         .context("gke_release_secret_payload_missing")?,
                 )
                 .map_err(|_| anyhow::anyhow!("gke_release_secret_payload_invalid"))?;
-            ensure!(
-                !bytes.is_empty() && bytes.len() <= 65536,
-                "gke_release_secret_payload_budget"
-            );
-            let checksum = value["payload"]["dataCrc32c"]
-                .as_str()
-                .context("gke_release_secret_checksum_missing")?
-                .parse::<u32>()?;
+            let bounded = !bytes.is_empty() && bytes.len() <= 65536;
             let valid = crc32c::crc32c(&bytes) == checksum;
+            let reviewed = fingerprint.is_none_or(|expected| {
+                day2::integration_host::credential_fingerprint(&bytes)
+                    .is_ok_and(|actual| &actual == expected)
+            });
             bytes.fill(0);
+            ensure!(bounded, "gke_release_secret_payload_budget");
             ensure!(valid, "gke_release_secret_checksum_changed");
+            ensure!(reviewed, "gke_release_credential_fingerprint_changed");
         }
         let reference = lease.approval.secret.clone();
         let resource = Digest::of(&reference)?;
@@ -421,6 +635,13 @@ impl GkeReleaseProvider {
             "gke-exact-secret-access-v1",
             &reference,
             &self.deployment.secret_versions,
+            &self.deployment.credentials.as_ref().map(|credentials| {
+                credentials
+                    .entries
+                    .iter()
+                    .map(|entry| (&entry.secret_version, &entry.fingerprint))
+                    .collect::<Vec<_>>()
+            }),
         ))?;
         Ok(SecretObservation {
             reference: reference.clone(),
@@ -444,52 +665,36 @@ impl GkeReleaseProvider {
         })
     }
 
+    /// The tofu-owned SecretProviderClasses must project exactly the pinned
+    /// versions at their paths; the release never writes them.
     fn projection(&self, api: &Api<'_>) -> Result<()> {
-        let namespace = &self.deployment.serving.namespace;
-        let projection = api.get(&format!("apis/secrets-store.csi.x-k8s.io/v1/namespaces/{namespace}/secretproviderclasses/{}", self.deployment.secret_projection))?.context("gke_release_projection_missing")?;
-        ensure!(
-            projection["spec"]["provider"] == "gke",
-            "gke_release_projection_changed"
-        );
-        #[derive(Deserialize)]
-        #[serde(rename_all = "camelCase", deny_unknown_fields)]
-        struct Projected {
-            resource_name: String,
-            path: String,
+        projected(
+            api,
+            &self.deployment.serving.namespace,
+            &self.deployment.secret_projection,
+            BTreeMap::from([
+                (
+                    "workload".to_owned(),
+                    self.deployment.secret_versions[0].resource_name(),
+                ),
+                (
+                    "issuer".to_owned(),
+                    self.deployment.secret_versions[1].resource_name(),
+                ),
+            ]),
+        )?;
+        if let Some(credentials) = &self.deployment.credentials {
+            projected(
+                api,
+                &self.deployment.serving.namespace,
+                &credentials.projection,
+                credentials
+                    .entries
+                    .iter()
+                    .map(|entry| (entry.key.clone(), entry.secret_version.resource_name()))
+                    .collect(),
+            )?;
         }
-        let projected: Vec<Projected> = serde_yaml::from_str(
-            projection["spec"]["parameters"]["secrets"]
-                .as_str()
-                .context("gke_release_projection_invalid")?,
-        )
-        .map_err(|_| anyhow::anyhow!("gke_release_projection_invalid"))?;
-        let mut names = std::collections::BTreeMap::new();
-        let mut paths = std::collections::BTreeSet::new();
-        for value in &projected {
-            ensure!(
-                matches!(value.path.as_str(), "workload" | "issuer")
-                    && paths.insert(value.path.clone())
-                    && names
-                        .insert(value.path.clone(), value.resource_name.clone())
-                        .is_none(),
-                "gke_release_projection_changed"
-            );
-        }
-        ensure!(
-            projected.len() == 2
-                && names
-                    == std::collections::BTreeMap::from([
-                        (
-                            "workload".to_owned(),
-                            self.deployment.secret_versions[0].resource_name()
-                        ),
-                        (
-                            "issuer".to_owned(),
-                            self.deployment.secret_versions[1].resource_name()
-                        ),
-                    ]),
-            "gke_release_projection_versions_changed"
-        );
         Ok(())
     }
 
@@ -505,32 +710,165 @@ impl GkeReleaseProvider {
         )
     }
 
+    fn credentials_name(&self, lease: &ReleaseLease) -> String {
+        format!("{}-credentials", self.instance_name(lease))
+    }
+
+    /// The immutable ConfigMaps this release's template mounts: its instance
+    /// and, with provider credentials, their registration metadata.
+    fn config_maps(&self, lease: &ReleaseLease) -> Result<Vec<(String, Value)>> {
+        let mut maps = vec![(
+            self.instance_name(lease),
+            json!({"instance.json": serde_json::to_string(&self.deployment.instance)?}),
+        )];
+        if let Some(credentials) = &self.deployment.credentials {
+            maps.push((
+                self.credentials_name(lease),
+                serde_json::to_value(&credentials.metadata)?,
+            ));
+        }
+        Ok(maps)
+    }
+
+    fn config_map_path(&self, name: &str) -> String {
+        format!(
+            "api/v1/namespaces/{}/configmaps/{name}",
+            self.deployment.serving.namespace
+        )
+    }
+
+    fn config_map_matches(&self, actual: &Value, lease: &ReleaseLease, data: &Value) -> bool {
+        actual["immutable"] == true
+            && actual["data"] == *data
+            && actual["metadata"]["annotations"][RELEASE] == lease.execution.plan.release.as_str()
+    }
+
     fn instance(&self, api: &Api<'_>, lease: &ReleaseLease) -> Result<()> {
-        let name = self.instance_name(lease);
         let collection = format!(
             "api/v1/namespaces/{}/configmaps",
             self.deployment.serving.namespace
         );
-        let path = format!("{collection}/{name}");
-        let data = json!({"instance.json": serde_json::to_string(&self.deployment.instance)?});
-        let desired = json!({"apiVersion":"v1", "kind":"ConfigMap", "metadata":{"name":name,"namespace":self.deployment.serving.namespace,"annotations":{RELEASE:lease.execution.plan.release}},"immutable":true,"data":data});
-        if api.get(&path)?.is_none() {
-            let (status, _) = api.request(Method::POST, &collection, Some(&desired), false)?;
+        for (name, data) in self.config_maps(lease)? {
+            let path = self.config_map_path(&name);
+            let desired = json!({"apiVersion":"v1", "kind":"ConfigMap", "metadata":{"name":name,"namespace":self.deployment.serving.namespace,"annotations":{RELEASE:lease.execution.plan.release}},"immutable":true,"data":data});
+            if api.get(&path)?.is_none() {
+                let (status, _) = api.request(Method::POST, &collection, Some(&desired), false)?;
+                ensure!(
+                    status.is_success() || status == StatusCode::CONFLICT,
+                    "gke_release_instance_create_unknown"
+                );
+            }
+            let actual = api
+                .get(&path)?
+                .context("gke_release_instance_readback_missing")?;
             ensure!(
-                status.is_success() || status == StatusCode::CONFLICT,
-                "gke_release_instance_create_unknown"
+                self.config_map_matches(&actual, lease, &data),
+                "gke_release_instance_conflict"
             );
         }
-        let actual = api
-            .get(&path)?
-            .context("gke_release_instance_readback_missing")?;
+        Ok(())
+    }
+
+    /// Registration runs the released image against metadata derived from the
+    /// released instance. Everything else in the credential machinery (the
+    /// SecretProviderClass, its paths and mounts) stays the stack's.
+    fn credential_template(&self, template: &mut Value, lease: &ReleaseLease) -> Result<()> {
+        let initial: &[Value] = template["spec"]["initContainers"]
+            .as_array()
+            .map_or(&[], Vec::as_slice);
+        let machinery = initial.iter().any(|init| {
+            init["name"] == "credential-files" || init["name"] == "credential-registration"
+        }) || template["spec"]["volumes"]
+            .as_array()
+            .is_some_and(|volumes| {
+                volumes.iter().any(|volume| {
+                    matches!(
+                        volume["name"].as_str(),
+                        Some("credential-sources" | "credentials" | "credential-metadata")
+                    )
+                })
+            })
+            || !template["metadata"]["annotations"][CREDENTIALS_SHA256].is_null();
+        let Some(credentials) = &self.deployment.credentials else {
+            ensure!(!machinery, "gke_release_credentials_not_declared");
+            return Ok(());
+        };
+        template["metadata"]["annotations"][CREDENTIALS_SHA256] = json!(credentials.digest());
+        let init = template["spec"]["initContainers"]
+            .as_array_mut()
+            .context("gke_release_credential_registration_missing")?;
+        let files = init
+            .iter_mut()
+            .find(|init| init["name"] == "credential-files")
+            .context("gke_release_credential_files_missing")?;
         ensure!(
-            actual["immutable"] == true
-                && actual["data"] == data
-                && actual["metadata"]["annotations"][RELEASE]
-                    == lease.execution.plan.release.as_str(),
-            "gke_release_instance_conflict"
+            files["command"]
+                .as_array()
+                .is_some_and(|command| command.len() > CREDENTIAL_FILES.len()
+                    && command.iter().zip(CREDENTIAL_FILES).all(|(a, b)| a == b)),
+            "gke_release_credential_files_changed"
         );
+        files["command"] = json!(
+            CREDENTIAL_FILES
+                .iter()
+                .map(|part| (*part).to_owned())
+                .chain(
+                    credentials
+                        .entries
+                        .iter()
+                        .map(|entry| format!("{CREDENTIAL_SOURCES}/{}", entry.key))
+                )
+                .collect::<Vec<_>>()
+        );
+        let registration = init
+            .iter_mut()
+            .find(|init| init["name"] == "credential-registration")
+            .context("gke_release_credential_registration_missing")?;
+        let mounted: BTreeSet<_> = registration["volumeMounts"]
+            .as_array()
+            .context("gke_release_credential_registration_changed")?
+            .iter()
+            .filter(|mount| mount["name"] == "credential-metadata")
+            .map(|mount| mount["subPath"].as_str())
+            .collect();
+        ensure!(
+            registration["command"] == json!(["/usr/local/bin/day2-provision-credentials"])
+                && registration["args"][1] == self.deployment.serving.target.app.as_str()
+                && registration["args"][2] == credentials.operator.as_str()
+                && registration["args"]
+                    .as_array()
+                    .is_some_and(|args| args.len() == 4)
+                && mounted
+                    == credentials
+                        .metadata
+                        .keys()
+                        .map(|key| Some(key.as_str()))
+                        .collect(),
+            "gke_release_credential_registration_changed"
+        );
+        registration["image"] = json!(self.deployment.image);
+        let volumes = template["spec"]["volumes"]
+            .as_array_mut()
+            .context("gke_release_volumes_missing")?;
+        ensure!(
+            volumes.iter().any(|volume| volume["name"] == "credential-sources"
+                && volume["csi"]["driver"] == CSI_DRIVER
+                && volume["csi"]["volumeAttributes"]["secretProviderClass"]
+                    == credentials.projection.as_str())
+                && volumes
+                    .iter()
+                    .any(|volume| volume["name"] == "credentials" && volume["emptyDir"].is_object()),
+            "gke_release_credential_projection_not_mounted"
+        );
+        let metadata = volumes
+            .iter_mut()
+            .find(|volume| volume["name"] == "credential-metadata")
+            .context("gke_release_credential_metadata_missing")?;
+        ensure!(
+            metadata["configMap"].is_object(),
+            "gke_release_credential_metadata_missing"
+        );
+        metadata["configMap"]["name"] = json!(self.credentials_name(lease));
         Ok(())
     }
 
@@ -572,35 +910,34 @@ impl GkeReleaseProvider {
             .context("gke_release_instance_mount_missing")?;
         instance["configMap"]["name"] = json!(self.instance_name(lease));
         ensure!(
-            volumes.iter().any(
-                |volume| volume["csi"]["driver"] == "secrets-store-gke.csi.k8s.io"
+            volumes
+                .iter()
+                .any(|volume| volume["csi"]["driver"] == CSI_DRIVER
                     && volume["csi"]["volumeAttributes"]["secretProviderClass"]
-                        == self.deployment.secret_projection
-            ),
+                        == self.deployment.secret_projection),
             "gke_release_projection_not_mounted"
         );
+        self.credential_template(&mut template, lease)?;
         Ok(template)
     }
 
     fn prepared(&self, api: &Api<'_>, lease: &ReleaseLease, controller: &Value) -> Result<bool> {
-        Ok(
-            controller["metadata"]["annotations"][EFFECT] == lease.effect.as_str()
-                && controller["metadata"]["annotations"][RELEASE]
-                    == lease.execution.plan.release.as_str()
-                && controller["spec"]["template"] == self.template(controller, lease)?
-                && api
-                    .get(&format!(
-                        "api/v1/namespaces/{}/configmaps/{}",
-                        self.deployment.serving.namespace,
-                        self.instance_name(lease)
-                    ))?
-                    .is_some_and(|cm| {
-                        cm["immutable"] == true
-                            && cm["data"]["instance.json"]
-                                == serde_json::to_string(&self.deployment.instance)
-                                    .unwrap_or_default()
-                    }),
-        )
+        if !(controller["metadata"]["annotations"][EFFECT] == lease.effect.as_str()
+            && controller["metadata"]["annotations"][RELEASE]
+                == lease.execution.plan.release.as_str()
+            && controller["spec"]["template"] == self.template(controller, lease)?)
+        {
+            return Ok(false);
+        }
+        for (name, data) in self.config_maps(lease)? {
+            if !api
+                .get(&self.config_map_path(&name))?
+                .is_some_and(|actual| self.config_map_matches(&actual, lease, &data))
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     fn ready(&self, lease: &ReleaseLease) -> Result<(DeploymentIncarnation, StateEvidence)> {
@@ -753,6 +1090,44 @@ impl GkeReleaseProvider {
     }
 }
 
+fn projected(
+    api: &Api<'_>,
+    namespace: &str,
+    name: &str,
+    expected: BTreeMap<String, String>,
+) -> Result<()> {
+    let projection = api
+        .get(&format!(
+            "apis/secrets-store.csi.x-k8s.io/v1/namespaces/{namespace}/secretproviderclasses/{name}"
+        ))?
+        .context("gke_release_projection_missing")?;
+    ensure!(
+        projection["spec"]["provider"] == "gke",
+        "gke_release_projection_changed"
+    );
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct Projected {
+        resource_name: String,
+        path: String,
+    }
+    let projected: Vec<Projected> = serde_yaml::from_str(
+        projection["spec"]["parameters"]["secrets"]
+            .as_str()
+            .context("gke_release_projection_invalid")?,
+    )
+    .map_err(|_| anyhow::anyhow!("gke_release_projection_invalid"))?;
+    let mut names = BTreeMap::new();
+    for value in projected {
+        ensure!(
+            names.insert(value.path, value.resource_name).is_none(),
+            "gke_release_projection_changed"
+        );
+    }
+    ensure!(names == expected, "gke_release_projection_versions_changed");
+    Ok(())
+}
+
 fn incarnation(controller: &Value) -> Result<DeploymentIncarnation> {
     let incarnation = DeploymentIncarnation {
         controller: controller["metadata"]["uid"]
@@ -803,7 +1178,8 @@ impl Capabilities for GkeReleaseProvider {
         ))?)?;
         let outcome = match lease.step.operation {
             ReleaseOperation::PrepareDependency => {
-                self.controller(&api)?;
+                // Refuse an installed workload this candidate cannot be released into.
+                self.template(&self.controller(&api)?, lease)?;
                 self.projection(&api)?;
                 ReleaseObserved::DependencyPrepared {}
             }

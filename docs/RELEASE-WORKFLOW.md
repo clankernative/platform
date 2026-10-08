@@ -27,19 +27,23 @@ The independent lab providers still exercise fault schedules without cloud acces
 Install infrastructure with the normal `deploy/gke/stacks/day2-app` root first.
 For this profile, use app calls with exactly two CSI keys (workload and issuer),
 an immutable image, the installed `runtime` Kubernetes service account and one
-SQLite StatefulSet replica. OAuth runtime and app credential provisioning are
-separate profiles. Enable `release_managed = true` on the installed workload;
-the adapter refuses workloads without that ownership annotation. Infrastructure
-plans then read the current image, artifact guard, release annotations and
-immutable instance ConfigMap from the installed controller. They continue to
-manage pod guardrails, storage, identity and edge configuration.
+SQLite StatefulSet replica. Provider credentials (`provider_credentials`) are
+part of the profile; OAuth runtime is a separate profile. Enable
+`release_managed = true` on the installed workload; the adapter refuses
+workloads without that ownership annotation. Infrastructure plans then read the
+current image, artifact guard, release annotations and immutable instance
+ConfigMap from the installed controller. They continue to manage pod guardrails,
+storage, identity and edge configuration.
 
 `tofu output -json release_deployment` renders public candidate metadata from
 the selected stack inputs: the static serving binding, image, instance, CSI
-projection, numeric key versions and serving ConfigMap. Key versions are ordered
-`[workload, issuer]` and must match those exact CSI paths. The static deployment
-binding stays stable across software releases; the complete candidate input has
-a separate digest in the durable release plan.
+projection, numeric key versions, serving ConfigMap and, for an app with provider
+credentials, `credentials` (null otherwise). Key versions are ordered
+`[workload, issuer]` and must match those exact CSI paths. `credentials` names the
+credential SecretProviderClass and registrant, each pinned entry, and the exact
+registration metadata the stack renders from the same instance. The static
+deployment binding stays stable across software releases; the complete candidate
+input has a separate digest in the durable release plan.
 
 The operator-owned JSON configuration has `version: 1`, `journal`,
 `artifact_store`, `instance`, `owner`, `durability`, `authority` and `candidates`.
@@ -104,7 +108,7 @@ publication retries safely; an old acknowledgment cannot erase a newer activatio
 and an older publisher cannot overwrite a newer ConfigMap revision. Calls still
 probe physical serving bindings. A single-replica rollout can interrupt calls;
 neither deployment nor publication is an atomic cloud traffic switch. There is
-no cleanup of old immutable instance ConfigMaps in this increment.
+no cleanup of old immutable instance or credential ConfigMaps in this increment.
 
 The normal path is:
 
@@ -131,6 +135,55 @@ is never included in source, the Roc decision input, or simulation traces.
 Release admission also requires an explicit runtime-secret binding and atomically
 reserves a protected consumer. A retirement barrier blocks new reservations and
 pending activation, including through another app alias of the same version.
+
+Journal activation does not activate the artifact in the app's own database.
+Once an app's state is initialized, `day2-serve` runs only the artifact that
+database activated. A release whose image carries a different artifact will not serve:
+the pod refuses with `active_artifact_unavailable`, naming both artifact IDs.
+Activate the new artifact first with `day2 platform maintain activate`
+([deploy/gke/README.md](../deploy/gke/README.md#maintenance-day2-platform-maintain)),
+then release it.
+
+### Provider credentials
+
+Registration (`day2-provision-credentials` in the `credential-registration`
+init container) checks a plan pinned to an operator-only copy of the serving
+instance and loads the artifact that instance names from the image. Both belong
+to the release: each release creates an immutable
+`day2-release-<id>-credentials` ConfigMap from the candidate's
+`credentials.metadata`, points the `credential-metadata` volume at it, runs
+registration from the released image, rewrites the `credential-files` copy list
+for the pinned keys and stamps `day2.dev/credentials-sha256` with the plan's
+SHA-256, as the stack does. Infrastructure plans keep those live fields.
+
+The stack keeps the credential SecretProviderClass and the Secret Manager IAM;
+the release never writes them. The candidate's `credentials.entries` pin each
+reference key, exact numeric version and reviewed fingerprint, and the deployment
+input digest pins them all. Before preparing and again before activation the
+adapter requires that the SecretProviderClass projects exactly those versions at
+those keys, and accesses every version: its checksum must hold and the SHA-256
+of the value without trailing newlines must equal the reviewed fingerprint, the
+same fingerprint registration enforces. Payloads are discarded after the check
+and never journaled. Admission also refuses metadata whose operator instance is
+not the candidate instance plus a control section naming only the registrant,
+whose plan digests do not match its files, or whose inputs differ from the
+pinned entries. A candidate without credentials is refused on a workload that
+still has credential machinery, and the reverse.
+
+While `release_managed` is enabled the credential set is fixed: the day2-app
+root refuses a plan whose `provider_credentials` keys differ from the live
+`credential-files` list, whose registrant differs, whose registration image is
+not the released image, or whose versions do not name the project by number.
+Adding, removing or rotating a provider credential (a new reference revision
+changes its key) is not yet a release-managed change. Until it is, disable
+`release_managed`, apply the change with the candidate image and artifact
+through OpenTofu, and enable it again.
+
+Approval still registers only the workload key as the release's runtime secret.
+Like the issuer key, provider credentials are pinned and verified by the
+deployment input, not reserved as protected consumers, so they have no
+retirement barrier: disabling a credential version that a release depends on is
+not blocked by this workflow.
 
 ## Persistence and recovery
 

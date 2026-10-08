@@ -350,7 +350,8 @@ resource "kubernetes_stateful_set_v1" "day2" {
             name              = "credential-files"
             image             = var.state_ownership_image
             image_pull_policy = "IfNotPresent"
-            command = concat(
+            # A release-managed workload keeps the released files (release.tf).
+            command = var.release_managed ? local.release_credential_files : concat(
               ["/busybox/install", "-o", "10001", "-g", "10001", "-m", "0400", "-t", local.credential_dir],
               [for credential in local.credentials : "${local.credential_source_dir}/${credential.key}"],
             )
@@ -403,11 +404,12 @@ resource "kubernetes_stateful_set_v1" "day2" {
           for_each = local.has_credentials ? [true] : []
 
           content {
-            name              = "credential-registration"
-            image             = var.image
+            name = "credential-registration"
+            # The released artifact is baked into the released image only.
+            image             = var.release_managed ? local.release_credential_image : var.image
             image_pull_policy = "IfNotPresent"
             command           = ["/usr/local/bin/day2-provision-credentials"]
-            args              = [local.operator_instance, var.app_id, var.credential_operator, local.provisioning_plan]
+            args              = local.credential_registration_args
 
             security_context {
               run_as_non_root            = true
@@ -684,8 +686,10 @@ resource "kubernetes_stateful_set_v1" "day2" {
           content {
             name = "credential-metadata"
 
+            # Derived from the released instance; the bootstrap ConfigMap
+            # serves only until the first release.
             config_map {
-              name         = kubernetes_config_map_v1.credentials[0].metadata[0].name
+              name         = var.release_managed ? local.release_credential_metadata : kubernetes_config_map_v1.credentials[0].metadata[0].name
               default_mode = "0444"
             }
           }
