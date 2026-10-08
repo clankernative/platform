@@ -1,5 +1,4 @@
-#[path = "support/compiler.rs"]
-mod compiler;
+use crate::support::compiler;
 use anyhow::{Context, Result};
 use day2::{
     admission, assets, output_schema, sandbox,

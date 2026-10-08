@@ -1,6 +1,5 @@
 //! HTTP protocol fixtures, not live GKE qualification or forge authentication.
-#[path = "support/release.rs"]
-mod support;
+use crate::support::release as support;
 
 use anyhow::Result;
 use axum::{

@@ -6,8 +6,7 @@ use day2_control::{
 };
 use rusqlite::Connection;
 
-#[path = "support/release.rs"]
-mod support;
+use crate::support::release as support;
 use support::*;
 
 #[test]

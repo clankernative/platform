@@ -4,6 +4,7 @@ default-run = "day2"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+autotests = false
 
 [dependencies]
 day2-capabilities = { path = "../day2-capabilities" }
@@ -54,3 +55,7 @@ proc-macro2 = "=1.0.107"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "cookies"] }
 syn = { version = "=2.0.119", features = ["full", "visit"] }
 tokio = { version = "1", features = ["test-util"] }
+
+[[test]]
+name = "day2_integration"
+path = "tests/main.rs"

@@ -1,5 +1,4 @@
-#[path = "support/commands.rs"]
-mod support;
+use crate::support::commands as support;
 
 use anyhow::{Context, Result, bail, ensure};
 use day2::{capabilities::NotificationWorld, invocations, store::Fault};

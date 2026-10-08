@@ -3,6 +3,7 @@ name = "day2-control"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+autotests = false
 
 [dependencies]
 anyhow = "1.0"
@@ -28,3 +29,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"
 [dev-dependencies]
 proptest = "=1.11.0"
 axum = "0.8.9"
+
+[[test]]
+name = "control_integration"
+path = "tests/main.rs"

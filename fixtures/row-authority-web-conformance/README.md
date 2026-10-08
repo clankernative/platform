@@ -24,7 +24,7 @@ not silently attach the old draft to a fresh version ticket; explicit draft
 comparison and conflict resolution remain separate UI work.
 
 Run through the platform verifier, or set `DAY2_TEST_OWNED_ARTIFACT` to a built
-artifact and run `cargo test --locked -p day2 --test owned_web`. These are real
+artifact and run `cargo test --locked -p day2 --test day2_integration -- owned_web::`. These are real
 HTTP protocol tests, not browser rendering or interaction certification.
 
 The HTTP tests provision isolated instances with the explicit

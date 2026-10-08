@@ -14,8 +14,7 @@ use std::{
 };
 use tempfile::TempDir;
 
-#[path = "support/evidence.rs"]
-mod evidence;
+use crate::support::evidence;
 
 fn artifact() -> PathBuf {
     std::env::var_os("DAY2_TEST_RELATIONAL_ARTIFACT")

@@ -6,8 +6,7 @@
 //! indistinguishable from one that is working, so every refusal is asserted to
 //! carry its reason rather than merely to produce no run.
 
-#[path = "support/commands.rs"]
-mod support;
+use crate::support::commands as support;
 use anyhow::{Context, Result};
 use day2::{
     invocations,
