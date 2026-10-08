@@ -1000,6 +1000,16 @@
           "local_path": null
         },
         {
+          "name": "proptest",
+          "kind": "dev",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
           "name": "reqwest",
           "kind": "dev",
           "target": null,
