@@ -383,6 +383,12 @@ The request file names the target exactly:
 }
 ```
 
+An initialized app serves only the artifact its database activated. An image
+whose artifact differs, whether applied through day2-app or released with
+`day2-gke-release` (which does not activate), will not serve until `activate`
+has run for that artifact: `day2-serve` refuses with
+`active_artifact_unavailable`, naming the activated and the requested artifact.
+
 `request_id` is for `authority-apply` and `activate`; `target` (the desired
 instance, e.g. rendered from the day2-app plan) is for `activate` only;
 `backup_dir` and `"yes": true` (skip the typed confirmation, recorded) are
