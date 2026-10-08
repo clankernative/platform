@@ -393,7 +393,12 @@ fn main() -> Result<()> {
             if action == "register-model" {
                 let roc_type = args.next().context("missing nominal Roc model type")?;
                 ensure!(args.next().is_none(), "unexpected register-model arguments");
-                day2::identity::register_model(&app, &table, &roc_type)?;
+                day2::identity::register_model(
+                    &app,
+                    &table,
+                    &roc_type,
+                    &day2::host_inputs::SecureEntropy,
+                )?;
             } else {
                 ensure!(args.next().is_none(), "unexpected retire-model arguments");
                 day2::identity::retire_model(&app, &table)?;

@@ -30,6 +30,7 @@ pub mod domain;
 mod error;
 mod execution;
 mod host;
+pub mod host_inputs;
 pub mod iap;
 pub mod iap_workload;
 pub mod identity;
