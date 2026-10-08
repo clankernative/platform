@@ -62,6 +62,10 @@ run "renders_the_native_selected_instance_without_rewriting_pins" {
     error_message = "The deployment must preserve the canonical bindings, all exact versions, clients and native runtime fields."
   }
   assert {
+    condition     = jsondecode(kubernetes_config_map_v1.instance.data["instance.json"]).control.security_epochs == jsondecode(file("tests/oauth-instance.json")).control.security_epochs
+    error_message = "The exact operator-selected immutable scope/UID/key-set metadata must remain unchanged; rendering does not observe a current epoch."
+  }
+  assert {
     condition = (
       kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[0].args == tolist(["/srv/day2/instance.json", "example_app", "--edge"]) &&
       kubernetes_stateful_set_v1.day2.spec[0].template[0].metadata[0].annotations["day2.dev/instance-sha256"] == sha256(kubernetes_config_map_v1.instance.data["instance.json"]) &&
@@ -200,6 +204,70 @@ run "refuses_a_key_from_another_project" {
   command = plan
   variables {
     oauth_instance_json = jsonencode(merge(jsondecode(file("tests/oauth-instance.json")), { control = merge(jsondecode(file("tests/oauth-instance.json")).control, { secrets = merge(jsondecode(file("tests/oauth-instance.json")).control.secrets, { verifier = { kind = "gcp_version", project_number = 999999999999, secret = "custody_verifier", version = 1 } }) }) }))
+  }
+  expect_failures = [terraform_data.oauth_admission]
+}
+
+run "refuses_missing_current_authority_selection" {
+  command = plan
+  variables {
+    oauth_instance_json = jsonencode(merge(jsondecode(file("tests/oauth-instance.json")), {
+      control = { for key, value in jsondecode(file("tests/oauth-instance.json")).control : key => value if key != "security_epochs" }
+    }))
+  }
+  expect_failures = [var.oauth_instance_json]
+}
+
+run "refuses_duplicate_current_authority_selection" {
+  command = plan
+  variables {
+    oauth_instance_json = jsonencode(merge(jsondecode(file("tests/oauth-instance.json")), {
+      control = merge(jsondecode(file("tests/oauth-instance.json")).control, {
+        security_epochs = merge(jsondecode(file("tests/oauth-instance.json")).control.security_epochs, {
+          duplicate = jsondecode(file("tests/oauth-instance.json")).control.security_epochs.app_epoch
+        })
+      })
+    }))
+  }
+  expect_failures = [var.oauth_instance_json]
+}
+
+run "refuses_foreign_current_authority_scope" {
+  command = plan
+  variables {
+    oauth_instance_json = jsonencode(merge(jsondecode(file("tests/oauth-instance.json")), {
+      control = merge(jsondecode(file("tests/oauth-instance.json")).control, {
+        security_epochs = { app_epoch = merge(jsondecode(file("tests/oauth-instance.json")).control.security_epochs.app_epoch, {
+          scope = { installation = "exampleco", environment = "production", app = "foreign" }
+        }) }
+      })
+    }))
+  }
+  expect_failures = [terraform_data.oauth_admission]
+}
+
+run "refuses_malformed_current_authority_uid" {
+  command = plan
+  variables {
+    oauth_instance_json = jsonencode(merge(jsondecode(file("tests/oauth-instance.json")), {
+      control = merge(jsondecode(file("tests/oauth-instance.json")).control, {
+        security_epochs = { app_epoch = merge(jsondecode(file("tests/oauth-instance.json")).control.security_epochs.app_epoch, {
+          provider = merge(jsondecode(file("tests/oauth-instance.json")).control.security_epochs.app_epoch.provider, { database_uid = "unqualified" })
+        }) }
+      })
+    }))
+  }
+  expect_failures = [terraform_data.oauth_admission]
+}
+
+run "refuses_malformed_current_authority_key_set" {
+  command = plan
+  variables {
+    oauth_instance_json = jsonencode(merge(jsondecode(file("tests/oauth-instance.json")), {
+      control = merge(jsondecode(file("tests/oauth-instance.json")).control, {
+        security_epochs = { app_epoch = merge(jsondecode(file("tests/oauth-instance.json")).control.security_epochs.app_epoch, { key_set = "ready" }) }
+      })
+    }))
   }
   expect_failures = [terraform_data.oauth_admission]
 }

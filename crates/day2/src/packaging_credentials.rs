@@ -242,6 +242,7 @@ fn prepare_connections(
         builders: BTreeMap::new(),
         runtimes: BTreeMap::new(),
         secrets: BTreeMap::new(),
+        security_epochs: BTreeMap::new(),
     });
     let operator = serde_json::to_vec_pretty(&operator)?;
     Instance::from_bytes(&operator)?;

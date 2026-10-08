@@ -1474,13 +1474,63 @@ fn create_for_with_imports(
     actor: &str,
     imports: &[ImportedQueryFixture],
 ) -> Result<Runtime> {
-    use std::{io::Write, os::unix::fs::PermissionsExt};
     let artifact_path = artifact_path.canonicalize()?;
     let artifact = LoadedArtifact::load(&artifact_path)?;
-    // Caller chooses a new directory: there is no implicit reset or policy rewrite.
-    fs::create_dir(directory).context("local development requires a new output directory")?;
-    fs::set_permissions(directory, fs::Permissions::from_mode(0o700))?;
-    let path = directory.join("instance.json");
+    ensure!(
+        artifact.contract().credential_manifest.is_empty(),
+        "credential artifacts require explicit verification selection or an admitted installation"
+    );
+    let instance = instance_for_artifact(&artifact_path, &artifact, policy, actor, imports)?;
+    create_selected_instance(instance, directory, imports)
+}
+
+/// Explicit disposable verification setup. Complete desired selections pass
+/// the ordinary loader; this entrance supplies no native credential authority.
+pub fn create_verification_for(
+    artifact_path: &Path,
+    directory: &Path,
+    policy: Option<Policy>,
+    actor: &str,
+) -> Result<Runtime> {
+    create_verification_for_with_imports(artifact_path, directory, policy, actor, &[])
+}
+
+fn create_verification_for_with_imports(
+    artifact_path: &Path,
+    directory: &Path,
+    policy: Option<Policy>,
+    actor: &str,
+    imports: &[ImportedQueryFixture],
+) -> Result<Runtime> {
+    let artifact_path = artifact_path.canonicalize()?;
+    let artifact = LoadedArtifact::load(&artifact_path)
+        .context("disposable verification artifact admission")?;
+    let mut instance = instance_for_artifact(&artifact_path, &artifact, policy, actor, imports)?;
+    if !artifact.contract().credential_manifest.is_empty() {
+        instance.identity = Some(crate::artifact::IdentityProvider {
+            scheme: crate::artifact::IdentityScheme::GoogleIap,
+            hosted_domain: "example.com".into(),
+        });
+        instance.security_shell = Some(crate::artifact::Edge {
+            origin: "https://security.example.com".into(),
+            iap_audience: "/projects/1/global/backendServices/2".into(),
+        });
+        instance.apps.get_mut("app").unwrap().edge = Some(crate::artifact::Edge {
+            origin: "https://app.example.com".into(),
+            iap_audience: "/projects/1/global/backendServices/3".into(),
+        });
+        credential_verification_selection(&mut instance, &artifact)?;
+    }
+    create_selected_instance(instance, directory, imports)
+}
+
+fn instance_for_artifact(
+    artifact_path: &Path,
+    artifact: &LoadedArtifact,
+    policy: Option<Policy>,
+    actor: &str,
+    imports: &[ImportedQueryFixture],
+) -> Result<Instance> {
     let mut instance = Instance {
         installation: "localdev".into(),
         environment: "disposable".into(),
@@ -1494,6 +1544,7 @@ fn create_for_with_imports(
         oauth_shell_transport: None,
         oauth_clients: None,
         oauth_runtime: None,
+        credential_runtime: None,
         apps: BTreeMap::from([(
             "app".into(),
             AppBinding {
@@ -1505,7 +1556,7 @@ fn create_for_with_imports(
                     .into(),
                 readers: BTreeSet::from([actor.into()]),
                 writers: BTreeSet::from([actor.into()]),
-                authority: Some(policy.unwrap_or(local_policy_for(&artifact, actor)?)),
+                authority: Some(policy.unwrap_or(local_policy_for(artifact, actor)?)),
                 resource_policies: Vec::new(),
                 credential_families: Default::default(),
                 oauth_connections: Default::default(),
@@ -1541,7 +1592,7 @@ fn create_for_with_imports(
     };
     let (resources, attachments) = resource_fixture_for_artifact_with_imports(
         "app",
-        &artifact,
+        artifact,
         instance.apps["app"]
             .authority
             .as_ref()
@@ -1549,14 +1600,25 @@ fn create_for_with_imports(
         imports,
     )?;
     instance.resources = Some(resources);
-    // Static disposable pins for metadata verification, with no key provider
-    // or lifecycle readiness. These never qualify production credential use.
-    credential_metadata_fixture(&mut instance, &artifact)?;
     instance
         .apps
         .get_mut("app")
         .expect("local app")
         .resource_policies = attachments;
+    Ok(instance)
+}
+
+fn create_selected_instance(
+    instance: Instance,
+    directory: &Path,
+    imports: &[ImportedQueryFixture],
+) -> Result<Runtime> {
+    use std::{io::Write, os::unix::fs::PermissionsExt};
+    let instance = Instance::from_bytes(&serde_json::to_vec(&instance)?)?;
+    // Caller chooses a new directory: there is no implicit reset or policy rewrite.
+    fs::create_dir(directory).context("local development requires a new output directory")?;
+    fs::set_permissions(directory, fs::Permissions::from_mode(0o700))?;
+    let path = directory.join("instance.json");
     let mut file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -1600,15 +1662,46 @@ fn create_for_with_imports(
     Ok(runtime.with_integrations(crate::integration_host::Host::simulated(&database, &scope)))
 }
 
-fn credential_metadata_fixture(instance: &mut Instance, artifact: &LoadedArtifact) -> Result<()> {
+fn credential_verification_selection(
+    instance: &mut Instance,
+    artifact: &LoadedArtifact,
+) -> Result<()> {
     use day2_capabilities::{
-        BindingRef, Digest, Name,
+        BindingRef, Digest, Name, SecretProvider,
+        credential_runtime::{CustodyRole, FamilyRuntime, RuntimeApp, RuntimeCatalog},
         credentials::*,
         oauth::{ResourceAudienceRef, SecurityOriginRef},
+        security_epoch::EpochStore,
     };
+    use std::num::NonZeroU64;
     let name = |value: &str| Name::try_from(value.to_owned());
     let pin = |value: &str| BindingRef::pin(name(value)?, &"disposable-metadata-only");
+    let mut secrets = BTreeMap::new();
+    let mut selected_families = BTreeMap::new();
     for family in &artifact.contract().credential_manifest {
+        let identity = Digest::of(&("credential-verification-family-v1", &family.id))?;
+        let suffix = &identity.as_str()[7..23];
+        let verifier = name(&format!("verify_{suffix}"))?;
+        let encryption = name(&format!("encrypt_{suffix}"))?;
+        let provider = |secret: Name| SecretProvider::GcpVersion {
+            project_number: NonZeroU64::new(1).unwrap(),
+            secret,
+            version: NonZeroU64::new(1).unwrap(),
+        };
+        let verifier_provider = provider(verifier.clone());
+        let encryption_provider = provider(encryption.clone());
+        secrets.insert(verifier.clone(), verifier_provider.clone());
+        secrets.insert(encryption.clone(), encryption_provider.clone());
+        selected_families.insert(
+            family.id.clone(),
+            FamilyRuntime {
+                verifier_secret: verifier.clone(),
+                custody: CustodyRole::IssuerReveal {
+                    encryption_secret: encryption.clone(),
+                },
+                max_active_lineages: 1000,
+            },
+        );
         let policy = ManagementPolicy {
             identity_authority: pin("disposable-identity")?,
             issue: ManagementPredicate::Creator,
@@ -1631,8 +1724,8 @@ fn credential_metadata_fixture(instance: &mut Instance, artifact: &LoadedArtifac
             management: BindingRef::pin(family.id.clone(), &policy)?,
             rotation: RotationProfile::AtomicReplace,
             delivery: DeliveryProfile::AuthenticatedCreatorReveal,
-            verifier: pin("disposable-verifier")?,
-            custody: pin("disposable-custody")?,
+            verifier: BindingRef::pin(verifier, &verifier_provider)?,
+            custody: BindingRef::pin(encryption, &encryption_provider)?,
             security_shell: SecurityOriginRef(pin("disposable-security")?),
             audience: ResourceAudienceRef(pin("disposable-audience")?),
             epoch_store: pin("disposable-epoch")?,
@@ -1656,6 +1749,222 @@ fn credential_metadata_fixture(instance: &mut Instance, artifact: &LoadedArtifac
             .credential_families
             .insert(family.id.as_str().into(), binding);
     }
+    let attestation = name("credential_attestation")?;
+    secrets.insert(
+        attestation.clone(),
+        SecretProvider::GcpVersion {
+            project_number: NonZeroU64::new(1).unwrap(),
+            secret: attestation.clone(),
+            version: NonZeroU64::new(1).unwrap(),
+        },
+    );
+    instance.control = Some(serde_json::from_value(serde_json::json!({
+        "version":1,"state_directory":"/srv/day2/.state/control","operators":["verification"],
+        "sources":{"fixture_source":{"kind":"local_git","repository":artifact.directory()}},
+        "apps":{"app":{"source":"fixture_source"}},"secrets":secrets
+    }))?);
+    instance.credential_runtime = Some(RuntimeCatalog {
+        version: 1,
+        apps: BTreeMap::from([(
+            name("app")?,
+            RuntimeApp {
+                service_account: "app@day2-verification.iam.gserviceaccount.com".into(),
+                attestation: pin("disposable-attestation")?,
+                attestation_secret: attestation,
+                families: selected_families,
+            },
+        )]),
+    });
+    // Explicit synthetic desired DATA; never an observed database or epoch.
+    let epoch: EpochStore = serde_json::from_value(serde_json::json!({
+        "scope":{"installation":instance.installation,"environment":instance.environment,"app":"app"},
+        "provider":{"kind":"firestore_native_v1","project":"day2-verification","project_number":1,
+            "database":"security","database_uid":"01234567-89ab-4cde-8fab-0123456789ab",
+            "iam_source":{"kind":"gke_workload_identity_v1","service_account":"app@day2-verification.iam.gserviceaccount.com"}},
+        "key_set":Digest::new(b"pending complete desired selection"),"max_lease_seconds":30
+    }))?;
+    instance
+        .control
+        .as_mut()
+        .unwrap()
+        .security_epochs
+        .insert(name("disposable-epoch")?, epoch);
+    repin_credential_verification_data(instance, artifact)
+}
+
+/// Re-pin only complete disposable verification DATA after an explicit final
+/// context change. Existing selectors and business predicates remain selected;
+/// this function cannot supply keys, current epochs or readiness authority.
+pub fn repin_credential_verification_data(
+    instance: &mut Instance,
+    artifact: &LoadedArtifact,
+) -> Result<()> {
+    use day2_capabilities::{
+        Digest, Name,
+        credential_runtime::{attestation_revision, quota_revision},
+        security_epoch::AuthorityScope,
+    };
+    ensure!(
+        instance.installation == "localdev" && instance.environment == "disposable",
+        "credential verification requires disposable scope"
+    );
+    artifact.require_current_api()?;
+    let app = instance
+        .apps
+        .get("app")
+        .context("credential verification app missing")?;
+    ensure!(
+        instance.apps.len() == 1 && app.artifact == artifact.directory().to_string_lossy(),
+        "credential verification artifact selection mismatch"
+    );
+    let families: BTreeSet<_> = artifact
+        .contract()
+        .credential_manifest
+        .iter()
+        .map(|family| family.id.clone())
+        .collect();
+    ensure!(
+        !families.is_empty()
+            && families.len() <= 64
+            && families.len() == artifact.contract().credential_manifest.len()
+            && families
+                == app
+                    .credential_families
+                    .keys()
+                    .map(|family| Name::try_from(family.clone()))
+                    .collect::<Result<_>>()?,
+        "credential verification manifest family coverage mismatch"
+    );
+    let scope = AuthorityScope {
+        installation: instance.installation.clone().try_into()?,
+        environment: instance.environment.clone().try_into()?,
+        app: "app".to_owned().try_into()?,
+    };
+    let runtime = instance
+        .credential_runtime
+        .as_ref()
+        .context("credential verification runtime missing")?;
+    runtime.validate()?;
+    let selected = runtime
+        .apps
+        .get(&scope.app)
+        .context("credential verification runtime app missing")?;
+    ensure!(
+        runtime.apps.len() == 1 && families == selected.families.keys().cloned().collect(),
+        "credential verification runtime family coverage mismatch"
+    );
+    let control = instance
+        .control
+        .as_ref()
+        .context("credential verification control missing")?;
+    control.validate(instance.apps.keys().map(String::as_str))?;
+    let epochs: Vec<_> = control
+        .security_epochs
+        .iter()
+        .filter(|(_, epoch)| epoch.scope == scope)
+        .map(|(alias, _)| alias.clone())
+        .collect();
+    ensure!(
+        epochs.len() == 1 && control.security_epochs.len() == 1,
+        "credential verification requires one exact scoped epoch"
+    );
+    let epoch_alias = &epochs[0];
+    let resources = instance
+        .resources
+        .as_ref()
+        .context("credential verification resources missing")?;
+    for family in &artifact.contract().credential_manifest {
+        let binding = &app.credential_families[family.id.as_str()];
+        ensure!(
+            binding.family == family.id
+                && binding.namespace.installation == scope.installation
+                && binding.namespace.environment == scope.environment
+                && binding.namespace.app == scope.app
+                && binding.epoch_store.id == *epoch_alias,
+            "credential verification family scope or epoch alias mismatch"
+        );
+        ensure!(
+            resources
+                .credentials
+                .approved_authority
+                .get(binding.approved_authority.id.as_str())
+                == Some(&family.roots)
+                && binding.approved_authority.revision
+                    == Digest::of(&("credential-approved-authority-v1", &family.roots))?,
+            "credential verification approved roots mismatch"
+        );
+    }
+    let identity = instance.credential_identity_revision("app")?;
+    let shell = instance.credential_shell_revision("app")?;
+    let quotas: BTreeMap<_, _> = selected
+        .families
+        .iter()
+        .map(|(family, runtime)| {
+            Ok((
+                family.as_str().to_owned(),
+                quota_revision(runtime.max_active_lineages)?,
+            ))
+        })
+        .collect::<Result<_>>()?;
+    let namespaces: Vec<_> = app
+        .credential_families
+        .values()
+        .map(|family| family.namespace.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let (_, edge) = instance.security_edge()?;
+    let attestation = attestation_revision(
+        &scope,
+        &namespaces,
+        control
+            .secrets
+            .get(&selected.attestation_secret)
+            .context("credential verification attestation provider missing")?,
+        &edge.origin,
+        &edge.iap_audience,
+    )?;
+    let resources = instance.resources.as_mut().unwrap();
+    for (name, family) in &mut instance.apps.get_mut("app").unwrap().credential_families {
+        let policy = resources
+            .credentials
+            .management
+            .get_mut(family.management.id.as_str())
+            .context("credential verification management policy missing")?;
+        policy.identity_authority.revision = identity.clone();
+        family.management.revision = Digest::of(policy)?;
+        family.security_shell.0.revision = shell.clone();
+        family.quota.revision = quotas[name].clone();
+    }
+    instance
+        .credential_runtime
+        .as_mut()
+        .unwrap()
+        .apps
+        .get_mut(&scope.app)
+        .unwrap()
+        .attestation
+        .revision = attestation;
+    let key_set = instance.security_key_set("app")?;
+    let epoch = instance
+        .control
+        .as_mut()
+        .unwrap()
+        .security_epochs
+        .get_mut(epoch_alias)
+        .unwrap();
+    epoch.key_set = key_set;
+    let revision = Digest::of(epoch)?;
+    for family in instance
+        .apps
+        .get_mut("app")
+        .unwrap()
+        .credential_families
+        .values_mut()
+    {
+        family.epoch_store.revision = revision.clone();
+    }
+    Instance::from_bytes(&serde_json::to_vec(instance)?)?;
     Ok(())
 }
 
@@ -2482,7 +2791,7 @@ pub fn verify_with_runner_imports(
         "verification requires positive bounded cases"
     );
     let mut campaign = Campaign::new(
-        create_for_with_imports(artifact, directory, None, ACTOR, imports)?,
+        create_verification_for_with_imports(artifact, directory, None, ACTOR, imports)?,
         None,
         seed,
         count,

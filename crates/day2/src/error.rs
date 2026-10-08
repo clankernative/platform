@@ -167,8 +167,9 @@ pub(crate) fn diagnostic(error: &anyhow::Error) -> serde_json::Value {
         .map(|error| format!("{:?}", error.classify()));
     let worker_exit = error
         .downcast_ref::<crate::worker::ExitEvidence>()
-        .map(|exit| json!({"code":exit.code,"signal":exit.signal}));
-    json!({"failure":failure,"sqlite":sqlite,"io":io,"json":json,"worker_exit":worker_exit})
+        .map(|exit| json!({"code":exit.code,"signal":exit.signal,"try_wait_failed":exit.try_wait_failed,"try_wait_errno":exit.try_wait_errno}));
+    let worker_stage = error.downcast_ref::<crate::worker::StageEvidence>();
+    json!({"failure":failure,"sqlite":sqlite,"io":io,"json":json,"worker_exit":worker_exit,"worker_stage":worker_stage})
 }
 
 /// Preserve machine-readable codes when observations acquire diagnostic context.
@@ -205,11 +206,16 @@ mod tests {
             .context(crate::worker::ExitEvidence {
                 code: None,
                 signal: Some(9),
+                try_wait_failed: 0,
+                try_wait_errno: None,
             })
             .context(private);
         assert_eq!(classify(&worker), Failure::WorkerCrashed);
         assert_eq!(diagnostic(&worker)["worker_exit"]["signal"], 9);
+        assert_eq!(diagnostic(&worker)["worker_exit"]["try_wait_failed"], 0);
+        assert!(diagnostic(&worker)["worker_exit"]["try_wait_errno"].is_null());
         assert_eq!(diagnostic(&worker)["failure"], "worker_crashed");
+        assert!(diagnostic(&worker)["worker_stage"].is_null());
         let opaque = anyhow::anyhow!(private).context(private);
         for error in [&sqlite, &io, &parse, &worker, &opaque] {
             assert!(!diagnostic(error).to_string().contains(private));

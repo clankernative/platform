@@ -1723,7 +1723,7 @@ mod tests {
                 .context("credential fixture artifact required")?,
         );
         let directory = tempfile::tempdir()?;
-        let runtime = crate::development::create_for(
+        let runtime = crate::development::create_verification_for(
             &artifact,
             &directory.path().join("instance"),
             None,
@@ -1761,6 +1761,7 @@ mod tests {
             .context("credential command root")?
             .actors
             .insert("credential_client:client_keys".into());
+        crate::development::repin_credential_verification_data(&mut instance, runtime.artifact())?;
         std::fs::write(runtime.instance_path(), serde_json::to_vec(&instance)?)?;
         let runtime = crate::store::Runtime::load(runtime.instance_path(), runtime.app())?;
         let current = crate::authority_state::current(&open(runtime.db())?)?;

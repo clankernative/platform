@@ -38,6 +38,7 @@ fn configuration(directory: &std::path::Path) -> InstallationControl {
         builders: BTreeMap::new(),
         runtimes: BTreeMap::new(),
         secrets: BTreeMap::new(),
+        security_epochs: BTreeMap::new(),
     }
 }
 fn scope() -> ControlScope {
@@ -335,6 +336,18 @@ async fn real_installation_export_build_and_temporal_completion() -> Result<()> 
     };
     let directory = tempfile::tempdir()?;
     let root = directory.path().canonicalize()?;
+    #[cfg(unix)]
+    anyhow::ensure!(
+        std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&root)?.permissions()) & 0o777
+            == 0o700,
+        "operator installation evidence root must be private"
+    );
+    // Direct stderr survives successful libtest capture; keep only after it succeeds.
+    std::io::Write::write_fmt(
+        &mut std::io::stderr().lock(),
+        format_args!("retained installation evidence: {}\n", root.display()),
+    )?;
+    let _retained_root = directory.keep();
     let platform = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()?;

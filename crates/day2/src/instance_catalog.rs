@@ -633,14 +633,22 @@ mod tests {
             let bindings = binding
                 .map(|value| BTreeMap::from([("keys", value)]))
                 .unwrap_or_default();
-            crate::artifact::Instance::from_bytes(&serde_json::to_vec(&json!({
+            let bytes = serde_json::to_vec(&json!({
                 "installation": "acme", "environment": "dev",
                 "apps": {"reports": {"artifact": "unused", "readers": [], "writers": [],
                     "credential_families": bindings}},
                 "resources": {"version": 1, "connections": {}, "resources": {}, "policies": {},
                     "credentials": {"management": {"managers": policy},
                         "approved_authority": {"approved": approved}}}
-            }))?)
+            }))?;
+            if binding.is_some() {
+                // Deliberately incomplete DATA for pure composition, not CURRENT.
+                let error = crate::artifact::Instance::from_bytes(&bytes).unwrap_err();
+                assert!(error.to_string().contains("credential_runtime_missing"));
+                crate::json::decode(&bytes)
+            } else {
+                crate::artifact::Instance::from_bytes(&bytes)
+            }
         };
         let selected = catalog(BTreeMap::from([(
             "reports".into(),
