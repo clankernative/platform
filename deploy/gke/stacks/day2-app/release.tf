@@ -21,9 +21,11 @@ data "kubernetes_resource" "release" {
 
 locals {
   released = var.release_managed ? data.kubernetes_resource.release[0].object : null
+  # day2.dev/activated-artifact: `day2 platform maintain activate` stamps it and
+  # the release that rolls the workload to that artifact removes it.
   release_annotations = var.release_managed ? merge({ "day2.dev/release-managed" = "true" }, {
     for key, value in try(local.released.metadata.annotations, {}) : key => value
-    if contains(["day2.dev/release-effect", "day2.dev/release-id"], key)
+    if contains(["day2.dev/release-effect", "day2.dev/release-id", "day2.dev/activated-artifact"], key)
   }) : {}
   release_template_annotations = var.release_managed ? {
     for key, value in local.released.spec.template.metadata.annotations : key => value

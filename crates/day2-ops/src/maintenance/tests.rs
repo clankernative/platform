@@ -105,6 +105,7 @@ struct FakeCluster {
     other_sessions: String,
     fail_on: Option<String>,
     drop_on_copy_out: Option<String>,
+    annotations: Rc<RefCell<BTreeMap<String, String>>>,
 }
 
 impl FakeCluster {
@@ -182,9 +183,17 @@ impl Cluster for FakeCluster {
         let args: Vec<&str> = args[2..].iter().map(String::as_str).collect();
         Ok(match args.as_slice() {
             ["get", "statefulset", STATEFULSET, "-o", "json"] => json!({
+                "metadata": {"annotations": *self.annotations.borrow()},
                 "spec": {"replicas": 1, "template": {"spec": {"containers": [{"image": self.running_image}]}}}
             })
             .to_string(),
+            ["annotate", "--overwrite", "statefulset", STATEFULSET, annotation] => {
+                let (key, value) = annotation.split_once('=').unwrap();
+                self.annotations
+                    .borrow_mut()
+                    .insert(key.to_owned(), value.to_owned());
+                String::new()
+            }
             ["get", "pods", "-l", MAINTENANCE_LABEL, "-o", "name"] => self.other_sessions.clone(),
             ["get", "configmap", _, "-o", "json"] => json!({"data": {"instance.json": self.instance}}).to_string(),
             ["get", "pod", _, "--ignore-not-found", "-o", "name"] => String::new(),
@@ -224,6 +233,7 @@ impl Cluster for FakeCluster {
 struct Harness {
     directory: tempfile::TempDir,
     calls: Rc<RefCell<Vec<Vec<String>>>>,
+    annotations: Rc<RefCell<BTreeMap<String, String>>>,
     asked: Rc<RefCell<usize>>,
     running: Image,
     target: Image,
@@ -234,6 +244,7 @@ impl Harness {
         Self {
             directory: tempfile::tempdir().unwrap(),
             calls: Rc::default(),
+            annotations: Rc::default(),
             asked: Rc::default(),
             running: image(b"old worker", None),
             target: image(b"new worker", None),
@@ -279,6 +290,7 @@ impl Harness {
             other_sessions: String::new(),
             fail_on: None,
             drop_on_copy_out: None,
+            annotations: self.annotations.clone(),
         };
         configure(&mut cluster);
         Tools {
@@ -442,8 +454,10 @@ fn a_failure_before_the_fence_removes_the_pod_and_restores_the_app() -> Result<(
     session.workflow("backup")?;
     session.copy_backup()?;
     ensure!(session.migration("plan").is_err(), "injected");
+    ensure!(session.mark_activated().is_err(), "nothing was activated");
     drop(session);
     assert!(harness.deleted_pod() && harness.scaled_up());
+    assert!(harness.annotations.borrow().is_empty());
     Ok(())
 }
 
@@ -468,8 +482,13 @@ fn after_the_fence_the_old_image_is_never_restarted() -> Result<()> {
     );
     session.workflow("authority-inspect")?;
     ensure!(session.workflow("authority-activate").is_err(), "injected");
+    ensure!(
+        session.mark_activated().is_err(),
+        "a failed activation is never marked"
+    );
     drop(session);
     assert!(harness.deleted_pod());
+    assert!(harness.annotations.borrow().is_empty());
     assert!(
         !harness.scaled_up(),
         "the old image must not restart after migration"
@@ -488,19 +507,39 @@ fn activate_leaves_the_app_stopped_for_the_new_image() -> Result<()> {
     session.confirm()?;
     session.fence()?;
     session.migration("apply")?;
+    ensure!(
+        session.mark_activated().is_err(),
+        "only a successful activation is marked"
+    );
     session.workflow("authority-inspect")?;
+    ensure!(
+        session.finish().is_err(),
+        "activate cannot finish before it is marked"
+    );
     session.workflow("authority-activate")?;
+    assert!(harness.annotations.borrow().is_empty());
+    session.mark_activated()?;
+    ensure!(session.mark_activated().is_err(), "marked once");
     let receipt = session.finish()?;
     assert_eq!(receipt["replicas_restored"], false);
     drop(session);
     assert!(harness.deleted_pod() && !harness.scaled_up());
     assert_eq!(*harness.asked.borrow(), 1);
+    assert_eq!(
+        *harness.annotations.borrow(),
+        BTreeMap::from([(
+            ACTIVATED.to_owned(),
+            format!("sha256:{}", harness.target.artifact_id)
+        )])
+    );
     let steps = harness.journal();
     let at = |step: &str| steps.iter().position(|s| s == step).unwrap();
     assert!(at("backup-copied") < at("confirmed") && at("confirmed") < at("fence"));
     assert!(
         at("fence") < at("migration-applied")
             && at("migration-applied") < at("authority-activated")
+            && at("authority-activated") < at("mark-activated")
+            && at("mark-activated") < at("activation-marked")
     );
     Ok(())
 }

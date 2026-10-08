@@ -584,6 +584,7 @@ fn maintain_activate_runs_every_guarded_step_in_order() -> Result<()> {
             "migration:apply",
             "workflow:authority-inspect",
             "workflow:authority-activate",
+            "mark-activated",
             "finish",
         ]
     );

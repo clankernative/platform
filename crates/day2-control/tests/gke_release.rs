@@ -56,6 +56,7 @@ struct Cloud {
     credential_versions: Vec<(String, String)>,
     payloads: BTreeMap<String, Vec<u8>>,
     patches: usize,
+    last_patch: Value,
     publications: usize,
     secret_denied: bool,
     drop_deployment_ack: bool,
@@ -112,6 +113,7 @@ async fn serve(
             assert_eq!(patch[0]["path"], "/metadata/uid");
             assert_eq!(patch[1]["path"], "/metadata/resourceVersion");
             cloud.patches += 1;
+            cloud.last_patch = patch.clone();
             if cloud.conflict
                 || patch[0]["value"] != cloud.controller["metadata"]["uid"]
                 || patch[1]["value"] != cloud.controller["metadata"]["resourceVersion"]
@@ -120,12 +122,9 @@ async fn serve(
                 status = StatusCode::CONFLICT;
             } else if cloud.unknown_absence {
                 status = StatusCode::INTERNAL_SERVER_ERROR;
+            } else if !json_patch(&mut cloud.controller, &patch) {
+                status = StatusCode::UNPROCESSABLE_ENTITY;
             } else {
-                cloud.controller["metadata"]["annotations"]["day2.dev/release-effect"] =
-                    patch[2]["value"].clone();
-                cloud.controller["metadata"]["annotations"]["day2.dev/release-id"] =
-                    patch[3]["value"].clone();
-                cloud.controller["spec"]["template"] = patch[4]["value"].clone();
                 let generation = cloud.controller["metadata"]["generation"].as_u64().unwrap() + 1;
                 cloud.controller["metadata"]["generation"] = json!(generation);
                 cloud.controller["metadata"]["resourceVersion"] = json!(format!("rv-{generation}"));
@@ -200,6 +199,40 @@ async fn serve(
     (status, axum::Json(body))
 }
 
+/// RFC 6902 `test`/`add`/`replace`/`remove` on object members, atomically.
+fn json_patch(target: &mut Value, patch: &Value) -> bool {
+    let mut next = target.clone();
+    for op in patch.as_array().unwrap() {
+        let path = op["path"].as_str().unwrap();
+        if op["op"] == "test" {
+            if next.pointer(path) != Some(&op["value"]) {
+                return false;
+            }
+            continue;
+        }
+        let (parent, key) = path.rsplit_once('/').unwrap();
+        let key = key.replace("~1", "/").replace("~0", "~");
+        let Some(parent) = next.pointer_mut(parent).and_then(Value::as_object_mut) else {
+            return false;
+        };
+        let present = parent.contains_key(&key);
+        match op["op"].as_str().unwrap() {
+            "add" => {
+                parent.insert(key, op["value"].clone());
+            }
+            "replace" if present => {
+                parent.insert(key, op["value"].clone());
+            }
+            "remove" if present => {
+                parent.remove(&key);
+            }
+            _ => return false,
+        }
+    }
+    *target = next;
+    true
+}
+
 struct Fixture {
     endpoint: String,
     cloud: Arc<Mutex<Cloud>>,
@@ -208,8 +241,16 @@ struct Fixture {
 }
 impl Fixture {
     fn new(deployment: &Deployment) -> Self {
-        let mut annotations = json!({"day2.dev/installation":"alpha","day2.dev/environment":"production","day2.dev/app":"reports","day2.dev/artifact":Digest::new(b"bootstrap")});
-        let mut controller = json!({"apiVersion":"apps/v1","kind":"StatefulSet","metadata":{"name":"day2-reports","namespace":NS,"uid":"controller-uid","generation":1,"resourceVersion":"rv-1","annotations":{"day2.dev/release-managed":"true"}},"spec":{"replicas":1,"template":{"metadata":{"annotations":{}},"spec":{"serviceAccountName":"runtime","initContainers":[{"name":"state-ownership","image":"busybox@sha256:fixture","command":["/busybox/chown","10001:10001","/srv/day2/.state"]}],"containers":[{"name":"day2","image":deployment.image,"env":[{"name":"DAY2_EXPECTED_ARTIFACT","value":Digest::new(b"bootstrap")}]}],"volumes":[{"name":"instance","configMap":{"name":"bootstrap-instance"}},{"name":"keys","csi":{"driver":"secrets-store-gke.csi.k8s.io","volumeAttributes":{"secretProviderClass":"keys"}}}]}}},"status":{"observedGeneration":1,"readyReplicas":1,"updatedReplicas":1,"currentRevision":"rev-1","updateRevision":"rev-1"}});
+        // The day2-app stack bootstraps the first candidate's artifact.
+        let bootstrap = format!(
+            "sha256:{}",
+            deployment.instance["apps"]["reports"]["artifact"]
+                .as_str()
+                .unwrap()
+                .trim_start_matches("artifacts/")
+        );
+        let mut annotations = json!({"day2.dev/installation":"alpha","day2.dev/environment":"production","day2.dev/app":"reports","day2.dev/artifact":bootstrap});
+        let mut controller = json!({"apiVersion":"apps/v1","kind":"StatefulSet","metadata":{"name":"day2-reports","namespace":NS,"uid":"controller-uid","generation":1,"resourceVersion":"rv-1","annotations":{"day2.dev/release-managed":"true"}},"spec":{"replicas":1,"template":{"metadata":{"annotations":{}},"spec":{"serviceAccountName":"runtime","initContainers":[{"name":"state-ownership","image":"busybox@sha256:fixture","command":["/busybox/chown","10001:10001","/srv/day2/.state"]}],"containers":[{"name":"day2","image":deployment.image,"env":[{"name":"DAY2_EXPECTED_ARTIFACT","value":bootstrap}]}],"volumes":[{"name":"instance","configMap":{"name":"bootstrap-instance"}},{"name":"keys","csi":{"driver":"secrets-store-gke.csi.k8s.io","volumeAttributes":{"secretProviderClass":"keys"}}}]}}},"status":{"observedGeneration":1,"readyReplicas":1,"updatedReplicas":1,"currentRevision":"rev-1","updateRevision":"rev-1"}});
         let mut credential_versions = Vec::new();
         if let Some(credentials) = &deployment.credentials {
             // As the day2-app stack installs it, before the first release.
@@ -258,6 +299,7 @@ impl Fixture {
             credential_versions,
             payloads: BTreeMap::from([(CREDENTIAL_VERSION.to_owned(), CREDENTIAL.to_vec())]),
             patches: 0,
+            last_patch: Value::Null,
             publications: 0,
             secret_denied: false,
             drop_deployment_ack: false,
@@ -437,9 +479,32 @@ impl World {
         );
         Ok(())
     }
+    /// What `day2 platform maintain activate` leaves: the app stopped and
+    /// stamped with the artifact its database now activates.
+    fn mark_activated(&self, artifact: &Digest) {
+        let mut cloud = self.fixture.cloud.lock().unwrap();
+        cloud.controller["metadata"]["annotations"]["day2.dev/activated-artifact"] =
+            json!(artifact);
+        cloud.controller["spec"]["replicas"] = json!(0);
+        let generation = cloud.controller["metadata"]["generation"].as_u64().unwrap() + 1;
+        cloud.controller["metadata"]["generation"] = json!(generation);
+        cloud.controller["metadata"]["resourceVersion"] = json!(format!("rv-{generation}"));
+    }
+
+    fn controller(&self) -> Value {
+        self.fixture.cloud.lock().unwrap().controller.clone()
+    }
+
+    /// Approve and accept a candidate with a new artifact and image.
     fn redeploy(&mut self) -> Result<()> {
         let mut journal = Journal::open(&self.journal)?;
-        let mut approval = approval(&mut journal, "alpha", 2, 1);
+        let generation = self.approval.expected_generation + 1;
+        let mut approval = approval(
+            &mut journal,
+            "alpha",
+            u8::try_from(generation + 1)?,
+            generation,
+        );
         // Same key and infrastructure; only the actual app candidate changes.
         approval.secret = self.approval.secret.clone();
         journal.approve_release(&approval)?;
@@ -495,6 +560,7 @@ fn redeploy_and_lost_publication_ack_are_durable_and_stale_publishers_cannot_rol
     assert!(!journal.serving_publication_pending(&world.approval.target)?);
     assert_eq!(first.revision, 1);
     world.redeploy()?;
+    world.mark_activated(&world.approval.artifact);
     world.activate()?;
     let second = journal.serving_publication(&[world.approval.target.clone()])?;
     assert_eq!(second.revision, 2);
@@ -938,4 +1004,121 @@ fn a_workload_without_its_registration_container_is_refused() -> Result<()> {
             json!({"name":"credential-metadata","configMap":{"name":"day2-reports-credentials"}}),
         );
     refused(world)
+}
+
+#[test]
+fn the_first_release_of_the_bootstrap_artifact_leaves_replicas_and_stamps_alone() -> Result<()> {
+    let mut world = World::new()?;
+    world.activate()?;
+    let cloud = world.fixture.cloud.lock().unwrap();
+    let ops: Vec<_> = cloud
+        .last_patch
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|op| op["path"].clone())
+        .collect();
+    assert_eq!(
+        ops,
+        [
+            "/metadata/uid",
+            "/metadata/resourceVersion",
+            "/metadata/annotations/day2.dev~1release-effect",
+            "/metadata/annotations/day2.dev~1release-id",
+            "/spec/template"
+        ]
+    );
+    assert_eq!(cloud.controller["spec"]["replicas"], 1);
+    Ok(())
+}
+
+#[test]
+fn an_artifact_change_needs_the_candidates_maintenance_activation() -> Result<()> {
+    let mut world = World::new()?;
+    world.activate()?;
+    let live = world.approval.artifact.clone();
+    let maps = world.fixture.cloud.lock().unwrap().maps.len();
+    world.redeploy()?;
+    let candidate = world.approval.artifact.clone();
+    let error = world.step().unwrap_err().to_string();
+    assert!(
+        error.starts_with("release_artifact_requires_activation: ")
+            && error.contains(live.as_str())
+            && error.contains(candidate.as_str())
+            && error.contains("day2 platform maintain activate"),
+        "{error}"
+    );
+    // An activation for another artifact authorizes nothing either.
+    world.mark_activated(&Digest::new(b"another-activated-artifact"));
+    for _ in 0..4 {
+        let _ = world.step();
+    }
+    {
+        let cloud = world.fixture.cloud.lock().unwrap();
+        assert_eq!(cloud.patches, 1);
+        assert_eq!(cloud.maps.len(), maps);
+        assert_eq!(
+            cloud.controller["spec"]["template"]["metadata"]["annotations"]["day2.dev/artifact"],
+            live.as_str()
+        );
+    }
+    assert_ne!(world.host.inspect(&world.id)?.phase, ReleasePhase::Active);
+    // The candidate's own activation lets the same execution continue.
+    world.mark_activated(&candidate);
+    world.activate()?;
+    let controller = world.controller();
+    assert_eq!(world.fixture.cloud.lock().unwrap().patches, 2);
+    assert_eq!(controller["spec"]["replicas"], 1);
+    assert!(controller["metadata"]["annotations"]["day2.dev/activated-artifact"].is_null());
+    assert_eq!(
+        controller["spec"]["template"]["metadata"]["annotations"]["day2.dev/artifact"],
+        candidate.as_str()
+    );
+    Ok(())
+}
+
+#[test]
+fn a_consumed_activation_reconciles_a_lost_ack_and_cannot_authorize_again() -> Result<()> {
+    let mut world = World::new()?;
+    world.activate()?;
+    world.redeploy()?;
+    world.mark_activated(&world.approval.artifact);
+    world.fixture.cloud.lock().unwrap().drop_deployment_ack = true;
+    world.activate()?;
+    let controller = world.controller();
+    assert_eq!(world.fixture.cloud.lock().unwrap().patches, 2);
+    assert_eq!(controller["spec"]["replicas"], 1);
+    assert!(controller["metadata"]["annotations"]["day2.dev/activated-artifact"].is_null());
+    // The next artifact needs its own activation.
+    world.redeploy()?;
+    let error = world.step().unwrap_err().to_string();
+    assert!(
+        error.starts_with("release_artifact_requires_activation: "),
+        "{error}"
+    );
+    assert_eq!(world.fixture.cloud.lock().unwrap().patches, 2);
+    Ok(())
+}
+
+#[test]
+fn a_stopped_workload_without_an_activation_is_refused() -> Result<()> {
+    let world = World::new()?;
+    world.fixture.cloud.lock().unwrap().controller["spec"]["replicas"] = json!(0);
+    refused(world)
+}
+
+#[test]
+fn the_release_scope_is_every_app_the_catalog_instance_binds() -> Result<()> {
+    let scope = target("alpha");
+    let instance = json!({"apps":{"reports":{},"notifications":{}}});
+    let targets = day2_control::gke_release_driver::release_scope(&instance, &scope)?;
+    let apps: Vec<_> = targets.iter().map(|target| target.app.as_str()).collect();
+    assert_eq!(apps, ["notifications", "reports"]);
+    assert!(
+        targets.iter().all(
+            |target| target.company == scope.company && target.environment == scope.environment
+        )
+    );
+    assert!(day2_control::gke_release_driver::release_scope(&json!({"apps":{}}), &scope).is_err());
+    Ok(())
 }

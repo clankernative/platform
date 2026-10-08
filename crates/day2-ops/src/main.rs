@@ -579,6 +579,7 @@ impl Operations {
             }
             "maintenance-confirm" => self.maintenance()?.confirm(),
             "maintenance-fence" => self.maintenance()?.fence(),
+            "maintenance-mark-activated" => self.maintenance()?.mark_activated(),
             "maintenance-finish" => self.maintenance()?.finish(),
             _ => anyhow::bail!("unknown private platform capability"),
         }

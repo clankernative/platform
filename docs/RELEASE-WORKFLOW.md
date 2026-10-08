@@ -91,6 +91,35 @@ controller UID and resourceVersion before replacing the template. A lost
 acknowledgment reconciles the exact release/effect markers and template; missing
 markers after an unknown write never authorize a blind second mutation.
 
+### Artifact changes
+
+Journal activation does not activate the artifact in the app's own database.
+Once `.state/<app>.sqlite` is initialized, `day2-serve` runs only the artifact
+that database activated, not the one the instance names; a pod whose image
+carries a different artifact refuses with `active_artifact_unavailable`, naming
+both artifact IDs. The release workflow does not activate either; it changes
+the artifact only onto state that `day2 platform maintain activate`
+([deploy/gke/README.md](../deploy/gke/README.md#maintenance-day2-platform-maintain))
+activated for it. Before any write (at dependency preparation and again before
+the deployment patch) the adapter compares the candidate artifact with the live
+template's `day2.dev/artifact`:
+
+- Equal: the release proceeds as before. The first release of the artifact the
+  day2-app stack bootstrapped is equal.
+- Different: the StatefulSet must carry `day2.dev/activated-artifact` naming
+  the candidate (`sha256:<id>`). Otherwise the release stops with
+  `release_artifact_requires_activation`, naming both artifacts, and writes
+  nothing. Run `day2 platform maintain activate` for the candidate, then rerun
+  the same configuration.
+
+`maintain activate` stamps that annotation only after the fresh activation of
+the target artifact succeeds, and leaves the app at zero replicas. The same
+conditional patch that rolls the template then restores `spec.replicas` to the
+profile's one replica and removes the stamp, so it cannot authorize a later
+change. A lost acknowledgment reconciles as before: the markers, template and
+one replica identify the applied patch. Infrastructure plans keep an unconsumed
+stamp.
+
 Fresh readback requires the prepared controller incarnation, ready current pod,
 actual immutable running image, artifact guard, scope and workload identity.
 It checks the numeric Secret Manager key accesses and CSI projection again
@@ -101,9 +130,14 @@ successful access is evidence of that observed access, not an instantaneous
 revocation guarantee. See [the provider contract](https://docs.cloud.google.com/secret-manager/docs/access-secret-version).
 
 Activation atomically queues a publication revision with its receipt. After the
-selected candidates are active, the driver publishes their coherent serving
-snapshot to each selected app's named ConfigMap with conditional writes and exact
-readback. Only then does it acknowledge the journal intent. A crash after partial
+selected candidates are active, the driver publishes one coherent serving
+snapshot to each candidate's named ConfigMap with conditional writes and exact
+readback. The snapshot selects every app the catalog instance binds in the
+scope that has an active release, not only this run's candidates: a host
+resolves each call target in its own snapshot, so releasing one app keeps its
+callees selected. Apps without an active release are omitted; a ConfigMap never
+receives a snapshot that does not select its own app. Other apps' ConfigMaps are
+not written and keep their previous snapshot until they are released. Only then does it acknowledge the journal intent. A crash after partial
 publication retries safely; an old acknowledgment cannot erase a newer activation
 and an older publisher cannot overwrite a newer ConfigMap revision. Calls still
 probe physical serving bindings. A single-replica rollout can interrupt calls;
@@ -135,14 +169,6 @@ is never included in source, the Roc decision input, or simulation traces.
 Release admission also requires an explicit runtime-secret binding and atomically
 reserves a protected consumer. A retirement barrier blocks new reservations and
 pending activation, including through another app alias of the same version.
-
-Journal activation does not activate the artifact in the app's own database.
-Once an app's state is initialized, `day2-serve` runs only the artifact that
-database activated. A release whose image carries a different artifact will not serve:
-the pod refuses with `active_artifact_unavailable`, naming both artifact IDs.
-Activate the new artifact first with `day2 platform maintain activate`
-([deploy/gke/README.md](../deploy/gke/README.md#maintenance-day2-platform-maintain)),
-then release it.
 
 ### Provider credentials
 

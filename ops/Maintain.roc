@@ -29,7 +29,9 @@ Maintain :: [].{
 				_ = Capability.call!("maintenance-fence", "{}", host!)?
 				_ = Capability.call!("maintenance-migration", Json.to_str({ step: "apply" }), host!)?
 				_ = workflow!("authority-inspect", host!)?
-				workflow!("authority-activate", host!)?
+				_ = workflow!("authority-activate", host!)?
+				# Only now may a release roll the app to the activated artifact.
+				Capability.call!("maintenance-mark-activated", "{}", host!)?
 			}
 			_ => return Err("maintain operation must be inspect, backup, authority-apply or activate")
 		}

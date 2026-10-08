@@ -8,7 +8,9 @@
 //! - after the fence, the old image is never restarted on the migrated volume;
 //! - the fence needs a verified local backup and a confirmation from this
 //!   session, and `migration apply` refuses to run without it;
-//! - one session per namespace; closed sets of workflows and kubectl verbs.
+//! - one session per namespace; closed sets of workflows and kubectl verbs;
+//! - only a successful fresh activation stamps the StatefulSet with the
+//!   activated artifact, the release workflow's precondition for changing it.
 //!
 //! Every step is journalled beside the backups before it runs, so a session
 //! killed outright (no `Drop`) can still be reconstructed.
@@ -41,6 +43,9 @@ const HOST: &str = "/workspace/platform/cli/day2-host";
 const DAY2: &str = "/workspace/platform/target/debug/day2";
 const OUTPUT_LIMIT: usize = 16 << 20;
 const LAYER_LIMIT: u64 = 1 << 30;
+/// day2-gke-release changes a release-managed app's artifact only to the one
+/// this annotation names, and removes it when it does.
+const ACTIVATED: &str = "day2.dev/activated-artifact";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Operation {
@@ -785,6 +790,8 @@ struct State {
     confirmed: bool,
     fenced: bool,
     migrated: bool,
+    activated: bool,
+    marked: bool,
     result: Option<Value>,
     finished: bool,
 }
@@ -1288,6 +1295,7 @@ impl Session {
                     &request_id,
                 ])?;
                 self.state.stamp = None;
+                self.state.activated = true;
                 self.state.result = Some(receipt.clone());
                 self.record("authority-activated", receipt.clone())?;
                 Ok(receipt)
@@ -1462,6 +1470,49 @@ impl Session {
         Ok(json!({"fenced": true}))
     }
 
+    /// Stamp the stopped StatefulSet with the artifact its database now
+    /// activates, so the release workflow may roll it to that artifact.
+    pub fn mark_activated(&mut self) -> Result<Value> {
+        ensure!(
+            self.operation == Operation::Activate && self.state.activated && !self.state.marked,
+            "the activation mark follows a successful activation, once"
+        );
+        let target = self.request.target.clone().context("target")?;
+        let value = format!("sha256:{}", target.artifact_id);
+        eprintln!(
+            "== marking {} activated for {value}",
+            self.request.statefulset
+        );
+        self.record(
+            "mark-activated",
+            json!({"annotation": ACTIVATED, "artifact": value}),
+        )?;
+        let statefulset = self.request.statefulset.clone();
+        self.kubectl(
+            &[
+                "annotate",
+                "--overwrite",
+                "statefulset",
+                &statefulset,
+                &format!("{ACTIVATED}={value}"),
+            ],
+            None,
+            Duration::from_secs(60),
+        )?;
+        let actual: Value = serde_json::from_str(&self.kubectl(
+            &["get", "statefulset", &statefulset, "-o", "json"],
+            None,
+            Duration::from_secs(60),
+        )?)?;
+        ensure!(
+            actual["metadata"]["annotations"][ACTIVATED] == value.as_str(),
+            "{statefulset} does not carry {ACTIVATED}={value}"
+        );
+        self.state.marked = true;
+        self.record("activation-marked", json!({"artifact": value}))?;
+        Ok(json!({"statefulset": statefulset, "activated_artifact": value}))
+    }
+
     pub fn finish(&mut self) -> Result<Value> {
         ensure!(
             self.state.pod && !self.state.finished,
@@ -1473,13 +1524,13 @@ impl Session {
                 self.state.backup.is_some(),
                 "the backup has not been copied"
             ),
-            Operation::AuthorityApply | Operation::Activate => {
-                ensure!(
-                    self.state.result.is_some(),
-                    "{} has not run",
-                    self.operation.name()
-                )
+            Operation::AuthorityApply => {
+                ensure!(self.state.result.is_some(), "authority-apply has not run")
             }
+            Operation::Activate => ensure!(
+                self.state.marked,
+                "activate has not run and marked the StatefulSet"
+            ),
         }
         let restored = self.close()?;
         self.state.finished = true;
@@ -1496,7 +1547,7 @@ impl Session {
         self.record("finish", receipt.clone())?;
         if self.operation == Operation::Activate {
             eprintln!(
-                "\nActivated. {} stays at 0 replicas: apply the day2-app plan for\nthe new image now (a fresh plan shows replicas 0 -> {}).",
+                "\nActivated. {} stays at 0 replicas. Release the activated artifact\nnext: day2-gke-release restores the replica for a release-managed app.\nOtherwise apply the day2-app plan for the new image (replicas 0 -> {}).",
                 self.request.statefulset, self.replicas
             );
         }
