@@ -7,8 +7,11 @@
       "verify",
       "infrastructure (cluster)",
       "infrastructure (app-edge)",
+      "infrastructure (security-shell-edge)",
+      "infrastructure (security-shell)",
       "infrastructure (day2-app)",
-      "infrastructure (qualification-runner)"
+      "infrastructure (qualification-runner)",
+      "gitea-integration-example"
     ]
   },
   "enforce_admins": true,
