@@ -41,18 +41,18 @@ Git host, named by host, owning organisation or group path, and repository:
 
 ```json
 "sources": {
-  "golinks-source": {
+  "reports-source": {
     "kind": "remote_git",
-    "host": "git.wonderly.info",
-    "namespace": "internal-tools",
-    "repository": "golinks",
+    "host": "git.example.com",
+    "namespace": "example-org",
+    "repository": "reports",
     "credential": "source-read"
   }
 }
 ```
 
-That is `https://git.wonderly.info/internal-tools/golinks.git`. `namespace` may
-be a nested group path such as `platform/internal-tools`. `credential` is
+That is `https://git.example.com/example-org/reports.git`. `namespace` may
+be a nested group path such as `platform/tools`. `credential` is
 optional and, when present, must be a logical name in the owning app's
 `provider_secrets`; its Secret Manager value is a read token, sent as the
 password of an HTTP Basic credential, which Gitea, GitLab and GitHub all accept.

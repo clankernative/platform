@@ -326,6 +326,10 @@ plan-on-pull-request, apply-on-main CI with no key:
   `push`/`workflow_dispatch` run of the apply workflow on `refs/heads/main` to
   the instance's apply identity. Anything else maps to no role.
 
+Set `gitea_url` and `oidc_issuer_uri` explicitly in the private instance
+inputs (for example, `https://git.example.com` and
+`https://git-oidc.example.com`). Neither endpoint has a platform default.
+
 Before the first apply, create the runner registration secret (the root reads
 it once) and enable Actions on the repository. `git-oidc` issues tokens for
 pull-request runs only for an explicitly trusted audience and workflow path, so
