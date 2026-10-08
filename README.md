@@ -68,6 +68,11 @@ domains, IAM grants, private state backends, authority policies and app images
 belong in the company's private instance repository. [The instance template](examples/instance/README.md)
 shows that boundary without containing live values.
 
+Git hosting and infrastructure CI are instance-owned choices, not platform
+prerequisites. App source repositories and the instance configuration repository
+may use different hosts. Optional [provider integration examples](deploy/integrations/README.md)
+are separate from the core runtime deployment stacks.
+
 [Linux runtime qualification](deploy/linux-sqlite/README.md) is required before
 using a native artifact on a target kernel. Cloud infrastructure tests are mocked
 contract tests; they are not evidence that a company's live deployment is qualified.
