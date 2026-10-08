@@ -745,7 +745,7 @@ mod tests {
         }))?;
         let mut new = old.clone();
         let mut registry = crate::identity::Registry::default();
-        registry.synchronize(&old.models)?;
+        registry.synchronize(&old.models, &crate::host_inputs::SecureEntropy)?;
         new.bind_identities(&registry)?;
         new.models
             .get_mut("parents")
