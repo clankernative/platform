@@ -20,13 +20,13 @@ panic = "abort"
 # Debug assertions and overflow checks are deliberately left enabled.
 [profile.dev]
 opt-level = 1
-# Debug info, not code, dominated the build tree: 70.6 GB across 238,661 object
-# files, because macOS leaves unpacked per-codegen-unit debug info behind and
-# nothing collects it. Line tables keep file and line numbers in panics and
-# backtraces at 6.8x less debug info; a debugger session that needs locals can
-# ask for them with CARGO_PROFILE_DEV_DEBUG=true.
-debug = "line-tables-only"
-split-debuginfo = "packed"
+# Debug info, not code, dominated the build tree. Unpacked, it left 70.6 GB of
+# per-codegen-unit object files; packed, every test binary link ran dsymutil and
+# left a .dSYM bundle behind (6.2 GB for one build of the test targets). Panic
+# messages keep their file and line without it, because those locations are
+# compiled in; only backtrace frames lose line numbers. Ask for them with
+# CARGO_PROFILE_DEV_DEBUG=line-tables-only, or for locals with =true.
+debug = false
 
 [profile.dev.package."*"]
 opt-level = 2
