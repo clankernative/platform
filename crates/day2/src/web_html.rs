@@ -384,6 +384,7 @@ pub(crate) struct View<'a> {
     pub runtime: &'a Runtime,
     pub appearance: &'a Appearance,
     pub secret: &'a [u8],
+    pub entropy: &'a dyn crate::host_inputs::Entropy,
     pub session: &'a Session,
     pub page: &'a str,
     pub input: &'a Value,
@@ -649,7 +650,7 @@ impl View<'_> {
             form_id: None,
             bound,
             editable: node.fields.iter().map(|field| field.name.clone()).collect(),
-            nonce: security::random()?,
+            nonce: security::random(self.entropy)?,
             issued: self.now,
             expires: (self.now + 1800).min(self.session.expires),
         };
