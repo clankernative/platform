@@ -281,7 +281,7 @@ fn resource_policy_rejects_non_ui_paths() {
             &bundle,
             &lock,
             &BTreeMap::new(),
-            Path::new("."),
+            &UiSnapshot::default(),
             &BTreeMap::new()
         )
         .is_err()

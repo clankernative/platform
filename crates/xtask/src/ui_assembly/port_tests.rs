@@ -156,7 +156,7 @@ fn process_adapter_nonzero_exit_remains_typed_provider_rejection() {
         Err(AssemblyFailure::ProviderRejected(message)) => {
             assert!(message.contains("no diagnostics"))
         }
-        _ => panic!("expected typed provider rejection"),
+        outcome => panic!("expected typed provider rejection, got {outcome:?}"),
     }
 }
 
@@ -254,7 +254,13 @@ fn application_fixture(root: &Path) -> ApplicationFixture {
         inputs,
         consumed_inputs: vec![],
     };
-    let hashes = BTreeMap::from([("app/ui/pages/index.html".into(), sha(source))]);
+    let hashes = BTreeMap::from([
+        ("app/ui/pages/index.html".into(), sha(source)),
+        (
+            format!("app/{LOCK}"),
+            sha(&serde_json::to_vec(&lock).unwrap()),
+        ),
+    ]);
     (request, lock, actual_inputs, bundle, hashes)
 }
 
@@ -301,10 +307,12 @@ fn simulated_assembly_runs_real_admission_and_staging_boundary() {
     };
     assemble_and_stage(
         &adapter,
+        &mut FilePublication {
+            captured: temp.path(),
+        },
         &request,
         &lock,
         &package,
-        temp.path(),
         &mut hashes,
     )
     .unwrap();
@@ -347,10 +355,12 @@ fn simulated_assembly_rejects_tampered_inputs_and_resources_without_partial_stag
         assert!(
             assemble_and_stage(
                 &adapter,
+                &mut FilePublication {
+                    captured: temp.path()
+                },
                 &request,
                 &lock,
                 &package,
-                temp.path(),
                 &mut hashes
             )
             .is_err()
@@ -380,7 +390,7 @@ fn process_adapter_timeout_is_a_typed_failure() {
     let mut request = request();
     request.ui = temp.path().display().to_string();
     let error = adapter.assemble(&request).unwrap_err();
-    assert!(matches!(error, AssemblyFailure::Timeout));
+    assert!(matches!(error, AssemblyFailure::Timeout), "got {error:?}");
 }
 
 #[cfg(unix)]

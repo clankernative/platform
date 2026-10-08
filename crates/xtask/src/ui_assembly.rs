@@ -16,7 +16,9 @@ use std::{
 };
 
 mod port;
+mod publication;
 use port::{AssemblyFailure, ProcessAssembler, UiAssembler};
+use publication::{FilePublication, PublicationPlan, UiPublication, UiSnapshot};
 
 const MAX_FILE: usize = 1_048_576;
 const MAX_FILES: usize = 512;
@@ -472,21 +474,36 @@ pub fn expand_with_pin(
         executable: &private_exe,
         timeout: Duration::from_secs(60),
     };
-    assemble_and_stage(&adapter, &request, &lock, &actual_inputs, captured, hashes)?;
+    let mut publication = FilePublication { captured };
+    assemble_and_stage(
+        &adapter,
+        &mut publication,
+        &request,
+        &lock,
+        &actual_inputs,
+        hashes,
+    )?;
     hashes.insert("ui-provider/executable".into(), exe_digest);
     Ok(())
 }
 
 /// Application boundary shared by production and deterministic port simulations.
-/// Simulation replaces the external provider only; admission/staging is real.
+/// Capture and publication are replaceable effects; admission and planning are pure.
 fn assemble_and_stage(
     adapter: &dyn UiAssembler,
+    publication: &mut dyn UiPublication,
     request: &AssemblyRequest,
     lock: &Lock,
     actual_inputs: &BTreeMap<String, Vec<u8>>,
-    captured: &Path,
     hashes: &mut BTreeMap<String, String>,
 ) -> Result<()> {
+    let captured = publication.capture()?;
+    captured.validate()?;
+    let captured_lock: Lock = serde_json::from_slice(captured.input("ui.lock.json")?)?;
+    ensure!(
+        serde_json::to_value(&captured_lock)? == serde_json::to_value(lock)?,
+        "captured UI lock changed"
+    );
     let env = adapter.assemble(request)?;
     ensure!(
         env.schema_version == 1
@@ -495,8 +512,11 @@ fn assemble_and_stage(
             && env.diagnostics.is_empty(),
         "invalid UI assembly outcome"
     );
-    validate_bundle(&env.data, lock, actual_inputs, captured, hashes)?;
-    apply_bundle(&env.data, actual_inputs, captured)?;
+    let current = publication.capture()?;
+    ensure!(current == captured, "UI source changed after assembly");
+    validate_bundle(&env.data, lock, actual_inputs, &current, hashes)?;
+    let plan = plan_bundle(&env.data, actual_inputs, &current)?;
+    publication.publish(&current, &plan)?;
     hashes.insert(PACKAGE_KEY.into(), lock.package.digest.clone());
     for input in &env.data.inputs {
         if input.path.starts_with("ui/") {
@@ -526,12 +546,9 @@ fn copy_tree_checked(source: &Path, target: &Path) -> Result<()> {
     let mut count = 0usize;
     let mut total = 0usize;
     while let Some((src, dst)) = stack.pop() {
-        for e in fs::read_dir(src)? {
-            let e = e?;
+        for e in publication::ordered_entries(&src, &mut count)? {
             let ty = e.file_type()?;
             ensure!(!ty.is_symlink(), "captured UI symlink forbidden");
-            count += 1;
-            ensure!(count <= MAX_FILES, "captured UI file budget exceeded");
             let out = dst.join(e.file_name());
             if ty.is_dir() {
                 fs::create_dir(&out)?;
@@ -653,9 +670,36 @@ fn validate_bundle(
     b: &Bundle,
     lock: &Lock,
     package: &BTreeMap<String, Vec<u8>>,
-    captured: &Path,
+    captured: &UiSnapshot,
     captured_hashes: &BTreeMap<String, String>,
 ) -> Result<()> {
+    captured.validate()?;
+    ensure!(
+        manifest_digest(&lock.package.inputs)? == lock.package.digest
+            && package.len() == lock.package.inputs.len(),
+        "locked input manifest mismatch"
+    );
+    for input in &lock.package.inputs {
+        let bytes = package
+            .get(&input.path)
+            .context("missing locked input snapshot")?;
+        ensure!(
+            bytes.len() == input.bytes && sha(bytes) == input.digest,
+            "locked input changed"
+        );
+    }
+    for (key, digest) in captured_hashes {
+        if let Some(rel) = key.strip_prefix("app/ui/") {
+            let bytes = captured
+                .files
+                .get(rel)
+                .context("incomplete captured UI snapshot")?;
+            ensure!(
+                sha(bytes) == *digest,
+                "captured source hash differs from snapshot manifest: {key}"
+            );
+        }
+    }
     ensure!(
         b.schema_version == 1
             && b.runtime_abi == 2
@@ -681,7 +725,7 @@ fn validate_bundle(
                 .cloned()
                 .context("input is not a locked package source")?
         } else if let Some(p) = i.path.strip_prefix("ui/") {
-            checked(&captured.join("ui"), p)?
+            captured.input(p)?.to_vec()
         } else {
             bail!("unsupported bundle input source")
         };
@@ -825,170 +869,97 @@ fn validate_bundle(
     }
     // Every template and claimed adapter UI input must match the original host
     // snapshot. Unused app resources are left to normal resource admission.
-    let mut stack = vec![(captured.join("ui"), String::new())];
-    let mut scanned = 0usize;
-    while let Some((dir, prefix)) = stack.pop() {
-        for e in fs::read_dir(&dir)? {
-            let e = e?;
-            let ty = e.file_type()?;
-            ensure!(!ty.is_symlink(), "captured UI symlink forbidden");
-            scanned += 1;
-            ensure!(scanned <= MAX_FILES, "captured UI source count exceeded");
-            let name = e
-                .file_name()
-                .into_string()
-                .map_err(|_| anyhow!("non-UTF8 UI source path"))?;
-            let rel = if prefix.is_empty() {
-                name
-            } else {
-                format!("{prefix}/{name}")
-            };
-            if ty.is_dir() {
-                stack.push((e.path(), rel));
-                continue;
-            }
-            ensure!(ty.is_file(), "special captured UI source forbidden");
-            if rel == "ui.lock.json" {
-                continue;
-            }
-            if (rel.starts_with("pages/") || rel.starts_with("components/"))
-                && rel.ends_with(".html")
-            {
-                ensure!(
-                    template_names.contains(&rel),
-                    "CLI omitted captured template {rel}"
-                );
-            }
-            let key = format!("ui/{rel}");
-            let Some(input) = inputmap.get(&key) else {
-                // Unused app JS/images remain captured host inputs, not adapter
-                // inputs. The CLI cannot overwrite them through this omission.
-                continue;
-            };
-            let source = checked(&captured.join("ui"), &rel)?;
+    for (rel, source) in &captured.files {
+        let original = captured_hashes.get(&format!("app/ui/{rel}"));
+        ensure!(
+            original.is_some_and(|digest| *digest == sha(source)),
+            "captured source absent/different in snapshot manifest: ui/{rel}"
+        );
+        if rel == "ui.lock.json" {
+            continue;
+        }
+        if (rel.starts_with("pages/") || rel.starts_with("components/")) && rel.ends_with(".html") {
             ensure!(
-                source.len() == input.bytes && sha(&source) == input.digest,
-                "UI source changed after capture: {key}"
-            );
-            let original = captured_hashes.get(&format!("app/{key}"));
-            ensure!(
-                original.is_some_and(|d| d == &input.digest),
-                "captured source hash differs from snapshot manifest: {key}"
+                template_names.contains(rel),
+                "CLI omitted captured template {rel}"
             );
         }
+        let key = format!("ui/{rel}");
+        let Some(input) = inputmap.get(&key) else {
+            continue;
+        };
+        ensure!(
+            source.len() == input.bytes && sha(source) == input.digest,
+            "UI source changed after capture: {key}"
+        );
+        ensure!(
+            captured_hashes
+                .get(&format!("app/{key}"))
+                .is_some_and(|d| d == &input.digest),
+            "captured source hash differs from snapshot manifest: {key}"
+        );
     }
     Ok(())
 }
-fn check_output_path(root: &Path, relative: &str) -> Result<()> {
-    ensure!(safe_rel(relative), "unsafe output path: {relative}");
-    let parts = relative.split('/').collect::<Vec<_>>();
-    let mut path = root.to_path_buf();
-    for (index, part) in parts.iter().enumerate() {
-        path.push(part);
-        match fs::symlink_metadata(&path) {
-            Ok(meta) => {
-                ensure!(
-                    !meta.file_type().is_symlink(),
-                    "output ancestor symlink forbidden: {}",
-                    path.display()
-                );
-                if index + 1 < parts.len() {
-                    ensure!(
-                        meta.is_dir(),
-                        "output parent is not a directory: {}",
-                        path.display()
-                    );
-                } else {
-                    ensure!(
-                        meta.is_file(),
-                        "output target is not a regular file: {}",
-                        path.display()
-                    );
-                }
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
-            Err(error) => return Err(error.into()),
-        }
-    }
-    Ok(())
-}
-fn apply_bundle(b: &Bundle, package: &BTreeMap<String, Vec<u8>>, captured: &Path) -> Result<()> {
-    let ui = captured.join("ui");
+fn plan_bundle(
+    b: &Bundle,
+    package: &BTreeMap<String, Vec<u8>>,
+    captured: &UiSnapshot,
+) -> Result<PublicationPlan> {
     let mut writes = BTreeMap::<String, Vec<u8>>::new();
     for (p, html) in &b.templates {
-        writes.insert(format!("ui/{p}"), html.as_bytes().to_vec());
+        writes.insert(p.clone(), html.as_bytes().to_vec());
     }
     for r in &b.resources {
         let bytes = if let Some(content) = &r.content {
             content.as_bytes().to_vec()
         } else {
             package
-                .get(r.source.as_deref().unwrap())
+                .get(r.source.as_deref().context("missing resource source")?)
                 .context("missing verified resource snapshot")?
                 .clone()
         };
-        writes.insert(r.path.clone(), bytes);
+        let rel = r.path.strip_prefix("ui/").context("output outside ui")?;
+        writes.insert(rel.into(), bytes);
     }
-    // Validate every target/collision before the first mutation.
-    for (path, bytes) in &writes {
-        let rel = path.strip_prefix("ui/").context("output outside ui")?;
-        check_output_path(&ui, rel)?;
-        if fs::symlink_metadata(ui.join(rel)).is_ok() {
-            let existing = checked(&ui, rel)?;
-            if b.templates.contains_key(rel) {
+    for (rel, bytes) in &writes {
+        captured.check_output(rel)?;
+        if captured.files.contains_key(rel) {
+            // Existing overwrite inputs retain the original MAX_FILE bound.
+            let existing = captured.input(rel)?;
+            if b.templates.contains_key(rel) || rel == "app.css" {
                 let input_path = format!("ui/{rel}");
                 let input = b
                     .inputs
                     .iter()
                     .find(|i| i.path == input_path)
-                    .context("template overwrite is not a captured input")?;
+                    .context("overwrite is not a captured input")?;
                 ensure!(
-                    sha(&existing) == input.digest,
-                    "captured template changed before overwrite: {rel}"
-                );
-            } else if path == "ui/app.css" {
-                let input = b
-                    .inputs
-                    .iter()
-                    .find(|i| i.path == "ui/app.css")
-                    .context("app.css overwrite is not a captured input")?;
-                ensure!(
-                    sha(&existing) == input.digest,
-                    "captured app.css changed before overwrite"
+                    sha(existing) == input.digest,
+                    "captured input changed before overwrite: {rel}"
                 );
             } else {
-                ensure!(&existing == bytes, "managed resource collision: {path}");
+                ensure!(existing == bytes, "managed resource collision: ui/{rel}");
             }
         }
     }
+    let mut removes = BTreeSet::new();
     for p in &b.consumed_inputs {
-        let rel = p.strip_prefix("ui/").unwrap();
-        let source = checked(&ui, rel)?;
-        let input = b.inputs.iter().find(|i| i.path == *p).unwrap();
-        ensure!(sha(&source) == input.digest, "consumed input changed: {p}");
+        let rel = p.strip_prefix("ui/").context("consumed input outside ui")?;
+        let source = captured.input(rel)?;
+        let input = b
+            .inputs
+            .iter()
+            .find(|i| i.path == *p)
+            .context("missing consumed input")?;
+        ensure!(sha(source) == input.digest, "consumed input changed: {p}");
         ensure!(
-            !writes.contains_key(p),
+            !writes.contains_key(rel),
             "consumed input collides with output: {p}"
         );
+        removes.insert(rel.into());
     }
-    for (path, bytes) in writes {
-        let rel = path.strip_prefix("ui/").unwrap();
-        let target = ui.join(rel);
-        if target.exists() {
-            let existing = checked(&ui, rel)?;
-            if existing == bytes {
-                continue;
-            }
-        }
-        let parent = target.parent().context("invalid output parent")?;
-        fs::create_dir_all(parent)?;
-        fs::write(target, bytes)?;
-    }
-    for p in &b.consumed_inputs {
-        let rel = p.strip_prefix("ui/").unwrap();
-        fs::remove_file(ui.join(rel))?;
-    }
-    Ok(())
+    Ok(PublicationPlan { writes, removes })
 }
 
 #[cfg(test)]
@@ -1006,3 +977,11 @@ mod port_tests;
 #[cfg(test)]
 #[path = "ui_assembly/external_tests.rs"]
 mod external_tests;
+
+#[cfg(test)]
+#[path = "ui_assembly/simulation_tests.rs"]
+mod simulation_tests;
+
+#[cfg(test)]
+#[path = "ui_assembly/publication_tests.rs"]
+mod publication_tests;
