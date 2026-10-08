@@ -122,7 +122,11 @@ impl Operations {
                 self.creation
                     .as_mut()
                     .context("app creation required")?
-                    .identity(&parameters.table, &parameters.roc_type)?;
+                    .identity(
+                        &parameters.table,
+                        &parameters.roc_type,
+                        &day2::host_inputs::SecureEntropy,
+                    )?;
                 Ok(json!({}))
             }
             "app-create-publish" => {
