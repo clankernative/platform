@@ -2,9 +2,9 @@
 
 These public OpenTofu roots create a dedicated project foundation and Standard
 GKE cluster, then one IAP-protected edge and single-replica SQLite workload per
-app. They are the whole control plane of an instance: nothing is shared with
-another platform's infrastructure code. All company inputs
-come from a separate private instance repository; start with the
+app. They define the instance's runtime infrastructure, not its Git hosting,
+CI workflows or runner fleet. All company inputs come from a separate private
+instance repository; start with the
 [synthetic template](../../examples/instance/README.md).
 
 | Root | Ownership |
@@ -17,7 +17,6 @@ come from a separate private instance repository; start with the
 | [security-shell](stacks/security-shell/main.tf) | Separate stateless shell Deployment and read-only instance ConfigMap, consuming the resolved installation edge and exact selected secret-container contract |
 | [day2-app](stacks/day2-app/main.tf) | Instance ConfigMap, one-replica StatefulSet and the hourly off-cluster backup CronJob |
 | [qualification-runner](stacks/qualification-runner/main.tf) | Optional x86_64 native Docker VM, off by default, private IP and IAP SSH |
-| [gitea-instance-ci](stacks/gitea-instance-ci/main.tf) | Optional plan-on-PR / apply-on-main CI for an instance repository on Gitea |
 
 Installed app-call workloads can hand software deployment to the native
 `day2-gke-release` command by enabling `release_managed` in the day2-app root.
@@ -311,31 +310,25 @@ from the selected canary account and observe the owning app's acknowledgement.
 No live shell deployment or Google qualification has been performed by these
 source and mocked-plan tests.
 
-## Instance CI on Gitea
+## Instance-owned source and CI
 
-`stacks/gitea-instance-ci` gives an instance configuration repository on Gitea
-plan-on-pull-request, apply-on-main CI with no key:
+An instance chooses where its configuration and app repositories live and how
+its infrastructure is provisioned. GitHub Actions, GitLab CI, Gitea Actions and
+manual operator provisioning are independent choices; none is required by these
+runtime roots. App repositories may use different Git hosts from the instance
+configuration repository. The control plane's `remote_git` source binding reads
+exact commits over HTTPS from the selected host; see
+[source ownership](../../docs/CONTROL-PLANE.md#where-an-apps-source-lives).
 
-- a dedicated runner VM (no external IP; SSH through IAP), registered to that
-  one repository. Its controller is act_runner's Docker-in-Docker build, run
-  privileged as in the fleet runner profile; jobs run in its inner daemon in a
-  pinned slim image, with no Docker socket, privileges or host volumes;
-- a workload identity provider for workflow tokens from `git-oidc`, which
-  trusts only the repository's native Gitea ids and maps a pull-request run of
-  the plan workflow to a read-only plan identity it creates, and a
-  `push`/`workflow_dispatch` run of the apply workflow on `refs/heads/main` to
-  the instance's apply identity. Anything else maps to no role.
+Keep workflow triggers, runners, workload identity federation, approvals,
+backend inputs and credentials in the private instance repository. CI executes
+the platform's pinned operations and verification recipes, not a second app SDK
+or app-selected build callbacks. Source fetching does not imply equivalent
+provider-specific webhook, check-publication or deployment-CI support.
 
-Set `gitea_url` and `oidc_issuer_uri` explicitly in the private instance
-inputs (for example, `https://git.example.com` and
-`https://git-oidc.example.com`). Neither endpoint has a platform default.
-
-Before the first apply, create the runner registration secret (the root reads
-it once) and enable Actions on the repository. `git-oidc` issues tokens for
-pull-request runs only for an explicitly trusted audience and workflow path, so
-the provider's canonical audience and the plan workflow must also be listed in
-its `trustedPullRequestPolicies`; main-branch runs need no entry. Workflows use
-the auth action's default audience, which is the provider's canonical URL.
+Reusable [provider integration examples](../integrations/README.md) are separate
+from these runtime roots and their apply order. Select one explicitly only when
+it matches the instance's provider and security requirements.
 
 ## Updates, rollback and data recovery
 

@@ -194,7 +194,7 @@ variable "runner_registration_secret_id" {
 }
 
 variable "runner_controller_image" {
-  description = "act_runner image, pinned by digest (the fleet runner profile's controller)."
+  description = "act_runner Docker-in-Docker controller image, pinned by digest. The controller runs privileged; jobs do not receive its socket."
   type        = string
   default     = "docker.io/gitea/act_runner@sha256:578925b4bdec5f60d93b5ba766cf02f2f9f32b1c8a4ec665ddf4d53d45f683c7"
 
@@ -205,7 +205,7 @@ variable "runner_controller_image" {
 }
 
 variable "job_image" {
-  description = "Image every job runs in, pinned by digest. The slim runner image (Node for JavaScript actions, about 200 MB): the fleet's full image is tens of gigabytes of language toolchains OpenTofu jobs never use. Jobs install their few tools themselves."
+  description = "Image every infrastructure job runs in, pinned by digest. The slim runner image includes Node for actions; instance-owned workflows install their required tools."
   type        = string
   default     = "docker.io/gitea/runner-images@sha256:7c285821aab503cffc21024bbb216822a86326c1b22ea53e341492e2aa6df245"
 
