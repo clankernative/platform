@@ -1,5 +1,20 @@
 use super::*;
 
+fn capture_fixture(captured: &Path) -> UiSnapshot {
+    FilePublication { captured }.capture().unwrap()
+}
+
+fn publish_fixture(
+    bundle: &Bundle,
+    package: &BTreeMap<String, Vec<u8>>,
+    captured: &Path,
+) -> Result<()> {
+    let mut publication = FilePublication { captured };
+    let snapshot = publication.capture()?;
+    let plan = plan_bundle(bundle, package, &snapshot)?;
+    publication.publish(&snapshot, &plan)
+}
+
 fn fixture_bundle(
     captured: &Path,
 ) -> (
@@ -76,9 +91,10 @@ fn fixture_bundle(
 fn bundle_accepts_runtime_abi_two_and_rejects_abi_one_or_unknown_resource_kind() {
     let temp = tempfile::tempdir().unwrap();
     let (mut bundle, lock, package, hashes) = fixture_bundle(temp.path());
-    validate_bundle(&bundle, &lock, &package, temp.path(), &hashes).unwrap();
+    let ui = capture_fixture(temp.path());
+    validate_bundle(&bundle, &lock, &package, &ui, &hashes).unwrap();
     bundle.runtime_abi = 1;
-    let error = validate_bundle(&bundle, &lock, &package, temp.path(), &hashes).unwrap_err();
+    let error = validate_bundle(&bundle, &lock, &package, &ui, &hashes).unwrap_err();
     assert!(error.to_string().contains("runtime ABI"));
     bundle.runtime_abi = 2;
     bundle.resources.push(Resource {
@@ -89,10 +105,10 @@ fn bundle_accepts_runtime_abi_two_and_rejects_abi_one_or_unknown_resource_kind()
         bytes: 10,
         kind: "module".into(),
     });
-    validate_bundle(&bundle, &lock, &package, temp.path(), &hashes).unwrap();
+    validate_bundle(&bundle, &lock, &package, &ui, &hashes).unwrap();
     bundle.resources[0].kind = "executable".into();
     assert!(
-        validate_bundle(&bundle, &lock, &package, temp.path(), &hashes)
+        validate_bundle(&bundle, &lock, &package, &ui, &hashes)
             .unwrap_err()
             .to_string()
             .contains("unknown resource kind")
@@ -103,20 +119,23 @@ fn bundle_accepts_runtime_abi_two_and_rejects_abi_one_or_unknown_resource_kind()
 fn input_closure_requires_every_locked_package_input_and_captured_template() {
     let temp = tempfile::tempdir().unwrap();
     let (mut bundle, lock, package, hashes) = fixture_bundle(temp.path());
-    validate_bundle(&bundle, &lock, &package, temp.path(), &hashes).unwrap();
+    let ui = capture_fixture(temp.path());
+    validate_bundle(&bundle, &lock, &package, &ui, &hashes).unwrap();
     bundle
         .inputs
         .retain(|input| input.path != "package/foo.d.ts");
-    assert!(validate_bundle(&bundle, &lock, &package, temp.path(), &hashes).is_err());
+    assert!(validate_bundle(&bundle, &lock, &package, &ui, &hashes).is_err());
     let (mut bundle, lock, package, hashes) = fixture_bundle(temp.path());
+    let ui = capture_fixture(temp.path());
     bundle.templates.clear();
-    assert!(validate_bundle(&bundle, &lock, &package, temp.path(), &hashes).is_err());
+    assert!(validate_bundle(&bundle, &lock, &package, &ui, &hashes).is_err());
 }
 
 #[test]
 fn ordinary_ui_package_module_uses_resource_digest_collision_and_staging_checks() {
     let temp = tempfile::tempdir().unwrap();
     let (mut bundle, lock, package, hashes) = fixture_bundle(temp.path());
+    let ui = capture_fixture(temp.path());
     let module = b"import './feature.js';\\n";
     bundle.resources.push(Resource {
         path: "ui/ui-package.js".into(),
@@ -126,30 +145,31 @@ fn ordinary_ui_package_module_uses_resource_digest_collision_and_staging_checks(
         bytes: module.len(),
         kind: "module".into(),
     });
-    validate_bundle(&bundle, &lock, &package, temp.path(), &hashes).unwrap();
-    apply_bundle(&bundle, &package, temp.path()).unwrap();
+    validate_bundle(&bundle, &lock, &package, &ui, &hashes).unwrap();
+    publish_fixture(&bundle, &package, temp.path()).unwrap();
     assert_eq!(
         fs::read(temp.path().join("ui/ui-package.js")).unwrap(),
         module
     );
 
     bundle.resources[0].digest = sha(b"wrong module bytes");
-    assert!(validate_bundle(&bundle, &lock, &package, temp.path(), &hashes).is_err());
+    assert!(validate_bundle(&bundle, &lock, &package, &ui, &hashes).is_err());
     bundle.resources[0].digest = sha(module);
     bundle.resources[0].path = "ui/pages/index.html".into();
-    assert!(validate_bundle(&bundle, &lock, &package, temp.path(), &hashes).is_err());
+    assert!(validate_bundle(&bundle, &lock, &package, &ui, &hashes).is_err());
 }
 
 #[test]
 fn unused_app_resources_may_be_omitted_but_claimed_source_hash_must_match_snapshot() {
     let temp = tempfile::tempdir().unwrap();
     let (bundle, lock, package, mut hashes) = fixture_bundle(temp.path());
-    validate_bundle(&bundle, &lock, &package, temp.path(), &hashes).unwrap();
+    let ui = capture_fixture(temp.path());
+    validate_bundle(&bundle, &lock, &package, &ui, &hashes).unwrap();
     hashes.insert(
         "app/ui/pages/index.html".into(),
         sha(b"different captured hash"),
     );
-    assert!(validate_bundle(&bundle, &lock, &package, temp.path(), &hashes).is_err());
+    assert!(validate_bundle(&bundle, &lock, &package, &ui, &hashes).is_err());
     hashes.insert(
         "app/ui/pages/index.html".into(),
         sha(b"<main>source</main>"),
@@ -159,7 +179,8 @@ fn unused_app_resources_may_be_omitted_but_claimed_source_hash_must_match_snapsh
         b"changed after capture",
     )
     .unwrap();
-    assert!(validate_bundle(&bundle, &lock, &package, temp.path(), &hashes).is_err());
+    let ui = capture_fixture(temp.path());
+    assert!(validate_bundle(&bundle, &lock, &package, &ui, &hashes).is_err());
 }
 
 #[test]
@@ -176,7 +197,7 @@ fn staging_uses_verified_resource_bytes_and_collision_causes_no_partial_write() 
         digest: sha(font),
         kind: "font".into(),
     });
-    apply_bundle(&bundle, &package, temp.path()).unwrap();
+    publish_fixture(&bundle, &package, temp.path()).unwrap();
     assert_eq!(
         fs::read(temp.path().join("ui/fonts/test.woff2")).unwrap(),
         font
@@ -193,7 +214,7 @@ fn staging_uses_verified_resource_bytes_and_collision_causes_no_partial_write() 
     });
     let before_page = fs::read(temp.path().join("ui/pages/index.html")).unwrap();
     let before_js = fs::read(temp.path().join("ui/app.js")).unwrap();
-    assert!(apply_bundle(&bundle, &package, temp.path()).is_err());
+    assert!(publish_fixture(&bundle, &package, temp.path()).is_err());
     assert_eq!(
         fs::read(temp.path().join("ui/pages/index.html")).unwrap(),
         before_page
@@ -205,6 +226,7 @@ fn staging_uses_verified_resource_bytes_and_collision_causes_no_partial_write() 
 fn provider_cannot_emit_or_consume_the_captured_ui_lock() {
     let temp = tempfile::tempdir().unwrap();
     let (mut bundle, lock, package, hashes) = fixture_bundle(temp.path());
+    let ui = capture_fixture(temp.path());
     bundle.resources.push(Resource {
         path: "ui/ui.lock.json".into(),
         source: None,
@@ -213,17 +235,19 @@ fn provider_cannot_emit_or_consume_the_captured_ui_lock() {
         bytes: 11,
         kind: "metadata".into(),
     });
-    assert!(validate_bundle(&bundle, &lock, &package, temp.path(), &hashes).is_err());
+    assert!(validate_bundle(&bundle, &lock, &package, &ui, &hashes).is_err());
 
     let (mut bundle, lock, package, hashes) = fixture_bundle(temp.path());
+    let ui = capture_fixture(temp.path());
     bundle.consumed_inputs.push("ui/ui.lock.json".into());
-    assert!(validate_bundle(&bundle, &lock, &package, temp.path(), &hashes).is_err());
+    assert!(validate_bundle(&bundle, &lock, &package, &ui, &hashes).is_err());
 }
 
 #[test]
 fn output_case_fold_and_prefix_collisions_are_rejected() {
     let temp = tempfile::tempdir().unwrap();
     let (mut bundle, lock, package, hashes) = fixture_bundle(temp.path());
+    let ui = capture_fixture(temp.path());
     bundle.resources.push(Resource {
         path: "ui/pages/INDEX.html".into(),
         source: None,
@@ -232,9 +256,10 @@ fn output_case_fold_and_prefix_collisions_are_rejected() {
         bytes: 5,
         kind: "metadata".into(),
     });
-    assert!(validate_bundle(&bundle, &lock, &package, temp.path(), &hashes).is_err());
+    assert!(validate_bundle(&bundle, &lock, &package, &ui, &hashes).is_err());
 
     let (mut bundle, lock, package, hashes) = fixture_bundle(temp.path());
+    let ui = capture_fixture(temp.path());
     bundle.resources.push(Resource {
         path: "ui/pages/index.html/child.css".into(),
         source: None,
@@ -243,7 +268,7 @@ fn output_case_fold_and_prefix_collisions_are_rejected() {
         bytes: 5,
         kind: "stylesheet".into(),
     });
-    assert!(validate_bundle(&bundle, &lock, &package, temp.path(), &hashes).is_err());
+    assert!(validate_bundle(&bundle, &lock, &package, &ui, &hashes).is_err());
 }
 
 #[test]

@@ -18,12 +18,15 @@ fn external_provider_matches_expected_outputs() {
     )
     .unwrap();
     assert!(expected.ok && expected.command == "assemble");
-    let mut hashes = expected
-        .data
-        .inputs
+    let snapshot = FilePublication {
+        captured: captured.path(),
+    }
+    .capture()
+    .unwrap();
+    let mut hashes = snapshot
+        .files
         .iter()
-        .filter(|input| input.path.starts_with("ui/"))
-        .map(|input| (format!("app/{}", input.path), input.digest.clone()))
+        .map(|(path, bytes)| (format!("app/ui/{path}"), sha(bytes)))
         .collect::<BTreeMap<_, _>>();
     expand_with_pin(&fixture.join("app"), captured.path(), &mut hashes, &pin).unwrap();
     for (path, html) in &expected.data.templates {
