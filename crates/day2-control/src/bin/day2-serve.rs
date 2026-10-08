@@ -65,7 +65,7 @@ fn run() -> Result<()> {
 
 fn main() {
     if let Err(error) = run() {
-        eprintln!("day2-serve refused or stopped: {error}");
+        eprintln!("day2-serve refused or stopped: {error:#}");
         std::process::exit(1);
     }
 }

@@ -136,6 +136,14 @@ Release admission also requires an explicit runtime-secret binding and atomicall
 reserves a protected consumer. A retirement barrier blocks new reservations and
 pending activation, including through another app alias of the same version.
 
+Journal activation does not activate the artifact in the app's own database.
+Once an app's state is initialized, `day2-serve` runs only the artifact that
+database activated. A release whose image carries a different artifact will not serve:
+the pod refuses with `active_artifact_unavailable`, naming both artifact IDs.
+Activate the new artifact first with `day2 platform maintain activate`
+([deploy/gke/README.md](../deploy/gke/README.md#maintenance-day2-platform-maintain)),
+then release it.
+
 ### Provider credentials
 
 Registration (`day2-provision-credentials` in the `credential-registration`
