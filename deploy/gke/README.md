@@ -366,7 +366,7 @@ does every native action with `kubectl` and the registry API. Operations:
 | `inspect` | Reads the active authority stamp and policy | restored |
 | `backup` | Verified backup, copied to `~/day2-backups/<namespace>/<stamp>/` | restored |
 | `authority-apply` | Backup, then applies the policy in the current ConfigMap, after a typed `apply` | restored |
-| `activate` | Backup, migration plan, typed `activate`, migration, fresh activation of the target artifact | stopped: apply day2-app for the new image next |
+| `activate` | Backup, migration plan, typed `activate`, migration, fresh activation of the target artifact, then the `day2.dev/activated-artifact` stamp | stopped: release the target artifact next (release-managed), otherwise apply day2-app for the new image |
 
 The request file names the target exactly:
 
@@ -384,10 +384,11 @@ The request file names the target exactly:
 ```
 
 An initialized app serves only the artifact its database activated. An image
-whose artifact differs, whether applied through day2-app or released with
-`day2-gke-release` (which does not activate), will not serve until `activate`
-has run for that artifact: `day2-serve` refuses with
-`active_artifact_unavailable`, naming the activated and the requested artifact.
+whose artifact differs will not serve until `activate` has run for that
+artifact: `day2-serve` refuses with `active_artifact_unavailable`, naming the
+activated and the requested artifact. `day2-gke-release` does not activate; it
+refuses such a change with `release_artifact_requires_activation`, before any
+write, until `activate` has stamped the StatefulSet for that artifact (below).
 
 `request_id` is for `authority-apply` and `activate`; `target` (the desired
 instance, e.g. rendered from the day2-app plan) is for `activate` only;
@@ -410,6 +411,13 @@ What the session guarantees, whatever the recipe does:
 - The local backup copy must match a SHA-256 manifest computed in the pod; a
   mismatching copy is renamed `<stamp>.INCOMPLETE` and refused.
 - One session per namespace; the running image must equal `app_image`.
+- Only a successful fresh activation stamps the StatefulSet with
+  `day2.dev/activated-artifact: sha256:<target artifact_id>`. For a
+  release-managed app, `day2-gke-release` changes the artifact only to the one
+  stamped, restores the replica and removes the stamp in the same patch. A
+  day2-app apply is not the next step: it keeps the stamp but also the released
+  (old) image, and would restart it on the migrated state (see
+  [the release workflow](../../docs/RELEASE-WORKFLOW.md#artifact-changes)).
 - Every step is journalled to `~/day2-backups/<namespace>/<stamp>.session.json`
   before it runs, for recovery after the operator's machine dies mid-session.
 

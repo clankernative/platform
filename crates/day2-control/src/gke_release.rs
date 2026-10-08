@@ -7,8 +7,8 @@ use crate::{
     provider_evidence::{DeploymentIncarnation, ReadBarrier, RevisionToken, StateEvidence},
     release::{ReleaseApproval, SecretObservation},
     release_execution::{
-        Capabilities, ReleaseEffectResult, ReleaseExecutionPlan, ReleaseLease, ReleaseObservation,
-        ReleaseObserved, ReleaseOperation,
+        Capabilities, ProviderRefusal, ReleaseEffectResult, ReleaseExecutionPlan, ReleaseLease,
+        ReleaseObservation, ReleaseObserved, ReleaseOperation,
     },
     secrets::{AccessTokenProvider, SecretVersion},
     serving_publication::Publication,
@@ -35,6 +35,11 @@ const RELEASE: &str = "day2.dev/release-id";
 const REVISION: &str = "day2.dev/selection-revision";
 const SNAPSHOT: &str = "day2.dev/selection-digest";
 const CREDENTIALS_SHA256: &str = "day2.dev/credentials-sha256";
+const ARTIFACT: &str = "day2.dev/artifact";
+/// Stamped on the StatefulSet by `day2 platform maintain activate` once the
+/// target artifact is activated in the app's database. Only that artifact may
+/// replace the live one; the release that does so consumes the stamp.
+const ACTIVATED: &str = "day2.dev/activated-artifact";
 const CSI_DRIVER: &str = "secrets-store-gke.csi.k8s.io";
 const OPERATOR_INSTANCE: &str = "operator-instance.json";
 const PROVISIONING: &str = "provisioning.json";
@@ -549,8 +554,11 @@ impl GkeReleaseProvider {
                 && controller["metadata"]["deletionTimestamp"].is_null(),
             "gke_release_controller_changed"
         );
+        // Zero only after a maintenance activation; see `admit`.
         ensure!(
-            controller["spec"]["replicas"] == 1
+            controller["spec"]["replicas"]
+                .as_u64()
+                .is_some_and(|replicas| replicas <= 1)
                 && controller["spec"]["template"]["spec"]["serviceAccountName"] == "runtime"
                 && controller["metadata"]["annotations"]["day2.dev/release-managed"] == "true",
             "gke_release_topology_changed"
@@ -580,6 +588,36 @@ impl GkeReleaseProvider {
             "gke_release_resource_version_missing"
         );
         Ok(controller)
+    }
+
+    /// Before any write: once initialized, the app's database (not the
+    /// instance) selects the served artifact, so a release may change the
+    /// artifact only onto state activated for it. Returns whether the release
+    /// consumes the activation stamp and restores the profile's one replica.
+    fn admit(&self, controller: &Value, lease: &ReleaseLease) -> Result<bool> {
+        let candidate = lease.approval.artifact.as_str();
+        let live = controller["spec"]["template"]["metadata"]["annotations"][ARTIFACT]
+            .as_str()
+            .context("gke_release_artifact_annotation_missing")?;
+        if live == candidate {
+            ensure!(
+                controller["spec"]["replicas"] == 1,
+                "gke_release_topology_changed"
+            );
+            return Ok(false);
+        }
+        let activated = controller["metadata"]["annotations"][ACTIVATED].as_str();
+        if activated != Some(candidate) {
+            return Err(ProviderRefusal(format!(
+                "release_artifact_requires_activation: {} serves {live}{}; run `day2 platform maintain activate` for {candidate} first",
+                self.deployment.serving.target.app.as_str(),
+                activated.map_or_else(String::new, |other| format!(
+                    " and is activated for {other}"
+                )),
+            ))
+            .into());
+        }
+        Ok(true)
     }
 
     fn secret(&self, lease: &ReleaseLease) -> Result<SecretObservation> {
@@ -877,7 +915,7 @@ impl GkeReleaseProvider {
         let annotations = template["metadata"]["annotations"]
             .as_object_mut()
             .context("gke_release_annotations_missing")?;
-        annotations.insert("day2.dev/artifact".into(), json!(lease.approval.artifact));
+        annotations.insert(ARTIFACT.into(), json!(lease.approval.artifact));
         annotations.insert(
             "day2.dev/instance-sha256".into(),
             json!(
@@ -925,6 +963,7 @@ impl GkeReleaseProvider {
         if !(controller["metadata"]["annotations"][EFFECT] == lease.effect.as_str()
             && controller["metadata"]["annotations"][RELEASE]
                 == lease.execution.plan.release.as_str()
+            && controller["spec"]["replicas"] == 1
             && controller["spec"]["template"] == self.template(controller, lease)?)
         {
             return Ok(false);
@@ -950,6 +989,7 @@ impl GkeReleaseProvider {
             before["metadata"]["annotations"][EFFECT] == prepared.effect.as_str()
                 && before["metadata"]["annotations"][RELEASE]
                     == lease.execution.plan.release.as_str()
+                && before["spec"]["replicas"] == 1
                 && before["spec"]["template"] == self.template(&before, lease)?,
             "gke_release_preparation_changed"
         );
@@ -1005,6 +1045,10 @@ impl GkeReleaseProvider {
         publication
             .snapshot
             .require_scope(&self.deployment.serving.target)?;
+        // Never publish to an app a snapshot its own calls cannot select from.
+        publication
+            .snapshot
+            .selected(&self.deployment.serving.target)?;
         ensure!(
             Digest::of(&publication.snapshot)? == publication.digest,
             "gke_publication_digest_changed"
@@ -1179,7 +1223,9 @@ impl Capabilities for GkeReleaseProvider {
         let outcome = match lease.step.operation {
             ReleaseOperation::PrepareDependency => {
                 // Refuse an installed workload this candidate cannot be released into.
-                self.template(&self.controller(&api)?, lease)?;
+                let controller = self.controller(&api)?;
+                self.admit(&controller, lease)?;
+                self.template(&controller, lease)?;
                 self.projection(&api)?;
                 ReleaseObserved::DependencyPrepared {}
             }
@@ -1195,16 +1241,27 @@ impl Capabilities for GkeReleaseProvider {
                     if lease.recovery == RecoveryMode::Reconcile {
                         return Ok(ReleaseEffectResult::Ambiguous {});
                     }
+                    let activated = self.admit(&controller, lease)?;
                     self.secret(lease)?;
                     self.projection(&api)?;
                     self.instance(&api, lease)?;
-                    let patch = json!([
-                        {"op":"test","path":"/metadata/uid","value":controller["metadata"]["uid"]},
-                        {"op":"test","path":"/metadata/resourceVersion","value":controller["metadata"]["resourceVersion"]},
-                        {"op":"add","path":"/metadata/annotations/day2.dev~1release-effect","value":lease.effect},
-                        {"op":"add","path":"/metadata/annotations/day2.dev~1release-id","value":lease.execution.plan.release},
-                        {"op":"replace","path":"/spec/template","value":self.template(&controller, lease)?}
-                    ]);
+                    let mut patch = vec![
+                        json!({"op":"test","path":"/metadata/uid","value":controller["metadata"]["uid"]}),
+                        json!({"op":"test","path":"/metadata/resourceVersion","value":controller["metadata"]["resourceVersion"]}),
+                        json!({"op":"add","path":"/metadata/annotations/day2.dev~1release-effect","value":lease.effect}),
+                        json!({"op":"add","path":"/metadata/annotations/day2.dev~1release-id","value":lease.execution.plan.release}),
+                        json!({"op":"replace","path":"/spec/template","value":self.template(&controller, lease)?}),
+                    ];
+                    if activated {
+                        // Activation left the app stopped. Consume the stamp the
+                        // resourceVersion test pins, so it cannot authorize a
+                        // later artifact change.
+                        patch.extend([
+                            json!({"op":"remove","path":"/metadata/annotations/day2.dev~1activated-artifact"}),
+                            json!({"op":"replace","path":"/spec/replicas","value":1}),
+                        ]);
+                    }
+                    let patch = Value::Array(patch);
                     let write =
                         api.request(Method::PATCH, &self.controller_path(), Some(&patch), true);
                     match write {

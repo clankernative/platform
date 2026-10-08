@@ -4,7 +4,7 @@ use crate::{
     BindingRef, Digest, Name,
     gke_release::{Deployment, GkeReleaseProvider},
     journal::Journal,
-    release::{ReleaseApproval, ReleaseAuthority},
+    release::{ReleaseApproval, ReleaseAuthority, ReleaseTarget},
     release_execution::{ReleaseExecutionHost, ReleaseExecutionPlan, ReleaseTerminal},
     release_recipe::CompiledReleaseRecipe,
     runtime_secret::ProviderResource,
@@ -58,7 +58,10 @@ impl Configuration {
         Ok(value)
     }
 
-    pub fn validate(&self) -> Result<()> {
+    /// Returns the release scope: every app the catalog instance binds in the
+    /// candidates' installation and environment. The published snapshot
+    /// selects each of them that has an active release.
+    pub fn validate(&self) -> Result<Vec<ReleaseTarget>> {
         ensure!(
             self.version == 1 && !self.candidates.is_empty() && self.candidates.len() <= 32,
             "release_configuration_scope"
@@ -98,7 +101,7 @@ impl Configuration {
             self.artifact_store.is_dir() && self.instance.is_file(),
             "release_catalog_inputs_missing"
         );
-        Ok(())
+        release_scope(&public_instance, scope)
     }
 
     /// Explicit operator approval. No source check or successful build is fabricated.
@@ -156,6 +159,7 @@ struct Execution {
 
 pub struct Session {
     configuration: Configuration,
+    scope: Vec<ReleaseTarget>,
     executions: Vec<Execution>,
 }
 
@@ -164,7 +168,7 @@ impl Session {
         configuration: Configuration,
         tokens: Arc<dyn AccessTokenProvider>,
     ) -> Result<Self> {
-        configuration.validate()?;
+        let scope = configuration.validate()?;
         let recipe = Arc::new(CompiledReleaseRecipe::installed()?);
         let mut executions = Vec::new();
         for candidate in &configuration.candidates {
@@ -207,6 +211,7 @@ impl Session {
         }
         Ok(Self {
             configuration,
+            scope,
             executions,
         })
     }
@@ -261,14 +266,10 @@ impl Session {
                 Ok(json!({}))
             }
             "gke-release-publish" => {
-                let targets: Vec<_> = self
-                    .configuration
-                    .candidates
-                    .iter()
-                    .map(|candidate| candidate.approval.target.clone())
-                    .collect();
+                // Each candidate's ConfigMap gets the selections of every
+                // active app in the scope, not only this run's candidates.
                 let mut journal = Journal::open(&self.configuration.journal)?;
-                let publication = journal.serving_publication(&targets)?;
+                let publication = journal.serving_publication(&self.scope)?;
                 for execution in &self.executions {
                     execution.provider.publish(&publication)?;
                 }
@@ -283,6 +284,24 @@ impl Session {
             _ => anyhow::bail!("unknown_gke_release_capability"),
         }
     }
+}
+
+/// The release targets of every app `instance` binds, in `scope`'s
+/// installation and environment.
+pub fn release_scope(instance: &Value, scope: &ReleaseTarget) -> Result<Vec<ReleaseTarget>> {
+    let apps = instance["apps"]
+        .as_object()
+        .context("release_instance_apps_missing")?;
+    ensure!(!apps.is_empty() && apps.len() <= 32, "release_scope_budget");
+    apps.keys()
+        .map(|app| {
+            Ok(ReleaseTarget {
+                company: scope.company.clone(),
+                environment: scope.environment.clone(),
+                app: app.clone().try_into()?,
+            })
+        })
+        .collect()
 }
 
 pub fn run(configuration: Configuration, tokens: Arc<dyn AccessTokenProvider>) -> Result<Value> {

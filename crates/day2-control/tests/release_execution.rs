@@ -301,6 +301,53 @@ fn published_serving_snapshot_is_scoped_and_rechecked_after_the_call() -> Result
 }
 
 #[test]
+fn a_publication_selects_every_active_app_of_the_scope_it_is_given() -> Result<()> {
+    let reports = Fixture::new(true);
+    let mut now = 0;
+    reports.until(ReleasePhase::Active, &mut now);
+    // Release only the second app; the publication still selects both.
+    let notifications = reports.sibling("notifications");
+    notifications.until(ReleasePhase::Active, &mut now);
+    let mut unreleased = reports.provider.approval.target.clone();
+    unreleased.app = name("unreleased");
+    let scope = [
+        unreleased.clone(),
+        reports.provider.approval.target.clone(),
+        notifications.provider.approval.target.clone(),
+    ];
+    let publication = Journal::open(&reports.path)?.serving_publication(&scope)?;
+    assert_eq!(publication.revision, 2);
+    let selected = |target| {
+        publication
+            .snapshot
+            .selected(target)
+            .map(|entry| entry.activation.clone())
+    };
+    for fixture in [&reports, &notifications] {
+        assert_eq!(
+            Some(selected(&fixture.provider.approval.target)?),
+            Journal::open(&fixture.path)?
+                .release_state(&fixture.provider.approval.target)?
+                .active
+                .map(|entry| entry.id)
+        );
+    }
+    assert!(
+        selected(&unreleased).is_err(),
+        "no active release, no selection"
+    );
+    let selections = serde_json::to_value(&publication.snapshot)?["selections"].clone();
+    assert_eq!(selections.as_array().map(Vec::len), Some(2));
+    assert!(
+        Journal::open(&reports.path)?
+            .serving_publication(std::slice::from_ref(&unreleased))
+            .is_err(),
+        "an empty selection is never published"
+    );
+    Ok(())
+}
+
+#[test]
 fn serving_fence_rechecks_the_selected_release_after_the_call() {
     let fixture = Fixture::new(true);
     fixture.until(ReleasePhase::Active, &mut 0);
@@ -1909,6 +1956,27 @@ impl Fixture {
     fn new_for_app(secret_ready: bool, artifact: Option<&Digest>, app: &str) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("release.sqlite");
+        Self::new_in(directory, path, secret_ready, artifact, app)
+    }
+
+    /// Another app's release in this fixture's journal and scope.
+    fn sibling(&self, app: &str) -> Self {
+        Self::new_in(
+            tempfile::tempdir().unwrap(),
+            self.path.clone(),
+            true,
+            None,
+            app,
+        )
+    }
+
+    fn new_in(
+        directory: tempfile::TempDir,
+        path: PathBuf,
+        secret_ready: bool,
+        artifact: Option<&Digest>,
+        app: &str,
+    ) -> Self {
         let mut journal = Journal::open(&path).unwrap();
         let mut target = target("alpha");
         target.app = name(app);

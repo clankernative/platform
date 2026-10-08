@@ -398,10 +398,13 @@ impl ReleaseExecutionHost {
                 Err(ReleaseRejection::InvalidFact.into())
             }
             Ok(result) => Ok(result),
-            Err(_) => {
+            Err(error) => {
                 let _=journal.connection.execute("INSERT INTO release_events(target,kind,body) VALUES(?1,'workflow_host_fault',?2)",
                     params![serde_json::to_string(&stored.snapshot.target)?,serde_json::to_string(&(&stored.snapshot.id,"provider"))?]);
-                Err(anyhow::anyhow!("release provider host fault"))
+                match error.downcast::<ProviderRefusal>() {
+                    Ok(refusal) => Err(refusal.into()),
+                    Err(_) => Err(anyhow::anyhow!("release provider host fault")),
+                }
             }
         }
     }
@@ -570,6 +573,21 @@ impl std::fmt::Display for ReleaseRejection {
     }
 }
 impl std::error::Error for ReleaseRejection {}
+
+/// A provider refusal that names the operator action it needs, such as an
+/// artifact change that needs a maintenance activation first. The host still
+/// records a provider fault but returns this message instead of hiding it.
+/// Never put provider responses or secret material in one.
+#[derive(Debug)]
+pub struct ProviderRefusal(pub String);
+
+impl std::fmt::Display for ProviderRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ProviderRefusal {}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

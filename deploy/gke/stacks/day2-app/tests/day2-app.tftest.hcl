@@ -94,7 +94,9 @@ run "infrastructure_preserves_software_after_release_handoff" {
     target = data.kubernetes_resource.release
     values = { object = {
       metadata = { name = "day2-example-app", namespace = "app-example", annotations = {
-        "day2.dev/release-effect" = "effect-two", "day2.dev/release-id" = "release-two"
+        "day2.dev/release-effect"     = "effect-two", "day2.dev/release-id" = "release-two"
+        "day2.dev/activated-artifact" = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        "unrelated.example.com/note"  = "dropped"
       } }
       spec = { template = {
         metadata = { annotations = {
@@ -112,6 +114,10 @@ run "infrastructure_preserves_software_after_release_handoff" {
   assert {
     condition     = kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[0].image == "registry.example.com/app@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" && kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[0].env[0].value == "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     error_message = "An infrastructure plan must keep the released image and artifact guard."
+  }
+  assert {
+    condition     = kubernetes_stateful_set_v1.day2.metadata[0].annotations["day2.dev/activated-artifact"] == "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" && !contains(keys(kubernetes_stateful_set_v1.day2.metadata[0].annotations), "unrelated.example.com/note")
+    error_message = "Infrastructure must keep a maintenance activation stamp until the release consumes it, and only the release-owned annotations."
   }
   assert {
     condition     = kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].volume[0].config_map[0].name == "day2-release-two" && kubernetes_stateful_set_v1.day2.metadata[0].annotations["day2.dev/release-effect"] == "effect-two" && kubernetes_stateful_set_v1.day2.spec[0].template[0].metadata[0].annotations["day2.dev/release-id"] == "release-two"
