@@ -15,6 +15,7 @@ const CONSUMED: &[u8] = b"provider syntax";
 enum Fault {
     None,
     NestedOutput,
+    UnsupportedLock,
     Timeout,
     Rejected,
     TamperAfterAssembly,
@@ -28,9 +29,10 @@ enum Fault {
     TamperBeforePublication,
 }
 
-const FAULTS: [Fault; 13] = [
+const FAULTS: [Fault; 14] = [
     Fault::None,
     Fault::NestedOutput,
+    Fault::UnsupportedLock,
     Fault::Timeout,
     Fault::Rejected,
     Fault::TamperAfterAssembly,
@@ -166,7 +168,11 @@ fn run(schedule: Schedule) -> Replay {
         bytes: CSS.len(),
     }];
     let lock = Lock {
-        schema_version: 1,
+        schema_version: if schedule.fault == Fault::UnsupportedLock {
+            2
+        } else {
+            1
+        },
         provider: "replay-provider".into(),
         package: LockedPackage {
             name: "opaque".into(),
@@ -313,6 +319,12 @@ fn run(schedule: Schedule) -> Replay {
     }
     let trace = serde_json::to_string(&replay).unwrap();
     assert_eq!(result.is_ok(), success, "replay: {trace}");
+    if schedule.fault == Fault::UnsupportedLock {
+        assert!(
+            replay.events.is_empty(),
+            "invalid lock requested an effect: {trace}"
+        );
+    }
     assert_eq!(replay.files, expected_files, "replay: {trace}");
     assert_eq!(replay.directories, expected_directories, "replay: {trace}");
     state
