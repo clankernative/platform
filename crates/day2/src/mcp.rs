@@ -383,7 +383,7 @@ fn call(context: &RequestContext<'_>, endpoint: &Endpoint, arguments: &Value) ->
         );
     }
     let invocation = if read {
-        security::random().map(|key| format!("mcp-query-{key}"))
+        security::random(context.entropy).map(|key| format!("mcp-query-{key}"))
     } else {
         arguments["idempotency_key"]
             .as_str()

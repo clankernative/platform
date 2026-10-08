@@ -798,7 +798,7 @@ pub(crate) fn bind(view: &View<'_>, markup: &str) -> Result<Markup> {
             document.tree.get_mut(form_id).context("form")?.detach();
             continue;
         }
-        let nonce = security::random()?;
+        let nonce = security::random(view.entropy)?;
         let ticket = Ticket {
             scope: view.runtime.scope().to_owned(),
             artifact: view.runtime.artifact().id().to_owned(),
