@@ -81,9 +81,8 @@ variable "operator_members" {
 }
 
 variable "gitea_url" {
-  description = "Gitea server the runner registers with."
+  description = "Company-owned Gitea server the runner registers with, supplied by the private instance configuration."
   type        = string
-  default     = "https://git.wonderly.info"
 }
 
 variable "repository" {
@@ -117,9 +116,8 @@ variable "repository_owner_id" {
 }
 
 variable "oidc_issuer_uri" {
-  description = "Issuer of the workflow OIDC tokens. Gitea has no Actions OIDC endpoint; git-oidc mints GitHub-shaped tokens for a named repository's running task."
+  description = "Company-owned issuer of the workflow OIDC tokens, supplied by the private instance configuration. Gitea has no Actions OIDC endpoint; git-oidc mints GitHub-shaped tokens for a named repository's running task."
   type        = string
-  default     = "https://git-oidc.wonderly.info"
 }
 
 variable "workload_identity_pool_id" {

@@ -11,6 +11,8 @@ variables {
   project_id                  = "example-project"
   project_number              = "123456789012"
   operator_members            = ["user:operator@example.com"]
+  gitea_url                   = "https://git.example.com"
+  oidc_issuer_uri             = "https://git-oidc.example.com"
   repository                  = "example-org/instance-config"
   repository_id               = "203"
   repository_owner_id         = "74"
@@ -35,6 +37,14 @@ run "identities_are_bound_to_the_repository_ids_and_one_workflow_each" {
   assert {
     condition     = google_iam_workload_identity_pool_provider.gitea.oidc[0].allowed_audiences == tolist(["https://iam.googleapis.com/projects/123456789012/locations/global/workloadIdentityPools/instance-ci/providers/gitea"])
     error_message = "the provider accepts exactly its own canonical audience"
+  }
+
+  assert {
+    condition = (
+      google_iam_workload_identity_pool_provider.gitea.oidc[0].issuer_uri == "https://git-oidc.example.com" &&
+      strcontains(google_compute_instance.runner.metadata["startup-script"], "-e GITEA_INSTANCE_URL='https://git.example.com'")
+    )
+    error_message = "the provider and runner must use the explicitly supplied instance endpoints"
   }
 
   assert {
