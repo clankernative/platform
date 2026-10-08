@@ -1,5 +1,5 @@
 //! Public TypeIDs, binary UUID storage, and permanent per-app model identities.
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};

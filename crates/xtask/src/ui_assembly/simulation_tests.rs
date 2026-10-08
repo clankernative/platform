@@ -14,6 +14,7 @@ const CONSUMED: &[u8] = b"provider syntax";
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 enum Fault {
     None,
+    NestedOutput,
     Timeout,
     Rejected,
     TamperAfterAssembly,
@@ -27,8 +28,9 @@ enum Fault {
     TamperBeforePublication,
 }
 
-const FAULTS: [Fault; 12] = [
+const FAULTS: [Fault; 13] = [
     Fault::None,
+    Fault::NestedOutput,
     Fault::Timeout,
     Fault::Rejected,
     Fault::TamperAfterAssembly,
@@ -132,6 +134,9 @@ impl UiPublication for Publication {
         // Mechanical application only: collision/admission/revalidation decisions
         // above use the same pure code as FilePublication, not mock-local policy.
         for (path, bytes) in &plan.writes {
+            for ancestor in path.match_indices('/').map(|(offset, _)| &path[..offset]) {
+                state.snapshot.directories.insert(ancestor.into());
+            }
             state.snapshot.files.insert(path.clone(), bytes.clone());
         }
         for path in &plan.removes {
@@ -149,6 +154,7 @@ struct Replay {
     events: Vec<String>,
     error: Option<String>,
     files: BTreeMap<String, Vec<u8>>,
+    directories: BTreeSet<String>,
     hashes: BTreeMap<String, String>,
 }
 
@@ -213,7 +219,7 @@ fn run(schedule: Schedule) -> Replay {
     } else {
         "ui/source.txt"
     };
-    let resource = if schedule.fault == Fault::ParentCollision {
+    let resource = if matches!(schedule.fault, Fault::ParentCollision | Fault::NestedOutput) {
         "ui/nested/provider.css"
     } else {
         "ui/provider.css"
@@ -235,6 +241,7 @@ fn run(schedule: Schedule) -> Replay {
         }
     }))
     .unwrap();
+    let mut expected_directories = directories.clone();
     let state = Rc::new(RefCell::new(State {
         snapshot: UiSnapshot {
             files: files.clone(),
@@ -269,20 +276,27 @@ fn run(schedule: Schedule) -> Replay {
         events: state.events.clone(),
         error: result.as_ref().err().map(|error| format!("{error:#}")),
         files: state.snapshot.files.clone(),
+        directories: state.snapshot.directories.clone(),
         hashes,
     };
     // Independent reference expectations do not use the production plan or validator.
-    let success = schedule.fault == Fault::None;
+    let success = matches!(schedule.fault, Fault::None | Fault::NestedOutput);
     let mut expected_files = files;
     let mut expected_hashes = original_hashes;
     match schedule.fault {
-        Fault::None => {
+        Fault::None | Fault::NestedOutput => {
+            let output = if schedule.fault == Fault::NestedOutput {
+                expected_directories.insert("nested".into());
+                "nested/provider.css"
+            } else {
+                "provider.css"
+            };
             expected_files.insert("pages/index.html".into(), EXPANDED.to_vec());
-            expected_files.insert("provider.css".into(), CSS.to_vec());
+            expected_files.insert(output.into(), CSS.to_vec());
             expected_files.remove("source.txt");
             expected_hashes.insert("ui/package".into(), lock.package.digest.clone());
             expected_hashes.insert("app/ui/pages/index.html".into(), sha(EXPANDED));
-            expected_hashes.insert("app/ui/provider.css".into(), sha(CSS));
+            expected_hashes.insert(format!("app/ui/{output}"), sha(CSS));
             expected_hashes.insert("ui-source/app/ui/pages/index.html".into(), sha(SOURCE));
             expected_hashes.insert("ui-source/app/ui/source.txt".into(), sha(CONSUMED));
         }
@@ -300,6 +314,11 @@ fn run(schedule: Schedule) -> Replay {
     let trace = serde_json::to_string(&replay).unwrap();
     assert_eq!(result.is_ok(), success, "replay: {trace}");
     assert_eq!(replay.files, expected_files, "replay: {trace}");
+    assert_eq!(replay.directories, expected_directories, "replay: {trace}");
+    state
+        .snapshot
+        .validate()
+        .expect("world must retain a consistent complete tree");
     assert_eq!(replay.hashes, expected_hashes, "replay: {trace}");
     assert_eq!(
         replay.events.iter().any(|event| event == "publish"),
