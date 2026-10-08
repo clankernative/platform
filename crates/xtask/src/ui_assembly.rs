@@ -169,6 +169,10 @@ fn parse_lock(path: &Path) -> Result<Lock> {
         "invalid captured UI lock"
     );
     let lock: Lock = serde_json::from_slice(&day2::assets::read_regular(path, MAX_FILE as u64)?)?;
+    validate_lock(&lock)?;
+    Ok(lock)
+}
+fn validate_lock(lock: &Lock) -> Result<()> {
     ensure!(
         lock.schema_version == 1
             && !lock.provider.is_empty()
@@ -193,7 +197,7 @@ fn parse_lock(path: &Path) -> Result<Lock> {
         manifest_digest(&lock.package.inputs)? == lock.package.digest,
         "locked input manifest digest mismatch"
     );
-    Ok(lock)
+    Ok(())
 }
 fn safe_lock_path(s: &str) -> bool {
     if s.contains('\\') || s.is_empty() {
@@ -497,6 +501,7 @@ fn assemble_and_stage(
     actual_inputs: &BTreeMap<String, Vec<u8>>,
     hashes: &mut BTreeMap<String, String>,
 ) -> Result<()> {
+    validate_lock(lock)?;
     let captured = publication.capture()?;
     captured.validate()?;
     let captured_lock: Lock = serde_json::from_slice(captured.input("ui.lock.json")?)?;
