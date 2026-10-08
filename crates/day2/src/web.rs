@@ -113,14 +113,6 @@ impl Admission {
         self.0.store(false, Ordering::Release);
     }
 }
-fn now() -> Result<i64> {
-    Ok(i64::try_from(SystemClock::new().wall_time()?.as_secs())?)
-}
-
-fn now_ms() -> Result<i64> {
-    Ok(i64::try_from(SystemClock::new().wall_time()?.as_millis())?)
-}
-
 /// How often the occurrence source looks for work. This is not the schedule
 /// interval: occurrences are derived from the clock, so this only bounds how late
 /// a run can start, never whether it happens. The shortest interval an application
@@ -448,6 +440,7 @@ impl LocalServer {
         let declared = !self.host.runtime.artifact().contract().schedules.is_empty();
         let scheduled = declared.then(|| {
             let runtime = self.host.runtime.clone();
+            let clock = self.host.clock.clone();
             let mut stopped = stop.subscribe();
             tokio::spawn(async move {
                 // A refusal is a condition, not an event: an unbound schedule is
@@ -464,8 +457,9 @@ impl LocalServer {
                         _ = stopped.changed() => break,
                         _ = interval.tick() => {
                             let runtime = runtime.clone();
+                            let clock = clock.clone();
                             let ticked = tokio::task::spawn_blocking(move || {
-                                crate::schedules::tick(&runtime, now_ms()?)
+                                crate::schedules::tick(&runtime, clock.wall_time()?.as_millis().try_into()?)
                             })
                             .await;
                             match ticked {
@@ -507,6 +501,7 @@ impl LocalServer {
         });
         let journal = {
             let runtime = self.host.runtime.clone();
+            let clock = self.host.clock.clone();
             let mut stopped = stop.subscribe();
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(JOURNAL_TICK);
@@ -516,9 +511,10 @@ impl LocalServer {
                         _ = stopped.changed() => break,
                         _ = interval.tick() => {
                             let runtime = runtime.clone();
+                            let clock = clock.clone();
                             let compacted = tokio::task::spawn_blocking(move || -> Result<()> {
                                 for _ in 0..JOURNAL_BATCHES_PER_TICK {
-                                    if crate::journal::compact(&runtime, now()?, JOURNAL_BATCH)? < JOURNAL_BATCH {
+                                    if crate::journal::compact(&runtime, clock.wall_time()?.as_secs().try_into()?, JOURNAL_BATCH)? < JOURNAL_BATCH {
                                         break;
                                     }
                                 }
