@@ -34,6 +34,13 @@ fn snapshot_rejects_aliases_and_incomplete_or_inconsistent_trees() {
     snapshot.files.remove("pages");
     snapshot.directories.insert("pages//nested".into());
     assert!(snapshot.validate().is_err());
+    let oversized = "x".repeat(256);
+    let snapshot = UiSnapshot {
+        files: BTreeMap::from([(oversized.clone(), vec![])]),
+        directories: BTreeSet::new(),
+    };
+    assert!(snapshot.validate().is_err());
+    assert!(UiSnapshot::default().check_output(&oversized).is_err());
 }
 
 #[test]
@@ -109,7 +116,7 @@ fn real_publication_revalidates_unused_files_and_consumed_sources_before_any_wri
     let plan = PublicationPlan {
         writes: BTreeMap::from([
             ("pages/index.html".into(), b"expanded".to_vec()),
-            ("new.css".into(), b"style".to_vec()),
+            ("nested/assets/new.css".into(), b"style".to_vec()),
         ]),
         removes: BTreeSet::from(["source.txt".into()]),
     };
@@ -120,7 +127,7 @@ fn real_publication_revalidates_unused_files_and_consumed_sources_before_any_wri
             fs::read(temp.path().join("ui/pages/index.html")).unwrap(),
             b"source"
         );
-        assert!(!temp.path().join("ui/new.css").exists());
+        assert!(!temp.path().join("ui/nested/assets/new.css").exists());
         assert!(temp.path().join("ui/source.txt").exists());
         fs::write(
             temp.path().join("ui").join(tampered),
@@ -133,7 +140,10 @@ fn real_publication_revalidates_unused_files_and_consumed_sources_before_any_wri
         fs::read(temp.path().join("ui/pages/index.html")).unwrap(),
         b"expanded"
     );
-    assert_eq!(fs::read(temp.path().join("ui/new.css")).unwrap(), b"style");
+    assert_eq!(
+        fs::read(temp.path().join("ui/nested/assets/new.css")).unwrap(),
+        b"style"
+    );
     assert!(!temp.path().join("ui/source.txt").exists());
 }
 

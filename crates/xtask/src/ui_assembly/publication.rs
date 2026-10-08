@@ -7,6 +7,8 @@ use std::{
     path::{Component, Path},
 };
 
+const MAX_PATH_BYTES: usize = 4096;
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct UiSnapshot {
     pub files: BTreeMap<String, Vec<u8>>,
@@ -22,10 +24,12 @@ impl UiSnapshot {
         let mut total = 0usize;
         for path in self.files.keys().chain(self.directories.iter()) {
             ensure!(
-                !path.contains('\\')
-                    && path
-                        .split('/')
-                        .all(|part| !part.is_empty() && part != "." && part != "..")
+                path.len() <= MAX_PATH_BYTES
+                    && !path.contains('\\')
+                    && path.split('/').all(|part| !part.is_empty()
+                        && part.len() <= 255
+                        && part != "."
+                        && part != "..")
                     && Path::new(path)
                         .components()
                         .all(|c| matches!(c, Component::Normal(_))),
@@ -66,7 +70,12 @@ impl UiSnapshot {
     }
 
     pub fn check_output(&self, relative: &str) -> Result<()> {
-        ensure!(safe_rel(relative), "unsafe output path: {relative}");
+        ensure!(
+            safe_rel(relative)
+                && relative.len() <= MAX_PATH_BYTES
+                && relative.split('/').all(|part| part.len() <= 255),
+            "unsafe output path: {relative}"
+        );
         ensure!(
             !self.directories.contains(relative),
             "output target is not a regular file"
@@ -161,6 +170,10 @@ impl UiPublication for FilePublication<'_> {
                 } else {
                     format!("{prefix}/{name}")
                 };
+                ensure!(
+                    relative.len() <= MAX_PATH_BYTES,
+                    "captured UI path byte budget exceeded"
+                );
                 if kind.is_dir() {
                     snapshot.directories.insert(relative.clone());
                     directories.push((entry.path(), relative));
