@@ -6,7 +6,7 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
     response::Response,
 };
-use std::time::Duration;
+use std::{collections::BTreeSet, time::Duration};
 use std::{
     pin::Pin,
     task::{Context as TaskContext, Poll},
@@ -92,25 +92,33 @@ struct Subscription {
     state: SubscriptionState,
 }
 
-/// Pure subscription decisions; the host supplies database and render observations.
+/// Replayable decisions; database/rendering observations are supplied by the host.
 struct SubscriptionState {
     actor: String,
     session: String,
     revision: i64,
     authority: AuthorityStamp,
     regions: BTreeMap<String, String>,
+    document_image_origins: BTreeSet<String>,
+    needs_image_refresh: bool,
     refreshed: Duration,
     refresh: Option<Duration>,
 }
 
 impl Host {
-    pub(super) fn live_initializer(&self, name: &str, input: &Value) -> Result<Markup> {
+    pub(super) fn live_initializer(
+        &self,
+        name: &str,
+        input: &Value,
+        image_origins: &[String],
+    ) -> Result<Markup> {
         if !self.runtime.artifact().page(name)?.live {
             return Ok(::maud::html! {});
         }
         let page_url = view::page_url(&self.runtime, name, input)?;
         let query = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("path", &page_url)
+            .append_pair("image-origins", &serde_json::to_string(image_origins)?)
             .finish();
         let url = format!("/_live?{query}");
         ensure!(url.len() <= 8192, Failure::UriBudget);
@@ -154,6 +162,9 @@ impl Host {
         );
         let mut fields = security::fields(uri.query().unwrap_or("").as_bytes())?;
         let path = fields.remove("path").context(Failure::InvalidInput)?;
+        // This is an untrusted description of the document's immutable CSP, not
+        // permission to fetch or render anything. The browser enforces that CSP.
+        let document_image_origins = parse_image_origins(fields.remove("image-origins"))?;
         if let Some(signals) = fields.remove("datastar") {
             ensure!(
                 serde_json::from_str::<Value>(&signals).ok() == Some(serde_json::json!({})),
@@ -191,7 +202,10 @@ impl Host {
         // using a revision sampled afterwards would lose that change forever.
         let revision = crate::live::revision(&open(self.runtime.db())?)?;
         let content = self.page(&page, &input, session, at, None, None)?;
-        let regions = web_templates::live_regions(&content.into_string())?;
+        let markup = content.into_string();
+        let regions = web_templates::live_regions(&markup)?;
+        let rendered_origins = web_templates::remote_image_origins(&markup)?;
+        let needs_image_refresh = has_new_image_origins(&document_image_origins, &rendered_origins);
         let subscription = Subscription {
             page,
             input,
@@ -202,6 +216,8 @@ impl Host {
                 revision,
                 authority,
                 regions,
+                document_image_origins,
+                needs_image_refresh,
                 refreshed: self.clock.monotonic(),
                 refresh: (definition.live_refresh_ms > 0)
                     .then(|| Duration::from_millis(definition.live_refresh_ms)),
@@ -215,6 +231,7 @@ impl Host {
         );
         let (sender, receiver) = mpsc::channel(1);
         let (terminal_sender, terminal) = oneshot::channel();
+        let refresh_url = view::page_url(&self.runtime, &subscription.page, &subscription.input)?;
         let initial = format!(
             "{}{}",
             subscription
@@ -223,8 +240,7 @@ impl Host {
                 .values()
                 .cloned()
                 .collect::<String>(),
-            ::maud::html! { div id="day2-live-status" role="status" aria-live="polite" {} }
-                .into_string()
+            image_refresh_notice(subscription.state.needs_image_refresh, &refresh_url)
         );
         sender
             .try_send(elements(&initial, "outer"))
@@ -243,6 +259,56 @@ impl Host {
     }
 }
 
+fn parse_image_origins(value: Option<String>) -> Result<BTreeSet<String>> {
+    let Some(value) = value else {
+        return Ok(BTreeSet::new());
+    };
+    let origins: Vec<String> = serde_json::from_str(&value).map_err(|_| Failure::InvalidInput)?;
+    ensure!(origins.len() <= 32, Failure::InvalidInput);
+    ensure!(
+        serde_json::to_string(&origins)? == value,
+        Failure::InvalidInput
+    );
+    let mut unique = BTreeSet::new();
+    let mut previous: Option<String> = None;
+    for origin in origins {
+        ensure!(
+            previous.as_ref().is_none_or(|value| value < &origin),
+            Failure::InvalidInput
+        );
+        previous = Some(origin.clone());
+        web_templates::validate_remote_image_source(&origin).map_err(|_| Failure::InvalidInput)?;
+        let parsed = url::Url::parse(&origin).map_err(|_| Failure::InvalidInput)?;
+        ensure!(
+            parsed.origin().ascii_serialization() == origin,
+            Failure::InvalidInput
+        );
+        ensure!(unique.insert(origin), Failure::InvalidInput);
+    }
+    Ok(unique)
+}
+
+fn has_new_image_origins(document: &BTreeSet<String>, rendered: &[String]) -> bool {
+    rendered.iter().any(|origin| !document.contains(origin))
+}
+
+fn image_refresh_notice(needs_refresh: bool, page_url: &str) -> String {
+    // Keep branching in ordinary Rust so the bounded canonical Maud grammar
+    // can distinguish static attribute names from all evaluated expressions.
+    let content = if needs_refresh {
+        ::maud::html! {
+            "Some new images need a page refresh to load. Your draft is unchanged. "
+            a href=(page_url) { "Refresh page" }
+        }
+    } else {
+        ::maud::html! {}
+    };
+    ::maud::html! {
+        div id="day2-live-status" role="status" aria-live="polite" { (content) }
+    }
+    .into_string()
+}
+
 impl SubscriptionState {
     fn authorize_session(&self, session: &Session, wall: i64) -> Result<()> {
         ensure!(
@@ -254,7 +320,7 @@ impl SubscriptionState {
 
     fn authorize(&self, session: &Session, authority: &AuthorityStamp, wall: i64) -> Result<()> {
         self.authorize_session(session, wall)?;
-        // Never acquire a newer grant, including identical A -> B -> A policies.
+        // Bind to the admission stamp, including identical A -> B -> A policies.
         ensure!(
             *authority == self.authority,
             Failure::AuthorityPolicyChanged
@@ -274,20 +340,28 @@ impl SubscriptionState {
         revision: i64,
         monotonic: Duration,
         regions: BTreeMap<String, String>,
+        rendered_origins: &[String],
+        refresh_url: &str,
     ) -> Result<Option<String>> {
         ensure!(
             regions.keys().eq(self.regions.keys()),
             "live_region_set_changed"
         );
-        let changed = regions
+        let needs_image_refresh =
+            has_new_image_origins(&self.document_image_origins, rendered_origins);
+        let mut changed = regions
             .iter()
             .filter(|(id, markup)| self.regions.get(*id) != Some(*markup))
             .map(|(_, markup)| markup.as_str())
             .collect::<String>();
+        if needs_image_refresh != self.needs_image_refresh {
+            changed.push_str(&image_refresh_notice(needs_image_refresh, refresh_url));
+        }
+        self.needs_image_refresh = needs_image_refresh;
         self.regions = regions;
         self.revision = revision;
         self.refreshed = monotonic;
-        Ok((!changed.is_empty()).then_some(changed))
+        Ok((!changed.is_empty()).then(|| elements(&changed, "outer")))
     }
 }
 
@@ -310,20 +384,16 @@ impl Subscription {
     }
 
     fn refresh(&mut self, host: &Host) -> Result<Option<String>> {
-        let (session, authority) = self.authorize(host, host.wall_seconds()?)?;
+        let wall = host.wall_seconds()?;
+        let (session, authority) = self.authorize(host, wall)?;
         let revision = crate::live::revision(&open(host.runtime.db())?)?;
         if !self.state.needs_refresh(revision, host.clock.monotonic()) {
             return Ok(None);
         }
-        let markup = host.page(
-            &self.page,
-            &self.input,
-            &session,
-            host.wall_seconds()?,
-            None,
-            None,
-        )?;
-        let regions = web_templates::live_regions(&markup.into_string())?;
+        let markup = host.page(&self.page, &self.input, &session, wall, None, None)?;
+        let markup = markup.into_string();
+        let regions = web_templates::live_regions(&markup)?;
+        let rendered_origins = web_templates::remote_image_origins(&markup)?;
         ensure!(
             regions.keys().eq(self.state.regions.keys()),
             "live_region_set_changed"
@@ -331,10 +401,14 @@ impl Subscription {
         // Reobserve wall time and authority after rendering, before committing a patch.
         let (_, current) = self.authorize(host, host.wall_seconds()?)?;
         ensure!(current == authority, Failure::AuthorityPolicyChanged);
-        Ok(self
-            .state
-            .rendered(revision, host.clock.monotonic(), regions)?
-            .map(|changed| elements(&changed, "outer")))
+        let refresh_url = view::page_url(&host.runtime, &self.page, &self.input)?;
+        self.state.rendered(
+            revision,
+            host.clock.monotonic(),
+            regions,
+            &rendered_origins,
+            &refresh_url,
+        )
     }
 
     async fn run(
@@ -484,6 +558,65 @@ mod simulation_tests;
 mod tests {
     use super::*;
     use tokio_stream::StreamExt;
+
+    #[test]
+    fn image_origin_policy_hints_are_bounded_distinct_canonical_https_origins() {
+        assert_eq!(parse_image_origins(None).unwrap(), BTreeSet::new());
+        assert_eq!(
+            parse_image_origins(Some(r#"["https://cdn.example.test"]"#.into())).unwrap(),
+            BTreeSet::from(["https://cdn.example.test".into()])
+        );
+        for invalid in [
+            r#"["http://cdn.example.test"]"#,
+            r#"["https://cdn.example.test/path"]"#,
+            r#"["https://user@cdn.example.test"]"#,
+            r#"["https://*.example.test"]"#,
+            r#"["https://cdn.example.test:bad"]"#,
+            r#"["https://CDN.example.test"]"#,
+            r#"["https://cdn.example.test","https://cdn.example.test"]"#,
+            "[] ",
+        ] {
+            assert!(
+                parse_image_origins(Some(invalid.into())).is_err(),
+                "{invalid}"
+            );
+        }
+        let too_many = (0..33)
+            .map(|index| format!("https://cdn{index}.example.test"))
+            .collect::<Vec<_>>();
+        assert!(parse_image_origins(Some(serde_json::to_string(&too_many).unwrap())).is_err());
+    }
+
+    #[test]
+    fn image_origin_refresh_notice_is_reserved_status_only_and_escaped() {
+        let url = "/reports?name=a&next=b";
+        let notice = image_refresh_notice(true, url);
+        assert!(notice.contains("id=\"day2-live-status\""));
+        assert!(notice.contains("role=\"status\""));
+        assert!(
+            notice
+                .contains("Some new images need a page refresh to load. Your draft is unchanged.")
+        );
+        assert!(notice.contains("href=\"/reports?name=a&amp;next=b\""));
+        assert!(!notice.contains("<form"));
+        assert!(!notice.contains("data-init"));
+        assert!(!image_refresh_notice(false, url).contains("Refresh page"));
+        assert!(!image_refresh_notice(false, url).contains("Some new images"));
+    }
+
+    #[test]
+    fn image_origin_subset_warns_only_for_new_hosts() {
+        let document = BTreeSet::from(["https://one.example.test".into()]);
+        assert!(!has_new_image_origins(
+            &document,
+            &["https://one.example.test".into()]
+        ));
+        assert!(!has_new_image_origins(&document, &[]));
+        assert!(has_new_image_origins(
+            &document,
+            &["https://two.example.test".into()]
+        ));
+    }
 
     #[tokio::test]
     async fn terminal_revocation_discards_a_saturated_data_queue() -> Result<()> {

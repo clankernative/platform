@@ -360,6 +360,7 @@ async fn real_installation_export_build_and_temporal_completion() -> Result<()> 
             xtask: operator_path("DAY2_TEST_BUILD_XTASK")?,
             rust: operator_path("DAY2_TEST_BUILD_RUST")?,
             registry: operator_path("DAY2_TEST_BUILD_REGISTRY")?,
+            ui_assembly: None,
         },
     );
     config.runtimes.insert(

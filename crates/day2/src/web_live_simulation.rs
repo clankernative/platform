@@ -17,6 +17,7 @@ struct Step {
     before: u64,
     after: u64,
     text: String,
+    new_origin: bool,
 }
 
 struct ScriptedTicks {
@@ -60,6 +61,8 @@ fn state() -> SubscriptionState {
             revision: 1,
         },
         regions: BTreeMap::from([("data".into(), "initial".into())]),
+        document_image_origins: BTreeSet::new(),
+        needs_image_refresh: false,
         refreshed: Duration::ZERO,
         refresh: Some(Duration::from_secs(5)),
     }
@@ -98,6 +101,12 @@ fn evaluate(
         step.revision,
         clock.monotonic(),
         BTreeMap::from([("data".into(), step.text.clone())]),
+        &if step.new_origin {
+            vec!["https://new.example.test".into()]
+        } else {
+            vec![]
+        },
+        "/reports",
     )
 }
 
@@ -128,13 +137,15 @@ async fn replay(steps: &[Step]) -> Result<()> {
     let mut actual = state();
     // Independent reference expectations: integer deadlines and explicit fence
     // order. It never calls needs_refresh/rendered/authorize to derive answers.
-    let (mut revision, mut refreshed_ms, mut text) = (1, 0, "initial".to_owned());
+    let (mut revision, mut refreshed_ms, mut text, mut image_notice) =
+        (1, 0, "initial".to_owned(), false);
     for step in steps {
         ticks.next().await;
         let before = serde_json::to_value((
             &actual.regions,
             actual.revision,
             actual.refreshed.as_millis(),
+            actual.needs_image_refresh,
         ))?;
         let result = evaluate(&mut actual, step, clock.as_ref());
         let due =
@@ -152,30 +163,42 @@ async fn replay(steps: &[Step]) -> Result<()> {
                     &actual.regions,
                     actual.revision,
                     actual.refreshed.as_millis(),
+                    actual.needs_image_refresh
                 ))? == before,
                 "refusal mutated subscription state"
             );
             break;
         }
         let patch = result?;
-        let changed = due && (step.text != text);
+        let changed = due && (step.text != text || step.new_origin != image_notice);
         ensure!(
             patch.is_some() == changed,
             "patch decision diverged: {step:?}"
         );
         if let Some(patch) = patch {
             ensure!(!patch.contains("<form"), "live patch replaced draft");
-            ensure!(patch == step.text, "wrong changed region");
+            ensure!(
+                patch.starts_with("event: datastar-patch-elements\ndata: mode outer\n"),
+                "wrong patch transport"
+            );
+            if step.new_origin != image_notice {
+                ensure!(
+                    patch.contains("day2-live-status"),
+                    "missing CSP refresh notice"
+                );
+            }
         }
         if due {
             revision = step.revision;
             refreshed_ms = step.monotonic_ms;
             text = step.text.clone();
+            image_notice = step.new_origin;
         }
         ensure!(
             actual.revision == revision
                 && actual.refreshed.as_millis() == u128::from(refreshed_ms)
-                && actual.regions["data"] == text,
+                && actual.regions["data"] == text
+                && actual.needs_image_refresh == image_notice,
             "reference state diverged: {step:?}"
         );
     }
@@ -212,6 +235,7 @@ fn schedule(seed: u64) -> Result<Vec<Step>> {
                 1
             },
             text: format!("version-{revision}"),
+            new_origin: bytes[3] % 2 == 0,
         });
     }
     Ok(steps)
@@ -283,6 +307,7 @@ async fn virtual_wall_expiration_monotonic_refresh_and_post_render_revocation_or
         before: 1,
         after: 1,
         text: "fresh".into(),
+        new_origin: false,
     };
     let steps = [
         base.clone(),
@@ -323,7 +348,7 @@ async fn virtual_wall_expiration_monotonic_refresh_and_post_render_revocation_or
     let original = actual.regions.clone();
     assert!(
         actual
-            .rendered(2, Duration::from_secs(10), BTreeMap::new())
+            .rendered(2, Duration::from_secs(10), BTreeMap::new(), &[], "/")
             .is_err()
     );
     assert_eq!(actual.regions, original);

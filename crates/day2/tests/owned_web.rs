@@ -181,10 +181,12 @@ impl Server {
 
     fn create(&self, world: &World, client: &Client, title: &str) -> Result<String> {
         let mut fields = form(&self.page(client, "/")?, "#create-link-form")?;
-        assert_eq!(
-            claims(&fields)?["editable"],
-            json!(["title", "destination"])
-        );
+        // Editable grants are an exact set, not compiler-reflected field order.
+        // Sorting preserves duplicates, so extra/missing/repeated fields still fail.
+        let mut editable: Vec<String> =
+            serde_json::from_value(claims(&fields)?["editable"].clone())?;
+        editable.sort();
+        assert_eq!(editable, ["destination", "title"]);
         fields.insert("title".into(), title.into());
         fields.insert("destination".into(), "https://example.com/handbook".into());
         let response = self.submit(client, &fields, false)?;

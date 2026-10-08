@@ -15,6 +15,8 @@ const MAX_PACK_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_FILES: usize = 128;
 const JS: &str = "text/javascript; charset=utf-8";
 const CSS: &str = "text/css; charset=utf-8";
+const WOFF2: &str = "font/woff2";
+const WOFF2_HEADER_BYTES: usize = 48;
 
 pub type Catalog = BTreeMap<String, Resource>;
 
@@ -50,7 +52,10 @@ fn media_type(path: &str) -> Result<&'static str> {
     match path.rsplit_once('.').map(|(_, extension)| extension) {
         Some("js") => Ok(JS),
         Some("css") => Ok(CSS),
-        _ => bail!("ui_resource_type: ui/ accepts only native .js modules and .css stylesheets"),
+        Some("woff2") if path.starts_with("fonts/") && path.matches('/').count() == 1 => Ok(WOFF2),
+        _ => bail!(
+            "ui_resource_type: ui/ accepts only native .js modules, .css stylesheets, and fonts/*.woff2"
+        ),
     }
 }
 
@@ -74,6 +79,7 @@ fn blob_name(resource: &Resource) -> Result<String> {
     let extension = match resource.media_type.as_str() {
         JS => "js",
         CSS => "css",
+        WOFF2 => "woff2",
         _ => bail!("ui_resource_media_type"),
     };
     Ok(format!(
@@ -169,7 +175,9 @@ fn collect(
             collect(&entry.path(), &format!("{path}/"), sources, total)?;
         } else {
             ensure!(kind.is_file(), "ui_resource_special_file_forbidden");
-            if name.ends_with(".md") || name.ends_with(".html") {
+            // The Native UI builder validates this build-only lock before packaging;
+            // it is an app input, not a browser resource.
+            if path == "ui.lock.json" || name.ends_with(".md") || name.ends_with(".html") {
                 continue;
             }
             media_type(&path).with_context(|| format!("ui/{path}"))?;
@@ -198,14 +206,48 @@ pub fn copy_blobs(source: &Path, target: &Path, catalog: &Catalog) -> Result<()>
 }
 
 fn validate_source(path: &str, bytes: &[u8], catalog: &Catalog) -> Result<()> {
-    let source =
-        std::str::from_utf8(bytes).with_context(|| format!("ui/{path}: expected UTF-8"))?;
     match media_type(path)? {
-        JS => validate_javascript(source, path, catalog),
-        CSS => validate_css(source),
-        _ => unreachable!(),
+        WOFF2 => validate_woff2(bytes),
+        kind => {
+            let source =
+                std::str::from_utf8(bytes).with_context(|| format!("ui/{path}: expected UTF-8"))?;
+            match kind {
+                JS => validate_javascript(source, path, catalog),
+                CSS => validate_stylesheet(source, path, catalog),
+                _ => unreachable!(),
+            }
+        }
     }
     .with_context(|| format!("ui/{path}"))
+}
+
+fn validate_woff2(bytes: &[u8]) -> Result<()> {
+    ensure!(
+        bytes.len() >= WOFF2_HEADER_BYTES,
+        "ui_woff2_header_truncated"
+    );
+    ensure!(&bytes[..4] == b"wOF2", "ui_woff2_magic");
+    let declared_length = u32::from_be_bytes(bytes[8..12].try_into()?);
+    ensure!(
+        declared_length as usize == bytes.len(),
+        "ui_woff2_length_mismatch"
+    );
+    let tables = u16::from_be_bytes(bytes[12..14].try_into()?);
+    let sfnt_size = u32::from_be_bytes(bytes[16..20].try_into()?);
+    let compressed_size = u32::from_be_bytes(bytes[20..24].try_into()?);
+    ensure!(
+        tables > 0 && tables <= 4096 && sfnt_size > 0 && compressed_size > 0,
+        "ui_woff2_header_invalid"
+    );
+    ensure!(
+        sfnt_size as u64 <= MAX_PACK_BYTES,
+        "ui_woff2_sfnt_size_budget"
+    );
+    ensure!(
+        compressed_size as usize <= bytes.len() - WOFF2_HEADER_BYTES,
+        "ui_woff2_compressed_length_invalid"
+    );
+    Ok(())
 }
 
 fn resolve_import(path: &str, specifier: &str, catalog: &Catalog) -> Result<()> {
@@ -308,15 +350,45 @@ fn validate_javascript(source: &str, path: &str, catalog: &Catalog) -> Result<()
 
 pub fn validate_inline_style(source: &str) -> Result<()> {
     ensure!(source.len() <= 16_384, "ui_inline_style_budget");
-    validate_css(source)
+    validate_css(source, None)
 }
 
-fn validate_css(source: &str) -> Result<()> {
+fn validate_stylesheet(source: &str, path: &str, catalog: &Catalog) -> Result<()> {
+    validate_css(source, Some((path, catalog)))
+}
+
+fn validate_css(source: &str, stylesheet: Option<(&str, &Catalog)>) -> Result<()> {
     let mut input = ParserInput::new(source);
     let mut parser = Parser::new(&mut input);
     let mut remaining = 131_072;
-    css_tokens(&mut parser, 0, &mut remaining)
+    css_tokens(&mut parser, 0, &mut remaining, false, false, stylesheet)
         .map_err(|error| anyhow::anyhow!("ui_css_policy: {error:?}"))
+}
+
+fn resolve_font(path: &str, value: &str, catalog: &Catalog) -> Result<()> {
+    ensure!(
+        !value.starts_with('/')
+            && value.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'/')
+            })
+            && !value.split('/').any(|part| part.is_empty() || part == ".."),
+        "ui_css_font_url_not_relative"
+    );
+    let base = url::Url::parse(&format!("https://ui.invalid/_admitted/{path}"))?;
+    let resolved = base.join(value)?;
+    ensure!(
+        resolved.origin() == base.origin(),
+        "ui_css_font_url_external"
+    );
+    let relative = resolved
+        .path()
+        .strip_prefix("/_admitted/")
+        .context("ui_css_font_path_escape")?;
+    ensure!(
+        media_type(relative)? == WOFF2 && catalog.contains_key(relative),
+        "ui_css_font_unresolved: {value:?} from {path}; expected an admitted fonts/*.woff2 resource"
+    );
+    Ok(())
 }
 
 fn fragment_url(value: &str) -> bool {
@@ -334,10 +406,16 @@ fn css_tokens<'i>(
     parser: &mut Parser<'i, '_>,
     depth: usize,
     remaining: &mut usize,
+    in_font_face: bool,
+    in_font_src: bool,
+    stylesheet: Option<(&str, &Catalog)>,
 ) -> std::result::Result<(), ParseError<'i, &'static str>> {
     if depth > 64 {
         return Err(parser.new_custom_error("CSS nesting budget"));
     }
+    let mut next_block_is_font_face = false;
+    let mut next_ident_is_src = false;
+    let mut font_src_value = in_font_src;
     while !parser.is_exhausted() {
         if *remaining == 0 {
             return Err(parser.new_custom_error("CSS token budget"));
@@ -353,16 +431,38 @@ fn css_tokens<'i>(
                     parser.new_custom_error("@import is not admitted; keep styles in ui/app.css")
                 );
             }
+            Token::AtKeyword(name) => {
+                next_block_is_font_face = name.eq_ignore_ascii_case("font-face");
+            }
+            Token::Ident(name) if in_font_face => {
+                next_ident_is_src = name.eq_ignore_ascii_case("src");
+            }
+            Token::Colon if in_font_face => {
+                font_src_value = next_ident_is_src;
+                next_ident_is_src = false;
+            }
+            Token::Semicolon if in_font_face => {
+                font_src_value = false;
+                next_ident_is_src = false;
+            }
             Token::UnquotedUrl(value) if !fragment_url(&value) => {
-                return Err(parser.new_custom_error(
-                    "CSS resource URLs are not admitted; use app image assets in HTML",
-                ));
+                if !in_font_face || !font_src_value || !validate_font_url(stylesheet, &value) {
+                    return Err(parser.new_custom_error(
+                        "CSS resource URLs are not admitted; only catalog WOFF2 URLs in source @font-face are admitted",
+                    ));
+                }
             }
             Token::Function(name) if name.eq_ignore_ascii_case("url") => {
                 parser.parse_nested_block(|nested| {
                     let value = nested.expect_string()?.clone();
-                    if !fragment_url(&value) {
-                        return Err(nested.new_custom_error("CSS resource URLs are not admitted"));
+                    if !fragment_url(&value)
+                        && (!in_font_face
+                            || !font_src_value
+                            || !validate_font_url(stylesheet, &value))
+                    {
+                        return Err(nested.new_custom_error(
+                            "CSS resource URLs are not admitted; only catalog WOFF2 URLs in source @font-face are admitted",
+                        ));
                     }
                     nested.expect_exhausted()?;
                     Ok(())
@@ -375,14 +475,33 @@ fn css_tokens<'i>(
             {
                 return Err(parser.new_custom_error("CSS image/source functions are not admitted"));
             }
-            Token::Function(_)
-            | Token::ParenthesisBlock
-            | Token::SquareBracketBlock
-            | Token::CurlyBracketBlock => {
-                parser.parse_nested_block(|nested| css_tokens(nested, depth + 1, remaining))?;
+            Token::Function(_) | Token::ParenthesisBlock | Token::SquareBracketBlock => {
+                next_block_is_font_face = false;
+                parser.parse_nested_block(|nested| {
+                    css_tokens(
+                        nested,
+                        depth + 1,
+                        remaining,
+                        in_font_face,
+                        font_src_value,
+                        stylesheet,
+                    )
+                })?;
             }
-            _ => {}
+            Token::CurlyBracketBlock => {
+                let font_face = in_font_face || next_block_is_font_face;
+                next_block_is_font_face = false;
+                parser.parse_nested_block(|nested| {
+                    css_tokens(nested, depth + 1, remaining, font_face, false, stylesheet)
+                })?;
+            }
+            Token::WhiteSpace(_) | Token::Comment(_) => {}
+            _ => next_block_is_font_face = false,
         }
     }
     Ok(())
+}
+
+fn validate_font_url(stylesheet: Option<(&str, &Catalog)>, value: &str) -> bool {
+    stylesheet.is_some_and(|(path, catalog)| resolve_font(path, value, catalog).is_ok())
 }
