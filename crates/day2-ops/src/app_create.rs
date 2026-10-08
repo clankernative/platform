@@ -4,7 +4,6 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeSet,
     fs,
     io::{IsTerminal, Write},
     path::{Component, Path, PathBuf},
@@ -60,21 +59,33 @@ struct Manifest {
     legal: Vec<Entry>,
 }
 
+mod bundle;
+pub(crate) mod core;
+#[cfg(test)]
+mod evidence_tests;
+#[cfg(test)]
+pub(crate) mod simulation;
+#[cfg(test)]
+mod state_machine;
+
+use core::{Admission, Creation, Node, Ports, Snapshot};
+
 pub struct Session {
+    pub source: PathBuf,
+    pub provider_pin: Option<PathBuf>,
+    engine: Creation<Native>,
+}
+
+struct Native {
     stage: tempfile::TempDir,
     parent: fs::File,
     destination: PathBuf,
-    pub source: PathBuf,
-    pub provider_pin: Option<PathBuf>,
+    source: PathBuf,
+    provider_pin: Option<PathBuf>,
     operator_pin: Option<PathBuf>,
-    name: String,
-    written: bool,
-    identified: bool,
-    verified_artifact: Option<PathBuf>,
-    build_input: Option<String>,
 }
 
-fn sha(bytes: &[u8]) -> String {
+pub(crate) fn sha(bytes: &[u8]) -> String {
     format!("sha256:{:x}", Sha256::digest(bytes))
 }
 
@@ -128,59 +139,64 @@ fn write(root: &Path, path: &str, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn tree_digest(root: &Path) -> Result<String> {
+// Native enumeration debits bounds before allocating; the shared evidence guard
+// checks the complete snapshot again. Neither adapter silently truncates state.
+fn snapshot(root: &Path) -> Result<Snapshot> {
     fn visit(
         root: &Path,
         prefix: &str,
-        hash: &mut Sha256,
+        snapshot: &mut Snapshot,
         count: &mut usize,
         total: &mut usize,
     ) -> Result<()> {
         ensure!(prefix.split('/').count() <= 10, "scaffold tree depth");
-        // Debit the global entry budget before collecting or descending; a
-        // hostile wide directory must not allocate an unbounded listing.
-        let mut entries = Vec::new();
         for entry in fs::read_dir(root.join(prefix))? {
             *count += 1;
             ensure!(*count <= 8192, "scaffold tree entry budget");
-            entries.push(entry?);
-        }
-        entries.sort_by_key(|entry| entry.file_name());
-        for entry in entries {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_str().context("scaffold filename")?;
             let path = if prefix.is_empty() {
-                entry
-                    .file_name()
-                    .to_str()
-                    .context("scaffold filename")?
-                    .to_owned()
+                name.to_owned()
             } else {
-                format!(
-                    "{prefix}/{}",
-                    entry.file_name().to_str().context("scaffold filename")?
-                )
+                format!("{prefix}/{name}")
             };
+            ensure!(relative(&path), "scaffold tree path/depth");
             let kind = entry.file_type()?;
-            ensure!(!kind.is_symlink(), "scaffold tree symlink");
-            if kind.is_dir() {
-                visit(root, &path, hash, count, total)?;
-            } else {
-                ensure!(kind.is_file(), "scaffold tree special file");
+            let node = if kind.is_symlink() {
+                Node::Link
+            } else if kind.is_dir() {
+                Node::Directory
+            } else if kind.is_file() {
                 let bytes = regular(root, &path, 1_048_576)?;
                 *total = total
                     .checked_add(bytes.len())
                     .context("scaffold tree bytes")?;
                 ensure!(*total <= 64 * 1024 * 1024, "scaffold tree byte budget");
-                hash.update(path.as_bytes());
-                hash.update([0]);
-                hash.update(sha(&bytes).as_bytes());
-                hash.update([0]);
+                Node::File(bytes)
+            } else {
+                Node::Special
+            };
+            ensure!(!matches!(node, Node::Link), "scaffold tree symlink");
+            ensure!(!matches!(node, Node::Special), "scaffold tree special file");
+            let directory = matches!(node, Node::Directory);
+            snapshot.0.insert(path.clone(), node);
+            if directory {
+                visit(root, &path, snapshot, count, total)?;
             }
         }
         Ok(())
     }
-    let mut hash = Sha256::new();
-    visit(root, "", &mut hash, &mut 0, &mut 0)?;
-    Ok(format!("sha256:{:x}", hash.finalize()))
+    no_links(root)?;
+    let mut snapshot = Snapshot::default();
+    visit(root, "", &mut snapshot, &mut 0, &mut 0)?;
+    snapshot.digest()?;
+    Ok(snapshot)
+}
+
+#[cfg(test)]
+fn tree_digest(root: &Path) -> Result<String> {
+    snapshot(root)?.digest()
 }
 
 /// One bounded terminal answer; question order and UI decisions belong to Roc.
@@ -210,29 +226,9 @@ pub fn prompt_answer(question: &str) -> Result<Value> {
     Ok(json!({"yes": answer(question)?}))
 }
 
-impl Session {
-    pub fn begin(options: Options) -> Result<Self> {
-        day2::schema::identifier(&options.name)?;
-        ensure!(options.name.len() <= 48, "app name budget");
-        ensure!(
-            ["none", "html", "clanker"].contains(&options.ui.as_str()),
-            "unsupported UI choice"
-        );
-        ensure!(
-            (options.ui == "clanker")
-                == (!options.bundle.is_empty() && !options.bundle_sha256.is_empty())
-                && (options.ui == "clanker"
-                    || (options.bundle.is_empty() && options.bundle_sha256.is_empty())),
-            "bundle approval is required only for Clanker"
-        );
-        ensure!(
-            !options
-                .destination
-                .components()
-                .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
-                && !options.destination.as_os_str().is_empty(),
-            "unsafe destination path"
-        );
+impl Native {
+    fn begin(options: Options) -> Result<Self> {
+        core::validate_options(&options)?;
         let parent_path = options
             .destination
             .parent()
@@ -262,11 +258,6 @@ impl Session {
             source,
             provider_pin: None,
             operator_pin: None,
-            name: options.name,
-            written: false,
-            identified: false,
-            verified_artifact: None,
-            build_input: None,
         };
         if options.ui == "clanker" {
             session.capture_bundle(Path::new(&options.bundle), &options.bundle_sha256)?;
@@ -275,212 +266,115 @@ impl Session {
     }
 
     fn capture_bundle(&mut self, root: &Path, approval: &str) -> Result<()> {
+        struct Reader<'a>(&'a Path);
+
+        impl bundle::Reader for Reader<'_> {
+            fn read(&self, path: &str, budget: u64) -> Result<Vec<u8>> {
+                regular(self.0, path, budget)
+            }
+        }
         no_links(root)?;
-        let manifest_bytes = regular(root, "manifest.json", 1_048_576)?;
-        ensure!(
-            sha(&manifest_bytes) == approval,
-            "approved bundle manifest digest mismatch"
-        );
-        let manifest: Manifest = day2::json::decode(&manifest_bytes)?;
         let target = match (std::env::consts::OS, std::env::consts::ARCH) {
             ("linux", "x86_64") => "linux-x86_64",
             ("macos", "aarch64") => "macos-aarch64",
             _ => anyhow::bail!("installed bundle host unsupported"),
         };
-        ensure!(
-            manifest.schema_version == 1
-                && manifest.target == target
-                && manifest.provider == "clanker-ui.native"
-                && manifest.assembly_protocol == 2
-                && manifest.binding_abi == 2
-                && manifest.template_engine == "minijinja-2.12.0"
-                && !manifest.tool_version.is_empty()
-                && manifest.source_revision.len() == 40
-                && manifest.executable.path == "bin/clanker-ui"
-                && manifest.executable.bytes <= 64 * 1024 * 1024
-                && manifest.package.name == "@clanker/vanilla"
-                && !manifest.package.version.is_empty()
-                && !manifest.entries.is_empty()
-                && manifest.entries.len() <= 4096,
-            "unsupported installed bundle manifest"
-        );
-        // Legal bytes are a closed, separately captured release input, never
-        // catalog resources or app-authored executable authority.
-        ensure!(
-            manifest.legal.len() == 2,
-            "unsupported bundle legal closure"
-        );
-        for (entry, path) in manifest
-            .legal
-            .iter()
-            .zip(["legal/LICENSE", "legal/NOTICES.txt"])
-        {
-            ensure!(
-                entry.path == path && entry.bytes > 0 && entry.bytes <= 1_048_576,
-                "unsafe bundle legal member or budget"
-            );
-            let bytes = regular(root, path, 1_048_576)?;
-            ensure!(
-                bytes.len() == entry.bytes && sha(&bytes) == entry.digest,
-                "bundle legal member mismatch"
-            );
-            write(&self.source, &format!(".ui-dependencies/{path}"), &bytes)?;
+        let capture = bundle::capture(&Reader(root), approval, target)?;
+        for (path, bytes) in capture.files {
+            write(&self.source, &path, &bytes)?;
         }
-        let installed_pin: Value =
-            day2::json::decode(&regular(root, "provider-pin.json", 1_048_576)?)?;
-        ensure!(
-            installed_pin
-                == json!({
-                    "schemaVersion":1,"provider":manifest.provider,"assemblyProtocol":2,"bindingAbi":2,
-                    "targets":{target:{"executable":"bin/clanker-ui","digest":manifest.executable.digest}}
-                }),
-            "installed provider pin must name only the reviewed manifest executable"
-        );
         self.operator_pin = Some(root.canonicalize()?.join("provider-pin.json"));
-        let executable = regular(root, &manifest.executable.path, 64 * 1024 * 1024)?;
-        ensure!(
-            executable.len() == manifest.executable.bytes
-                && sha(&executable) == manifest.executable.digest,
-            "bundle executable mismatch"
-        );
-        // Recreate the generic operator pin from approved captured executable bytes.
-        // The app lock does not authorize any executable or fetch any dependency.
+        // Only the closed approved executable is recreated, not app authority.
         let adapter = self.stage.path().join("adapter");
-        fs::write(&adapter, executable)?;
+        fs::write(&adapter, capture.executable)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&adapter, fs::Permissions::from_mode(0o700))?;
         }
         let pin = self.stage.path().join("provider-pin.json");
-        fs::write(
-            &pin,
-            serde_json::to_vec(&json!({
-                "schemaVersion":1,"provider":manifest.provider,"assemblyProtocol":2,"bindingAbi":2,
-                "targets":{target:{"executable":"adapter","digest":manifest.executable.digest}}
-            }))?,
-        )?;
-        let mut sorted = manifest.entries.iter().collect::<Vec<_>>();
-        sorted.sort_by(|a, b| a.path.cmp(&b.path));
-        let mut hash = Sha256::new();
-        let mut names = BTreeSet::new();
-        let mut total = 0usize;
-        let mut inputs = Vec::new();
-        for entry in sorted {
-            ensure!(
-                relative(&entry.path)
-                    && names.insert(entry.path.to_ascii_lowercase())
-                    && entry.bytes <= 1_048_576,
-                "unsafe/colliding bundle member"
-            );
-            total = total
-                .checked_add(entry.bytes)
-                .context("bundle byte overflow")?;
-            ensure!(total <= 32 * 1024 * 1024, "bundle byte budget");
-            let bytes = regular(root, &format!("package/{}", entry.path), 1_048_576)?;
-            ensure!(
-                bytes.len() == entry.bytes && sha(&bytes) == entry.digest,
-                "bundle package member mismatch"
-            );
-            write(
-                &self.source,
-                &format!(".ui-dependencies/vanilla/{}", entry.path),
-                &bytes,
-            )?;
-            hash.update(entry.path.as_bytes());
-            hash.update([0]);
-            hash.update(entry.bytes.to_string().as_bytes());
-            hash.update([0]);
-            hash.update(entry.digest.as_bytes());
-            hash.update(b"\n");
-            inputs.push(json!({"path":entry.path,"bytes":entry.bytes,"digest":entry.digest}));
-        }
-        ensure!(
-            format!("sha256:{:x}", hash.finalize()) == manifest.package.digest,
-            "bundle package manifest mismatch"
-        );
-        write(
-            &self.source,
-            "ui/ui.lock.json",
-            &serde_json::to_vec_pretty(&json!({
-                "schemaVersion":1,"provider":manifest.provider,
-                "package":{"name":manifest.package.name,"version":manifest.package.version,
-                    "path":"../.ui-dependencies/vanilla","digest":manifest.package.digest,"inputs":inputs}
-            }))?,
-        )?;
+        fs::write(&pin, capture.pin)?;
         self.provider_pin = Some(pin);
         Ok(())
     }
+}
 
-    pub fn write_files(&mut self, files: Vec<SourceFile>) -> Result<()> {
-        ensure!(
-            !self.written && !files.is_empty() && files.len() <= 32,
-            "scaffold write state/budget"
-        );
-        let mut names = BTreeSet::new();
-        for file in &files {
-            ensure!(
-                relative(&file.path)
-                    && names.insert(file.path.to_ascii_lowercase())
-                    && file.content.len() <= 128_000
-                    && ["roc", "md", "html", "css"].contains(
-                        &Path::new(&file.path)
-                            .extension()
-                            .and_then(|s| s.to_str())
-                            .unwrap_or("")
-                    )
-                    && !file.path.starts_with(".ui-dependencies/")
-                    && file.path != "model-identities.json",
-                "unsafe scaffold file or budget"
-            );
-        }
-        for file in files {
-            write(&self.source, &file.path, file.content.as_bytes())?;
-        }
-        self.written = true;
-        Ok(())
+impl Session {
+    pub fn begin(options: Options) -> Result<Self> {
+        let name = options.name.clone();
+        let port = Native::begin(options)?;
+        let source = port.source.clone();
+        let provider_pin = port.provider_pin.clone();
+        Ok(Self {
+            source: source.clone(),
+            provider_pin,
+            engine: Creation::new(name, source, port)?,
+        })
     }
 
-    pub fn identity(&mut self, table: &str, roc_type: &str) -> Result<()> {
-        ensure!(self.written && !self.identified, "identity authoring state");
-        day2::identity::register_model(&self.source, table, roc_type)?;
-        self.identified = true;
-        Ok(())
+    pub fn write_files(&mut self, files: Vec<SourceFile>) -> Result<()> {
+        self.engine.write_files(files)
+    }
+
+    pub fn identity(
+        &mut self,
+        table: &str,
+        roc_type: &str,
+        entropy: &dyn day2::host_inputs::Entropy,
+    ) -> Result<()> {
+        self.engine.identity(table, roc_type, entropy)
     }
 
     pub fn check_build_source(&mut self, source: &Path) -> Result<()> {
-        ensure!(
-            self.identified && self.build_input.is_none() && source.canonicalize()? == self.source,
-            "build must use identified captured app exactly once"
-        );
-        self.build_input = Some(tree_digest(&self.source)?);
-        Ok(())
+        self.engine.check_build_source(source)
     }
 
     /// Called only by the ordinary native build adapter after its verified build succeeds.
     pub fn built(&mut self, artifact: &Path) -> Result<()> {
-        ensure!(
-            self.build_input.as_deref() == Some(tree_digest(&self.source)?.as_str()),
-            "scaffold changed during build"
-        );
-        let loaded = day2::artifact::LoadedArtifact::load(artifact)?;
-        ensure!(
-            loaded.contract().namespace == self.name,
-            "created artifact namespace mismatch"
-        );
-        self.verified_artifact = Some(artifact.to_path_buf());
-        Ok(())
+        self.engine.built(artifact)
     }
 
     pub fn publish(&mut self, artifact: &Path) -> Result<Value> {
-        ensure!(
-            self.verified_artifact.as_deref() == Some(artifact),
-            "ordinary verified build required before publication"
-        );
-        ensure!(
-            self.build_input.as_deref() == Some(tree_digest(&self.source)?.as_str()),
-            "scaffold changed after build"
-        );
+        self.engine.publish(artifact)
+    }
+}
+
+impl Ports for Native {
+    fn snapshot(&self) -> Result<Snapshot> {
+        snapshot(&self.source)
+    }
+
+    fn resolve_source(&self, source: &Path) -> Result<PathBuf> {
+        no_links(source)?;
+        Ok(source.canonicalize()?)
+    }
+
+    fn write(&mut self, files: &std::collections::BTreeMap<String, Vec<u8>>) -> Result<()> {
+        for (path, bytes) in files {
+            if path == day2::identity::REGISTRY_FILE {
+                // Preserve the native registry's atomic no-clobber authoring
+                // boundary; bytes and entropy decisions belong to the pure core.
+                let mut temporary = tempfile::NamedTempFile::new_in(&self.source)?;
+                temporary.write_all(bytes)?;
+                temporary.as_file().sync_all()?;
+                temporary.persist_noclobber(self.source.join(path))?;
+            } else {
+                write(&self.source, path, bytes)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn admit(&self, artifact: &Path) -> Result<Admission> {
+        let loaded = day2::artifact::LoadedArtifact::load(artifact)?;
+        Ok(Admission {
+            artifact: artifact.to_path_buf(),
+            identity: loaded.id().to_owned(),
+            namespace: loaded.contract().namespace.clone(),
+        })
+    }
+
+    fn publish(&mut self, artifact: &Path) -> Result<Value> {
         let leaf = self
             .destination
             .file_name()
@@ -533,7 +427,7 @@ mod tests {
         let root = private_test_root()?;
         let output = root.path().join("app");
         let session = Session::begin(options(output.clone()))?;
-        let staging = session.stage.path().to_path_buf();
+        let staging = session.engine.port.stage.path().to_path_buf();
         assert!(!output.exists());
         drop(session);
         assert!(!staging.exists());
@@ -548,7 +442,6 @@ mod tests {
     fn unsafe_sources_and_unverified_publication_fail() -> Result<()> {
         let root = private_test_root()?;
         let output = root.path().join("app");
-        let mut session = Session::begin(options(output.clone()))?;
         for path in [
             "../escape.roc",
             "/absolute.roc",
@@ -558,15 +451,20 @@ mod tests {
             "build.sh",
             "model-identities.json",
         ] {
+            let mut session = Session::begin(options(output.clone()))?;
+            let error = session
+                .write_files(vec![SourceFile {
+                    path: path.into(),
+                    content: "x".into(),
+                }])
+                .unwrap_err();
             assert!(
-                session
-                    .write_files(vec![SourceFile {
-                        path: path.into(),
-                        content: "x".into()
-                    }])
-                    .is_err()
+                error.to_string().contains("unsafe scaffold file or budget"),
+                "{path}: {error}"
             );
+            assert!(!output.exists());
         }
+        let mut session = Session::begin(options(output.clone()))?;
         assert!(session.publish(Path::new("fake-artifact")).is_err());
         assert!(!output.exists());
         Ok(())
@@ -676,7 +574,10 @@ mod tests {
         assert_eq!(lock["schemaVersion"], 1);
         assert_eq!(lock["package"]["name"], "@clanker/vanilla");
         assert_eq!(lock["package"]["path"], "../.ui-dependencies/vanilla");
-        assert_eq!(session.operator_pin, Some(bundle.join("provider-pin.json")));
+        assert_eq!(
+            session.engine.port.operator_pin,
+            Some(bundle.join("provider-pin.json"))
+        );
         assert!(session.provider_pin.as_ref().unwrap().is_file());
         assert!(!root.path().join("app").exists());
         Ok(())
@@ -835,15 +736,17 @@ mod tests {
                 path: "README.md".into(),
                 content: "captured".into(),
             }])?;
-            // Test-only direct state injection isolates the native rename boundary;
-            // production can set these fields only after the ordinary build adapter.
-            session.build_input = Some(tree_digest(&session.source)?);
-            session.verified_artifact = Some(PathBuf::from("verified-test-artifact"));
+            // Isolate the unchanged atomic native rename port, just as the
+            // original test's injected build state did. The shared guard itself
+            // is exercised separately by the complete no-FS state-machine campaign.
             if race {
                 fs::create_dir(&output)?;
                 fs::write(output.join("keep"), "racer")?;
             }
-            let result = session.publish(Path::new("verified-test-artifact"));
+            let result = session
+                .engine
+                .port
+                .publish(Path::new("verified-test-artifact"));
             if race {
                 assert!(result.is_err());
                 assert_eq!(fs::read_to_string(output.join("keep"))?, "racer");
@@ -863,15 +766,52 @@ mod tests {
             path: "README.md".into(),
             content: "captured".into(),
         }])?;
-        session.build_input = Some(tree_digest(&session.source)?);
-        session.verified_artifact = Some(PathBuf::from("verified-test-artifact"));
+        session.engine.test_built(Admission {
+            artifact: PathBuf::from("verified-test-artifact"),
+            identity: "test-artifact".into(),
+            namespace: "starter".into(),
+        })?;
         fs::write(session.source.join("README.md"), "changed")?;
+        let error = session
+            .publish(Path::new("verified-test-artifact"))
+            .unwrap_err();
+        assert!(error.to_string().contains("captured scaffold changed"));
+        assert!(!root.path().join("app").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn native_and_memory_identity_evidence_match_and_both_reject_capture_tamper() -> Result<()> {
+        use super::simulation::{Memory, SeededEntropy};
+        let root = private_test_root()?;
+        let output = root.path().join("app");
+        let mut native = Session::begin(options(output.clone()))?;
+        let mut memory = Memory::begin(&options(output.clone()))?;
+        native.write_files(super::state_machine::sources())?;
+        memory.write_files(super::state_machine::sources())?;
+        native.identity("starters", "Models.StarterRecord", &SeededEntropy::new(130))?;
+        memory.identity("starters", "Models.StarterRecord", &SeededEntropy::new(130))?;
+        let captured = memory.port.snapshot()?;
+        assert_eq!(
+            fs::read(native.source.join(day2::identity::REGISTRY_FILE))?,
+            captured.bytes(day2::identity::REGISTRY_FILE)?
+        );
+        assert_eq!(native.engine.port.snapshot()?.digest()?, captured.digest()?);
+        fs::write(native.source.join("README.md"), "tampered")?;
+        memory
+            .port
+            .tree
+            .0
+            .insert("README.md".into(), Node::File(b"tampered".to_vec()));
+        let source = native.source.clone();
+        assert!(native.check_build_source(&source).is_err());
         assert!(
-            session
-                .publish(Path::new("verified-test-artifact"))
+            memory
+                .check_build_source(Path::new("/captured-source"))
                 .is_err()
         );
-        assert!(!root.path().join("app").exists());
+        assert!(!output.exists());
+        assert_eq!(memory.port.publications, 0);
         Ok(())
     }
 

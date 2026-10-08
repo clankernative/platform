@@ -597,6 +597,7 @@ dependencies = [
  "day2",
  "day2-capabilities",
  "flate2",
+ "proptest",
  "reqwest",
  "rusqlite",
  "rustix",
