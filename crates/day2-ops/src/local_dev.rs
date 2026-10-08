@@ -162,6 +162,127 @@ fn atomic_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+// Contract-only ports: no app authority, watcher clocks, or random scheduling.
+trait ContractCapture {
+    fn capture(&mut self, artifact_directory: &Path) -> Result<Vec<u8>>;
+}
+
+trait ContractPublisher {
+    fn remove_stale(&mut self, path: &Path) -> Result<()>;
+
+    fn publish(&mut self, path: &Path, bytes: &[u8]) -> Result<()>;
+}
+
+struct FilesystemContractCapture;
+struct FilesystemContractPublisher;
+
+impl ContractCapture for FilesystemContractCapture {
+    fn capture(&mut self, artifact_directory: &Path) -> Result<Vec<u8>> {
+        // Normal artifact admission is mandatory, even for a previously served artifact.
+        day2::app_contracts::export_bytes(artifact_directory)
+    }
+}
+
+impl ContractPublisher for FilesystemContractPublisher {
+    fn remove_stale(&mut self, path: &Path) -> Result<()> {
+        match fs::symlink_metadata(path) {
+            Ok(_) => fs::remove_file(path).map_err(Into::into),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn publish(&mut self, path: &Path, bytes: &[u8]) -> Result<()> {
+        // Entropy for temporary names and all atomic filesystem effects belong to
+        // this adapter. Cleanup made the output absent; races must not clobber it.
+        let mut file =
+            tempfile::NamedTempFile::new_in(path.parent().context("local file parent")?)?;
+        file.as_file()
+            .set_permissions(fs::Permissions::from_mode(0o600))?;
+        file.write_all(bytes)?;
+        file.as_file().sync_all()?;
+        file.persist_noclobber(path)?;
+        Ok(())
+    }
+}
+
+enum ContractStep {
+    Cleanup,
+    Capture,
+    Publish { bytes: Vec<u8>, digest: String },
+    Done(Value),
+}
+
+enum ContractObservation {
+    Cleaned(Result<()>),
+    Captured(Result<Vec<u8>>),
+    Published(Result<()>),
+}
+
+impl ContractStep {
+    // Pure reducer: observations are data. Failures never advertise an output,
+    // and identity validation happens before requesting any publication.
+    fn advance(self, path: &Path, artifact_id: &str, observation: ContractObservation) -> Self {
+        let next = (|| -> Result<Self> {
+            match (self, observation) {
+                (Self::Cleanup, ContractObservation::Cleaned(result)) => {
+                    result.context("remove stale app contracts")?;
+                    Ok(Self::Capture)
+                }
+                (Self::Capture, ContractObservation::Captured(result)) => {
+                    let bytes = result?;
+                    ensure!(
+                        bytes.len() <= 4 * 1024 * 1024,
+                        "app contract export byte budget exceeded"
+                    );
+                    let document: Value = serde_json::from_slice(&bytes)?;
+                    ensure!(
+                        document["artifact"].as_str() == Some(artifact_id),
+                        "exported app contract artifact differs from served artifact"
+                    );
+                    let digest = day2::digest(&bytes);
+                    Ok(Self::Publish { bytes, digest })
+                }
+                (Self::Publish { digest, .. }, ContractObservation::Published(result)) => {
+                    result.context("write app contracts")?;
+                    Ok(Self::Done(json!({
+                        "path":path,
+                        "artifact":artifact_id,
+                        "sha256":digest.strip_prefix("sha256:").unwrap_or(&digest),
+                    })))
+                }
+                _ => bail!("invalid app contract publication observation"),
+            }
+        })();
+        next.unwrap_or_else(|error| {
+            Self::Done(json!({"error":format!("{error:#}"),"artifact":artifact_id}))
+        })
+    }
+}
+
+fn contract_status_with(
+    path: &Path,
+    artifact_directory: &Path,
+    artifact_id: &str,
+    capture: &mut impl ContractCapture,
+    publisher: &mut impl ContractPublisher,
+) -> Value {
+    let mut step = ContractStep::Cleanup;
+    loop {
+        let observation = match &step {
+            ContractStep::Cleanup => ContractObservation::Cleaned(publisher.remove_stale(path)),
+            ContractStep::Capture => {
+                ContractObservation::Captured(capture.capture(artifact_directory))
+            }
+            ContractStep::Publish { bytes, .. } => {
+                ContractObservation::Published(publisher.publish(path, bytes))
+            }
+            ContractStep::Done(status) => return status.clone(),
+        };
+        step = step.advance(path, artifact_id, observation);
+    }
+}
+
 fn control(directory: &Path, action: &str) -> Result<Option<Value>> {
     let socket = directory.join("control.sock");
     if !socket.exists() {
@@ -732,26 +853,13 @@ impl Session {
     }
 
     fn contracts(&self, artifact_directory: &Path, artifact_id: &str) -> Value {
-        let path = self.directory.join("app-contracts.json");
-        let result = (|| -> Result<Value> {
-            if path.exists() || fs::symlink_metadata(&path).is_ok() {
-                fs::remove_file(&path).context("remove stale app contracts")?;
-            }
-            let bytes = day2::app_contracts::export_bytes(artifact_directory)?;
-            let document: Value = serde_json::from_slice(&bytes)?;
-            ensure!(
-                document["artifact"].as_str() == Some(artifact_id),
-                "exported app contract artifact differs from served artifact"
-            );
-            atomic_bytes(&path, &bytes).context("write app contracts")?;
-            let digest = day2::digest(&bytes);
-            Ok(json!({
-                "path":path,
-                "artifact":artifact_id,
-                "sha256":digest.strip_prefix("sha256:").unwrap_or(&digest),
-            }))
-        })();
-        result.unwrap_or_else(|error| json!({"error":format!("{error:#}"),"artifact":artifact_id}))
+        contract_status_with(
+            &self.directory.join("app-contracts.json"),
+            artifact_directory,
+            artifact_id,
+            &mut FilesystemContractCapture,
+            &mut FilesystemContractPublisher,
+        )
     }
 
     fn ready(&self, info: Value) -> Result<()> {
@@ -1132,6 +1240,221 @@ mod contract_tests {
                 data_requested: false,
             },
         )
+    }
+
+    struct MemoryCapture {
+        bytes: Vec<u8>,
+        fail: bool,
+        trace: std::rc::Rc<std::cell::RefCell<Vec<Value>>>,
+    }
+
+    impl ContractCapture for MemoryCapture {
+        fn capture(&mut self, _: &Path) -> Result<Vec<u8>> {
+            self.trace.borrow_mut().push(json!("capture"));
+            ensure!(!self.fail, "capture failed");
+            Ok(self.bytes.clone())
+        }
+    }
+
+    struct MemoryPublisher {
+        file: Option<Vec<u8>>,
+        cleanup_fail: bool,
+        publish_fail: bool,
+        race: bool,
+        trace: std::rc::Rc<std::cell::RefCell<Vec<Value>>>,
+    }
+
+    impl ContractPublisher for MemoryPublisher {
+        fn remove_stale(&mut self, _: &Path) -> Result<()> {
+            self.trace.borrow_mut().push(json!("cleanup"));
+            ensure!(!self.cleanup_fail, "cleanup failed");
+            self.file = None;
+            Ok(())
+        }
+
+        fn publish(&mut self, _: &Path, bytes: &[u8]) -> Result<()> {
+            self.trace.borrow_mut().push(json!({"publish":bytes}));
+            if self.race {
+                self.file = Some(b"racer".to_vec());
+            }
+            ensure!(!self.publish_fail, "publish failed");
+            ensure!(self.file.is_none(), "output exists");
+            self.file = Some(bytes.to_vec());
+            Ok(())
+        }
+    }
+
+    struct PublicationReplayTrace {
+        seed: u64,
+        records: Vec<Value>,
+    }
+
+    impl Drop for PublicationReplayTrace {
+        fn drop(&mut self) {
+            if std::thread::panicking() {
+                let save = (|| -> Result<PathBuf> {
+                    let root = tempfile::tempdir()?;
+                    fs::write(
+                        root.path().join("contract-publication-replay.json"),
+                        serde_json::to_vec(&json!({"seed":self.seed,"records":self.records}))?,
+                    )?;
+                    Ok(root.keep())
+                })();
+                eprintln!("contract publication failure replay: {save:?}");
+            }
+        }
+    }
+
+    fn replay_publications(seed: u64) -> Result<Vec<u8>> {
+        let mut schedule = seed;
+        let mut evidence = PublicationReplayTrace {
+            seed,
+            records: Vec::new(),
+        };
+        let records = &mut evidence.records;
+        for _ in 0..64 {
+            schedule = schedule.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let case = (schedule >> 32) % 8;
+            let bytes = match case {
+                3 => br#"{"artifact":"sha256:other"}"#.to_vec(),
+                5 => b"not json".to_vec(),
+                6 => vec![b' '; 4 * 1024 * 1024 + 1],
+                _ => br#"{"artifact":"sha256:served"}"#.to_vec(),
+            };
+            let trace = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let mut capture = MemoryCapture {
+                bytes: bytes.clone(),
+                fail: case == 2,
+                trace: trace.clone(),
+            };
+            let mut publisher = MemoryPublisher {
+                file: Some(b"stale".to_vec()),
+                cleanup_fail: case == 1,
+                publish_fail: case == 4,
+                race: case == 7,
+                trace: trace.clone(),
+            };
+            let path = Path::new("/session/app-contracts.json");
+            let status = contract_status_with(
+                path,
+                Path::new("/artifact"),
+                "sha256:served",
+                &mut capture,
+                &mut publisher,
+            );
+            let ready = json!({"state":"ready","artifact":"sha256:served","contracts":status});
+            let expected_file = match case {
+                0 => Some(bytes.clone()),
+                1 => Some(b"stale".to_vec()),
+                7 => Some(b"racer".to_vec()),
+                _ => None,
+            };
+            let expected_trace = match case {
+                1 => json!(["cleanup"]),
+                0 | 4 | 7 => json!(["cleanup", "capture", {"publish":bytes}]),
+                _ => json!(["cleanup", "capture"]),
+            };
+            records.push(
+                json!({"case":case,"status":ready,"file":publisher.file,"trace":*trace.borrow()}),
+            );
+            assert_eq!(
+                publisher.file, expected_file,
+                "seed={seed} trace={records:?}"
+            );
+            assert_eq!(
+                serde_json::to_value(&*trace.borrow())?,
+                expected_trace,
+                "seed={seed} trace={records:?}"
+            );
+            assert_eq!(ready["state"], "ready");
+            assert_eq!(status["artifact"], "sha256:served");
+            if case == 0 {
+                let digest = day2::digest(&bytes);
+                assert_eq!(
+                    status,
+                    json!({"artifact":"sha256:served","path":path,"sha256":&digest[7..]})
+                );
+            } else {
+                assert!(status["error"].is_string(), "seed={seed} trace={records:?}");
+                assert!(status.get("path").is_none());
+                assert!(status.get("sha256").is_none());
+                let message = match case {
+                    1 => "remove stale app contracts: cleanup failed",
+                    2 => "capture failed",
+                    3 => "exported app contract artifact differs from served artifact",
+                    4 => "write app contracts: publish failed",
+                    5 => "expected ident",
+                    6 => "app contract export byte budget exceeded",
+                    7 => "write app contracts: output exists",
+                    _ => unreachable!(),
+                };
+                assert!(status["error"].as_str().unwrap().contains(message));
+            }
+        }
+        Ok(serde_json::to_vec(&json!({"seed":seed,"records":records}))?)
+    }
+
+    #[test]
+    fn seeded_contract_status_and_publication_replay_byte_identically() -> Result<()> {
+        for seed in [0, 42, 130, u64::MAX] {
+            let trace = replay_publications(seed)?;
+            assert_eq!(trace, replay_publications(seed)?);
+            let root = tempfile::tempdir()?;
+            let path = root.path().join("contract-publication-replay.json");
+            fs::write(&path, &trace)?;
+            let replay: Value = serde_json::from_slice(&fs::read(path)?)?;
+            assert_eq!(
+                trace,
+                replay_publications(replay["seed"].as_u64().unwrap())?
+            );
+            eprintln!("contract publication replay: {}", root.keep().display());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn out_of_order_contract_observation_fails_closed() {
+        let step = ContractStep::Cleanup.advance(
+            Path::new("/output"),
+            "sha256:served",
+            ContractObservation::Published(Ok(())),
+        );
+        let ContractStep::Done(status) = step else {
+            panic!("invalid sequence must finish")
+        };
+        assert_eq!(status["artifact"], "sha256:served");
+        assert!(status["error"].is_string());
+        assert!(status.get("path").is_none());
+    }
+
+    #[test]
+    fn filesystem_contract_publication_is_private_and_no_clobber() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("app-contracts.json");
+        let mut publisher = FilesystemContractPublisher;
+        publisher.publish(&path, b"current")?;
+        assert_eq!(fs::read(&path)?, b"current");
+        assert_eq!(
+            fs::symlink_metadata(&path)?.permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(publisher.publish(&path, b"replacement").is_err());
+        assert_eq!(fs::read(&path)?, b"current");
+        publisher.remove_stale(&path)?;
+        let artifact = root.path().join("artifact.json");
+        fs::write(&artifact, b"admitted")?;
+        fs::hard_link(&artifact, &path)?;
+        assert!(publisher.publish(&path, b"replacement").is_err());
+        assert_eq!(fs::read(&artifact)?, b"admitted");
+        assert_eq!(fs::read(&path)?, b"admitted");
+        publisher.remove_stale(&path)?;
+        std::os::unix::fs::symlink(&artifact, &path)?;
+        assert!(publisher.publish(&path, b"replacement").is_err());
+        assert_eq!(fs::read(&artifact)?, b"admitted");
+        publisher.remove_stale(&path)?;
+        assert_eq!(fs::read(&artifact)?, b"admitted");
+        assert_eq!(fs::read_dir(root.path())?.count(), 1);
+        Ok(())
     }
 
     #[test]

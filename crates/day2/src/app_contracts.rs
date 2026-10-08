@@ -146,13 +146,77 @@ struct Example {
 }
 
 pub fn export_file(artifact_directory: &Path, output: Option<&Path>) -> Result<()> {
-    let bytes = export_bytes(artifact_directory)?;
-    if let Some(path) = output {
-        write_output(prepare_output(artifact_directory, path)?, &bytes)?;
-    } else {
-        println!("{}", String::from_utf8(bytes)?);
+    export_file_with(
+        artifact_directory,
+        output,
+        &mut FilesystemArtifactCapture,
+        &mut FilesystemTemplateCapture,
+        &mut FilesystemPublication,
+    )
+}
+
+// These ports are private operator internals, never app capabilities. Production
+// entrypoints always select normal admission; only private tests substitute captures.
+trait ArtifactCapture {
+    fn capture(&mut self, directory: &Path) -> Result<LoadedArtifact>;
+}
+
+trait TemplateCapture {
+    fn capture(
+        &mut self,
+        directory: &Path,
+        artifact: &Artifact,
+    ) -> Result<BTreeMap<String, String>>;
+}
+
+trait Publication {
+    fn publish(&mut self, directory: &Path, output: Option<&Path>, bytes: &[u8]) -> Result<()>;
+}
+
+struct FilesystemArtifactCapture;
+struct FilesystemTemplateCapture;
+struct FilesystemPublication;
+
+impl TemplateCapture for FilesystemTemplateCapture {
+    fn capture(
+        &mut self,
+        directory: &Path,
+        artifact: &Artifact,
+    ) -> Result<BTreeMap<String, String>> {
+        crate::web_templates::validate(&artifact.templates)?;
+        artifact
+            .templates
+            .iter()
+            .map(|(path, template)| {
+                Ok((
+                    path.clone(),
+                    crate::web_templates::read_blob(directory, template)?,
+                ))
+            })
+            .collect()
     }
-    Ok(())
+}
+
+impl Publication for FilesystemPublication {
+    fn publish(&mut self, directory: &Path, output: Option<&Path>, bytes: &[u8]) -> Result<()> {
+        if let Some(path) = output {
+            write_output(prepare_output(directory, path)?, bytes)
+        } else {
+            println!("{}", std::str::from_utf8(bytes)?);
+            Ok(())
+        }
+    }
+}
+
+fn export_file_with(
+    directory: &Path,
+    output: Option<&Path>,
+    artifact_capture: &mut impl ArtifactCapture,
+    template_capture: &mut impl TemplateCapture,
+    publication: &mut impl Publication,
+) -> Result<()> {
+    let bytes = export_bytes_with(directory, artifact_capture, template_capture)?;
+    publication.publish(directory, output, &bytes)
 }
 
 struct OutputFile {
@@ -223,31 +287,57 @@ fn write_output(output: OutputFile, bytes: &[u8]) -> Result<()> {
 }
 
 pub fn export_bytes(artifact_directory: &Path) -> Result<Vec<u8>> {
-    let metadata = fs::symlink_metadata(artifact_directory)?;
-    ensure!(
-        metadata.file_type().is_dir(),
-        "artifact path must be a directory"
-    );
-    let artifact_directory = artifact_directory.canonicalize()?;
-    for (file, maximum, label) in [
-        ("artifact.json", MAX_ARTIFACT_BYTES, "artifact"),
-        ("worker", MAX_WORKER_BYTES, "worker"),
-        (
-            "checked-types.json",
-            MAX_CHECKED_TYPES_BYTES,
-            "checked types",
-        ),
-    ] {
-        let path = artifact_directory.join(file);
-        let metadata = fs::symlink_metadata(path)?;
+    export_bytes_with(
+        artifact_directory,
+        &mut FilesystemArtifactCapture,
+        &mut FilesystemTemplateCapture,
+    )
+}
+
+impl ArtifactCapture for FilesystemArtifactCapture {
+    fn capture(&mut self, artifact_directory: &Path) -> Result<LoadedArtifact> {
+        let metadata = fs::symlink_metadata(artifact_directory)?;
         ensure!(
-            metadata.file_type().is_file() && metadata.len() <= maximum,
-            "app contract {label} file type or byte budget invalid"
+            metadata.file_type().is_dir(),
+            "artifact path must be a directory"
         );
+        let artifact_directory = artifact_directory.canonicalize()?;
+        for (file, maximum, label) in [
+            ("artifact.json", MAX_ARTIFACT_BYTES, "artifact"),
+            ("worker", MAX_WORKER_BYTES, "worker"),
+            (
+                "checked-types.json",
+                MAX_CHECKED_TYPES_BYTES,
+                "checked types",
+            ),
+        ] {
+            let path = artifact_directory.join(file);
+            let metadata = fs::symlink_metadata(path)?;
+            ensure!(
+                metadata.file_type().is_file() && metadata.len() <= maximum,
+                "app contract {label} file type or byte budget invalid"
+            );
+        }
+        LoadedArtifact::load(&artifact_directory)
     }
-    let artifact = LoadedArtifact::load(&artifact_directory)?;
-    let document = export(artifact.id(), artifact.contract(), &artifact_directory)?;
-    let bytes = serde_json::to_vec_pretty(&document)?;
+}
+
+fn export_bytes_with(
+    directory: &Path,
+    artifact_capture: &mut impl ArtifactCapture,
+    template_capture: &mut impl TemplateCapture,
+) -> Result<Vec<u8>> {
+    let artifact = artifact_capture.capture(directory)?;
+    let templates = template_capture.capture(artifact.directory(), artifact.contract())?;
+    project_bytes(artifact.id(), artifact.contract(), &templates)
+}
+
+fn project_bytes(
+    artifact_id: &str,
+    artifact: &Artifact,
+    templates: &BTreeMap<String, String>,
+) -> Result<Vec<u8>> {
+    let bytes = serde_json::to_vec_pretty(&export(artifact_id, artifact, templates)?)?;
     ensure!(
         bytes.len() <= MAX_EXPORT_BYTES,
         "app contract export byte budget exceeded"
@@ -258,8 +348,23 @@ pub fn export_bytes(artifact_directory: &Path) -> Result<Vec<u8>> {
 fn export<'a>(
     artifact_id: &str,
     artifact: &'a Artifact,
-    artifact_directory: &Path,
+    templates: &BTreeMap<String, String>,
 ) -> Result<Export<'a>> {
+    crate::web_templates::validate(&artifact.templates)?;
+    ensure!(
+        templates.len() == artifact.templates.len(),
+        "app contract template snapshot catalog mismatch"
+    );
+    for (path, template) in &artifact.templates {
+        let source = templates
+            .get(path)
+            .with_context(|| format!("app contract template snapshot missing: {path}"))?;
+        ensure!(
+            source.len() as u64 == template.bytes
+                && crate::digest(source.as_bytes()) == template.digest,
+            "template_digest_mismatch"
+        );
+    }
     ensure!(
         artifact.format >= 7,
         "app contracts require explicit admitted routes"
@@ -294,7 +399,7 @@ fn export<'a>(
         query.routes.sort();
     }
     let commands = export_commands(artifact, definition)?;
-    let forms = export_forms(artifact, artifact_directory)?;
+    let forms = export_forms(templates)?;
     let schedules = artifact
         .schedules
         .iter()
@@ -507,12 +612,11 @@ fn export_commands(
     Ok(commands)
 }
 
-fn export_forms(artifact: &Artifact, artifact_directory: &Path) -> Result<Vec<FormExport>> {
+fn export_forms(templates: &BTreeMap<String, String>) -> Result<Vec<FormExport>> {
     let mut forms = Vec::new();
     let selector = scraper::Selector::parse("form[data-command]").expect("static selector");
-    for (path, template) in &artifact.templates {
-        let source = crate::web_templates::read_blob(artifact_directory, template)?;
-        let html = scraper::Html::parse_fragment(&source);
+    for (path, source) in templates {
+        let html = scraper::Html::parse_fragment(source);
         for form in html.select(&selector) {
             let command = form
                 .value()
@@ -876,8 +980,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn export_projects_admitted_routes_defaults_descriptions_and_examples() -> Result<()> {
+    fn fixture() -> Result<(Artifact, BTreeMap<String, String>)> {
         let schema = crate::schema::Schema {
             models: BTreeMap::new(),
             inputs: BTreeMap::from([(
@@ -954,19 +1057,10 @@ mod tests {
             operation: command.intent.target.clone(),
             additional_operations: Vec::new(),
         };
-        let directory = tempfile::tempdir()?;
         let template_bytes =
             b"<form data-command=\"gallery.save\"><input name=\"limit\" type=\"number\"></form>";
         let template_digest = crate::digest(template_bytes);
-        fs::create_dir(directory.path().join("web_templates"))?;
-        fs::write(
-            directory
-                .path()
-                .join("web_templates")
-                .join(format!("{}.html", &template_digest[7..])),
-            template_bytes,
-        )?;
-        let mut artifact = Artifact {
+        let artifact = Artifact {
             format: crate::artifact::CURRENT_FORMAT,
             app_contract: Some(crate::app_contract::Definition {
                 operations: BTreeMap::from([
@@ -1069,8 +1163,19 @@ mod tests {
             sources: BTreeMap::new(),
             admission: "local-spike-only".into(),
         };
-        let serialized =
-            serde_json::to_value(export("sha256:fixture", &artifact, directory.path())?)?;
+        Ok((
+            artifact,
+            BTreeMap::from([(
+                "pages/home.html".into(),
+                String::from_utf8(template_bytes.to_vec())?,
+            )]),
+        ))
+    }
+
+    #[test]
+    fn export_projects_admitted_routes_defaults_descriptions_and_examples() -> Result<()> {
+        let (mut artifact, templates) = fixture()?;
+        let serialized = serde_json::to_value(export("sha256:fixture", &artifact, &templates)?)?;
         assert_eq!(serialized["schemaVersion"], 1);
         assert_eq!(serialized["kind"], "clanker-app-contracts");
         assert_eq!(serialized["artifact"], "sha256:fixture");
@@ -1148,17 +1253,15 @@ mod tests {
             serialized["templateContext"]["shared"]["company"]["kind"],
             "record"
         );
-        let first_bytes =
-            serde_json::to_vec_pretty(&export("sha256:fixture", &artifact, directory.path())?)?;
+        let first_bytes = project_bytes("sha256:fixture", &artifact, &templates)?;
         artifact.operations.reverse();
         artifact.pages.reverse();
         assert_eq!(
             first_bytes,
-            serde_json::to_vec_pretty(&export("sha256:fixture", &artifact, directory.path())?)?
+            project_bytes("sha256:fixture", &artifact, &templates)?
         );
         artifact.pages.clear();
-        let unrouted =
-            serde_json::to_value(export("sha256:fixture", &artifact, directory.path())?)?;
+        let unrouted = serde_json::to_value(export("sha256:fixture", &artifact, &templates)?)?;
         assert_eq!(unrouted["queries"]["gallery.list"]["routes"], json!([]));
         assert_eq!(unrouted["queries"]["gallery.list"]["api"]["method"], "GET");
         artifact
@@ -1169,7 +1272,247 @@ mod tests {
             .get_mut("gallery.list")
             .unwrap()
             .response_example = r#"{"title":42}"#.into();
-        assert!(export("sha256:fixture", &artifact, directory.path()).is_err());
+        assert!(export("sha256:fixture", &artifact, &templates).is_err());
+        Ok(())
+    }
+
+    struct MemoryArtifactCapture {
+        artifact: Artifact,
+        fail: bool,
+        trace: std::rc::Rc<std::cell::RefCell<Vec<Value>>>,
+    }
+
+    impl ArtifactCapture for MemoryArtifactCapture {
+        fn capture(&mut self, directory: &Path) -> Result<LoadedArtifact> {
+            self.trace.borrow_mut().push(json!("artifact"));
+            ensure!(!self.fail, "injected artifact capture failure");
+            Ok(LoadedArtifact::from_contract_for_tests(
+                "sha256:fixture".into(),
+                directory.to_path_buf(),
+                self.artifact.clone(),
+            ))
+        }
+    }
+
+    struct MemoryTemplateCapture {
+        templates: BTreeMap<String, String>,
+        fail: bool,
+        trace: std::rc::Rc<std::cell::RefCell<Vec<Value>>>,
+    }
+
+    impl TemplateCapture for MemoryTemplateCapture {
+        fn capture(&mut self, _: &Path, _: &Artifact) -> Result<BTreeMap<String, String>> {
+            self.trace.borrow_mut().push(json!("templates"));
+            ensure!(!self.fail, "injected template capture failure");
+            Ok(self.templates.clone())
+        }
+    }
+
+    struct MemoryPublication {
+        bytes: Option<Vec<u8>>,
+        fail: bool,
+        trace: std::rc::Rc<std::cell::RefCell<Vec<Value>>>,
+    }
+
+    impl Publication for MemoryPublication {
+        fn publish(&mut self, _: &Path, _: Option<&Path>, bytes: &[u8]) -> Result<()> {
+            self.trace.borrow_mut().push(json!("publish"));
+            ensure!(!self.fail, "injected publication failure");
+            self.bytes = Some(bytes.to_vec());
+            Ok(())
+        }
+    }
+
+    struct ExportReplayTrace {
+        seed: u64,
+        records: Vec<Value>,
+    }
+
+    impl Drop for ExportReplayTrace {
+        fn drop(&mut self) {
+            if std::thread::panicking() {
+                let save = (|| -> Result<PathBuf> {
+                    let root = tempfile::tempdir()?;
+                    fs::write(
+                        root.path().join("contract-export-replay.json"),
+                        serde_json::to_vec(&json!({"seed":self.seed,"records":self.records}))?,
+                    )?;
+                    Ok(root.keep())
+                })();
+                eprintln!("contract export failure replay: {save:?}");
+            }
+        }
+    }
+
+    fn replay_exports(seed: u64) -> Result<Vec<u8>> {
+        let mut schedule = seed;
+        let mut evidence = ExportReplayTrace {
+            seed,
+            records: Vec::new(),
+        };
+        let records = &mut evidence.records;
+        for _ in 0..32 {
+            schedule = schedule.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let case = (schedule >> 32) % 6;
+            let trace = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let (mut artifact, mut templates) = fixture()?;
+            if case == 4 {
+                templates.get_mut("pages/home.html").unwrap().push(' ');
+            }
+            if case == 5 {
+                artifact
+                    .app_contract
+                    .as_mut()
+                    .unwrap()
+                    .operations
+                    .get_mut("gallery.list")
+                    .unwrap()
+                    .response_example = r#"{"title":42}"#.into();
+            }
+            let mut capture = MemoryArtifactCapture {
+                artifact,
+                fail: case == 1,
+                trace: trace.clone(),
+            };
+            let mut template_capture = MemoryTemplateCapture {
+                templates,
+                fail: case == 2,
+                trace: trace.clone(),
+            };
+            let mut publication = MemoryPublication {
+                bytes: None,
+                fail: case == 3,
+                trace: trace.clone(),
+            };
+            let result = export_file_with(
+                Path::new("/artifact"),
+                Some(Path::new("/output.json")),
+                &mut capture,
+                &mut template_capture,
+                &mut publication,
+            );
+            // Independent expectations, not a second call to the projection.
+            let expected_events = match case {
+                1 => json!(["artifact"]),
+                0 | 3 => json!(["artifact", "templates", "publish"]),
+                _ => json!(["artifact", "templates"]),
+            };
+            let record = json!({
+                "case":case, "trace":*trace.borrow(), "bytes":publication.bytes,
+                "error":result.as_ref().err().map(|error| format!("{error:#}")),
+            });
+            records.push(record);
+            assert_eq!(
+                serde_json::to_value(&*trace.borrow())?,
+                expected_events,
+                "seed={seed} trace={records:?}"
+            );
+            assert_eq!(result.is_ok(), case == 0, "seed={seed} trace={records:?}");
+            assert_eq!(
+                publication.bytes.is_some(),
+                case == 0,
+                "seed={seed} trace={records:?}"
+            );
+            if let Some(bytes) = &publication.bytes {
+                let document: Value = serde_json::from_slice(bytes)?;
+                assert_eq!(document["artifact"], "sha256:fixture");
+                assert_eq!(
+                    document["routes"]["home"]["queryDefaults"],
+                    json!({"limit":1})
+                );
+                assert_eq!(
+                    document["queries"]["gallery.list"]["inputSchema"]["additionalProperties"],
+                    false
+                );
+                assert_eq!(document["forms"][0]["fields"][0]["name"], "limit");
+            }
+        }
+        Ok(serde_json::to_vec(&json!({"seed":seed,"records":records}))?)
+    }
+
+    #[test]
+    fn seeded_export_ports_replay_byte_identically() -> Result<()> {
+        for seed in [0, 42, 130, u64::MAX] {
+            let trace = replay_exports(seed)?;
+            assert_eq!(trace, replay_exports(seed)?);
+            let root = tempfile::tempdir()?;
+            let path = root.path().join("contract-export-replay.json");
+            fs::write(&path, &trace)?;
+            let replay: Value = serde_json::from_slice(&fs::read(path)?)?;
+            assert_eq!(trace, replay_exports(replay["seed"].as_u64().unwrap())?);
+            eprintln!("contract export replay: {}", root.keep().display());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn filesystem_template_capture_matches_pure_snapshot() -> Result<()> {
+        let (artifact, templates) = fixture()?;
+        let root = tempfile::tempdir()?;
+        fs::create_dir(root.path().join("web_templates"))?;
+        let descriptor = &artifact.templates["pages/home.html"];
+        let path = root
+            .path()
+            .join("web_templates")
+            .join(format!("{}.html", &descriptor.digest[7..]));
+        fs::write(&path, &templates["pages/home.html"])?;
+        let captured = FilesystemTemplateCapture.capture(root.path(), &artifact)?;
+        assert_eq!(captured, templates);
+        fs::remove_file(&path)?;
+        assert_eq!(
+            project_bytes("sha256:fixture", &artifact, &captured)?,
+            project_bytes("sha256:fixture", &artifact, &templates)?
+        );
+        assert!(
+            FilesystemTemplateCapture
+                .capture(root.path(), &artifact)
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn simulation_fixture_cannot_bypass_production_admission() -> Result<()> {
+        let (artifact, templates) = fixture()?;
+        assert!(project_bytes("sha256:fixture", &artifact, &templates).is_ok());
+        let root = tempfile::tempdir()?;
+        let directory = root.path().join("artifact");
+        fs::create_dir(&directory)?;
+        fs::write(
+            directory.join("artifact.json"),
+            serde_json::to_vec(&artifact)?,
+        )?;
+        fs::write(directory.join("worker"), b"not an admitted worker")?;
+        fs::write(directory.join("checked-types.json"), b"{}")?;
+        let output = root.path().join("output.json");
+        fs::write(&output, b"agreed output")?;
+        assert!(export_file(&directory, Some(&output)).is_err());
+        assert_eq!(fs::read(output)?, b"agreed output");
+        Ok(())
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn arbitrary_seed_export_replay(seed in proptest::prelude::any::<u64>()) {
+            proptest::prop_assert_eq!(replay_exports(seed).unwrap(), replay_exports(seed).unwrap());
+        }
+
+        #[test]
+        fn template_snapshot_changes_fail_closed(suffix in "[a-z]{1,64}") {
+            let (artifact, mut templates) = fixture().unwrap();
+            templates.get_mut("pages/home.html").unwrap().push_str(&suffix);
+            proptest::prop_assert!(project_bytes("sha256:fixture", &artifact, &templates).is_err());
+        }
+    }
+
+    #[test]
+    fn snapshot_requires_exact_catalog() -> Result<()> {
+        let (artifact, mut templates) = fixture()?;
+        templates.insert("pages/unknown.html".into(), "<p>unknown</p>".into());
+        assert!(project_bytes("sha256:fixture", &artifact, &templates).is_err());
+        templates.remove("pages/unknown.html");
+        templates.clear();
+        assert!(project_bytes("sha256:fixture", &artifact, &templates).is_err());
         Ok(())
     }
 
