@@ -17,11 +17,16 @@ impl Credentials {
     }
 
     pub(crate) fn bearer(value: String) -> Result<Self, AdapterError> {
+        Self::validate(&value)?;
+        Ok(Self(value))
+    }
+
+    pub(crate) fn validate(value: &str) -> Result<(), AdapterError> {
         if value.is_empty() || value.len() > 16_384 || !value.bytes().all(|b| b.is_ascii_graphic())
         {
             return Err(AdapterError::CredentialUnavailable);
         }
-        Ok(Self(value))
+        Ok(())
     }
 }
 

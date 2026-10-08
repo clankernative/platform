@@ -355,7 +355,10 @@ fn verification_secrets_are_provisioned_by_their_own_reference() -> Result<()> {
         .collect::<Result<_>>()?;
     assert_eq!(mounts[0].reference, None);
     assert_eq!(mounts[1].reference, Some(signer.clone()));
-    assert_eq!(mounts[1].credential_file, Path::new(&target(&signer)?));
+    assert_eq!(
+        mounts[1].credential_file,
+        Path::new(&credential_path(&signer)?)
+    );
     assert_ne!(mounts[0].credential_file, mounts[1].credential_file);
     for (_, bytes) in &prepared.inputs {
         assert!(!std::str::from_utf8(bytes)?.contains("SYNTHETIC_NEVER_EXPORT"));

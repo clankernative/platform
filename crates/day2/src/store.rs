@@ -50,6 +50,39 @@ mod supply_tests;
 #[path = "delegation_capability_tests.rs"]
 mod delegation_capability_tests;
 
+/// Once state is initialized only the artifact the database activated may run,
+/// so a tree (a release image, say) that does not carry it cannot serve. Replace
+/// the loader's bare missing-file error with one naming both identities and the
+/// required activation. Other failures pass through unchanged; never falls back.
+pub(crate) fn activated_artifact_unavailable(
+    active: &crate::authority_state::ActiveAuthority,
+    desired: &Path,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    let missing = error
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound);
+    if !missing {
+        return error;
+    }
+    let requested = desired
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| format!("sha256:{name}"))
+        .filter(|id| crate::assets::hash_part(id).is_ok())
+        .unwrap_or_else(|| desired.display().to_string());
+    let requested = if requested == active.artifact_id {
+        String::new()
+    } else {
+        format!(" The instance requests {requested}, which is not activated.")
+    };
+    anyhow::anyhow!(
+        "active_artifact_unavailable: the database's activated artifact {} is not present at {}.{requested} Activate the new artifact with the maintenance workflow before deploying it",
+        active.artifact_id,
+        active.artifact_path
+    )
+}
+
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ObservedPage {
@@ -506,10 +539,15 @@ impl Runtime {
         } else {
             None
         };
+        let desired = parent.join(&binding.artifact);
         let artifact = LoadedArtifact::load(&active.as_ref().map_or_else(
-            || parent.join(&binding.artifact),
+            || desired.clone(),
             |authority| PathBuf::from(&authority.artifact_path),
-        ))?;
+        ))
+        .map_err(|error| match &active {
+            Some(authority) => activated_artifact_unavailable(authority, &desired, error),
+            None => error,
+        })?;
         if let Some(active) = &active {
             ensure!(
                 active.artifact_id == artifact.id(),

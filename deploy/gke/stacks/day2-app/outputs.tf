@@ -23,7 +23,7 @@ output "backup_cron_job" {
   value       = "${var.namespace}/${kubernetes_cron_job_v1.backup.metadata[0].name}"
 }
 output "release_deployment" {
-  description = "Public candidate metadata for day2-gke-release, rendered from this stack's selected inputs. Key references only; bootstrap and enable release_managed before executing."
+  description = "Public candidate metadata for day2-gke-release, rendered from this stack's selected inputs. Key and credential references, fingerprints and registration metadata only; bootstrap and enable release_managed before executing."
   value = var.app_calls == null ? null : {
     serving            = try(var.app_calls.serving[var.app_id], null)
     image              = var.image
@@ -35,5 +35,22 @@ output "release_deployment" {
       secret         = split("/", reference)[3]
       version        = tonumber(split("/", reference)[5])
     }]
+    # Exactly the registration metadata this root renders for the candidate's
+    # instance; the release verifies and installs it immutably.
+    credentials = local.has_credentials ? {
+      projection = kubernetes_manifest.credentials[0].manifest.metadata.name
+      operator   = var.credential_operator
+      entries = [for credential in local.credentials : {
+        key            = credential.key
+        credential_ref = credential.credential_ref
+        secret_version = {
+          project_number = try(tonumber(split("/", credential.secret_version)[1]), null)
+          secret         = split("/", credential.secret_version)[3]
+          version        = tonumber(split("/", credential.secret_version)[5])
+        }
+        fingerprint = credential.fingerprint
+      }]
+      metadata = local.credential_metadata
+    } : null
   }
 }

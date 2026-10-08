@@ -333,11 +333,15 @@ fn layout(instance_path: &Path, app: &str) -> Result<(PathBuf, RuntimeProfile, P
     } else {
         None
     };
+    let desired = root.join(&binding.artifact);
     let artifact = active.as_ref().map_or_else(
-        || root.join(&binding.artifact),
+        || desired.clone(),
         |active| PathBuf::from(&active.artifact_path),
     );
-    artifact_directory(root, &artifact)?;
+    artifact_directory(root, &artifact).map_err(|error| match &active {
+        Some(active) => crate::store::activated_artifact_unavailable(active, &desired, error),
+        None => error,
+    })?;
     if let Some(active) = active {
         ensure!(
             artifact.file_name().and_then(|name| name.to_str())
@@ -851,6 +855,77 @@ mod tests {
             ],
         )?;
         assert!(layout(&instance, "reports").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn activated_artifact_missing_from_the_tree_requires_activation_and_names_both_ids()
+    -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let root = temporary.path().canonicalize()?;
+        let (activated, desired) = ("a".repeat(64), "b".repeat(64));
+        // A release image carries only its own artifact, not the activated one.
+        fs::create_dir_all(root.join("artifacts").join(&desired))?;
+        fs::create_dir(root.join(".state"))?;
+        let instance = root.join("instance.json");
+        fs::write(
+            &instance,
+            serde_json::to_vec(&json!({
+                "installation":"example", "environment":"development",
+                "apps":{"reports":{
+                    "artifact":format!("artifacts/{desired}"), "readers":[], "writers":[],
+                    "runtime":profile()
+                }}
+            }))?,
+        )?;
+        let missing = root.join("artifacts").join(&activated);
+        let mut db = rusqlite::Connection::open(root.join(".state/reports.sqlite"))?;
+        let tx = db.transaction()?;
+        crate::authority_state::upgrade(&tx)?;
+        tx.execute(
+            "INSERT INTO day2_authority VALUES(1,?1,1,?2,?3,?4)",
+            rusqlite::params![
+                crate::digest(b"layout-test"),
+                json!({"enabled":false,"readers":[],"writers":[],"policy":null}).to_string(),
+                format!("sha256:{activated}"),
+                missing.to_string_lossy()
+            ],
+        )?;
+        tx.commit()?;
+        let expected = format!(
+            "active_artifact_unavailable: the database's activated artifact sha256:{activated} is not present at {}. The instance requests sha256:{desired}, which is not activated. Activate the new artifact with the maintenance workflow before deploying it",
+            missing.display()
+        );
+        let error = layout(&instance, "reports")
+            .err()
+            .context("layout must refuse")?;
+        assert_eq!(format!("{error:#}"), expected);
+        // The non-deployment runtime selects code from the same binding.
+        let error = Runtime::load(&instance, "reports")
+            .err()
+            .context("runtime must refuse")?;
+        assert_eq!(format!("{error:#}"), expected);
+        // When the instance already requests the activated artifact, only the
+        // absence is reported. Nothing falls back to another artifact.
+        db.execute(
+            "UPDATE day2_authority SET artifact_id=?1",
+            [format!("sha256:{desired}")],
+        )?;
+        db.execute(
+            "UPDATE day2_authority SET artifact_path=?1",
+            [root
+                .join("artifacts")
+                .join("c".repeat(64))
+                .to_string_lossy()],
+        )?;
+        let error = layout(&instance, "reports")
+            .err()
+            .context("layout must refuse")?;
+        let message = format!("{error:#}");
+        assert!(message.starts_with(&format!(
+            "active_artifact_unavailable: the database's activated artifact sha256:{desired} is not present at"
+        )));
+        assert!(!message.contains("The instance requests"));
         Ok(())
     }
 

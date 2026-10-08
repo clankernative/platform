@@ -18,6 +18,14 @@
 # Registration is idempotent for an unchanged version and refuses a changed
 # one, so both run on every start. Rotating a secret means a new Secret Manager
 # version, a new day2 credential revision in the catalog, and a new fingerprint.
+#
+# Under release_managed, day2-gke-release owns what registration derives from
+# the instance it releases: the registration image, an immutable copy of the
+# metadata below (from release_deployment.credentials) and the files copied.
+# This root keeps the SecretProviderClass and its IAM; the release verifies
+# that it projects exactly the pinned versions and that each version matches
+# its reviewed fingerprint. The credential set is fixed while release-managed
+# (see release.tf).
 
 variable "provider_credentials" {
   description = "Secrets the app's grants and signed endpoints (paused ones too) need: the day2 credential reference a catalog connection declares (credential_ref or signing_secret_ref), the exact Secret Manager version holding it, and its reviewed fingerprint (sha256: of the value without trailing newlines)."
@@ -104,6 +112,8 @@ locals {
     }
   }))
 
+  credential_registration_args = [local.operator_instance, var.app_id, var.credential_operator, local.provisioning_plan]
+
   provisioning_plan_json = jsonencode({
     version         = 1
     app             = var.app_id
@@ -116,6 +126,12 @@ locals {
         credential_digest = credential.fingerprint
       }
     ]
+  })
+
+  # The bootstrap ConfigMap's data, and the release candidate's: one renderer.
+  credential_metadata = merge(local.provisioning_inputs, {
+    "operator-instance.json" = local.operator_instance_json
+    "provisioning.json"      = local.provisioning_plan_json
   })
 }
 
@@ -132,10 +148,7 @@ resource "kubernetes_config_map_v1" "credentials" {
   }
 
   # Metadata only: references, paths and fingerprints, never secret bytes.
-  data = merge(local.provisioning_inputs, {
-    "operator-instance.json" = local.operator_instance_json
-    "provisioning.json"      = local.provisioning_plan_json
-  })
+  data = local.credential_metadata
 
   lifecycle {
     precondition {

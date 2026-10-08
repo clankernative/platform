@@ -117,6 +117,255 @@ run "infrastructure_preserves_software_after_release_handoff" {
     condition     = kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].volume[0].config_map[0].name == "day2-release-two" && kubernetes_stateful_set_v1.day2.metadata[0].annotations["day2.dev/release-effect"] == "effect-two" && kubernetes_stateful_set_v1.day2.spec[0].template[0].metadata[0].annotations["day2.dev/release-id"] == "release-two"
     error_message = "Infrastructure must preserve the immutable release instance and reconciliation markers."
   }
+  assert {
+    condition     = output.release_deployment.credentials == null
+    error_message = "An app without provider credentials releases no registration metadata."
+  }
+}
+
+# The release owns what registration derives from its instance: an infrastructure
+# apply with another candidate image and artifact keeps the released ones.
+run "infrastructure_preserves_released_credential_registration" {
+  command = plan
+  variables {
+    release_managed = true
+    image           = "registry.example.com/day2/example@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    app_calls = {
+      workload_key                = { id = "workload-1", secret_version = "projects/123/secrets/workload/versions/1" }
+      issuer_key                  = { issuer = "example-issuer", id = "issuer-1", secret_version = "projects/123/secrets/issuer/versions/1" }
+      serving_snapshot_config_map = "active-app-serving"
+      serving                     = {}
+      outgoing                    = {}
+      incoming                    = {}
+    }
+    resource_catalog = {
+      version = 1
+      connections = { alerts = {
+        revision = 1
+        provider = "slack_webhook"
+        live     = { provider = "slack_webhook", credential_ref = { id = "alerts-webhook", revision = 1 } }
+      } }
+      resources = {}
+      policies  = {}
+    }
+    credential_operator = "operator@example.com"
+    provider_credentials = [{
+      credential_ref = { id = "alerts-webhook", revision = 1 }
+      secret_version = "projects/123/secrets/alerts-webhook/versions/4"
+      fingerprint    = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+    }]
+  }
+  override_data {
+    target = data.kubernetes_config_map_v1.platform_contract
+    values = { data = {
+      APP_DOMAIN                   = "example.test.example.com"
+      IAP_JWT_AUDIENCE             = "/projects/123/global/backendServices/1"
+      APP_CALL_ISSUER_AUDIENCE     = "/projects/123/global/backendServices/2"
+      APP_CALL_RECEIVER_AUDIENCE   = "/projects/123/global/backendServices/3"
+      APP_CALL_WORKLOAD_EMAIL      = "example-call@example-tools.iam.gserviceaccount.com"
+      PVC_NAME                     = "data"
+      SERVICE_NAME                 = "app"
+      REQUIRED_SERVICE_LABEL_KEY   = "platform.example.com/service"
+      REQUIRED_SERVICE_LABEL_VALUE = "app"
+    } }
+  }
+  override_data {
+    target = data.kubernetes_resource.release
+    values = { object = {
+      metadata = { name = "day2-example-app", namespace = "app-example", annotations = {
+        "day2.dev/release-effect" = "effect-two", "day2.dev/release-id" = "release-two"
+      } }
+      spec = { template = {
+        metadata = { annotations = {
+          "day2.dev/installation"       = "exampleco", "day2.dev/environment" = "production", "day2.dev/app" = "example_app"
+          "day2.dev/artifact"           = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          "day2.dev/instance-sha256"    = "released-instance", "day2.dev/release-id" = "release-two"
+          "day2.dev/credentials-sha256" = "released-credentials"
+        } }
+        spec = {
+          initContainers = [
+            { name = "state-ownership", image = "registry.example.com/busybox@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", command = ["/busybox/chown", "10001:10001", "/srv/day2/.state"] },
+            { name = "credential-files", image = "registry.example.com/busybox@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", command = ["/busybox/install", "-o", "10001", "-g", "10001", "-m", "0400", "-t", "/run/day2/credentials", "/run/day2/credential-sources/ef04e428d3b9a659ce6eaee5c890220e9ff59ac9f9b3889f2176569021744d2a"] },
+            { name = "credential-registration", image = "registry.example.com/app@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", command = ["/usr/local/bin/day2-provision-credentials"], args = ["/srv/day2/operator-instance.json", "example_app", "operator@example.com", "/srv/day2/provisioning.json"] },
+          ]
+          containers = [{ name = "day2", image = "registry.example.com/app@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", env = [{ name = "DAY2_EXPECTED_ARTIFACT", value = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }] }]
+          volumes = [
+            { name = "instance", configMap = { name = "day2-release-two" } },
+            { name = "credential-sources", csi = { driver = "secrets-store-gke.csi.k8s.io", volumeAttributes = { secretProviderClass = "day2-example-app-credentials" } } },
+            { name = "credentials", emptyDir = { medium = "Memory", sizeLimit = "1Mi" } },
+            { name = "credential-metadata", configMap = { name = "day2-release-two-credentials" } },
+          ]
+        }
+      } }
+    } }
+  }
+  assert {
+    condition = (
+      one([for init in kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].init_container : init.image if init.name == "credential-registration"]) == "registry.example.com/app@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" &&
+      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[0].image == "registry.example.com/app@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    )
+    error_message = "Registration must keep the released image, which alone contains the released artifact."
+  }
+  assert {
+    condition = (
+      one([for init in kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].init_container : init.command if init.name == "credential-files"]) == tolist(["/busybox/install", "-o", "10001", "-g", "10001", "-m", "0400", "-t", "/run/day2/credentials", "/run/day2/credential-sources/ef04e428d3b9a659ce6eaee5c890220e9ff59ac9f9b3889f2176569021744d2a"]) &&
+      one([for volume in kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].volume : volume.config_map[0].name if volume.name == "credential-metadata"]) == "day2-release-two-credentials" &&
+      kubernetes_stateful_set_v1.day2.spec[0].template[0].metadata[0].annotations["day2.dev/credentials-sha256"] == "released-credentials" &&
+      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].volume[0].config_map[0].name == "day2-release-two"
+    )
+    error_message = "Infrastructure must preserve the released credential files, metadata ConfigMap and digest."
+  }
+  assert {
+    condition = (
+      output.release_deployment.image == var.image &&
+      output.release_deployment.credentials.projection == "day2-example-app-credentials" &&
+      output.release_deployment.credentials.operator == "operator@example.com" &&
+      jsonencode(output.release_deployment.credentials.entries) == jsonencode([{
+        key            = "ef04e428d3b9a659ce6eaee5c890220e9ff59ac9f9b3889f2176569021744d2a"
+        credential_ref = { id = "alerts-webhook", revision = 1 }
+        secret_version = { project_number = 123, secret = "alerts-webhook", version = 4 }
+        fingerprint    = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+      }]) &&
+      jsonencode(output.release_deployment.credentials.metadata) == jsonencode(kubernetes_config_map_v1.credentials[0].data) &&
+      jsondecode(output.release_deployment.credentials.metadata["provisioning.json"]).instance_digest == "sha256:${sha256(output.release_deployment.credentials.metadata["operator-instance.json"])}" &&
+      jsonencode({ for key, value in jsondecode(output.release_deployment.credentials.metadata["operator-instance.json"]) : key => value if key != "control" }) == jsonencode(output.release_deployment.instance)
+    )
+    error_message = "The candidate must carry the exact registration metadata rendered from the instance it releases, and the pinned versions."
+  }
+}
+
+run "release_management_refuses_a_changed_credential_set" {
+  command = plan
+  variables {
+    release_managed = true
+    app_calls = {
+      workload_key                = { id = "workload-1", secret_version = "projects/123/secrets/workload/versions/1" }
+      issuer_key                  = { issuer = "example-issuer", id = "issuer-1", secret_version = "projects/123/secrets/issuer/versions/1" }
+      serving_snapshot_config_map = "active-app-serving"
+      serving                     = {}
+      outgoing                    = {}
+      incoming                    = {}
+    }
+    resource_catalog = {
+      version = 1
+      connections = { alerts = {
+        revision = 2
+        provider = "slack_webhook"
+        live     = { provider = "slack_webhook", credential_ref = { id = "alerts-webhook", revision = 2 } }
+      } }
+      resources = {}
+      policies  = {}
+    }
+    credential_operator = "operator@example.com"
+    # A rotation: the next revision's key is not the installed one.
+    provider_credentials = [{
+      credential_ref = { id = "alerts-webhook", revision = 2 }
+      secret_version = "projects/123/secrets/alerts-webhook/versions/5"
+      fingerprint    = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+    }]
+  }
+  override_data {
+    target = data.kubernetes_config_map_v1.platform_contract
+    values = { data = {
+      APP_DOMAIN                   = "example.test.example.com"
+      IAP_JWT_AUDIENCE             = "/projects/123/global/backendServices/1"
+      APP_CALL_ISSUER_AUDIENCE     = "/projects/123/global/backendServices/2"
+      APP_CALL_RECEIVER_AUDIENCE   = "/projects/123/global/backendServices/3"
+      APP_CALL_WORKLOAD_EMAIL      = "example-call@example-tools.iam.gserviceaccount.com"
+      PVC_NAME                     = "data"
+      SERVICE_NAME                 = "app"
+      REQUIRED_SERVICE_LABEL_KEY   = "platform.example.com/service"
+      REQUIRED_SERVICE_LABEL_VALUE = "app"
+    } }
+  }
+  override_data {
+    target = data.kubernetes_resource.release
+    values = { object = {
+      metadata = { name = "day2-example-app", namespace = "app-example", annotations = {} }
+      spec = { template = {
+        metadata = { annotations = {
+          "day2.dev/installation" = "exampleco", "day2.dev/environment" = "production", "day2.dev/app" = "example_app"
+          "day2.dev/artifact"     = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        } }
+        spec = {
+          initContainers = [
+            { name = "credential-files", image = "registry.example.com/busybox@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", command = ["/busybox/install", "-o", "10001", "-g", "10001", "-m", "0400", "-t", "/run/day2/credentials", "/run/day2/credential-sources/ef04e428d3b9a659ce6eaee5c890220e9ff59ac9f9b3889f2176569021744d2a"] },
+            { name = "credential-registration", image = "registry.example.com/app@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", command = ["/usr/local/bin/day2-provision-credentials"], args = ["/srv/day2/operator-instance.json", "example_app", "operator@example.com", "/srv/day2/provisioning.json"] },
+          ]
+          containers = [{ name = "day2", image = "registry.example.com/app@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", env = [{ name = "DAY2_EXPECTED_ARTIFACT", value = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }] }]
+          volumes = [
+            { name = "instance", configMap = { name = "day2-release-two" } },
+            { name = "credential-sources", csi = { driver = "secrets-store-gke.csi.k8s.io", volumeAttributes = { secretProviderClass = "day2-example-app-credentials" } } },
+            { name = "credentials", emptyDir = { medium = "Memory", sizeLimit = "1Mi" } },
+            { name = "credential-metadata", configMap = { name = "day2-release-two-credentials" } },
+          ]
+        }
+      } }
+    } }
+  }
+  expect_failures = [terraform_data.release_admission]
+}
+
+run "release_management_refuses_credentials_added_after_handoff" {
+  command = plan
+  variables {
+    release_managed = true
+    app_calls = {
+      workload_key                = { id = "workload-1", secret_version = "projects/123/secrets/workload/versions/1" }
+      issuer_key                  = { issuer = "example-issuer", id = "issuer-1", secret_version = "projects/123/secrets/issuer/versions/1" }
+      serving_snapshot_config_map = "active-app-serving"
+      serving                     = {}
+      outgoing                    = {}
+      incoming                    = {}
+    }
+    resource_catalog = {
+      version = 1
+      connections = { alerts = {
+        revision = 1
+        provider = "slack_webhook"
+        live     = { provider = "slack_webhook", credential_ref = { id = "alerts-webhook", revision = 1 } }
+      } }
+      resources = {}
+      policies  = {}
+    }
+    credential_operator = "operator@example.com"
+    provider_credentials = [{
+      credential_ref = { id = "alerts-webhook", revision = 1 }
+      secret_version = "projects/123/secrets/alerts-webhook/versions/4"
+      fingerprint    = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+    }]
+  }
+  override_data {
+    target = data.kubernetes_config_map_v1.platform_contract
+    values = { data = {
+      APP_DOMAIN                   = "example.test.example.com"
+      IAP_JWT_AUDIENCE             = "/projects/123/global/backendServices/1"
+      APP_CALL_ISSUER_AUDIENCE     = "/projects/123/global/backendServices/2"
+      APP_CALL_RECEIVER_AUDIENCE   = "/projects/123/global/backendServices/3"
+      APP_CALL_WORKLOAD_EMAIL      = "example-call@example-tools.iam.gserviceaccount.com"
+      PVC_NAME                     = "data"
+      SERVICE_NAME                 = "app"
+      REQUIRED_SERVICE_LABEL_KEY   = "platform.example.com/service"
+      REQUIRED_SERVICE_LABEL_VALUE = "app"
+    } }
+  }
+  override_data {
+    target = data.kubernetes_resource.release
+    values = { object = {
+      metadata = { name = "day2-example-app", namespace = "app-example", annotations = {} }
+      spec = { template = {
+        metadata = { annotations = {
+          "day2.dev/installation" = "exampleco", "day2.dev/environment" = "production", "day2.dev/app" = "example_app"
+          "day2.dev/artifact"     = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        } }
+        spec = {
+          containers = [{ name = "day2", image = "registry.example.com/app@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", env = [{ name = "DAY2_EXPECTED_ARTIFACT", value = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }] }]
+          volumes    = [{ name = "instance", configMap = { name = "day2-release-two" } }]
+        }
+      } }
+    } }
+  }
+  expect_failures = [terraform_data.release_admission]
 }
 
 override_data {
