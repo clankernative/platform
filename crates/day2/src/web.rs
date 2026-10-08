@@ -1,6 +1,7 @@
 use crate::{
     audit::Filter,
     digest,
+    host_inputs::{Clock, Entropy, LiveTicks, SecureEntropy, SystemClock, TokioTicks},
     store::{Fault, Runtime, open},
     web_assets::Appearance,
     web_html::{self as view, document, icon},
@@ -23,7 +24,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 use tokio::{net::TcpListener, sync::Semaphore};
 
@@ -35,6 +36,25 @@ struct Grant {
     actor: String,
     expires: i64,
 }
+impl Grant {
+    fn issue(actor: &str, entropy: &dyn Entropy, clock: &dyn Clock) -> Result<(Self, String)> {
+        let token = security::random(entropy)?;
+        let wall = i64::try_from(clock.wall_time()?.as_secs())?;
+        Ok((
+            Self {
+                hash: digest(token.as_bytes()),
+                actor: actor.into(),
+                expires: wall + 600,
+            },
+            token,
+        ))
+    }
+
+    fn accepts(&self, token: &str, wall: i64) -> bool {
+        self.hash == digest(token.as_bytes()) && wall < self.expires
+    }
+}
+
 /// How a request comes to be from someone.
 enum SignIn {
     /// Development: one link, printed at startup and good once, for one actor.
@@ -51,6 +71,9 @@ struct Notice<'a> {
     operation: &'a str,
 }
 struct Host {
+    entropy: Arc<dyn Entropy>,
+    clock: Arc<dyn Clock>,
+    live_ticks: Arc<dyn LiveTicks>,
     oauth: Option<Arc<crate::oauth::shell_transport::AppApprovalReceiver>>,
     runtime: Runtime,
     credential_effects: crate::managed_credentials::effects::Captured,
@@ -91,15 +114,11 @@ impl Admission {
     }
 }
 fn now() -> Result<i64> {
-    Ok(i64::try_from(
-        SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
-    )?)
+    Ok(i64::try_from(SystemClock::new().wall_time()?.as_secs())?)
 }
 
 fn now_ms() -> Result<i64> {
-    Ok(i64::try_from(
-        SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis(),
-    )?)
+    Ok(i64::try_from(SystemClock::new().wall_time()?.as_millis())?)
 }
 
 /// How often the occurrence source looks for work. This is not the schedule
@@ -311,17 +330,13 @@ impl LocalServer {
             crate::error::Failure::Forbidden
         );
         let origin = format!("http://{authority}");
-        let token = security::random()?;
+        let (grant, token) = Grant::issue(actor, &SecureEntropy, &SystemClock::new())?;
         let mut server = Self::bind_listener(
             runtime,
             listener,
             authority,
             origin.clone(),
-            SignIn::Link(Mutex::new(Some(Grant {
-                hash: digest(token.as_bytes()),
-                actor: actor.into(),
-                expires: now()? + 600,
-            }))),
+            SignIn::Link(Mutex::new(Some(grant))),
             concurrency,
             health_endpoints,
         )?;
@@ -350,7 +365,11 @@ impl LocalServer {
         } else {
             ""
         };
+        let entropy: Arc<dyn Entropy> = Arc::new(SecureEntropy);
         let host = Arc::new(Host {
+            entropy: entropy.clone(),
+            clock: Arc::new(SystemClock::new()),
+            live_ticks: Arc::new(TokioTicks),
             oauth: None,
             credential_effects: crate::managed_credentials::effects::capture(),
             api,
@@ -359,7 +378,7 @@ impl LocalServer {
                 .transpose()?,
             redirects: crate::redirects::Catalog::from_artifact(runtime.artifact().contract())?,
             appearance: Appearance::load(&runtime)?,
-            secret: security::secret(&runtime)?,
+            secret: security::secret(&runtime, entropy.as_ref())?,
             cookie_name: format!(
                 "{prefix}day2_{}_{}",
                 runtime.app(),
@@ -672,7 +691,7 @@ async fn handle_inner(host: Arc<Host>, request: Request) -> Response {
         {
             crate::managed_credentials::effects::wall_time()?
         } else {
-            now()?
+            host.wall_seconds()?
         };
         let category = match parts.uri.path() {
             "/actions" => "command",
@@ -817,7 +836,7 @@ async fn handle_app_call(host: Arc<Host>, request: Request) -> Response {
     };
     match tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
         let _permit = permit;
-        let at = now()?;
+        let at = host.wall_seconds()?;
         host.runtime.web_event(at, None, "app_call", 102)?;
         let result = port.receive(&host.runtime, &path, &body, &assertion, at);
         host.runtime
@@ -833,6 +852,10 @@ async fn handle_app_call(host: Arc<Host>, request: Request) -> Response {
     }
 }
 impl Host {
+    fn wall_seconds(&self) -> Result<i64> {
+        Ok(i64::try_from(self.clock.wall_time()?.as_secs())?)
+    }
+
     /// Who a request is from, before anything else looks at it.
     ///
     /// Development reads the session cookie the sign-in link set. At the edge
@@ -883,7 +906,8 @@ impl Host {
             session.origin = Some(verified);
             return Ok((Some(session), None));
         }
-        let token = security::create_session(&self.runtime, &verified.email, at)?;
+        let token =
+            security::create_session(&self.runtime, &verified.email, at, self.entropy.as_ref())?;
         let mut session = security::session_for_token(&self.runtime, &token, at)?;
         session.origin = Some(verified);
         Ok((Some(session), Some(token)))
@@ -973,6 +997,7 @@ impl Host {
                         runtime: &self.runtime,
                         catalog: &self.api,
                         secret: &self.secret,
+                        entropy: self.entropy.as_ref(),
                         session,
                         origin: &self.origin,
                         at,
@@ -1057,6 +1082,7 @@ impl Host {
                 runtime: &self.runtime,
                 catalog: &self.api,
                 secret: &self.secret,
+                entropy: self.entropy.as_ref(),
                 session,
                 origin: &self.origin,
                 at,
@@ -1375,7 +1401,7 @@ impl Host {
             }
             None => {}
         }
-        let id = format!("redirect-{}", security::random()?);
+        let id = format!("redirect-{}", security::random(self.entropy.as_ref())?);
         let outcome = self.runtime.invoke_verified(
             &route.operation,
             crate::store::RequestIdentity {
@@ -1464,7 +1490,7 @@ impl Host {
             .as_ref()
             .context(crate::error::Failure::InvalidLoginLink)?;
         ensure!(
-            current.hash == digest(token.as_bytes()) && at < current.expires,
+            current.accepts(&token, at),
             crate::error::Failure::InvalidLoginLink
         );
         ensure!(
@@ -1486,7 +1512,8 @@ impl Host {
                 )?,
             ));
         }
-        let token = security::create_session(&self.runtime, &current.actor, at)?;
+        let token =
+            security::create_session(&self.runtime, &current.actor, at, self.entropy.as_ref())?;
         *grant = None;
         let mut response = redirect("/")?;
         response
@@ -1607,7 +1634,7 @@ impl Host {
         // A completion can invalidate a prepared read between its observation
         // and validation. Retry only the page query with a fresh invocation;
         // the command and its durable receipt are never repeated here.
-        let outcome = fresh_page_query(|id| {
+        let outcome = fresh_page_query(self.entropy.as_ref(), |id| {
             self.runtime
                 .render_page(name, &session.actor, id, input, at)
         })?;
@@ -1624,6 +1651,7 @@ impl Host {
             runtime: &self.runtime,
             appearance: &self.appearance,
             secret: &self.secret,
+            entropy: self.entropy.as_ref(),
             session,
             page: name,
             input,
@@ -2147,10 +2175,11 @@ fn failure(error: &anyhow::Error) -> Response {
 }
 
 fn fresh_page_query(
+    entropy: &dyn Entropy,
     mut render: impl FnMut(&str) -> Result<crate::protocol::Outcome>,
 ) -> Result<crate::protocol::Outcome> {
     for attempt in 1..=3 {
-        let id = format!("page-{}", security::random()?);
+        let id = format!("page-{}", security::random(entropy)?);
         let outcome = render(&id)?;
         if outcome.status != "failure" || outcome.error != "preparation_conflict" || attempt == 3 {
             return Ok(outcome);
