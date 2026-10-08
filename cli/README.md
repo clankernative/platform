@@ -16,7 +16,6 @@ cd ..
 ./cli/day2 platform --help
 ./cli/day2 platform check examples/reports 42 16
 ./cli/day2 platform local-dev examples/reports
-./cli/day2 platform app-create new-app hello --ui html
 ```
 
 The distribution contains `day2`, `day2-host`, `day2-workflows`, `xtask`,
@@ -47,9 +46,7 @@ perform remote authentication. Its conservative `artifact_integrity` label remai
 `not_verified` for compatibility across legacy/current discovery responses.
 
 Platform operations return JSON receipts, with errors on stderr and a nonzero
-exit. [App creation](../docs/APP-CREATE.md) supports `--ui none|html|clanker`;
-Clanker requires an installed, separately approved bundle. `local-dev` prints a
-login URL, watches app edits and serves until Ctrl-C.
+exit. `local-dev` prints a login URL, watches app edits and serves until Ctrl-C.
 It preserves local data; `--reset` explicitly starts a fresh managed instance.
 Use `--detach`, `--status`, `--stop`, `--logs` and `--follow` for background sessions.
 `check`/`test` report reproducible evidence paths. Backup and restore preserve

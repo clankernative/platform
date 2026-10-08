@@ -27,7 +27,7 @@ day2 = { path = "../day2" }
 day2-capabilities = { path = "../day2-capabilities" }
 tempfile = "3.27"
 rusqlite = { version = "=0.40.2", features = ["bundled", "backup"] }
-rustix = { version = "1.1.4", features = ["process", "fs"] }
+rustix = { version = "1.1.4", features = ["process"] }
 # The same features day2 already locks (IAP key fetch): blocking + rustls.
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 tokio = { version = "1", features = ["rt-multi-thread", "signal"] }
@@ -37,5 +37,4 @@ tar = { version = "0.4", default-features = false }
 sha2 = "0.10"
 
 [dev-dependencies]
-proptest = "=1.11.0"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "cookies"] }
