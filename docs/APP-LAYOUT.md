@@ -205,10 +205,11 @@ its recorded world and does not consult a live release journal.
 
 ## App creation
 
-`day2 platform app-create NEW_DIRECTORY NAME --ui none|html|clanker` initializes
-this layout and runs ordinary build/verification before atomic publication.
-See [APP-CREATE.md](APP-CREATE.md) for installation and execution approval.
-The starter model is educational, not an inferred business domain.
+Apps are currently authored manually using this layout and Reports as the canonical
+reference. Register complete operations once in `App.definition`, author model
+identities through the existing capability, and use ordinary build and required
+verification. Automated app scaffolding is deferred; optional UI assembly works
+with existing or manually authored apps.
 
 ## Connection intent
 

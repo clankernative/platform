@@ -200,7 +200,6 @@ info_json = |is_help| {
 			version: Output.version,
 			implemented_commands: ["app.describe"],
 			platform_commands: [
-				"platform.app-create",
 				"platform.build",
 				"platform.check",
 				"platform.test",

@@ -8,10 +8,6 @@ USAGE
   day2 platform --help
 
 PLATFORM OPERATIONS
-  platform app-create NEW_DIR NAME [options] Create and verify a fresh app (optional).
-    --ui none|html|clanker                  Explicit choice; prompts only on a terminal.
-    --bundle DIR --bundle-sha256 SHA256     Clanker: approve installed manifest/executable.
-                                           Vanilla package recommended; no download.
   platform build SOURCE                   Build and admit an app artifact.
   platform check SOURCE [SEED CASES]        Build and run reproducible checks.
   platform test SOURCE [SEED CASES]         Alias for check.
@@ -52,8 +48,7 @@ EXAMPLES
   day2 platform local-dev ../reports-app
 
 FOR AGENTS
-  App describe never prompts, starts a pager, emits color, or switches format.
-  App-create requires --ui when piped; optional terminal prompts go to stderr.
+  Never prompts, starts a pager, emits color, or switches format when piped.
   JSON success and failure share schema_version, ok, command, exit_code,
   result, error, and next_actions. Prefer next_actions[].argv over shell parsing.
   Read operation inputs from result.operations[].input_fields; example_input_json
