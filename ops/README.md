@@ -8,6 +8,7 @@ Roc recipes; the recipes select steps, their order, examples, and checks.
 
 | Roc source | Operational decisions |
 | --- | --- |
+| [AppCreate.roc](AppCreate.roc) | Optional UI choice → private scaffold → model identity → ordinary verified build → atomic fresh app publication ([guide](../docs/APP-CREATE.md)) |
 | [Build.roc](Build.roc) | Stage → checked schema → bind → admission → ABI → native host → check → link → publish |
 | [Check.roc](Check.roc) | Select examples, iterate generated cases, replay, duplicate delivery, invalid inputs, properties and command completion |
 | [LocalDev.roc](LocalDev.roc) | Managed development sessions, seed selection, watch/rebuild, checkpoint/migration, recovery and lifecycle commands |
