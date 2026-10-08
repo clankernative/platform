@@ -67,6 +67,48 @@ impl TickStream for TokioTickStream {
 }
 
 #[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_inputs_satisfy_shared_port_contracts() -> Result<()> {
+        fn shared<T: Send + Sync>() {}
+        shared::<SecureEntropy>();
+        shared::<SystemClock>();
+        shared::<TokioTicks>();
+        let mut bytes = [0; 32];
+        SecureEntropy.fill(&mut bytes)?;
+        let clock = SystemClock::new();
+        clock.wall_time()?;
+        let before = clock.monotonic();
+        assert!(clock.monotonic() >= before);
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn native_live_ticks_are_immediate_then_periodic_and_skip_missed_ticks() {
+        let period = Duration::from_millis(250);
+        let mut ticks = TokioTicks.start(period);
+        let start = tokio::time::Instant::now();
+        ticks.next().await;
+        assert_eq!(tokio::time::Instant::now() - start, Duration::ZERO);
+        ticks.next().await;
+        assert_eq!(tokio::time::Instant::now() - start, period);
+        tokio::time::advance(Duration::from_millis(1000)).await;
+        ticks.next().await;
+        assert_eq!(
+            tokio::time::Instant::now() - start,
+            Duration::from_millis(1250)
+        );
+        ticks.next().await;
+        assert_eq!(
+            tokio::time::Instant::now() - start,
+            Duration::from_millis(1500)
+        );
+    }
+}
+
+#[cfg(test)]
 pub(crate) mod simulation {
     use super::*;
     use std::sync::Mutex;

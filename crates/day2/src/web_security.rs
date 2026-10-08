@@ -426,6 +426,29 @@ mod session_tests {
     use super::*;
 
     #[test]
+    fn entropy_failure_does_not_install_a_secret_or_emit_a_nonce() -> Result<()> {
+        struct Unavailable;
+        impl crate::host_inputs::Entropy for Unavailable {
+            fn fill(&self, bytes: &mut [u8]) -> Result<()> {
+                bytes.fill(42);
+                anyhow::bail!("scripted entropy failure")
+            }
+        }
+        let db = rusqlite::Connection::open_in_memory()?;
+        db.execute_batch(
+            "CREATE TABLE day2_web_secret(id INTEGER PRIMARY KEY, secret BLOB NOT NULL)",
+        )?;
+        assert!(secret_in(&db, &Unavailable).is_err());
+        assert_eq!(
+            db.query_row("SELECT COUNT(*) FROM day2_web_secret", [], |row| row
+                .get::<_, i64>(0))?,
+            0
+        );
+        assert!(random(&Unavailable).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn seeded_secret_and_session_ports_conform_to_real_sqlite() -> Result<()> {
         use crate::host_inputs::{
             Clock,

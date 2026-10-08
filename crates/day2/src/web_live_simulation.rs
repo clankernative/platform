@@ -110,7 +110,21 @@ fn evaluate(
     )
 }
 
+const MAX_STEPS: usize = 48;
+const MAX_REPLAY_BYTES: u64 = 65_536;
+
 async fn replay(steps: &[Step]) -> Result<()> {
+    ensure!(
+        !steps.is_empty() && steps.len() <= MAX_STEPS,
+        "live_replay_step_budget"
+    );
+    for step in steps {
+        ensure!(
+            step.wall <= i64::MAX as u64 && step.wall_after <= i64::MAX as u64,
+            "live_replay_wall_budget"
+        );
+        ensure!(step.text.len() <= 256, "live_replay_text_budget");
+    }
     let clock = Arc::new(VirtualClock(Mutex::new((
         Duration::from_secs(100),
         Duration::ZERO,
@@ -134,7 +148,8 @@ async fn replay(steps: &[Step]) -> Result<()> {
             actual.needs_image_refresh,
         ))?;
         let result = evaluate(&mut actual, step, clock.as_ref());
-        let due = step.revision != revision || step.monotonic_ms >= refreshed_ms + 5000;
+        let due =
+            step.revision != revision || step.monotonic_ms.saturating_sub(refreshed_ms) >= 5000;
         let refused = step.wall >= 700
             || step.before != 1
             || (due && (step.wall_after >= 700 || step.after != 1));
@@ -194,7 +209,7 @@ fn schedule(seed: u64) -> Result<Vec<Step>> {
     let entropy = SeededEntropy::new(seed);
     let (mut elapsed, mut revision) = (0, 1);
     let mut steps = Vec::new();
-    for index in 0..48 {
+    for index in 0..MAX_STEPS {
         let mut bytes = [0; 4];
         entropy.fill(&mut bytes)?;
         elapsed += u64::from(bytes[0]) * 25;
@@ -230,7 +245,16 @@ fn schedule(seed: u64) -> Result<Vec<Step>> {
 fn seeded_live_schedules_match_independent_reference_and_replay() -> Result<()> {
     let runtime = tokio::runtime::Builder::new_current_thread().build()?;
     if let Some(path) = std::env::var_os("DAY2_WEB_LIVE_REPLAY") {
-        let steps: Vec<Step> = serde_json::from_slice(&std::fs::read(path)?)?;
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)?
+            .take(MAX_REPLAY_BYTES + 1)
+            .read_to_end(&mut bytes)?;
+        ensure!(
+            bytes.len() as u64 <= MAX_REPLAY_BYTES,
+            "live_replay_byte_budget"
+        );
+        let steps: Vec<Step> = serde_json::from_slice(&bytes)?;
         return runtime.block_on(replay(&steps));
     }
     use proptest::{
@@ -251,8 +275,13 @@ fn seeded_live_schedules_match_independent_reference_and_replay() -> Result<()> 
             let result = runtime.block_on(replay(&decoded));
             if let Err(error) = result {
                 // Persist the entire observation schedule, not just a random seed.
-                let directory = std::path::Path::new("target/day2-web-live-replays");
-                std::fs::create_dir_all(directory).unwrap();
+                let target = std::env::var_os("CARGO_TARGET_DIR")
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|| {
+                        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target")
+                    });
+                let directory = target.join("day2-web-live-replays");
+                std::fs::create_dir_all(&directory).unwrap();
                 let path = directory.join(format!("seed-{seed}.json"));
                 std::fs::write(&path, bytes).unwrap();
                 return Err(TestCaseError::fail(format!(
