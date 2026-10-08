@@ -49,8 +49,11 @@ gh api repos/clankernative/platform/vulnerability-alerts --method PUT
 
 Enable secret scanning and push protection in the repository's Code security
 settings and verify them. Keep Actions' default token permissions read-only and
-disable Actions approval of pull requests. Require all seven CI check contexts
-in the supplied [branch protection payload](.github/branch-protection.json).
+disable Actions approval of pull requests. Require every CI check context in
+the supplied [branch protection payload](.github/branch-protection.json), including
+both security-shell roots and the optional integration's mocked tests. Keep the
+payload synchronized with the jobs and expanded infrastructure matrix in
+[Platform CI](.github/workflows/ci.yml).
 The payload includes administrators, requires review of the latest push, resolves
 conversations, and disallows force-pushes and branch deletion. Obtain a passing
 first public CI run and verify the private advisory URL before announcing release.
