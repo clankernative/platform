@@ -31,20 +31,17 @@ mod tests {
         static BINARY: OnceLock<PathBuf> = OnceLock::new();
         BINARY.get_or_init(|| {
             let root = root();
-            let native = Command::new("cargo")
-                .args(["build", "--locked", "-p", "day2-ops", "--bin", "day2-host"])
-                .current_dir(root.parent().unwrap())
-                .output()
-                .unwrap();
+            // Keep the host installed by the gate with its distribution receipt.
+            // A nested, narrower Cargo build would replace the workspace's
+            // dependency artifacts and force the next campaign to rebuild them.
             assert!(
-                native.status.success(),
-                "native CLI host: {}",
-                String::from_utf8_lossy(&native.stderr)
+                root.join("day2-host").is_file(),
+                "run xtask cli before CLI checks"
             );
-            for name in ["day2-host", "day2-workflows", "day2-workflows.json"] {
+            for name in ["day2-workflows", "day2-workflows.json"] {
                 let temporary = tempfile::NamedTempFile::new_in(&root).unwrap();
                 fs::copy(root.join("../target/debug").join(name), temporary.path())
-                    .expect("run xtask workflows before CLI checks");
+                    .expect("run xtask cli before CLI checks");
                 temporary.persist(root.join(name)).unwrap();
             }
             let roc = root.join("../../.toolchains/roc");
