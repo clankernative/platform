@@ -1,0 +1,14 @@
+{
+  "format": 1,
+  "models": [
+    {
+      "identity": {
+        "key": "c3f3e155961a1ec15d9836afadf5d5a5",
+        "prefix": "cha"
+      },
+      "table": "chart_samples",
+      "roc_type": "Models.ChartSample",
+      "retired": false
+    }
+  ]
+}

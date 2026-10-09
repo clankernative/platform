@@ -1156,6 +1156,7 @@ mod tests {
                 crate::web_templates::Template {
                     digest: template_digest,
                     bytes: template_bytes.len() as u64,
+                    presentations: BTreeMap::new(),
                 },
             )]),
             api_docs: BTreeMap::new(),

@@ -1,0 +1,2287 @@
+{
+  "schemaVersion": 1,
+  "provider": "clanker-ui.native",
+  "package": {
+    "name": "@clanker/vanilla",
+    "version": "0.7.0",
+    "path": "../.ui-dependencies/vanilla",
+    "digest": "sha256:97cc09576294cd8f78beda4021072072f31b676749a5cc2e76a16aa50867ba2e",
+    "inputs": [
+      {
+        "path": "browser/lifecycle.js",
+        "digest": "sha256:eb90fb5c0d3d1c06ab93bd5f732129aacfe190b8302d9b0edf69515c4e7dace3",
+        "bytes": 4975
+      },
+      {
+        "path": "components/activity-feed/component.json",
+        "digest": "sha256:65803d8f23831385f2cafc2ab1da415e582be011b40a1c917c34e51461845cb4",
+        "bytes": 4242
+      },
+      {
+        "path": "components/activity-feed/fixtures/compact-golden.json",
+        "digest": "sha256:4ebc36dc5a3ce7d8fd21b8988b48b8218200d2232d16ccc9645392384c2ee26d",
+        "bytes": 824
+      },
+      {
+        "path": "components/activity-feed/fixtures/danger.json",
+        "digest": "sha256:2762a92c5dd4ad287c00174b5cd719659ad8ed08ee7f0cc21ba1873925e5019b",
+        "bytes": 798
+      },
+      {
+        "path": "components/activity-feed/fixtures/info.json",
+        "digest": "sha256:eca309cfa26bb9d3d96aa65cd0c7840626ae4fba908a2144448cd0b812a31f6c",
+        "bytes": 786
+      },
+      {
+        "path": "components/activity-feed/fixtures/typical-golden.json",
+        "digest": "sha256:c632f7f6314fee60b1fe0a762888a32fe079a28cc23df6353e02c237193902d5",
+        "bytes": 1117
+      },
+      {
+        "path": "components/activity-feed/fixtures/warning.json",
+        "digest": "sha256:4d4941685ae78c9e1a6b88c6f89e2d97b6c4259358fdc029743e578bb25663e5",
+        "bytes": 796
+      },
+      {
+        "path": "components/activity-feed/fragment.html",
+        "digest": "sha256:f2fd0eeaa588d2da55f7a28151b8adc03a4a3ee1e5ab51f8d5c1026d468b47c8",
+        "bytes": 102
+      },
+      {
+        "path": "components/activity-feed/styles.css",
+        "digest": "sha256:d6cf978f817bee4845da5d800e8e3171664113ef8f05aab571e122f2ceb762ba",
+        "bytes": 2364
+      },
+      {
+        "path": "components/alert/component.json",
+        "digest": "sha256:349a385437a397d1f6c9983252d799adc1ab09f37e1cc64e080bf36606c2dc84",
+        "bytes": 8823
+      },
+      {
+        "path": "components/alert/fixtures/accent-h2.json",
+        "digest": "sha256:b1eba5c58b8cde1d8b6fe17b5df566bdd05c9159898a2961d3405493025eaa3b",
+        "bytes": 908
+      },
+      {
+        "path": "components/alert/fixtures/accent-h3.json",
+        "digest": "sha256:431607dcb3bb1e9b8966d6656a8552cdf85947f637811efddfc15ce15ac31a9d",
+        "bytes": 908
+      },
+      {
+        "path": "components/alert/fixtures/accent-h4.json",
+        "digest": "sha256:21d329811da82a3d4e90b8ea7060a214400d7c12c21b84d1242e6d45234a1b2d",
+        "bytes": 908
+      },
+      {
+        "path": "components/alert/fixtures/assertive.json",
+        "digest": "sha256:c6442d2cd9904c913f9833ab5e3770c3657c394b2ce972c7ab0d9298f52c1309",
+        "bytes": 953
+      },
+      {
+        "path": "components/alert/fixtures/danger.json",
+        "digest": "sha256:dd4292c3beb6db7de0d306684576e4cdf9f77f226b274db41d4ad1e761b430d3",
+        "bytes": 907
+      },
+      {
+        "path": "components/alert/fixtures/escaped.json",
+        "digest": "sha256:faf845f820e26062884871786425d15ded22240f9ccaad25641ae9e59b1a239b",
+        "bytes": 1156
+      },
+      {
+        "path": "components/alert/fixtures/info.json",
+        "digest": "sha256:aa1afe819a775c7b695a605a645c8535f8e688893d376af2af898db2da552196",
+        "bytes": 844
+      },
+      {
+        "path": "components/alert/fixtures/outlined-h2.json",
+        "digest": "sha256:bd91360801a57d9ea243bf7c22640026d7640588b3f283d7a084ac45076691fe",
+        "bytes": 912
+      },
+      {
+        "path": "components/alert/fixtures/outlined-h3.json",
+        "digest": "sha256:0fbc26d219d3a96f29f8e05d54bbf36dd8ffec5c7fdb24f2ce5aab59904ff5bb",
+        "bytes": 912
+      },
+      {
+        "path": "components/alert/fixtures/outlined-h4.json",
+        "digest": "sha256:8ed0dc6d4dcbf2aba9a9e07bb17a3196c0be57a8a406002f397b41269076ae99",
+        "bytes": 912
+      },
+      {
+        "path": "components/alert/fixtures/polite.json",
+        "digest": "sha256:74fb326dd6856d43892b6eb1f3279031dca74bd0425caa50693c7eff1109c5b8",
+        "bytes": 915
+      },
+      {
+        "path": "components/alert/fixtures/recovery.json",
+        "digest": "sha256:32d6f0b49890bd99794a360f33d0a0ae3d7599a3e699e6f2f75833a79fb78921",
+        "bytes": 1039
+      },
+      {
+        "path": "components/alert/fixtures/soft-h3.json",
+        "digest": "sha256:deabe639d9b02c0a449904c524de8994b21c2a782298bd59c3f09160d9616bb5",
+        "bytes": 904
+      },
+      {
+        "path": "components/alert/fixtures/soft-h4.json",
+        "digest": "sha256:d1630735eee0517412402e17f7b00befc028deceff5e6842bb8a7c04c1e8ed88",
+        "bytes": 904
+      },
+      {
+        "path": "components/alert/fixtures/success.json",
+        "digest": "sha256:1b009e8629e940ffc1bbb60f47f006c0a117bd6497feb79bd32162ac47976e38",
+        "bytes": 777
+      },
+      {
+        "path": "components/alert/fixtures/warning.json",
+        "digest": "sha256:f32ca72b90339bf315ec355a9afaada92724903e572786c1d6f08b82a08554c0",
+        "bytes": 888
+      },
+      {
+        "path": "components/alert/fragment.html",
+        "digest": "sha256:64cd2c940925c2a1a0aa760356027bc0c4a0fa629f976e475c7437fa44759fc9",
+        "bytes": 221
+      },
+      {
+        "path": "components/alert/styles.css",
+        "digest": "sha256:b5a182d714abd3d361b3d6d91898d1a82bb1b9c470d03d5ba628736ec6104f81",
+        "bytes": 3241
+      },
+      {
+        "path": "components/avatar/component.json",
+        "digest": "sha256:4f4619959b54fc9af6175d2948cf7bfd415fb38bfb51380bca4b4f644306ed18",
+        "bytes": 6936
+      },
+      {
+        "path": "components/avatar/fixtures/extra-large-brand.json",
+        "digest": "sha256:a16ec1a1fdefa19f6fd56122177c3392339966f2f3f9cd895efe993276a49d99",
+        "bytes": 328
+      },
+      {
+        "path": "components/avatar/fixtures/extra-small-neutral.json",
+        "digest": "sha256:d15df30ac03fb342df3f40a5dfe62604c0f3a09e11c23b4338f6f5457538d42e",
+        "bytes": 338
+      },
+      {
+        "path": "components/avatar/fixtures/image-host-asset.json",
+        "digest": "sha256:cfe8bf851fe2760c87c7645ce9ac5609ece6ade0025ffc64156973920c49ff55",
+        "bytes": 546
+      },
+      {
+        "path": "components/avatar/fixtures/image-https.json",
+        "digest": "sha256:1ce720655e8a5112d65397cdebf8c43ac900af37c85139a2c9b7886b28c22d2e",
+        "bytes": 564
+      },
+      {
+        "path": "components/avatar/fixtures/large-brand.json",
+        "digest": "sha256:8c87254b69132db933653a43ab75704111c7477a8fbc446b04a74969c5621525",
+        "bytes": 350
+      },
+      {
+        "path": "components/avatar/fixtures/large-neutral.json",
+        "digest": "sha256:98737d48e515fa4a8846e110c4a52768a121c0a7c3fe9fa429398f93a8da57b4",
+        "bytes": 322
+      },
+      {
+        "path": "components/avatar/fixtures/medium-neutral.json",
+        "digest": "sha256:a97d546af11f7cdcbd192f68f3caa9c259b73d73c6e9b7aedceea60aae3b361b",
+        "bytes": 407
+      },
+      {
+        "path": "components/avatar/fixtures/medium-success.json",
+        "digest": "sha256:8c1378b495fdb97ea60085cb1bbb948fa43bca7dba472bac1e1a04bb416a3e47",
+        "bytes": 334
+      },
+      {
+        "path": "components/avatar/fixtures/small-brand.json",
+        "digest": "sha256:d2453dc86826a032e3018247ca5d5e76ce049dcb583981dea4d2f5f9cba50cfc",
+        "bytes": 318
+      },
+      {
+        "path": "components/avatar/fixtures/small-success.json",
+        "digest": "sha256:855f5f853b92f9a3d0f78ef5a577d2099ae6c45b95561ead435ef3cc6f2f18b2",
+        "bytes": 328
+      },
+      {
+        "path": "components/avatar/fragment.html",
+        "digest": "sha256:9c2a520d0a284159dab58cbbae8af2950325221b43a78fb80a7f8c7657c59b12",
+        "bytes": 11
+      },
+      {
+        "path": "components/avatar/styles.css",
+        "digest": "sha256:4b566d65ed76d23045aa08dacda76e532c5ae0f2afac578e913eee15dc83a76c",
+        "bytes": 2400
+      },
+      {
+        "path": "components/badge/component.json",
+        "digest": "sha256:674eacc4af7cfae2104c076ae2d05c8906b94a9e94c60571fcbb1436db8b86ec",
+        "bytes": 6623
+      },
+      {
+        "path": "components/badge/fixtures/custom-icon.json",
+        "digest": "sha256:10e3865986c461eeb7325771e46d2df0e441ec61688f0621536cad324b0334d2",
+        "bytes": 569
+      },
+      {
+        "path": "components/badge/fixtures/danger.json",
+        "digest": "sha256:08c62b7b187976a073b2933ef59a991e84e00658a6d4320f89cfc7dc85a6d210",
+        "bytes": 616
+      },
+      {
+        "path": "components/badge/fixtures/long-label.json",
+        "digest": "sha256:d0082fa782c5564d0ab2a73766a491d35a504f87de3729da71c7325a282eeb50",
+        "bytes": 322
+      },
+      {
+        "path": "components/badge/fixtures/running.json",
+        "digest": "sha256:921cde53531139d521675eba778211d00be337af1ed7116ff4e28e613bac2766",
+        "bytes": 564
+      },
+      {
+        "path": "components/badge/fixtures/statuses.json",
+        "digest": "sha256:1e81c462494a50aed483e4ab724a509f05c7af11cd245c46593722831f7d0440",
+        "bytes": 607
+      },
+      {
+        "path": "components/badge/fixtures/text-only.json",
+        "digest": "sha256:4aa03f057dfb6c8f39d32d6efcb9e5760e4245e29114a1a9561982761dfab83c",
+        "bytes": 241
+      },
+      {
+        "path": "components/badge/fixtures/warning.json",
+        "digest": "sha256:5d4162fee767f9c46168aa027987efd6d021cbcfe84b56937952f4c813b95967",
+        "bytes": 631
+      },
+      {
+        "path": "components/badge/fragment.html",
+        "digest": "sha256:6a6e53b0a8edfa955d159677e2194d06b38d0fc615299149ba8be08325c5306c",
+        "bytes": 84
+      },
+      {
+        "path": "components/badge/styles.css",
+        "digest": "sha256:a0c91e9d871eb282ce6bf0fa7bd0bd334ddee8e3470768bb31d29d9f87d70662",
+        "bytes": 2108
+      },
+      {
+        "path": "components/breadcrumbs/component.json",
+        "digest": "sha256:d11973014f4aa8c514507bd36a051c7f7d2d0c254ad70ad3e56183b05e011920",
+        "bytes": 6118
+      },
+      {
+        "path": "components/breadcrumbs/fixtures/deep-trail.json",
+        "digest": "sha256:5ff22143cf2e8a800e0c1ef6f1843c752a7da4d2586af8283f2eb9221c33abc7",
+        "bytes": 1088
+      },
+      {
+        "path": "components/breadcrumbs/fixtures/long-content.json",
+        "digest": "sha256:e9313e07939ccd07ebeee4e2a18b3eec0fc355ba52d48ffd6296601bb0e1d0ac",
+        "bytes": 613
+      },
+      {
+        "path": "components/breadcrumbs/fixtures/typical.json",
+        "digest": "sha256:8c9a5985680642d79e5e0f0d3f2e6fceabe0b77893fb725f7970bafc7794cbe8",
+        "bytes": 734
+      },
+      {
+        "path": "components/breadcrumbs/fragment.html",
+        "digest": "sha256:b1f7ed68b6a58bffca78dd92feb90ac366df28ec9bc56e872648bf56bca80718",
+        "bytes": 59
+      },
+      {
+        "path": "components/breadcrumbs/styles.css",
+        "digest": "sha256:2d22aeaf502333b1828091ae36f4c3b1a89652a80fdf40ef512bbd8c0b4fa9ca",
+        "bytes": 1005
+      },
+      {
+        "path": "components/button-group/component.json",
+        "digest": "sha256:97d1a3cb394b52698f8c81ea0bf5fd42a8bdc3ee12b5999b1781f8c98b2d3a6a",
+        "bytes": 2113
+      },
+      {
+        "path": "components/button-group/fixtures/spaced-full-width-golden.json",
+        "digest": "sha256:7d83b93c8c54a31f787f471a7c447d4538d25741427b3d79c5f6f3abebd9bbfe",
+        "bytes": 481
+      },
+      {
+        "path": "components/button-group/fixtures/typical-golden.json",
+        "digest": "sha256:543d81f586270ed983ffb8aa7d9812552fdf8317af9c2f90ef127af446197dd7",
+        "bytes": 545
+      },
+      {
+        "path": "components/button-group/fragment.html",
+        "digest": "sha256:140a6094167446e8f190f6e119609d31e0ef302ed603be507519fe5a69e7cf39",
+        "bytes": 38
+      },
+      {
+        "path": "components/button-group/styles.css",
+        "digest": "sha256:fa90bb5dc0e89847e9db93b4b13f1145ea5518e9b279b23190c6058de4271b53",
+        "bytes": 1278
+      },
+      {
+        "path": "components/button/component.json",
+        "digest": "sha256:369f3a016ea566d45c3f2d0bc2aa5e3c17abfadc20dc56966cae30975f37a754",
+        "bytes": 8137
+      },
+      {
+        "path": "components/button/fixtures/danger.json",
+        "digest": "sha256:d230cb4c42d233b0e8957be82ecbb3c2497479aef74522b78885fbeaa0c76994",
+        "bytes": 156
+      },
+      {
+        "path": "components/button/fixtures/escaped.json",
+        "digest": "sha256:9fb186b1b9667494a217914a74162bf09e4674eee5bf630e9ecd9e0f37ffc64f",
+        "bytes": 198
+      },
+      {
+        "path": "components/button/fixtures/primary.json",
+        "digest": "sha256:6a6ae315c15ee5ade450e5852e57178de9f223b0ca938d1f1cda788b30239af7",
+        "bytes": 170
+      },
+      {
+        "path": "components/button/fixtures/quiet.json",
+        "digest": "sha256:269bdf3ad4c6f39283bce4fb3682fb3fdd5220979b66cab27ab7241433ea64d5",
+        "bytes": 156
+      },
+      {
+        "path": "components/button/fixtures/secondary.json",
+        "digest": "sha256:008d7af62fcc493885cf754ea173fa6539ee45c3196f4d86ea018d3d046508df",
+        "bytes": 162
+      },
+      {
+        "path": "components/button/fragment.html",
+        "digest": "sha256:e7717c7e85aff010672d85327fa7f5d2c124e956270ee403d428685bcd95628c",
+        "bytes": 56
+      },
+      {
+        "path": "components/button/styles.css",
+        "digest": "sha256:a6b04d0a17e94fcd4fa430bb51a6345b5635500bc64159b8a7404973b108b2d5",
+        "bytes": 2907
+      },
+      {
+        "path": "components/button/template.html",
+        "digest": "sha256:a29e0e807cd06cc8650a274aa1f5f8e7b5dbcece9fd3bd6225f1e11c9841bba6",
+        "bytes": 93
+      },
+      {
+        "path": "components/card/component.json",
+        "digest": "sha256:c3f6a6501cfc14630fb10676cbe1dea45031c28c3e40a9bad517c95e9dd2af14",
+        "bytes": 4217
+      },
+      {
+        "path": "components/card/fixtures/escaped.json",
+        "digest": "sha256:5859c41a564668eff225189cf228e2500f47b64e758701fb1a99a1ce55254a7c",
+        "bytes": 554
+      },
+      {
+        "path": "components/card/fixtures/heading-level.json",
+        "digest": "sha256:7b07ced5f709076cc059a626ff17c38bbf37fe1f9f30d6b8eb57b57652ec42bf",
+        "bytes": 384
+      },
+      {
+        "path": "components/card/fixtures/typical.json",
+        "digest": "sha256:3c4e83d1b88c1fbad8358468038ffd7b99b9d066b9159fb32e04bf3b5449a4b4",
+        "bytes": 595
+      },
+      {
+        "path": "components/card/fragment.html",
+        "digest": "sha256:7376436e442c2b0c34e58e13bf9956f0310953205f86b640eeecfa4f484caf18",
+        "bytes": 119
+      },
+      {
+        "path": "components/card/styles.css",
+        "digest": "sha256:36da2e59732cae6f413382c8d0d6aea3b7d31d949ef9edf41db21e308f2ca1f6",
+        "bytes": 1499
+      },
+      {
+        "path": "components/chart/component.json",
+        "digest": "sha256:3a1b3ebc45bf9616646de6af2d24f3700eb212baa45b782679d4021e3652c699",
+        "bytes": 5101
+      },
+      {
+        "path": "components/chart/fixtures/gap-zero.json",
+        "digest": "sha256:b89deb7b0062cb9a7d53503c4a8ba295758c10f1622714e1d00729d91c860d28",
+        "bytes": 752
+      },
+      {
+        "path": "components/chart/fixtures/line.json",
+        "digest": "sha256:d656c7652f268666294674e38b3647b067199a3133dd83807af57a014f4b5a1a",
+        "bytes": 545
+      },
+      {
+        "path": "components/chart/fragment.html",
+        "digest": "sha256:58e0369aaf04898af3751c9b3585abeb09770e02689015d3c57ca151b9c349f7",
+        "bytes": 117
+      },
+      {
+        "path": "components/chart/interaction.js",
+        "digest": "sha256:8a8753296498672d44ea25b4544827802a0c9b38c433929e2d15da5a9ce53b36",
+        "bytes": 13748
+      },
+      {
+        "path": "components/chart/renderer-contract.json",
+        "digest": "sha256:c206e55f1ab4c8d290b53a81298638a7f3927e55bb600eda5dd9cebbb761e514",
+        "bytes": 1963
+      },
+      {
+        "path": "components/chart/styles.css",
+        "digest": "sha256:2b321da819bb0f6e70f6a94fe0898349a0f507b252796bfe28d79e2f6618a0e4",
+        "bytes": 3355
+      },
+      {
+        "path": "components/checkbox-group/component.json",
+        "digest": "sha256:cdca96e3772cdd9a1a59bda9d2d8bfbcee95bca614064e0991461f7b5c50640d",
+        "bytes": 6431
+      },
+      {
+        "path": "components/checkbox-group/fixtures/disabled-golden.json",
+        "digest": "sha256:24f8a2d6aae21b9ad4e1db0865913e25052d1e86971e9c7a5794b903f715f36c",
+        "bytes": 1156
+      },
+      {
+        "path": "components/checkbox-group/fixtures/inline-golden.json",
+        "digest": "sha256:38e9e2d519cf3695136432173a45f3d84c381466422571d85b342d33b9428893",
+        "bytes": 1121
+      },
+      {
+        "path": "components/checkbox-group/fixtures/typical-golden.json",
+        "digest": "sha256:aa636611cb86e17461c8dfd123079e1d511015381e3bd136a6bf522b586833aa",
+        "bytes": 1792
+      },
+      {
+        "path": "components/checkbox-group/fixtures/validation-golden.json",
+        "digest": "sha256:fb65fcaffea47de57886901cb4ac39a45f957b8328268c2da9851e2bb59a8165",
+        "bytes": 1584
+      },
+      {
+        "path": "components/checkbox-group/fragment.html",
+        "digest": "sha256:221004eb9dd44f93cdf72ddde0798a749bbe522c4e003b6311c764b6dc3ef633",
+        "bytes": 73
+      },
+      {
+        "path": "components/checkbox-group/styles.css",
+        "digest": "sha256:180cd62dd9fbb828d74b46d58af17c28bbb487982bda5bb2dd3ed489a284aa08",
+        "bytes": 2415
+      },
+      {
+        "path": "components/cluster/component.json",
+        "digest": "sha256:27c03b08292d0ec6be502ea5168df36b2b9444023118f41d81bab13655447aa9",
+        "bytes": 2271
+      },
+      {
+        "path": "components/cluster/fixtures/nowrap.json",
+        "digest": "sha256:6e965076334ee63e86360d657501871127a8a6c5417ed15d93b7a03bc52add58",
+        "bytes": 403
+      },
+      {
+        "path": "components/cluster/fixtures/typical.json",
+        "digest": "sha256:0a6a80463133b0b26b3894aa5704a955c61b9c0cab291ac28ee50abab8b6847c",
+        "bytes": 314
+      },
+      {
+        "path": "components/cluster/fragment.html",
+        "digest": "sha256:f31d7c773190b90ad8e3b26182d47f4e9e8ac033da1687ae15e472a2e10d71af",
+        "bytes": 67
+      },
+      {
+        "path": "components/cluster/styles.css",
+        "digest": "sha256:99c8a164bc716687bb1293040028d341a888074ab82e8c85ad92b6d727b323fe",
+        "bytes": 1210
+      },
+      {
+        "path": "components/command-menu/component.json",
+        "digest": "sha256:fe9b3605f838a484963eeaa7047d267ec8fd40e7a9d9e3c8e2bd7500af8c83fe",
+        "bytes": 4246
+      },
+      {
+        "path": "components/command-menu/fixtures/dense-golden.json",
+        "digest": "sha256:75d4744fe58cc090e6c2b9521254615f87b3ecebfdbe2ecbdbdf68e261ef023b",
+        "bytes": 5236
+      },
+      {
+        "path": "components/command-menu/fixtures/typical-golden.json",
+        "digest": "sha256:14d5817a1d1398f057efffb194a8c666d278c5132f3a780464dd419c45500dec",
+        "bytes": 4825
+      },
+      {
+        "path": "components/command-menu/fragment.html",
+        "digest": "sha256:81d7319055310a203b8961c7f36517201fce7ed8ee6df1d0b1e4f72b0fe4ce65",
+        "bytes": 17
+      },
+      {
+        "path": "components/command-menu/interaction.js",
+        "digest": "sha256:d87cc8871be3d7d0363111eb08243c7438c82a2894b726916ebfe22ddbc75c08",
+        "bytes": 7957
+      },
+      {
+        "path": "components/command-menu/styles.css",
+        "digest": "sha256:e0db3622331538805fe4bf233762f8ef3a2ad96036e129eedb795c0500ba8bb8",
+        "bytes": 5079
+      },
+      {
+        "path": "components/confirm-dialog/browser.d.ts",
+        "digest": "sha256:3d259e2db43a2f8ddd0bec74ad7b627e0ef92e7e9610e826eb3fbee28e113eb9",
+        "bytes": 1205
+      },
+      {
+        "path": "components/confirm-dialog/component.json",
+        "digest": "sha256:6cd443ca58db69f1ff20dd0b17584cbdfd74f49ca7407d75b31431d501b1fdfa",
+        "bytes": 4732
+      },
+      {
+        "path": "components/confirm-dialog/fixtures/danger-golden.json",
+        "digest": "sha256:c1c990ec4460eb2192835021ee425cf7f3630cd2ab3e953547a9bbfaf90bb17b",
+        "bytes": 1975
+      },
+      {
+        "path": "components/confirm-dialog/fixtures/neutral-golden.json",
+        "digest": "sha256:53ca5906f0c5d7d540f4860ddb9abb06a6582a13e7010666f67bfa75e645421f",
+        "bytes": 1871
+      },
+      {
+        "path": "components/confirm-dialog/fragment.html",
+        "digest": "sha256:aeaba544a046602118c87deb668988f6e8691a5dcd25c8a54ca535502e8de0ea",
+        "bytes": 19
+      },
+      {
+        "path": "components/confirm-dialog/interaction.js",
+        "digest": "sha256:e3ee975cd078735ca117c3a8a9afefe9bf93555e1bbbf4a41e71655334ed09d6",
+        "bytes": 8101
+      },
+      {
+        "path": "components/confirm-dialog/styles.css",
+        "digest": "sha256:94d7545f614bebeeee2a925210c21d47190789ff94f2b8fdeb0d895ff899c6c8",
+        "bytes": 2204
+      },
+      {
+        "path": "components/container/component.json",
+        "digest": "sha256:691699fa8bad01a9a56da3ab00f61c5d1b4a2c4ac0da1e4b1e47d4801a8a76b0",
+        "bytes": 2846
+      },
+      {
+        "path": "components/container/fixtures/compact-width.json",
+        "digest": "sha256:dad4f05799e440466a522ca8b6e205be747ef9df0f5316e737e85380f39167cb",
+        "bytes": 260
+      },
+      {
+        "path": "components/container/fixtures/full-width.json",
+        "digest": "sha256:be66ee9e62a0b62eb0cda8378bc1b8761473ec447f72a601e8f39f6bff4abaab",
+        "bytes": 286
+      },
+      {
+        "path": "components/container/fixtures/reading-width.json",
+        "digest": "sha256:0aa00e4eeefedd0766410aab72d08b426b9fb7a11066387aaf3c951d61ac5df4",
+        "bytes": 260
+      },
+      {
+        "path": "components/container/fixtures/typical.json",
+        "digest": "sha256:f0368ebf610edbae12d49a76faec8026dfe9be529f614be773cdb29af7389828",
+        "bytes": 237
+      },
+      {
+        "path": "components/container/fixtures/wide-width.json",
+        "digest": "sha256:6da3bccd600b473ee5e8a9d01dad56df12f23b11100a76b11564ea029a01de87",
+        "bytes": 254
+      },
+      {
+        "path": "components/container/fragment.html",
+        "digest": "sha256:842d2df5346507da1ccd0238288c1366bb1dc6a1b4cc5d8defead1e93a8bcf6c",
+        "bytes": 69
+      },
+      {
+        "path": "components/container/styles.css",
+        "digest": "sha256:4601c92ee6716160fe0fd762fc0accb5c30681d21f58b52f066259778ac0d4a4",
+        "bytes": 883
+      },
+      {
+        "path": "components/copy-field/component.json",
+        "digest": "sha256:7abfecbbd5edcaf57936fe50a2c7fb4722952aaa46afccafae716f58671ca6e0",
+        "bytes": 3634
+      },
+      {
+        "path": "components/copy-field/fixtures/typical-golden.json",
+        "digest": "sha256:bdf49a678e91043356f38904a0e6f2be78b032266a5d0e6fc2ed3e5ec6b84e37",
+        "bytes": 1516
+      },
+      {
+        "path": "components/copy-field/fragment.html",
+        "digest": "sha256:7382a0675581a446cbb340243d24b561e4d050d87eabadb146947f441882af86",
+        "bytes": 53
+      },
+      {
+        "path": "components/copy-field/interaction.js",
+        "digest": "sha256:c95ee0d1602d5832590b8a073666c1561068a9501945ab7a1cdfa4e8c68544d2",
+        "bytes": 3583
+      },
+      {
+        "path": "components/copy-field/styles.css",
+        "digest": "sha256:506643aa3ff5124b145a21fc36e6814b7416e006cad2f823e8c0c4fda64aa590",
+        "bytes": 1870
+      },
+      {
+        "path": "components/cover/component.json",
+        "digest": "sha256:d8386dcd1e7e900faeef8cf4700304cf53a013f0a1576ed71970a231a1982ff7",
+        "bytes": 2887
+      },
+      {
+        "path": "components/cover/fixtures/compact.json",
+        "digest": "sha256:cb174173436e70ac111d935420bbd156029a346b0fe9de8b178749f07f52867f",
+        "bytes": 369
+      },
+      {
+        "path": "components/cover/fixtures/fill.json",
+        "digest": "sha256:cc6f4658f47efec9ec4577b5450b21d82d4cec7a0808debae388baeb4f7f4d70",
+        "bytes": 423
+      },
+      {
+        "path": "components/cover/fixtures/standard.json",
+        "digest": "sha256:3bc2d18dcd181032f12091e9a2013abc7b6b1d2f619a593e9b1c9596ede8f154",
+        "bytes": 434
+      },
+      {
+        "path": "components/cover/fixtures/viewport.json",
+        "digest": "sha256:2b227847bc388ca8d65400c5e40a5096e0f05a247256950ff4875afcd93876af",
+        "bytes": 494
+      },
+      {
+        "path": "components/cover/fragment.html",
+        "digest": "sha256:8fde0d3ee8013d89dbc467f5699a097217988a21640ae63e337611f054fa310f",
+        "bytes": 194
+      },
+      {
+        "path": "components/cover/styles.css",
+        "digest": "sha256:ab2649fa93c305b5bf71b64dd8238f0b0ff99aad71ea5937e1e261845f834fb0",
+        "bytes": 1161
+      },
+      {
+        "path": "components/data-table/component.json",
+        "digest": "sha256:b2a73568e2e9fe81e83522424e3ced8eeeb9fc5956bae9bd0d57bf7cf77c95a5",
+        "bytes": 10992
+      },
+      {
+        "path": "components/data-table/fixtures/dense-long-text.json",
+        "digest": "sha256:83c3364636f5a2d01a389877cb4f6b38c9de6f34ed059db9abe77871c0cebffc",
+        "bytes": 1341
+      },
+      {
+        "path": "components/data-table/fixtures/empty.json",
+        "digest": "sha256:ae0f2bad8b1e84913b3ee03117e3a3e70d279d176adb88d9359c09c86d74cf36",
+        "bytes": 534
+      },
+      {
+        "path": "components/data-table/fixtures/host-composed-body.json",
+        "digest": "sha256:7c3bf58e1b6f5b8a7ab8868aaeaa110a82d3820c04ae55f0ee0b034f53e102f8",
+        "bytes": 1027
+      },
+      {
+        "path": "components/data-table/fixtures/typical.json",
+        "digest": "sha256:452a174a81d9122520480a29023b99d75ae00483b48a99859c20e62d2802001f",
+        "bytes": 1212
+      },
+      {
+        "path": "components/data-table/fragment.html",
+        "digest": "sha256:9387133c44bcc143015b1ca3b65228dff8b39672bcb9cdb72fe480034c1937e0",
+        "bytes": 99
+      },
+      {
+        "path": "components/data-table/styles.css",
+        "digest": "sha256:f70962eee9a5f5ed95dea2c9dc69dd944d3541fba4dc161ac28c3ee80846ed48",
+        "bytes": 2552
+      },
+      {
+        "path": "components/data-viewport/browser.d.ts",
+        "digest": "sha256:aac862b90f53f0ce69ec4e074238d26fd4e136f70c91564094f07d119d448a66",
+        "bytes": 1586
+      },
+      {
+        "path": "components/data-viewport/component.json",
+        "digest": "sha256:d75c718c677495194aded119e32ffc6f4a3c70afdcadb9b6723e6883d743e23c",
+        "bytes": 6008
+      },
+      {
+        "path": "components/data-viewport/fixtures/incremental-standard-golden.json",
+        "digest": "sha256:930171133977c67f03096391acba6a0eede067d584ef935070c1fddc44c058b0",
+        "bytes": 2640
+      },
+      {
+        "path": "components/data-viewport/fixtures/paged-navigation-golden.json",
+        "digest": "sha256:3f71589f87d7d467effe94d5401c64156a04e51af70dfc95f33a4ece015c005e",
+        "bytes": 2620
+      },
+      {
+        "path": "components/data-viewport/fixtures/windowed-golden.json",
+        "digest": "sha256:3dd9b1e558e58b9a12c0b5787fc06026da97da2622c44184eb9d204f1f41c246",
+        "bytes": 2365
+      },
+      {
+        "path": "components/data-viewport/fixtures/windowed-viewport-golden.json",
+        "digest": "sha256:1423c8c90d9ab3e4cc68478f3b65b64e363f9cc62f0e88da6a6a9eac7d7052ae",
+        "bytes": 2365
+      },
+      {
+        "path": "components/data-viewport/fragment.html",
+        "digest": "sha256:8e9713cbfdd2c93181457dc51768f81feb26969105043bc1a3c981f6de3d5dad",
+        "bytes": 67
+      },
+      {
+        "path": "components/data-viewport/interaction.js",
+        "digest": "sha256:b67ca7a9c01ea96a12b63f24eedba797e6606669340a2a3860ba5b5f4bdfdd13",
+        "bytes": 10584
+      },
+      {
+        "path": "components/data-viewport/styles.css",
+        "digest": "sha256:f0aa7c4d7e19af51afbb9b256db00e66f92aaa74c8f695e46e1923fec06266fb",
+        "bytes": 3722
+      },
+      {
+        "path": "components/date-calendar/browser.d.ts",
+        "digest": "sha256:fe4755df252760d7196451668abefda4b2b3d9970f8782e19416b080aa3e2134",
+        "bytes": 544
+      },
+      {
+        "path": "components/date-calendar/component.json",
+        "digest": "sha256:591b2283e01eb44104a766c69746699f78113af5f6cd883e9bc048896b697b76",
+        "bytes": 4387
+      },
+      {
+        "path": "components/date-calendar/fixtures/disabled-golden.json",
+        "digest": "sha256:8a2216d5224eb0df8b34aa6486c78beac3482ec5492558568e8b67bbe631739f",
+        "bytes": 17865
+      },
+      {
+        "path": "components/date-calendar/fixtures/readonly-golden.json",
+        "digest": "sha256:d5759697c3e61fc5f21be71fb92adfe4a790fabf4f0046ee48c24e9da843955b",
+        "bytes": 10910
+      },
+      {
+        "path": "components/date-calendar/fixtures/typical-golden.json",
+        "digest": "sha256:7a48636eb62d543d5b2fa6010e0038f2bc2f13a05ddd946dbd895fdd42bd1cd1",
+        "bytes": 16164
+      },
+      {
+        "path": "components/date-calendar/fragment.html",
+        "digest": "sha256:cfd476c475de3485082874f5b8dcc6cfba07019e66136b0b4b7cd61491c541ad",
+        "bytes": 13
+      },
+      {
+        "path": "components/date-calendar/interaction.js",
+        "digest": "sha256:f9040478b5a62d0b1e2915439e0c0338637e724db15e9e18caf08dbac2e32347",
+        "bytes": 16122
+      },
+      {
+        "path": "components/date-calendar/styles.css",
+        "digest": "sha256:aecbbedbb3db98a7224bbfe6f2d7f9c11479e860e72d88ca2dc9fc3b94a1b02a",
+        "bytes": 2300
+      },
+      {
+        "path": "components/date-picker/browser.d.ts",
+        "digest": "sha256:89188cc4892f68bf4a52f990f03e92fe7078686ccad96b128a24a57a247039b1",
+        "bytes": 575
+      },
+      {
+        "path": "components/date-picker/component.json",
+        "digest": "sha256:35cefb95361c6eac6df330ef63021bdfbcc3d52ebffcb222016e7f9231a0cb8e",
+        "bytes": 4924
+      },
+      {
+        "path": "components/date-picker/fixtures/range-dropdown-golden.json",
+        "digest": "sha256:aee4b077e1676e8ed188a3e630c6971b7ea358b1f5333ae58d856e6746b03913",
+        "bytes": 17117
+      },
+      {
+        "path": "components/date-picker/fixtures/range-golden.json",
+        "digest": "sha256:f4d227acaa3b0887e4789ba54cb2992d9d1990982515e964c03b2e0744d8accc",
+        "bytes": 16853
+      },
+      {
+        "path": "components/date-picker/fixtures/single-golden.json",
+        "digest": "sha256:2948edd75af31105d0380b81634d5ac6a5c983c051a81de29ab18d4070f4da0a",
+        "bytes": 17000
+      },
+      {
+        "path": "components/date-picker/fixtures/single-inline-golden.json",
+        "digest": "sha256:12fb3f291e4648ec5600de9fa7a408da9fbea0ea7dc0d9f9954686fef06b25ab",
+        "bytes": 16740
+      },
+      {
+        "path": "components/date-picker/fragment.html",
+        "digest": "sha256:8abde8aa226cb2285a3d58d0f8c9ba7c4af2505e8ba501d3484efaf9b8828325",
+        "bytes": 11
+      },
+      {
+        "path": "components/date-picker/interaction.js",
+        "digest": "sha256:8164839d8fa6791daae217a8eaec733577ccad88c12cbbb82bd342bdf4061a87",
+        "bytes": 13027
+      },
+      {
+        "path": "components/date-picker/styles.css",
+        "digest": "sha256:45eeb5b4530f1440bc3ee0012f547452b58a88a4b15122923cb6dcb451786c5c",
+        "bytes": 2353
+      },
+      {
+        "path": "components/definition-list/component.json",
+        "digest": "sha256:b9588973450406b18fc5949e7c2ce4d8bce418edf2877cd021455ab25a04d3dc",
+        "bytes": 3146
+      },
+      {
+        "path": "components/definition-list/fixtures/compact-plain-golden.json",
+        "digest": "sha256:4d33e6a46f6ca3b3ff66c31e468e7d9d4d065a7e5980a64fe9b0e01e6581dcc0",
+        "bytes": 501
+      },
+      {
+        "path": "components/definition-list/fixtures/typical-golden.json",
+        "digest": "sha256:646195fe19bfb09564bb3cdccf182c3f0dba9ec6c45e97a2f7c78a5c4238438d",
+        "bytes": 696
+      },
+      {
+        "path": "components/definition-list/fragment.html",
+        "digest": "sha256:78770a972cf3b1d60a542e3b29d8ece4b097a4996b4bf410b273ff91a87005c3",
+        "bytes": 34
+      },
+      {
+        "path": "components/definition-list/styles.css",
+        "digest": "sha256:caed72de8ff887d0ef4e13e22f879e5cdb90b368c82e4533b06e2f35526f5469",
+        "bytes": 1220
+      },
+      {
+        "path": "components/disclosure/component.json",
+        "digest": "sha256:1c470473335daf804bc5704aad0771618a2be875f844796c83c74e00d2b95890",
+        "bytes": 3066
+      },
+      {
+        "path": "components/disclosure/fixtures/contained-golden.json",
+        "digest": "sha256:0180555f3c1d163cb0481bca6d2e52c8979017ef9dab457a68796e9912b694d1",
+        "bytes": 500
+      },
+      {
+        "path": "components/disclosure/fixtures/plain-open-golden.json",
+        "digest": "sha256:50e3cabe47b379999ca2cf8bb48a8d0a2bcc592408de34d15b362d8618838ed4",
+        "bytes": 472
+      },
+      {
+        "path": "components/disclosure/fragment.html",
+        "digest": "sha256:673fb9eacace1fea26945dff9995bdf5e7804e66128d1802c82b5601910dc0a6",
+        "bytes": 219
+      },
+      {
+        "path": "components/disclosure/styles.css",
+        "digest": "sha256:efaab9be9551a265123756f21598ee1d620f33d24ebafd956cabd42bc3290b52",
+        "bytes": 1928
+      },
+      {
+        "path": "components/divider/component.json",
+        "digest": "sha256:3b6bcdb12608b2928afefe40e93b2727af581eb8bd8c9745366f04ee685058c0",
+        "bytes": 3214
+      },
+      {
+        "path": "components/divider/fixtures/long-content.json",
+        "digest": "sha256:891353ab40ba4736c933968b71d023cac9255e0415e032787e114b6aeafa8490",
+        "bytes": 559
+      },
+      {
+        "path": "components/divider/fixtures/typical.json",
+        "digest": "sha256:cbab592ae42c2d1141bacbe8bf5c816b4953c39adf28f9ba1c7016be5e52785b",
+        "bytes": 407
+      },
+      {
+        "path": "components/divider/fixtures/unlabelled.json",
+        "digest": "sha256:70f659afbd9013f1a2f3a277e5b79e53ef480d4bf656b663fb1059177706a693",
+        "bytes": 249
+      },
+      {
+        "path": "components/divider/fixtures/vertical.json",
+        "digest": "sha256:95b4b4c19332534b2155dd7053d8d3b4425868864c383814f0a06b5296f47f49",
+        "bytes": 241
+      },
+      {
+        "path": "components/divider/fragment.html",
+        "digest": "sha256:c0f9c71369fd3a35f2dfbe3a70fa24b20e03f10e13911f52467f7ffb126993bf",
+        "bytes": 36
+      },
+      {
+        "path": "components/divider/styles.css",
+        "digest": "sha256:dd030ec52306d6abdf9268bb02619d0c51c75efaa5404f1695738dac0e3f0414",
+        "bytes": 1225
+      },
+      {
+        "path": "components/drawer/component.json",
+        "digest": "sha256:e656643ecf2cd6581610ed61b2d79a8c741bc41411c85d9bc2da055a22410b00",
+        "bytes": 4542
+      },
+      {
+        "path": "components/drawer/fixtures/end-standard-golden.json",
+        "digest": "sha256:26f68f02a753d81214fe77bd5b8366b1fe580e44408848f12c821a0d2d3e7733",
+        "bytes": 1690
+      },
+      {
+        "path": "components/drawer/fixtures/start-narrow-golden.json",
+        "digest": "sha256:19589f1d13fe52d09a75f4dd95c9a500dcee8dff0c1a5128304be96951edb4fa",
+        "bytes": 1690
+      },
+      {
+        "path": "components/drawer/fixtures/start-wide-golden.json",
+        "digest": "sha256:8bc8e022ef386f9c07450589bd96a95df4d9ab2a32c192b5d098b5582dd160d7",
+        "bytes": 1686
+      },
+      {
+        "path": "components/drawer/fragment.html",
+        "digest": "sha256:73237fd41302ca97a7b2f04918eff385ecec4b68e7d952288892f554fd86e5f8",
+        "bytes": 11
+      },
+      {
+        "path": "components/drawer/interaction.js",
+        "digest": "sha256:75998e71ccd2d159d8cced5c59363fa4df39bd496ebf24bf724fa23df7022cb4",
+        "bytes": 3112
+      },
+      {
+        "path": "components/drawer/styles.css",
+        "digest": "sha256:840b488bd59fe0f486013311b4cbd6aa6fc2fe995d7e7cd92d364b7f23b12d0e",
+        "bytes": 3989
+      },
+      {
+        "path": "components/empty-state/component.json",
+        "digest": "sha256:c2a5ea1287482f63079ad2c08273ff253e04f3bae6dc8764a28a243319e32cef",
+        "bytes": 7277
+      },
+      {
+        "path": "components/empty-state/fixtures/center-h2.json",
+        "digest": "sha256:c64e30dff97e21b9f009bdbe5c8f73512772c9237ff64596b6f2b93d26d7f944",
+        "bytes": 474
+      },
+      {
+        "path": "components/empty-state/fixtures/center-h3.json",
+        "digest": "sha256:96fc43e4cb4a281b580163f419a724869ece23aa358c00304637e888dec3a58c",
+        "bytes": 474
+      },
+      {
+        "path": "components/empty-state/fixtures/center-h4.json",
+        "digest": "sha256:a247e41434febfaac2c481c4aa95de1b2d82a58572947db337ae1b02b7e0e564",
+        "bytes": 474
+      },
+      {
+        "path": "components/empty-state/fixtures/escaping-action.json",
+        "digest": "sha256:452bba9bfac8e39351a9092fcb6394b8dbe6b6ff1eb995b19aa72f931c72b15f",
+        "bytes": 715
+      },
+      {
+        "path": "components/empty-state/fixtures/long-body.json",
+        "digest": "sha256:bbc12d0651dc62e827694af4adcbc45372b00906c3a7368655ed6ff5d29b1965",
+        "bytes": 862
+      },
+      {
+        "path": "components/empty-state/fixtures/root-action.json",
+        "digest": "sha256:b34fa8b9ece3cd6851c80caa220deebbdea91b8e66302d8acbca8e1d9dc21a83",
+        "bytes": 635
+      },
+      {
+        "path": "components/empty-state/fixtures/start-h2.json",
+        "digest": "sha256:c8859298a9295ccb0a9431e101ff6209781bf2a797e34af53e6aaf4fc5027284",
+        "bytes": 472
+      },
+      {
+        "path": "components/empty-state/fixtures/start-h3.json",
+        "digest": "sha256:b2da62d8603f940b663765ce922b844cfc7bc7666fc0e5dbee5b84fa144cb582",
+        "bytes": 472
+      },
+      {
+        "path": "components/empty-state/fixtures/start-h4.json",
+        "digest": "sha256:2957914e949d5e777a7af30be0e50ba4ea6085b78c0ea9ace817ec6a893f719c",
+        "bytes": 472
+      },
+      {
+        "path": "components/empty-state/fragment.html",
+        "digest": "sha256:0f81acd2c76b1a1e098e99e6ec84175c0c2597d3660447d79a94e1e465e40376",
+        "bytes": 16
+      },
+      {
+        "path": "components/empty-state/styles.css",
+        "digest": "sha256:38a6e1218e01efc8a2c09fb393b6c08b56cd9f16fdd74428f6b86631c7dbc0eb",
+        "bytes": 3053
+      },
+      {
+        "path": "components/file-upload/browser.d.ts",
+        "digest": "sha256:ba88a57e484f0fad7f5cec235a66c27d9ed7523dfa6c614009c82c3931c72296",
+        "bytes": 913
+      },
+      {
+        "path": "components/file-upload/component.json",
+        "digest": "sha256:1f97b3ed52c486f92a4a9bed2822b6dede942090dfe72ccf02b78f648465c748",
+        "bytes": 5379
+      },
+      {
+        "path": "components/file-upload/fixtures/disabled-golden.json",
+        "digest": "sha256:c069dc8ced257ecf79996e04fa96f30756f981aaf299a54461527810144bc72b",
+        "bytes": 1526
+      },
+      {
+        "path": "components/file-upload/fixtures/typical-golden.json",
+        "digest": "sha256:993b121746aac7aee4ec17f68efd4582d205819fd0756c9a51a5bce937f533da",
+        "bytes": 2688
+      },
+      {
+        "path": "components/file-upload/fixtures/validation-golden.json",
+        "digest": "sha256:4c0dd8eb991663c0b7218baca9aa2d5c0c0f547854dc2f7f95851eb982e807a6",
+        "bytes": 1898
+      },
+      {
+        "path": "components/file-upload/fragment.html",
+        "digest": "sha256:6bf1ac4040aa7d621a035f13b02803ba25eb3c4b30750e97df8df92f1a17d62c",
+        "bytes": 60
+      },
+      {
+        "path": "components/file-upload/interaction.js",
+        "digest": "sha256:292013903d79e7659e97ca1646acf8b545a0692183f6ce9eb5a6fdb8f8ad0da8",
+        "bytes": 10818
+      },
+      {
+        "path": "components/file-upload/styles.css",
+        "digest": "sha256:b10d8711958fd08299107a34add11aae96cf3c55012ae231aceec75764eebf24",
+        "bytes": 4066
+      },
+      {
+        "path": "components/filter-bar/component.json",
+        "digest": "sha256:503d6bf17eb4030a65043dbef6a2e4d2d9c83fc767d465ebd3f06fd0f7c325b8",
+        "bytes": 6548
+      },
+      {
+        "path": "components/filter-bar/fixtures/empty-optional.json",
+        "digest": "sha256:7c1245c7c17e926833b011aa9a3580e4c292ab4ffc673e5bfb4c767c6dfea017",
+        "bytes": 396
+      },
+      {
+        "path": "components/filter-bar/fixtures/long-summary.json",
+        "digest": "sha256:561c06e357f16a96c8a53aeb322a2036c258f929cc760c0877a2d0b379f1458e",
+        "bytes": 582
+      },
+      {
+        "path": "components/filter-bar/fixtures/typical.json",
+        "digest": "sha256:797410f0a8afa95d591ffdbcc7ceb78a3e6685b5b5a1ca2b6b06da59448cc743",
+        "bytes": 717
+      },
+      {
+        "path": "components/filter-bar/fragment.html",
+        "digest": "sha256:a2f964bd610916f7f3e651f28956b0e393d2768a4c19d60d8f527ea7beb86bc3",
+        "bytes": 139
+      },
+      {
+        "path": "components/filter-bar/styles.css",
+        "digest": "sha256:7082c00b73ceba5eb1474645f2803f99a361126a663cb4e37f69c74e4872ee33",
+        "bytes": 892
+      },
+      {
+        "path": "components/form-field/component.json",
+        "digest": "sha256:48e9c8f59e65e96b92ed28e9c4ab5ad776442918aa402f9457b9d0fc034e801f",
+        "bytes": 8260
+      },
+      {
+        "path": "components/form-field/fixtures/disabled-input.json",
+        "digest": "sha256:cd3f9b851da92bf3e79fb816ef3c069d15436a102424633df4288f410fd247ec",
+        "bytes": 468
+      },
+      {
+        "path": "components/form-field/fixtures/disabled-textarea.json",
+        "digest": "sha256:e231a92ee3c198f4bb82017be827a266f6ada10b69cfd313e9f1f8c50a4bc903",
+        "bytes": 488
+      },
+      {
+        "path": "components/form-field/fixtures/input-date.json",
+        "digest": "sha256:d8381b595feb646de91bf4fab7ba76f967f8a8b4a4dc287fbcaf6057a974731e",
+        "bytes": 428
+      },
+      {
+        "path": "components/form-field/fixtures/input-email.json",
+        "digest": "sha256:dc36cffec36de7e15e5a9b53f0c9046bc4ee0fcabedc15493991ff4dd3e36b67",
+        "bytes": 831
+      },
+      {
+        "path": "components/form-field/fixtures/input-number.json",
+        "digest": "sha256:02702f1b56e4bade8d8bef41adb908afcbd52ee47b3c7b8e0afa4e9d91d9fdb5",
+        "bytes": 501
+      },
+      {
+        "path": "components/form-field/fixtures/input-password.json",
+        "digest": "sha256:89c864a63f537b4dcb80e36bc061dbc0c4a94671a67560f07d7b0dcea343f02c",
+        "bytes": 615
+      },
+      {
+        "path": "components/form-field/fixtures/input-search.json",
+        "digest": "sha256:89243a94afeb3a1a06661ea61f6e885029371e88655f671b3f471ab8b5b55c8d",
+        "bytes": 486
+      },
+      {
+        "path": "components/form-field/fixtures/input-tel.json",
+        "digest": "sha256:03b7e9355ae88ba5feecfb2c3438d1dd51e93847f4577b80b7ca05ae4cfcbb0d",
+        "bytes": 477
+      },
+      {
+        "path": "components/form-field/fixtures/input-text.json",
+        "digest": "sha256:c9bac2f7dac73c01e87d900c62a9ec4ee16e606c4ef5c622d74894afa4f9fe9d",
+        "bytes": 505
+      },
+      {
+        "path": "components/form-field/fixtures/input-url.json",
+        "digest": "sha256:647344f072876941c67f29f63f32921a72b38a433396c5c2f3f59d8ab9087304",
+        "bytes": 717
+      },
+      {
+        "path": "components/form-field/fixtures/textarea.json",
+        "digest": "sha256:1b856bcc3174860951ce980369d315e1047bbd992fa0ca15e8a450df719cc6fe",
+        "bytes": 898
+      },
+      {
+        "path": "components/form-field/fragment.html",
+        "digest": "sha256:3df0f672d0f790b68e5daedc231c32bde21e1b0f44090feff343849848d89ab3",
+        "bytes": 62
+      },
+      {
+        "path": "components/form-field/styles.css",
+        "digest": "sha256:172ec1d1ffe45e5e7258b0c9d572115e9fbc88c45191c2208dc03ffbb828af45",
+        "bytes": 2688
+      },
+      {
+        "path": "components/grid/component.json",
+        "digest": "sha256:0dcb2bb6130b6766e0b7c847e090c408471e6b9e0ba576b130b634ea70dd1177",
+        "bytes": 2959
+      },
+      {
+        "path": "components/grid/fixtures/fixed-columns.json",
+        "digest": "sha256:3a046edf79269c201149105cfc272ad32d94421894cc793cc3cf3fcb504a38ac",
+        "bytes": 461
+      },
+      {
+        "path": "components/grid/fixtures/four-columns.json",
+        "digest": "sha256:7f14eb2b54f1634ac1a5f1be183d28e962d26508f9afa6df9bfba382cd093512",
+        "bytes": 371
+      },
+      {
+        "path": "components/grid/fixtures/two-columns.json",
+        "digest": "sha256:04ee043fe76e1ddad6f58905381f7f36f51ad46ce4af4e479873315f24711840",
+        "bytes": 369
+      },
+      {
+        "path": "components/grid/fixtures/typical.json",
+        "digest": "sha256:f337af7818ce4f5c93a754f483eb881978cf85c5f10e0c0eb261d9f98b0ea665",
+        "bytes": 388
+      },
+      {
+        "path": "components/grid/fragment.html",
+        "digest": "sha256:366df89201c30d935daf42dd3bcade22af50eb4a4dfe3600abdb07dd10e11c7b",
+        "bytes": 99
+      },
+      {
+        "path": "components/grid/styles.css",
+        "digest": "sha256:77f24a6b524e4042c06bc2c9d49f1255d67c2fd559400ab3a5f2e02561834053",
+        "bytes": 3257
+      },
+      {
+        "path": "components/icon/component.json",
+        "digest": "sha256:18a37280177e1f2388ef95ac35d2ce3861324d0ae6b80886886ff3ddcf13622a",
+        "bytes": 2792
+      },
+      {
+        "path": "components/icon/fixtures/large-decorative.json",
+        "digest": "sha256:5a59311ab56ef5bae5d79bf026b2ad247134ccef36641e976db39e69a2004026",
+        "bytes": 367
+      },
+      {
+        "path": "components/icon/fixtures/medium-labeled.json",
+        "digest": "sha256:cfc612ac97d0171bbfa1e72a759c64e12b36bcf39448fcd433167666f56cf30b",
+        "bytes": 391
+      },
+      {
+        "path": "components/icon/fixtures/small-decorative.json",
+        "digest": "sha256:9390f7d135e9d1759f90d8dff32727edde8b5efcfc5519490c201aca46c9deda",
+        "bytes": 367
+      },
+      {
+        "path": "components/icon/fragment.html",
+        "digest": "sha256:a8ce7b8af6acafd5919bdbec1cae518c111ffe4d18b0f9fe2b904c759b4b3bc2",
+        "bytes": 39
+      },
+      {
+        "path": "components/icon/styles.css",
+        "digest": "sha256:014899706631f165b060de343533cde8af349cf52bf931c597fdb46686507c72",
+        "bytes": 513
+      },
+      {
+        "path": "components/layer/component.json",
+        "digest": "sha256:06ed70e520f8748a9c0c64499c48b12714e401889de7ffa415a0141991b87260",
+        "bytes": 2438
+      },
+      {
+        "path": "components/layer/fixtures/bottom-end.json",
+        "digest": "sha256:cf2fa604edd0819d23dc4f9b1954bb3670e9a2a0b2bd9c462acb69528786ca0d",
+        "bytes": 425
+      },
+      {
+        "path": "components/layer/fixtures/bottom-start.json",
+        "digest": "sha256:7056f4f5a6a12ee0965923e1e7a85ff0d2a4207924e00cec2874049db61c91ff",
+        "bytes": 429
+      },
+      {
+        "path": "components/layer/fixtures/center.json",
+        "digest": "sha256:1a5196ef98d0ea1a1c3a09667eedff80200d3876ab24e38cd311b663c498d0a6",
+        "bytes": 417
+      },
+      {
+        "path": "components/layer/fixtures/stretch.json",
+        "digest": "sha256:704d6ad75377eac980eaa5fdbc40afb00de025b7fb3d117852986376bc5232dc",
+        "bytes": 419
+      },
+      {
+        "path": "components/layer/fixtures/top-end.json",
+        "digest": "sha256:5efbc1bc98bfa25556009fd9d060282a4d703eb7d6f68b910e3d7a32620507cd",
+        "bytes": 419
+      },
+      {
+        "path": "components/layer/fixtures/top-start.json",
+        "digest": "sha256:6fd71e4a3cd0873f0dd9c408d8307978701913e13e19dc26bbf2c021b1c262fe",
+        "bytes": 423
+      },
+      {
+        "path": "components/layer/fragment.html",
+        "digest": "sha256:8644fad25da76a22ad975b541aac4070176145050aea92f997e5462a1cf0253a",
+        "bytes": 155
+      },
+      {
+        "path": "components/layer/styles.css",
+        "digest": "sha256:714592a638d798f03063de2399e8304eb67beea0fe674bb01e8d59dde7f9c148",
+        "bytes": 1674
+      },
+      {
+        "path": "components/metric/component.json",
+        "digest": "sha256:ea73c44e38acda493d40b8ec561acd0bee1a59cf57e479978f9ce704245f2817",
+        "bytes": 6064
+      },
+      {
+        "path": "components/metric/fixtures/contained.json",
+        "digest": "sha256:c5e070d6d7184aa822344a18c93ca6f9c487e69a88bea3255947470494bbe607",
+        "bytes": 313
+      },
+      {
+        "path": "components/metric/fixtures/down.json",
+        "digest": "sha256:19974ac3bd053c7dd92b4505a390ef72f68291edd4813738cc69ecb438726a50",
+        "bytes": 865
+      },
+      {
+        "path": "components/metric/fixtures/flat.json",
+        "digest": "sha256:6d8a908bed3f39b634619851a9e2efd81f5ea5ccf6e717df91fd8800f2ccd234",
+        "bytes": 841
+      },
+      {
+        "path": "components/metric/fixtures/icon-detail.json",
+        "digest": "sha256:5f72d36c2ce3957fd1a269ff766b38381906555680ab9dc18c96e8156b212241",
+        "bytes": 917
+      },
+      {
+        "path": "components/metric/fixtures/negative.json",
+        "digest": "sha256:42b3a17b73e684eed678150e18c64f1222dd664bd5a010a87ee5d6827154963e",
+        "bytes": 859
+      },
+      {
+        "path": "components/metric/fixtures/neutral.json",
+        "digest": "sha256:84d819acaf9703c1214d404b6acfefaf3db1bef23eb2b00a1fc3a7392c183363",
+        "bytes": 853
+      },
+      {
+        "path": "components/metric/fixtures/plain.json",
+        "digest": "sha256:d197cd07a860e7361bb8584c24b6841055b627bdbbc0d1394a39835c6af9453d",
+        "bytes": 292
+      },
+      {
+        "path": "components/metric/fixtures/positive.json",
+        "digest": "sha256:5a0f38cfde3a406c8a2a5949e5184dea0131e56070e843b49ca399147c92f6da",
+        "bytes": 863
+      },
+      {
+        "path": "components/metric/fixtures/up.json",
+        "digest": "sha256:5274091f02f92274eb02be514f1ea9900844734b25b07ed294eaadc5ffd67330",
+        "bytes": 857
+      },
+      {
+        "path": "components/metric/fragment.html",
+        "digest": "sha256:63cf2d703910932bc6c5d8fdc286ea61e8631ec48d2278a85745a210cf2f2cce",
+        "bytes": 11
+      },
+      {
+        "path": "components/metric/styles.css",
+        "digest": "sha256:98962af8f6cc202e64a679890a2395ef687054e35fce695612f0a41bbc8e595e",
+        "bytes": 2791
+      },
+      {
+        "path": "components/modal/component.json",
+        "digest": "sha256:9d5408af17be7fe7e84179ea98902e69e394da3e13f68e5e3788bdf7ba200b37",
+        "bytes": 4466
+      },
+      {
+        "path": "components/modal/fixtures/small-golden.json",
+        "digest": "sha256:6a5cfedb68f1568d604368dbd3d186c6aa581eb4de26e863ee679ceaa17ce69b",
+        "bytes": 1277
+      },
+      {
+        "path": "components/modal/fixtures/standard-golden.json",
+        "digest": "sha256:a8833d585c1b7f0138e0d0977718abcef860e7b2af9e60513a2e0f955cce390e",
+        "bytes": 1299
+      },
+      {
+        "path": "components/modal/fixtures/wide-golden.json",
+        "digest": "sha256:52db440ab6a88edaff50f73e88ade584d819e0ca11fc1c6f00ed37f4dd9cf318",
+        "bytes": 1275
+      },
+      {
+        "path": "components/modal/fragment.html",
+        "digest": "sha256:025dba741f1ffb7c4a7e9b55b3edf8d3fc6738a775742c12b5a02674d48315be",
+        "bytes": 10
+      },
+      {
+        "path": "components/modal/interaction.js",
+        "digest": "sha256:a7f19d998b709f68d0ebd5a8b295157de07fc1e4e077386ad6f1418f3a8cdf75",
+        "bytes": 3371
+      },
+      {
+        "path": "components/modal/styles.css",
+        "digest": "sha256:8e73567a10005d097b25bdd26ba58845fe43cb888085086c67d9eacfdb7f2dbe",
+        "bytes": 2866
+      },
+      {
+        "path": "components/page-header/component.json",
+        "digest": "sha256:1ddae24f53cd138b5fa214ebdb582ab12b445c95d307f7a4d8b3caca03709343",
+        "bytes": 4570
+      },
+      {
+        "path": "components/page-header/fixtures/actions.json",
+        "digest": "sha256:38d0bd7cf827d65a071d13da1347920643f7c4ab555f0a3ec0b35c98ac3a0c22",
+        "bytes": 514
+      },
+      {
+        "path": "components/page-header/fixtures/described.json",
+        "digest": "sha256:eea208cdcad3e5eb2865c13e8c78038427222d5f2689f52bd335775f1b82a051",
+        "bytes": 385
+      },
+      {
+        "path": "components/page-header/fixtures/escaped.json",
+        "digest": "sha256:7c4f6a6035293ea7a0f3e0283085ffb125526fbdf82c6b2958c7d27d2bb098e1",
+        "bytes": 477
+      },
+      {
+        "path": "components/page-header/fixtures/long-copy.json",
+        "digest": "sha256:e0588a0ef68b298554e75d27c49be7725553d31aedf6368bb1746a914fd07303",
+        "bytes": 745
+      },
+      {
+        "path": "components/page-header/fixtures/title-only.json",
+        "digest": "sha256:5aa8d5ba20d1b12b9f8082e849b104ac7b102c48e92ba39af2f3796466c92c5b",
+        "bytes": 230
+      },
+      {
+        "path": "components/page-header/fragment.html",
+        "digest": "sha256:e921cca6c42f8491f90e91f2efa9de2a70135fcbcf1ee0a2ac12a80d1ca27b55",
+        "bytes": 16
+      },
+      {
+        "path": "components/page-header/styles.css",
+        "digest": "sha256:8fb0a88706f3550c076e9b607460e2f440ffe0674c790e2d1e59c5f3e441b7b0",
+        "bytes": 1590
+      },
+      {
+        "path": "components/pagination/component.json",
+        "digest": "sha256:ff95e545ac092421c4cf31f5d3c3509b51f67cdf770153c6cb826e5127959466",
+        "bytes": 9981
+      },
+      {
+        "path": "components/pagination/fixtures/compact-disabled.json",
+        "digest": "sha256:25b48a996fc641399d5efd59eb71a5b7c3cd23d9962084e1d9cfeb089f3048d5",
+        "bytes": 854
+      },
+      {
+        "path": "components/pagination/fixtures/many-pages.json",
+        "digest": "sha256:fc4844d00b1cdff80765616f790704ae5700e6eea9403410a363732cc24de16d",
+        "bytes": 2168
+      },
+      {
+        "path": "components/pagination/fixtures/typical.json",
+        "digest": "sha256:95ac92744bb30978ba68fde239fe06d4dea86d0092f6808f97047910c4002765",
+        "bytes": 1412
+      },
+      {
+        "path": "components/pagination/fragment.html",
+        "digest": "sha256:b1f7ed68b6a58bffca78dd92feb90ac366df28ec9bc56e872648bf56bca80718",
+        "bytes": 59
+      },
+      {
+        "path": "components/pagination/styles.css",
+        "digest": "sha256:6f991ac6af18c1230699b620fc20d6cc2138db8c02898a5907a8a085eeeee982",
+        "bytes": 2587
+      },
+      {
+        "path": "components/pane/component.json",
+        "digest": "sha256:5df16aa3460c4c4e2fac1dee66899728fb7a10d7738ee20d637f2d99ccc9e8ac",
+        "bytes": 2147
+      },
+      {
+        "path": "components/pane/fixtures/bounded-no-scroll.json",
+        "digest": "sha256:ebf77244625a46da72e18b9a10af7b831629fd3e5b183d482cb5ae68693e3be2",
+        "bytes": 304
+      },
+      {
+        "path": "components/pane/fixtures/compact.json",
+        "digest": "sha256:bf31a1f753e59332417921cea6727f97f752a2f137925f27294469afdfb73da0",
+        "bytes": 322
+      },
+      {
+        "path": "components/pane/fixtures/content-scroll.json",
+        "digest": "sha256:bc7ef35e123411c55f26bfe255948f601ca81110b2bf4ecb74a21847f872418e",
+        "bytes": 315
+      },
+      {
+        "path": "components/pane/fixtures/content.json",
+        "digest": "sha256:ee9ca686ccdfb81e5fbb61c896577231f29a1ea4a76d3f478e727d45ce923a08",
+        "bytes": 272
+      },
+      {
+        "path": "components/pane/fixtures/fill.json",
+        "digest": "sha256:9171b9384354f5943db49ae98a711ee526256db7371342b0c6438490a8641f55",
+        "bytes": 316
+      },
+      {
+        "path": "components/pane/fixtures/standard.json",
+        "digest": "sha256:4dcb22e427f3c6c2d616873874b235e6603c3ade1b21a4290c0c705efb5a9c19",
+        "bytes": 324
+      },
+      {
+        "path": "components/pane/fixtures/viewport.json",
+        "digest": "sha256:bee7c956cd4de4f4ea1115c9db508fe7002acb522eac87d199a5da58ff479a1d",
+        "bytes": 324
+      },
+      {
+        "path": "components/pane/fragment.html",
+        "digest": "sha256:8f2d987474384c74edc847bffec4aeeaf950651ffdaaedb047a8e66d9e4d8dd3",
+        "bytes": 84
+      },
+      {
+        "path": "components/pane/styles.css",
+        "digest": "sha256:854ae93229aca5af03551ac29f2f5c94076ac5e25efd50f59fba775ed87699bd",
+        "bytes": 1939
+      },
+      {
+        "path": "components/popover/component.json",
+        "digest": "sha256:cdbb5d4f38f51fb10ff40156ca255b96b90558503e5e8e3211928082484e4ed8",
+        "bytes": 5031
+      },
+      {
+        "path": "components/popover/fixtures/end-standard-golden.json",
+        "digest": "sha256:b9be1b7c4298d4c657d88a10f74c5952699ee61c4ecbedb8070da48c0bea1195",
+        "bytes": 1344
+      },
+      {
+        "path": "components/popover/fixtures/end-wide-golden.json",
+        "digest": "sha256:21598219c0f699f728bd2f1c8107411c204c8fed4e2bb33e84fb29b0ec0bc94b",
+        "bytes": 1336
+      },
+      {
+        "path": "components/popover/fixtures/start-narrow-golden.json",
+        "digest": "sha256:04b583ed0f787fe79b9a48430c1ca3b2dd68f577036dfb2d5ab227a4bbe86cc5",
+        "bytes": 1344
+      },
+      {
+        "path": "components/popover/fixtures/start-standard-golden.json",
+        "digest": "sha256:2a4cdcd6e458fb010904a8fe981490c0bf026e6eada453752c5f0567d2b61978",
+        "bytes": 1348
+      },
+      {
+        "path": "components/popover/fixtures/start-wide-golden.json",
+        "digest": "sha256:ebabd7b763f6b72bd5cb45b954e9dabb4d9ee034b3a1eb9feaad52abcfa10fa3",
+        "bytes": 1340
+      },
+      {
+        "path": "components/popover/fragment.html",
+        "digest": "sha256:96b132aefb9e47113aaebc88eb8d88566d9eb4284c35db8829bc082778c449fd",
+        "bytes": 12
+      },
+      {
+        "path": "components/popover/interaction.js",
+        "digest": "sha256:d655291519238ccd90e0eda458c2001f9061828de7dc17a2c8a5bcf812f8a7c6",
+        "bytes": 5007
+      },
+      {
+        "path": "components/popover/styles.css",
+        "digest": "sha256:2ba9cc39e441461f8ceda1689136c661b01fe68913752b9fd2faee00a88177cd",
+        "bytes": 3406
+      },
+      {
+        "path": "components/progress-steps/component.json",
+        "digest": "sha256:e251f54f707aef38cedaa87c5de9ec1ff9327a14ae7afd3aed9c3a77a68365c3",
+        "bytes": 7918
+      },
+      {
+        "path": "components/progress-steps/fixtures/compact-golden.json",
+        "digest": "sha256:53e49456b0f60cc83846f030fe03d9f6205397d47a4feb0dbdab129e16b75445",
+        "bytes": 2013
+      },
+      {
+        "path": "components/progress-steps/fixtures/typical-golden.json",
+        "digest": "sha256:7007b50e8577b3934ff642cc9930583f514cb682b17934d6133f6ba0e919f481",
+        "bytes": 3247
+      },
+      {
+        "path": "components/progress-steps/fixtures/vertical-error-localized-golden.json",
+        "digest": "sha256:6b0bcf3872b5fcd42840ba5360b451ce60e65c7a466d407deb546934cfd84224",
+        "bytes": 2765
+      },
+      {
+        "path": "components/progress-steps/fragment.html",
+        "digest": "sha256:b1f7ed68b6a58bffca78dd92feb90ac366df28ec9bc56e872648bf56bca80718",
+        "bytes": 59
+      },
+      {
+        "path": "components/progress-steps/styles.css",
+        "digest": "sha256:f1f39a63acb63997964315da58782e79008be7818edebbceb3135d84b5b37e58",
+        "bytes": 5763
+      },
+      {
+        "path": "components/progress/component.json",
+        "digest": "sha256:d36258df4814302440c5f7b228f16d22f2604b685e6ae937e528134159cd086a",
+        "bytes": 4951
+      },
+      {
+        "path": "components/progress/fixtures/compact.json",
+        "digest": "sha256:d4dc89367e3d80d4b6b8895e0349d182f4609cd39ea7c75144d0bda7386b0cb8",
+        "bytes": 570
+      },
+      {
+        "path": "components/progress/fixtures/complete.json",
+        "digest": "sha256:ce058a83851e8744800bf1feb4c600b2723ca58c04124279c145849597e1fab4",
+        "bytes": 927
+      },
+      {
+        "path": "components/progress/fixtures/determinate-danger.json",
+        "digest": "sha256:13ece732b86b25ce9ac0dd81893f0adcc1969bba46f7fdc42d9ac019abc354c9",
+        "bytes": 684
+      },
+      {
+        "path": "components/progress/fixtures/determinate-info.json",
+        "digest": "sha256:df402382ab660a57385247248fdd2ebf3f027841aa8b4bbc74839a90649b4457",
+        "bytes": 841
+      },
+      {
+        "path": "components/progress/fixtures/determinate-success.json",
+        "digest": "sha256:56a05b619b75ee7ca36dea89ded187062257fe61a89622381607efd7b3c0313a",
+        "bytes": 677
+      },
+      {
+        "path": "components/progress/fixtures/determinate-warning.json",
+        "digest": "sha256:4fac7f5b6f2ab813b05c21edd95e72bbc4aa05cf4a067ef489e80b79981069bf",
+        "bytes": 687
+      },
+      {
+        "path": "components/progress/fixtures/escaped-copy.json",
+        "digest": "sha256:2c0261e39a73c23f5398a5c09b97bb4c9a627ebb10316c2e856b352ba614013c",
+        "bytes": 957
+      },
+      {
+        "path": "components/progress/fixtures/indeterminate.json",
+        "digest": "sha256:f17a76a774f41f679d7a18d9225eb4c9b487c549829b2fa9ea2a5a8691fe1a6e",
+        "bytes": 921
+      },
+      {
+        "path": "components/progress/fixtures/long-copy.json",
+        "digest": "sha256:89d647eb9c78b6712d999b7cbf5a82131e61210e40b70a32dcce54247a1a4647",
+        "bytes": 1084
+      },
+      {
+        "path": "components/progress/fixtures/zero.json",
+        "digest": "sha256:02830539d3c611012facb450b3c456ee550ec396177b1fc2ea3b1faa00c2f926",
+        "bytes": 655
+      },
+      {
+        "path": "components/progress/fragment.html",
+        "digest": "sha256:c4523d3d6c44368ad1328821652559bc3679ccf276655ff3733b42383f476ce4",
+        "bytes": 149
+      },
+      {
+        "path": "components/progress/styles.css",
+        "digest": "sha256:23f3cc5b471c2862500af1919f501b11cb697d46485670b2102287133e88ff63",
+        "bytes": 2947
+      },
+      {
+        "path": "components/radio-group/component.json",
+        "digest": "sha256:7ff6abd4851a19d6d07224adb96d7da7f7433109dcb3cf1d1c46cbaf77884d20",
+        "bytes": 6254
+      },
+      {
+        "path": "components/radio-group/fixtures/disabled-golden.json",
+        "digest": "sha256:7dba653c8850723fc3ba3c1b2a05140c4145fe73e0bb6d45f902166a036d68cd",
+        "bytes": 1076
+      },
+      {
+        "path": "components/radio-group/fixtures/inline-golden.json",
+        "digest": "sha256:480d5f5d6b7e29b7b487cfbc1f488bdb6994afe015899d083ec55a5659a23452",
+        "bytes": 1072
+      },
+      {
+        "path": "components/radio-group/fixtures/typical-golden.json",
+        "digest": "sha256:c86c7bcf95020d9601fe65a435616051d6994d230ae5619f32ff5c7073c7c826",
+        "bytes": 2120
+      },
+      {
+        "path": "components/radio-group/fixtures/validation-golden.json",
+        "digest": "sha256:30d7db6d3f01f032f3e2aa9d3407cace678d8234015519ea007f46f8c0281155",
+        "bytes": 1524
+      },
+      {
+        "path": "components/radio-group/fragment.html",
+        "digest": "sha256:221004eb9dd44f93cdf72ddde0798a749bbe522c4e003b6311c764b6dc3ef633",
+        "bytes": 73
+      },
+      {
+        "path": "components/radio-group/styles.css",
+        "digest": "sha256:1ab385a4d0f4d1fbc7a7504849f74aa2ac79041e1b96ef54c1811ffe78834ddb",
+        "bytes": 2385
+      },
+      {
+        "path": "components/reel/component.json",
+        "digest": "sha256:06e0d4c1dd351f00ac75f46abe79808f1dc7bb32a9f141d1f7795161be9b1b95",
+        "bytes": 3275
+      },
+      {
+        "path": "components/reel/fixtures/content.json",
+        "digest": "sha256:77c3d1311ade5832c6cd6a328df9a994beffc7d241b99bb362ea8cc2f53400bf",
+        "bytes": 412
+      },
+      {
+        "path": "components/reel/fixtures/narrow.json",
+        "digest": "sha256:f227b6bab1331fe076285e4ecb880cde13a94b6163553a5bec88f5c2a212c49b",
+        "bytes": 410
+      },
+      {
+        "path": "components/reel/fixtures/standard.json",
+        "digest": "sha256:619fcce2e5cacc4f924b369bc80952c93c6464b733e65c36d8ba1922c5db7fe1",
+        "bytes": 414
+      },
+      {
+        "path": "components/reel/fixtures/wide.json",
+        "digest": "sha256:a578f1e71b33c4d9cd0b58b4d04ae4614180deb90d3e524f3693fd93efa1909f",
+        "bytes": 406
+      },
+      {
+        "path": "components/reel/fragment.html",
+        "digest": "sha256:8c42d703b02cdd5343367f0ee142fd0fb2a451baf99ccf0e7f4aa12b9e493341",
+        "bytes": 149
+      },
+      {
+        "path": "components/reel/styles.css",
+        "digest": "sha256:2a711c0fab3b7eb0fc1caf8a5df643615ea207cf16c59e16b26e0823e9d6df33",
+        "bytes": 1535
+      },
+      {
+        "path": "components/segmented-control/component.json",
+        "digest": "sha256:89f7ed7e7260d2296ccea823fd27dcce81a2a9895dce230284440c2cdd3e440e",
+        "bytes": 4876
+      },
+      {
+        "path": "components/segmented-control/fixtures/equal-width-golden.json",
+        "digest": "sha256:3c1a648868c64bdde7e02862a7b460fc18ae485e24d2e3a1e75065741902ca7e",
+        "bytes": 769
+      },
+      {
+        "path": "components/segmented-control/fixtures/escaped-localized-golden.json",
+        "digest": "sha256:8b3c6d3dbd6430ed3ed871dcde992ab0690ddea1714aa5c677d457412f042e19",
+        "bytes": 776
+      },
+      {
+        "path": "components/segmented-control/fixtures/typical-golden.json",
+        "digest": "sha256:aeee1ffe00c15886d3d4d7ed7885a5460d68b9df74831e62d05b4d244109bbea",
+        "bytes": 1263
+      },
+      {
+        "path": "components/segmented-control/fragment.html",
+        "digest": "sha256:b1f7ed68b6a58bffca78dd92feb90ac366df28ec9bc56e872648bf56bca80718",
+        "bytes": 59
+      },
+      {
+        "path": "components/segmented-control/styles.css",
+        "digest": "sha256:dfeb74d77be5cfb8dd860a749324ad092d1b7c9e673f85ebe18f2b1be6fac4a1",
+        "bytes": 2359
+      },
+      {
+        "path": "components/select-field/component.json",
+        "digest": "sha256:1d7b0d3d464a2d130e358e13b28fdac58809bd30904c1e457255990168bdbb5a",
+        "bytes": 11360
+      },
+      {
+        "path": "components/select-field/fixtures/disabled.json",
+        "digest": "sha256:ced49117bd0fc8d1a25334740f7e3944e5c4579827307f62456e0331510377fe",
+        "bytes": 947
+      },
+      {
+        "path": "components/select-field/fixtures/invalid-state.json",
+        "digest": "sha256:6ae5fd3184aa0406bde41a97768ce89e4ed3249aaf48546507bde79e792d5f63",
+        "bytes": 982
+      },
+      {
+        "path": "components/select-field/fixtures/long-text.json",
+        "digest": "sha256:1e482e0cd62425d9df79cd726c47c651c09fc905cc11f7cbd65ef1c60278c4e8",
+        "bytes": 969
+      },
+      {
+        "path": "components/select-field/fixtures/typical.json",
+        "digest": "sha256:4e8227f3b793be91d84ad5edf4ee5baa54335f9c911b016d1a60256e3e48305a",
+        "bytes": 826
+      },
+      {
+        "path": "components/select-field/fragment.html",
+        "digest": "sha256:3df0f672d0f790b68e5daedc231c32bde21e1b0f44090feff343849848d89ab3",
+        "bytes": 62
+      },
+      {
+        "path": "components/select-field/styles.css",
+        "digest": "sha256:4dae9a7e0bdcc3eecc4da9d71a1c15733123a05120412448beb1b92e5c55c3f5",
+        "bytes": 1687
+      },
+      {
+        "path": "components/sidebar/component.json",
+        "digest": "sha256:4a31fb8ee32e30fb058c953a15a185f9684f39fb28de6529f34811c538267fe1",
+        "bytes": 2943
+      },
+      {
+        "path": "components/sidebar/fixtures/end.json",
+        "digest": "sha256:d0581bf02aaebbb689241950b94052449aafec7fdd651d76cbd0f15b93fda9e7",
+        "bytes": 513
+      },
+      {
+        "path": "components/sidebar/fixtures/start.json",
+        "digest": "sha256:4e7dbc745b6bd0c86258315bd53571f22b9ec06621dca2647bd269c42be35c4d",
+        "bytes": 517
+      },
+      {
+        "path": "components/sidebar/fragment.html",
+        "digest": "sha256:075082126e710dbe6cda813f339fd5bd893ca2fc8862e7485e43bdea5dd4120f",
+        "bytes": 110
+      },
+      {
+        "path": "components/sidebar/styles.css",
+        "digest": "sha256:d05d41c5e0a5739f18a3864848b6c59cdd8ddff113e62a477fd6e552a1db8816",
+        "bytes": 3071
+      },
+      {
+        "path": "components/skeleton/component.json",
+        "digest": "sha256:a2e35801ce0a831df8572d025c8fb2981cfb775ef1ff3c4670d5d5bccd989c91",
+        "bytes": 5341
+      },
+      {
+        "path": "components/skeleton/fixtures/animated.json",
+        "digest": "sha256:0b5b2b03936e462f5eb1d27b341fdc905b19c5ef70db316983b79f7bc9f71f69",
+        "bytes": 261
+      },
+      {
+        "path": "components/skeleton/fixtures/circle.json",
+        "digest": "sha256:a96bd6e2cd6ba155b31a4bcbe8408e40c600d84114891b607a0872454463c068",
+        "bytes": 265
+      },
+      {
+        "path": "components/skeleton/fixtures/full.json",
+        "digest": "sha256:0b5b2b03936e462f5eb1d27b341fdc905b19c5ef70db316983b79f7bc9f71f69",
+        "bytes": 261
+      },
+      {
+        "path": "components/skeleton/fixtures/large.json",
+        "digest": "sha256:413e2c39bc43e6cae06fcf0b0b478d6ce1ae28f5dbee80562de4af0af8972433",
+        "bytes": 259
+      },
+      {
+        "path": "components/skeleton/fixtures/medium.json",
+        "digest": "sha256:0b5b2b03936e462f5eb1d27b341fdc905b19c5ef70db316983b79f7bc9f71f69",
+        "bytes": 261
+      },
+      {
+        "path": "components/skeleton/fixtures/rectangle.json",
+        "digest": "sha256:0b7394a666b2b83f9f749db8662b7dc160724643037770609178ca5a09259dc3",
+        "bytes": 271
+      },
+      {
+        "path": "components/skeleton/fixtures/short.json",
+        "digest": "sha256:1b4e59a19fc8b9eedcf4f55efdd56f322d27b13826bd60672668e2c59e3b833e",
+        "bytes": 263
+      },
+      {
+        "path": "components/skeleton/fixtures/small.json",
+        "digest": "sha256:bcb802b561e1d4b726f7888cb3fe94d33f57e75ab17b4b8173a346f0562af3e0",
+        "bytes": 259
+      },
+      {
+        "path": "components/skeleton/fixtures/static.json",
+        "digest": "sha256:b224d57c3f2294b1ea23d213d29fb0d5e3fa8af5612e9c0d44ffc78b47751bdb",
+        "bytes": 260
+      },
+      {
+        "path": "components/skeleton/fixtures/text.json",
+        "digest": "sha256:0b5b2b03936e462f5eb1d27b341fdc905b19c5ef70db316983b79f7bc9f71f69",
+        "bytes": 261
+      },
+      {
+        "path": "components/skeleton/fixtures/width-medium.json",
+        "digest": "sha256:cb9c99d7e0f6037ce555850dba8752f73c53b91bc0ccf91fc8b123020f871035",
+        "bytes": 265
+      },
+      {
+        "path": "components/skeleton/fragment.html",
+        "digest": "sha256:be4e0903e57b51ec22f35cba5882334c794318b339c09589384fddc845db146b",
+        "bytes": 13
+      },
+      {
+        "path": "components/skeleton/styles.css",
+        "digest": "sha256:5c4d06ab2b42e7c201241f02e50c241863923dbd3bb5483fdc090633fadf722d",
+        "bytes": 2305
+      },
+      {
+        "path": "components/split/component.json",
+        "digest": "sha256:8e20136c7d5d2f6d0560cc3acf7a1f94a9f23f08fd9c532bd41118dfa6f8d364",
+        "bytes": 2504
+      },
+      {
+        "path": "components/split/fixtures/end-dominant.json",
+        "digest": "sha256:b15964b8d551b8ea65ec3769d18f5d72ae18e2f77e394ff8ab99f4db7074111f",
+        "bytes": 469
+      },
+      {
+        "path": "components/split/fixtures/end-wide.json",
+        "digest": "sha256:a4611fb4eec08effa4a3bd06afd1bb927986ba76932d5070b3a7911c82959df1",
+        "bytes": 461
+      },
+      {
+        "path": "components/split/fixtures/start-dominant.json",
+        "digest": "sha256:80ce28df7d753b0e8db48206b30629f30c5492090016c575f3f36aabaf2b92be",
+        "bytes": 473
+      },
+      {
+        "path": "components/split/fixtures/start-wide.json",
+        "digest": "sha256:9e58245e78003b06b59a73819dddbaa7580c55f64cb9fefaa3fa861bbb7958c2",
+        "bytes": 528
+      },
+      {
+        "path": "components/split/fixtures/typical.json",
+        "digest": "sha256:3bb81b0402cff11329979025abe5532bc2be3aa82120774774d71a0b14ac2d4a",
+        "bytes": 461
+      },
+      {
+        "path": "components/split/fragment.html",
+        "digest": "sha256:24fe7903252f7fe253fca02822dfcaecc79dd8f0e6cb0b4eb10c1a1fd0936779",
+        "bytes": 181
+      },
+      {
+        "path": "components/split/styles.css",
+        "digest": "sha256:69faf2eb1b09981e8750fe0317f8c8709173f3290346fc8a5e415d01ea972ece",
+        "bytes": 3975
+      },
+      {
+        "path": "components/stack/component.json",
+        "digest": "sha256:a530155baa52503d2f3d29419215232aacfdcd4a06de7e4ad2aecdd6e157f799",
+        "bytes": 2430
+      },
+      {
+        "path": "components/stack/fixtures/alignment.json",
+        "digest": "sha256:d07f3bdd2242c69cbb86726b277752b4475b9147a3aab52b230d2c05577cf406",
+        "bytes": 278
+      },
+      {
+        "path": "components/stack/fixtures/compact-gap.json",
+        "digest": "sha256:d9d1eb1fd684dc8982808fdeae2d55a749ebae23b48294e650f26de1e583b4c4",
+        "bytes": 244
+      },
+      {
+        "path": "components/stack/fixtures/generous-gap.json",
+        "digest": "sha256:240827ef7cb08ae89273d54766cf58a7c3ab07083cf5bd7ffab157699c5c2b3b",
+        "bytes": 246
+      },
+      {
+        "path": "components/stack/fixtures/no-gap.json",
+        "digest": "sha256:a8743f76b69a628b8d77c4ed4bd1ed7c35869fb3c919c5a85e545578709b142f",
+        "bytes": 238
+      },
+      {
+        "path": "components/stack/fixtures/typical.json",
+        "digest": "sha256:52305aae9cf0505354c8e24e57d3488550f317d79144bc16dbc43814af9219ec",
+        "bytes": 233
+      },
+      {
+        "path": "components/stack/fragment.html",
+        "digest": "sha256:f3011299ad47fef069c4bb87afc3a04a7d7a81cfc97eb166903a033e4db5ee91",
+        "bytes": 65
+      },
+      {
+        "path": "components/stack/styles.css",
+        "digest": "sha256:27737608080aad3dc75edcde6798736ce2fbcff93e2a4eb0be0a1ea989e0c3b9",
+        "bytes": 859
+      },
+      {
+        "path": "components/status-indicator/component.json",
+        "digest": "sha256:b32e0a4ce3e2bb0b5d25b88a23252e7a826e055eaf29bce1a2caec7220e88175",
+        "bytes": 4763
+      },
+      {
+        "path": "components/status-indicator/fixtures/danger.json",
+        "digest": "sha256:ce25a8908bca741fe95b362c76a64f0114dd64b8a708a9dc515b04d0664ce40a",
+        "bytes": 365
+      },
+      {
+        "path": "components/status-indicator/fixtures/escaped.json",
+        "digest": "sha256:27300c505adc25da832bdd4dc5f55618855299966180953486690567253d630c",
+        "bytes": 528
+      },
+      {
+        "path": "components/status-indicator/fixtures/live.json",
+        "digest": "sha256:151d0ab300a5d53fbfe0b0135344e7743393390e28ac6ef68e2126c90e09416e",
+        "bytes": 648
+      },
+      {
+        "path": "components/status-indicator/fixtures/neutral.json",
+        "digest": "sha256:949bf172a2c68832f39141dfb45b339ef9912ae2d2ad104cce67051e58621cc2",
+        "bytes": 352
+      },
+      {
+        "path": "components/status-indicator/fixtures/success.json",
+        "digest": "sha256:f824e364d04f662dc21ca716de0f64b04b9cb42b89f544a292758161a6d2e411",
+        "bytes": 460
+      },
+      {
+        "path": "components/status-indicator/fragment.html",
+        "digest": "sha256:fed18ff1c462608a922aa674587cd54758ba668efc2e8c9694215743e5c165aa",
+        "bytes": 163
+      },
+      {
+        "path": "components/status-indicator/styles.css",
+        "digest": "sha256:8d0fe98c26b946eb6792c45fc0d41452e329c27f52dda7c1f893d5e05a540607",
+        "bytes": 2029
+      },
+      {
+        "path": "components/switch/component.json",
+        "digest": "sha256:dab3452b233c4826dec08d83164fc3f7f6428124b572552b73a130efc0fb0762",
+        "bytes": 2260
+      },
+      {
+        "path": "components/switch/fixtures/equal.json",
+        "digest": "sha256:17bea665357859289e9a203a6224e7da77b3b3c602e44ace9fa2aa9b08a87d4c",
+        "bytes": 418
+      },
+      {
+        "path": "components/switch/fixtures/natural.json",
+        "digest": "sha256:728e0d0581b45a13ef83daab6d3f52b652a54c47cd2ac65abff51bdec91160e9",
+        "bytes": 422
+      },
+      {
+        "path": "components/switch/fragment.html",
+        "digest": "sha256:53124dc4bb4d1a5e60a70ade2506bb4b3af51c08389b846da373b195cba94657",
+        "bytes": 103
+      },
+      {
+        "path": "components/switch/styles.css",
+        "digest": "sha256:b8730d9f68660c23a1d460ae3ab6e9c57a681f8bb6099e089c82825cc0a86b47",
+        "bytes": 2991
+      },
+      {
+        "path": "components/tabs/component.json",
+        "digest": "sha256:f3c3d4ac8d7813f88b705fcf43b1ba89a09f0ca2edc7c1779e18ca60030ed382",
+        "bytes": 3087
+      },
+      {
+        "path": "components/tabs/fixtures/escaped-localized-golden.json",
+        "digest": "sha256:960676e1d5d5f93aedd53a7051818b33b938f51fd55d09f357df2bbe01bbcd82",
+        "bytes": 698
+      },
+      {
+        "path": "components/tabs/fixtures/typical-golden.json",
+        "digest": "sha256:685db6ab2129eb4a4e94454cf3bc306a8fca529555832b56c651149940c9a251",
+        "bytes": 878
+      },
+      {
+        "path": "components/tabs/fragment.html",
+        "digest": "sha256:b1f7ed68b6a58bffca78dd92feb90ac366df28ec9bc56e872648bf56bca80718",
+        "bytes": 59
+      },
+      {
+        "path": "components/tabs/styles.css",
+        "digest": "sha256:0e1d69dc04d550ccae027e2ce9faee5bef328465354e0e6b38a33d160b0a2a65",
+        "bytes": 1312
+      },
+      {
+        "path": "components/tag/component.json",
+        "digest": "sha256:be759122efbbe224d5ad66f8fc9cef00a535c229edb0afc2f3a89b538ef69813",
+        "bytes": 9812
+      },
+      {
+        "path": "components/tag/fixtures/brand.json",
+        "digest": "sha256:af919f3202f90e75ccb416dad95b07f3135cf71902e7a577c66468be00be4635",
+        "bytes": 254
+      },
+      {
+        "path": "components/tag/fixtures/danger.json",
+        "digest": "sha256:a5b4b052f8943223e88bf470b6bfa4d5732018063b85526c0c427686e0dff9a9",
+        "bytes": 255
+      },
+      {
+        "path": "components/tag/fixtures/escaped.json",
+        "digest": "sha256:c0cb07da8c8bad1e65e94ba46156c43aec24fef964cc7ae6d7f888b1ef1afd17",
+        "bytes": 847
+      },
+      {
+        "path": "components/tag/fixtures/large.json",
+        "digest": "sha256:7e2b3736987e17c978b330d8e26a1d59ba650032de21bdbcdc1dc730d2bc9f03",
+        "bytes": 272
+      },
+      {
+        "path": "components/tag/fixtures/linked.json",
+        "digest": "sha256:1503129c40b416a288c28bd16f749fa2bc8c4ab483ad727236ce43eb6a98b7c4",
+        "bytes": 346
+      },
+      {
+        "path": "components/tag/fixtures/long-content.json",
+        "digest": "sha256:8f293758d46edfb91f8d448eb4ba75e78849caf2799c91f8152792166da4465e",
+        "bytes": 633
+      },
+      {
+        "path": "components/tag/fixtures/removable.json",
+        "digest": "sha256:8608faac365a8ac357778d02c76c05256ddc4e2e09d87b25717f7e6489917826",
+        "bytes": 773
+      },
+      {
+        "path": "components/tag/fixtures/small.json",
+        "digest": "sha256:769fabf6698e89cfc36ff8426ab9f24ed25f8d660193e282804f69fb8a7f49e7",
+        "bytes": 268
+      },
+      {
+        "path": "components/tag/fixtures/typical.json",
+        "digest": "sha256:9e0ad0e6592c15a008e422c564a263cdb9a9dc09098e6660fd55b989fa9f094b",
+        "bytes": 759
+      },
+      {
+        "path": "components/tag/fixtures/warning.json",
+        "digest": "sha256:6af5569a7f63384fde09ee925137082a054210d2f1b3f091aafa92682a6126a4",
+        "bytes": 262
+      },
+      {
+        "path": "components/tag/fragment.html",
+        "digest": "sha256:f5d446ef33c7f2dbbd270ad1f42cde2a14dba476cb4b252fc3ec1397c793dcd3",
+        "bytes": 8
+      },
+      {
+        "path": "components/tag/styles.css",
+        "digest": "sha256:cc7bf52fc5a8b0f2e445ef7f2330da8f5888b6ae2b89eb53a5723492f32fc4ef",
+        "bytes": 3752
+      },
+      {
+        "path": "components/theme-switcher/component.json",
+        "digest": "sha256:a4ebfe2474d94f824305b54b5d291bbdc5745a1bc7f24081d8071ef7cf7c2d4a",
+        "bytes": 4089
+      },
+      {
+        "path": "components/theme-switcher/fixtures/icons-golden.json",
+        "digest": "sha256:4bbb5e10236988f509f35813c888f6f3029c10153b123088fca7cdbe641cfe7e",
+        "bytes": 2112
+      },
+      {
+        "path": "components/theme-switcher/fixtures/text-golden.json",
+        "digest": "sha256:bfeaaf1048baf5d176cb508a5bf3b961b27cea5c50b9c493fc0b4c1d0e601370",
+        "bytes": 2110
+      },
+      {
+        "path": "components/theme-switcher/fragment.html",
+        "digest": "sha256:560466341a2eb10e1908e4a8e5dc903adc71010c2f78bbbef6a44ec6be1192e3",
+        "bytes": 18
+      },
+      {
+        "path": "components/theme-switcher/install.js",
+        "digest": "sha256:b96eab098f36c71dc02ba8a9ef867b6b7aa755591f8d5271c20f05167db354da",
+        "bytes": 7118
+      },
+      {
+        "path": "components/theme-switcher/styles.css",
+        "digest": "sha256:c597711a2bf8a8d52202a7883d41bcc52137c41d02ed3da3ec9d8189f3595f49",
+        "bytes": 1222
+      },
+      {
+        "path": "components/toast/component.json",
+        "digest": "sha256:b9a50153269d99636ef369ee44e0821ae125ba9e62ba48fe386540c9847072cf",
+        "bytes": 5393
+      },
+      {
+        "path": "components/toast/fixtures/bottom-center-golden.json",
+        "digest": "sha256:0cbdabf7768cf8ce7c7416e7fd6f1edc9fe905ccea5d0583159614802e914fc5",
+        "bytes": 6168
+      },
+      {
+        "path": "components/toast/fixtures/bottom-end-golden.json",
+        "digest": "sha256:1db2a9ce7e8121afc30f1b9820cbf95271b25c952e9a6c49c7aa3d2de4d939e4",
+        "bytes": 6162
+      },
+      {
+        "path": "components/toast/fixtures/inline-golden.json",
+        "digest": "sha256:4b43a11fecf8c00c1b15caadadf7d864f2613bed9c21b879a04bef03db2f99c9",
+        "bytes": 6154
+      },
+      {
+        "path": "components/toast/fixtures/preserve-golden.json",
+        "digest": "sha256:f6918e8b031a78f0d64863d34f9682fb6edbb13029ffd5f96828f71ebeb36964",
+        "bytes": 6168
+      },
+      {
+        "path": "components/toast/fixtures/remove-golden.json",
+        "digest": "sha256:c9a9d7c7600f1c9e4c873b947ce3b4c5ab9b0cf036df1c90c53ba3cc69d5c5f0",
+        "bytes": 6164
+      },
+      {
+        "path": "components/toast/fixtures/top-center-golden.json",
+        "digest": "sha256:d49c5532c7b9b9f69f6db6c3137575d0fc124cbfea14316090383803f43e385d",
+        "bytes": 6162
+      },
+      {
+        "path": "components/toast/fixtures/top-end-golden.json",
+        "digest": "sha256:d38832016966783ef96f3f6529fda5a1b3a1c9264b1690fe8ef00f008e9fa214",
+        "bytes": 6156
+      },
+      {
+        "path": "components/toast/fragment.html",
+        "digest": "sha256:ab6655e962f8722255db8b7a1128b66846781753ffd67c6181b96dbd4fb84ced",
+        "bytes": 16
+      },
+      {
+        "path": "components/toast/install.js",
+        "digest": "sha256:737185be8899b5fff1df808cebe65b330d9244b093c5eac402b2912925cbe28c",
+        "bytes": 5610
+      },
+      {
+        "path": "components/toast/styles.css",
+        "digest": "sha256:bb4212db922fcf941fe67f08ffc8314e37d40a0c92443f466cd48e0ba778ec11",
+        "bytes": 2865
+      },
+      {
+        "path": "components/toggle/component.json",
+        "digest": "sha256:5d01c4a121227a01921daccd1cd87297384078756b2d47e1d8ff3e62d71d1902",
+        "bytes": 5055
+      },
+      {
+        "path": "components/toggle/fixtures/disabled-golden.json",
+        "digest": "sha256:54b48550fd0699c41ecd29af3b784d0eab66d9c236a74cc8c0e72e05ddd36780",
+        "bytes": 422
+      },
+      {
+        "path": "components/toggle/fixtures/typical-golden.json",
+        "digest": "sha256:d31325fc503b7c658b6f62e0c2131dc1319dd5c79ad0192656646c2e18fd564b",
+        "bytes": 646
+      },
+      {
+        "path": "components/toggle/fixtures/unchecked-golden.json",
+        "digest": "sha256:507beabaca899f5277a65738292640d8ae8b20efb8e63b29cf4ad1ce3ee1bd4d",
+        "bytes": 415
+      },
+      {
+        "path": "components/toggle/fixtures/validation-golden.json",
+        "digest": "sha256:1b6f0427ab72ded99c666475b8de9b0c14d39d31c6defa45a2fb11cbae6cd094",
+        "bytes": 813
+      },
+      {
+        "path": "components/toggle/fragment.html",
+        "digest": "sha256:c882aa07a4401f691a2a03b43af3c96c09e321a098e0f568c5693086c250e78d",
+        "bytes": 51
+      },
+      {
+        "path": "components/toggle/styles.css",
+        "digest": "sha256:f4e69c90099cf3de4d7866c6f195b27c4fb70dccf7dfc47ddae4ff7276866232",
+        "bytes": 2425
+      },
+      {
+        "path": "components/tooltip/component.json",
+        "digest": "sha256:d03ab5cb51b60610b22f735cd426a2471c3dea5f5478b19c03ca9e5dab226e1c",
+        "bytes": 3587
+      },
+      {
+        "path": "components/tooltip/fixtures/bottom-golden.json",
+        "digest": "sha256:159b0acd5145da64d33febabb2331f2af42b1a458ca0f337c7c1e594d16ce4af",
+        "bytes": 1202
+      },
+      {
+        "path": "components/tooltip/fixtures/left-golden.json",
+        "digest": "sha256:470a2ee9aec99b802a368e0bbdbb7d9d00243c3665e53058ba05bf664c95c700",
+        "bytes": 1198
+      },
+      {
+        "path": "components/tooltip/fixtures/right-golden.json",
+        "digest": "sha256:7e5587ee8eea8588b3b0fd239ac8e96b537117a07dbfcbb0da5ae54f79155a03",
+        "bytes": 1200
+      },
+      {
+        "path": "components/tooltip/fixtures/top-golden.json",
+        "digest": "sha256:ae2c9b420673a75bcebf0b9ed0f64fe0ebdbea4a32c1a8ce4739f8287739a410",
+        "bytes": 1196
+      },
+      {
+        "path": "components/tooltip/fragment.html",
+        "digest": "sha256:f2e86737e9f607ccb04b1aa92c4dc3732bfb2b8b47de9d32a3d651b9d56b1360",
+        "bytes": 12
+      },
+      {
+        "path": "components/tooltip/install.js",
+        "digest": "sha256:a7f37d4887b45a72c65cd5e362db3ee72e1ea7c7435c3f6b4598866c8f93ba26",
+        "bytes": 5628
+      },
+      {
+        "path": "components/tooltip/styles.css",
+        "digest": "sha256:1bf0901fc9e565e65bb69e2fdc06ccf379cf7642910f23551b99b8b913d51962",
+        "bytes": 2961
+      },
+      {
+        "path": "fonts/GEIST-LICENSE.txt",
+        "digest": "sha256:930853ee1daa68554d9e35c8a9175affb74f699fad9a5da6ee5ebe76379d9137",
+        "bytes": 4368
+      },
+      {
+        "path": "fonts/geist-mono-variable.woff2",
+        "digest": "sha256:5f687a5dd4c87da13deaff9f6b9503d5e62249ff501265a96b134565f9aa8c87",
+        "bytes": 71004
+      },
+      {
+        "path": "fonts/geist-sans-variable.woff2",
+        "digest": "sha256:e24cec106619c03f0b3519e31b9bc55e0d5e926b6a95b8d798cd8cef215b1505",
+        "bytes": 69436
+      },
+      {
+        "path": "icon-catalog.json",
+        "digest": "sha256:a6e931669f41ab3a2d79bced48a03cad628567f57c5d878d2a529e082ebfc7e2",
+        "bytes": 9818
+      },
+      {
+        "path": "icons.json",
+        "digest": "sha256:a382a13d38ef52fad2f287496610a043d8f201ba8514f2633b9f54200b8fbb32",
+        "bytes": 11967
+      },
+      {
+        "path": "property-catalog.json",
+        "digest": "sha256:6f16244b1ea5ae04fd96ed53c26fa58de426a155a0bd90215dd2e88c114bf82b",
+        "bytes": 233518
+      },
+      {
+        "path": "theme/default.css",
+        "digest": "sha256:f0de659b97b62cf7e761c639db28f723441d5ce7f610d6cad7e66444b35da076",
+        "bytes": 25403
+      },
+      {
+        "path": "theme/fonts.css",
+        "digest": "sha256:c004050528a4b29cb8178cba8c58928cdb7b7e487e59d4ddda31391af5a1ffb8",
+        "bytes": 350
+      },
+      {
+        "path": "theme/reference.css",
+        "digest": "sha256:20221cb03b3bb0b046b4f38b3294f28c861b0b9e8af23fa313ba2b626fb77ab6",
+        "bytes": 17483
+      },
+      {
+        "path": "theme/token-metadata.json",
+        "digest": "sha256:5ff6f612c1eff08db1cb45361dc6948aee37f04abb5510649863dcf167ba0f6f",
+        "bytes": 17236
+      },
+      {
+        "path": "ui-package.json",
+        "digest": "sha256:30ac12bd68b38453a2b8d8e8afb5c617b545190b5a102be9a186f87ab139e501",
+        "bytes": 1557
+      }
+    ]
+  }
+}
