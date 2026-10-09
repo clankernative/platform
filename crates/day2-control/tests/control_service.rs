@@ -334,7 +334,13 @@ async fn real_installation_export_build_and_temporal_completion() -> Result<()> 
         StepOutcome,
         local::{LOCAL_TASK_QUEUE, LocalServer},
     };
-    let directory = tempfile::tempdir()?;
+    let mut directory = tempfile::Builder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        directory.permissions(fs::Permissions::from_mode(0o700));
+    }
+    let directory = directory.tempdir()?;
     let root = directory.path().canonicalize()?;
     #[cfg(unix)]
     anyhow::ensure!(
