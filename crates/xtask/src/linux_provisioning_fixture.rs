@@ -105,7 +105,7 @@ pub fn package(
         root.is_absolute() && !root.exists(),
         "new absolute provisioning fixture root required"
     );
-    day2::schema::identifier(installation)?;
+    day2_contracts::names::identifier(installation)?;
     let artifact = LoadedArtifact::load(artifact_path)?;
     artifact.require_current_api()?;
     let policy: day2::authority::Policy = serde_json::from_str(include_str!(

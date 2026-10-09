@@ -67,6 +67,16 @@
           "local_path": null
         },
         {
+          "name": "day2-assets",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": "crates/day2-assets"
+        },
+        {
           "name": "day2-capabilities",
           "kind": "normal",
           "target": null,
@@ -75,6 +85,16 @@
           "default_features": true,
           "optional": false,
           "local_path": "crates/day2-capabilities"
+        },
+        {
+          "name": "day2-contracts",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": "crates/day2-contracts"
         },
         {
           "name": "day2-sandbox",
@@ -138,7 +158,7 @@
         },
         {
           "name": "image",
-          "kind": "normal",
+          "kind": "dev",
           "target": null,
           "rename": null,
           "features": [
@@ -283,27 +303,7 @@
           "local_path": null
         },
         {
-          "name": "resvg",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
-          "features": [],
-          "default_features": false,
-          "optional": false,
-          "local_path": null
-        },
-        {
           "name": "ring",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
-          "features": [],
-          "default_features": true,
-          "optional": false,
-          "local_path": null
-        },
-        {
-          "name": "roxmltree",
           "kind": "normal",
           "target": null,
           "rename": null,
@@ -518,6 +518,98 @@
       ]
     },
     {
+      "name": "day2-assets",
+      "manifest": "crates/day2-assets/Cargo.toml",
+      "role": "adapter",
+      "dependencies": [
+        {
+          "name": "anyhow",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "day2-contracts",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": "crates/day2-contracts"
+        },
+        {
+          "name": "image",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [
+            "jpeg",
+            "png",
+            "webp"
+          ],
+          "default_features": false,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "resvg",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": false,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "roxmltree",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "serde",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [
+            "derive"
+          ],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "sha2",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        }
+      ],
+      "production_targets": [
+        {
+          "name": "day2_assets",
+          "kind": [
+            "lib"
+          ],
+          "source": "crates/day2-assets/src/lib.rs"
+        }
+      ]
+    },
+    {
       "name": "day2-capabilities",
       "manifest": "crates/day2-capabilities/Cargo.toml",
       "role": "contracts",
@@ -612,6 +704,57 @@
       ]
     },
     {
+      "name": "day2-contracts",
+      "manifest": "crates/day2-contracts/Cargo.toml",
+      "role": "contracts",
+      "dependencies": [
+        {
+          "name": "anyhow",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": false,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "serde",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [
+            "alloc",
+            "derive"
+          ],
+          "default_features": false,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "serde_json",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [
+            "alloc"
+          ],
+          "default_features": false,
+          "optional": false,
+          "local_path": null
+        }
+      ],
+      "production_targets": [
+        {
+          "name": "day2_contracts",
+          "kind": [
+            "lib"
+          ],
+          "source": "crates/day2-contracts/src/lib.rs"
+        }
+      ]
+    },
+    {
       "name": "day2-control",
       "manifest": "crates/day2-control/Cargo.toml",
       "role": "runtime",
@@ -667,6 +810,16 @@
           "local_path": "crates/day2"
         },
         {
+          "name": "day2-assets",
+          "kind": "dev",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": "crates/day2-assets"
+        },
+        {
           "name": "day2-capabilities",
           "kind": "normal",
           "target": null,
@@ -675,6 +828,16 @@
           "default_features": true,
           "optional": false,
           "local_path": "crates/day2-capabilities"
+        },
+        {
+          "name": "day2-contracts",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": "crates/day2-contracts"
         },
         {
           "name": "day2-kernel",
@@ -970,6 +1133,16 @@
           "local_path": "crates/day2"
         },
         {
+          "name": "day2-assets",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": "crates/day2-assets"
+        },
+        {
           "name": "day2-capabilities",
           "kind": "normal",
           "target": null,
@@ -978,6 +1151,16 @@
           "default_features": true,
           "optional": false,
           "local_path": "crates/day2-capabilities"
+        },
+        {
+          "name": "day2-contracts",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": "crates/day2-contracts"
         },
         {
           "name": "flate2",
@@ -1425,6 +1608,26 @@
           "default_features": true,
           "optional": false,
           "local_path": "crates/day2"
+        },
+        {
+          "name": "day2-assets",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": "crates/day2-assets"
+        },
+        {
+          "name": "day2-contracts",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": "crates/day2-contracts"
         },
         {
           "name": "day2-control",

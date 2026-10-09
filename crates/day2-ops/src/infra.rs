@@ -67,11 +67,11 @@ fn configuration(path: &Path) -> Result<(Configuration, String)> {
             && configuration.apps.len() <= 32,
         "infrastructure configuration version or app count"
     );
-    day2::schema::identifier(&configuration.installation)?;
-    day2::schema::identifier(&configuration.environment)?;
+    day2_contracts::names::identifier(&configuration.installation)?;
+    day2_contracts::names::identifier(&configuration.environment)?;
     let mut apps = BTreeSet::new();
     for app in &configuration.apps {
-        day2::schema::identifier(app)?;
+        day2_contracts::names::identifier(app)?;
         ensure!(apps.insert(app), "duplicate infrastructure app");
     }
     ensure!(
@@ -110,7 +110,7 @@ pub fn render(graph: &Graph, version: &str) -> Result<Value> {
     let mut resources = BTreeMap::new();
     let mut dependencies: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
     for resource in &graph.resources {
-        day2::schema::identifier(&resource.key)?;
+        day2_contracts::names::identifier(&resource.key)?;
         ensure!(
             !resources.contains_key(&resource.key),
             "duplicate resource address"
@@ -122,7 +122,7 @@ pub fn render(graph: &Graph, version: &str) -> Result<Value> {
         let mut fields = BTreeMap::new();
         let mut edges = BTreeSet::new();
         for input in &resource.inputs {
-            day2::schema::identifier(&input.name)?;
+            day2_contracts::names::identifier(&input.name)?;
             ensure!(
                 !fields.contains_key(&input.name),
                 "duplicate resource input"
@@ -138,7 +138,7 @@ pub fn render(graph: &Graph, version: &str) -> Result<Value> {
                     input.value.replace("${", "$${").replace("%{", "%%{")
                 }
                 "reference" => {
-                    day2::schema::identifier(&input.target)?;
+                    day2_contracts::names::identifier(&input.target)?;
                     ensure!(
                         input.value.is_empty() && input.attribute == "output",
                         "unsupported deferred reference"

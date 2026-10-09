@@ -81,7 +81,7 @@ fn unsigned_64_bit_examples_and_client_samples_preserve_the_full_range() -> Resu
         .fields
         .insert(
             "version".into(),
-            day2::schema::Kind::Unsigned(day2::numeric::Unsigned::U64),
+            day2::schema::Kind::Unsigned(day2_contracts::numeric::Unsigned::U64),
         );
     artifact.outputs.get_mut("page").unwrap().shape = serde_json::from_value(json!({
         "collection_page":{"record":{"id":"string","version":{"unsigned":"U64"}}}

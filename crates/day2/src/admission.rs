@@ -7,8 +7,9 @@
 //! No authored Roc source is searched or rewritten, and generated implementations
 //! and opaque representations remain the same in both profiles.
 
-use crate::{assets, output_schema, schema::Schema};
+use crate::{output_schema, schema::Schema};
 use anyhow::{Context, Result, ensure};
+use day2_assets as assets;
 use std::{fs, path::Path};
 
 // These are exact edits to trusted SDK sources, not an application-language parser.

@@ -62,13 +62,13 @@ impl ReviewedCatalog {
         ensure!(entries.len() <= 64, "OAuth reviewed catalog budget");
         let mut selected = BTreeMap::new();
         for entry in entries {
-            crate::schema::identifier(&entry.capability)?;
+            day2_contracts::names::identifier(&entry.capability)?;
             ensure!(
                 !entry.action_scopes.is_empty() && entry.action_scopes.len() <= 32,
                 "OAuth reviewed action budget"
             );
             for (action, scopes) in &entry.action_scopes {
-                crate::schema::identifier(action)?;
+                day2_contracts::names::identifier(action)?;
                 ensure!(
                     !scopes.is_empty() && scopes.len() <= 32,
                     "OAuth reviewed scope budget"
@@ -994,7 +994,7 @@ pub(crate) fn binding_namespace(binding: &OutboundConnectionBinding) -> Result<S
     ))?;
     Ok(format!(
         "oauth_binding_{}",
-        crate::assets::hash_part(digest.as_str())?
+        day2_assets::hash_part(digest.as_str())?
     ))
 }
 

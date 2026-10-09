@@ -350,7 +350,7 @@ fn validate_restored_intent(intent: &super::lifecycle::Intent, family: &str) -> 
                 continue;
             }
             let registration = &encoded[..offset];
-            if crate::schema::identifier(registration).is_err() {
+            if day2_contracts::names::identifier(registration).is_err() {
                 continue;
             }
             let candidate = || -> Result<()> {

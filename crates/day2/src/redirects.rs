@@ -192,7 +192,7 @@ impl Catalog {
 impl Route {
     fn compile(declared: &artifact::Redirect, artifact: &Artifact) -> Result<Self> {
         // The name reaches App.definition and the audit trail's route label.
-        crate::schema::identifier(&declared.name)?;
+        day2_contracts::names::identifier(&declared.name)?;
         let (prefix, field) = pattern(&declared.path)?;
         let command = artifact
             .operations
@@ -347,7 +347,7 @@ fn pattern(path: &str) -> Result<(Vec<String>, String)> {
         .strip_prefix('{')
         .and_then(|rest| rest.strip_suffix("..}"))
         .context("redirect route must end in one rest parameter, such as /{path..}")?;
-    crate::schema::identifier(field)?;
+    day2_contracts::names::identifier(field)?;
     ensure!(
         literals.len() < MAX_SEGMENTS,
         "redirect route segment budget"

@@ -833,7 +833,7 @@ fn template_redirect_helpers_check_arguments_and_encode_each_path_segment() -> R
             catalog,
             "pages/test.html",
             &shape,
-            &day2::assets::Catalog::new(),
+            &day2_assets::Catalog::new(),
             &routes,
         )
     };

@@ -1,6 +1,7 @@
-use crate::{assets, digest};
+use crate::digest;
 use anyhow::{Context, Result, bail, ensure};
 use cssparser::{ParseError, Parser, ParserInput, Token};
+use day2_assets as assets;
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
     ExportAllDeclaration, ExportFromDeclaration, Expression, ImportDeclaration, ImportExpression,

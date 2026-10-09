@@ -206,7 +206,7 @@ fn read_json(path: &Path) -> Result<Value> {
 
 fn image_id(path: &Path) -> Result<String> {
     let value = fs::read_to_string(path)?.trim().to_owned();
-    day2::assets::hash_part(&value)?;
+    day2_assets::hash_part(&value)?;
     Ok(value)
 }
 
@@ -218,14 +218,13 @@ pub(super) fn inspect_artifact(path: &Path) -> Result<Value> {
     let contract = read_json(&path.join("artifact.json"))?;
     let artifact = digest(&serde_json::to_vec(&contract)?);
     ensure!(
-        path.file_name().and_then(|name| name.to_str())
-            == Some(day2::assets::hash_part(&artifact)?),
+        path.file_name().and_then(|name| name.to_str()) == Some(day2_assets::hash_part(&artifact)?),
         "exported artifact address mismatch"
     );
     let worker = contract["worker_digest"]
         .as_str()
         .context("artifact worker digest")?;
-    day2::assets::hash_part(worker)?;
+    day2_assets::hash_part(worker)?;
     let metadata = fs::symlink_metadata(path.join("worker"))?;
     ensure!(
         metadata.is_file() && metadata.len() <= 256 * 1024 * 1024,
@@ -493,7 +492,7 @@ impl Session {
                 let artifact = pointer["artifact"]
                     .as_str()
                     .context("selected Linux artifact")?;
-                let hash = day2::assets::hash_part(artifact)?;
+                let hash = day2_assets::hash_part(artifact)?;
                 let destination = self.output.join("artifacts").join(hash);
                 logged(
                     &self.output,
@@ -580,7 +579,7 @@ impl Session {
                 let id = pointer["artifact"]
                     .as_str()
                     .context("probe artifact identity")?;
-                let hash = day2::assets::hash_part(id)?;
+                let hash = day2_assets::hash_part(id)?;
                 let destination = self.output.join("artifacts").join(hash);
                 ensure!(
                     !destination.exists(),
@@ -659,7 +658,7 @@ impl Session {
                 let id = pointer["artifact"]
                     .as_str()
                     .context("row-authority fixture artifact identity")?;
-                let hash = day2::assets::hash_part(id)?;
+                let hash = day2_assets::hash_part(id)?;
                 let destination = self.output.join("artifacts").join(hash);
                 ensure!(
                     !destination.exists(),
@@ -770,7 +769,7 @@ impl Session {
                         .file_name()
                         .and_then(|value| value.to_str())
                         .context("native delegation address")?;
-                    day2::assets::hash_part(&format!("sha256:{hash}"))?;
+                    day2_assets::hash_part(&format!("sha256:{hash}"))?;
                     ensure!(
                         path == Path::new("/workspace/platform/artifacts").join(hash),
                         "native delegation artifact path changed"
@@ -1048,7 +1047,7 @@ impl Session {
         )?;
         self.hand_over("/qualification-export/failed-current.json".to_owned())?;
         let pointer = read_json(&self.output.join("artifacts/failed-current.json"))?;
-        let hash = day2::assets::hash_part(
+        let hash = day2_assets::hash_part(
             pointer["artifact"]
                 .as_str()
                 .context("failed artifact address")?,
@@ -1161,7 +1160,7 @@ mod tests {
         let worker = b"\x7fELFforeign-native-transport-fixture";
         let contract = json!({"worker_digest":digest(worker)});
         let id = digest(&serde_json::to_vec(&contract)?);
-        let directory = temporary.path().join(day2::assets::hash_part(&id)?);
+        let directory = temporary.path().join(day2_assets::hash_part(&id)?);
         fs::create_dir(&directory)?;
         fs::write(
             directory.join("artifact.json"),

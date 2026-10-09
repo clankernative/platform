@@ -1,8 +1,6 @@
 use anyhow::Result;
-use day2::{
-    assets,
-    branding::{self, Brand},
-};
+use day2::branding::{self, Brand};
+use day2_assets as assets;
 use proptest::{
     prelude::*,
     test_runner::{Config, RngSeed, TestRunner},

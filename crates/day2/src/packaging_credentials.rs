@@ -60,7 +60,7 @@ pub(super) struct Prepared {
 /// and secret projection path.
 pub fn reference_key(reference: &VersionRef) -> Result<String> {
     reference.validate()?;
-    Ok(crate::assets::hash_part(&crate::digest(&serde_json::to_vec(reference)?))?.into())
+    Ok(day2_assets::hash_part(&crate::digest(&serde_json::to_vec(reference)?))?.into())
 }
 
 /// Where a reference's secret is mounted in tooling and runtime.

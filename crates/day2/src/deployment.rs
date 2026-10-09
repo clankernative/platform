@@ -345,7 +345,7 @@ fn layout(instance_path: &Path, app: &str) -> Result<(PathBuf, RuntimeProfile, P
     if let Some(active) = active {
         ensure!(
             artifact.file_name().and_then(|name| name.to_str())
-                == Some(crate::assets::hash_part(&active.artifact_id)?),
+                == Some(day2_assets::hash_part(&active.artifact_id)?),
             "active deployment artifact address mismatch"
         );
     }
@@ -357,7 +357,7 @@ fn layout(instance_path: &Path, app: &str) -> Result<(PathBuf, RuntimeProfile, P
 
 fn replica_lock(state: &Path, app: &str) -> Result<File> {
     use std::os::unix::fs::OpenOptionsExt;
-    crate::schema::identifier(app)?;
+    day2_contracts::names::identifier(app)?;
     let path = state.join(format!("{app}.serve.lock"));
     if let Ok(metadata) = fs::symlink_metadata(&path) {
         ensure!(metadata.is_file(), "invalid runtime lease file");
@@ -507,7 +507,7 @@ async fn serve_configured(
             .directory()
             .file_name()
             .and_then(|name| name.to_str())
-            == Some(crate::assets::hash_part(runtime.artifact().id())?),
+            == Some(day2_assets::hash_part(runtime.artifact().id())?),
         "active deployment artifact address mismatch"
     );
     runtime.initialize()?;

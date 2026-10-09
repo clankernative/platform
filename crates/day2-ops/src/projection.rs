@@ -14,8 +14,8 @@ pub fn instance(path: &Path) -> Result<Value> {
     let raw = fs::read(path)?;
     ensure!(raw.len() <= 1_048_576, "instance byte budget");
     let instance = Instance::from_bytes(&raw)?;
-    day2::schema::identifier(&instance.installation)?;
-    day2::schema::identifier(&instance.environment)?;
+    day2_contracts::names::identifier(&instance.installation)?;
+    day2_contracts::names::identifier(&instance.environment)?;
     ensure!(
         !instance.apps.is_empty() && instance.apps.len() <= 128,
         "instance app count"
@@ -25,7 +25,7 @@ pub fn instance(path: &Path) -> Result<Value> {
     }
     let mut apps = serde_json::Map::new();
     for (name, binding) in &instance.apps {
-        day2::schema::identifier(name)?;
+        day2_contracts::names::identifier(name)?;
         ensure!(
             !binding.artifact.trim().is_empty() && binding.artifact.len() <= 4096,
             "artifact path budget"

@@ -205,7 +205,7 @@ pub fn decode(raw: &[u8]) -> Result<Definition> {
     #[serde(deny_unknown_fields)]
     struct Domain {
         name: String,
-        rules: crate::domain::TextRule,
+        rules: day2_contracts::text::TextRule,
     }
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -523,7 +523,7 @@ impl CredentialAccess {
                     || (matches!(fields.get(&self.rotation_head), Some(Kind::Text))
                         && matches!(
                             fields.get(&self.rotation_revision),
-                            Some(Kind::Unsigned(crate::numeric::Unsigned::U64))
+                            Some(Kind::Unsigned(day2_contracts::numeric::Unsigned::U64))
                         )
                         && self.management_lineage != self.rotation_head),
                 "credential rotation requires distinct lineage/head text paths and a U64 revision path"
@@ -1900,7 +1900,7 @@ mod selector_tests {
             unified: true,
             commands: BTreeMap::from([(
                 "update".into(),
-                registry::Operation {
+                day2_contracts::registry::Operation {
                     input: "update".into(),
                     output: "result".into(),
                 },

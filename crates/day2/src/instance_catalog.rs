@@ -237,12 +237,12 @@ impl CandidateCatalog {
         environment: String,
         apps: BTreeMap<String, SelectedApp>,
     ) -> Result<Self> {
-        crate::schema::identifier(&installation)?;
-        crate::schema::identifier(&environment)?;
+        day2_contracts::names::identifier(&installation)?;
+        day2_contracts::names::identifier(&environment)?;
         ensure!((1..=1024).contains(&apps.len()), "candidate app budget");
         let mut identities = BTreeMap::new();
         for (name, selected) in &apps {
-            crate::schema::identifier(name)?;
+            day2_contracts::names::identifier(name)?;
             ensure!(
                 selected.manifest.app == *name,
                 "selected export belongs to another app: {name}"

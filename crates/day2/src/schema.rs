@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, bail, ensure};
+use day2_contracts::names::identifier;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -7,7 +8,7 @@ use std::collections::BTreeMap;
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Kind {
     Integer,
-    Unsigned(crate::numeric::Unsigned),
+    Unsigned(day2_contracts::numeric::Unsigned),
     RowVersion,
     Text,
     Boolean,
@@ -42,7 +43,7 @@ pub struct Record {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub roc_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub identity: Option<crate::identity::ModelIdentity>,
+    pub identity: Option<day2_contracts::identity::ModelIdentity>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -108,27 +109,6 @@ struct Node {
     args: Vec<usize>,
     ret: usize,
     tags: Vec<Tag>,
-}
-
-pub fn identifier(name: &str) -> Result<()> {
-    ensure!(
-        !name.is_empty() && name.len() <= 48,
-        "invalid identifier length"
-    );
-    ensure!(
-        name.as_bytes()[0].is_ascii_lowercase(),
-        "identifier must start with a-z: {name}"
-    );
-    ensure!(
-        name.bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_'),
-        "invalid identifier: {name}"
-    );
-    ensure!(
-        !name.starts_with("day2_") && !name.starts_with("sqlite_"),
-        "reserved identifier: {name}"
-    );
-    Ok(())
 }
 
 impl Table {
@@ -435,7 +415,7 @@ impl Table {
         match node.kind.as_str() {
             "integer" => Ok(Kind::Integer),
             "unsigned" => Ok(Kind::Unsigned(
-                crate::numeric::Unsigned::from_roc(&node.name)
+                day2_contracts::numeric::Unsigned::from_roc(&node.name)
                     .context("unsupported unsigned integer width")?,
             )),
             "text" => Ok(Kind::Text),
@@ -594,7 +574,7 @@ impl Table {
             "integer" if builtin => Type::Integer,
             "boolean" if builtin => Type::Boolean,
             "unsigned" => Type::Unsigned(
-                crate::numeric::Unsigned::from_roc(&node.name)
+                day2_contracts::numeric::Unsigned::from_roc(&node.name)
                     .context("unsupported unsigned input width")?,
             ),
             "unit" if node.name.is_empty() => {
@@ -1344,7 +1324,7 @@ impl Schema {
                     definition.push_str(&format!(" CHECK(\"{field}\" IN (0,1))"));
                 }
                 if let Kind::Unsigned(unsigned) = kind {
-                    if *unsigned == crate::numeric::Unsigned::U64 {
+                    if *unsigned == day2_contracts::numeric::Unsigned::U64 {
                         definition.push_str(&format!(" CHECK(length(\"{field}\") = 8)"));
                     } else {
                         definition.push_str(&format!(
@@ -1416,9 +1396,8 @@ impl Index {
 impl Kind {
     pub fn ddl(&self) -> Result<&'static str> {
         Ok(match self {
-            Self::Unsigned(crate::numeric::Unsigned::U64) | Self::ModelReference { .. } => {
-                "BLOB NOT NULL"
-            }
+            Self::Unsigned(day2_contracts::numeric::Unsigned::U64)
+            | Self::ModelReference { .. } => "BLOB NOT NULL",
             Self::Integer
             | Self::Unsigned(_)
             | Self::RowVersion
@@ -1463,7 +1442,7 @@ impl Kind {
         match self {
             Self::Integer => value.as_i64().is_some(),
             Self::Unsigned(unsigned) => unsigned.valid(value),
-            Self::RowVersion => crate::numeric::valid_row_version(value),
+            Self::RowVersion => day2_contracts::numeric::valid_row_version(value),
             Self::Cursor => value.as_str().is_some_and(|raw| {
                 raw.parse::<i64>()
                     .is_ok_and(|number| number >= 0 && number.to_string() == raw)

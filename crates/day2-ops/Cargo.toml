@@ -20,6 +20,8 @@ name = "day2-provision-credentials"
 path = "src/bin/day2-provision-credentials.rs"
 
 [dependencies]
+day2-assets = { path = "../day2-assets" }
+day2-contracts = { path = "../day2-contracts" }
 anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

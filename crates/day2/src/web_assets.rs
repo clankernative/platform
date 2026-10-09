@@ -1,10 +1,5 @@
 use crate::{
-    artifact::Instance,
-    assets::{self, Asset},
-    branding::LoadedBrand,
-    digest,
-    store::Runtime,
-    web_security::Session,
+    artifact::Instance, branding::LoadedBrand, digest, store::Runtime, web_security::Session,
 };
 use anyhow::{Context, Result, ensure};
 use axum::{
@@ -12,6 +7,7 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
+use day2_assets::{self as assets, Asset};
 use maud::{Markup, html};
 
 pub(crate) struct Appearance {

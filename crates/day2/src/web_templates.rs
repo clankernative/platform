@@ -1,5 +1,6 @@
-use crate::{assets, digest, output_schema::Type};
+use crate::{digest, output_schema::Type};
 use anyhow::{Context, Result, bail, ensure};
+use day2_assets as assets;
 use html5gum::{DefaultEmitter, Token, Tokenizer};
 use minijinja::{AutoEscape, Environment, UndefinedBehavior, machinery::ast};
 use scraper::{Html, Selector};
@@ -192,11 +193,11 @@ fn handles(catalog: &Catalog) -> Result<BTreeMap<String, String>> {
             .and_then(|path| path.strip_suffix(".html"))
             .context("template_handle_path")?;
         for part in stem.split('/') {
-            crate::schema::identifier(part)
+            day2_contracts::names::identifier(part)
                 .context("template_handle_requires_snake_case_page_path")?;
         }
         let handle = stem.replace('/', "_");
-        crate::schema::identifier(&handle)?;
+        day2_contracts::names::identifier(&handle)?;
         ensure!(
             handle != "path" && handles.insert(handle.clone(), path.clone()).is_none(),
             "template_handle_collision_or_reserved: {handle}"
@@ -1345,7 +1346,7 @@ fn validate_forms(
                         let key = key.with_context(|| {
                             format!("template_map_form_field_requires_key: {command}.{field}")
                         })?;
-                        crate::schema::identifier(key)?;
+                        day2_contracts::names::identifier(key)?;
                         ensure!(
                             keyed.insert((field, key)),
                             "template_duplicate_form_field: {field}.{key}"
