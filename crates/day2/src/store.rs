@@ -1827,9 +1827,12 @@ impl Runtime {
                                 &self.scope,
                                 request,
                                 &instruction,
-                                policy,
-                                operation,
-                                self.inputs.entropy.as_ref(),
+                                EffectContext {
+                                    scope: &self.scope,
+                                    policy,
+                                    operation,
+                                    entropy: self.inputs.entropy.as_ref(),
+                                },
                             )
                         }
                     })();
@@ -4045,6 +4048,14 @@ mod selection_tests {
     }
 }
 
+/// Invocation-owned authority and entropy for a database effect.
+pub(crate) struct EffectContext<'a> {
+    pub(crate) scope: &'a str,
+    pub(crate) policy: &'a Policy,
+    pub(crate) operation: &'a str,
+    pub(crate) entropy: &'a dyn crate::host_inputs::Entropy,
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct StorageContract<'a> {
     pub schema: &'a Schema,
@@ -4057,10 +4068,15 @@ pub(crate) fn effect(
     scope: &str,
     request: &Request,
     instruction: &Instruction,
-    policy: &Policy,
-    operation: &str,
-    entropy: &dyn crate::host_inputs::Entropy,
+    context: EffectContext<'_>,
 ) -> Result<String> {
+    let EffectContext {
+        scope: context_scope,
+        policy,
+        operation,
+        entropy,
+    } = context;
+    ensure!(context_scope == scope, "effect_scope_mismatch");
     let Step::Database(instruction) = instruction.decode()? else {
         bail!("unsupported_database_effect");
     };
@@ -4497,9 +4513,12 @@ mod rollup_read_tests {
             "test",
             &request,
             &instruction,
-            &policy,
-            "lookup",
-            &crate::host_inputs::SecureEntropy,
+            EffectContext {
+                scope: "test",
+                policy: &policy,
+                operation: "lookup",
+                entropy: &crate::host_inputs::SecureEntropy,
+            },
         )?)?;
         assert_eq!(first["items"].as_array().unwrap().len(), 1);
         let data: Value = serde_json::from_str(first["items"][0]["data"].as_str().unwrap())?;
@@ -4518,9 +4537,12 @@ mod rollup_read_tests {
             "test",
             &request,
             &instruction,
-            &policy,
-            "lookup",
-            &crate::host_inputs::SecureEntropy,
+            EffectContext {
+                scope: "test",
+                policy: &policy,
+                operation: "lookup",
+                entropy: &crate::host_inputs::SecureEntropy,
+            },
         )?)?;
         let data: Value = serde_json::from_str(second["items"][0]["data"].as_str().unwrap())?;
         assert_eq!(data["amount"], 8);
@@ -4541,9 +4563,12 @@ mod rollup_read_tests {
                 "test",
                 &request,
                 &write,
-                &policy,
-                "lookup",
-                &crate::host_inputs::SecureEntropy,
+                EffectContext {
+                    scope: "test",
+                    policy: &policy,
+                    operation: "lookup",
+                    entropy: &crate::host_inputs::SecureEntropy,
+                },
             )
             .unwrap_err()
             .to_string()
@@ -4561,9 +4586,12 @@ mod rollup_read_tests {
                 "test",
                 &request,
                 &instruction,
-                &denied,
-                "lookup",
-                &crate::host_inputs::SecureEntropy,
+                EffectContext {
+                    scope: "test",
+                    policy: &denied,
+                    operation: "lookup",
+                    entropy: &crate::host_inputs::SecureEntropy,
+                },
             )
             .is_err()
         );
@@ -4578,9 +4606,12 @@ mod rollup_read_tests {
                 "test",
                 &request,
                 &instruction,
-                &policy,
-                "lookup",
-                &crate::host_inputs::SecureEntropy,
+                EffectContext {
+                    scope: "test",
+                    policy: &policy,
+                    operation: "lookup",
+                    entropy: &crate::host_inputs::SecureEntropy,
+                },
             )
             .unwrap_err()
             .to_string()

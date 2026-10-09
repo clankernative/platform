@@ -1,4 +1,6 @@
-use anyhow::{Context, Result, bail, ensure};
+#[cfg(not(target_os = "linux"))]
+use anyhow::bail;
+use anyhow::{Context, Result, ensure};
 #[cfg(not(target_os = "macos"))]
 use std::io::BufReader;
 use std::io::{BufRead, Write};
