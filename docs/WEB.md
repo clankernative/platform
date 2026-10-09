@@ -8,6 +8,19 @@ The current Links proof of concept uses ordinary app-owned HTML/Jinja templates,
 CSS and native browser modules. Roc supplies typed query data and business
 commands, not a page-building DSL. See [UI-POC.md](UI-POC.md) for the file map.
 
+## Experimental request-time presentations
+
+An opt-in `ui_scene` call transforms current authorized query data through an
+independently approved bounded renderer, returning typed scene records for
+ordinary escaped templates. Declarations do not approve executable bytes;
+build-time UI assembly never runs on requests. Apps without declarations are
+unchanged.
+
+[RUNTIME-PRESENTATIONS.md](RUNTIME-PRESENTATIONS.md) defines the ABI, operator
+pin, ports, limits and failure behavior.
+[Chart Live verification](../examples/chart-live/VERIFICATION.md) separates
+deterministic simulations, real adapters, builds and remaining browser/full gates.
+
 ## Live queries over SSE
 
 SSE is the platform transport for live frontend updates. A live page subscribes

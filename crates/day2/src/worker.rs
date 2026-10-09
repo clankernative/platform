@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 #[cfg(target_os = "linux")]
@@ -43,7 +43,7 @@ impl Worker {
             Self::start_macos(path)
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-        bail!("worker sandbox unsupported on this operating system");
+        anyhow::bail!("worker sandbox unsupported on this operating system");
     }
 
     /// The launcher path is supplied by trusted host installation/tests, never app input.
@@ -229,7 +229,7 @@ pub fn qualify_sandbox() -> Result<()> {
         Ok(())
     }
     #[cfg(not(target_os = "linux"))]
-    bail!("Linux worker qualification requires Linux");
+    anyhow::bail!("Linux worker qualification requires Linux");
 }
 
 fn read_frame(reader: &mut impl BufRead) -> Result<Vec<u8>> {

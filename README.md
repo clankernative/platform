@@ -60,6 +60,20 @@ Use `cargo run --locked -p xtask -- fmt` for authored Rust and Roc. Run
 separate app. Build outputs stay in ignored `artifacts/`; they can contain private
 application inputs and must not be uploaded as public release assets.
 
+## Experimental request-time presentations
+
+An opt-in, provider-neutral presentation port transforms current authorized
+query data into checked scene records before ordinary template rendering.
+Declarations and executable approval are separate; build-time UI assembly never
+runs on page requests. Apps without declarations need no renderer configuration.
+
+[Presentation setup and limits](docs/RUNTIME-PRESENTATIONS.md) describe the ABI
+and operator pin. [Chart Live](examples/chart-live/README.md) demonstrates dynamic
+SVG charts with Clanker Native UI, normal commands and server-backed ranges.
+Its [qualification record](examples/chart-live/VERIFICATION.md) distinguishes
+working request-time rendering from outstanding browser/full/release gates.
+This is experimental source support, not a production or release claim.
+
 ## Deploy a company instance
 
 [The GKE deployment guide](deploy/gke/README.md) describes the public infrastructure

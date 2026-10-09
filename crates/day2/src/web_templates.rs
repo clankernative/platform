@@ -27,6 +27,8 @@ pub type Catalog = BTreeMap<String, Template>;
 pub struct Template {
     pub digest: String,
     pub bytes: u64,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub presentations: crate::presentation::Catalog,
 }
 
 fn path_name(path: &str) -> Result<()> {
@@ -57,6 +59,7 @@ pub fn validate(catalog: &Catalog) -> Result<()> {
     for (path, template) in catalog {
         path_name(path)?;
         assets::hash_part(&template.digest)?;
+        crate::presentation::validate_catalog(&template.presentations)?;
         ensure!(template.bytes <= MAX_FILE_BYTES, "template_file_budget");
         total += template.bytes;
     }
@@ -104,6 +107,7 @@ pub fn package(source: &Path, target: &Path) -> Result<Catalog> {
     }
     let mut sources = BTreeMap::new();
     collect(source, "", &mut sources)?;
+    let presentations = crate::presentation::read_declarations(source)?;
     let catalog: Catalog = sources
         .iter()
         .map(|(path, source)| {
@@ -112,6 +116,7 @@ pub fn package(source: &Path, target: &Path) -> Result<Catalog> {
                 Template {
                     digest: digest(source.as_bytes()),
                     bytes: source.len() as u64,
+                    presentations: presentations.clone(),
                 },
             )
         })
@@ -258,6 +263,7 @@ struct Analysis<'a> {
     routes: Option<&'a crate::routing::Catalog>,
     repeated_live_regions: bool,
     repeated_live_forms: bool,
+    presentations: crate::presentation::Catalog,
 }
 
 fn integer_literal(value: &minijinja::Value) -> bool {
@@ -360,11 +366,53 @@ impl Analysis<'_> {
                 Ok(Type::Boolean)
             }
             E::Const(value) if value.value.as_i64().is_some() => Ok(Type::Integer),
+            E::Map(record) => {
+                ensure!(record.keys.len() <= 64, "template_record_field_budget");
+                let mut fields = BTreeMap::new();
+                for (key, value) in record.keys.iter().zip(&record.values) {
+                    let E::Const(key) = key else {
+                        bail!("template_record_key_literal")
+                    };
+                    let key = key.value.as_str().context("template_record_key_literal")?;
+                    ensure!(
+                        !key.is_empty()
+                            && key.len() <= 64
+                            && key
+                                .bytes()
+                                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'),
+                        "template_record_key"
+                    );
+                    ensure!(
+                        fields
+                            .insert(key.into(), self.expression(value, context)?)
+                            .is_none(),
+                        "template_record_duplicate_key"
+                    );
+                }
+                Ok(Type::Record(fields))
+            }
             E::Call(call) => {
                 let E::Var(function) = &call.expr else {
                     bail!("template_function_not_admitted")
                 };
                 match function.id {
+                    "ui_scene" => {
+                        let [ast::CallArg::Pos(E::Const(id)), ast::CallArg::Pos(data)] =
+                            call.args.as_slice()
+                        else {
+                            bail!("template_ui_scene_arguments")
+                        };
+                        let id = id.value.as_str().context("template_ui_scene_id_literal")?;
+                        let contract = self
+                            .presentations
+                            .get(id)
+                            .context("template_ui_scene_not_declared")?;
+                        ensure!(
+                            self.expression(data, context)? == contract.input,
+                            "template_ui_scene_input_type"
+                        );
+                        Ok(contract.output.clone())
+                    }
                     "ui_text" => {
                         let [
                             ast::CallArg::Pos(value),
@@ -731,6 +779,7 @@ impl Analysis<'_> {
                         "ui_number",
                         "ui_compare",
                         "ui_image",
+                        "ui_scene",
                         "asset"
                     ]
                     .contains(&target.id)
@@ -814,12 +863,40 @@ fn combine(left: Vec<String>, right: Vec<String>) -> Result<Vec<String>> {
     Ok(variants)
 }
 
+#[cfg(test)]
 fn analyze<'a>(
     sources: &'a BTreeMap<String, String>,
     path: &str,
     context: &Type,
     assets: &'a assets::Catalog,
     routes: Option<&'a crate::routing::Catalog>,
+) -> Result<(Analysis<'a>, Vec<String>)> {
+    analyze_with_presentations(sources, path, context, assets, routes, BTreeMap::new())
+}
+
+pub fn presentation_catalog(catalog: &Catalog) -> Result<crate::presentation::Catalog> {
+    let mut declarations = BTreeMap::new();
+    for template in catalog.values() {
+        for (id, contract) in &template.presentations {
+            if let Some(previous) = declarations.insert(id.clone(), contract.clone()) {
+                ensure!(
+                    previous == *contract,
+                    "template_presentation_contract_conflict"
+                );
+            }
+        }
+    }
+    crate::presentation::validate_catalog(&declarations)?;
+    Ok(declarations)
+}
+
+fn analyze_with_presentations<'a>(
+    sources: &'a BTreeMap<String, String>,
+    path: &str,
+    context: &Type,
+    assets: &'a assets::Catalog,
+    routes: Option<&'a crate::routing::Catalog>,
+    presentations: crate::presentation::Catalog,
 ) -> Result<(Analysis<'a>, Vec<String>)> {
     if let Type::Record(fields) = context {
         ensure!(
@@ -830,6 +907,7 @@ fn analyze<'a>(
                 "ui_number",
                 "ui_compare",
                 "ui_image",
+                "ui_scene",
                 "asset"
             ]
             .iter()
@@ -856,6 +934,7 @@ fn analyze<'a>(
         routes,
         repeated_live_regions: false,
         repeated_live_forms: false,
+        presentations,
     };
     let variants = analysis.template(path, context)?;
     for markup in &variants {
@@ -871,7 +950,14 @@ pub fn validate_page(
     context: &Type,
     assets: &assets::Catalog,
 ) -> Result<()> {
-    analyze(&sources(directory, catalog)?, path, context, assets, None)?;
+    analyze_with_presentations(
+        &sources(directory, catalog)?,
+        path,
+        context,
+        assets,
+        None,
+        presentation_catalog(catalog)?,
+    )?;
     Ok(())
 }
 
@@ -883,12 +969,13 @@ pub fn validate_routed_page(
     assets: &assets::Catalog,
     routes: &crate::routing::Catalog,
 ) -> Result<()> {
-    analyze(
+    analyze_with_presentations(
         &sources(directory, catalog)?,
         path,
         context,
         assets,
         Some(routes),
+        presentation_catalog(catalog)?,
     )?;
     Ok(())
 }
@@ -904,7 +991,14 @@ pub fn validate_live_page(
     routes: Option<&crate::routing::Catalog>,
 ) -> Result<()> {
     let sources = sources(directory, catalog)?;
-    let (analysis, variants) = analyze(&sources, path, context, assets, routes)?;
+    let (analysis, variants) = analyze_with_presentations(
+        &sources,
+        path,
+        context,
+        assets,
+        routes,
+        presentation_catalog(catalog)?,
+    )?;
     validate_live_variants(&analysis, &variants)
 }
 
@@ -1609,7 +1703,14 @@ pub fn validate_bindings(
     schema: &crate::schema::Schema,
 ) -> Result<()> {
     let sources = sources(directory, catalog)?;
-    let (analysis, variants) = analyze(&sources, path, context, assets, None)?;
+    let (analysis, variants) = analyze_with_presentations(
+        &sources,
+        path,
+        context,
+        assets,
+        None,
+        presentation_catalog(catalog)?,
+    )?;
     validate_forms(&analysis, &variants, operations, schema)
 }
 
@@ -1623,7 +1724,14 @@ pub fn validate_routed_bindings(
     artifact: &crate::artifact::Artifact,
 ) -> Result<()> {
     let sources = sources(directory, catalog)?;
-    let (analysis, variants) = analyze(&sources, path, context, assets, Some(routes))?;
+    let (analysis, variants) = analyze_with_presentations(
+        &sources,
+        path,
+        context,
+        assets,
+        Some(routes),
+        presentation_catalog(catalog)?,
+    )?;
     validate_forms(&analysis, &variants, &artifact.operations, &artifact.schema)
 }
 
@@ -1933,6 +2041,7 @@ fn validate_runtime_context_names(context: &serde_json::Value, routed: bool) -> 
                 "ui_number",
                 "ui_compare",
                 "ui_image",
+                "ui_scene",
                 "asset"
             ]
             .iter()
@@ -1954,9 +2063,21 @@ pub fn render(
     context: serde_json::Value,
     asset_urls: BTreeMap<String, String>,
 ) -> Result<String> {
+    render_with_presentations(directory, catalog, path, context, asset_urls, None)
+}
+
+pub fn render_with_presentations(
+    directory: &Path,
+    catalog: &Catalog,
+    path: &str,
+    context: serde_json::Value,
+    asset_urls: BTreeMap<String, String>,
+    port: Option<Arc<dyn crate::presentation::Port>>,
+) -> Result<String> {
     validate_runtime_context_names(&context, false)?;
     let sources = sources(directory, catalog)?;
     let mut environment = environment(&sources, asset_urls)?;
+    install_presentations(&mut environment, presentation_catalog(catalog)?, port)?;
     let emissions = Arc::new(Mutex::new(Emissions::default()));
     install_formatter(&mut environment, emissions.clone());
     let mut output = BoundedOutput(Vec::new(), Some(emissions.clone()));
@@ -1981,6 +2102,54 @@ pub fn render(
     crate::ui_values::validate_selects(&markup)?;
     crate::ui_values::validate_navigation(&markup)?;
     Ok(markup)
+}
+
+fn install_presentations(
+    environment: &mut Environment<'_>,
+    contracts: crate::presentation::Catalog,
+    port: Option<Arc<dyn crate::presentation::Port>>,
+) -> Result<()> {
+    crate::presentation::validate_catalog(&contracts)?;
+    // Owned by this template evaluation, never a cross-request/application cache.
+    let memo = Arc::new(Mutex::new(BTreeMap::<String, serde_json::Value>::new()));
+    environment.add_function("ui_scene", move |id: String, value: minijinja::Value| {
+        let contract = contracts
+            .get(&id)
+            .ok_or_else(|| template_error("presentation_not_declared"))?;
+        let data = serde_json::to_value(value).map_err(template_error)?;
+        contract
+            .input
+            .validate_value(&data)
+            .map_err(template_error)?;
+        let key = format!(
+            "{id}:{}",
+            digest(&serde_json::to_vec(&data).map_err(template_error)?)
+        );
+        let cached = memo.lock().map_err(template_error)?.get(&key).cloned();
+        let result = if let Some(result) = cached {
+            result
+        } else {
+            if memo.lock().map_err(template_error)?.len() >= 8 {
+                return Err(template_error("presentation_request_budget"));
+            }
+            let result = port
+                .as_ref()
+                .ok_or_else(|| template_error("presentation_approval_required"))?
+                .render(&id, &data)
+                .map_err(template_error)?;
+            // Test/simulation ports cross exactly the same checked output boundary.
+            contract
+                .output
+                .validate_value(&result)
+                .map_err(template_error)?;
+            memo.lock()
+                .map_err(template_error)?
+                .insert(key, result.clone());
+            result
+        };
+        Ok(minijinja::Value::from_serialize(result))
+    });
+    Ok(())
 }
 
 fn environment<'a>(
@@ -2121,12 +2290,50 @@ pub fn render_routed(
     routes: &crate::routing::Catalog,
     origin: &str,
 ) -> Result<String> {
+    render_routed_with_presentations(
+        RoutedRender {
+            directory,
+            catalog,
+            path,
+            context,
+            asset_urls,
+            routes,
+            origin,
+        },
+        None,
+    )
+}
+
+pub struct RoutedRender<'a> {
+    pub directory: &'a Path,
+    pub catalog: &'a Catalog,
+    pub path: &'a str,
+    pub context: serde_json::Value,
+    pub asset_urls: BTreeMap<String, String>,
+    pub routes: &'a crate::routing::Catalog,
+    pub origin: &'a str,
+}
+
+pub fn render_routed_with_presentations(
+    request: RoutedRender<'_>,
+    port: Option<Arc<dyn crate::presentation::Port>>,
+) -> Result<String> {
+    let RoutedRender {
+        directory,
+        catalog,
+        path,
+        context,
+        asset_urls,
+        routes,
+        origin,
+    } = request;
     let sources = sources(directory, catalog)?;
     context
         .as_object()
         .context("template_context_record_required")?;
     validate_runtime_context_names(&context, true)?;
     let mut environment = environment(&sources, asset_urls)?;
+    install_presentations(&mut environment, presentation_catalog(catalog)?, port)?;
     environment.add_global(
         "routes",
         minijinja::Value::from_object(Routes(routes.clone())),
