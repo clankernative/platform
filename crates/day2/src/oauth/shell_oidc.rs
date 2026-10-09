@@ -3,6 +3,7 @@
 
 use super::{
     approval_keys::{GcpSecretReader, GcpSecretVersion},
+    fresh_auth::FreshIntent,
     security_shell::{FreshAuthenticator, ReauthStart},
 };
 use crate::iap;
@@ -163,20 +164,161 @@ impl CodeExchange for GoogleCodeExchange {
 
 #[derive(Clone)]
 struct Pending {
-    attempt: String,
-    challenge: Digest,
+    intent: FreshIntent,
     iap_subject: String,
     iap_email: String,
     nonce: String,
     verifier: String,
     started_at: i64,
+    started: effects::Instant,
+    location: String,
 }
 
 pub(crate) struct Reauthenticated {
-    pub attempt: String,
-    pub challenge: Digest,
-    pub human: String,
-    pub authenticated_at: i64,
+    intent: FreshIntent,
+    human: String,
+    subject: String,
+    authenticated_at: i64,
+    provider_expires_at: i64,
+    started_at: i64,
+    started: effects::Instant,
+    lifetime: Mutex<Lifetime>,
+    #[cfg(test)]
+    isolated_fixture: bool,
+}
+
+struct Lifetime {
+    wall: i64,
+    observed: effects::Instant,
+    refused: bool,
+}
+
+impl Reauthenticated {
+    pub(in crate::oauth) fn intent(&self) -> &FreshIntent {
+        &self.intent
+    }
+
+    pub(in crate::oauth) fn human(&self) -> &str {
+        &self.human
+    }
+
+    pub(in crate::oauth) fn subject(&self) -> &str {
+        &self.subject
+    }
+
+    pub(in crate::oauth) fn authenticated_at(&self) -> i64 {
+        self.authenticated_at
+    }
+
+    pub(in crate::oauth) fn deadline(&self) -> Result<i64> {
+        let deadline = self
+            .authenticated_at
+            .checked_add(ATTEMPT_SECONDS)
+            .context("OIDC authentication time overflow")?
+            .min(
+                self.started_at
+                    .checked_add(ATTEMPT_SECONDS)
+                    .context("OIDC attempt time overflow")?,
+            )
+            .min(self.provider_expires_at);
+        Ok(self
+            .intent
+            .deadline()
+            .map_or(deadline, |pending| deadline.min(pending)))
+    }
+
+    pub(in crate::oauth) fn require_current(&self, now: i64) -> Result<()> {
+        self.observe_current(now).map(|_| ())
+    }
+
+    pub(in crate::oauth) fn observe_current(&self, entry_now: i64) -> Result<i64> {
+        let mut lifetime = self
+            .lifetime
+            .lock()
+            .map_err(|_| anyhow::anyhow!("OIDC lifetime unavailable"))?;
+        let result = (|| {
+            ensure!(
+                !lifetime.refused,
+                "OIDC original lifetime permanently refused"
+            );
+            ensure!(
+                entry_now >= self.authenticated_at,
+                "OIDC request predates authentication"
+            );
+            #[cfg(test)]
+            let now = if self.isolated_fixture {
+                entry_now
+            } else {
+                effects::wall_time()?
+            };
+            #[cfg(not(test))]
+            let now = effects::wall_time()?;
+            // Existing OAuth Instant is a same-domain upper bound, not a suspend
+            // clock or a mapping of Google's auth_time into a local clock domain.
+            let observed = effects::Instant::now();
+            ensure!(
+                now >= lifetime.wall
+                    && observed.checked_duration_since(lifetime.observed).is_some(),
+                "OIDC original clock observation moved backwards or changed domain"
+            );
+            let elapsed = observed
+                .checked_duration_since(self.started)
+                .context("OIDC authentication clock changed")?;
+            let budget = self
+                .deadline()?
+                .checked_sub(self.started_at)
+                .and_then(|seconds| u64::try_from(seconds).ok())
+                .context("OIDC original lifetime invalid")?;
+            ensure!(
+                now >= entry_now
+                    && self.authenticated_at >= self.started_at
+                    && self.authenticated_at > self.intent.created_at()
+                    && now >= self.authenticated_at
+                    && now < self.deadline()?
+                    && elapsed < Duration::from_secs(budget),
+                "OIDC authentication expired or time changed"
+            );
+            Ok((now, observed))
+        })();
+        match result {
+            Ok((now, observed)) => {
+                lifetime.wall = now;
+                lifetime.observed = observed;
+                Ok(now)
+            }
+            Err(error) => {
+                lifetime.refused = true;
+                Err(error)
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(in crate::oauth) fn fixture(
+        intent: FreshIntent,
+        human: String,
+        subject: String,
+        authenticated_at: i64,
+    ) -> Self {
+        let started = effects::Instant::now();
+        Self {
+            intent,
+            human,
+            subject,
+            authenticated_at,
+            provider_expires_at: authenticated_at
+                .checked_add(ATTEMPT_SECONDS)
+                .expect("fixture lifetime overflow"),
+            started_at: authenticated_at,
+            started,
+            lifetime: Mutex::new(Lifetime {
+                wall: authenticated_at,
+                observed: started,
+                refused: false,
+            }),
+            isolated_fixture: true,
+        }
+    }
 }
 
 struct RsaKey {
@@ -244,12 +386,11 @@ impl FreshAuthenticator for GoogleFreshAuthenticator {
     fn begin(
         &self,
         identity: &iap::Verified,
-        attempt: &str,
-        challenge: &Digest,
+        intent: FreshIntent,
         now: i64,
     ) -> Result<ReauthStart> {
         Ok(ReauthStart::Redirect(
-            self.oidc.begin(identity, attempt, challenge, now)?,
+            self.oidc.begin(identity, intent, now)?,
         ))
     }
 
@@ -300,38 +441,49 @@ impl GoogleOidc {
     pub(crate) fn begin(
         &self,
         identity: &iap::Verified,
-        attempt: &str,
-        challenge: &Digest,
+        intent: FreshIntent,
         now: i64,
     ) -> Result<String> {
+        intent.require_identity(identity)?;
+        let origin = url::Url::parse(&self.redirect_uri)?
+            .origin()
+            .ascii_serialization();
+        intent.require_shell_origin(&origin)?;
         ensure!(
-            attempt.len() <= 128 && !attempt.is_empty(),
+            intent.attempt().len() <= 128
+                && !intent.attempt().is_empty()
+                && now >= intent.created_at()
+                && intent.deadline().is_none_or(|deadline| now < deadline),
             "invalid OIDC attempt"
         );
+        let started = effects::Instant::now();
+        let mut attempts = self
+            .pending
+            .lock()
+            .map_err(|_| anyhow::anyhow!("OIDC state unavailable"))?;
+        attempts.retain(|_, pending| {
+            now >= pending.started_at
+                && now - pending.started_at <= ATTEMPT_SECONDS
+                && started
+                    .checked_duration_since(pending.started)
+                    .is_some_and(|elapsed| elapsed <= Duration::from_secs(ATTEMPT_SECONDS as u64))
+        });
+        for pending in attempts.values() {
+            if pending.intent.attempt() == intent.attempt() {
+                ensure!(
+                    pending.intent == intent,
+                    "active Google pending purpose or context changed"
+                );
+                // Return the original state/nonce/PKCE link without resetting
+                // either original lifetime or substituting a new intent.
+                return Ok(pending.location.clone());
+            }
+        }
+        ensure!(attempts.len() < MAX_ATTEMPTS, "OIDC state capacity reached");
         let state = effects::random()?;
         let nonce = effects::random()?;
         let verifier = effects::random()?;
         let code_challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
-        let pending = Pending {
-            attempt: attempt.to_owned(),
-            challenge: challenge.clone(),
-            iap_subject: identity.subject.clone(),
-            iap_email: identity.email.clone(),
-            nonce: nonce.clone(),
-            verifier,
-            started_at: now,
-        };
-        {
-            let mut attempts = self
-                .pending
-                .lock()
-                .map_err(|_| anyhow::anyhow!("OIDC state unavailable"))?;
-            attempts.retain(|_, pending| {
-                now >= pending.started_at && now - pending.started_at <= ATTEMPT_SECONDS
-            });
-            ensure!(attempts.len() < MAX_ATTEMPTS, "OIDC state capacity reached");
-            attempts.insert(Digest::new(state.as_bytes()).as_str().to_owned(), pending);
-        }
         let mut url = url::Url::parse(AUTHORIZATION_URL)?;
         url.query_pairs_mut()
             .append_pair("response_type", "code")
@@ -346,7 +498,21 @@ impl GoogleOidc {
             .append_pair("claims", r#"{"id_token":{"auth_time":{"essential":true}}}"#)
             .append_pair("hd", &self.hosted_domain)
             .append_pair("login_hint", &identity.email);
-        Ok(url.into())
+        let location: String = url.into();
+        attempts.insert(
+            Digest::new(state.as_bytes()).as_str().to_owned(),
+            Pending {
+                intent,
+                iap_subject: identity.subject.clone(),
+                iap_email: identity.email.clone(),
+                nonce,
+                verifier,
+                started_at: now,
+                started,
+                location: location.clone(),
+            },
+        );
+        Ok(location)
     }
 
     /// Callback state is consumed before the code exchange. A failed exchange or
@@ -384,6 +550,9 @@ impl GoogleOidc {
         ensure!(
             now >= pending.started_at
                 && now - pending.started_at <= ATTEMPT_SECONDS
+                && effects::Instant::now()
+                    .checked_duration_since(pending.started)
+                    .is_some_and(|elapsed| elapsed <= Duration::from_secs(ATTEMPT_SECONDS as u64))
                 && pending.iap_subject == identity.subject
                 && pending.iap_email == identity.email,
             "OIDC identity or time changed"
@@ -397,10 +566,20 @@ impl GoogleOidc {
             "OIDC authentication predates shell challenge"
         );
         Ok(Reauthenticated {
-            attempt: pending.attempt,
-            challenge: pending.challenge,
-            human: identity.email.clone(),
+            intent: pending.intent,
+            human: pending.iap_email,
+            subject: pending.iap_subject,
             authenticated_at: claims.auth_time,
+            provider_expires_at: claims.exp,
+            started_at: pending.started_at,
+            started: pending.started,
+            lifetime: Mutex::new(Lifetime {
+                wall: now,
+                observed: effects::Instant::now(),
+                refused: false,
+            }),
+            #[cfg(test)]
+            isolated_fixture: false,
         })
     }
 
@@ -565,8 +744,535 @@ fn token_shape(value: &str) -> bool {
 }
 
 #[cfg(test)]
+pub(in crate::oauth) use signed_fixtures::fixture_login;
+
+#[cfg(test)]
+mod signed_fixtures {
+    use super::*;
+    use ring::{
+        rand::SystemRandom,
+        signature::{
+            ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, KeyPair, RSA_PKCS1_SHA256, RsaKeyPair,
+        },
+    };
+    use std::sync::Arc;
+
+    // Public, test-only 2048-bit RSA fixture from the previously reviewed Google
+    // parser control. It is not an enrollment, provider or production key.
+    const TEST_PKCS8: &[u8] = &[
+        0x30, 0x82, 0x04, 0xbe, 0x02, 0x01, 0x00, 0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86,
+        0xf7, 0x0d, 0x01, 0x01, 0x01, 0x05, 0x00, 0x04, 0x82, 0x04, 0xa8, 0x30, 0x82, 0x04, 0xa4,
+        0x02, 0x01, 0x00, 0x02, 0x82, 0x01, 0x01, 0x00, 0xe2, 0xf9, 0xc3, 0x04, 0x8c, 0x18, 0x57,
+        0x1c, 0x40, 0x98, 0x5c, 0x58, 0x3b, 0xb0, 0x69, 0x1e, 0x3f, 0xb8, 0x03, 0xa7, 0x01, 0xc7,
+        0xfd, 0x3a, 0x2e, 0x26, 0xbe, 0x33, 0x2f, 0xbf, 0xcb, 0xdb, 0x5b, 0x2e, 0x5f, 0x55, 0x42,
+        0x16, 0x8e, 0x9c, 0x75, 0x91, 0x21, 0x95, 0x22, 0x04, 0xbe, 0xbf, 0x1e, 0x62, 0x67, 0xe9,
+        0x1f, 0x67, 0x49, 0xce, 0x06, 0xad, 0x2c, 0x30, 0xdc, 0x9c, 0x03, 0xa3, 0x1b, 0x0c, 0x06,
+        0xdd, 0x12, 0xd1, 0xbd, 0x68, 0x07, 0xca, 0x33, 0x1e, 0x86, 0xf8, 0x1d, 0x7e, 0x57, 0x2f,
+        0x36, 0x95, 0x88, 0x02, 0xeb, 0x52, 0x17, 0xc8, 0x97, 0xdc, 0x29, 0xb5, 0xc5, 0x4f, 0x01,
+        0xcd, 0x29, 0xd9, 0x2c, 0xf5, 0xc0, 0x66, 0x3f, 0x78, 0xe8, 0xa0, 0x0d, 0x56, 0xa3, 0x44,
+        0x73, 0x28, 0x26, 0x26, 0x38, 0x37, 0x18, 0x4f, 0x8a, 0xe3, 0xa5, 0x60, 0x04, 0x93, 0xdf,
+        0x32, 0x6f, 0xc3, 0xaa, 0xe9, 0x5a, 0xa3, 0x07, 0xc6, 0xcb, 0x5e, 0x5e, 0x8d, 0xec, 0x04,
+        0x80, 0xa1, 0xff, 0x52, 0x3e, 0x48, 0xe6, 0x2a, 0xa3, 0xf2, 0x41, 0xde, 0xa7, 0xba, 0xc1,
+        0x9c, 0x22, 0xb5, 0xff, 0xf3, 0x99, 0x6b, 0xda, 0x9b, 0xc5, 0xa7, 0xb8, 0x41, 0xad, 0x19,
+        0xee, 0xe1, 0xc2, 0x07, 0x84, 0xb4, 0x1b, 0xac, 0xff, 0x3c, 0xa7, 0x03, 0x9d, 0x2a, 0x38,
+        0x43, 0x7f, 0x44, 0xd2, 0x3e, 0xf6, 0xf2, 0xb6, 0xee, 0x44, 0x5d, 0xc1, 0xab, 0xa6, 0x28,
+        0xda, 0xf7, 0x44, 0x93, 0xa2, 0x7f, 0xa0, 0xe4, 0x19, 0x26, 0x8f, 0xd0, 0x55, 0x9a, 0xe0,
+        0xb8, 0xc4, 0x5a, 0x55, 0x5e, 0xbb, 0x91, 0x99, 0xe0, 0x81, 0xf4, 0xcc, 0x85, 0x57, 0xd4,
+        0xcc, 0x41, 0xeb, 0x36, 0x4a, 0xc1, 0xb0, 0xfe, 0x5d, 0x85, 0x9b, 0xdf, 0x37, 0xc7, 0x09,
+        0x50, 0x1f, 0xbf, 0xd1, 0x61, 0x60, 0xa3, 0x44, 0x85, 0x02, 0x03, 0x01, 0x00, 0x01, 0x02,
+        0x82, 0x01, 0x01, 0x00, 0x9f, 0x0a, 0x04, 0xf5, 0x0d, 0xb9, 0x0c, 0x68, 0xb6, 0x76, 0x4b,
+        0xd6, 0x63, 0x54, 0x94, 0x03, 0x67, 0x00, 0x68, 0x46, 0xc0, 0x3f, 0xc2, 0x96, 0xde, 0xb9,
+        0xb4, 0xf2, 0x26, 0xd6, 0x0c, 0x60, 0x92, 0x7e, 0x66, 0xbc, 0x55, 0xc7, 0x7a, 0x7b, 0xf5,
+        0x01, 0x11, 0x77, 0xee, 0xd3, 0x46, 0x58, 0xa2, 0x50, 0xaf, 0xa0, 0xb0, 0xa9, 0x6e, 0x14,
+        0x97, 0xa7, 0x05, 0xdc, 0xe2, 0xe7, 0xca, 0xc0, 0xa1, 0xf6, 0x06, 0x65, 0x27, 0x87, 0xa1,
+        0x60, 0xe0, 0x7c, 0x74, 0xdf, 0x42, 0x11, 0x5e, 0x91, 0x25, 0x43, 0xe6, 0xca, 0x55, 0xf8,
+        0x3d, 0xad, 0x53, 0x0e, 0xf2, 0x21, 0x89, 0x74, 0x5d, 0x61, 0xa3, 0xd0, 0x7f, 0x2f, 0x36,
+        0x8a, 0xa8, 0x1a, 0xbd, 0x04, 0xda, 0x73, 0x33, 0x85, 0x6e, 0x77, 0x4a, 0xfd, 0x69, 0xe5,
+        0xc3, 0xe4, 0x0e, 0xfb, 0xc5, 0x45, 0x07, 0x9e, 0xc4, 0xf6, 0x5c, 0x20, 0x28, 0x4b, 0x42,
+        0x9f, 0x87, 0xc9, 0xab, 0xf2, 0xe8, 0xd1, 0x17, 0x98, 0xdc, 0xaa, 0x62, 0x66, 0x05, 0xf4,
+        0xd1, 0x66, 0x4f, 0xee, 0x82, 0xa6, 0xfd, 0xf5, 0xeb, 0x62, 0x2b, 0xac, 0x1d, 0x0a, 0x1f,
+        0xfe, 0xbf, 0xa8, 0xd3, 0x57, 0x0f, 0x26, 0x65, 0xbd, 0x23, 0x98, 0x7f, 0xd0, 0xca, 0x4a,
+        0x2f, 0x64, 0xee, 0x3f, 0xba, 0x1d, 0x57, 0xea, 0xdc, 0xb2, 0x76, 0xbe, 0xc2, 0x62, 0x3f,
+        0x46, 0x95, 0x42, 0x63, 0xe1, 0x11, 0xcd, 0x5d, 0x38, 0x91, 0x41, 0x8d, 0x54, 0x81, 0xa7,
+        0x3f, 0x48, 0xcb, 0xa8, 0x07, 0x63, 0x77, 0x32, 0x0c, 0xec, 0xed, 0x5a, 0xc9, 0xbf, 0xd1,
+        0xc5, 0xc5, 0xc3, 0x40, 0x9d, 0x09, 0x75, 0x15, 0xd0, 0x06, 0xee, 0x7a, 0x95, 0xcf, 0x4f,
+        0x6e, 0x41, 0xd1, 0xa6, 0xe1, 0x82, 0xf3, 0xf5, 0xb6, 0xfd, 0x8e, 0xb4, 0xdb, 0xaf, 0x68,
+        0xed, 0xb0, 0xb9, 0x6a, 0x8d, 0x02, 0x81, 0x81, 0x00, 0xf4, 0x49, 0x43, 0x31, 0xaa, 0x2d,
+        0xc3, 0x8f, 0x92, 0xfa, 0xab, 0x4e, 0xb2, 0x5c, 0x2c, 0x7d, 0x04, 0xc4, 0x9f, 0x8d, 0x3b,
+        0x83, 0xd8, 0xa8, 0x1e, 0xcb, 0x76, 0x22, 0x2e, 0xd7, 0xb6, 0xf6, 0x7f, 0x01, 0xe6, 0x5f,
+        0x44, 0xcc, 0x99, 0x2d, 0x14, 0x9c, 0x3e, 0x00, 0xff, 0xde, 0xf4, 0xa2, 0xb7, 0x17, 0x58,
+        0x92, 0xf5, 0x79, 0x23, 0x47, 0x7e, 0xa4, 0x3b, 0xed, 0x2a, 0xf4, 0x56, 0x99, 0x65, 0x27,
+        0x83, 0xc2, 0xcc, 0xc6, 0x05, 0x19, 0xf0, 0xaf, 0x85, 0x97, 0x20, 0x88, 0xd2, 0x9a, 0x40,
+        0x13, 0x40, 0xb0, 0x81, 0xb5, 0x96, 0x7f, 0x58, 0x1d, 0xfe, 0xd5, 0x13, 0xe7, 0xec, 0xc9,
+        0xa6, 0xeb, 0xa3, 0xf7, 0xab, 0x72, 0x65, 0xa2, 0xaa, 0xec, 0xc1, 0xb0, 0x7a, 0x31, 0x0e,
+        0xd6, 0x91, 0x08, 0xc2, 0xbb, 0x2a, 0xde, 0xc3, 0x29, 0xc4, 0x11, 0xeb, 0x1c, 0x8c, 0xa5,
+        0xb0, 0x3b, 0x02, 0x81, 0x81, 0x00, 0xed, 0xdc, 0x00, 0xe4, 0x44, 0xc3, 0x5c, 0x0f, 0xb9,
+        0x63, 0xde, 0xe5, 0xd9, 0x44, 0x9c, 0xae, 0x6d, 0xc6, 0x1c, 0xed, 0xcc, 0x82, 0x1b, 0xd4,
+        0xd5, 0x9b, 0xb0, 0xca, 0x38, 0xda, 0xfe, 0xad, 0x0a, 0x2f, 0x60, 0x10, 0xb0, 0x30, 0x98,
+        0x98, 0x11, 0xb6, 0x40, 0x52, 0x43, 0x33, 0x28, 0x50, 0x2c, 0x31, 0x91, 0x02, 0x2f, 0xe9,
+        0x60, 0xde, 0x73, 0x71, 0x3e, 0xb8, 0x79, 0x0b, 0xf1, 0x5d, 0x70, 0x9b, 0x6f, 0x2e, 0x0b,
+        0x63, 0xa0, 0xff, 0x23, 0xae, 0x6c, 0xae, 0xf5, 0x10, 0x99, 0x5c, 0xf8, 0x0c, 0xba, 0xce,
+        0x5b, 0x46, 0x00, 0x2a, 0x5d, 0xd7, 0x89, 0x45, 0x37, 0x16, 0x0b, 0x08, 0x83, 0xa1, 0xc3,
+        0x69, 0xbf, 0x36, 0xa7, 0x6f, 0x5f, 0x3a, 0x5b, 0xf3, 0x70, 0x97, 0xf2, 0xb3, 0xa4, 0x3a,
+        0x3b, 0x7e, 0x3e, 0xc8, 0x90, 0xf8, 0xed, 0x4d, 0x70, 0xe6, 0xf7, 0x9e, 0x52, 0x3f, 0x02,
+        0x81, 0x80, 0x0e, 0x93, 0xfc, 0xad, 0x8f, 0x11, 0x52, 0x15, 0x54, 0x59, 0x1f, 0x36, 0x00,
+        0x10, 0xde, 0x1a, 0xcb, 0xd9, 0x0c, 0x08, 0x7a, 0x9f, 0xc0, 0xa3, 0x2f, 0xcb, 0x46, 0x8e,
+        0x7d, 0xab, 0x23, 0xe1, 0x0b, 0xed, 0x4a, 0x19, 0x2f, 0x5a, 0xe2, 0x5d, 0x3d, 0x58, 0xa1,
+        0x9e, 0x9f, 0xa6, 0x67, 0x84, 0xfa, 0x56, 0x2b, 0x54, 0x01, 0xd0, 0x2b, 0xd9, 0xcd, 0x65,
+        0xf1, 0xa9, 0x92, 0xa1, 0xa8, 0x35, 0x59, 0x43, 0x05, 0x6a, 0xef, 0x9b, 0x75, 0x9c, 0x79,
+        0xaf, 0x8f, 0xd2, 0x57, 0xff, 0xb2, 0x49, 0xc0, 0x3f, 0x25, 0xe2, 0x22, 0xab, 0x7a, 0x82,
+        0xb8, 0xf8, 0x79, 0x47, 0xaf, 0xfb, 0x6c, 0x37, 0x10, 0x7e, 0x09, 0x77, 0xf3, 0x44, 0x4d,
+        0x6a, 0x6a, 0xb6, 0xdc, 0x4c, 0x32, 0xce, 0x90, 0xab, 0x1f, 0x56, 0x9d, 0x80, 0x5b, 0xeb,
+        0x95, 0x4b, 0xfd, 0xc6, 0x6f, 0xf8, 0x71, 0x30, 0x46, 0x17, 0x02, 0x81, 0x80, 0x4a, 0xe2,
+        0x9d, 0xe1, 0x40, 0x08, 0xe5, 0x7e, 0x09, 0xd6, 0xf8, 0x81, 0x12, 0xc3, 0x38, 0x34, 0xee,
+        0x58, 0x96, 0x19, 0x03, 0xee, 0xde, 0x86, 0x46, 0x6e, 0x0a, 0xdd, 0xcf, 0xc2, 0x9a, 0xb5,
+        0xad, 0xe4, 0x36, 0x71, 0x6a, 0x97, 0x12, 0x23, 0xa6, 0x47, 0xe3, 0xbe, 0x42, 0x6b, 0xe3,
+        0xc0, 0x41, 0xf9, 0xa4, 0xf6, 0xb4, 0x50, 0xdc, 0x6f, 0x8c, 0x96, 0xd5, 0xb1, 0x4c, 0x62,
+        0xc7, 0x2d, 0xac, 0xdb, 0x32, 0xc8, 0xa3, 0x4b, 0x4d, 0x8f, 0xa6, 0x13, 0x2f, 0x22, 0x72,
+        0x03, 0x34, 0xd5, 0x81, 0x3e, 0xb8, 0xbd, 0x69, 0x1d, 0x03, 0xc6, 0x52, 0xdf, 0x1d, 0xd7,
+        0x8d, 0xbd, 0x41, 0xe1, 0xff, 0x57, 0x39, 0x67, 0x9c, 0x8c, 0xbf, 0x70, 0x1f, 0xe2, 0x06,
+        0xbb, 0x00, 0xf2, 0xc5, 0xb5, 0x6a, 0xf9, 0xee, 0x6b, 0x13, 0xa7, 0x1f, 0x85, 0x4f, 0x68,
+        0xb7, 0x27, 0xf0, 0x43, 0x87, 0x0f, 0x02, 0x81, 0x81, 0x00, 0xcc, 0x70, 0x22, 0xd0, 0x95,
+        0xba, 0x27, 0xe5, 0x00, 0x0c, 0x8a, 0x76, 0xa9, 0x51, 0xdb, 0xb7, 0x66, 0x94, 0x1e, 0xac,
+        0x7e, 0x14, 0x61, 0x5b, 0x8a, 0xe7, 0x38, 0xfc, 0x23, 0x51, 0xd3, 0xbd, 0x94, 0x4e, 0x7b,
+        0xae, 0x6b, 0xd7, 0xe2, 0xcc, 0xa5, 0x77, 0xd7, 0xee, 0x0c, 0xcd, 0x85, 0x2c, 0xe1, 0xff,
+        0xde, 0xea, 0x89, 0x4d, 0x19, 0xc7, 0xbf, 0x0c, 0x85, 0xbb, 0x90, 0x2e, 0xdb, 0x57, 0xa9,
+        0x38, 0xe0, 0x3f, 0x28, 0x0a, 0x9a, 0x18, 0x55, 0x27, 0x32, 0x2c, 0x6d, 0x69, 0x6b, 0xbf,
+        0xce, 0xcd, 0xb7, 0x14, 0xd2, 0xf8, 0xbb, 0x84, 0xa5, 0x4d, 0x42, 0xab, 0xa4, 0xf8, 0x75,
+        0x02, 0x7c, 0x66, 0x4e, 0x34, 0x94, 0x83, 0x12, 0x58, 0xd1, 0x2d, 0x07, 0xfe, 0x30, 0x26,
+        0xf9, 0x9a, 0x04, 0xdc, 0x3d, 0xb9, 0xea, 0x17, 0x74, 0x64, 0xe2, 0xd1, 0xdf, 0xc2, 0xb6,
+        0xc1, 0x4c, 0x95,
+    ];
+
+    struct Keys(String);
+
+    impl KeySource for Keys {
+        fn fetch(&self) -> Result<String> {
+            Ok(self.0.clone())
+        }
+    }
+
+    impl iap::KeySource for Keys {
+        fn fetch(&self) -> Result<String> {
+            Ok(self.0.clone())
+        }
+    }
+
+    struct Exchange {
+        key: Arc<RsaKeyPair>,
+        nonce: Arc<Mutex<Option<String>>>,
+        identity: iap::Verified,
+        authenticated_at: i64,
+        completed_at: i64,
+        expires_at: i64,
+    }
+
+    impl CodeExchange for Exchange {
+        fn exchange(
+            &self,
+            code: &str,
+            verifier: &str,
+            redirect: &str,
+            client: &str,
+        ) -> Result<String> {
+            ensure!(
+                code == "signed-fixture-code"
+                    && token_shape(verifier)
+                    && redirect == "https://security.example.com/_day2/reauth/callback"
+                    && client == "123.apps.googleusercontent.com",
+                "fixture Google selection changed"
+            );
+            let nonce = self
+                .nonce
+                .lock()
+                .unwrap()
+                .take()
+                .context("fixture nonce already consumed")?;
+            let subject = self
+                .identity
+                .subject
+                .strip_prefix("accounts.google.com:")
+                .context("fixture Google subject missing")?;
+            let claims = serde_json::json!({
+                "iss": ISSUER, "aud": client, "sub": subject, "email": self.identity.email,
+                "email_verified": true, "hd": "example.com",
+                "iat": self.completed_at, "exp": self.expires_at,
+                "nonce": nonce, "auth_time": self.authenticated_at,
+            });
+            let signed = format!(
+                "{}.{}",
+                URL_SAFE_NO_PAD.encode(br#"{"alg":"RS256","kid":"owned-google-fixture"}"#),
+                URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims)?)
+            );
+            let mut signature = vec![0; self.key.public().modulus_len()];
+            self.key
+                .sign(
+                    &RSA_PKCS1_SHA256,
+                    &SystemRandom::new(),
+                    signed.as_bytes(),
+                    &mut signature,
+                )
+                .map_err(|_| anyhow::anyhow!("fixture RSA signature failed"))?;
+            Ok(format!("{signed}.{}", URL_SAFE_NO_PAD.encode(signature)))
+        }
+    }
+
+    fn der<'a>(input: &mut &'a [u8], tag: u8) -> Result<&'a [u8]> {
+        let (actual, rest) = input.split_first().context("fixture DER tag missing")?;
+        ensure!(*actual == tag, "fixture DER tag mismatch");
+        let (first, rest) = rest.split_first().context("fixture DER length missing")?;
+        let (length, rest) = if first & 0x80 == 0 {
+            (usize::from(*first), rest)
+        } else {
+            let count = usize::from(first & 0x7f);
+            ensure!(
+                (1..=2).contains(&count) && rest.len() >= count,
+                "fixture DER length budget"
+            );
+            (
+                rest[..count]
+                    .iter()
+                    .fold(0usize, |size, byte| size * 256 + usize::from(*byte)),
+                &rest[count..],
+            )
+        };
+        ensure!(
+            length <= 4096 && rest.len() >= length,
+            "fixture DER content budget"
+        );
+        let (value, rest) = rest.split_at(length);
+        *input = rest;
+        Ok(value)
+    }
+
+    /// Uses the real IAP and Google signature parsers and the exact original
+    /// begin/state/nonce/PKCE path. No test scalar proof enters the callback.
+    /// Ephemeral IAP signing entropy makes these parser/conformance inputs
+    /// nondeterministic; they are not seeded campaign or saved-replay evidence.
+    pub(in crate::oauth) fn fixture_login(
+        identity: &iap::Verified,
+        intent: FreshIntent,
+        started_at: i64,
+        authenticated_at: i64,
+        completed_at: i64,
+    ) -> Result<(Arc<GoogleFreshAuthenticator>, HeaderMap, String)> {
+        fixture_login_with_expiry(
+            identity,
+            intent,
+            started_at,
+            authenticated_at,
+            completed_at,
+            completed_at
+                .checked_add(300)
+                .context("fixture expiry overflow")?,
+        )
+    }
+
+    pub(super) fn fixture_login_with_expiry(
+        identity: &iap::Verified,
+        intent: FreshIntent,
+        started_at: i64,
+        authenticated_at: i64,
+        completed_at: i64,
+        expires_at: i64,
+    ) -> Result<(Arc<GoogleFreshAuthenticator>, HeaderMap, String)> {
+        let key = Arc::new(
+            RsaKeyPair::from_pkcs8(TEST_PKCS8)
+                .map_err(|_| anyhow::anyhow!("public RSA fixture invalid"))?,
+        );
+        let mut bytes = key.public_key().as_ref();
+        let mut sequence = der(&mut bytes, 0x30)?;
+        ensure!(bytes.is_empty(), "fixture public key trailing bytes");
+        let modulus = der(&mut sequence, 0x02)?;
+        let exponent = der(&mut sequence, 0x02)?;
+        ensure!(sequence.is_empty(), "fixture public key extra fields");
+        let modulus = modulus.strip_prefix(&[0]).unwrap_or(modulus);
+        let keys = serde_json::json!({"keys":[{
+            "kid":"owned-google-fixture","kty":"RSA","alg":"RS256","use":"sig",
+            "n":URL_SAFE_NO_PAD.encode(modulus),"e":URL_SAFE_NO_PAD.encode(exponent),
+        }]})
+        .to_string();
+        let nonce = Arc::new(Mutex::new(None));
+        let oidc = GoogleOidc::new(
+            "123.apps.googleusercontent.com".into(),
+            "example.com".into(),
+            "https://security.example.com/",
+            Box::new(Exchange {
+                key,
+                nonce: nonce.clone(),
+                identity: identity.clone(),
+                authenticated_at,
+                completed_at,
+                expires_at,
+            }),
+            Box::new(Keys(keys)),
+        )?;
+        let location = oidc.begin(identity, intent, started_at)?;
+        let url = url::Url::parse(&location)?;
+        let fields: BTreeMap<String, String> = url.query_pairs().into_owned().collect();
+        *nonce.lock().unwrap() = Some(fields["nonce"].clone());
+        let callback = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("state", &fields["state"])
+            .append_pair("code", "signed-fixture-code")
+            .append_pair("iss", ISSUER)
+            .finish();
+
+        let rng = SystemRandom::new();
+        let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng)
+            .map_err(|_| anyhow::anyhow!("fixture IAP key generation failed"))?;
+        let pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8.as_ref(), &rng)
+            .map_err(|_| anyhow::anyhow!("fixture IAP key invalid"))?;
+        let point = pair.public_key().as_ref();
+        let iap_keys = serde_json::json!({"keys":[{
+            "kid":"owned-iap-fixture","kty":"EC","crv":"P-256","alg":"ES256","use":"sig",
+            "x":URL_SAFE_NO_PAD.encode(&point[1..33]),"y":URL_SAFE_NO_PAD.encode(&point[33..65]),
+        }]})
+        .to_string();
+        let audience = "/projects/123/global/backendServices/456";
+        let claims = serde_json::json!({"iss":"https://cloud.google.com/iap","aud":audience,
+            "iat":started_at,"exp":started_at.checked_add(600).context("fixture IAP expiry overflow")?,
+            "sub":identity.subject,"email":identity.email,"hd":"example.com"});
+        let signed = format!(
+            "{}.{}",
+            URL_SAFE_NO_PAD.encode(br#"{"alg":"ES256","kid":"owned-iap-fixture"}"#),
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims)?)
+        );
+        let signature = pair
+            .sign(&rng, signed.as_bytes())
+            .map_err(|_| anyhow::anyhow!("fixture IAP signature failed"))?;
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            iap::ASSERTION_HEADER,
+            format!("{signed}.{}", URL_SAFE_NO_PAD.encode(signature.as_ref())).parse()?,
+        );
+        let authenticator = Arc::new(GoogleFreshAuthenticator {
+            iap: iap::Verifier::new(audience, "example.com", Box::new(Keys(iap_keys)))?,
+            oidc,
+        });
+        Ok((authenticator, headers, callback))
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn signed_original_google_intent_reuse_completion_and_lifetime_are_owned() -> Result<()> {
+        struct FixedClock {
+            domain: u64,
+            wall: i64,
+            ticks: Duration,
+        }
+        impl effects::Hooks for FixedClock {
+            fn domain(&self) -> u64 {
+                self.domain
+            }
+            fn wall_time(&self) -> Result<i64> {
+                Ok(self.wall)
+            }
+            fn monotonic(&self) -> Duration {
+                self.ticks
+            }
+            fn fill(&self, _: &mut [u8]) -> Result<()> {
+                anyhow::bail!("clock-only control has no entropy")
+            }
+            fn send(&self, _: reqwest::blocking::Request) -> Result<effects::Response> {
+                anyhow::bail!("clock-only control has no HTTP provider")
+            }
+        }
+        let clock = crate::oauth::simulation::World::new(901);
+        clock.advance(95);
+        effects::scope(clock.clone(), || {
+            let identity = identity();
+            let intent = FreshIntent::fixture_oauth(
+                &identity,
+                "original-purpose-attempt",
+                &Digest::new(b"complete original challenge"),
+                "https://security.example.com/",
+            )?;
+            let (authenticator, headers, callback) =
+                fixture_login(&identity, intent.clone(), 100, 101, 101)?;
+            let ReauthStart::Redirect(original) =
+                authenticator.begin(&identity, intent.clone(), 100)?
+            else {
+                anyhow::bail!("Google begin bypassed actual authorization");
+            };
+            clock.advance(1);
+            let ReauthStart::Redirect(reopened) =
+                authenticator.begin(&identity, intent.clone(), 101)?
+            else {
+                anyhow::bail!("Google reuse bypassed actual authorization");
+            };
+            assert_eq!(original, reopened);
+            let changed = FreshIntent::fixture_oauth(
+                &identity,
+                intent.attempt(),
+                &Digest::new(b"changed complete original challenge"),
+                "https://security.example.com/",
+            )?;
+            assert!(authenticator.begin(&identity, changed, 101).is_err());
+            let verified = authenticator.identify(&headers, 101)?;
+            let proof = super::super::fresh_auth::VerifiedAuthTime::from_google(
+                authenticator.complete(&callback, &verified, 101)?,
+            );
+            proof.require_intent(&intent, &identity)?;
+            proof.require_current(101)?;
+            assert_eq!(proof.authenticated_at(), 101);
+            assert_eq!(proof.subject(), identity.subject);
+            assert_eq!(proof.deadline()?, 400); // Original begin, not completion +300.
+            assert!(authenticator.complete(&callback, &verified, 101).is_err());
+            let independent_proof = || -> Result<super::super::fresh_auth::VerifiedAuthTime> {
+                let (authenticator, headers, callback) =
+                    fixture_login(&identity, intent.clone(), 100, 101, 101)?;
+                let verified = authenticator.identify(&headers, 101)?;
+                Ok(super::super::fresh_auth::VerifiedAuthTime::from_google(
+                    authenticator.complete(&callback, &verified, 101)?,
+                ))
+            };
+            let predating_entry = independent_proof()?;
+            assert!(predating_entry.require_current(100).is_err());
+            let domain = effects::Hooks::domain(clock.as_ref());
+            let ticks = effects::Hooks::monotonic(clock.as_ref());
+            let healthy = std::sync::Arc::new(FixedClock {
+                domain,
+                wall: 101,
+                ticks,
+            });
+            effects::scope(healthy, || proof.require_current(101))?;
+            let expired = std::sync::Arc::new(FixedClock {
+                domain,
+                wall: 101,
+                ticks: ticks
+                    .checked_add(Duration::from_secs(300))
+                    .context("clock control overflow")?,
+            });
+            let monotonic_proof = independent_proof()?;
+            effects::scope(expired, || {
+                assert!(monotonic_proof.require_current(101).is_err())
+            });
+            let other_domain = std::sync::Arc::new(FixedClock {
+                domain: domain
+                    .checked_add(1)
+                    .context("clock domain control overflow")?,
+                wall: 101,
+                ticks,
+            });
+            let domain_proof = independent_proof()?;
+            domain_proof.require_current(101)?;
+            effects::scope(other_domain, || {
+                assert!(domain_proof.require_current(101).is_err())
+            });
+            let expired_wall_proof = independent_proof()?;
+            let forward = std::sync::Arc::new(FixedClock {
+                domain,
+                wall: 401,
+                ticks,
+            });
+            effects::scope(forward, || {
+                assert!(expired_wall_proof.require_current(101).is_err())
+            });
+            let rollback = std::sync::Arc::new(FixedClock {
+                domain,
+                wall: 102,
+                ticks,
+            });
+            effects::scope(rollback, || {
+                assert!(expired_wall_proof.require_current(101).is_err())
+            });
+            let rollback_proof = independent_proof()?;
+            let later = std::sync::Arc::new(FixedClock {
+                domain,
+                wall: 103,
+                ticks,
+            });
+            effects::scope(later, || {
+                assert_eq!(rollback_proof.observe_current(101).unwrap(), 103)
+            });
+            let backwards = std::sync::Arc::new(FixedClock {
+                domain,
+                wall: 102,
+                ticks,
+            });
+            effects::scope(backwards, || {
+                assert!(rollback_proof.require_current(101).is_err())
+            });
+            let recovered_wall = std::sync::Arc::new(FixedClock {
+                domain,
+                wall: 104,
+                ticks,
+            });
+            effects::scope(recovered_wall, || {
+                assert!(rollback_proof.require_current(101).is_err())
+            });
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn signed_google_callback_refuses_original_subject_substitution_and_expiry() -> Result<()> {
+        for expired in [false, true] {
+            let identity = identity();
+            let intent = FreshIntent::fixture_oauth(
+                &identity,
+                "signed-current-owner",
+                &Digest::new(b"signed current context"),
+                "https://security.example.com/",
+            )?;
+            let (authenticator, _, callback) = fixture_login(&identity, intent, 100, 101, 101)?;
+            let current = if expired {
+                identity.clone()
+            } else {
+                iap::Verified {
+                    email: identity.email.clone(),
+                    subject: "accounts.google.com:replacement".into(),
+                }
+            };
+            assert!(
+                authenticator
+                    .complete(&callback, &current, if expired { 401 } else { 101 })
+                    .is_err()
+            );
+            assert!(authenticator.complete(&callback, &identity, 101).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn signed_google_short_provider_expiry_bounds_original_session() -> Result<()> {
+        let clock = crate::oauth::simulation::World::new(903);
+        clock.advance(95);
+        effects::scope(clock.clone(), || {
+            let identity = identity();
+            let intent = FreshIntent::fixture_oauth(
+                &identity,
+                "short-signed-proof",
+                &Digest::new(b"short original proof"),
+                "https://security.example.com/",
+            )?;
+            let (authenticator, headers, callback) = signed_fixtures::fixture_login_with_expiry(
+                &identity,
+                intent.clone(),
+                100,
+                101,
+                101,
+                103,
+            )?;
+            clock.advance(1);
+            let identity = authenticator.identify(&headers, 101)?;
+            let proof = super::super::fresh_auth::VerifiedAuthTime::from_google(
+                authenticator.complete(&callback, &identity, 101)?,
+            );
+            proof.require_intent(&intent, &identity)?;
+            assert_eq!(proof.deadline()?, 103);
+            proof.require_current(101)?;
+            clock.advance(1);
+            assert_eq!(proof.observe_current(101)?, 102);
+            clock.advance(1);
+            assert!(proof.require_current(101).is_err()); // Stale entry time cannot bypass expiry.
+            Ok(())
+        })
+    }
 
     #[test]
     fn oidc_reads_the_exact_credential_per_exchange_and_redacts_failures() -> Result<()> {
@@ -708,8 +1414,16 @@ mod tests {
                             assert!(!format!("{error:#}").contains("private-fixture"));
                         }
                         let oidc = oidc();
-                        let location =
-                            oidc.begin(&identity(), "attempt", &Digest::of(&"pending")?, 5)?;
+                        let location = oidc.begin(
+                            &identity(),
+                            FreshIntent::fixture_oauth(
+                                &identity(),
+                                "attempt",
+                                &Digest::of(&"pending")?,
+                                "https://security.example/",
+                            )?,
+                            5,
+                        )?;
                         let url = url::Url::parse(&location)?;
                         let state = url
                             .query_pairs()
@@ -817,8 +1531,13 @@ mod tests {
         let url = oidc
             .begin(
                 &identity(),
-                "attempt_1",
-                &Digest::of(&"pending").unwrap(),
+                FreshIntent::fixture_oauth(
+                    &identity(),
+                    "attempt_1",
+                    &Digest::of(&"pending").unwrap(),
+                    "https://security.example/",
+                )
+                .unwrap(),
                 1_700_000_000,
             )
             .unwrap();
@@ -866,8 +1585,13 @@ mod tests {
         let url = oidc
             .begin(
                 &identity(),
-                "attempt_1",
-                &Digest::of(&"pending").unwrap(),
+                FreshIntent::fixture_oauth(
+                    &identity(),
+                    "attempt_1",
+                    &Digest::of(&"pending").unwrap(),
+                    "https://security.example/",
+                )
+                .unwrap(),
                 1_700_000_000,
             )
             .unwrap();

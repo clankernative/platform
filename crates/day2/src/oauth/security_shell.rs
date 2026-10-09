@@ -4,8 +4,9 @@
 #[cfg(test)]
 use super::approval_registry;
 use super::{
-    admission, approval_keys, connect, external, profiles, registration, shell_oidc,
-    shell_transport,
+    admission, approval_keys, connect, external,
+    fresh_auth::{FreshIntent, FreshPurpose, VerifiedAuthTime},
+    profiles, registration, shell_oidc, shell_transport,
 };
 use crate::oauth::effects;
 use crate::{artifact::Instance, iap, managed_credentials::browser as credentials};
@@ -96,13 +97,8 @@ pub(crate) trait ApprovalRegistry: Send + Sync {
 /// neither proves when the human last authenticated.
 pub(crate) trait FreshAuthenticator: Send + Sync {
     fn identify(&self, headers: &HeaderMap, now: i64) -> Result<iap::Verified>;
-    fn begin(
-        &self,
-        identity: &iap::Verified,
-        attempt: &str,
-        challenge: &Digest,
-        now: i64,
-    ) -> Result<ReauthStart>;
+    fn begin(&self, identity: &iap::Verified, intent: FreshIntent, now: i64)
+    -> Result<ReauthStart>;
     fn complete(
         &self,
         _query: &str,
@@ -119,6 +115,7 @@ pub(crate) enum ReauthStart {
     Redirect(String),
 }
 
+#[cfg(test)]
 pub(crate) struct FreshHuman {
     pub human: String,
     pub subject: String,
@@ -126,7 +123,7 @@ pub(crate) struct FreshHuman {
 }
 
 #[derive(Clone)]
-struct ShellSession {
+pub(crate) struct ShellSession {
     attempt: String,
     human: String,
     subject: String,
@@ -135,6 +132,107 @@ struct ShellSession {
     authenticated_at: i64,
     expires_at: i64,
     csrf: String,
+    proof: Arc<VerifiedAuthTime>,
+    digest: Digest,
+}
+
+impl ShellSession {
+    fn approval(
+        view: &shell_transport::ApprovalView,
+        identity: &iap::Verified,
+        proof: VerifiedAuthTime,
+        digest: Digest,
+        csrf: String,
+        at: i64,
+    ) -> Result<Self> {
+        proof.require_approval(view, identity)?;
+        proof.require_current(at)?;
+        Ok(Self {
+            attempt: view.attempt().into(),
+            human: proof.human().into(),
+            subject: proof.subject().into(),
+            challenge: view.challenge().clone(),
+            preview: view.digest()?,
+            authenticated_at: proof.authenticated_at(),
+            expires_at: proof.deadline()?,
+            csrf,
+            proof: Arc::new(proof),
+            digest,
+        })
+    }
+
+    pub(in crate::oauth) fn require_approval(
+        &self,
+        view: &shell_transport::ApprovalView,
+        at: i64,
+    ) -> Result<()> {
+        let identity = iap::Verified {
+            email: self.proof.human().into(),
+            subject: self.proof.subject().into(),
+        };
+        ensure!(
+            valid_session(self, view, &identity, at),
+            "fresh OAuth shell session changed or expired"
+        );
+        Ok(())
+    }
+
+    pub(in crate::oauth) fn digest(&self) -> Digest {
+        self.digest.clone()
+    }
+
+    pub(in crate::oauth) fn authenticated_at(&self) -> i64 {
+        self.proof.authenticated_at()
+    }
+
+    pub(in crate::oauth) fn observe_current(&self, entry_now: i64) -> Result<i64> {
+        self.proof.observe_current(entry_now)
+    }
+
+    #[cfg(test)]
+    pub(in crate::oauth) fn approval_signed_fixture(
+        view: &shell_transport::ApprovalView,
+        identity: &iap::Verified,
+        google: shell_oidc::Reauthenticated,
+        digest: Digest,
+        at: i64,
+    ) -> Result<Self> {
+        Self::approval(
+            view,
+            identity,
+            VerifiedAuthTime::from_google(google),
+            digest,
+            "signed fixture".into(),
+            at,
+        )
+    }
+
+    #[cfg(test)]
+    pub(in crate::oauth) fn approval_fixture(
+        view: &shell_transport::ApprovalView,
+        identity: &iap::Verified,
+        authenticated_at: i64,
+        digest: Digest,
+    ) -> Result<Self> {
+        let proof = VerifiedAuthTime::from_google(shell_oidc::Reauthenticated::fixture(
+            FreshIntent::approval(view, identity)?,
+            identity.email.clone(),
+            identity.subject.clone(),
+            authenticated_at,
+        ));
+        Ok(Self {
+            attempt: view.attempt().into(),
+            human: identity.email.clone(),
+            subject: identity.subject.clone(),
+            challenge: view.challenge().clone(),
+            preview: view.digest()?,
+            authenticated_at,
+            expires_at: proof.deadline()?,
+            csrf: "fixture".into(),
+            proof: Arc::new(proof),
+            digest,
+        })
+    }
 }
 
 /// Mount this router only behind the dedicated HTTPS security origin. The
@@ -667,28 +765,29 @@ impl SecurityShell {
             identity.email == pending.human(),
             "shell human does not own pending approval"
         );
-        let (session, issued): (ShellSession, Option<String>) = match self
-            .read_session(headers, at)?
-        {
-            Some(session) if valid_session(&session, &pending, identity, at) => (session, None),
-            _ => {
-                match self
-                    .authenticator
-                    .begin(identity, attempt, pending.challenge(), at)?
-                {
-                    #[cfg(test)]
-                    ReauthStart::Authenticated(human) => {
-                        let (session, token) = self.issue_session(&pending, identity, human, at)?;
-                        (session, Some(token))
-                    }
-                    ReauthStart::Redirect(url) => {
-                        return Ok(
-                            (StatusCode::SEE_OTHER, [(header::LOCATION, url)]).into_response()
-                        );
+        let (session, issued): (ShellSession, Option<String>) =
+            match self.read_session(headers, at)? {
+                Some(session) if valid_session(&session, &pending, identity, at) => (session, None),
+                _ => {
+                    match self.authenticator.begin(
+                        identity,
+                        FreshIntent::approval(&pending, identity)?,
+                        at,
+                    )? {
+                        #[cfg(test)]
+                        ReauthStart::Authenticated(human) => {
+                            let (session, token) =
+                                self.issue_session_fixture(&pending, identity, human, at)?;
+                            (session, Some(token))
+                        }
+                        ReauthStart::Redirect(url) => {
+                            return Ok(
+                                (StatusCode::SEE_OTHER, [(header::LOCATION, url)]).into_response()
+                            );
+                        }
                     }
                 }
-            }
-        };
+            };
         let account = &pending.observed;
         let scopes = &pending.scopes;
         let markup = html! {
@@ -735,29 +834,20 @@ impl SecurityShell {
         &self,
         pending: &shell_transport::ApprovalView,
         identity: &iap::Verified,
-        human: FreshHuman,
+        proof: VerifiedAuthTime,
         at: i64,
     ) -> Result<(ShellSession, String)> {
-        ensure!(
-            human.human == pending.human()
-                && human.human == identity.email
-                && human.subject == identity.subject
-                && human.authenticated_at > pending.quarantined_at()
-                && human.authenticated_at <= at
-                && at - human.authenticated_at <= SESSION_SECONDS,
-            "fresh shell authentication required"
-        );
+        proof.require_approval(pending, identity)?;
+        proof.require_current(at)?;
         let token = effects::random()?;
-        let session = ShellSession {
-            attempt: pending.attempt().to_owned(),
-            human: human.human,
-            subject: human.subject,
-            challenge: pending.challenge().clone(),
-            preview: pending.digest()?,
-            authenticated_at: human.authenticated_at,
-            expires_at: human.authenticated_at + SESSION_SECONDS,
-            csrf: effects::random()?,
-        };
+        let session = ShellSession::approval(
+            pending,
+            identity,
+            proof,
+            Digest::new(token.as_bytes()),
+            effects::random()?,
+            at,
+        )?;
         let mut sessions = self
             .sessions
             .lock()
@@ -774,6 +864,27 @@ impl SecurityShell {
         Ok((session, token))
     }
 
+    #[cfg(test)]
+    fn issue_session_fixture(
+        &self,
+        pending: &shell_transport::ApprovalView,
+        identity: &iap::Verified,
+        human: FreshHuman,
+        at: i64,
+    ) -> Result<(ShellSession, String)> {
+        self.issue_session(
+            pending,
+            identity,
+            VerifiedAuthTime::from_google(shell_oidc::Reauthenticated::fixture(
+                FreshIntent::approval(pending, identity)?,
+                human.human,
+                human.subject,
+                human.authenticated_at,
+            )),
+            at,
+        )
+    }
+
     fn reauth_callback(
         &self,
         query: &str,
@@ -781,48 +892,32 @@ impl SecurityShell {
         identity: &iap::Verified,
         at: i64,
     ) -> Result<Response> {
-        let proof = self.authenticator.complete(query, identity, at)?;
-        if proof.attempt.starts_with("credential-") {
+        let proof =
+            VerifiedAuthTime::from_google(self.authenticator.complete(query, identity, at)?);
+        proof.require_current(at)?;
+        if proof.purpose() == FreshPurpose::CredentialIntent {
             let registry = self
                 .credentials
                 .as_ref()
                 .context("credential security shell unavailable")?;
-            let (_, pending) = registry
-                .resolve(&proof.attempt, identity, at)?
+            let (runtime, pending) = registry
+                .resolve(proof.attempt(), identity, at)?
                 .context("credential intent unavailable")?;
             ensure!(
-                proof.challenge == pending.challenge()?,
+                proof.challenge() == &pending.challenge()?,
                 "credential reauthentication challenge changed"
             );
-            let (_, token) = self.credential_session(
-                &pending,
-                identity,
-                FreshHuman {
-                    human: proof.human,
-                    subject: identity.subject.clone(),
-                    authenticated_at: proof.authenticated_at,
-                },
-                at,
-            )?;
+            let (_, token) = self.credential_session(&runtime, &pending, identity, proof, at)?;
             return credential_redirect(&pending.path(), Some(&token));
         }
-        let Some(pending) = self.pending(&proof.attempt, identity, headers, at)? else {
+        let Some(pending) = self.pending(proof.attempt(), identity, headers, at)? else {
             return Ok(StatusCode::NOT_FOUND.into_response());
         };
         ensure!(
-            proof.challenge == *pending.challenge(),
+            proof.challenge() == pending.challenge(),
             "reauthentication challenge changed"
         );
-        let (_, token) = self.issue_session(
-            &pending,
-            identity,
-            FreshHuman {
-                human: proof.human,
-                subject: identity.subject.clone(),
-                authenticated_at: proof.authenticated_at,
-            },
-            at,
-        )?;
+        let (_, token) = self.issue_session(&pending, identity, proof, at)?;
         let mut response = (
             StatusCode::SEE_OTHER,
             [(header::LOCATION, path_for(pending.attempt()))],
@@ -871,12 +966,7 @@ impl SecurityShell {
             );
             sessions.remove(&key).expect("checked shell session")
         };
-        let evidence = self.signer.attest(
-            &pending,
-            Digest::new(token.as_bytes()),
-            session.authenticated_at,
-            at,
-        )?;
+        let evidence = self.signer.attest(&pending, &session, at)?;
         let approved = self
             .approvals
             .confirm(&pending, identity, headers, evidence, at)?;
@@ -909,30 +999,29 @@ impl SecurityShell {
 
     fn credential_session(
         &self,
+        runtime: &crate::store::Runtime,
         pending: &credentials::Pending,
         identity: &iap::Verified,
-        human: FreshHuman,
+        proof: VerifiedAuthTime,
         at: i64,
     ) -> Result<(ShellSession, String)> {
-        ensure!(
-            human.human == pending.actor
-                && human.human == identity.email
-                && human.subject == identity.subject
-                && human.authenticated_at > pending.created_at
-                && human.authenticated_at <= at
-                && at - human.authenticated_at <= SESSION_SECONDS,
-            "fresh credential authentication required"
-        );
+        proof.require_intent(
+            &credentials::fresh_intent(runtime, pending, identity)?,
+            identity,
+        )?;
+        proof.require_current(at)?;
         let token = effects::random()?;
         let session = ShellSession {
             attempt: pending.attempt.clone(),
-            human: human.human,
-            subject: human.subject,
+            human: proof.human().into(),
+            subject: proof.subject().into(),
             challenge: pending.challenge()?,
             preview: pending.challenge()?,
-            authenticated_at: human.authenticated_at,
-            expires_at: (human.authenticated_at + SESSION_SECONDS).min(pending.expires_at),
+            authenticated_at: proof.authenticated_at(),
+            expires_at: proof.deadline()?.min(pending.expires_at),
             csrf: effects::random()?,
+            proof: Arc::new(proof),
+            digest: Digest::new(token.as_bytes()),
         };
         let mut sessions = self
             .sessions
@@ -948,6 +1037,29 @@ impl SecurityShell {
             session.clone(),
         );
         Ok((session, token))
+    }
+
+    #[cfg(test)]
+    fn credential_session_fixture(
+        &self,
+        runtime: &crate::store::Runtime,
+        pending: &credentials::Pending,
+        identity: &iap::Verified,
+        human: FreshHuman,
+        at: i64,
+    ) -> Result<(ShellSession, String)> {
+        self.credential_session(
+            runtime,
+            pending,
+            identity,
+            VerifiedAuthTime::from_google(shell_oidc::Reauthenticated::fixture(
+                credentials::fresh_intent(runtime, pending, identity)?,
+                human.human,
+                human.subject,
+                human.authenticated_at,
+            )),
+            at,
+        )
     }
 
     fn credential_dispatch(
@@ -967,8 +1079,12 @@ impl SecurityShell {
             return Ok(StatusCode::NOT_FOUND.into_response());
         };
         let challenge = pending.challenge()?;
+        let intent = credentials::fresh_intent(&runtime, &pending, identity)?;
+        intent.require_shell_origin(&self.origin)?;
         let valid = |session: &ShellSession| {
             session.attempt == attempt
+                && session.proof.require_intent(&intent, identity).is_ok()
+                && session.proof.require_current(at).is_ok()
                 && session.human == identity.email
                 && session.subject == identity.subject
                 && session.challenge == challenge
@@ -979,26 +1095,24 @@ impl SecurityShell {
         };
         if *method == Method::GET {
             ensure!(body.is_empty(), "credential GET body refused");
-            let (session, issued): (ShellSession, Option<String>) =
-                match self.read_session(headers, at)? {
-                    Some(session) if valid(&session) => (session, None),
-                    _ => match self
-                        .authenticator
-                        .begin(identity, attempt, &challenge, at)?
-                    {
-                        #[cfg(test)]
-                        ReauthStart::Authenticated(human) => {
-                            let (session, token) =
-                                self.credential_session(&pending, identity, human, at)?;
-                            (session, Some(token))
-                        }
-                        ReauthStart::Redirect(url) => {
-                            return Ok(
-                                (StatusCode::SEE_OTHER, [(header::LOCATION, url)]).into_response()
-                            );
-                        }
-                    },
-                };
+            let (session, issued): (ShellSession, Option<String>) = match self
+                .read_session(headers, at)?
+            {
+                Some(session) if valid(&session) => (session, None),
+                _ => match self.authenticator.begin(identity, intent.clone(), at)? {
+                    #[cfg(test)]
+                    ReauthStart::Authenticated(human) => {
+                        let (session, token) = self
+                            .credential_session_fixture(&runtime, &pending, identity, human, at)?;
+                        (session, Some(token))
+                    }
+                    ReauthStart::Redirect(url) => {
+                        return Ok(
+                            (StatusCode::SEE_OTHER, [(header::LOCATION, url)]).into_response()
+                        );
+                    }
+                },
+            };
             let confirmed = {
                 use rusqlite::OptionalExtension;
                 open(runtime.db())?
@@ -1126,7 +1240,7 @@ impl SecurityShell {
                     &pending,
                     identity,
                     &session_binding,
-                    session.authenticated_at,
+                    &session.proof,
                     at,
                 )?;
                 ensure!(
@@ -1141,6 +1255,7 @@ impl SecurityShell {
                     &pending,
                     identity,
                     &session_binding,
+                    &session.proof,
                     at,
                     false,
                 )?
@@ -1163,7 +1278,15 @@ impl SecurityShell {
                     .into_response())
             }
             Some("acknowledge") => {
-                credentials::deliver(&runtime, &pending, identity, &session_binding, at, true)?;
+                credentials::deliver(
+                    &runtime,
+                    &pending,
+                    identity,
+                    &session_binding,
+                    &session.proof,
+                    at,
+                    true,
+                )?;
                 self.sessions
                     .lock()
                     .map_err(|_| anyhow::anyhow!("shell session lock failed"))?
@@ -1213,6 +1336,8 @@ fn valid_session(
     at: i64,
 ) -> bool {
     session.attempt == pending.attempt()
+        && session.proof.require_approval(pending, identity).is_ok()
+        && session.proof.require_current(at).is_ok()
         && session.human == pending.human()
         && session.human == identity.email
         && session.subject == identity.subject
@@ -1398,8 +1523,7 @@ mod tests {
         fn attest(
             &self,
             _: &shell_transport::ApprovalView,
-            _: Digest,
-            _: i64,
+            _: &ShellSession,
             _: i64,
         ) -> Result<external::FreshExternalApproval> {
             anyhow::bail!("OAuth signer unavailable in credential fixture")
@@ -1459,13 +1583,7 @@ mod tests {
                     .into(),
             })
         }
-        fn begin(
-            &self,
-            identity: &iap::Verified,
-            _: &str,
-            _: &Digest,
-            now: i64,
-        ) -> Result<ReauthStart> {
+        fn begin(&self, identity: &iap::Verified, _: FreshIntent, now: i64) -> Result<ReauthStart> {
             if !self.fresh {
                 return Ok(ReauthStart::Redirect(
                     "https://accounts.google.com/reauthenticate".into(),
@@ -2600,7 +2718,7 @@ mod tests {
             let session = shell
                 .read_session(&headers, world.now)?
                 .context("credential session missing")?;
-            let at = session.authenticated_at;
+            let at = effects::wall_time;
             let page = page.text().await?;
             assert!(!page.contains("d2c1."));
             assert!(page.contains(&format!("name=\"csrf\" value=\"{}\"", session.csrf)));
@@ -2612,7 +2730,7 @@ mod tests {
             assert!(
                 world
                     .runtime
-                    .accept(operation, "alice@example.com", id, &input, at)
+                    .accept(operation, "alice@example.com", id, &input, at()?)
                     .is_err()
             );
             let before = world.keys.0.load(Ordering::SeqCst);
@@ -2628,7 +2746,7 @@ mod tests {
                 .preview = Digest::of(&"changed-credential-preview")?;
             assert!(
                 shell
-                    .dispatch(&Method::POST, &path, None, &headers, &confirm, at)
+                    .dispatch(&Method::POST, &path, None, &headers, &confirm, at()?)
                     .is_err()
             );
             assert_eq!(world.keys.0.load(Ordering::SeqCst), before);
@@ -2643,7 +2761,7 @@ mod tests {
             wrong.insert(header::ORIGIN, "https://app.example.com".parse()?);
             assert!(
                 shell
-                    .dispatch(&Method::POST, &path, None, &wrong, &confirm, at)
+                    .dispatch(&Method::POST, &path, None, &wrong, &confirm, at()?)
                     .is_err()
             );
             assert_eq!(world.keys.0.load(Ordering::SeqCst), before);
@@ -2662,7 +2780,7 @@ mod tests {
             // Lost-response retry runs the identical accepted product invocation.
             assert_eq!(
                 shell
-                    .dispatch(&Method::POST, &path, None, &headers, &confirm, at)?
+                    .dispatch(&Method::POST, &path, None, &headers, &confirm, at()?)?
                     .status(),
                 StatusCode::SEE_OTHER
             );
@@ -2685,14 +2803,14 @@ mod tests {
             wrong.insert("test-subject", "someone-else".parse()?);
             assert!(
                 shell
-                    .dispatch(&Method::POST, &path, None, &wrong, &reveal, at)
+                    .dispatch(&Method::POST, &path, None, &wrong, &reveal, at()?)
                     .is_err()
             );
             let mut wrong = headers.clone();
             wrong.append(header::COOKIE, headers[header::COOKIE].clone());
             assert!(
                 shell
-                    .dispatch(&Method::POST, &path, None, &wrong, &reveal, at)
+                    .dispatch(&Method::POST, &path, None, &wrong, &reveal, at()?)
                     .is_err()
             );
             let mut bad = session.clone();
@@ -2705,7 +2823,7 @@ mod tests {
                         None,
                         &headers,
                         &credential_body(&bad, "reveal"),
-                        at
+                        at()?
                     )
                     .is_err()
             );
@@ -2719,7 +2837,7 @@ mod tests {
                         None,
                         &headers,
                         &credential_body(&bad, "reveal"),
-                        at
+                        at()?
                     )
                     .is_err()
             );
@@ -2731,7 +2849,7 @@ mod tests {
                         Some("version=forged"),
                         &headers,
                         &reveal,
-                        at
+                        at()?
                     )
                     .is_err()
             );
@@ -2786,7 +2904,7 @@ mod tests {
             );
             assert!(
                 shell
-                    .dispatch(&Method::POST, &path, None, &headers, &reveal, at)
+                    .dispatch(&Method::POST, &path, None, &headers, &reveal, at()?)
                     .is_err()
             );
             assert_eq!(world.keys.0.load(Ordering::SeqCst), before);
@@ -2796,6 +2914,10 @@ mod tests {
             )?;
             reject_navigation_origins(&client, &endpoint, &headers, &reveal).await?;
             assert_eq!(world.keys.0.load(Ordering::SeqCst), before);
+            session
+                .proof
+                .require_current(at()?)
+                .context("credential proof refused after negative delivery probes")?;
             let response = client
                 .post(&endpoint)
                 .headers(headers.clone())
@@ -2829,7 +2951,7 @@ mod tests {
             let before = world.keys.0.load(Ordering::SeqCst);
             assert!(
                 shell
-                    .dispatch(&Method::POST, &path, None, &headers, &reveal, at)
+                    .dispatch(&Method::POST, &path, None, &headers, &reveal, at()?)
                     .is_err()
             );
             assert_eq!(world.keys.0.load(Ordering::SeqCst), before);
@@ -2846,6 +2968,310 @@ mod tests {
         let _ = stop.send(());
         tokio::time::timeout(Duration::from_secs(3), server).await???;
         Ok(())
+    }
+
+    #[test]
+    fn credential_signed_google_session_keeps_original_intent_across_three_roles() -> Result<()> {
+        // The normal checked Credential Metadata artifact and actual local
+        // registry/product-command consumer remain mandatory. This is a native
+        // signed fixture, not a Google live campaign or remote app transport.
+        struct CredentialClock(Arc<super::super::simulation::World>);
+
+        impl crate::host::Host for CredentialClock {
+            fn entropy(&self, scope: &str, invocation: &str) -> Result<[u8; 32]> {
+                crate::host::Host::entropy(&crate::host::System, scope, invocation)
+            }
+
+            fn now_ms(&self) -> Result<i64> {
+                effects::Hooks::wall_time(self.0.as_ref())?
+                    .checked_mul(1000)
+                    .context("fixture runtime milliseconds overflow")
+            }
+
+            fn worker_action(
+                &self,
+                phase: crate::protocol::Phase,
+                request: &crate::protocol::Request,
+            ) -> Result<crate::host::WorkerAction> {
+                crate::host::Host::worker_action(&crate::host::System, phase, request)
+            }
+
+            fn record_exchange(
+                &self,
+                phase: crate::protocol::Phase,
+                request: &crate::protocol::Request,
+                result: &Result<crate::protocol::Response>,
+            ) -> Result<()> {
+                crate::host::Host::record_exchange(&crate::host::System, phase, request, result)
+            }
+
+            fn deadline(
+                &self,
+                phase: crate::protocol::Phase,
+                started: std::time::Instant,
+            ) -> Result<()> {
+                crate::host::Host::deadline(&crate::host::System, phase, started)
+            }
+        }
+
+        let mut world = browser_world(1)?;
+        let clock = super::super::simulation::World::new(904);
+        clock.advance(u64::try_from(
+            world
+                .now
+                .checked_sub(5)
+                .context("fixture wall time invalid")?,
+        )?);
+        world.runtime = world
+            .runtime
+            .with_host(Arc::new(CredentialClock(clock.clone())));
+        effects::scope(clock.clone(), || {
+            let identity = iap::Verified {
+                email: "alice@example.com".into(),
+                subject: "accounts.google.com:google-alice".into(),
+            };
+            let registry = Arc::new(credentials::Registry::new(
+                &world.instance,
+                vec![world.runtime.clone()],
+                world.authority.clone(),
+            )?);
+            let url = credentials::start(
+                &world.runtime,
+                "credential_metadata.create_client",
+                &identity.email,
+                "signed-google-three-roles",
+                &serde_json::json!({"label":"Client"}),
+                None,
+                world.now - 1,
+            )?;
+            let path = url::Url::parse(&url)?.path().to_owned();
+            let attempt = path
+                .strip_prefix(credentials::PREFIX)
+                .context("credential attempt")?;
+            let (runtime, pending) = registry
+                .resolve(attempt, &identity, world.now)?
+                .context("actual pending")?;
+            let intent = credentials::fresh_intent(&runtime, &pending, &identity)?;
+            let (authenticator, assertions, callback) = shell_oidc::fixture_login(
+                &identity,
+                intent.clone(),
+                world.now,
+                world.now + 1,
+                world.now + 1,
+            )?;
+            let mut substitutions = Vec::new();
+            for mutation in 0..5 {
+                let mut changed = pending.clone();
+                let mut owner = identity.clone();
+                match mutation {
+                    0 => changed.input["label"] = serde_json::json!("different intent"),
+                    1 => owner.subject = "accounts.google.com:replacement".into(),
+                    2 => changed.binding = Digest::new(b"different selected binding"),
+                    3 => changed.authority.revision += 1,
+                    4 => changed.created_at -= 1,
+                    _ => unreachable!(),
+                }
+                let changed = credentials::fresh_intent(&runtime, &changed, &owner)?;
+                assert!(
+                    authenticator
+                        .begin(&owner, changed.clone(), world.now)
+                        .is_err(),
+                    "active Google intent accepted substitution {mutation}"
+                );
+                substitutions.push((changed, owner));
+            }
+            let opposite = FreshIntent::fixture_oauth(
+                &identity,
+                attempt,
+                &pending.challenge()?,
+                "https://security.example.com/",
+            )?;
+            assert!(
+                authenticator
+                    .begin(&identity, opposite.clone(), world.now)
+                    .is_err()
+            );
+            let oauth = Arc::new(NoOAuth);
+            let shell = SecurityShell::with_transport(
+                "https://security.example.com/".into(),
+                oauth.clone(),
+                oauth,
+                authenticator,
+            )?
+            .with_credentials(registry.clone())?;
+            let mut headers = credential_headers();
+            headers.insert(
+                iap::ASSERTION_HEADER,
+                assertions[iap::ASSERTION_HEADER].clone(),
+            );
+            clock.advance(1);
+            assert_eq!(effects::wall_time()?, world.now + 1);
+            assert_eq!(
+                world.runtime.host().now_ms()?.div_euclid(1000),
+                effects::wall_time()?
+            );
+            let response = shell.dispatch(
+                &Method::GET,
+                shell_oidc::GoogleOidc::callback_path(),
+                Some(&callback),
+                &headers,
+                &[],
+                world.now + 1,
+            )?;
+            assert_eq!(response.status(), StatusCode::SEE_OTHER);
+            let cookie = response.headers()[header::SET_COOKIE]
+                .to_str()?
+                .split(';')
+                .next()
+                .context("issued credential cookie")?
+                .to_owned();
+            headers.insert(header::COOKIE, cookie.parse()?);
+            let session = shell
+                .read_session(&headers, world.now + 1)?
+                .context("actual Google session")?;
+            session.proof.require_intent(&intent, &identity)?;
+            assert!(session.proof.purpose() == FreshPurpose::CredentialIntent);
+            assert!(session.proof.require_intent(&opposite, &identity).is_err());
+            for (changed, owner) in &substitutions {
+                assert!(session.proof.require_intent(changed, owner).is_err());
+            }
+            assert!(
+                shell
+                    .dispatch(
+                        &Method::GET,
+                        shell_oidc::GoogleOidc::callback_path(),
+                        Some(&callback),
+                        &headers,
+                        &[],
+                        world.now + 1
+                    )
+                    .is_err()
+            );
+            let at = world.now + 1;
+            assert_eq!(effects::wall_time()?, at);
+            assert_eq!(
+                world.runtime.host().now_ms()?.div_euclid(1000),
+                effects::wall_time()?
+            );
+            let confirmed = shell.dispatch(
+                &Method::POST,
+                &path,
+                None,
+                &headers,
+                &credential_body(&session, "confirm"),
+                at,
+            )?;
+            assert_eq!(confirmed.status(), StatusCode::SEE_OTHER);
+            let (current_runtime, current) = registry
+                .resolve(attempt, &identity, at)?
+                .context("confirmed pending")?;
+            assert!(intent == credentials::fresh_intent(&current_runtime, &current, &identity)?);
+            let revealed = shell.dispatch(
+                &Method::POST,
+                &path,
+                None,
+                &headers,
+                &credential_body(&session, "reveal"),
+                at,
+            )?;
+            assert_eq!(revealed.status(), StatusCode::OK);
+            drop(revealed);
+            let acknowledged = shell.dispatch(
+                &Method::POST,
+                &path,
+                None,
+                &headers,
+                &credential_body(&session, "acknowledge"),
+                at,
+            )?;
+            assert_eq!(acknowledged.status(), StatusCode::SEE_OTHER);
+            assert!(shell.sessions.lock().unwrap().is_empty());
+            assert!(
+                shell
+                    .dispatch(
+                        &Method::POST,
+                        &path,
+                        None,
+                        &headers,
+                        &credential_body(&session, "reveal"),
+                        at
+                    )
+                    .is_err()
+            );
+            assert_eq!(
+                open(world.runtime.db())?
+                    .query_row("SELECT count(*) FROM entries", [], |row| row
+                        .get::<_, i64>(0))?,
+                1
+            );
+            for expired in [false, true] {
+                clock.advance(1);
+                let at = effects::wall_time()?;
+                let id = if expired {
+                    "signed-google-pending-expired"
+                } else {
+                    "signed-google-pending-replaced"
+                };
+                let url = credentials::start(
+                    &world.runtime,
+                    "credential_metadata.create_client",
+                    &identity.email,
+                    id,
+                    &serde_json::json!({"label":"Original"}),
+                    None,
+                    at - 1,
+                )?;
+                let path = url::Url::parse(&url)?.path().to_owned();
+                let attempt = path
+                    .strip_prefix(credentials::PREFIX)
+                    .context("new credential attempt")?;
+                let (runtime, mut pending) = registry
+                    .resolve(attempt, &identity, at)?
+                    .context("original pending")?;
+                let original = credentials::fresh_intent(&runtime, &pending, &identity)?;
+                let (authenticator, assertions, callback) =
+                    shell_oidc::fixture_login(&identity, original, at, at + 1, at + 1)?;
+                if expired {
+                    pending.expires_at = at;
+                } else {
+                    pending.input["label"] =
+                        serde_json::json!("Replaced after original Google begin");
+                }
+                assert_eq!(open(runtime.db())?.execute(
+                "UPDATE day2_credential_browser SET intent=?1,expires_at=?2 WHERE attempt=?3",
+                rusqlite::params![serde_json::to_string(&pending)?, pending.expires_at, attempt])?, 1);
+                let oauth = Arc::new(NoOAuth);
+                let changed_shell = SecurityShell::with_transport(
+                    "https://security.example.com/".into(),
+                    oauth.clone(),
+                    oauth,
+                    authenticator,
+                )?
+                .with_credentials(registry.clone())?;
+                let mut current_headers = credential_headers();
+                current_headers.insert(
+                    iap::ASSERTION_HEADER,
+                    assertions[iap::ASSERTION_HEADER].clone(),
+                );
+                clock.advance(1);
+                let keys_before = world.keys.0.load(Ordering::SeqCst);
+                assert!(
+                    changed_shell
+                        .dispatch(
+                            &Method::GET,
+                            shell_oidc::GoogleOidc::callback_path(),
+                            Some(&callback),
+                            &current_headers,
+                            &[],
+                            at + 1
+                        )
+                        .is_err()
+                );
+                assert!(changed_shell.sessions.lock().unwrap().is_empty());
+                assert_eq!(world.keys.0.load(Ordering::SeqCst), keys_before);
+            }
+            Ok(())
+        })
     }
 
     #[test]
@@ -3124,16 +3550,13 @@ mod tests {
         let view =
             shell_transport::ApprovalView::from_pending("app", &context, &pending, &identity)
                 .unwrap();
-        let session = ShellSession {
-            attempt: view.attempt().into(),
-            human: identity.email.clone(),
-            subject: identity.subject.clone(),
-            challenge: view.challenge().clone(),
-            preview: view.digest().unwrap(),
-            authenticated_at: 5,
-            expires_at: 305,
-            csrf: "fixture".into(),
-        };
+        let session = ShellSession::approval_fixture(
+            &view,
+            &identity,
+            5,
+            Digest::new(b"fixture issued shell cookie"),
+        )
+        .unwrap();
         assert!(valid_session(&session, &view, &identity, 6));
         for mutation in 0..6 {
             let mut changed = view.clone();

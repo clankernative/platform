@@ -190,8 +190,7 @@ pub(crate) trait ApprovalSigner: Send + Sync {
     fn attest(
         &self,
         view: &ApprovalView,
-        session: Digest,
-        authenticated_at: i64,
+        session: &super::security_shell::ShellSession,
         now: i64,
     ) -> Result<external::FreshExternalApproval>;
 }

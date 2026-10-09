@@ -225,6 +225,7 @@
     "crates/day2/src/oauth/effects.rs",
     "crates/day2/src/oauth/exchange.rs",
     "crates/day2/src/oauth/external.rs",
+    "crates/day2/src/oauth/fresh_auth.rs",
     "crates/day2/src/oauth/gitlab.rs",
     "crates/day2/src/oauth/google.rs",
     "crates/day2/src/oauth/host.rs",

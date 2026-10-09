@@ -732,8 +732,7 @@ mod tests {
         fn begin(
             &self,
             _: &iap::Verified,
-            _: &str,
-            _: &Digest,
+            _: crate::oauth::fresh_auth::FreshIntent,
             _: i64,
         ) -> Result<crate::oauth::security_shell::ReauthStart> {
             anyhow::bail!("reauthentication is unrelated to qualification")
@@ -766,8 +765,7 @@ mod tests {
         fn attest(
             &self,
             _: &crate::oauth::shell_transport::ApprovalView,
-            _: Digest,
-            _: i64,
+            _: &crate::oauth::security_shell::ShellSession,
             _: i64,
         ) -> Result<crate::oauth::external::FreshExternalApproval> {
             anyhow::bail!("qualification must not sign product account approval")
