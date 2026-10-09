@@ -1721,10 +1721,6 @@ impl Host {
                 .runtime
                 .authority_snapshot(&page.operation, &session.actor)?
                 .stamp;
-            ensure!(
-                current == authority,
-                crate::error::Failure::AuthorityPolicyChanged
-            );
             let db = open(self.runtime.db())?;
             let current_session: Option<(String, i64)> = db
                 .query_row(
@@ -1733,12 +1729,13 @@ impl Host {
                     |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .optional()?;
-            ensure!(
-                current_session.is_some_and(|(actor, expires)| {
-                    actor == session.actor && self.wall_seconds().is_ok_and(|at| at < expires)
-                }),
-                crate::error::Failure::SignInRequired
-            );
+            validate_presentation_delivery(
+                &authority,
+                &current,
+                &session.actor,
+                current_session.as_ref(),
+                self.wall_seconds(),
+            )?;
         }
         Ok(html! { main id="day2-main"
             data-day2-invocation=[notice.as_ref().map(|value| value.invocation)]
@@ -2216,6 +2213,26 @@ fn failure(error: &anyhow::Error) -> Response {
     error_page(status, message)
 }
 
+fn validate_presentation_delivery(
+    expected: &crate::authority_state::AuthorityStamp,
+    current: &crate::authority_state::AuthorityStamp,
+    actor: &str,
+    session: Option<&(String, i64)>,
+    wall: Result<i64>,
+) -> Result<()> {
+    ensure!(
+        current == expected,
+        crate::error::Failure::AuthorityPolicyChanged
+    );
+    ensure!(
+        session.is_some_and(|(session_actor, expires)| {
+            session_actor == actor && wall.as_ref().is_ok_and(|at| at < expires)
+        }),
+        crate::error::Failure::SignInRequired
+    );
+    Ok(())
+}
+
 fn fresh_page_query(
     entropy: &dyn Entropy,
     mut render: impl FnMut(&str) -> Result<crate::protocol::Outcome>,
@@ -2266,6 +2283,10 @@ fn patch(markup: Markup) -> Response {
     event.push('\n');
     ([(header::CONTENT_TYPE, "text/event-stream")], event).into_response()
 }
+
+#[cfg(test)]
+#[path = "presentation_delivery_tests.rs"]
+mod presentation_delivery_tests;
 
 #[cfg(test)]
 mod deployment_health_tests {

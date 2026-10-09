@@ -255,6 +255,7 @@
     "crates/day2/src/people_providers.rs",
     "crates/day2/src/preparation.rs",
     "crates/day2/src/presentation.rs",
+    "crates/day2/src/presentation_delivery_tests.rs",
     "crates/day2/src/properties.rs",
     "crates/day2/src/protocol.rs",
     "crates/day2/src/read_coverage_tests.rs",
