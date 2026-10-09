@@ -191,6 +191,7 @@ impl Fixture {
             "schema_digest":"host-test","schema":{"models":{"items":{"fields":{"value":"text"}}},"inputs":{"input":{"fields":{}}},"foreign_keys":[]},
             "operations":[{"name":"run","kind":"command","input_type":"input","output_type":""}],"sources":{},"admission":"local-spike-only"}),
         )?;
+        let inputs = crate::host_inputs::Inputs::default();
         let runtime = Runtime {
             integrations: Arc::new(integration_host::Host::local(&path)?),
             app_calls: None,
@@ -205,7 +206,8 @@ impl Fixture {
                 artifact_directory,
                 contract,
             )),
-            host: Arc::new(crate::host::System),
+            host: Arc::new(crate::host::System(inputs.clone())),
+            inputs,
         }
         .with_integrations(integration_host::Host::injected(
             Arc::new(Resolver),
