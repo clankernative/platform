@@ -364,6 +364,7 @@ does every native action with `kubectl` and the registry API. Operations:
 | `backup` | Verified backup, copied to `~/day2-backups/<namespace>/<stamp>/` | restored |
 | `authority-apply` | Backup, then applies the policy in the current ConfigMap, after a typed `apply` | restored |
 | `activate` | Backup, migration plan, typed `activate`, migration, fresh activation of the target artifact, then the `day2.dev/activated-artifact` stamp | stopped: release the target artifact next (release-managed), otherwise apply day2-app for the new image |
+| `mark-activated` | Recovery when `activate`'s stamp step failed: reads the database's active artifact and, only if it is the target, stamps the stopped StatefulSet | stopped, as `activate` leaves it |
 
 The request file names the target exactly:
 
@@ -387,8 +388,9 @@ activated and the requested artifact. `day2-gke-release` does not activate; it
 refuses such a change with `release_artifact_requires_activation`, before any
 write, until `activate` has stamped the StatefulSet for that artifact (below).
 
-`request_id` is for `authority-apply` and `activate`; `target` (the desired
-instance, e.g. rendered from the day2-app plan) is for `activate` only;
+`request_id` is for `authority-apply`, `activate` and `mark-activated`; `target`
+(the desired instance, e.g. rendered from the day2-app plan) is for `activate`
+and `mark-activated`, which take the same request file;
 `backup_dir` and `"yes": true` (skip the typed confirmation, recorded) are
 optional. The tooling image must come from the same platform build as the app's
 artifact.
@@ -409,17 +411,40 @@ What the session guarantees, whatever the recipe does:
   mismatching copy is renamed `<stamp>.INCOMPLETE` and refused.
 - One session per namespace; the running image must equal `app_image`.
 - Only a successful fresh activation stamps the StatefulSet with
-  `day2.dev/activated-artifact: sha256:<target artifact_id>`. For a
+  `day2.dev/activated-artifact: sha256:<target artifact_id>`, after re-reading
+  it stopped on `app_image`. If that stamp step fails, the error prints the
+  exact `day2 platform maintain mark-activated REQUEST_JSON` command to run once
+  the cause is fixed. `mark-activated` stamps only when the database's active
+  artifact is the target, the StatefulSet is at 0 replicas on `app_image`, and it
+  is unstamped or stamped for the same target (then it changes nothing). For a
   release-managed app, `day2-gke-release` changes the artifact only to the one
-  stamped, restores the replica and removes the stamp in the same patch. A
-  day2-app apply is not the next step: it keeps the stamp but also the released
-  (old) image, and would restart it on the migrated state (see
+  stamped, restores the replica and removes the stamp in the same patch (see
   [the release workflow](../../docs/RELEASE-WORKFLOW.md#artifact-changes)).
 - Every step is journalled to `~/day2-backups/<namespace>/<stamp>.session.json`
   before it runs, for recovery after the operator's machine dies mid-session.
 
 `deploy/gke/scripts/day2-maintain.sh` remains until this command has run a
 production activation; it will then be removed.
+
+#### Activation and the day2-app stack
+
+Every day2-app plan reads the live StatefulSet (none on the first install, which
+plans normally). An activation is pending while the StatefulSet carries
+`day2.dev/activated-artifact` and it differs from the template's
+`day2.dev/artifact`; a stamp equal to the live artifact is inert.
+
+- Release-managed apps: a plan while an activation is pending keeps the live
+  replicas (0) instead of 1 and warns
+  `activation of sha256:… pending; replicas held at 0 until day2-gke-release rolls it`.
+  Everything else applies normally. Release the activated artifact next.
+- Directly deployed apps (`release_managed = false`, e.g. GoLinks): the apply
+  rolls the app, so it is refused while an activation is pending unless
+  `artifact_id` (and the image carrying it) is the activated build. That apply
+  starts the new image at one replica and, since the stack does not declare the
+  stamp, removes it (were it kept, it would equal the live artifact: inert). The order for a new build is: open the tfvars change for
+  the new `image`/`artifact_id`, run `maintain activate` for it, then merge and
+  apply. Any other apply in between is refused, never restarting the old image
+  on the migrated state.
 
 To roll back code, plan the prior qualified image and configuration. After a schema
 migration, first prove backward compatibility or restore the matching backup;

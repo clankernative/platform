@@ -10,7 +10,9 @@
 //!   session, and `migration apply` refuses to run without it;
 //! - one session per namespace; closed sets of workflows and kubectl verbs;
 //! - only a successful fresh activation stamps the StatefulSet with the
-//!   activated artifact, the release workflow's precondition for changing it.
+//!   activated artifact, the release workflow's precondition for changing it;
+//!   `mark-activated` repeats that stamp only for the artifact the database
+//!   already activated, on the still-stopped old image.
 //!
 //! Every step is journalled beside the backups before it runs, so a session
 //! killed outright (no `Drop`) can still be reconstructed.
@@ -53,6 +55,8 @@ pub enum Operation {
     Backup,
     AuthorityApply,
     Activate,
+    /// Recovery for `activate` when its own stamp step failed.
+    MarkActivated,
 }
 
 impl Operation {
@@ -62,7 +66,10 @@ impl Operation {
             "backup" => Self::Backup,
             "authority-apply" => Self::AuthorityApply,
             "activate" => Self::Activate,
-            _ => bail!("maintain operation must be inspect, backup, authority-apply or activate"),
+            "mark-activated" => Self::MarkActivated,
+            _ => bail!(
+                "maintain operation must be inspect, backup, authority-apply, activate or mark-activated"
+            ),
         })
     }
 
@@ -72,7 +79,13 @@ impl Operation {
             Self::Backup => "backup",
             Self::AuthorityApply => "authority-apply",
             Self::Activate => "activate",
+            Self::MarkActivated => "mark-activated",
         }
+    }
+
+    /// `activate` and its `mark-activated` recovery take the same request.
+    fn targeted(self) -> bool {
+        matches!(self, Self::Activate | Self::MarkActivated)
     }
 }
 
@@ -156,7 +169,7 @@ impl Request {
             label_key(&self.pod_label.key) && label_value(&self.pod_label.value),
             "pod_label must be a Kubernetes label key and value"
         );
-        let needs_id = matches!(operation, Operation::AuthorityApply | Operation::Activate);
+        let needs_id = operation == Operation::AuthorityApply || operation.targeted();
         match &self.request_id {
             Some(id) => ensure!(
                 needs_id
@@ -165,12 +178,12 @@ impl Request {
                     && id
                         .chars()
                         .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)),
-                "request_id is 1-128 letters, digits, dots, dashes or underscores, for authority-apply and activate only"
+                "request_id is 1-128 letters, digits, dots, dashes or underscores, for authority-apply, activate and mark-activated only"
             ),
             None => ensure!(!needs_id, "{} requires request_id", operation.name()),
         }
-        match (&self.target, operation) {
-            (Some(target), Operation::Activate) => {
+        match (&self.target, operation.targeted()) {
+            (Some(target), true) => {
                 pinned_image(&target.app_image)?;
                 hex64(&target.artifact_id, "target.artifact_id")?;
                 ensure!(
@@ -178,9 +191,9 @@ impl Request {
                     "the target names the running image or artifact; nothing to activate"
                 );
             }
-            (None, Operation::Activate) => bail!("activate requires target"),
-            (Some(_), _) => bail!("only activate takes a target"),
-            (None, _) => {}
+            (None, true) => bail!("{} requires target", operation.name()),
+            (Some(_), false) => bail!("only activate and mark-activated take a target"),
+            (None, false) => {}
         }
         Ok(())
     }
@@ -791,6 +804,8 @@ struct State {
     fenced: bool,
     migrated: bool,
     activated: bool,
+    /// The artifact the app's database activates, from `authority-inspect`.
+    active_artifact: Option<String>,
     marked: bool,
     result: Option<Value>,
     finished: bool,
@@ -799,6 +814,8 @@ struct State {
 pub struct Session {
     tools: Tools,
     request: Request,
+    /// For the `mark-activated` recovery command an `activate` failure prints.
+    request_file: PathBuf,
     operation: Operation,
     stamp: String,
     pod: String,
@@ -865,6 +882,12 @@ impl Session {
             "the StatefulSet runs {running}, not app_image {}",
             request.app_image
         );
+        let marked = statefulset["metadata"]["annotations"][ACTIVATED]
+            .as_str()
+            .map(str::to_owned);
+        if operation == Operation::MarkActivated {
+            unmarked(&request, replicas, marked.as_deref())?;
+        }
         let others = kubectl(&["get", "pods", "-l", MAINTENANCE_LABEL, "-o", "name"])?;
         ensure!(
             others.trim().is_empty(),
@@ -888,6 +911,7 @@ impl Session {
             .tempdir()?;
         let mut session = Self {
             tools,
+            request_file: request_file.to_path_buf(),
             operation,
             stamp,
             pod,
@@ -906,7 +930,7 @@ impl Session {
                 "statefulset":session.request.statefulset,"replicas":replicas,
                 "app_image":session.request.app_image,"artifact":session.request.artifact_id,
                 "target":session.request.target.as_ref().map(|target| json!({"app_image":target.app_image,"artifact":target.artifact_id})),
-                "pod":session.pod,"operator":session.request.operator}),
+                "activated":marked,"pod":session.pod,"operator":session.request.operator}),
         )?;
         eprintln!(
             "== {} {}/{} ({replicas} replica(s)); journal {}",
@@ -1214,8 +1238,11 @@ impl Session {
         match name {
             "backup" => {
                 ensure!(
-                    self.operation != Operation::Inspect && !self.state.pod_backup,
-                    "one backup per session, not for inspect"
+                    matches!(
+                        self.operation,
+                        Operation::Backup | Operation::AuthorityApply | Operation::Activate
+                    ) && !self.state.pod_backup,
+                    "one backup per session, not for inspect or mark-activated"
                 );
                 eprintln!("== backup (current instance)");
                 let output = format!("{ROOT}/backup-{}", self.stamp);
@@ -1238,6 +1265,9 @@ impl Session {
                     "operations": document["policy"]["operations"].as_object().map_or(0, |ops| ops.len()),
                 });
                 self.state.stamp = Some(stamp);
+                self.state.active_artifact = inspected["active"]["artifact_id"]
+                    .as_str()
+                    .map(str::to_owned);
                 self.record("authority-inspect", summary.clone())?;
                 if self.operation == Operation::Inspect {
                     self.state.result = Some(summary.clone());
@@ -1471,14 +1501,54 @@ impl Session {
     }
 
     /// Stamp the stopped StatefulSet with the artifact its database now
-    /// activates, so the release workflow may roll it to that artifact.
+    /// activates, so the release workflow may roll it to that artifact. For
+    /// `activate` this follows its own fresh activation; for `mark-activated`
+    /// the database's active artifact (read by `authority-inspect`) must
+    /// already be the target.
     pub fn mark_activated(&mut self) -> Result<Value> {
-        ensure!(
-            self.operation == Operation::Activate && self.state.activated && !self.state.marked,
-            "the activation mark follows a successful activation, once"
-        );
         let target = self.request.target.clone().context("target")?;
         let value = format!("sha256:{}", target.artifact_id);
+        match self.operation {
+            Operation::Activate => ensure!(
+                self.state.activated && !self.state.marked,
+                "the activation mark follows a successful activation, once"
+            ),
+            Operation::MarkActivated => {
+                ensure!(
+                    self.state.pod && !self.state.marked,
+                    "mark-activated runs once, in the maintenance pod"
+                );
+                let active = self
+                    .state
+                    .active_artifact
+                    .clone()
+                    .context("read the database's active artifact first")?;
+                ensure!(
+                    active == value,
+                    "the database of {} activates {active}, not the target {value}; nothing was marked",
+                    self.request.app
+                );
+            }
+            _ => bail!("only activate and mark-activated mark the StatefulSet"),
+        }
+        let marked = self.stamp(&value);
+        if self.operation == Operation::Activate {
+            return marked.with_context(|| self.recovery());
+        }
+        marked
+    }
+
+    /// The command that repeats a failed stamp after a successful activation.
+    fn recovery(&self) -> String {
+        format!(
+            "{} is activated for the target in the database, but {} is not marked; once the cause is fixed run: day2 platform maintain mark-activated {}",
+            self.request.app,
+            self.request.statefulset,
+            self.request_file.display()
+        )
+    }
+
+    fn stamp(&mut self, value: &str) -> Result<Value> {
         eprintln!(
             "== marking {} activated for {value}",
             self.request.statefulset
@@ -1488,29 +1558,65 @@ impl Session {
             json!({"annotation": ACTIVATED, "artifact": value}),
         )?;
         let statefulset = self.request.statefulset.clone();
-        self.kubectl(
-            &[
-                "annotate",
-                "--overwrite",
-                "statefulset",
-                &statefulset,
-                &format!("{ACTIVATED}={value}"),
-            ],
+        let live: Value = serde_json::from_str(&self.kubectl(
+            &["get", "statefulset", &statefulset, "-o", "json"],
             None,
             Duration::from_secs(60),
-        )?;
+        )?)?;
+        let replicas = live["spec"]["replicas"]
+            .as_u64()
+            .context("StatefulSet replicas")?;
+        let running = live["spec"]["template"]["spec"]["containers"][0]["image"]
+            .as_str()
+            .context("StatefulSet image")?;
+        ensure!(
+            running == self.request.app_image,
+            "{statefulset} now runs {running}, not app_image {}; nothing was marked",
+            self.request.app_image
+        );
+        let existing = live["metadata"]["annotations"][ACTIVATED].as_str();
+        // A fresh activation is authoritative; the recovery only repeats it.
+        if self.operation == Operation::MarkActivated {
+            unmarked(&self.request, replicas, existing)?;
+        } else {
+            ensure!(
+                replicas == 0,
+                "{statefulset} has {replicas} replica(s), not 0; nothing was marked"
+            );
+        }
+        let already = existing == Some(value);
+        if !already {
+            self.kubectl(
+                &[
+                    "annotate",
+                    "--overwrite",
+                    "statefulset",
+                    &statefulset,
+                    &format!("{ACTIVATED}={value}"),
+                ],
+                None,
+                Duration::from_secs(60),
+            )?;
+        }
         let actual: Value = serde_json::from_str(&self.kubectl(
             &["get", "statefulset", &statefulset, "-o", "json"],
             None,
             Duration::from_secs(60),
         )?)?;
         ensure!(
-            actual["metadata"]["annotations"][ACTIVATED] == value.as_str(),
+            actual["metadata"]["annotations"][ACTIVATED] == value,
             "{statefulset} does not carry {ACTIVATED}={value}"
         );
         self.state.marked = true;
-        self.record("activation-marked", json!({"artifact": value}))?;
-        Ok(json!({"statefulset": statefulset, "activated_artifact": value}))
+        let receipt = json!({"statefulset": statefulset, "activated_artifact": value, "already_marked": already});
+        if self.operation == Operation::MarkActivated {
+            self.state.result = Some(receipt.clone());
+        }
+        self.record(
+            "activation-marked",
+            json!({"artifact": value, "already_marked": already}),
+        )?;
+        Ok(receipt)
     }
 
     pub fn finish(&mut self) -> Result<Value> {
@@ -1531,6 +1637,9 @@ impl Session {
                 self.state.marked,
                 "activate has not run and marked the StatefulSet"
             ),
+            Operation::MarkActivated => {
+                ensure!(self.state.marked, "the StatefulSet has not been marked")
+            }
         }
         let restored = self.close()?;
         self.state.finished = true;
@@ -1545,10 +1654,10 @@ impl Session {
             "journal": self.journal,
         });
         self.record("finish", receipt.clone())?;
-        if self.operation == Operation::Activate {
+        if self.operation.targeted() {
             eprintln!(
-                "\nActivated. {} stays at 0 replicas. Release the activated artifact\nnext: day2-gke-release restores the replica for a release-managed app.\nOtherwise apply the day2-app plan for the new image (replicas 0 -> {}).",
-                self.request.statefulset, self.replicas
+                "\nActivated. {} stays at 0 replicas. Release the activated artifact\nnext: day2-gke-release restores the replica for a release-managed app.\nOtherwise apply day2-app with image and artifact_id set to the activated build.",
+                self.request.statefulset
             );
         }
         Ok(receipt)
@@ -1623,7 +1732,9 @@ impl Drop for Session {
         if let Err(error) = outcome {
             eprintln!("WARNING: {error:#}");
         }
-        if fenced {
+        if self.state.activated && !self.state.marked {
+            eprintln!("{}", self.recovery());
+        } else if fenced {
             eprintln!(
                 "The migration fence was passed, so {} was NOT restarted on its old image.\n\
                  Either apply the day2-app plan for the new image, or restore the backup in {}.\n\
@@ -1637,6 +1748,26 @@ impl Drop for Session {
             );
         }
     }
+}
+
+/// `mark-activated` repeats a stamp on the app exactly as `activate` left it:
+/// stopped, and unmarked or marked for the same target.
+fn unmarked(request: &Request, replicas: u64, marked: Option<&str>) -> Result<()> {
+    let target = request.target.as_ref().context("target")?;
+    let value = format!("sha256:{}", target.artifact_id);
+    ensure!(
+        replicas == 0,
+        "mark-activated needs {} stopped at 0 replicas, as activate leaves it; it has {replicas}",
+        request.statefulset
+    );
+    if let Some(other) = marked {
+        ensure!(
+            other == value,
+            "{} is already marked activated for {other}, not {value}",
+            request.statefulset
+        );
+    }
+    Ok(())
 }
 
 fn private_directory(path: &Path) -> Result<()> {

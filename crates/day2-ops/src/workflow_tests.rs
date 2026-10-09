@@ -592,6 +592,48 @@ fn maintain_activate_runs_every_guarded_step_in_order() -> Result<()> {
 }
 
 #[test]
+fn maintain_mark_activated_reads_the_database_before_it_marks() -> Result<()> {
+    let mut effects = Vec::new();
+    automation::run(
+        &automation::runner()?,
+        &["platform", "maintain", "mark-activated", "request.json"],
+        |request| {
+            let step = match request.action.as_str() {
+                "maintenance-workflow" => format!(
+                    "workflow:{}",
+                    request.decode::<Value>()?["workflow"]
+                        .as_str()
+                        .unwrap_or_default()
+                ),
+                "maintenance-open" => {
+                    assert_eq!(
+                        request.decode::<Value>()?,
+                        json!({"operation": "mark-activated", "request": "request.json"})
+                    );
+                    "open".into()
+                }
+                other => other.trim_start_matches("maintenance-").to_owned(),
+            };
+            effects.push(step);
+            Ok(json!({}))
+        },
+    )?;
+    assert_eq!(
+        effects,
+        [
+            "open",
+            "artifacts",
+            "stop",
+            "pod",
+            "workflow:authority-inspect",
+            "mark-activated",
+            "finish",
+        ]
+    );
+    Ok(())
+}
+
+#[test]
 fn maintain_stops_at_a_refused_confirmation_before_the_fence() -> Result<()> {
     let mut effects = Vec::new();
     let result = automation::run(

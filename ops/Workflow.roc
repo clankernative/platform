@@ -49,6 +49,7 @@ Workflow :: [].{
 		["maintain", "backup", request_file] => Ok(Maintain("backup", request_file))
 		["maintain", "authority-apply", request_file] => Ok(Maintain("authority-apply", request_file))
 		["maintain", "activate", request_file] => Ok(Maintain("activate", request_file))
+		["maintain", "mark-activated", request_file] => Ok(Maintain("mark-activated", request_file))
 		["backup", instance, app_name, output] => Ok(Backup(instance, app_name, output))
 		["restore", backup, output] => Ok(Restore(backup, output))
 		["infra", "plan", configuration, output] => Ok(Infra(configuration, output))
@@ -93,7 +94,7 @@ Workflow :: [].{
 			Ok(AuthorityActivate(instance, app_name, target, operator, expected, request_id))
 		}
 		_ => Err(
-			"usage: day2 platform build SOURCE | check SOURCE [SEED CASES] | local-dev [SOURCE] [OPTIONS] | backup INSTANCE APP NEW_DIRECTORY | restore BACKUP NEW_DIRECTORY | infra plan CONFIG NEW_DIRECTORY | maintain inspect|backup|authority-apply|activate REQUEST_JSON_FILE",
+			"usage: day2 platform build SOURCE | check SOURCE [SEED CASES] | local-dev [SOURCE] [OPTIONS] | backup INSTANCE APP NEW_DIRECTORY | restore BACKUP NEW_DIRECTORY | infra plan CONFIG NEW_DIRECTORY | maintain inspect|backup|authority-apply|activate|mark-activated REQUEST_JSON_FILE",
 		)
 	}
 
@@ -116,7 +117,7 @@ Workflow :: [].{
 					"resources save|attach|propose|decide|allocate|recover|resolve-overruns INSTANCE APP LOCAL_OPERATOR INPUT_JSON_FILE",
 					"authority apply INSTANCE APP LOCAL_OPERATOR EXPECTED_STAMP_JSON REQUEST_ID",
 					"authority activate INSTANCE APP TARGET LOCAL_OPERATOR EXPECTED_STAMP_JSON REQUEST_ID",
-					"maintain inspect|backup|authority-apply|activate REQUEST_JSON_FILE",
+					"maintain inspect|backup|authority-apply|activate|mark-activated REQUEST_JSON_FILE",
 				],
 			}),
 		)
@@ -160,5 +161,10 @@ expect match Workflow.parse(["maintain", "restart", "request.json"]) {
 
 expect match Workflow.parse(["maintain", "activate", "request.json"]) {
 	Ok(Maintain("activate", "request.json")) => Bool.True
+	_ => Bool.False
+}
+
+expect match Workflow.parse(["maintain", "mark-activated", "request.json"]) {
+	Ok(Maintain("mark-activated", "request.json")) => Bool.True
 	_ => Bool.False
 }
