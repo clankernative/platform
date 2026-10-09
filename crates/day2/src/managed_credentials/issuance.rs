@@ -525,7 +525,7 @@ mod tests {
         let artifact = PathBuf::from(std::env::var_os("DAY2_TEST_CREDENTIAL_METADATA_ARTIFACT")
             .context("build credential-metadata-conformance and set DAY2_TEST_CREDENTIAL_METADATA_ARTIFACT")?);
         let directory = tempfile::tempdir()?;
-        let runtime = crate::development::create_for(
+        let runtime = crate::development::create_verification_for(
             &artifact,
             &directory.path().join("instance"),
             None,

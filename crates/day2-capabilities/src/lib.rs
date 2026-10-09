@@ -6,12 +6,14 @@
     clippy::disallowed_macros
 )]
 
+pub mod credential_runtime;
 pub mod credentials;
 pub mod integrations;
 pub mod oauth;
 pub mod registry;
 pub mod resources;
 pub mod runtime;
+pub mod security_epoch;
 
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -249,6 +251,9 @@ pub struct InstallationControl {
     pub runtimes: BTreeMap<Name, DurabilityProvider>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub secrets: BTreeMap<Name, SecretProvider>,
+    /// Operator-selected external authority, outside any app database backup.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub security_epochs: BTreeMap<Name, security_epoch::EpochStore>,
 }
 
 impl InstallationControl {
@@ -269,7 +274,8 @@ impl InstallationControl {
             self.apps.len() <= 1024
                 && self.sources.len() <= 1024
                 && self.builders.len() <= 64
-                && self.runtimes.len() <= 64,
+                && self.runtimes.len() <= 64
+                && self.security_epochs.len() <= 128,
             "control binding budget"
         );
         // A separate operator tooling instance may administer resources without
@@ -280,7 +286,8 @@ impl InstallationControl {
                 || (self.sources.is_empty()
                     && self.builders.is_empty()
                     && self.runtimes.is_empty()
-                    && self.secrets.is_empty()),
+                    && self.secrets.is_empty()
+                    && self.security_epochs.is_empty()),
             "operator_only_control_cannot_have_provider_bindings"
         );
         for provider in self.builders.values() {
@@ -310,6 +317,20 @@ impl InstallationControl {
             Name::try_from(task_queue.clone())?;
         }
         let installed: BTreeSet<_> = installed_apps.into_iter().collect();
+        let mut epoch_scopes = BTreeSet::new();
+        let mut epoch_authorities = BTreeSet::new();
+        for store in self.security_epochs.values() {
+            store.validate()?;
+            ensure!(
+                installed.contains(store.scope.app.as_str()),
+                "security_epoch_app_not_installed"
+            );
+            ensure!(
+                epoch_scopes.insert(store.scope.clone())
+                    && epoch_authorities.insert(store.authority_key()?),
+                "duplicate_security_epoch_authority"
+            );
+        }
         ensure!(self.secrets.len() <= 1024, "secret binding budget");
         let mut used_sources = BTreeSet::new();
         let mut repositories = BTreeSet::new();
@@ -459,4 +480,76 @@ fn absolute_directory(value: &str) -> Result<()> {
         "expected normalized absolute operator directory"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod security_epoch_catalog_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn control() -> InstallationControl {
+        serde_json::from_value(json!({"version":1,"state_directory":"/operator/state",
+            "operators":["operator@example.com"],"sources":{"source":{"kind":"local_git","repository":"/source/app"}},
+            "apps":{"reports":{"source":"source"}},"security_epochs":{"epoch":{
+                "scope":{"installation":"company","environment":"staging","app":"reports"},
+                "provider":{"kind":"firestore_native_v1","project":"company-tools","project_number":7,
+                    "database":"security","database_uid":"01234567-89ab-4cde-8fab-0123456789ab",
+                    "iam_source":{"kind":"gke_workload_identity_v1","service_account":"epochs@company-tools.iam.gserviceaccount.com"}},
+                "key_set":Digest::new(b"selected keys"),"max_lease_seconds":30
+            }}})).unwrap()
+    }
+
+    #[test]
+    fn epoch_catalog_is_optional_and_omitted_when_empty() -> Result<()> {
+        let mut selected = control();
+        selected.validate(["reports"])?;
+        selected.security_epochs.clear();
+        selected.validate(["reports"])?;
+        assert!(
+            serde_json::to_value(selected)?
+                .get("security_epochs")
+                .is_none()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn epoch_catalog_rejects_uninstalled_duplicate_and_excess_authority() -> Result<()> {
+        let selected = control();
+        let mut unbound = selected.clone();
+        unbound
+            .security_epochs
+            .values_mut()
+            .next()
+            .unwrap()
+            .scope
+            .app = "missing".to_owned().try_into()?;
+        assert!(unbound.validate(["reports"]).is_err());
+        let mut duplicate = selected.clone();
+        let store = duplicate.security_epochs.values().next().unwrap().clone();
+        duplicate
+            .security_epochs
+            .insert("second".to_owned().try_into()?, store);
+        assert!(duplicate.validate(["reports"]).is_err());
+        let mut excessive = selected.clone();
+        let store = excessive.security_epochs.values().next().unwrap().clone();
+        for number in 0..128 {
+            excessive
+                .security_epochs
+                .insert(format!("epoch_{number}").try_into()?, store.clone());
+        }
+        assert!(excessive.validate(["reports"]).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn operator_only_projection_cannot_select_external_epoch_authority() -> Result<()> {
+        let mut selected = control();
+        selected.apps.clear();
+        selected.sources.clear();
+        assert!(selected.validate(["reports"]).is_err());
+        selected.security_epochs.clear();
+        selected.validate(["reports"])?;
+        Ok(())
+    }
 }

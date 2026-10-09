@@ -752,7 +752,12 @@ impl TrustedRunner {
                             && (1..=100).contains(&input.count),
                         "CI campaign binding or budget mismatch"
                     );
-                    let runtime = day2::development::create(&input.artifact, &input.output, None)?;
+                    let runtime = day2::development::create_verification_for(
+                        &input.artifact,
+                        &input.output,
+                        None,
+                        day2::development::ACTOR,
+                    )?;
                     campaign = Some(day2::development::Campaign::new(
                         runtime,
                         None,

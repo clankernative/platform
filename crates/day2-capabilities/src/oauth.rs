@@ -166,6 +166,14 @@ pub type GoogleAccountPolicy = ProviderAccountPolicy;
 
 impl RuntimeCatalog {
     pub fn validate(&self) -> Result<()> {
+        ensure!(!self.apps.is_empty(), "OAuth runtime app budget");
+        self.validate_shared_shell_metadata()
+    }
+
+    /// Validate shared shell selectors and every selected OAuth app. This is
+    /// metadata only: a caller admitting an empty OAuth app set must separately
+    /// validate actual selected credential apps in the installation.
+    pub fn validate_shared_shell_metadata(&self) -> Result<()> {
         ensure!(
             self.version == 1,
             "unsupported OAuth runtime catalog version"
@@ -173,10 +181,7 @@ impl RuntimeCatalog {
         if let Some(resources) = &self.shell_resources {
             resources.validate()?;
         }
-        ensure!(
-            !self.apps.is_empty() && self.apps.len() <= 128,
-            "OAuth runtime app budget"
-        );
+        ensure!(self.apps.len() <= 128, "OAuth runtime app budget");
         let shell = &self.shell;
         ShellTransport {
             service_account: format!("readiness@{}.iam.gserviceaccount.com", shell.project),
@@ -266,6 +271,54 @@ impl RuntimeCatalog {
 mod runtime_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn shared_shell_metadata_keeps_standalone_oauth_nonempty_and_all_selector_bounds() -> Result<()>
+    {
+        let value = json!({"version":1,"shell":{"project":"company-tools","backend_service":"shell-backend","url_map":"shell-map","https_proxy":"shell-proxy","forwarding_rule":"shell-https","kubernetes_service":"tools/security-shell"},
+            "apps":{}});
+        let selected: RuntimeCatalog = serde_json::from_value(value.clone())?;
+        assert!(selected.validate().is_err());
+        selected.validate_shared_shell_metadata()?;
+        for (path, substitution) in [
+            ("/version", json!(2)),
+            ("/shell/project", json!("other/../project")),
+            ("/shell/backend_service", json!("https://attacker.example")),
+            ("/shell/kubernetes_service", json!("tools/app/extra")),
+            (
+                "/apps",
+                json!({"workspace":{"service_account":"operator@example.com","accounts":{"calendar":{"kind":"iap_subject"}}}}),
+            ),
+            (
+                "/apps",
+                json!({"workspace":{"service_account":"app@company-tools.iam.gserviceaccount.com","accounts":{}}}),
+            ),
+        ] {
+            let mut wrong = value.clone();
+            *wrong.pointer_mut(path).unwrap() = substitution;
+            assert!(
+                serde_json::from_value::<RuntimeCatalog>(wrong)?
+                    .validate_shared_shell_metadata()
+                    .is_err(),
+                "{path}"
+            );
+        }
+        let mut excessive = selected;
+        let app = RuntimeApp {
+            service_account: "app@company-tools.iam.gserviceaccount.com".into(),
+            accounts: BTreeMap::from([(
+                Name::try_from("calendar".to_owned())?,
+                ProviderAccountPolicy::IapSubject,
+            )]),
+        };
+        for index in 0..129 {
+            excessive
+                .apps
+                .insert(Name::try_from(format!("app_{index}"))?, app.clone());
+        }
+        assert!(excessive.validate_shared_shell_metadata().is_err());
+        Ok(())
+    }
 
     #[test]
     fn runtime_selection_is_closed_bounded_and_contains_only_desired_selectors() -> Result<()> {
