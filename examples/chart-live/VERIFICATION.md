@@ -13,7 +13,7 @@ qualification are separate; none is implied by a local demo.
 | Native port | Typed admission/projection, request-local memoization, virtual admission deadlines and seeded restart/contention schedules | Same ports/validation; explicit simulated failures |
 | Confinement | Linux real-worker replay/recovery and concurrent renders through unchanged isolation/frame/exchange budgets | Requires independently reviewed executable bytes; rerun after source changes |
 | Browser adapters | Seeded DOM lifecycle and injected network/timer schedules, delayed-body/cancellation/draft regressions | Simulations, not real browser acceptance |
-| Native app | Prior ordinary Mac build and app verification; persisted value 0→35/version 1→2 changed SVG without rebuild; operator-confirmed smaller range fetched data | Prior implementation; current cleanup changes need fresh Mac review |
+| Native app | Current PR source passed ordinary Mac Native build; browser confirmed 0→35/version 1→2, Add 83/version 1, changed SVG, retained draft 84, keyboard range/cancel/apply, and a server-confirmed six-hour range | Actual persisted/query/HTTP/browser path; partial acceptance, not every interaction |
 
 Unit schedules have no real sleeps/network. Failures identify seed/step; real
 adapters run separately. Worker and host budgets are unchanged. App/server data
@@ -29,11 +29,12 @@ These are focused source/adapter checks, not a substitute for the gates below.
 
 ## Remaining gates
 
-- Rebuild current sources normally on Mac; qualify Add with an unused timestamp,
-  continuous/reversed/clipped/short pointer ranges and SVG-only text-selection
-  suppression. Preserve persisted data and unrelated drafts.
-- Real keyboard/focus/dialog, mobile, no-JS, reduced motion, stale cancellation,
-  replacement/back/BFCache and concurrent GET/live acknowledgements.
+- Continuous/reversed/clipped/short pointer ranges, SVG-only text-selection
+  suppression and table copying. The current browser bridge lacks drag operations.
+- Dialog focus return, mobile, no-JS, reduced motion, stale cancellation,
+  replacement/back/BFCache and concurrent GET/live acknowledgements. Current
+  browser proof covers keyboard navigation/selection/apply/cancel and dialog
+  open/close, but its tools lack viewport, console and JS-disabled contexts.
 - HTTP range/reset/empty, owner isolation/version conflicts and authority/session
   revocation during slow render; login-consumption regression with the separately
   built HTTP-conformance artifact.
