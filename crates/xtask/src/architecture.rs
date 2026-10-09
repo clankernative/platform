@@ -4590,7 +4590,31 @@ fn ambient_import_target(target: &str, names: &BTreeSet<String>) -> bool {
             && names.contains(relative_name(target).split("::").next().unwrap_or_default())
 }
 
+fn task_set_scheduling_method(method: &str) -> bool {
+    matches!(
+        method,
+        "spawn"
+            | "spawn_on"
+            | "spawn_local"
+            | "spawn_local_on"
+            | "spawn_blocking"
+            | "spawn_blocking_on"
+            | "join_next"
+            | "join_next_with_id"
+            | "try_join_next"
+            | "try_join_next_with_id"
+            | "abort_all"
+            | "shutdown"
+            | "detach_all"
+    )
+}
+
 fn hazard(target: &str) -> Option<&'static str> {
+    if target.rsplit_once("::").is_some_and(|(owner, method)| {
+        owner == "tokio::task::JoinSet" && task_set_scheduling_method(method)
+    }) {
+        return Some("scheduling");
+    }
     if let Some(method) = target.strip_prefix("std::fs::ReadDir::")
         && (read_dir_lazy_method(method) || method == "size_hint")
     {
@@ -4776,6 +4800,9 @@ fn hazard(target: &str) -> Option<&'static str> {
 }
 
 fn method_hazard(origin: &str, method: &str) -> Option<&'static str> {
+    if origin == "tokio::task::JoinSet" && task_set_scheduling_method(method) {
+        return Some("scheduling");
+    }
     if path_receiver_type(origin) && path_filesystem_method(method) {
         return Some("filesystem");
     }
@@ -8290,6 +8317,65 @@ mod tests {
             assert!(
                 findings.iter().any(|finding| finding.target == target),
                 "missing {target}: {findings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn native_task_set_submission_and_settlement_require_review() {
+        for source in [
+            r#"
+            fn sample() {
+                let mut jobs = tokio::task::JoinSet::new();
+                jobs.spawn_blocking(|| ());
+                jobs.join_next_with_id();
+            }
+            "#,
+            r#"
+            use tokio::task::JoinSet as Tasks;
+            fn sample(jobs: &mut Tasks<()>) {
+                Tasks::spawn_blocking(jobs, || ());
+                Tasks::join_next_with_id(jobs);
+            }
+            "#,
+            r#"
+            use tokio::task::JoinSet as Tasks;
+            struct Adapter { jobs: Tasks<()> }
+            impl Adapter {
+                fn sample(&mut self) {
+                    self.jobs.spawn_blocking(|| ());
+                    self.jobs.join_next_with_id();
+                }
+            }
+            "#,
+            r#"
+            async fn sample() {
+                let mut jobs = tokio::task::JoinSet::new();
+                jobs.spawn_blocking(|| ());
+                tokio::select! {
+                    Some(result) = jobs.join_next_with_id(), if !jobs.is_empty() => {}
+                }
+            }
+            "#,
+        ] {
+            let findings = scan(source);
+            for method in ["spawn_blocking", "join_next_with_id"] {
+                let target = format!("tokio::task::JoinSet::{method}");
+                assert_eq!(
+                    findings
+                        .iter()
+                        .filter(|finding| finding.kind == "scheduling" && finding.target == target)
+                        .count(),
+                    1,
+                    "{source}: missing exact {target}: {findings:?}"
+                );
+            }
+            assert!(
+                !findings.iter().any(|finding| {
+                    finding.target == "tokio::task::JoinSet::new"
+                        || finding.target.ends_with("::is_empty")
+                }),
+                "pure collection operations are not scheduling: {findings:?}"
             );
         }
     }
