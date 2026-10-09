@@ -64,7 +64,7 @@ pub struct Rule {
 
 impl Rule {
     pub fn validate(&self, model: &str) -> Result<()> {
-        crate::schema::identifier(model)?;
+        day2_contracts::names::identifier(model)?;
         ensure!(
             self.after_days >= 1,
             "retention_window_must_outlast_the_deletion"
@@ -182,7 +182,10 @@ fn perform(
     connection: &Connection,
     app: &str,
     rules: &[(String, Rule)],
-    identities: &std::collections::BTreeMap<String, Option<crate::identity::ModelIdentity>>,
+    identities: &std::collections::BTreeMap<
+        String,
+        Option<day2_contracts::identity::ModelIdentity>,
+    >,
     operator: &str,
     now: i64,
     reviewed: &Plan,
@@ -227,7 +230,7 @@ fn declared(instance: &Path, app: &str, operator: &str) -> Result<Vec<(String, R
 /// `ELIGIBLE`, so they cannot disagree about which rows are in scope.
 fn eligible(connection: &Connection, model: &str, rule: &Rule, now: i64) -> Result<ModelPlan> {
     let cutoff = rule.cutoff(now)?;
-    let table = crate::schema::identifier(model).map(|()| model)?;
+    let table = day2_contracts::names::identifier(model).map(|()| model)?;
     let (eligible, oldest, newest) = connection.query_row(
         &format!(
             "SELECT count(*), min(deleted_at), max(deleted_at) FROM \"{table}\" WHERE {ELIGIBLE}"
@@ -260,13 +263,13 @@ fn eligible(connection: &Connection, model: &str, rule: &Rule, now: i64) -> Resu
 fn remove(
     connection: &Connection,
     model: &str,
-    identity: Option<&crate::identity::ModelIdentity>,
+    identity: Option<&day2_contracts::identity::ModelIdentity>,
     rule: &Rule,
     operator: &str,
     now: i64,
 ) -> Result<i64> {
     let cutoff = rule.cutoff(now)?;
-    let table = crate::schema::identifier(model).map(|()| model)?;
+    let table = day2_contracts::names::identifier(model).map(|()| model)?;
     let doomed: Vec<(rusqlite::types::Value, i64, i64)> = connection
         .prepare(&format!(
             "SELECT id,created_at,deleted_at FROM \"{table}\" WHERE {ELIGIBLE} ORDER BY id"
@@ -300,7 +303,7 @@ fn remove(
 /// A stored id in the form the rest of the platform shows it.
 fn readable(
     id: &rusqlite::types::Value,
-    identity: Option<&crate::identity::ModelIdentity>,
+    identity: Option<&day2_contracts::identity::ModelIdentity>,
 ) -> Result<String> {
     Ok(match (id, identity) {
         (rusqlite::types::Value::Integer(value), _) => value.to_string(),

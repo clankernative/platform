@@ -497,7 +497,9 @@ dependencies = [
  "cookie",
  "crc32c",
  "cssparser",
+ "day2-assets",
  "day2-capabilities",
+ "day2-contracts",
  "day2-sandbox",
  "ego-tree",
  "getrandom 0.3.4",
@@ -516,9 +518,7 @@ dependencies = [
  "proc-macro2",
  "proptest",
  "reqwest",
- "resvg",
  "ring",
- "roxmltree",
  "rusqlite",
  "rustix",
  "scraper",
@@ -531,6 +531,19 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "url",
+]
+
+[[package]]
+name = "day2-assets"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "day2-contracts",
+ "image",
+ "resvg",
+ "roxmltree",
+ "serde",
+ "sha2",
 ]
 
 [[package]]
@@ -552,6 +565,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "day2-contracts"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "day2-control"
 version = "0.1.0"
 dependencies = [
@@ -560,7 +582,9 @@ dependencies = [
  "base64 0.22.1",
  "crc32c",
  "day2",
+ "day2-assets",
  "day2-capabilities",
+ "day2-contracts",
  "day2-kernel",
  "durable-temporal",
  "hmac",
@@ -594,7 +618,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "day2",
+ "day2-assets",
  "day2-capabilities",
+ "day2-contracts",
  "flate2",
  "reqwest",
  "rusqlite",
@@ -4871,6 +4897,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "day2",
+ "day2-assets",
+ "day2-contracts",
  "day2-control",
  "day2-ops",
  "proc-macro2",

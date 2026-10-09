@@ -2,6 +2,12 @@
 
 ## Trust And Ownership
 
+`day2-contracts` owns the shared numeric, model identity, text rule, operation
+and identifier representations. It is a `no_std` crate with allocation and no
+compiler or host dependency. `day2-assets` owns bounded image/SVG admission and
+asset packaging; the compiler and runtime consume these crates directly.
+Their contracts and adapter roles are enforced by `architecture-boundaries.json`.
+
 The local operator and Rust platform are trusted. Roc app behavior is constrained
 by the supplied platform, the compiler sandbox, a separate native worker, and
 host-side effect validation. Native worker isolation is defense in depth, not a

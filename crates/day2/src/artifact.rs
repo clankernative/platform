@@ -64,7 +64,7 @@ impl Schedule {
     /// unobserved, at an hour nobody is watching.
     pub fn validate(&self, artifact: &Artifact) -> Result<()> {
         // The name reaches the invocation id, which accepts a narrow alphabet.
-        crate::schema::identifier(&self.name)?;
+        day2_contracts::names::identifier(&self.name)?;
         ensure!(
             self.interval_ms >= crate::schedules::MINIMUM_INTERVAL_MS as u64,
             "schedule interval is below the platform minimum"
@@ -139,7 +139,7 @@ impl Endpoint {
     /// against a provider that will retry into the same failure.
     pub fn validate(&self, artifact: &Artifact) -> Result<()> {
         // The name reaches the derived invocation identity, whose alphabet is narrow.
-        crate::schema::identifier(&self.name)?;
+        day2_contracts::names::identifier(&self.name)?;
         ensure!(
             crate::ingress::PROVIDERS.contains(&self.provider.as_str()),
             "endpoint names an unregistered ingress provider: {}",
@@ -249,7 +249,7 @@ pub struct Artifact {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub redirects: Vec<Redirect>,
     #[serde(default)]
-    pub assets: crate::assets::Catalog,
+    pub assets: day2_assets::Catalog,
     #[serde(default)]
     pub web_resources: crate::web_resources::Catalog,
     #[serde(default)]
@@ -274,13 +274,13 @@ impl Artifact {
 
     pub fn page_context_schema(&self, page: &Page) -> Result<crate::output_schema::Type> {
         page.validate_live()?;
-        crate::schema::identifier(&page.name)?;
+        day2_contracts::names::identifier(&page.name)?;
         ensure!(
             !["company", "asset"].contains(&page.name.as_str())
                 && (self.format < 7 || !["routes", "platform"].contains(&page.name.as_str())),
             "reserved page context name"
         );
-        crate::schema::identifier(&page.output_type)?;
+        day2_contracts::names::identifier(&page.output_type)?;
         if self.format < 7 {
             ensure!(
                 page.template == format!("pages/{}.html", page.name),
@@ -553,7 +553,7 @@ impl LoadedArtifact {
                     && operation
                         .name
                         .split('.')
-                        .all(|part| crate::schema::identifier(part).is_ok()),
+                        .all(|part| day2_contracts::names::identifier(part).is_ok()),
                 "invalid operation name"
             );
             ensure!(names.insert(&operation.name), "duplicate operation name");
@@ -571,7 +571,7 @@ impl LoadedArtifact {
                         || (contract.format >= 10 && operation.kind == "command"),
                     "typed output requires a supported query/command contract"
                 );
-                crate::schema::identifier(&operation.output_type)?;
+                day2_contracts::names::identifier(&operation.output_type)?;
                 ensure!(
                     contract.outputs.contains_key(&operation.output_type),
                     "unknown query output contract"
@@ -662,7 +662,7 @@ impl LoadedArtifact {
             contract.format >= 4 || contract.assets.is_empty(),
             "legacy artifact has assets"
         );
-        crate::assets::validate_blobs(&directory, &contract.assets)?;
+        day2_assets::validate_blobs(&directory, &contract.assets)?;
         ensure!(
             contract.format >= 5 || contract.web_resources.is_empty(),
             "legacy artifact has web resources"
@@ -710,7 +710,7 @@ impl LoadedArtifact {
         let mut pages = BTreeSet::new();
         for page in &contract.pages {
             page.validate_live()?;
-            crate::schema::identifier(&page.name)?;
+            day2_contracts::names::identifier(&page.name)?;
             ensure!(pages.insert(&page.name), "duplicate page name");
             ensure!(
                 !page.title.trim().is_empty() && page.title.len() <= 100,
@@ -1811,11 +1811,11 @@ impl Instance {
             transport.validate()?;
             instance.security_edge()?;
         }
-        crate::schema::identifier(&instance.installation)?;
-        crate::schema::identifier(&instance.environment)?;
+        day2_contracts::names::identifier(&instance.installation)?;
+        day2_contracts::names::identifier(&instance.environment)?;
         ensure!(!instance.apps.is_empty(), "instance has no apps");
         for name in instance.apps.keys() {
-            crate::schema::identifier(name)?;
+            day2_contracts::names::identifier(name)?;
         }
         if let Some(control) = &instance.control {
             control.validate(instance.apps.keys().map(String::as_str))?;
@@ -1840,7 +1840,7 @@ impl Instance {
                 "OAuth connection binding budget"
             );
             for (registration, binding) in &selected.oauth_connections {
-                crate::schema::identifier(registration)?;
+                day2_contracts::names::identifier(registration)?;
                 binding.namespace.validate()?;
                 ensure!(
                     binding.namespace.installation.as_str() == instance.installation
@@ -1869,7 +1869,7 @@ impl Instance {
                 "credential family binding budget"
             );
             for (id, binding) in &selected.credential_families {
-                crate::schema::identifier(id)?;
+                day2_contracts::names::identifier(id)?;
                 binding.namespace.validate()?;
                 ensure!(
                     binding.namespace.installation.as_str() == instance.installation

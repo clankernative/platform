@@ -1129,14 +1129,14 @@ step = |raw| raw
         commands: BTreeMap::from([
             (
                 "create_client".into(),
-                day2::registry::Operation {
+                day2_contracts::registry::Operation {
                     input: "client_input".into(),
                     output: "unit".into(),
                 },
             ),
             (
                 "create_personal".into(),
-                day2::registry::Operation {
+                day2_contracts::registry::Operation {
                     input: "personal_input".into(),
                     output: "unit".into(),
                 },

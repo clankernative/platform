@@ -1,5 +1,6 @@
 //! Public TypeIDs, binary UUID storage, and permanent per-app model identities.
 use anyhow::{Context, Result, bail, ensure};
+use day2_contracts::identity::ModelIdentity;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -211,13 +212,6 @@ impl<'de> Deserialize<'de> for Id {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct ModelIdentity {
-    pub key: String,
-    pub prefix: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct Registration {
     pub identity: ModelIdentity,
     pub table: String,
@@ -250,7 +244,7 @@ impl Registry {
         let (mut prefixes, mut keys, mut tables) =
             (BTreeSet::new(), BTreeSet::new(), BTreeSet::new());
         for model in &self.models {
-            crate::schema::identifier(&model.table)?;
+            day2_contracts::names::identifier(&model.table)?;
             crate::schema::roc_type_name(&model.roc_type)?;
             ensure!(
                 valid_prefix(&model.identity.prefix) && prefixes.insert(&model.identity.prefix),
@@ -428,7 +422,7 @@ pub fn rename_registered(app: &Path, old: &str, table: &str, roc_type: &str) -> 
 /// Explicit authoring, separate from ordinary read-only builds. History survives
 /// retirement and future reuse of a table name receives a new identity.
 pub fn register_model(app: &Path, table: &str, roc_type: &str) -> Result<()> {
-    crate::schema::identifier(table)?;
+    day2_contracts::names::identifier(table)?;
     crate::schema::roc_type_name(roc_type)?;
     edit_registry(app, true, |registry| {
         ensure!(

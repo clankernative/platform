@@ -363,7 +363,7 @@ impl LocalServer {
             cookie_name: format!(
                 "{prefix}day2_{}_{}",
                 runtime.app(),
-                &crate::assets::hash_part(&digest(runtime.scope().as_bytes()))?[..16]
+                &day2_assets::hash_part(&digest(runtime.scope().as_bytes()))?[..16]
             ),
             runtime,
             authority,

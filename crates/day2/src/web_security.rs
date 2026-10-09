@@ -401,10 +401,8 @@ mod session_tests {
 #[cfg(test)]
 mod numeric_tests {
     use super::*;
-    use crate::{
-        numeric::Unsigned,
-        schema::{Kind, Record},
-    };
+    use crate::schema::{Kind, Record};
+    use day2_contracts::numeric::Unsigned;
     use serde_json::json;
     use std::collections::BTreeMap;
 

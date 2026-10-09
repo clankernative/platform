@@ -150,7 +150,7 @@ pub fn annotate(schema: &mut Value, fields: &[Field]) -> Result<()> {
             let (name, array) = part
                 .strip_suffix("[]")
                 .map_or((part, false), |name| (name, true));
-            crate::schema::identifier(name)?;
+            day2_contracts::names::identifier(name)?;
             target = target
                 .get_mut("properties")
                 .and_then(|properties| properties.get_mut(name))

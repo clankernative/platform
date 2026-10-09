@@ -57,7 +57,7 @@ fn compiler_fixture(root: &Path, stage: &Path, artifact: &LoadedArtifact) -> Res
         ),
         (
             "Assets.roc",
-            day2::assets::roc_module(&artifact.contract().assets)?,
+            day2_assets::roc_module(&artifact.contract().assets)?,
         ),
         (
             "Templates.roc",

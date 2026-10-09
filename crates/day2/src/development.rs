@@ -154,7 +154,7 @@ pub fn examples(artifact: &LoadedArtifact) -> Result<Vec<Example>> {
     let mut names = BTreeSet::new();
     let mut total = 0;
     for example in &values {
-        crate::schema::identifier(&example.name)?;
+        day2_contracts::names::identifier(&example.name)?;
         ensure!(names.insert(&example.name), "duplicate example name");
         ensure!(
             example.error.is_empty(),
@@ -213,7 +213,7 @@ pub fn samples(artifact: &LoadedArtifact, seed: u64, count: u64) -> Result<Vec<S
     let mut actual: BTreeMap<&str, Vec<u64>> = BTreeMap::new();
     let mut operations = BTreeMap::new();
     for sample in &values {
-        crate::schema::identifier(&sample.generator)?;
+        day2_contracts::names::identifier(&sample.generator)?;
         ensure!(
             sample.error.is_empty(),
             "generator {} failed: {}",
