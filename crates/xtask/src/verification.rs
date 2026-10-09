@@ -13,6 +13,28 @@ use std::{
 
 const CACHE_FORMAT: u32 = 1;
 
+// Every campaign in the full gate resolves this same package/feature graph.
+// Target and libtest filters choose what executes without narrowing Cargo's
+// selected workspace members and rebuilding their shared dependencies.
+const WORKSPACE_TEST_ARGUMENTS: &[&str] = &[
+    "-p",
+    "day2",
+    "-p",
+    "xtask",
+    "-p",
+    "day2-ops",
+    "-p",
+    "day2-cli-checks",
+    "-p",
+    "day2-control",
+    "-p",
+    "day2-capabilities",
+    "-p",
+    "day2-kernel",
+    "-p",
+    "durable-temporal",
+];
+
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 struct VerificationCache {
@@ -609,12 +631,7 @@ pub(super) fn linux_tests(root: &Path, suite: &str, artifact: &Path, probe: &Pat
     )
 }
 
-fn tests(
-    root: &Path,
-    suite: &str,
-    fixtures: &BTreeMap<String, PathBuf>,
-    budget: std::time::Duration,
-) -> Result<()> {
+fn test_command(suite: &str) -> Result<Command> {
     // Each crate links its integration tests into one binary. A module filter
     // after `--` selects the tests of what used to be a separate test target.
     let (arguments, modules): (&[&str], &[&str]) = match suite {
@@ -715,58 +732,8 @@ fn tests(
             ],
             &[],
         ),
-        // The full gate used to invoke this package set as separate
-        // `all-runtime` and `control` campaigns. Keeping it in one Cargo
-        // invocation preserves the tests and serial execution policy while
-        // avoiding a second, differently resolved compile/link graph.
-        "workspace-runtime" => (
-            &[
-                "-p",
-                "day2",
-                "-p",
-                "xtask",
-                "-p",
-                "day2-ops",
-                "-p",
-                "day2-cli-checks",
-                "-p",
-                "day2-control",
-                "-p",
-                "day2-capabilities",
-                "-p",
-                "day2-kernel",
-                "-p",
-                "durable-temporal",
-            ],
-            &[],
-        ),
-        // Select the same package graph as `workspace-runtime`, but execute the
-        // independently isolated app_inference cases with bounded intra-binary
-        // parallelism. Matching the package graph lets Cargo reuse the
-        // already-linked test executables.
-        "parallel-runtime" => (
-            &[
-                "-p",
-                "day2",
-                "-p",
-                "xtask",
-                "-p",
-                "day2-ops",
-                "-p",
-                "day2-cli-checks",
-                "-p",
-                "day2-control",
-                "-p",
-                "day2-capabilities",
-                "-p",
-                "day2-kernel",
-                "-p",
-                "durable-temporal",
-                "--test",
-                "day2_integration",
-            ],
-            &["app_inference::"],
-        ),
+        "workspace-runtime" => (&[], &[]),
+        "parallel-runtime" => (&["--test", "day2_integration"], &["app_inference::"]),
         "control" => (
             &[
                 "-p",
@@ -782,8 +749,6 @@ fn tests(
         ),
         "isolated-build" => (
             &[
-                "-p",
-                "day2-control",
                 "--test",
                 "control_integration",
                 "build::real_isolated_owned_links_build_produces_bound_evidence_and_recovers_receipt",
@@ -792,8 +757,6 @@ fn tests(
         ),
         "installation-build" => (
             &[
-                "-p",
-                "day2-control",
                 "--test",
                 "control_integration",
                 "control_service::real_installation_export_build_and_temporal_completion",
@@ -802,14 +765,31 @@ fn tests(
         ),
         _ => bail!("unknown test suite"),
     };
+    let mut command = Command::new("cargo");
+    command.args(["test", "--locked"]);
+    if [
+        "workspace-runtime",
+        "parallel-runtime",
+        "isolated-build",
+        "installation-build",
+    ]
+    .contains(&suite)
+    {
+        command.args(WORKSPACE_TEST_ARGUMENTS);
+    }
+    command.args(arguments).arg("--").args(modules);
+    Ok(command)
+}
+
+fn tests(
+    root: &Path,
+    suite: &str,
+    fixtures: &BTreeMap<String, PathBuf>,
+    budget: std::time::Duration,
+) -> Result<()> {
     #[cfg(target_os = "linux")]
     prepare_linux_test_installation(root)?;
-    let mut command = Command::new("cargo");
-    command
-        .args(["test", "--locked"])
-        .args(arguments)
-        .arg("--")
-        .args(modules);
+    let mut command = test_command(suite)?;
     if ["isolated-build", "installation-build"].contains(&suite) {
         let rust = Command::new("rustc")
             .args(["--print", "sysroot"])
@@ -1170,6 +1150,36 @@ fn required_steps(scope: &str) -> Result<&'static [&'static str]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn full_gate_filters_keep_the_same_cargo_package_graph() -> Result<()> {
+        let selected = |command: &Command| {
+            let args = command.get_args().collect::<Vec<_>>();
+            args.windows(2)
+                .filter(|pair| pair[0] == "-p")
+                .map(|pair| pair[1].to_string_lossy().into_owned())
+                .collect::<BTreeSet<_>>()
+        };
+        let expected = selected(&test_command("workspace-runtime")?);
+        assert!(expected.contains("day2") && expected.contains("day2-control"));
+        for suite in ["parallel-runtime", "isolated-build", "installation-build"] {
+            let command = test_command(suite)?;
+            assert_eq!(selected(&command), expected, "{suite}");
+            let args = command.get_args().collect::<Vec<_>>();
+            let target = args.windows(2).find(|pair| pair[0] == "--test").unwrap()[1];
+            assert_eq!(
+                target,
+                if suite == "parallel-runtime" {
+                    "day2_integration"
+                } else {
+                    "control_integration"
+                },
+                "{suite}"
+            );
+        }
+        assert!(test_command("unknown").is_err());
+        Ok(())
+    }
 
     #[test]
     fn test_campaign_budget_defaults_and_aggregate_override_are_bounded() -> Result<()> {
