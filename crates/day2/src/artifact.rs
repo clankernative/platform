@@ -367,6 +367,17 @@ impl Identity {
     }
 }
 
+// These identifiers are validated before admission reaches the exchange. The
+// path hash describes the retained lexical selection, not the executing image.
+fn app_contract_exchange_context(id: &str, worker_digest: &str, executable: &Path) -> String {
+    let path = executable.as_os_str().as_encoded_bytes();
+    format!(
+        "artifact admission app-contract exchange [artifact_id={id} admitted_worker_digest={worker_digest} selected_path_bytes={} selected_path_digest={}]",
+        path.len(),
+        digest(path),
+    )
+}
+
 #[cfg(test)]
 impl LoadedArtifact {
     /// Host-boundary unit tests supply a contract without launching a compiler.
@@ -782,8 +793,17 @@ impl LoadedArtifact {
         };
         if loaded.contract.format == CURRENT_FORMAT {
             let executable = loaded.materialize_worker()?;
-            let mut worker = crate::worker::Worker::start(&executable)?;
-            let compiled = crate::app_contract::decode(&worker.exchange(b"app-contract")?)?;
+            let mut worker = crate::worker::Worker::start(&executable)
+                .context("artifact admission worker start")?;
+            let compiled = crate::app_contract::decode(
+                &worker.exchange(b"app-contract").with_context(|| {
+                    app_contract_exchange_context(
+                        &loaded.id,
+                        &loaded.contract.worker_digest,
+                        &executable,
+                    )
+                })?,
+            )?;
             ensure!(
                 serde_json::to_value(&compiled)?
                     == serde_json::to_value(&loaded.contract.app_contract)?,
@@ -791,7 +811,9 @@ impl LoadedArtifact {
             );
             if !loaded.contract.credential_declarations.is_empty() {
                 let compiled = crate::credential_declaration::decode(
-                    &worker.exchange(b"credential-contract")?,
+                    &worker
+                        .exchange(b"credential-contract")
+                        .context("artifact admission credential-contract exchange")?,
                     &loaded.contract,
                 )?;
                 ensure!(
@@ -801,7 +823,9 @@ impl LoadedArtifact {
             }
             if !loaded.contract.connection_declarations.is_empty() {
                 let compiled = crate::oauth::declaration::decode(
-                    &worker.exchange(b"connection-contract")?,
+                    &worker
+                        .exchange(b"connection-contract")
+                        .context("artifact admission connection-contract exchange")?,
                     &loaded.contract,
                 )?;
                 ensure!(
@@ -809,8 +833,11 @@ impl LoadedArtifact {
                     "connection declarations differ from compiled App.definition"
                 );
             }
-            let mut manifest: serde_json::Value =
-                serde_json::from_slice(&worker.exchange(b"manifest")?)?;
+            let mut manifest: serde_json::Value = serde_json::from_slice(
+                &worker
+                    .exchange(b"manifest")
+                    .context("artifact admission manifest exchange")?,
+            )?;
             // Earlier format-14 workers predate optional live-page metadata.
             // Compare their defaulted page contracts without weakening the
             // exact comparison of any other compiled manifest fields.
@@ -1294,10 +1321,480 @@ pub struct Instance {
     pub oauth_clients: Option<day2_capabilities::oauth::ClientCatalog>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oauth_runtime: Option<day2_capabilities::oauth::RuntimeCatalog>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_runtime: Option<day2_capabilities::credential_runtime::RuntimeCatalog>,
     pub apps: BTreeMap<String, AppBinding>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SecurityKeyPurpose {
+    CredentialVerifier,
+    CredentialEncryption,
+    CredentialShellAttestation,
+    OauthCustodyVerifier,
+    OauthCustodyEncryption,
+    OauthShellAttestation,
+    OauthProviderClient,
+    OauthReauthenticationClient,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+struct SecurityKeySelection {
+    namespace: day2_capabilities::credentials::Namespace,
+    selections: BTreeSet<day2_capabilities::Name>,
+    purpose: SecurityKeyPurpose,
+    binding: day2_capabilities::BindingRef,
+    provider: day2_capabilities::SecretProvider,
+}
+
+type SecurityKeyIdentity = (
+    day2_capabilities::credentials::Namespace,
+    SecurityKeyPurpose,
+    day2_capabilities::Name,
+    day2_capabilities::Digest,
+);
+
+fn secret_container(
+    provider: &day2_capabilities::SecretProvider,
+) -> (u64, day2_capabilities::Name) {
+    let day2_capabilities::SecretProvider::GcpVersion {
+        project_number,
+        secret,
+        ..
+    } = provider;
+    (project_number.get(), secret.clone())
+}
+
+fn insert_security_key(
+    keys: &mut BTreeMap<SecurityKeyIdentity, SecurityKeySelection>,
+    containers: &mut BTreeMap<(u64, day2_capabilities::Name), SecurityKeyPurpose>,
+    namespace: &day2_capabilities::credentials::Namespace,
+    selection: day2_capabilities::Name,
+    purpose: SecurityKeyPurpose,
+    binding: &day2_capabilities::BindingRef,
+    provider: &day2_capabilities::SecretProvider,
+) -> Result<()> {
+    let container = secret_container(provider);
+    if let Some(previous) = containers.insert(container, purpose) {
+        ensure!(
+            previous == purpose,
+            "security_key_purposes_share_secret_container"
+        );
+    }
+    let identity = (
+        namespace.clone(),
+        purpose,
+        binding.id.clone(),
+        binding.revision.clone(),
+    );
+    if let Some(previous) = keys.get_mut(&identity) {
+        ensure!(
+            previous.provider == *provider,
+            "security_key_binding_has_conflicting_exact_versions"
+        );
+        previous.selections.insert(selection);
+    } else {
+        ensure!(keys.len() < 512, "security_key_selection_budget");
+        keys.insert(
+            identity,
+            SecurityKeySelection {
+                namespace: namespace.clone(),
+                selections: BTreeSet::from([selection]),
+                purpose,
+                binding: binding.clone(),
+                provider: provider.clone(),
+            },
+        );
+    }
+    Ok(())
+}
+
 impl Instance {
+    /// Desired identity and shell selectors, with no live provider observation.
+    pub(crate) fn credential_identity_revision(
+        &self,
+        app: &str,
+    ) -> Result<day2_capabilities::Digest> {
+        let (identity, edge) = self.security_edge()?;
+        day2_capabilities::Digest::of(&(
+            "credential-iap-identity-selection-v1",
+            self.credential_scope(app)?,
+            identity,
+            &edge.origin,
+            &edge.iap_audience,
+        ))
+    }
+
+    pub(crate) fn credential_shell_revision(&self, app: &str) -> Result<day2_capabilities::Digest> {
+        let (_, edge) = self.security_edge()?;
+        day2_capabilities::Digest::of(&(
+            "credential-security-shell-selection-v1",
+            self.credential_scope(app)?,
+            &edge.origin,
+            &edge.iap_audience,
+        ))
+    }
+
+    fn credential_scope(
+        &self,
+        app: &str,
+    ) -> Result<day2_capabilities::security_epoch::AuthorityScope> {
+        ensure!(self.apps.contains_key(app), "credential_app_not_installed");
+        Ok(day2_capabilities::security_epoch::AuthorityScope {
+            installation: self.installation.clone().try_into()?,
+            environment: self.environment.clone().try_into()?,
+            app: app.to_owned().try_into()?,
+        })
+    }
+
+    /// Complete provider-free catalog admission. This does not load keys or
+    /// supply a native issuer, subject mapping, epoch or freshness proof.
+    pub(crate) fn validate_credential_runtime_metadata(&self) -> Result<()> {
+        use day2_capabilities::{
+            Digest,
+            credentials::{DeliveryProfile, ManagementPredicate},
+        };
+        let bound: BTreeSet<_> = self
+            .apps
+            .iter()
+            .filter(|(_, binding)| !binding.credential_families.is_empty())
+            .map(|(app, _)| app.as_str())
+            .collect();
+        let Some(catalog) = &self.credential_runtime else {
+            ensure!(bound.is_empty(), "credential_runtime_missing");
+            return Ok(());
+        };
+        catalog.validate()?;
+        let selected: BTreeSet<_> = catalog.apps.keys().map(|app| app.as_str()).collect();
+        ensure!(
+            selected == bound,
+            "credential_runtime_app_selection_incomplete"
+        );
+        let control = self
+            .control
+            .as_ref()
+            .context("credential_control_catalog_missing")?;
+        let resources = self
+            .resources
+            .as_ref()
+            .context("credential_resource_catalog_missing")?;
+        let (_, shell) = self.security_edge()?;
+        for (app, runtime) in &catalog.apps {
+            let scope = self.credential_scope(app.as_str())?;
+            let binding = &self.apps[app.as_str()];
+            runtime.selected_keys(&binding.credential_families, &control.secrets)?;
+            runtime.attestation_key(
+                &scope,
+                &binding.credential_families,
+                &control.secrets,
+                &shell.origin,
+                &shell.iap_audience,
+            )?;
+            for family in binding.credential_families.values() {
+                ensure!(
+                    family.namespace.installation == scope.installation
+                        && family.namespace.environment == scope.environment
+                        && family.namespace.app == scope.app
+                        && family.security_shell.0.revision
+                            == self.credential_shell_revision(app.as_str())?,
+                    "credential_runtime_namespace_or_shell_mismatch"
+                );
+                let policy = resources
+                    .credentials
+                    .management
+                    .get(family.management.id.as_str())
+                    .context("credential_management_policy_missing")?;
+                ensure!(
+                    family.management.revision == Digest::of(policy)?
+                        && policy.identity_authority.revision
+                            == self.credential_identity_revision(app.as_str())?
+                        && [&policy.issue, &policy.rotate, &policy.revoke]
+                            .into_iter()
+                            .all(|predicate| matches!(predicate, ManagementPredicate::Creator))
+                        && matches!(family.delivery, DeliveryProfile::AuthenticatedCreatorReveal),
+                    "unsupported_credential_management_or_delivery"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// The complete desired key selection for this app's external authority.
+    /// This digest selects inputs; it carries no current readiness or epoch.
+    pub fn security_key_set(&self, app: &str) -> Result<day2_capabilities::Digest> {
+        let scope = day2_capabilities::security_epoch::AuthorityScope {
+            installation: self.installation.clone().try_into()?,
+            environment: self.environment.clone().try_into()?,
+            app: app.to_owned().try_into()?,
+        };
+        day2_capabilities::Digest::of(&(
+            "day2-instance-security-key-set-v1",
+            scope,
+            self.security_key_selections(app)?,
+        ))
+    }
+
+    fn security_key_selections(&self, app: &str) -> Result<Vec<SecurityKeySelection>> {
+        use day2_capabilities::{Name, credential_runtime::KeyPurpose};
+        let binding = self
+            .apps
+            .get(app)
+            .context("security_key_app_not_installed")?;
+        let control = self
+            .control
+            .as_ref()
+            .context("security_key_provider_catalog_missing")?;
+        ensure!(
+            binding.credential_families.len() <= 64 && binding.oauth_connections.len() <= 64,
+            "security_key_binding_budget"
+        );
+        let mut keys = BTreeMap::new();
+        let mut containers = BTreeMap::new();
+        let mut namespaces = BTreeSet::new();
+        if !binding.credential_families.is_empty() {
+            let runtime = self
+                .credential_runtime
+                .as_ref()
+                .context("credential_runtime_missing")?;
+            runtime.validate()?;
+            let selected = runtime
+                .apps
+                .get(&Name::try_from(app.to_owned())?)
+                .context("credential_runtime_app_missing")?;
+            for key in selected.selected_keys(&binding.credential_families, &control.secrets)? {
+                namespaces.insert(key.namespace.clone());
+                let purpose = match key.purpose {
+                    KeyPurpose::Verifier => SecurityKeyPurpose::CredentialVerifier,
+                    KeyPurpose::Encryption => SecurityKeyPurpose::CredentialEncryption,
+                };
+                insert_security_key(
+                    &mut keys,
+                    &mut containers,
+                    &key.namespace,
+                    key.family,
+                    purpose,
+                    &key.binding,
+                    &key.provider,
+                )?;
+            }
+            let (_, shell) = self.security_edge()?;
+            let scope = day2_capabilities::security_epoch::AuthorityScope {
+                installation: self.installation.clone().try_into()?,
+                environment: self.environment.clone().try_into()?,
+                app: app.to_owned().try_into()?,
+            };
+            let attestation = selected.attestation_key(
+                &scope,
+                &binding.credential_families,
+                &control.secrets,
+                &shell.origin,
+                &shell.iap_audience,
+            )?;
+            for (family, selected_binding) in &binding.credential_families {
+                insert_security_key(
+                    &mut keys,
+                    &mut containers,
+                    &selected_binding.namespace,
+                    Name::try_from(family.clone())?,
+                    SecurityKeyPurpose::CredentialShellAttestation,
+                    &attestation.binding,
+                    &attestation.provider,
+                )?;
+            }
+        }
+        for (name, connection) in &binding.oauth_connections {
+            let namespace = &connection.namespace;
+            namespaces.insert(namespace.clone());
+            for (purpose, key_binding, alias) in [
+                (
+                    SecurityKeyPurpose::OauthCustodyVerifier,
+                    &connection.custody,
+                    &connection.custody_verifier_secret,
+                ),
+                (
+                    SecurityKeyPurpose::OauthCustodyEncryption,
+                    &connection.custody,
+                    &connection.custody_encryption_secret,
+                ),
+                (
+                    SecurityKeyPurpose::OauthShellAttestation,
+                    &connection.shell_attestation,
+                    &connection.shell_attestation_secret,
+                ),
+            ] {
+                let provider = control
+                    .secrets
+                    .get(alias)
+                    .context("security_key_provider_missing")?;
+                insert_security_key(
+                    &mut keys,
+                    &mut containers,
+                    namespace,
+                    Name::try_from(name.clone())?,
+                    purpose,
+                    key_binding,
+                    provider,
+                )?;
+            }
+            let clients = self
+                .oauth_clients
+                .as_ref()
+                .context("security_key_oauth_clients_missing")?;
+            clients.validate()?;
+            let selected = clients
+                .registrations
+                .get(&connection.registration.id)
+                .context("security_key_registration_client_missing")?;
+            let client = selected.client();
+            let provider = control
+                .secrets
+                .get(client.credential())
+                .context("security_key_client_provider_missing")?;
+            let reference = crate::oauth::clients::selected_provider_credential(self, &client)?;
+            insert_security_key(
+                &mut keys,
+                &mut containers,
+                namespace,
+                Name::try_from(name.clone())?,
+                SecurityKeyPurpose::OauthProviderClient,
+                &reference,
+                provider,
+            )?;
+        }
+        if let Some(clients) = &self.oauth_clients {
+            clients.validate()?;
+            let provider = control
+                .secrets
+                .get(&clients.reauthentication.credential)
+                .context("security_key_reauthentication_provider_missing")?;
+            let reference =
+                crate::oauth::clients::selected_credential(self, &clients.reauthentication)?;
+            for namespace in &namespaces {
+                insert_security_key(
+                    &mut keys,
+                    &mut containers,
+                    namespace,
+                    Name::try_from("reauthentication".to_owned())?,
+                    SecurityKeyPurpose::OauthReauthenticationClient,
+                    &reference,
+                    provider,
+                )?;
+            }
+        }
+        ensure!(
+            !keys.is_empty(),
+            "security_key_set_has_no_selected_identity_keys"
+        );
+        for key in keys.values() {
+            key.namespace.validate()?;
+            ensure!(
+                key.namespace.installation.as_str() == self.installation
+                    && key.namespace.environment.as_str() == self.environment
+                    && key.namespace.app.as_str() == app,
+                "security_key_namespace_mismatch"
+            );
+        }
+        Ok(keys.into_values().collect())
+    }
+
+    fn validate_security_authority(&self) -> Result<()> {
+        use day2_capabilities::{BindingRef, Digest};
+        let mut enabled: BTreeSet<_> = self
+            .apps
+            .iter()
+            .filter(|(_, binding)| {
+                !binding.credential_families.is_empty() || !binding.oauth_connections.is_empty()
+            })
+            .map(|(app, _)| app.as_str())
+            .collect();
+        if let Some(catalog) = &self.credential_runtime {
+            catalog.validate()?;
+            self.security_edge()?;
+            for app in catalog.apps.keys() {
+                ensure!(
+                    self.apps.contains_key(app.as_str()),
+                    "credential_runtime_app_not_installed"
+                );
+                enabled.insert(app.as_str());
+            }
+        }
+        if let Some(control) = &self.control {
+            for store in control.security_epochs.values() {
+                ensure!(
+                    store.scope.installation.as_str() == self.installation
+                        && store.scope.environment.as_str() == self.environment,
+                    "security_epoch_scope_mismatch"
+                );
+                ensure!(
+                    self.apps.contains_key(store.scope.app.as_str()),
+                    "security_epoch_app_not_installed"
+                );
+                enabled.insert(store.scope.app.as_str());
+            }
+        }
+        if let Some(catalog) = &self.oauth_runtime {
+            catalog.validate_shared_shell_metadata()?;
+            for app in catalog.apps.keys() {
+                ensure!(
+                    self.apps.contains_key(app.as_str()),
+                    "oauth_runtime_app_not_installed"
+                );
+                enabled.insert(app.as_str());
+            }
+        }
+        // An ordinary app with no selected security declarations, runtime or
+        // epoch needs no authority selector. Security-enabled apps do.
+        if enabled.is_empty() {
+            return Ok(());
+        }
+        let control = self
+            .control
+            .as_ref()
+            .context("security_epoch_control_catalog_missing")?;
+        let mut containers = BTreeMap::new();
+        for app in enabled {
+            let mut stores = control
+                .security_epochs
+                .iter()
+                .filter(|(_, store)| store.scope.app.as_str() == app);
+            let (alias, store) = stores.next().context("security_epoch_store_missing")?;
+            ensure!(stores.next().is_none(), "security_epoch_store_ambiguous");
+            ensure!(
+                store.key_set == self.security_key_set(app)?,
+                "security_epoch_complete_key_set_mismatch"
+            );
+            let selected = BindingRef {
+                id: alias.clone(),
+                revision: Digest::of(store)?,
+            };
+            for family in self.apps[app].credential_families.values() {
+                ensure!(
+                    family.epoch_store == selected,
+                    "credential_epoch_store_pin_mismatch"
+                );
+            }
+            for key in self.security_key_selections(app)? {
+                let container = secret_container(&key.provider);
+                if let Some(previous) = containers.insert(container, key.purpose) {
+                    ensure!(
+                        previous == key.purpose,
+                        "security_key_purposes_share_secret_container"
+                    );
+                }
+            }
+        }
+        // Validate every explicitly selected runtime app's complete family
+        // selectors even when the app is not otherwise selected by OAuth.
+        if let Some(catalog) = &self.credential_runtime {
+            for (app, selected) in &catalog.apps {
+                let binding = &self.apps[app.as_str()];
+                selected.selected_keys(&binding.credential_families, &control.secrets)?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn load(path: &Path) -> Result<Self> {
         ensure!(
             fs::metadata(path)?.len() <= 1_048_576,
@@ -1391,6 +1888,8 @@ impl Instance {
                 journal.validate()?;
             }
         }
+        instance.validate_credential_runtime_metadata()?;
+        instance.validate_security_authority()?;
         instance.validate_edges()?;
         instance.validate_domain_entries()?;
         let mut queues = BTreeSet::new();
@@ -1519,6 +2018,466 @@ impl Instance {
 }
 
 #[cfg(test)]
+mod security_authority_selection_tests {
+    use super::*;
+    use day2_capabilities::{
+        BindingRef, Digest, Name, SecretProvider,
+        credential_runtime::{
+            CustodyRole, FamilyRuntime, RuntimeApp, RuntimeCatalog, attestation_revision,
+            quota_revision,
+        },
+        credentials::{CredentialFamilyBinding, DeliveryProfile, Namespace, RotationProfile},
+        oauth::{ResourceAudienceRef, SecurityOriginRef},
+        security_epoch::{AuthorityScope, EpochStore},
+    };
+    use std::num::NonZeroU64;
+
+    fn name(value: &str) -> Name {
+        value.to_owned().try_into().unwrap()
+    }
+    fn pin(value: &str) -> BindingRef {
+        BindingRef::pin(name(value), &value).unwrap()
+    }
+    fn scope(instance: &Instance) -> AuthorityScope {
+        AuthorityScope {
+            installation: name(&instance.installation),
+            environment: name(&instance.environment),
+            app: name("workspace"),
+        }
+    }
+    fn provider(value: &str, version: u64) -> SecretProvider {
+        SecretProvider::GcpVersion {
+            project_number: NonZeroU64::new(7).unwrap(),
+            secret: name(value),
+            version: NonZeroU64::new(version).unwrap(),
+        }
+    }
+    fn update_attestation(instance: &mut Instance) -> Result<()> {
+        let selected = &instance.credential_runtime.as_ref().unwrap().apps[&name("workspace")];
+        let provider = &instance.control.as_ref().unwrap().secrets[&selected.attestation_secret];
+        let namespaces: Vec<_> = instance.apps["workspace"]
+            .credential_families
+            .values()
+            .map(|family| family.namespace.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let (_, shell) = instance.security_edge()?;
+        let revision = attestation_revision(
+            &scope(instance),
+            &namespaces,
+            provider,
+            &shell.origin,
+            &shell.iap_audience,
+        )?;
+        instance
+            .credential_runtime
+            .as_mut()
+            .unwrap()
+            .apps
+            .get_mut(&name("workspace"))
+            .unwrap()
+            .attestation
+            .revision = revision;
+        Ok(())
+    }
+
+    // Reuse the admitted OAuth fixture's actual selections; add only the
+    // credential selectors under test. This is not a native readiness proof.
+    fn selected_instance() -> Result<Instance> {
+        let mut instance = crate::oauth::admission::live::tests::selected()?
+            .instance()
+            .clone();
+        let namespace = Namespace {
+            installation: name(&instance.installation),
+            environment: name(&instance.environment),
+            app: name("workspace"),
+            binding_generation: 7,
+        };
+        let family = CredentialFamilyBinding {
+            namespace,
+            family: name("clients"),
+            approved_authority: pin("approved"),
+            management: pin("management"),
+            rotation: RotationProfile::AtomicReplace,
+            delivery: DeliveryProfile::AuthenticatedCreatorReveal,
+            verifier: pin("credential-verifier"),
+            custody: pin("credential-custody"),
+            security_shell: SecurityOriginRef(pin("security-shell")),
+            audience: ResourceAudienceRef(pin("resource-audience")),
+            epoch_store: pin("unselected-epoch"),
+            max_lifetime_seconds: 3600,
+            reveal_window_seconds: 60,
+            quota: BindingRef {
+                id: name("quota"),
+                revision: quota_revision(12)?,
+            },
+        };
+        instance
+            .apps
+            .get_mut("workspace")
+            .unwrap()
+            .credential_families
+            .insert("clients".into(), family);
+        instance.credential_runtime = Some(RuntimeCatalog {
+            version: 1,
+            apps: BTreeMap::from([(
+                name("workspace"),
+                RuntimeApp {
+                    service_account: "credential-app@company-tools.iam.gserviceaccount.com".into(),
+                    attestation: pin("credential-attestation"),
+                    attestation_secret: name("credential-attestation"),
+                    families: BTreeMap::from([(
+                        name("clients"),
+                        FamilyRuntime {
+                            verifier_secret: name("credential-verify"),
+                            custody: CustodyRole::IssuerReveal {
+                                encryption_secret: name("credential-encrypt"),
+                            },
+                            max_active_lineages: 12,
+                        },
+                    )]),
+                },
+            )]),
+        });
+        let control = instance.control.as_mut().unwrap();
+        for (alias, secret) in [
+            ("credential-verify", provider("credential-verifier", 2)),
+            ("credential-encrypt", provider("credential-encryption", 3)),
+            (
+                "credential-attestation",
+                provider("credential-attestation", 4),
+            ),
+        ] {
+            control.secrets.insert(name(alias), secret);
+        }
+        update_attestation(&mut instance)?;
+        let mut store:EpochStore=crate::json::decode(serde_json::to_vec(&serde_json::json!({
+            "scope":{"installation":instance.installation,"environment":instance.environment,"app":"workspace"},
+            "provider":{"kind":"firestore_native_v1","project":"company-tools","project_number":7,"database":"tools",
+                "database_uid":"00000000-0000-4000-8000-000000000007","iam_source":{"kind":"gke_workload_identity_v1",
+                    "service_account":"epoch@company-tools.iam.gserviceaccount.com"}},
+            "key_set":Digest::of(&"pending-selection")?,"max_lease_seconds":30,
+        }))?.as_slice())?;
+        store.key_set = instance.security_key_set("workspace")?;
+        let reference = BindingRef {
+            id: name("external-epoch"),
+            revision: Digest::of(&store)?,
+        };
+        instance
+            .apps
+            .get_mut("workspace")
+            .unwrap()
+            .credential_families
+            .get_mut("clients")
+            .unwrap()
+            .epoch_store = reference;
+        let control = instance.control.as_mut().unwrap();
+        control
+            .security_epochs
+            .retain(|_, selected| selected.scope.app.as_str() != "workspace");
+        control
+            .security_epochs
+            .insert(name("external-epoch"), store);
+        Ok(instance)
+    }
+
+    #[test]
+    fn complete_key_set_includes_credentials_oauth_and_dedicated_attestation() -> Result<()> {
+        let instance = selected_instance()?;
+        instance.validate_security_authority()?;
+        let selections = instance.security_key_selections("workspace")?;
+        let purposes: BTreeSet<_> = selections.iter().map(|key| key.purpose).collect();
+        assert_eq!(
+            purposes,
+            BTreeSet::from([
+                SecurityKeyPurpose::CredentialVerifier,
+                SecurityKeyPurpose::CredentialEncryption,
+                SecurityKeyPurpose::CredentialShellAttestation,
+                SecurityKeyPurpose::OauthCustodyVerifier,
+                SecurityKeyPurpose::OauthCustodyEncryption,
+                SecurityKeyPurpose::OauthShellAttestation,
+                SecurityKeyPurpose::OauthProviderClient,
+                SecurityKeyPurpose::OauthReauthenticationClient,
+            ])
+        );
+        let credential_only =
+            instance.credential_runtime.as_ref().unwrap().apps[&name("workspace")].key_set(
+                &scope(&instance),
+                &instance.apps["workspace"].credential_families,
+                &instance.control.as_ref().unwrap().secrets,
+            )?;
+        assert_ne!(credential_only, instance.security_key_set("workspace")?);
+        let mut without_oauth = instance.clone();
+        without_oauth
+            .apps
+            .get_mut("workspace")
+            .unwrap()
+            .oauth_connections
+            .clear();
+        assert_ne!(
+            instance.security_key_set("workspace")?,
+            without_oauth.security_key_set("workspace")?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn complete_key_set_pins_exact_versions_bindings_namespace_generation_and_names() -> Result<()>
+    {
+        let instance = selected_instance()?;
+        let original = instance.security_key_set("workspace")?;
+        let mut changed = instance.clone();
+        changed.control.as_mut().unwrap().secrets.insert(
+            name("credential-verify"),
+            provider("credential-verifier", 8),
+        );
+        assert_ne!(original, changed.security_key_set("workspace")?);
+        let mut changed = instance.clone();
+        changed
+            .apps
+            .get_mut("workspace")
+            .unwrap()
+            .credential_families
+            .get_mut("clients")
+            .unwrap()
+            .verifier
+            .revision = Digest::of(&"new-verifier-binding")?;
+        assert_ne!(original, changed.security_key_set("workspace")?);
+        let mut changed = instance.clone();
+        changed
+            .apps
+            .get_mut("workspace")
+            .unwrap()
+            .credential_families
+            .get_mut("clients")
+            .unwrap()
+            .namespace
+            .binding_generation += 1;
+        assert!(changed.security_key_set("workspace").is_err());
+        update_attestation(&mut changed)?;
+        assert_ne!(original, changed.security_key_set("workspace")?);
+        let mut changed = instance.clone();
+        changed.control.as_mut().unwrap().secrets.insert(
+            name("credential-attestation"),
+            provider("credential-attestation", 9),
+        );
+        assert!(changed.security_key_set("workspace").is_err());
+        update_attestation(&mut changed)?;
+        assert_ne!(original, changed.security_key_set("workspace")?);
+        let mut changed = instance.clone();
+        let families = &mut changed
+            .apps
+            .get_mut("workspace")
+            .unwrap()
+            .credential_families;
+        let mut family = families.remove("clients").unwrap();
+        family.family = name("automation-clients");
+        families.insert("automation-clients".into(), family);
+        let families = &mut changed
+            .credential_runtime
+            .as_mut()
+            .unwrap()
+            .apps
+            .get_mut(&name("workspace"))
+            .unwrap()
+            .families;
+        let family = families.remove(&name("clients")).unwrap();
+        families.insert(name("automation-clients"), family);
+        assert_ne!(original, changed.security_key_set("workspace")?);
+        Ok(())
+    }
+
+    #[test]
+    fn repeated_oauth_purpose_refs_deduplicate_but_pin_all_named_selections() -> Result<()> {
+        let instance = selected_instance()?;
+        let original = instance.security_key_selections("workspace")?;
+        let mut repeated = instance.clone();
+        let connection = repeated.apps["workspace"].oauth_connections["calendar"].clone();
+        repeated
+            .apps
+            .get_mut("workspace")
+            .unwrap()
+            .oauth_connections
+            .insert("calendar_copy".into(), connection);
+        let selections = repeated.security_key_selections("workspace")?;
+        assert_eq!(original.len(), selections.len());
+        for key in selections.iter().filter(|key| {
+            matches!(
+                key.purpose,
+                SecurityKeyPurpose::OauthCustodyVerifier
+                    | SecurityKeyPurpose::OauthCustodyEncryption
+                    | SecurityKeyPurpose::OauthShellAttestation
+                    | SecurityKeyPurpose::OauthProviderClient
+            )
+        }) {
+            assert_eq!(
+                key.selections,
+                BTreeSet::from([name("calendar"), name("calendar_copy")])
+            );
+        }
+        assert_ne!(
+            instance.security_key_set("workspace")?,
+            repeated.security_key_set("workspace")?
+        );
+        let mut roundtrip: Instance =
+            crate::json::decode(serde_json::to_vec(&repeated)?.as_slice())?;
+        roundtrip
+            .apps
+            .get_mut("workspace")
+            .unwrap()
+            .oauth_connections = repeated.apps["workspace"]
+            .oauth_connections
+            .iter()
+            .rev()
+            .map(|(name, binding)| (name.clone(), binding.clone()))
+            .collect();
+        assert_eq!(
+            repeated.security_key_set("workspace")?,
+            roundtrip.security_key_set("workspace")?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cross_protocol_purposes_cannot_share_a_secret_container_even_at_distinct_versions()
+    -> Result<()> {
+        for target in [
+            "custody_verifier",
+            "custody_encryption",
+            "shell_attestation",
+        ] {
+            let mut instance = selected_instance()?;
+            let connection = &instance.apps["workspace"].oauth_connections["calendar"];
+            let alias = match target {
+                "custody_verifier" => &connection.custody_verifier_secret,
+                "custody_encryption" => &connection.custody_encryption_secret,
+                _ => &connection.shell_attestation_secret,
+            };
+            let mut reused = instance.control.as_ref().unwrap().secrets[alias].clone();
+            let SecretProvider::GcpVersion { version, .. } = &mut reused;
+            *version = NonZeroU64::new(99).unwrap();
+            let selected = if target == "shell_attestation" {
+                "credential-attestation"
+            } else {
+                "credential-verify"
+            };
+            instance
+                .control
+                .as_mut()
+                .unwrap()
+                .secrets
+                .insert(name(selected), reused);
+            update_attestation(&mut instance)?;
+            assert!(
+                instance.security_key_set("workspace").is_err(),
+                "accepted {target} container overlap"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn external_epoch_selection_requires_complete_scoped_pinned_authority() -> Result<()> {
+        let instance = selected_instance()?;
+        instance.validate_security_authority()?;
+        let mut missing = instance.clone();
+        missing.control.as_mut().unwrap().security_epochs.clear();
+        assert!(missing.validate_security_authority().is_err());
+        let mut ambiguous = instance.clone();
+        let store =
+            ambiguous.control.as_ref().unwrap().security_epochs[&name("external-epoch")].clone();
+        ambiguous
+            .control
+            .as_mut()
+            .unwrap()
+            .security_epochs
+            .insert(name("another-epoch"), store);
+        assert!(ambiguous.validate_security_authority().is_err());
+        let mut changed = instance.clone();
+        changed
+            .control
+            .as_mut()
+            .unwrap()
+            .security_epochs
+            .get_mut(&name("external-epoch"))
+            .unwrap()
+            .scope
+            .environment = name("other");
+        assert!(changed.validate_security_authority().is_err());
+        let mut changed = instance.clone();
+        changed
+            .control
+            .as_mut()
+            .unwrap()
+            .security_epochs
+            .get_mut(&name("external-epoch"))
+            .unwrap()
+            .key_set = Digest::of(&"credential-only")?;
+        assert!(changed.validate_security_authority().is_err());
+        let mut changed = instance.clone();
+        changed
+            .apps
+            .get_mut("workspace")
+            .unwrap()
+            .credential_families
+            .get_mut("clients")
+            .unwrap()
+            .epoch_store
+            .revision = Digest::of(&"wrong-store")?;
+        assert!(changed.validate_security_authority().is_err());
+        let mut changed = instance.clone();
+        changed
+            .credential_runtime
+            .as_mut()
+            .unwrap()
+            .apps
+            .get_mut(&name("workspace"))
+            .unwrap()
+            .families
+            .clear();
+        assert!(changed.validate_security_authority().is_err());
+        let mut changed = instance.clone();
+        let selected =
+            changed.credential_runtime.as_ref().unwrap().apps[&name("workspace")].clone();
+        changed
+            .credential_runtime
+            .as_mut()
+            .unwrap()
+            .apps
+            .insert(name("not-installed"), selected);
+        assert!(changed.validate_security_authority().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn current_oauth_declarations_require_the_complete_scoped_authority_selector() -> Result<()> {
+        let mut instance = crate::oauth::admission::live::tests::selected()?
+            .instance()
+            .clone();
+        instance.validate_security_authority()?;
+        instance.control.as_mut().unwrap().security_epochs.clear();
+        let error = instance.validate_security_authority().unwrap_err();
+        assert!(format!("{error:#}").contains("security_epoch_store_missing"));
+        // Removing runtime metadata cannot hide actual selected declarations.
+        instance.oauth_runtime = None;
+        let error = instance.validate_security_authority().unwrap_err();
+        assert!(format!("{error:#}").contains("security_epoch_store_missing"));
+        assert!(instance.security_key_set("missing").is_err());
+        assert!(instance.security_key_set("workspace").is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn security_free_current_app_needs_no_runtime_or_authority_selector() -> Result<()> {
+        let instance=Instance::from_bytes(br#"{"installation":"test","environment":"test","apps":{"app":{"artifact":"/artifact","readers":[],"writers":[]}}}"#)?;
+        instance.validate_credential_runtime_metadata()?;
+        instance.validate_security_authority()?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
 mod retired_audit_grant_tests {
     use super::*;
     use serde_json::json;
@@ -1557,6 +2516,83 @@ mod worker_executable_tests {
     use super::*;
     use serde_json::json;
     use std::os::unix::fs::{PermissionsExt, symlink};
+
+    #[test]
+    fn admission_context_keeps_private_selection_out_of_public_diagnostics() {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+        let path = PathBuf::from(OsString::from_vec(
+            b"/private/tmp/PRIVATE_WORKER_\xff".to_vec(),
+        ));
+        let id = digest(b"artifact fixture");
+        let worker_digest = digest(b"worker fixture");
+        let context = app_contract_exchange_context(&id, &worker_digest, &path);
+        assert!(context.contains(&format!("artifact_id={id}")));
+        assert!(context.contains(&format!("admitted_worker_digest={worker_digest}")));
+        assert!(context.contains(&format!(
+            "selected_path_bytes={}",
+            path.as_os_str().as_encoded_bytes().len()
+        )));
+        assert!(context.contains(&digest(path.as_os_str().as_encoded_bytes())));
+        assert!(!context.contains("PRIVATE_WORKER"));
+        assert!(context.len() < 512);
+        let different = PathBuf::from(OsString::from_vec(
+            b"/private/tmp/PRIVATE_WORKER_\xfe".to_vec(),
+        ));
+        assert_ne!(
+            context,
+            app_contract_exchange_context(&id, &worker_digest, &different)
+        );
+        let long = PathBuf::from(OsString::from_vec(vec![b'x'; 65_536]));
+        assert!(app_contract_exchange_context(&id, &worker_digest, &long).len() < 512);
+
+        let original = anyhow::Error::new(crate::error::Failure::WorkerTimeout).context(
+            crate::worker::ExitEvidence {
+                code: Some(70),
+                signal: None,
+                try_wait_failed: 0,
+                try_wait_errno: None,
+            },
+        );
+        let diagnostic = crate::error::diagnostic(&original);
+        let public = crate::web_api::failure_details(&original);
+        let failed: Result<()> = Err(original);
+        let error = failed
+            .with_context(|| app_contract_exchange_context(&id, &worker_digest, &path))
+            .unwrap_err()
+            .context("native build required application verification");
+        assert_eq!(
+            crate::error::classify(&error),
+            crate::error::Failure::WorkerTimeout
+        );
+        assert_eq!(
+            crate::error::classify(&error).category(),
+            crate::error::Category::Timeout
+        );
+        assert_eq!(crate::error::observation_code(&error), "worker_timeout");
+        assert_eq!(crate::error::diagnostic(&error), diagnostic);
+        assert_eq!(diagnostic["failure"], "worker_timeout");
+        assert_eq!(diagnostic["worker_exit"]["code"], 70);
+        assert_eq!(crate::web_api::failure_details(&error), public);
+        assert!(!diagnostic.to_string().contains(&id));
+        assert!(!diagnostic.to_string().contains(&worker_digest));
+        assert!(
+            !diagnostic
+                .to_string()
+                .contains(&digest(path.as_os_str().as_encoded_bytes()))
+        );
+        for field in [
+            "artifact_id",
+            "admitted_worker_digest",
+            "selected_path_bytes",
+            "selected_path_digest",
+            "PRIVATE_WORKER",
+        ] {
+            assert!(!diagnostic.to_string().contains(field));
+        }
+        assert!(format!("{error:#}").contains(&context));
+        assert!(format!("{error:#}").contains("worker_timeout"));
+        assert!(!format!("{error:#}").contains("PRIVATE_WORKER"));
+    }
 
     fn fixture() -> Result<(tempfile::TempDir, LoadedArtifact, Vec<u8>)> {
         let directory = tempfile::tempdir()?;

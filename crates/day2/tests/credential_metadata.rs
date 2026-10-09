@@ -9,9 +9,17 @@ use day2::{
     web::LocalServer,
 };
 use day2_capabilities::{BindingRef, Digest, Name, oauth::GrantCeiling};
-use reqwest::{StatusCode, blocking::Client, redirect::Policy};
+use reqwest::{
+    StatusCode,
+    blocking::Client,
+    header::{COOKIE, HOST, SET_COOKIE},
+    redirect::Policy,
+};
+use ring::{
+    rand::SystemRandom,
+    signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, KeyPair},
+};
 use rusqlite::params;
-use scraper::{Html, Selector};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 use std::{collections::BTreeMap, fs, path::PathBuf, sync::mpsc, thread, time::Duration};
@@ -21,6 +29,47 @@ use crate::support::compiler;
 struct World {
     _directory: tempfile::TempDir,
     runtime: Runtime,
+}
+
+struct MetadataIapKeys(String);
+
+impl day2::iap::KeySource for MetadataIapKeys {
+    fn fetch(&self) -> Result<String> {
+        Ok(self.0.clone())
+    }
+}
+
+/// Real test-held signature, checked by the existing IAP verifier and session
+/// path. These keys are not Google keys or a live browser/provider receipt.
+fn metadata_iap(edge: &day2::artifact::Edge, domain: &str) -> Result<(String, String)> {
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    let random = SystemRandom::new();
+    let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &random)
+        .map_err(|_| anyhow::anyhow!("metadata IAP signing key"))?;
+    let pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8.as_ref(), &random)
+        .map_err(|_| anyhow::anyhow!("metadata IAP key"))?;
+    let point = pair.public_key().as_ref();
+    let keys = json!({"keys":[{"kid":"metadata","kty":"EC","crv":"P-256","alg":"ES256",
+        "x":URL_SAFE_NO_PAD.encode(&point[1..33]),"y":URL_SAFE_NO_PAD.encode(&point[33..65])}]})
+    .to_string();
+    let now: i64 = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs()
+        .try_into()?;
+    let claims = json!({"iss":day2::iap::ISSUER,"aud":edge.iap_audience,"iat":now,"exp":now+600,
+        "sub":"accounts.google.com:google-bob","email":"bob@example.com","hd":domain});
+    let signed = format!(
+        "{}.{}",
+        URL_SAFE_NO_PAD.encode(json!({"alg":"ES256","kid":"metadata","typ":"JWT"}).to_string()),
+        URL_SAFE_NO_PAD.encode(claims.to_string())
+    );
+    let signature = pair
+        .sign(&random, signed.as_bytes())
+        .map_err(|_| anyhow::anyhow!("metadata IAP signature"))?;
+    Ok((
+        keys,
+        format!("{signed}.{}", URL_SAFE_NO_PAD.encode(signature.as_ref())),
+    ))
 }
 
 /// Canonical public fixture data, never a generated credential or entropy port.
@@ -78,6 +127,170 @@ fn lifecycle_admission_rejects_unbound_or_ambiguous_management_intent() -> Resul
     Ok(())
 }
 
+#[test]
+fn ordinary_creation_refuses_credentials_before_output_and_verification_preserves_complete_selection()
+-> Result<()> {
+    use day2_capabilities::credentials::ManagementPredicate;
+    let artifact_path = PathBuf::from(
+        std::env::var_os("DAY2_TEST_CREDENTIAL_METADATA_ARTIFACT")
+            .context("credential fixture required")?,
+    );
+    let artifact = LoadedArtifact::load(&artifact_path)?;
+    let directory = tempfile::tempdir()?;
+    for explicit_actor in [false, true] {
+        let output = directory.path().join(if explicit_actor {
+            "ordinary-for"
+        } else {
+            "ordinary"
+        });
+        let result = if explicit_actor {
+            day2::development::create_for(&artifact_path, &output, None, "alice@example.com")
+        } else {
+            day2::development::create(&artifact_path, &output, None)
+        };
+        let error = result
+            .err()
+            .context("ordinary credential creation was admitted")?;
+        assert!(
+            error
+                .to_string()
+                .contains("credential artifacts require explicit verification selection")
+        );
+        assert!(!output.exists());
+    }
+    let runtime = day2::development::create_verification_for(
+        &artifact_path,
+        &directory.path().join("verification"),
+        None,
+        "alice@example.com",
+    )?;
+    let original = Instance::load(runtime.instance_path())?;
+    for mutation in ["runtime", "missing_epoch", "foreign_epoch", "wrong_alias"] {
+        let mut invalid = original.clone();
+        match mutation {
+            "runtime" => invalid.credential_runtime = None,
+            "missing_epoch" => invalid.control.as_mut().unwrap().security_epochs.clear(),
+            "foreign_epoch" => {
+                invalid
+                    .control
+                    .as_mut()
+                    .unwrap()
+                    .security_epochs
+                    .values_mut()
+                    .next()
+                    .unwrap()
+                    .scope
+                    .environment = Name::try_from("foreign".to_owned())?
+            }
+            "wrong_alias" => {
+                invalid
+                    .apps
+                    .get_mut("app")
+                    .unwrap()
+                    .credential_families
+                    .values_mut()
+                    .next()
+                    .unwrap()
+                    .epoch_store
+                    .id = Name::try_from("foreign-epoch".to_owned())?
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            day2::development::repin_credential_verification_data(&mut invalid, &artifact).is_err(),
+            "{mutation}"
+        );
+    }
+    let mut current = original.clone();
+    current.identity.as_mut().unwrap().hosted_domain = "other.example.com".into();
+    current.security_shell.as_mut().unwrap().origin = "https://security.other.example.com".into();
+    current
+        .apps
+        .get_mut("app")
+        .unwrap()
+        .edge
+        .as_mut()
+        .unwrap()
+        .origin = "https://app.other.example.com".into();
+    current
+        .resources
+        .as_mut()
+        .unwrap()
+        .credentials
+        .management
+        .get_mut("client_keys")
+        .unwrap()
+        .read_metadata = ManagementPredicate::MemberOf {
+        group: Name::try_from("managers".to_owned())?,
+    };
+    let expected = current.clone();
+    day2::development::repin_credential_verification_data(&mut current, &artifact)?;
+    let admitted = Instance::from_bytes(&serde_json::to_vec(&current)?)?;
+    let old_epoch = original
+        .control
+        .as_ref()
+        .unwrap()
+        .security_epochs
+        .values()
+        .next()
+        .unwrap();
+    let epoch = admitted
+        .control
+        .as_ref()
+        .unwrap()
+        .security_epochs
+        .values()
+        .next()
+        .unwrap();
+    assert_eq!(epoch.scope, old_epoch.scope);
+    assert_eq!(epoch.provider, old_epoch.provider);
+    assert_eq!(epoch.max_lease_seconds, old_epoch.max_lease_seconds);
+    assert_eq!(epoch.key_set, admitted.security_key_set("app")?);
+    assert_eq!(
+        admitted
+            .resources
+            .as_ref()
+            .unwrap()
+            .credentials
+            .approved_authority,
+        expected
+            .resources
+            .as_ref()
+            .unwrap()
+            .credentials
+            .approved_authority
+    );
+    assert_eq!(
+        admitted.resources.as_ref().unwrap().credentials.management["client_keys"].read_metadata,
+        expected.resources.as_ref().unwrap().credentials.management["client_keys"].read_metadata
+    );
+    assert_eq!(
+        admitted
+            .credential_runtime
+            .as_ref()
+            .unwrap()
+            .apps
+            .values()
+            .next()
+            .unwrap()
+            .families,
+        original
+            .credential_runtime
+            .as_ref()
+            .unwrap()
+            .apps
+            .values()
+            .next()
+            .unwrap()
+            .families
+    );
+    assert_eq!(
+        admitted.control.as_ref().unwrap().secrets,
+        original.control.as_ref().unwrap().secrets
+    );
+    Ok(())
+}
+
 impl World {
     fn new() -> Result<Self> {
         let artifact_path = PathBuf::from(std::env::var_os("DAY2_TEST_CREDENTIAL_METADATA_ARTIFACT")
@@ -88,7 +301,7 @@ impl World {
             operation.actors.insert("bob@example.com".into());
         }
         let directory = tempfile::tempdir()?;
-        let runtime = day2::development::create_for(
+        let runtime = day2::development::create_verification_for(
             &artifact_path,
             &directory.path().join("instance"),
             Some(policy),
@@ -508,6 +721,20 @@ fn hostile_instructions_require_exact_declared_family_and_current_invocation_aut
 fn http_session_principal_controls_the_generated_metadata_query() -> Result<()> {
     let world = World::new()?;
     let runtime = world.runtime.clone();
+    let instance = Instance::load(runtime.instance_path())?;
+    let edge = instance.apps[runtime.app()]
+        .edge
+        .as_ref()
+        .context("metadata fixture edge")?
+        .clone();
+    let domain = instance
+        .identity
+        .as_ref()
+        .context("metadata fixture identity")?
+        .hosted_domain
+        .clone();
+    let (keys, assertion) = metadata_iap(&edge, &domain)?;
+    let authority = edge.authority().to_owned();
     let (sender, receiver) = mpsc::channel();
     let (stop, stopped) = tokio::sync::oneshot::channel();
     let thread = thread::spawn(move || -> Result<()> {
@@ -516,8 +743,17 @@ fn http_session_principal_controls_the_generated_metadata_query() -> Result<()> 
             .enable_all()
             .build()?
             .block_on(async {
-                let server = LocalServer::bind(runtime, "bob@example.com", 0).await?;
-                sender.send((server.origin.clone(), server.login_url.clone()))?;
+                let listener =
+                    tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
+                let address = format!("http://{}", listener.local_addr()?);
+                let verifier = day2::iap::Verifier::new(
+                    &edge.iap_audience,
+                    &domain,
+                    Box::new(MetadataIapKeys(keys)),
+                )?;
+                let server =
+                    LocalServer::bind_edge_listener(runtime, listener, &edge, verifier, 4)?;
+                sender.send(address)?;
                 server
                     .serve(async {
                         let _ = stopped.await;
@@ -525,7 +761,7 @@ fn http_session_principal_controls_the_generated_metadata_query() -> Result<()> 
                     .await
             })
     });
-    let (origin, login) = match receiver.recv_timeout(Duration::from_secs(10)) {
+    let origin = match receiver.recv_timeout(Duration::from_secs(10)) {
         Ok(addresses) => addresses,
         Err(error) => {
             thread.join().expect("HTTP server startup")?;
@@ -533,7 +769,6 @@ fn http_session_principal_controls_the_generated_metadata_query() -> Result<()> 
         }
     };
     let client = Client::builder()
-        .cookie_store(true)
         .redirect(Policy::none())
         .timeout(Duration::from_secs(30))
         .build()?;
@@ -543,33 +778,37 @@ fn http_session_principal_controls_the_generated_metadata_query() -> Result<()> 
                 .get(format!(
                     "{origin}/api/credential_metadata.list?after=&limit=1"
                 ))
+                .header(HOST, &authority)
                 .send()?
                 .status(),
             StatusCode::UNAUTHORIZED
         );
-        let html = Html::parse_document(&client.get(login).send()?.text()?);
-        let fields: BTreeMap<_, _> = html
-            .select(&Selector::parse("form input[name]").unwrap())
-            .map(|input| {
-                (
-                    input.value().attr("name").unwrap().to_owned(),
-                    input.value().attr("value").unwrap_or("").to_owned(),
-                )
-            })
-            .collect();
-        assert_eq!(
-            client
-                .post(format!("{origin}/login"))
-                .header("Origin", &origin)
-                .form(&fields)
-                .send()?
-                .status(),
-            StatusCode::SEE_OTHER
-        );
+        let session = client
+            .get(format!("{origin}/api/session"))
+            .header(HOST, &authority)
+            .header("x-goog-iap-jwt-assertion", &assertion)
+            .send()?;
+        assert_eq!(session.status(), StatusCode::OK);
+        let set_cookie = session
+            .headers()
+            .get(SET_COOKIE)
+            .context("metadata IAP session cookie")?
+            .to_str()?;
+        assert!(set_cookie.contains("Secure") && set_cookie.contains("HttpOnly"));
+        let cookie = set_cookie
+            .split(';')
+            .next()
+            .context("metadata IAP cookie")?
+            .to_owned();
+        let session_body: Value = serde_json::from_slice(&session.bytes()?)?;
+        assert_eq!(session_body["actor"], "bob@example.com");
         let response = client
             .get(format!(
                 "{origin}/api/credential_metadata.list?after=&limit=1"
             ))
+            .header(HOST, &authority)
+            .header("x-goog-iap-jwt-assertion", &assertion)
+            .header(COOKIE, &cookie)
             .header("X-Authenticated-User", "alice@example.com")
             .send()?;
         assert_eq!(response.status(), StatusCode::OK);
@@ -584,6 +823,9 @@ fn http_session_principal_controls_the_generated_metadata_query() -> Result<()> 
                 .get(format!(
                     "{origin}/api/credential_metadata.list?after=&limit=1&actor=alice@example.com"
                 ))
+                .header(HOST, &authority)
+                .header("x-goog-iap-jwt-assertion", &assertion)
+                .header(COOKIE, &cookie)
                 .send()?
                 .status(),
             StatusCode::BAD_REQUEST

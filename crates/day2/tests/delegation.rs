@@ -66,6 +66,7 @@ impl Pair {
             oauth_shell_transport: None,
             oauth_clients: None,
             oauth_runtime: None,
+            credential_runtime: None,
         };
         let path = directory.path().join("instance.json");
         fs::write(&path, serde_json::to_vec(&instance)?)?;
@@ -116,6 +117,7 @@ impl Pair {
             builders: BTreeMap::new(),
             runtimes: BTreeMap::new(),
             secrets: BTreeMap::new(),
+            security_epochs: BTreeMap::new(),
         });
         fs::write(&path, serde_json::to_vec(&instance)?)?;
         self.caller = Runtime::load(&path, "caller")?;

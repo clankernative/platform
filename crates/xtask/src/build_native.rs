@@ -516,7 +516,8 @@ fn publish_contract(
         directory.join("schema.sql"),
         schema.ddl()?.join(";\n") + ";\n",
     )?;
-    day2::artifact::LoadedArtifact::load(&directory)?;
+    day2::artifact::LoadedArtifact::load(&directory)
+        .context("native build published candidate admission")?;
     println!("Built candidate; verifying required application obligations");
     Ok(directory)
 }
@@ -706,7 +707,8 @@ pub fn execute(
                         2,
                         runner,
                         &prepared.import_fixtures,
-                    )?;
+                    )
+                    .context("native build required application verification")?;
                     ensure!(
                         evidence.verification_complete,
                         "application verification obligations incomplete"
@@ -722,7 +724,8 @@ pub fn execute(
                         "verified application required before selection"
                     );
                     let artifact = published.as_ref().context("candidate required")?;
-                    let loaded = day2::artifact::LoadedArtifact::load(artifact)?;
+                    let loaded = day2::artifact::LoadedArtifact::load(artifact)
+                        .context("native build candidate selection admission")?;
                     ensure!(
                         platform_sources(root)? == prepared.platform_hashes,
                         "platform inputs changed during verification"
@@ -731,7 +734,8 @@ pub fn execute(
                         .join("artifacts")
                         .join(loaded.id().trim_start_matches("sha256:"));
                     if destination.exists() {
-                        let existing = day2::artifact::LoadedArtifact::load(&destination)?;
+                        let existing = day2::artifact::LoadedArtifact::load(&destination)
+                            .context("native build existing selection admission")?;
                         ensure!(existing.id() == loaded.id(), "existing artifact differs");
                         fs::copy(
                             artifact.join("verification.json"),

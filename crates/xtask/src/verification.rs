@@ -236,7 +236,8 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
                         build_fixture(root, fixture, &fixtures)?
                     }
                 };
-                let loaded = day2::artifact::LoadedArtifact::load(&artifact)?;
+                let loaded = day2::artifact::LoadedArtifact::load(&artifact)
+                    .context("verification fixture artifact admission")?;
                 cache
                     .fixtures
                     .insert(fixture.into(), loaded.id().to_owned());
@@ -846,6 +847,7 @@ fn tests(
         for test in [
             "managed_credentials::simulation::actual_credential_http_inherits_ports_and_replays_exact_ids",
             "managed_credentials::store::tests::schema_native_runtime_initialization_reopens_with_installed_peers",
+            "unsecured_restore_refuses_declared_credentials_and_oauth_before_output_mutation",
             "managed_credentials::issuance::tests::native_issuance_rolls_back_and_recovers_the_same_public_receipt",
             "managed_credentials::issuance::tests::personal_issuance_uses_the_confirmed_subject_and_missing_readiness_denies",
             "managed_credentials::issuance::tests::hostile_issue_rejects_changed_label_family_principal_and_second_mutation",
@@ -860,6 +862,12 @@ fn tests(
         ] {
             command.args(["--skip", test]);
         }
+    }
+    if !fixtures.contains_key("oauth-calendar") && fixtures.contains_key("credential-metadata") {
+        command.args([
+            "--skip",
+            "unsecured_restore_refuses_declared_credentials_and_oauth_before_output_mutation",
+        ]);
     }
     for (fixture, variable) in [
         ("reports", "DAY2_TEST_REPORTS_ARTIFACT"),
