@@ -112,8 +112,8 @@ impl Rollup {
     }
 
     pub(crate) fn validate(&self, source: &Record) -> Result<()> {
-        crate::schema::identifier(&self.name)?;
-        crate::schema::identifier(&self.table())?;
+        day2_contracts::names::identifier(&self.name)?;
+        day2_contracts::names::identifier(&self.table())?;
         ensure!(
             !self.group.is_empty() && self.group.len() <= 8,
             "rollup {} needs one to eight group columns",
@@ -163,7 +163,7 @@ impl Rollup {
             );
         }
         for aggregate in &self.measures {
-            crate::schema::identifier(&aggregate.name)?;
+            day2_contracts::names::identifier(&aggregate.name)?;
             ensure!(
                 !self.group.iter().any(|group| group.field == aggregate.name)
                     && !matches!(
@@ -206,7 +206,7 @@ impl Rollup {
             fields,
             // Rows decode as a structural record, so no type is generated for them.
             roc_type: None,
-            identity: Some(crate::identity::ModelIdentity {
+            identity: Some(day2_contracts::identity::ModelIdentity {
                 key: source
                     .identity
                     .as_ref()

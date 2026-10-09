@@ -1,5 +1,6 @@
 use crate::{artifact::Artifact, output_schema, schema::Schema};
 use anyhow::{Context, Result, ensure};
+use day2_contracts::registry::Operation;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -24,13 +25,6 @@ pub struct Catalog {
     pub credentials: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub connections: BTreeMap<String, String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct Operation {
-    pub input: String,
-    pub output: String,
 }
 
 pub fn entrypoint(admission: bool) -> String {
@@ -270,7 +264,7 @@ impl Table {
             "integer" | "text" | "boolean" | "unit" => Ok(true),
             "unsigned" => {
                 ensure!(
-                    crate::numeric::Unsigned::from_roc(&a.name).is_some(),
+                    day2_contracts::numeric::Unsigned::from_roc(&a.name).is_some(),
                     "unsupported unsigned declaration width"
                 );
                 Ok(true)
@@ -376,7 +370,7 @@ pub fn from_checked_types(bytes: &[u8]) -> Result<Catalog> {
         ("day2_queries", "Declaration.Query", &mut catalog.queries),
     ] {
         for field in table.fields(symbol)? {
-            crate::schema::identifier(&field.name)?;
+            day2_contracts::names::identifier(&field.name)?;
             ensure!(
                 names.insert(field.name.clone()),
                 "command/query names must not conflict"
@@ -646,7 +640,7 @@ impl AppShape {
             );
             let mut names = BTreeSet::new();
             for field in &record.fields {
-                crate::schema::identifier(&field.name)?;
+                day2_contracts::names::identifier(&field.name)?;
                 ensure!(
                     names.insert(field.name.clone()),
                     "duplicate App.definition operation"
@@ -1095,11 +1089,11 @@ impl Catalog {
     }
 
     pub fn validate_artifact(&self, artifact: &Artifact) -> Result<()> {
-        crate::schema::identifier(&artifact.namespace)?;
+        day2_contracts::names::identifier(&artifact.namespace)?;
         let mut expected = BTreeMap::new();
         for (kind, entries) in [("command", &self.commands), ("query", &self.queries)] {
             for (name, declaration) in entries {
-                crate::schema::identifier(name)?;
+                day2_contracts::names::identifier(name)?;
                 ensure!(
                     expected
                         .insert(

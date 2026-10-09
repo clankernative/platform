@@ -65,7 +65,7 @@ impl Fixture {
                 "Outputs.roc",
                 day2::output_schema::roc_module(&contract.outputs)?,
             ),
-            ("Assets.roc", day2::assets::roc_module(&contract.assets)?),
+            ("Assets.roc", day2_assets::roc_module(&contract.assets)?),
             (
                 "Templates.roc",
                 day2::web_templates::roc_module(&contract.templates)?,

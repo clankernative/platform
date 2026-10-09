@@ -464,7 +464,7 @@ fn replay_business_observations(document: &Value) -> Result<()> {
         "business trace profile"
     );
     for app in ["request_desk", "stock_ledger"] {
-        day2::assets::hash_part(
+        day2_assets::hash_part(
             document["artifacts"][app]
                 .as_str()
                 .context("trace artifact")?,

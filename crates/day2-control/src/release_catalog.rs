@@ -74,8 +74,8 @@ impl Journal {
         environment: &Name,
         artifact_store: &Path,
     ) -> Result<()> {
-        day2::schema::identifier(company.as_str())?;
-        day2::schema::identifier(environment.as_str())?;
+        day2_contracts::names::identifier(company.as_str())?;
+        day2_contracts::names::identifier(environment.as_str())?;
         let checked = self.active_catalog(company, environment, artifact_store)?;
         let tx = day2::write_queue::immediate(&mut self.connection)?;
         ensure!(

@@ -7,6 +7,8 @@ license.workspace = true
 autotests = false
 
 [dependencies]
+day2-assets = { path = "../day2-assets" }
+day2-contracts = { path = "../day2-contracts" }
 day2-capabilities = { path = "../day2-capabilities" }
 anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
@@ -30,9 +32,6 @@ ring = "=0.17.14"
 getrandom = "0.3"
 cookie = "0.18"
 time = { version = "0.3", features = ["formatting"] }
-image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp"] }
-resvg = { version = "0.48.1", default-features = false }
-roxmltree = "0.21"
 cssparser = "=0.35.0"
 oxc_allocator = "=0.148.0"
 oxc_ast = "=0.148.0"
@@ -50,6 +49,7 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 day2-sandbox = { path = "../day2-sandbox" }
 
 [dev-dependencies]
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp"] }
 proptest = "=1.11.0"
 proc-macro2 = "=1.0.107"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "cookies"] }

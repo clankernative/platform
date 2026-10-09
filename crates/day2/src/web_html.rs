@@ -218,7 +218,7 @@ pub(crate) fn nodes(value: &Value) -> Result<Vec<Node>> {
             "unexpected_asset"
         );
         if !node.asset.is_empty() {
-            crate::schema::identifier(&node.asset)?;
+            day2_contracts::names::identifier(&node.asset)?;
         }
         ensure!(node.kind == "link" || node.url.is_empty(), "unexpected_url");
         ensure!(
@@ -722,7 +722,7 @@ pub(crate) fn page_url(runtime: &Runtime, page: &str, input: &Value) -> Result<S
         return crate::routing::Catalog::from_artifact(runtime.artifact().contract())?
             .build_url(page, input);
     }
-    crate::schema::identifier(page)?;
+    day2_contracts::names::identifier(page)?;
     let mut query = url::form_urlencoded::Serializer::new(String::new());
     for (name, value) in input.as_object().context("page_input")? {
         query.append_pair(

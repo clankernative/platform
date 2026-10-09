@@ -1,9 +1,6 @@
-use crate::{
-    artifact::Instance,
-    assets::{self, Catalog},
-    digest,
-};
+use crate::{artifact::Instance, digest};
 use anyhow::{Context, Result, ensure};
+use day2_assets::{self as assets, Catalog};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,

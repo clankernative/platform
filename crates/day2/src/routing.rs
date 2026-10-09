@@ -65,7 +65,7 @@ impl Catalog {
         let mut routes = BTreeMap::new();
         for page in pages {
             page.validate_live()?;
-            crate::schema::identifier(&page.name)?;
+            day2_contracts::names::identifier(&page.name)?;
             let queries = operations
                 .iter()
                 .filter(|operation| operation.name == page.operation)
@@ -86,7 +86,7 @@ impl Catalog {
                 .clone();
             ensure!(input.fields.len() <= 32, "route input field budget");
             for (field, kind) in &input.fields {
-                crate::schema::identifier(field)?;
+                day2_contracts::names::identifier(field)?;
                 ensure!(
                     !matches!(kind, Kind::OptionalText | Kind::InputShape { .. }),
                     "optional and structured route fields are not supported"
@@ -388,7 +388,7 @@ fn pattern(path: &str) -> Result<Vec<Segment>> {
         ensure!(!raw.is_empty(), "route trailing or repeated slash");
         let segment =
             if let Some(parameter) = raw.strip_prefix('{').and_then(|raw| raw.strip_suffix('}')) {
-                crate::schema::identifier(parameter)?;
+                day2_contracts::names::identifier(parameter)?;
                 Segment::Parameter(parameter.into())
             } else {
                 ensure!(

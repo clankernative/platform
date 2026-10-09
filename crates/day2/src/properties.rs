@@ -34,7 +34,7 @@ pub fn validate_catalog(names: &[String]) -> Result<()> {
     );
     let mut unique = BTreeSet::new();
     for name in names {
-        crate::schema::identifier(name)?;
+        day2_contracts::names::identifier(name)?;
         ensure!(unique.insert(name), "duplicate property name");
     }
     Ok(())

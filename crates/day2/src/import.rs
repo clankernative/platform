@@ -85,7 +85,7 @@ pub fn invocation_id(operation: &str, key: &str, actor: &str, input: &Value) -> 
     let digest = crate::digest(serde_json::to_string(&(actor, input))?.as_bytes());
     let id = format!(
         "import-{operation}-{key}-{}",
-        &crate::assets::hash_part(&digest)?[..16]
+        &day2_assets::hash_part(&digest)?[..16]
     );
     ensure!(id.len() <= 128, "invalid_import_key");
     Ok(id)

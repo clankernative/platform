@@ -454,7 +454,7 @@ impl StoredApprovalRegistry {
         let mut paths = BTreeSet::new();
         let mut selected = BTreeMap::new();
         for (app, path) in app_databases {
-            crate::schema::identifier(&app)?;
+            day2_contracts::names::identifier(&app)?;
             let metadata = fs::symlink_metadata(&path)?;
             ensure!(
                 metadata.is_file() && !metadata.file_type().is_symlink(),

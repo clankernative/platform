@@ -23,7 +23,7 @@ pub use credentials::{
 };
 
 fn image_digest(value: &str) -> Result<()> {
-    crate::assets::hash_part(value)?;
+    day2_assets::hash_part(value)?;
     Ok(())
 }
 
@@ -155,7 +155,7 @@ fn compose(
     profile.validate()?;
     let resources = profile.resources();
     let scope = crate::digest(instance.scope(app)?.as_bytes());
-    let hash = crate::assets::hash_part(&scope)?;
+    let hash = day2_assets::hash_part(&scope)?;
     let project = format!("day2-{hash}");
     let mut volumes = vec![
         json!({"type":"bind","source":"./instance.json","target":"/srv/day2/instance.json","read_only":true,"bind":{"create_host_path":false}}),
@@ -280,11 +280,11 @@ pub fn export_with_provisioning(
     );
     let branding = LoadedBrand::for_instance(&instance_path)?;
     let mut selected = binding.clone();
-    selected.artifact = format!("artifacts/{}", crate::assets::hash_part(artifact.id())?);
+    selected.artifact = format!("artifacts/{}", day2_assets::hash_part(artifact.id())?);
     let selected_branding = branding
         .as_ref()
         .map(|brand| {
-            Ok::<_, anyhow::Error>(format!("branding/{}", crate::assets::hash_part(&brand.id)?))
+            Ok::<_, anyhow::Error>(format!("branding/{}", day2_assets::hash_part(&brand.id)?))
         })
         .transpose()?;
     let instance = Instance {

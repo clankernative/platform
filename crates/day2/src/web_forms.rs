@@ -345,7 +345,7 @@ pub(crate) fn bind(view: &View<'_>, markup: &str) -> Result<Markup> {
                 Carrier::Scalar => ensure!(first, "invalid_or_duplicate_form_field"),
                 Carrier::Map => {
                     let key = key.context("map_form_field_requires_key")?;
-                    crate::schema::identifier(key)?;
+                    day2_contracts::names::identifier(key)?;
                     ensure!(keys.insert((field, key)), "invalid_or_duplicate_form_field");
                 }
                 Carrier::List | Carrier::Set => {}
