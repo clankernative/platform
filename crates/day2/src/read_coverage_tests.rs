@@ -657,12 +657,14 @@ fn required_all_rows_denies_child_request_and_rolls_back_prior_parent_write() ->
         let result = effect(
             &tx,
             &fixture.runtime.artifact().contract().schema,
-            fixture.runtime.scope(),
             &origin,
             &update,
-            active.policy()?,
-            "plain_write",
-            &crate::host_inputs::SecureEntropy,
+            EffectContext {
+                scope: fixture.runtime.scope(),
+                policy: active.policy()?,
+                operation: "plain_write",
+                entropy: &crate::host_inputs::SecureEntropy,
+            },
         )?;
         origin.observations.push(Observation {
             instruction: update,
