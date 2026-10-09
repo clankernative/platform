@@ -238,7 +238,7 @@ fn field<'a>(schema: &'a Value, path: &str) -> Result<&'a Value> {
         let (name, array) = part
             .strip_suffix("[]")
             .map_or((part, false), |name| (name, true));
-        crate::schema::identifier(name)?;
+        day2_contracts::names::identifier(name)?;
         value = value
             .get("properties")
             .and_then(|fields| fields.get(name))

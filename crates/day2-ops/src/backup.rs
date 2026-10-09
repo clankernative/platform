@@ -257,10 +257,7 @@ pub fn take(instance_path: &Path, app: &str, output: &Path) -> Result<Manifest> 
     // quiesced provider work, as the managed local checkpoint does before take.
     // This is not an atomic distributed snapshot of arbitrary active executors.
     let provider_databases = snapshot_providers(runtime.db(), output)?;
-    let artifact_relative = format!(
-        "artifacts/{}",
-        day2::assets::hash_part(&active.artifact_id)?
-    );
+    let artifact_relative = format!("artifacts/{}", day2_assets::hash_part(&active.artifact_id)?);
     private_new(&output.join("artifacts"))?;
     copy_tree(&artifact, &output.join(&artifact_relative), &mut 0, 0)?;
     ensure!(
@@ -305,7 +302,7 @@ pub fn verify(backup: &Path) -> Result<Manifest> {
             && manifest.instance.scope(&manifest.app)? == manifest.scope,
         "invalid backup scope"
     );
-    let artifact_relative = format!("artifacts/{}", day2::assets::hash_part(&manifest.artifact)?);
+    let artifact_relative = format!("artifacts/{}", day2_assets::hash_part(&manifest.artifact)?);
     ensure!(
         manifest.instance.branding.is_none()
             && manifest.instance.apps[&manifest.app].artifact == artifact_relative,
@@ -359,7 +356,7 @@ fn require_unsecured_restore(
 pub fn restore(backup: &Path, output: &Path) -> Result<PathBuf> {
     // Revalidate at the write boundary even if the Roc recipe already checked.
     let manifest = verify(backup)?;
-    let artifact_relative = format!("artifacts/{}", day2::assets::hash_part(&manifest.artifact)?);
+    let artifact_relative = format!("artifacts/{}", day2_assets::hash_part(&manifest.artifact)?);
     let artifact = day2::artifact::LoadedArtifact::load(&backup.join(&artifact_relative))?;
     require_unsecured_restore(&manifest, &artifact)?;
     private_new(output)?;

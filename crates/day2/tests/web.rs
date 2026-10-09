@@ -2775,7 +2775,7 @@ fn asset_cache_validators_do_not_bypass_blob_integrity_or_brand_binding() -> Res
         .directory
         .path()
         .join("artifacts")
-        .join(day2::assets::hash_part(world.runtime.artifact().id())?);
+        .join(day2_assets::hash_part(world.runtime.artifact().id())?);
     copy_tree(world.runtime.artifact().directory(), &artifact)?;
     let mut instance = Instance::load(world.runtime.instance_path())?;
     instance.apps.get_mut("links").unwrap().artifact = artifact.to_string_lossy().into();
@@ -2809,20 +2809,20 @@ fn asset_cache_validators_do_not_bypass_blob_integrity_or_brand_binding() -> Res
             attribute(&page, "script[src$='/app.js']", "src")?,
             artifact
                 .join("web_resources")
-                .join(format!("{}.js", day2::assets::hash_part(&module.digest)?)),
+                .join(format!("{}.js", day2_assets::hash_part(&module.digest)?)),
         ),
         (
             attribute(&page, "img.app-icon", "src")?,
             artifact
                 .join("assets")
-                .join(format!("{}.png", day2::assets::hash_part(&image.digest)?)),
+                .join(format!("{}.png", day2_assets::hash_part(&image.digest)?)),
         ),
         (
             attribute(&login_html, ".brand img", "src")?,
             brand
                 .directory
                 .join("assets")
-                .join(format!("{}.png", day2::assets::hash_part(&logo.digest)?)),
+                .join(format!("{}.png", day2_assets::hash_part(&logo.digest)?)),
         ),
     ] {
         let url = format!("{}{path}", server.origin);

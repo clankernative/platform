@@ -46,7 +46,7 @@ fn render<'a>(
     );
     let mut seen = BTreeSet::new();
     for name in names {
-        crate::schema::identifier(name)?;
+        day2_contracts::names::identifier(name)?;
         ensure!(seen.insert(name), "duplicate generated credential family");
         ensure!(seen.len() <= 64, "generated credential family budget");
         // Concrete nominals avoid return-only phantom specialization in the

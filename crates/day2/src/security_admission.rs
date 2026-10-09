@@ -139,7 +139,7 @@ impl Requirements {
             "sdk/main.roc",
             "sdk/contracts/Resource.roc",
         ] {
-            crate::assets::hash_part(
+            day2_assets::hash_part(
                 artifact
                     .contract()
                     .sources
@@ -149,7 +149,7 @@ impl Requirements {
         }
         match &self.containment {
             Containment::MacosSandboxV1 { supervisor } => {
-                crate::assets::hash_part(supervisor)?;
+                day2_assets::hash_part(supervisor)?;
             }
             Containment::LinuxQualifiedV1 { evidence } => {
                 for value in [
@@ -159,7 +159,7 @@ impl Requirements {
                     &evidence.runtime_supervisor,
                     &evidence.runtime_sandbox,
                 ] {
-                    crate::assets::hash_part(value)?;
+                    day2_assets::hash_part(value)?;
                 }
                 ensure!(
                     evidence.platform_inventory == self.platform_inventory,

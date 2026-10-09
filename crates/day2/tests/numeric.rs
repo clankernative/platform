@@ -1,10 +1,10 @@
 use anyhow::Result;
 use day2::{
-    numeric::Unsigned,
     openapi,
     output_schema::{self, Type},
     schema::{Kind, Record, Schema},
 };
+use day2_contracts::numeric::Unsigned;
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, fs, path::Path};
 

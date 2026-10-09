@@ -109,7 +109,7 @@ fn render(imports: &ImportedContracts, admission: bool) -> Result<String> {
         ));
         let function = package.operation.id.replace(['.', '-'], "_");
         if package.operation.kind == crate::operation_contract::Kind::Query {
-            crate::schema::identifier(&function)?;
+            day2_contracts::names::identifier(&function)?;
             ensure!(
                 functions.insert(function.clone()),
                 "imported function name collision"
@@ -156,8 +156,8 @@ fn render(imports: &ImportedContracts, admission: bool) -> Result<String> {
         } else {
             let send = format!("{function}_send");
             let status = format!("{function}_status");
-            crate::schema::identifier(&send)?;
-            crate::schema::identifier(&status)?;
+            day2_contracts::names::identifier(&send)?;
+            day2_contracts::names::identifier(&status)?;
             ensure!(
                 functions.insert(send.clone()) && functions.insert(status.clone()),
                 "imported function name collision"

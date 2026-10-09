@@ -69,7 +69,7 @@ pub(crate) fn activated_artifact_unavailable(
         .file_name()
         .and_then(|name| name.to_str())
         .map(|name| format!("sha256:{name}"))
-        .filter(|id| crate::assets::hash_part(id).is_ok())
+        .filter(|id| day2_assets::hash_part(id).is_ok())
         .unwrap_or_else(|| desired.display().to_string());
     let requested = if requested == active.artifact_id {
         String::new()
@@ -195,7 +195,7 @@ mod observed_target_tests {
 #[cfg(test)]
 mod unsigned_storage_tests {
     use super::*;
-    use crate::numeric::Unsigned;
+    use day2_contracts::numeric::Unsigned;
     use std::collections::BTreeMap;
 
     #[test]
@@ -1935,7 +1935,7 @@ fn read_row(row: &rusqlite::Row<'_>, record: &Record) -> rusqlite::Result<Row> {
                     .map_err(|_| rusqlite::Error::InvalidQuery)?;
                 json!(Id::from_uuid(prefix, bytes).map_err(|_| rusqlite::Error::InvalidQuery)?)
             }
-            Kind::Unsigned(crate::numeric::Unsigned::U64) => {
+            Kind::Unsigned(day2_contracts::numeric::Unsigned::U64) => {
                 let bytes: Vec<u8> = row.get(index + 3)?;
                 let bytes: [u8; 8] = bytes
                     .try_into()
@@ -2234,7 +2234,7 @@ fn sql_value(kind: &Kind, value: &Value) -> Result<SqlValue> {
                 .bytes_for(prefix)?
                 .to_vec(),
         ),
-        Kind::Unsigned(crate::numeric::Unsigned::U64) => SqlValue::Blob(
+        Kind::Unsigned(day2_contracts::numeric::Unsigned::U64) => SqlValue::Blob(
             value
                 .as_u64()
                 .context("invalid_unsigned_integer")?
@@ -2703,7 +2703,7 @@ mod selection_tests {
             ("active".into(), Kind::Boolean),
             (
                 "visits".into(),
-                Kind::Unsigned(crate::numeric::Unsigned::U64),
+                Kind::Unsigned(day2_contracts::numeric::Unsigned::U64),
             ),
             ("description".into(), Kind::OptionalText),
             ("unindexed".into(), Kind::Text),

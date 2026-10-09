@@ -19,7 +19,7 @@ pub(crate) fn validate_schema(shape: &Type, depth: usize, nodes: &mut usize) -> 
         Type::Record(fields) => {
             ensure!(fields.len() <= MAX_FIELDS, "input record field budget");
             for (name, field) in fields {
-                crate::schema::identifier(name)?;
+                day2_contracts::names::identifier(name)?;
                 validate_schema(field, depth + 1, nodes)?;
             }
         }
@@ -290,7 +290,9 @@ mod tests {
         ] {
             assert!(validate_schema(&Type::List(Box::new(unsupported)), 1, &mut 0).is_err());
         }
-        let shape = Type::List(Box::new(Type::Unsigned(crate::numeric::Unsigned::U64)));
+        let shape = Type::List(Box::new(Type::Unsigned(
+            day2_contracts::numeric::Unsigned::U64,
+        )));
         validate_value(&shape, &json!([u64::MAX]))?;
         assert!(validate_value(&shape, &json!([1.5])).is_err());
         assert!(validate_value(&shape, &json!([-1])).is_err());

@@ -552,7 +552,7 @@ impl Session {
         let tx = day2::write_queue::immediate(&mut db)?;
         tx.execute_batch("PRAGMA defer_foreign_keys=ON")?;
         for model in runtime.artifact().contract().schema.models.keys() {
-            day2::schema::identifier(model)?;
+            day2_contracts::names::identifier(model)?;
             let count: i64 =
                 tx.query_row(&format!("SELECT COUNT(*) FROM \"{model}\""), [], |row| {
                     row.get(0)

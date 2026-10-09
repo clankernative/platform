@@ -90,7 +90,7 @@ impl Catalog {
                     && operation
                         .name
                         .split('.')
-                        .all(|name| crate::schema::identifier(name).is_ok()),
+                        .all(|name| day2_contracts::names::identifier(name).is_ok()),
                 "invalid public operation name"
             );
             ensure!(
@@ -275,7 +275,7 @@ pub fn input_schema(kind: &Kind) -> Value {
             json!({"type":"integer","format":"int64","minimum":i64::MIN,"maximum":i64::MAX,"examples":[1]})
         }
         Kind::Unsigned(unsigned) => unsigned.schema(),
-        Kind::RowVersion => crate::numeric::row_version_schema(),
+        Kind::RowVersion => day2_contracts::numeric::row_version_schema(),
         Kind::Text => string_schema(),
         Kind::Boolean => json!({"type":"boolean","examples":[false]}),
         Kind::TextDomain { roc_type } => {
@@ -337,7 +337,7 @@ pub fn output_schema(shape: &Type) -> Value {
         }
         Type::Integer => input_schema(&Kind::Integer),
         Type::Unsigned(unsigned) => unsigned.schema(),
-        Type::RowVersion => crate::numeric::row_version_schema(),
+        Type::RowVersion => day2_contracts::numeric::row_version_schema(),
         Type::Boolean => input_schema(&Kind::Boolean),
         Type::Cursor => input_schema(&Kind::Cursor),
         Type::PageSize => input_schema(&Kind::PageSize),
