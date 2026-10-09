@@ -29,6 +29,7 @@ mod error;
 mod execution;
 mod host;
 pub mod host_inputs;
+mod host_loop;
 pub mod iap;
 pub mod iap_workload;
 pub mod identity;

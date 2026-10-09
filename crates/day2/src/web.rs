@@ -113,20 +113,6 @@ impl Admission {
         self.0.store(false, Ordering::Release);
     }
 }
-/// How often the occurrence source looks for work. This is not the schedule
-/// interval: occurrences are derived from the clock, so this only bounds how late
-/// a run can start, never whether it happens. The shortest interval an application
-/// may declare is a minute, so looking every ten seconds is frequent enough to keep
-/// lateness small and rare enough to cost two indexed lookups per schedule.
-const SCHEDULE_TICK: Duration = Duration::from_secs(10);
-
-/// How often the journal is compacted, and how much one pass may do. Each batch is
-/// its own short write transaction, so requests queue behind at most one batch; a
-/// backlog larger than one pass drains over the following minutes.
-const JOURNAL_TICK: Duration = Duration::from_secs(60);
-const JOURNAL_BATCH: usize = 500;
-const JOURNAL_BATCHES_PER_TICK: usize = 20;
-
 /// A loopback documentation preview with no sessions or business API dispatcher.
 pub async fn serve_docs_preview(
     artifact: crate::artifact::LoadedArtifact,
@@ -416,138 +402,34 @@ impl LocalServer {
         host.oauth = Some(receiver);
         Ok(())
     }
+
     pub async fn serve(self, shutdown: impl Future<Output = ()> + Send + 'static) -> Result<()> {
-        let runtime = self.host.runtime.clone();
-        let (stop, mut stopped) = tokio::sync::watch::channel(false);
-        let commands = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_millis(200));
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            loop {
-                tokio::select! {
-                    _ = stopped.changed() => break,
-                    _ = interval.tick() => {
-                        let runtime = runtime.clone();
-                        match tokio::task::spawn_blocking(move || crate::invocations::drain(&runtime, 8)).await {
-                            Ok(Ok(_)) => {}
-                            Ok(Err(error)) => eprintln!("command_scheduler_tick_failed {}", crate::error::diagnostic(&error)),
-                            Err(_) => eprintln!("command_scheduler_task_failed"),
-                        }
-                    }
-                }
-            }
-        });
-        // Only applications that declare a schedule get an occurrence source.
-        let declared = !self.host.runtime.artifact().contract().schedules.is_empty();
-        let scheduled = declared.then(|| {
-            let runtime = self.host.runtime.clone();
-            let clock = self.host.clock.clone();
-            let mut stopped = stop.subscribe();
-            tokio::spawn(async move {
-                // A refusal is a condition, not an event: an unbound schedule is
-                // still unbound on the next tick. Report each one when it changes,
-                // so a stuck schedule is visible without a line every ten seconds.
-                let mut reported = crate::schedules::Refusals::default();
-                let mut interval = tokio::time::interval(SCHEDULE_TICK);
-                // A tick missed under load is skipped rather than replayed: the
-                // occurrence it would have found is still derived from the clock on
-                // the next one, so catching up here would only duplicate work.
-                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                loop {
-                    tokio::select! {
-                        _ = stopped.changed() => break,
-                        _ = interval.tick() => {
-                            let runtime = runtime.clone();
-                            let clock = clock.clone();
-                            let ticked = tokio::task::spawn_blocking(move || {
-                                crate::schedules::tick(&runtime, clock.wall_time()?.as_millis().try_into()?)
-                            })
-                            .await;
-                            match ticked {
-                                Ok(Ok(ticks)) => {
-                                    for tick in ticks {
-                                        // A refusal is reported once, where it happens.
-                                        // A schedule that silently does nothing cannot be
-                                        // told from one that is working.
-                                        if reported.should_report(
-                                            &tick.schedule,
-                                            tick.skipped.as_ref(),
-                                        ) {
-                                            eprintln!(
-                                                "schedule_not_offered {} {:?}",
-                                                tick.schedule,
-                                                tick.skipped
-                                            );
-                                        }
-                                        for (occurrence, outcome) in tick.offered {
-                                            if outcome.status == "failure" {
-                                                eprintln!(
-                                                    "schedule_run_failed {} {occurrence} {}",
-                                                    tick.schedule, outcome.error
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
-                                Ok(Err(error)) => eprintln!(
-                                    "schedule_source_tick_failed {}",
-                                    crate::error::diagnostic(&error)
-                                ),
-                                Err(_) => eprintln!("schedule_source_task_failed"),
-                            }
-                        }
-                    }
-                }
-            })
-        });
-        let journal = {
-            let runtime = self.host.runtime.clone();
-            let clock = self.host.clock.clone();
-            let mut stopped = stop.subscribe();
-            tokio::spawn(async move {
-                let mut interval = tokio::time::interval(JOURNAL_TICK);
-                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                loop {
-                    tokio::select! {
-                        _ = stopped.changed() => break,
-                        _ = interval.tick() => {
-                            let runtime = runtime.clone();
-                            let clock = clock.clone();
-                            let compacted = tokio::task::spawn_blocking(move || -> Result<()> {
-                                for _ in 0..JOURNAL_BATCHES_PER_TICK {
-                                    if crate::journal::compact(&runtime, clock.wall_time()?.as_secs().try_into()?, JOURNAL_BATCH)? < JOURNAL_BATCH {
-                                        break;
-                                    }
-                                }
-                                Ok(())
-                            })
-                            .await;
-                            match compacted {
-                                Ok(Ok(())) => {}
-                                Ok(Err(error)) => eprintln!(
-                                    "journal_compaction_failed {}",
-                                    crate::error::diagnostic(&error)
-                                ),
-                                Err(_) => eprintln!("journal_compaction_task_failed"),
-                            }
-                        }
-                    }
-                }
-            })
-        };
+        let (stop, stopped) = tokio::sync::watch::channel(false);
+        let background = tokio::spawn(crate::host_loop::run(
+            self.host.runtime.clone(),
+            self.host.clock.clone(),
+            self.host.live_ticks.clone(),
+            self.host.admitting.clone(),
+            stopped,
+        ));
         let admitting = self.host.admitting.clone();
+        let shutdown_admission = admitting.clone();
+        let shutdown_stop = stop.clone();
         let router = Router::new().fallback(handle).with_state(self.host);
         let result = axum::serve(self.listener, router)
             .with_graceful_shutdown(async move {
                 shutdown.await;
-                admitting.store(false, Ordering::Release);
+                shutdown_admission.store(false, Ordering::Release);
+                // Stop pumps immediately, not only after HTTP has drained.
+                let _ = shutdown_stop.send(true);
             })
             .await;
+        // Also stop after an unexpected server exit. Already admitted requests
+        // and blocking native calls may still finish; shutdown does not undo
+        // their transactions or interrupt external calls. Await pump settlement.
+        admitting.store(false, Ordering::Release);
         let _ = stop.send(true);
-        commands.await?;
-        journal.await?;
-        if let Some(scheduled) = scheduled {
-            scheduled.await?;
-        }
+        background.await??;
         result?;
         Ok(())
     }
