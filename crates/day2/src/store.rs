@@ -1569,18 +1569,14 @@ impl Runtime {
                     let mutation = step.mutation();
                     let result = (|| -> Result<String> {
                         ensure!(!mutation || kind != "query", "query_write_forbidden");
-                        if matches!(step, Step::Database(Database::Write { .. }))
+                        if let Step::Database(write @ Database::Write { .. }) = step
                             && let Some(contract) = &self.artifact.contract().app_contract
                         {
-                            crate::domain::record(
+                            check_write_domains(
+                                connection,
+                                &self.artifact.contract().schema,
                                 &contract.domains,
-                                self.artifact
-                                    .contract()
-                                    .schema
-                                    .models
-                                    .get(&instruction.model)
-                                    .context("unknown_model")?,
-                                &serde_json::from_str(&instruction.data)?,
+                                write,
                             )?;
                         }
                         if matches!(
@@ -1724,25 +1720,22 @@ impl Runtime {
         validate_storage_snapshot(&mut connection, &self.artifact, &self.scope)
     }
 
+    /// Retained rows, including tombstones, for storage comparison and inspection.
     pub fn inspect(&self) -> Result<Value> {
+        self.snapshot(SnapshotScope::Retained)
+    }
+
+    /// Complete live application state, matching ordinary query visibility.
+    /// App-owned checks receive Entities, which deliberately expose no deletion flag.
+    pub fn application_snapshot(&self) -> Result<Value> {
+        self.snapshot(SnapshotScope::Live)
+    }
+
+    fn snapshot(&self, scope: SnapshotScope) -> Result<Value> {
         let mut connection = open(&self.db)?;
         let snapshot = connection.transaction()?;
         self.check_binding(&snapshot)?;
-        let limit = crate::properties::MAX_ROWS_PER_MODEL;
-        let mut models = serde_json::Map::new();
-        for (name, record) in &self.artifact.contract().schema.models {
-            let sql = format!(
-                "SELECT {} FROM \"{name}\" ORDER BY id LIMIT {}",
-                projection(record),
-                limit + 1
-            );
-            let mut statement = snapshot.prepare(&sql)?;
-            let rows = statement
-                .query_map([], |row| read_row(row, record))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            ensure!(rows.len() <= limit, "inspection_limit");
-            models.insert(name.clone(), serde_json::to_value(rows)?);
-        }
+        let models = read_model_snapshot(&snapshot, &self.artifact.contract().schema, scope)?;
         for rollup in &self.artifact.contract().schema.rollups {
             ensure!(
                 rollup.mismatches(&snapshot)? == 0,
@@ -1751,7 +1744,7 @@ impl Runtime {
             );
         }
         snapshot.commit()?;
-        Ok(Value::Object(models))
+        Ok(models)
     }
 }
 
@@ -2027,6 +2020,39 @@ pub(crate) fn get(connection: &Connection, model: &str, record: &Record, id: Id)
     get_optional(connection, model, record, id)?.context(crate::error::Failure::NotFound)
 }
 
+#[derive(Clone, Copy)]
+enum SnapshotScope {
+    Retained,
+    Live,
+}
+
+fn read_model_snapshot(
+    connection: &Connection,
+    schema: &Schema,
+    scope: SnapshotScope,
+) -> Result<Value> {
+    let limit = crate::properties::MAX_ROWS_PER_MODEL;
+    let predicate = match scope {
+        SnapshotScope::Retained => "",
+        SnapshotScope::Live => " WHERE deleted_at=0",
+    };
+    let mut models = serde_json::Map::new();
+    for (name, record) in &schema.models {
+        let sql = format!(
+            "SELECT {} FROM \"{name}\"{predicate} ORDER BY id LIMIT {}",
+            projection(record),
+            limit + 1,
+        );
+        let mut statement = connection.prepare(&sql)?;
+        let rows = statement
+            .query_map([], |row| read_row(row, record))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        ensure!(rows.len() <= limit, "inspection_limit");
+        models.insert(name.clone(), serde_json::to_value(rows)?);
+    }
+    Ok(Value::Object(models))
+}
+
 fn get_optional(
     connection: &Connection,
     model: &str,
@@ -2142,6 +2168,32 @@ fn precondition_target(
         );
     }
     Ok(application.or(operator))
+}
+
+fn check_write_domains(
+    connection: &Connection,
+    schema: &Schema,
+    domains: &crate::domain::Catalog,
+    write: Database<'_>,
+) -> Result<()> {
+    let Database::Write {
+        model,
+        data,
+        change,
+    } = write
+    else {
+        bail!("unsupported_database_effect");
+    };
+    let record = schema.models.get(model).context("unknown_model")?;
+    // Lifecycle instructions cannot carry field edits. Validate their stored
+    // value (including deleted rows for restore), not an empty JSON payload.
+    let value = match change {
+        Write::SoftDelete { id, .. } | Write::Restore { id, .. } => {
+            serde_json::from_str(&get_any(connection, model, record, id)?.data)?
+        }
+        Write::Create | Write::Update { .. } => serde_json::from_str(data)?,
+    };
+    crate::domain::record(domains, record, &value)
 }
 
 fn check_app_effect(
@@ -2791,6 +2843,169 @@ mod selection_tests {
                 now: 100,
             },
         )?)?)
+    }
+
+    #[test]
+    fn application_snapshots_hide_tombstones_without_losing_retained_state() -> Result<()> {
+        let (connection, schema) = fixture()?;
+        let retained = read_model_snapshot(&connection, &schema, SnapshotScope::Retained)?;
+        assert_eq!(
+            retained,
+            read_model_snapshot(&connection, &schema, SnapshotScope::Live)?
+        );
+        connection.execute(
+            "UPDATE links SET deleted_at=500,version=version+1 WHERE id=2",
+            [],
+        )?;
+        let deleted = read_model_snapshot(&connection, &schema, SnapshotScope::Retained)?;
+        let live = read_model_snapshot(&connection, &schema, SnapshotScope::Live)?;
+        assert_eq!(
+            deleted["links"].as_array().context("retained rows")?.len(),
+            250
+        );
+        assert_eq!(live["links"].as_array().context("live rows")?.len(), 249);
+        assert!(
+            deleted["links"]
+                .as_array()
+                .context("retained rows")?
+                .iter()
+                .any(|row| row["id"] == 2)
+        );
+        assert!(
+            live["links"]
+                .as_array()
+                .context("live rows")?
+                .iter()
+                .all(|row| row["id"] != 2)
+        );
+        assert_ne!(
+            retained, deleted,
+            "retained comparisons still detect lifecycle changes"
+        );
+        connection.execute(
+            "UPDATE links SET deleted_at=0,version=version+1 WHERE id=2",
+            [],
+        )?;
+        assert_eq!(
+            read_model_snapshot(&connection, &schema, SnapshotScope::Retained)?,
+            read_model_snapshot(&connection, &schema, SnapshotScope::Live)?,
+            "restored records return to application state",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn snapshot_scopes_fail_closed_without_silent_truncation() -> Result<()> {
+        let (connection, schema) = fixture()?;
+        connection.execute(
+            "INSERT INTO links(id,version,created_at,name,owner,active,visits,unindexed) \
+             SELECT id+250,version,created_at,name,owner,active,visits,unindexed FROM links WHERE id<=7",
+            [],
+        )?;
+        for scope in [SnapshotScope::Retained, SnapshotScope::Live] {
+            assert_eq!(
+                read_model_snapshot(&connection, &schema, scope)
+                    .unwrap_err()
+                    .to_string(),
+                "inspection_limit"
+            );
+        }
+        connection.execute("UPDATE links SET deleted_at=500 WHERE id>250", [])?;
+        assert_eq!(
+            read_model_snapshot(&connection, &schema, SnapshotScope::Retained)
+                .unwrap_err()
+                .to_string(),
+            "inspection_limit"
+        );
+        assert_eq!(
+            read_model_snapshot(&connection, &schema, SnapshotScope::Live)?["links"]
+                .as_array()
+                .context("live rows")?
+                .len(),
+            250
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn payloadless_lifecycle_writes_validate_the_stored_domain_value() -> Result<()> {
+        let (connection, mut schema) = fixture()?;
+        schema
+            .models
+            .get_mut("links")
+            .context("links")?
+            .fields
+            .insert(
+                "name".into(),
+                Kind::StandardText {
+                    domain: "LifecycleName".into(),
+                },
+            );
+        let domains = BTreeMap::from([(
+            "LifecycleName".into(),
+            crate::domain::TextRule {
+                maximum_bytes: 20,
+                nonblank: true,
+                description: "Nonblank lifecycle fixture name".into(),
+            },
+        )]);
+        for kind in ["create", "update"] {
+            for (name, accepted) in [("Valid name", true), ("", false)] {
+                let instruction = Instruction {
+                    kind: kind.into(),
+                    model: "links".into(),
+                    id: if kind == "update" {
+                        Id::Legacy(2)
+                    } else {
+                        Id::default()
+                    },
+                    expected_version: if kind == "update" { 3 } else { 0 },
+                    data: json!({"name":name}).to_string(),
+                    ..Instruction::default()
+                };
+                let Step::Database(write) = instruction.decode()? else {
+                    bail!("expected field database write");
+                };
+                let result = check_write_domains(&connection, &schema, &domains, write);
+                assert_eq!(
+                    result.is_ok(),
+                    accepted,
+                    "{kind} must validate its supplied fields"
+                );
+                if !accepted {
+                    assert_eq!(result.unwrap_err().to_string(), "invalid_domain_value");
+                }
+            }
+        }
+        for (kind, deleted_at) in [("soft_delete", 0), ("restore", 500)] {
+            connection.execute("UPDATE links SET deleted_at=?1 WHERE id=2", [deleted_at])?;
+            let instruction = Instruction {
+                kind: kind.into(),
+                model: "links".into(),
+                id: Id::Legacy(2),
+                expected_version: 3,
+                ..Instruction::default()
+            };
+            let Step::Database(write) = instruction.decode()? else {
+                bail!("expected lifecycle database write");
+            };
+            check_write_domains(&connection, &schema, &domains, write)?;
+            connection.execute("UPDATE links SET name='' WHERE id=2", [])?;
+            assert_eq!(
+                check_write_domains(&connection, &schema, &domains, write)
+                    .unwrap_err()
+                    .to_string(),
+                "invalid_domain_value",
+                "{kind} must not bypass stored domain constraints",
+            );
+            connection.execute("UPDATE links SET name='item002' WHERE id=2", [])?;
+            let changed = Instruction {
+                data: "{}".into(),
+                ..instruction
+            };
+            assert!(changed.decode().is_err(), "{kind} must remain payload-free");
+        }
+        Ok(())
     }
 
     /// A soft-deleted row leaves every ordinary read, and only an explicit ask
@@ -3481,7 +3696,7 @@ pub(crate) fn effect(
             limit,
             ..
         } => {
-            let mut predicates = vec!["id > ?1".to_string()];
+            let mut predicates = vec!["id > ?1".to_string(), "deleted_at=0".to_string()];
             let cursor = if after.empty() {
                 if record.identity.is_some() {
                     SqlValue::Blob(vec![0; 16])

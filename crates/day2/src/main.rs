@@ -91,7 +91,7 @@ fn main() -> Result<()> {
             let runtime = Runtime::load(Path::new(instance), app)?;
             serde_json::to_value(day2::properties::require(
                 runtime.artifact(),
-                &runtime.inspect()?,
+                &runtime.application_snapshot()?,
                 Path::new(evidence_dir),
             )?)?
         }
