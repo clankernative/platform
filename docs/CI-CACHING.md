@@ -35,10 +35,15 @@ one PR is scoped to that PR and cannot seed other PRs or `main`. The first
 successful run on `main` populates the shared base cache; later PRs can reuse it.
 The first run in an empty namespace is still cold.
 
-`day2-platform-ci-v1` is the dependency cache prefix and compiler cache namespace.
+`day2-platform-ci-v2` is the dependency cache prefix and compiler cache namespace.
 Change both only when deliberately retiring a cache generation. Toolchain,
 dependency and compiler input changes already invalidate the corresponding
 entries automatically; do not add a commit SHA or run ID to either namespace.
+
+The initial v1 seed failed in a live-update test after writing compiler outputs.
+The test now finishes its executor-local fault before starting the HTTP scheduler
+and asserts that rollback preserves both the live revision and application data.
+The v2 generation starts empty so that failed run is not used as a cold baseline.
 
 ## Measurement
 
