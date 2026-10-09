@@ -1364,6 +1364,7 @@ pub(crate) fn history(
         &binding,
         &request.context.invocation_id,
         request.context.now,
+        runtime.inputs().entropy.as_ref(),
     )
 }
 
@@ -1373,6 +1374,7 @@ fn history_page(
     binding: &str,
     invocation_id: &str,
     now: i64,
+    entropy: &dyn crate::host_inputs::Entropy,
 ) -> Result<String> {
     use crate::error::Failure::InvalidCursor;
     crate::store::upgrade_selection_cursors(db)?;
@@ -1468,6 +1470,7 @@ fn history_page(
                     values: vec![serde_json::json!(last.sequence)],
                 },
                 now,
+                entropy,
             )?;
             crate::store::pin_selection_cursor(db, &token, invocation_id)?;
             token
@@ -1575,6 +1578,7 @@ mod history_tests {
             binding,
             "",
             100,
+            &crate::host_inputs::SecureEntropy,
         )?)?)
     }
 

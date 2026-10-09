@@ -90,11 +90,14 @@ fn create(db: &Connection, schema: &Schema, request: &mut Request, model: &str) 
     let result = effect(
         db,
         schema,
-        "installation-a",
         request,
         &instruction,
-        &policy()?,
-        "change",
+        EffectContext {
+            scope: "installation-a",
+            policy: &policy()?,
+            operation: "change",
+            entropy: &crate::host_inputs::SecureEntropy,
+        },
     )?;
     let row = serde_json::from_str(&result)?;
     request.observations.push(Observation {
@@ -220,11 +223,14 @@ fn created_update_requires_native_exact_origin_and_preserves_primary_edit_target
     effect(
         &db,
         &schema,
-        "installation-a",
         &current,
         &update("children", &preexisting),
-        &policy()?,
-        "change",
+        EffectContext {
+            scope: "installation-a",
+            policy: &policy()?,
+            operation: "change",
+            entropy: &crate::host_inputs::SecureEntropy,
+        },
     )?;
     assert!(!crate::audit::created_by_invocation(
         &db,
@@ -269,11 +275,14 @@ fn created_update_survives_reopen_but_not_rollback_or_another_installation() -> 
     effect(
         &db,
         &schema,
-        "installation-a",
         &current,
         &instruction,
-        &policy()?,
-        "change",
+        EffectContext {
+            scope: "installation-a",
+            policy: &policy()?,
+            operation: "change",
+            entropy: &crate::host_inputs::SecureEntropy,
+        },
     )?;
     db.execute_batch("ROLLBACK; BEGIN IMMEDIATE")?;
     assert_eq!(
@@ -284,11 +293,14 @@ fn created_update_survives_reopen_but_not_rollback_or_another_installation() -> 
     let result = effect(
         &db,
         &schema,
-        "installation-a",
         &current,
         &instruction,
-        &policy()?,
-        "change",
+        EffectContext {
+            scope: "installation-a",
+            policy: &policy()?,
+            operation: "change",
+            entropy: &crate::host_inputs::SecureEntropy,
+        },
     )?;
     current.observations.push(Observation {
         instruction,
@@ -338,21 +350,27 @@ fn created_origin_does_not_refresh_cas_or_override_current_operator_authority() 
     effect(
         &db,
         &schema,
-        "installation-a",
         &foreign,
         &instruction,
-        &policy()?,
-        "change",
+        EffectContext {
+            scope: "installation-a",
+            policy: &policy()?,
+            operation: "change",
+            entropy: &crate::host_inputs::SecureEntropy,
+        },
     )?;
     check(&db, &schema, &declared, &current, &instruction)?;
     let conflict = effect(
         &db,
         &schema,
-        "installation-a",
         &current,
         &instruction,
-        &policy()?,
-        "change",
+        EffectContext {
+            scope: "installation-a",
+            policy: &policy()?,
+            operation: "change",
+            entropy: &crate::host_inputs::SecureEntropy,
+        },
     )
     .unwrap_err();
     assert_eq!(crate::error::observation_code(&conflict), "conflict");
@@ -372,11 +390,14 @@ fn created_origin_does_not_refresh_cas_or_override_current_operator_authority() 
             effect(
                 &db,
                 &schema,
-                "installation-a",
                 &current,
                 &instruction,
-                &restricted,
-                "change"
+                EffectContext {
+                    scope: "installation-a",
+                    policy: &restricted,
+                    operation: "change",
+                    entropy: &crate::host_inputs::SecureEntropy,
+                },
             )
             .is_err()
         );
@@ -397,11 +418,14 @@ fn created_origin_does_not_refresh_cas_or_override_current_operator_authority() 
         effect(
             &db,
             &schema,
-            "installation-a",
             &current,
             &instruction,
-            &revoked,
-            "change"
+            EffectContext {
+                scope: "installation-a",
+                policy: &revoked,
+                operation: "change",
+                entropy: &crate::host_inputs::SecureEntropy,
+            },
         )
         .is_err()
     );
@@ -419,11 +443,14 @@ fn created_origin_does_not_refresh_cas_or_override_current_operator_authority() 
         effect(
             &db,
             &schema,
-            "installation-a",
             &current,
             &instruction,
-            &fields_revoked,
-            "change"
+            EffectContext {
+                scope: "installation-a",
+                policy: &fields_revoked,
+                operation: "change",
+                entropy: &crate::host_inputs::SecureEntropy,
+            },
         )
         .is_err()
     );
@@ -440,11 +467,14 @@ fn created_origin_does_not_refresh_cas_or_override_current_operator_authority() 
         effect(
             &db,
             &schema,
-            "installation-a",
             &wrong_owner,
             &instruction,
-            &owner_policy,
-            "change"
+            EffectContext {
+                scope: "installation-a",
+                policy: &owner_policy,
+                operation: "change",
+                entropy: &crate::host_inputs::SecureEntropy,
+            },
         )
         .is_err()
     );
@@ -453,11 +483,14 @@ fn created_origin_does_not_refresh_cas_or_override_current_operator_authority() 
     effect(
         &db,
         &schema,
-        "installation-a",
         &current,
         &instruction,
-        &policy()?,
-        "change",
+        EffectContext {
+            scope: "installation-a",
+            policy: &policy()?,
+            operation: "change",
+            entropy: &crate::host_inputs::SecureEntropy,
+        },
     )?;
     Ok(())
 }
@@ -494,11 +527,14 @@ fn a_soft_deleted_row_leaves_every_read_until_a_restore_brings_it_back() -> Resu
         let result = effect(
             &db,
             &schema,
-            "installation-a",
             request,
             instruction,
-            &policy()?,
-            "change",
+            EffectContext {
+                scope: "installation-a",
+                policy: &policy()?,
+                operation: "change",
+                entropy: &crate::host_inputs::SecureEntropy,
+            },
         );
         request.observations.push(Observation {
             instruction: instruction.clone(),

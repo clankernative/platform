@@ -81,6 +81,7 @@ impl Fixture {
             "app_contract":{"operations":operation_contracts,"presentation":{"stylesheet":"","script":""},
                 "identities":"","invariants":{},"domains":{},"errors":{}}
         }))?;
+        let inputs = crate::host_inputs::Inputs::default();
         let runtime = Runtime {
             integrations: Arc::new(crate::integration_host::Host::local(&instance_path)?),
             app_calls: None,
@@ -95,7 +96,8 @@ impl Fixture {
                 artifact_directory,
                 contract,
             )),
-            host: Arc::new(crate::host::System),
+            host: Arc::new(crate::host::System(inputs.clone())),
+            inputs,
         };
         runtime.initialize()?;
         let db = open(runtime.db())?;
@@ -199,6 +201,180 @@ impl Fixture {
         );
         self.assert_unmodified_business()
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn runtime_input_clones_survive_nested_async_and_blocking_boundaries_without_leakage()
+-> Result<()> {
+    use crate::host_inputs::{
+        Entropy, Inputs,
+        simulation::{SeededEntropy, VirtualClock},
+    };
+    use std::sync::Mutex;
+    let left = Fixture::new()?;
+    let right = Fixture::new()?;
+    let left_clock = Arc::new(VirtualClock(Mutex::new((
+        Duration::from_secs(11),
+        Duration::from_secs(3),
+    ))));
+    let right_clock = Arc::new(VirtualClock(Mutex::new((
+        Duration::from_secs(22),
+        Duration::from_secs(4),
+    ))));
+    let left = left.runtime.clone().with_inputs(Inputs {
+        entropy: Arc::new(SeededEntropy::new(10)),
+        clock: left_clock.clone(),
+        ..Inputs::default()
+    });
+    let right = right.runtime.clone().with_inputs(Inputs {
+        entropy: Arc::new(SeededEntropy::new(20)),
+        clock: right_clock.clone(),
+        ..Inputs::default()
+    });
+    let sample = |runtime: &Runtime| -> Result<(i64, Duration, [u8; 32])> {
+        let mut secret = [0; 32];
+        runtime.inputs().entropy.fill(&mut secret)?;
+        Ok((runtime.host().now_ms()?, runtime.host().monotonic(), secret))
+    };
+    let first = sample(&left)?;
+    let nested = sample(&right)?;
+    let left_task = left.clone();
+    let right_task = right.clone();
+    let (after, other) = tokio::try_join!(
+        tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            tokio::task::spawn_blocking(move || sample(&left_task)).await
+        }),
+        tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            tokio::task::spawn_blocking(move || sample(&right_task)).await
+        }),
+    )?;
+    let after = after??;
+    let other = other??;
+    assert_eq!((first.0, first.1), (11000, Duration::from_secs(3)));
+    assert_eq!((after.0, after.1), (first.0, first.1));
+    assert_eq!((nested.0, nested.1), (22000, Duration::from_secs(4)));
+    assert_eq!((other.0, other.1), (nested.0, nested.1));
+    for (seed, observed) in [(10, [first.2, after.2]), (20, [nested.2, other.2])] {
+        let reference = SeededEntropy::new(seed);
+        for bytes in observed {
+            let mut expected = [0; 32];
+            reference.fill(&mut expected)?;
+            assert_eq!(bytes, expected);
+        }
+    }
+    right_clock.0.lock().unwrap().0 = Duration::from_secs(99);
+    assert_eq!(right.host().now_ms()?, 99000);
+    assert_eq!(left.host().now_ms()?, 11000);
+    Ok(())
+}
+
+#[tokio::test]
+async fn local_server_refuses_host_only_contract_before_drawing_runtime_secret_entropy()
+-> Result<()> {
+    use crate::host_inputs::{Entropy, Inputs};
+    struct RefusingEntropy(AtomicUsize);
+    impl Entropy for RefusingEntropy {
+        fn fill(&self, _: &mut [u8]) -> Result<()> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            bail!("injected_secret_entropy_failure")
+        }
+    }
+    let fixture = Fixture::new()?;
+    let entropy = Arc::new(RefusingEntropy(AtomicUsize::new(0)));
+    let runtime = fixture.runtime.clone().with_inputs(Inputs {
+        entropy: entropy.clone(),
+        ..Inputs::default()
+    });
+    // This fixture intentionally proves host guards, not native Roc admission.
+    // Do not make it serve by weakening the complete application contract guard.
+    let error = crate::web::LocalServer::bind(runtime.clone(), "alice", 0)
+        .await
+        .err()
+        .context("host-only contract unexpectedly admitted")?;
+    assert_eq!(
+        error.to_string(),
+        "every persistent model requires a verification obligation"
+    );
+    assert_eq!(entropy.0.load(Ordering::Relaxed), 0);
+    let count: i64 =
+        open(runtime.db())?
+            .query_row("SELECT count(*) FROM day2_web_secret", [], |row| row.get(0))?;
+    assert_eq!(count, 0);
+    Ok(())
+}
+
+#[test]
+fn fresh_runtime_id_seeds_are_scope_stable_and_simulation_clock_is_composed() -> Result<()> {
+    let root = Path::new("/tmp/dst-platform-input-composition");
+    fs::create_dir_all(root)?;
+    let evidence = tempfile::Builder::new()
+        .prefix("id-traces-")
+        .tempdir_in(root)?
+        .keep();
+    let mut traces = Vec::new();
+    for replay in 0..2 {
+        let fixture = Fixture::new()?;
+        let simulation = crate::simulation::Simulation::with_scripted_providers(
+            fixture.runtime.clone(),
+            [42; 32],
+            7000,
+        )?;
+        let runtime = simulation.runtime();
+        let path = evidence.join(format!("replay-{replay}.json"));
+        fs::write(
+            &path,
+            serde_json::to_vec(
+                &json!({"seed":vec![42; 32],"wall_ms":7000,"invocations":["one","two"]}),
+            )?,
+        )?;
+        for id in if replay == 0 {
+            ["one", "two"]
+        } else {
+            ["two", "one"]
+        } {
+            runtime.accept("guarded_read", "alice", id, &json!({}), 7)?;
+        }
+        let db = open(runtime.db())?;
+        let seeds = db
+            .prepare("SELECT invocation,seed FROM day2_id_seeds ORDER BY invocation")?
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        assert_eq!(seeds.len(), 2);
+        for (id, seed) in &seeds {
+            assert_eq!(seed, &runtime.host().entropy(runtime.scope(), id)?.to_vec());
+            assert_ne!(
+                seed,
+                &runtime.host().entropy("different/scope/app", id)?.to_vec()
+            );
+        }
+        assert_ne!(seeds[0].1, seeds[1].1);
+        let ids = seeds.iter().map(|(id, seed)| -> Result<Value> {
+            let seed: [u8; 32] = seed.as_slice().try_into()?;
+            Ok(json!({"invocation":id,"uuid":crate::identity::generate(&seed, 7000, "items", 0)?}))
+        }).collect::<Result<Vec<_>>>()?;
+        fs::write(
+            &path,
+            serde_json::to_vec(&json!({"seeds":seeds,"ids":ids}))?,
+        )?;
+        traces.push(json!({"seeds":seeds,"ids":ids}));
+        let started = runtime.host().monotonic();
+        simulation.set_time(9000)?;
+        assert_eq!(runtime.inputs().clock.wall_time()?, Duration::from_secs(9));
+        runtime.host().deadline(Phase::Decide, started)?;
+        simulation.advance_monotonic(Duration::from_secs(15))?;
+        assert_eq!(runtime.inputs().clock.monotonic(), Duration::from_secs(15));
+        assert_eq!(
+            classify(&runtime.host().deadline(Phase::Decide, started).unwrap_err()),
+            Failure::TransactionDeadline
+        );
+        assert_eq!(runtime.host().now_ms()?, 9000);
+    }
+    assert_eq!(traces[0], traces[1], "{}", evidence.display());
+    Ok(())
 }
 
 fn fence_grant<'a>(document: &'a mut AuthorityDocument, operation: &str) -> &'a mut ModelGrant {
@@ -481,11 +657,14 @@ fn required_all_rows_denies_child_request_and_rolls_back_prior_parent_write() ->
         let result = effect(
             &tx,
             &fixture.runtime.artifact().contract().schema,
-            fixture.runtime.scope(),
             &origin,
             &update,
-            active.policy()?,
-            "plain_write",
+            EffectContext {
+                scope: fixture.runtime.scope(),
+                policy: active.policy()?,
+                operation: "plain_write",
+                entropy: &crate::host_inputs::SecureEntropy,
+            },
         )?;
         origin.observations.push(Observation {
             instruction: update,

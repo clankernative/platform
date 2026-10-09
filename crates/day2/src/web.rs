@@ -1,7 +1,7 @@
 use crate::{
     audit::Filter,
     digest,
-    host_inputs::{Clock, Entropy, LiveTicks, SecureEntropy, SystemClock, TokioTicks},
+    host_inputs::{Clock, Entropy, LiveTicks},
     store::{Fault, Runtime, open},
     web_assets::Appearance,
     web_html::{self as view, document, icon},
@@ -322,7 +322,8 @@ impl LocalServer {
             crate::error::Failure::Forbidden
         );
         let origin = format!("http://{authority}");
-        let (grant, token) = Grant::issue(actor, &SecureEntropy, &SystemClock::new())?;
+        let inputs = runtime.inputs();
+        let (grant, token) = Grant::issue(actor, inputs.entropy.as_ref(), inputs.clock.as_ref())?;
         let mut server = Self::bind_listener(
             runtime,
             listener,
@@ -357,11 +358,12 @@ impl LocalServer {
         } else {
             ""
         };
-        let entropy: Arc<dyn Entropy> = Arc::new(SecureEntropy);
+        let inputs = runtime.inputs();
+        let entropy = inputs.entropy.clone();
         let host = Arc::new(Host {
             entropy: entropy.clone(),
-            clock: Arc::new(SystemClock::new()),
-            live_ticks: Arc::new(TokioTicks),
+            clock: inputs.clock.clone(),
+            live_ticks: inputs.live_ticks.clone(),
             oauth: None,
             credential_effects: crate::managed_credentials::effects::capture(),
             api,

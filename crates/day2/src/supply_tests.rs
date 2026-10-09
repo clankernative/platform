@@ -47,6 +47,7 @@ fn runtime(directory: &Path) -> Result<Runtime> {
         "schema":{"models":{},"inputs":{},"foreign_keys":[]},
         "operations":[],"sources":{},"admission":"local-spike-only"
     }))?;
+    let inputs = crate::host_inputs::Inputs::default();
     Ok(Runtime {
         integrations: Arc::new(crate::integration_host::Host::simulated(
             &db,
@@ -64,7 +65,8 @@ fn runtime(directory: &Path) -> Result<Runtime> {
             artifact_directory,
             contract,
         )),
-        host: Arc::new(crate::host::System),
+        host: Arc::new(crate::host::System(inputs.clone())),
+        inputs,
     })
 }
 
