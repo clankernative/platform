@@ -31,10 +31,14 @@ mod tests {
         static BINARY: OnceLock<PathBuf> = OnceLock::new();
         BINARY.get_or_init(|| {
             let root = root();
-            // The verification gate builds this host before running the checks.
+            // Keep the host installed by the gate with its distribution receipt.
             // A nested, narrower Cargo build would replace the workspace's
             // dependency artifacts and force the next campaign to rebuild them.
-            for name in ["day2-host", "day2-workflows", "day2-workflows.json"] {
+            assert!(
+                root.join("day2-host").is_file(),
+                "run xtask cli before CLI checks"
+            );
+            for name in ["day2-workflows", "day2-workflows.json"] {
                 let temporary = tempfile::NamedTempFile::new_in(&root).unwrap();
                 fs::copy(root.join("../target/debug").join(name), temporary.path())
                     .expect("run xtask cli before CLI checks");
