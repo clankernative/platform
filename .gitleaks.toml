@@ -55,6 +55,14 @@ regexTarget = "line"
 regexes = ['''^\s*\{"identity": \{"key": "(b41c7d2e8a95f60312ad4e7b9c06f158|f70a1b6c93de5827401c8fa3b6e29d5f|0123456789abcdef0123456789abcdef)", "prefix": "(cmp|add|old)"\},$''']
 
 [[allowlists]]
+description = "Exact public alerts-webhook revision-1 reference hash used as a mounted filename in the mocked release test"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''(^|/)deploy/gke/stacks/day2-app/tests/day2-app\.tftest\.hcl$''']
+regexTarget = "line"
+regexes = ['''^\s*key\s*=\s*"ef04e428d3b9a659ce6eaee5c890220e9ff59ac9f9b3889f2176569021744d2a"\s*$''']
+
+[[allowlists]]
 description = "Documentation generator references an environment variable, never a credential"
 targetRules = ["generic-api-key"]
 condition = "AND"
