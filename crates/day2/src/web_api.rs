@@ -156,6 +156,7 @@ pub(crate) struct RequestContext<'a> {
     pub runtime: &'a Runtime,
     pub catalog: &'a Catalog,
     pub secret: &'a [u8],
+    pub entropy: &'a dyn crate::host_inputs::Entropy,
     pub session: &'a Session,
     pub origin: &'a str,
     pub at: i64,
@@ -303,7 +304,10 @@ impl RequestContext<'_> {
             ensure!(body.is_empty(), crate::error::Failure::InvalidInput);
             let input = openapi::query_input(record, uri.query().unwrap_or(""))
                 .context(crate::error::Failure::InvalidInput)?;
-            (input, format!("api-query-{}", security::random()?))
+            (
+                input,
+                format!("api-query-{}", security::random(self.entropy)?),
+            )
         } else {
             ensure!(uri.query().is_none(), crate::error::Failure::InvalidInput);
             ensure!(
