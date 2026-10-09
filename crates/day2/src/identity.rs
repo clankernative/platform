@@ -268,7 +268,22 @@ impl Registry {
         Ok(())
     }
 
-    pub fn synchronize(&mut self, models: &BTreeMap<String, crate::schema::Record>) -> Result<()> {
+    pub fn synchronize(
+        &mut self,
+        models: &BTreeMap<String, crate::schema::Record>,
+        entropy: &dyn crate::host_inputs::Entropy,
+    ) -> Result<()> {
+        let mut next = self.clone();
+        next.synchronize_in(models, entropy)?;
+        *self = next;
+        Ok(())
+    }
+
+    fn synchronize_in(
+        &mut self,
+        models: &BTreeMap<String, crate::schema::Record>,
+        entropy: &dyn crate::host_inputs::Entropy,
+    ) -> Result<()> {
         self.validate()?;
         for registered in &mut self.models {
             if !registered.retired && !models.contains_key(&registered.table) {
@@ -310,8 +325,7 @@ impl Registry {
                 }
             };
             let mut key = [0_u8; 16];
-            getrandom::fill(&mut key)
-                .map_err(|e| anyhow::anyhow!("model identity entropy: {e}"))?;
+            entropy.fill(&mut key).context("model identity entropy")?;
             self.models.push(Registration {
                 identity: ModelIdentity {
                     key: key.iter().map(|b| format!("{b:02x}")).collect(),
@@ -323,6 +337,47 @@ impl Registry {
             });
         }
         self.validate()
+    }
+
+    pub fn register_model(
+        &mut self,
+        table: &str,
+        roc_type: &str,
+        entropy: &dyn crate::host_inputs::Entropy,
+    ) -> Result<()> {
+        day2_contracts::names::identifier(table)?;
+        crate::schema::roc_type_name(roc_type)?;
+        ensure!(
+            !self
+                .models
+                .iter()
+                .any(|model| !model.retired && model.table == table),
+            "model_already_registered"
+        );
+        let mut models: BTreeMap<_, _> = self
+            .models
+            .iter()
+            .filter(|model| !model.retired)
+            .map(|model| {
+                (
+                    model.table.clone(),
+                    crate::schema::Record {
+                        roc_type: Some(model.roc_type.clone()),
+                        identity: None,
+                        fields: BTreeMap::new(),
+                    },
+                )
+            })
+            .collect();
+        models.insert(
+            table.into(),
+            crate::schema::Record {
+                roc_type: Some(roc_type.into()),
+                identity: None,
+                fields: BTreeMap::new(),
+            },
+        );
+        self.synchronize(&models, entropy)
     }
 
     pub fn identity(&self, table: &str, roc_type: &str) -> Result<&ModelIdentity> {
@@ -393,7 +448,7 @@ pub fn prepare(app: &Path, schema: &crate::schema::Schema, readonly: bool) -> Re
         .transpose()?
         .unwrap_or_default();
     let previous = registry.clone();
-    registry.synchronize(&schema.models)?;
+    registry.synchronize(&schema.models, &crate::host_inputs::SecureEntropy)?;
     if original.is_none() || previous != registry {
         ensure!(!readonly, "commit_model_identities_before_build");
         let bytes = serde_json::to_vec_pretty(&registry)?;
@@ -421,41 +476,14 @@ pub fn rename_registered(app: &Path, old: &str, table: &str, roc_type: &str) -> 
 
 /// Explicit authoring, separate from ordinary read-only builds. History survives
 /// retirement and future reuse of a table name receives a new identity.
-pub fn register_model(app: &Path, table: &str, roc_type: &str) -> Result<()> {
-    day2_contracts::names::identifier(table)?;
-    crate::schema::roc_type_name(roc_type)?;
+pub fn register_model(
+    app: &Path,
+    table: &str,
+    roc_type: &str,
+    entropy: &dyn crate::host_inputs::Entropy,
+) -> Result<()> {
     edit_registry(app, true, |registry| {
-        ensure!(
-            !registry
-                .models
-                .iter()
-                .any(|model| !model.retired && model.table == table),
-            "model_already_registered"
-        );
-        let mut models: BTreeMap<_, _> = registry
-            .models
-            .iter()
-            .filter(|model| !model.retired)
-            .map(|model| {
-                (
-                    model.table.clone(),
-                    crate::schema::Record {
-                        roc_type: Some(model.roc_type.clone()),
-                        identity: None,
-                        fields: BTreeMap::new(),
-                    },
-                )
-            })
-            .collect();
-        models.insert(
-            table.into(),
-            crate::schema::Record {
-                roc_type: Some(roc_type.into()),
-                identity: None,
-                fields: BTreeMap::new(),
-            },
-        );
-        registry.synchronize(&models)
+        registry.register_model(table, roc_type, entropy)
     })
 }
 
@@ -523,19 +551,37 @@ mod tests {
     #[test]
     fn explicit_authoring_preserves_retired_identity_history() -> Result<()> {
         let directory = tempfile::tempdir()?;
-        register_model(directory.path(), "reports", "Models.Report")?;
+        register_model(
+            directory.path(),
+            "reports",
+            "Models.Report",
+            &crate::host_inputs::SecureEntropy,
+        )?;
         let read = || -> Result<Registry> {
             Ok(serde_json::from_slice(&fs::read(
                 directory.path().join(REGISTRY_FILE),
             )?)?)
         };
         let original = read()?;
-        assert!(register_model(directory.path(), "reports", "Models.Report").is_err());
+        assert!(
+            register_model(
+                directory.path(),
+                "reports",
+                "Models.Report",
+                &crate::host_inputs::SecureEntropy
+            )
+            .is_err()
+        );
         rename_registered(directory.path(), "reports", "documents", "Models.Document")?;
         let renamed = read()?;
         assert_eq!(original.models[0].identity, renamed.models[0].identity);
         retire_model(directory.path(), "documents")?;
-        register_model(directory.path(), "documents", "Models.NewDocument")?;
+        register_model(
+            directory.path(),
+            "documents",
+            "Models.NewDocument",
+            &crate::host_inputs::SecureEntropy,
+        )?;
         let next = read()?;
         assert!(next.models[0].retired);
         assert_ne!(next.models[0].identity, next.models[1].identity);
@@ -615,11 +661,12 @@ mod tests {
 
     #[test]
     fn prefixes_survive_growth_rename_and_retirement() -> Result<()> {
+        let entropy = crate::host_inputs::simulation::SeededEntropy::new(130);
         let mut registry = Registry::default();
-        registry.synchronize(&models(&[
-            ("customers", "Customer"),
-            ("ordinals", "Ordinal"),
-        ]))?;
+        registry.synchronize(
+            &models(&[("customers", "Customer"), ("ordinals", "Ordinal")]),
+            &entropy,
+        )?;
         assert_eq!(
             registry.identity("customers", "Models.Customer")?.prefix,
             "cus"
@@ -627,18 +674,24 @@ mod tests {
         let ordinal = registry.identity("ordinals", "Models.Ordinal")?.clone();
         assert_eq!(ordinal.prefix, "ord");
         let initial = registry.clone();
-        registry.synchronize(&models(&[
-            ("customers", "Customer"),
-            ("ordinals", "Ordinal"),
-            ("orders", "Order"),
-        ]))?;
+        registry.synchronize(
+            &models(&[
+                ("customers", "Customer"),
+                ("ordinals", "Ordinal"),
+                ("orders", "Order"),
+            ]),
+            &entropy,
+        )?;
         assert_eq!(registry.identity("orders", "Models.Order")?.prefix, "orde");
         assert_eq!(registry.identity("ordinals", "Models.Ordinal")?, &ordinal);
         initial.check_successor(&registry)?;
         registry.rename("ordinals", "positions", "Models.Position")?;
         assert_eq!(registry.identity("positions", "Models.Position")?, &ordinal);
         initial.check_successor(&registry)?;
-        registry.synchronize(&models(&[("customers", "Customer"), ("orders", "Order")]))?;
+        registry.synchronize(
+            &models(&[("customers", "Customer"), ("orders", "Order")]),
+            &entropy,
+        )?;
         assert!(
             registry
                 .models
@@ -646,11 +699,14 @@ mod tests {
                 .any(|m| m.identity == ordinal && m.retired)
         );
         let retired = registry.clone();
-        registry.synchronize(&models(&[
-            ("customers", "Customer"),
-            ("orders", "Order"),
-            ("ordinals", "Ordinal"),
-        ]))?;
+        registry.synchronize(
+            &models(&[
+                ("customers", "Customer"),
+                ("orders", "Order"),
+                ("ordinals", "Ordinal"),
+            ]),
+            &entropy,
+        )?;
         assert_eq!(
             registry.identity("ordinals", "Models.Ordinal")?.prefix,
             "ordi"
@@ -665,6 +721,55 @@ mod tests {
         let mut invalid = registry.clone();
         invalid.models[0].identity.prefix = invalid.models[1].identity.prefix.clone();
         assert!(invalid.validate().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_entropy_replays_authoring_and_failure_does_not_publish_partial_state() -> Result<()>
+    {
+        struct Unavailable;
+        impl crate::host_inputs::Entropy for Unavailable {
+            fn fill(&self, _: &mut [u8]) -> Result<()> {
+                bail!("scripted entropy failure")
+            }
+        }
+        let author = || -> Result<Registry> {
+            let entropy = crate::host_inputs::simulation::SeededEntropy::new(130);
+            let mut registry = Registry::default();
+            registry.register_model("orders", "Models.Order", &entropy)?;
+            registry.register_model("ordinals", "Models.Ordinal", &entropy)?;
+            assert!(
+                registry
+                    .register_model("orders", "Models.Order", &entropy)
+                    .is_err()
+            );
+            registry.rename("orders", "purchases", "Models.Purchase")?;
+            registry.synchronize(&models(&[("ordinals", "Ordinal")]), &entropy)?;
+            registry.register_model("orders", "Models.NewOrder", &entropy)?;
+            Ok(registry)
+        };
+        let registry = author()?;
+        assert_eq!(registry, author()?);
+        // Independent namespace/history expectations, not another call to the decision logic.
+        assert_eq!(
+            registry
+                .models
+                .iter()
+                .map(|m| (m.table.as_str(), m.identity.prefix.as_str(), m.retired))
+                .collect::<Vec<_>>(),
+            vec![
+                ("purchases", "ord", true),
+                ("ordinals", "ordi", false),
+                ("orders", "orde", false)
+            ]
+        );
+        let mut unchanged = registry.clone();
+        assert!(
+            unchanged
+                .synchronize(&models(&[("customers", "Customer")]), &Unavailable)
+                .is_err()
+        );
+        assert_eq!(unchanged, registry);
         Ok(())
     }
 
