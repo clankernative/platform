@@ -128,6 +128,7 @@ impl Granted {
             "schema":{"models":{"items":{"fields":{"value":"text"}}},"inputs":{"input":{"fields":{}}},"foreign_keys":[]},
             "operations":[{"name":"ask","kind":"command","input_type":"input","output_type":""}],
             "sources":{},"admission":"local-spike-only","imports":imports}))?;
+        let inputs = crate::host_inputs::Inputs::default();
         let caller = Runtime {
             integrations: Arc::new(integration_host::Host::local(&path)?),
             app_calls: None,
@@ -142,7 +143,8 @@ impl Granted {
                 artifact_directory,
                 contract,
             )),
-            host: Arc::new(crate::host::System),
+            host: Arc::new(crate::host::System(inputs.clone())),
+            inputs,
         };
         caller.initialize()?;
         Ok(Self {
@@ -459,6 +461,7 @@ impl Impersonating {
                 "inputs":{"input":{"fields":{}}},"foreign_keys":[]},
             "operations":[{"name":"look","kind":"command","input_type":"input","output_type":""}],
             "sources":{},"admission":"local-spike-only"}))?;
+        let inputs = crate::host_inputs::Inputs::default();
         let runtime = Runtime {
             integrations: Arc::new(integration_host::Host::local(&path)?),
             app_calls: None,
@@ -473,7 +476,8 @@ impl Impersonating {
                 artifact_directory,
                 contract,
             )),
-            host: Arc::new(crate::host::System),
+            host: Arc::new(crate::host::System(inputs.clone())),
+            inputs,
         };
         runtime.initialize()?;
         Ok(Self {

@@ -173,6 +173,7 @@ pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
                 &instruction,
                 &policy,
                 &registered_operation,
+                runtime.inputs().entropy.as_ref(),
             );
             tx.commit()?;
             result
@@ -374,6 +375,7 @@ pub(crate) fn validate_local(
                 &observation.instruction,
                 policy,
                 operation,
+                runtime.inputs().entropy.as_ref(),
             )?;
             ensure!(
                 current == observation.result,

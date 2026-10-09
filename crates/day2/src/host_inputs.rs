@@ -1,6 +1,25 @@
 //! Native operator/runtime inputs. These ports are not part of the app SDK.
 use anyhow::Result;
-use std::{future::Future, pin::Pin, time::Duration};
+use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
+
+/// Explicit runtime-owned ports, carried by clones rather than ambient scopes.
+/// Identity derivation remains on invocation Host; this entropy is secret material.
+#[derive(Clone)]
+pub(crate) struct Inputs {
+    pub(crate) entropy: Arc<dyn Entropy>,
+    pub(crate) clock: Arc<dyn Clock>,
+    pub(crate) live_ticks: Arc<dyn LiveTicks>,
+}
+
+impl Default for Inputs {
+    fn default() -> Self {
+        Self {
+            entropy: Arc::new(SecureEntropy),
+            clock: Arc::new(SystemClock::new()),
+            live_ticks: Arc::new(TokioTicks),
+        }
+    }
+}
 
 pub trait Entropy: Send + Sync {
     fn fill(&self, bytes: &mut [u8]) -> Result<()>;

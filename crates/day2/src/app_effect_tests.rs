@@ -95,6 +95,7 @@ fn create(db: &Connection, schema: &Schema, request: &mut Request, model: &str) 
         &instruction,
         &policy()?,
         "change",
+        &crate::host_inputs::SecureEntropy,
     )?;
     let row = serde_json::from_str(&result)?;
     request.observations.push(Observation {
@@ -225,6 +226,7 @@ fn created_update_requires_native_exact_origin_and_preserves_primary_edit_target
         &update("children", &preexisting),
         &policy()?,
         "change",
+        &crate::host_inputs::SecureEntropy,
     )?;
     assert!(!crate::audit::created_by_invocation(
         &db,
@@ -274,6 +276,7 @@ fn created_update_survives_reopen_but_not_rollback_or_another_installation() -> 
         &instruction,
         &policy()?,
         "change",
+        &crate::host_inputs::SecureEntropy,
     )?;
     db.execute_batch("ROLLBACK; BEGIN IMMEDIATE")?;
     assert_eq!(
@@ -289,6 +292,7 @@ fn created_update_survives_reopen_but_not_rollback_or_another_installation() -> 
         &instruction,
         &policy()?,
         "change",
+        &crate::host_inputs::SecureEntropy,
     )?;
     current.observations.push(Observation {
         instruction,
@@ -343,6 +347,7 @@ fn created_origin_does_not_refresh_cas_or_override_current_operator_authority() 
         &instruction,
         &policy()?,
         "change",
+        &crate::host_inputs::SecureEntropy,
     )?;
     check(&db, &schema, &declared, &current, &instruction)?;
     let conflict = effect(
@@ -353,6 +358,7 @@ fn created_origin_does_not_refresh_cas_or_override_current_operator_authority() 
         &instruction,
         &policy()?,
         "change",
+        &crate::host_inputs::SecureEntropy,
     )
     .unwrap_err();
     assert_eq!(crate::error::observation_code(&conflict), "conflict");
@@ -376,7 +382,8 @@ fn created_origin_does_not_refresh_cas_or_override_current_operator_authority() 
                 &current,
                 &instruction,
                 &restricted,
-                "change"
+                "change",
+                &crate::host_inputs::SecureEntropy,
             )
             .is_err()
         );
@@ -401,7 +408,8 @@ fn created_origin_does_not_refresh_cas_or_override_current_operator_authority() 
             &current,
             &instruction,
             &revoked,
-            "change"
+            "change",
+            &crate::host_inputs::SecureEntropy,
         )
         .is_err()
     );
@@ -423,7 +431,8 @@ fn created_origin_does_not_refresh_cas_or_override_current_operator_authority() 
             &current,
             &instruction,
             &fields_revoked,
-            "change"
+            "change",
+            &crate::host_inputs::SecureEntropy,
         )
         .is_err()
     );
@@ -444,7 +453,8 @@ fn created_origin_does_not_refresh_cas_or_override_current_operator_authority() 
             &wrong_owner,
             &instruction,
             &owner_policy,
-            "change"
+            "change",
+            &crate::host_inputs::SecureEntropy,
         )
         .is_err()
     );
@@ -458,6 +468,7 @@ fn created_origin_does_not_refresh_cas_or_override_current_operator_authority() 
         &instruction,
         &policy()?,
         "change",
+        &crate::host_inputs::SecureEntropy,
     )?;
     Ok(())
 }
@@ -499,6 +510,7 @@ fn a_soft_deleted_row_leaves_every_read_until_a_restore_brings_it_back() -> Resu
             instruction,
             &policy()?,
             "change",
+            &crate::host_inputs::SecureEntropy,
         );
         request.observations.push(Observation {
             instruction: instruction.clone(),
