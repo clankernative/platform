@@ -35,6 +35,24 @@ const WORKSPACE_TEST_ARGUMENTS: &[&str] = &[
     "durable-temporal",
 ];
 
+// These compiler probes own private staging directories and only read the
+// admitted fixtures/toolchain. Add individual cases after checking their I/O;
+// future tests in the same modules retain serial execution by default.
+const PARALLEL_RUNTIME_TESTS: &[&str] = &[
+    "app_inference::ordinary_reports_requires_its_complete_root_in_both_profiles",
+    "app_inference::separate_internal_commands_infer_independent_nominal_types_and_require_complete_definitions",
+    "app_inference::a_structural_request_alias_is_rejected_during_codec_binding",
+    "app_inference::resource_handles_and_issuance_context_cannot_be_forged_or_broadened",
+    "app_inference::omissions_stale_references_and_forged_factories_fail_compilation",
+    "app_contract::native_error_cases_preserve_typed_command_query_inputs_and_singleton_authoring",
+    "app_contract::native_required_all_rows_builders_preserve_typed_definitions",
+    "guards::checked_compiler_rejects_wrong_models_forged_values_and_unavailable_io",
+    "credential_metadata::native_compiler_preserves_family_types_and_seals_host_read_constructors",
+    "connection_declarations::native_connection_declarations_require_nominal_access_and_account_policy",
+    "numeric::native_generated_numeric_codecs_roundtrip_boundaries_and_reject_negative_values",
+    "schema::native_structured_inputs_reflect_and_roundtrip_without_flattening_records",
+];
+
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 struct VerificationCache {
@@ -734,7 +752,7 @@ fn test_command(suite: &str) -> Result<Command> {
             &[],
         ),
         "workspace-runtime" => (&[], &[]),
-        "parallel-runtime" => (&[], &["app_inference::"]),
+        "parallel-runtime" => (&[], PARALLEL_RUNTIME_TESTS),
         "control" => (
             &[
                 "-p",
@@ -773,6 +791,16 @@ fn test_command(suite: &str) -> Result<Command> {
         command.args(WORKSPACE_TEST_ARGUMENTS);
     }
     command.args(arguments).arg("--").args(modules);
+    // libtest applies --exact to both inclusion and skip filters. With no
+    // inclusion filters, the serial campaign still runs every other test.
+    if ["workspace-runtime", "parallel-runtime"].contains(&suite) {
+        command.arg("--exact");
+    }
+    if suite == "workspace-runtime" {
+        for test in PARALLEL_RUNTIME_TESTS {
+            command.args(["--skip", test]);
+        }
+    }
     Ok(command)
 }
 
@@ -803,7 +831,7 @@ fn tests(
             .env("DAY2_TEST_BUILD_REGISTRY", cargo_cache.join("registry"));
     }
     // Library unit tests own their temporary state, so the fast gate uses
-    // libtest's default parallelism; runtime campaigns stay serial.
+    // libtest's default parallelism; the reviewed probes use four threads.
     match suite {
         "parallel-runtime" => {
             command.arg("--test-threads=4");
@@ -814,20 +842,6 @@ fn tests(
         }
     }
     command.env("DAY2_TEST_TOFU_CONFIG", root.join(".cache/tofu.json"));
-    if suite == "workspace-runtime" {
-        // These cases run in the explicitly bounded parallel campaign. Exact
-        // names make this coverage-safe: a renamed or new test stops matching
-        // here and therefore still runs in the serial workspace campaign.
-        for test in [
-            "ordinary_reports_requires_its_complete_root_in_both_profiles",
-            "separate_internal_commands_infer_independent_nominal_types_and_require_complete_definitions",
-            "a_structural_request_alias_is_rejected_during_codec_binding",
-            "resource_handles_and_issuance_context_cannot_be_forged_or_broadened",
-            "omissions_stale_references_and_forged_factories_fail_compilation",
-        ] {
-            command.args(["--skip", test]);
-        }
-    }
     if suite == "fast-libraries" {
         command.args([
             "--skip",
