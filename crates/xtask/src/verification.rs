@@ -13,9 +13,9 @@ use std::{
 
 const CACHE_FORMAT: u32 = 1;
 
-// Every campaign in the full gate resolves this same package/feature graph.
-// Target and libtest filters choose what executes without narrowing Cargo's
-// selected workspace members and rebuilding their shared dependencies.
+// Every test campaign in the full gate selects the same Cargo packages and
+// targets. Only libtest filters change: selecting a narrower Cargo test target
+// can disable dev-dependency features and rebuild shared dependencies.
 const WORKSPACE_TEST_ARGUMENTS: &[&str] = &[
     "-p",
     "day2",
@@ -733,7 +733,7 @@ fn test_command(suite: &str) -> Result<Command> {
             &[],
         ),
         "workspace-runtime" => (&[], &[]),
-        "parallel-runtime" => (&["--test", "day2_integration"], &["app_inference::"]),
+        "parallel-runtime" => (&[], &["app_inference::"]),
         "control" => (
             &[
                 "-p",
@@ -748,20 +748,14 @@ fn test_command(suite: &str) -> Result<Command> {
             &[],
         ),
         "isolated-build" => (
+            &[],
             &[
-                "--test",
-                "control_integration",
                 "build::real_isolated_owned_links_build_produces_bound_evidence_and_recovers_receipt",
             ],
-            &[],
         ),
         "installation-build" => (
-            &[
-                "--test",
-                "control_integration",
-                "control_service::real_installation_export_build_and_temporal_completion",
-            ],
             &[],
+            &["control_service::real_installation_export_build_and_temporal_completion"],
         ),
         _ => bail!("unknown test suite"),
     };
@@ -1152,30 +1146,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn full_gate_filters_keep_the_same_cargo_package_graph() -> Result<()> {
-        let selected = |command: &Command| {
-            let args = command.get_args().collect::<Vec<_>>();
-            args.windows(2)
-                .filter(|pair| pair[0] == "-p")
-                .map(|pair| pair[1].to_string_lossy().into_owned())
-                .collect::<BTreeSet<_>>()
+    fn full_gate_filters_keep_the_same_cargo_package_and_target_graph() -> Result<()> {
+        let cargo_arguments = |command: &Command| {
+            command
+                .get_args()
+                .take_while(|argument| *argument != "--")
+                .map(|argument| argument.to_os_string())
+                .collect::<Vec<_>>()
         };
-        let expected = selected(&test_command("workspace-runtime")?);
-        assert!(expected.contains("day2") && expected.contains("day2-control"));
+        let expected = cargo_arguments(&test_command("workspace-runtime")?);
+        assert!(expected.iter().any(|argument| argument == "day2"));
+        assert!(expected.iter().any(|argument| argument == "day2-control"));
+        assert!(!expected.iter().any(|argument| argument == "--test"));
         for suite in ["parallel-runtime", "isolated-build", "installation-build"] {
             let command = test_command(suite)?;
-            assert_eq!(selected(&command), expected, "{suite}");
-            let args = command.get_args().collect::<Vec<_>>();
-            let target = args.windows(2).find(|pair| pair[0] == "--test").unwrap()[1];
-            assert_eq!(
-                target,
-                if suite == "parallel-runtime" {
-                    "day2_integration"
-                } else {
-                    "control_integration"
-                },
-                "{suite}"
-            );
+            assert_eq!(cargo_arguments(&command), expected, "{suite}");
         }
         assert!(test_command("unknown").is_err());
         Ok(())
