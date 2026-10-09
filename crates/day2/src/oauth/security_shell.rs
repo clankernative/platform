@@ -2978,6 +2978,7 @@ mod tests {
             runtime: &world.runtime,
             catalog: &catalog,
             secret: &secret,
+            entropy: &crate::host_inputs::SecureEntropy,
             session: &session,
             origin: "https://app.example.com",
             at: world.now - 1,
@@ -3069,7 +3070,7 @@ mod tests {
         headers.insert(header::COOKIE, format!("{COOKIE}=bad").parse().unwrap());
         assert!(cookie_token(&headers).is_err());
         headers.clear();
-        let token = web_security::random().unwrap();
+        let token = web_security::random(&crate::host_inputs::SecureEntropy).unwrap();
         headers.append(header::COOKIE, format!("{COOKIE}={token}").parse().unwrap());
         headers.append(header::COOKIE, format!("{COOKIE}={token}").parse().unwrap());
         assert!(cookie_token(&headers).is_err());
