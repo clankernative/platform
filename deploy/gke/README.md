@@ -695,8 +695,13 @@ change with the candidate image and artifact, then enable it again. See
 Size the state volume for the app's invocation rate. A completed invocation keeps
 its full trace, which includes the authority it ran under, for 72 hours unless
 `journal_trace_hours` is set; an app with frequent schedules should set a few
-hours. Backups copy the database online within a fixed deadline, so a database
-that outgrows it stops the hourly backup before the disk fills.
+hours. The hourly backup copies the database online in time proportional to
+its size (bounded at 15 s plus 8 MiB/s, see the
+[Linux guide](../linux-sqlite/README.md#online-backup-in-the-runtime-image)),
+and its scratch volume holds a full copy: as the database grows, keep
+`backup_scratch_size_limit` above the database, provider stores and artifact
+together, and `backup_active_deadline_seconds` above the copy, integrity checks
+and upload.
 
 `app-edge.signed_webhook_paths` optionally routes exact `/ingress/<endpoint>`
 paths through a separate backend without IAP. This is for provider deliveries:

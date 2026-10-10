@@ -1,17 +1,49 @@
 //! Online SQLite snapshots and restore into a new directory. Never copy a live
 //! main database file without its WAL, overwrite an instance, or resume commands.
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use day2::{artifact::Instance, authority_state, store::Runtime};
 use rusqlite::{
-    Connection, OpenFlags,
+    Connection, ErrorCode, OpenFlags,
     backup::{Backup, StepResult},
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
+    ffi::c_int,
     fs,
     path::{Path, PathBuf},
     time::{Duration, Instant},
+};
+
+/// Bounds of one online snapshot. The copy reads inside a single read
+/// transaction on the source, so it is one consistent snapshot: commits by
+/// other connections neither appear in it nor restart it, however long it
+/// takes. (Without that transaction SQLite restarts an online backup from the
+/// first page whenever another connection writes, so a large database that the
+/// app writes more often than one full copy takes is never copied.) In WAL mode
+/// the snapshot never blocks the app's writers; it only keeps checkpoints from
+/// passing it until it ends. A rollback-journal source blocks writers' commits
+/// for the copy, which only the small synthetic provider stores use.
+#[derive(Clone, Copy)]
+struct Pace {
+    /// Pages per `sqlite3_backup_step`, between progress and deadline checks.
+    step_pages: c_int,
+    /// Fails once the copy has not advanced for this long, including waiting
+    /// for a lock to start the snapshot (a writer that never releases it).
+    stall: Duration,
+    /// Fails once the copy takes longer than `stall` plus the snapshot's size
+    /// at this rate: progress too slow to finish in reasonable time.
+    floor_bytes_per_second: u64,
+}
+
+/// A 2.5 GiB database may take up to 15 s + 320 s. The GKE backup Job's
+/// `backup_active_deadline_seconds` (default 1800) bounds the whole run,
+/// including integrity checks, verification and upload, and must stay above it.
+const ONLINE: Pace = Pace {
+    step_pages: 1024,
+    stall: Duration::from_secs(15),
+    floor_bytes_per_second: 8 << 20,
 };
 
 #[derive(Serialize, Deserialize)]
@@ -106,13 +138,16 @@ fn private_new(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Streams the file, so the digest needs no memory proportional to its size;
+/// the same `sha256:` form as `day2::digest`.
 fn database_digest(path: &Path) -> Result<String> {
-    let metadata = fs::symlink_metadata(path)?;
     ensure!(
-        metadata.file_type().is_file() && metadata.len() <= 256 * 1024 * 1024,
-        "bounded regular database required"
+        fs::symlink_metadata(path)?.file_type().is_file(),
+        "regular database file required"
     );
-    Ok(day2::digest(&fs::read(path)?))
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut fs::File::open(path)?, &mut hasher)?;
+    Ok(format!("sha256:{:x}", hasher.finalize()))
 }
 
 fn copy_tree(source: &Path, target: &Path, budget: &mut u64, depth: u32) -> Result<()> {
@@ -154,29 +189,77 @@ fn integrity(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Copies `source` into the new database `destination` as one consistent
+/// online snapshot (see [`Pace`]) and returns the open destination.
+/// `elapsed` is the time since the caller started the snapshot.
+fn online_snapshot(
+    source: &Path,
+    destination: &Path,
+    pace: Pace,
+    mut elapsed: impl FnMut() -> Duration,
+) -> Result<Connection> {
+    let mut source = Connection::open_with_flags(source, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    // SQLite waits for a source lock up to this long before it reports busy,
+    // both to start the snapshot and in a step, so a busy result is a stall.
+    source.busy_timeout(pace.stall)?;
+    let snapshot = source.transaction()?;
+    // The first read starts the snapshot; the transaction keeps it until the end.
+    let value =
+        |pragma: &str| snapshot.pragma_query_value(None, pragma, |row| row.get::<_, i64>(0));
+    let bytes = match value("page_count").and_then(|pages| Ok(pages * value("page_size")?)) {
+        Err(error) if error.sqlite_error_code() == Some(ErrorCode::DatabaseBusy) => bail!(
+            "online backup stalled: the source stayed locked for {} s",
+            pace.stall.as_secs_f64()
+        ),
+        result => u64::try_from(result?)?,
+    };
+    let bound =
+        pace.stall + Duration::from_secs_f64(bytes as f64 / pace.floor_bytes_per_second as f64);
+    let mut destination = Connection::open(destination)?;
+    let backup = Backup::new(&snapshot, &mut destination)?;
+    let (mut remaining, mut advanced) = (c_int::MAX, Duration::ZERO);
+    loop {
+        let result = backup.step(pace.step_pages)?;
+        let now = elapsed();
+        let progress = backup.progress();
+        match result {
+            StepResult::Done => break,
+            StepResult::More if progress.remaining < remaining => {
+                (remaining, advanced) = (progress.remaining, now);
+            }
+            StepResult::More | StepResult::Busy => {}
+            // Only a write through the backup's own source connection (or a
+            // shared cache) reports locked; this read-only connection has none.
+            _ => bail!("unsupported online backup result"),
+        }
+        ensure!(
+            now.saturating_sub(advanced) < pace.stall,
+            "online backup stalled: no page copied for {} s ({} of {} pages left)",
+            pace.stall.as_secs_f64(),
+            progress.remaining,
+            progress.pagecount
+        );
+        ensure!(
+            now < bound,
+            "online backup too slow: {} of {} pages left after {} s, the bound for {bytes} bytes",
+            progress.remaining,
+            progress.pagecount,
+            bound.as_secs_f64()
+        );
+    }
+    drop(backup);
+    Ok(destination)
+}
+
 fn snapshot_database(source: &Path, destination: &Path) -> Result<()> {
     ensure!(
         fs::symlink_metadata(source)?.file_type().is_file(),
         "provider database must be a regular file"
     );
-    let source = Connection::open_with_flags(source, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    let mut destination_db = Connection::open(destination)?;
-    let backup = Backup::new(&source, &mut destination_db)?;
     let start = Instant::now();
-    loop {
-        ensure!(
-            start.elapsed() < Duration::from_secs(15),
-            "online provider backup deadline"
-        );
-        match backup.step(256)? {
-            StepResult::Done => break,
-            StepResult::More => {}
-            StepResult::Busy | StepResult::Locked => std::thread::sleep(Duration::from_millis(10)),
-            _ => anyhow::bail!("unsupported provider backup result"),
-        }
-    }
-    drop(backup);
-    drop(destination_db);
+    drop(online_snapshot(source, destination, ONLINE, || {
+        start.elapsed()
+    })?);
     integrity(destination)
 }
 
@@ -194,7 +277,8 @@ fn snapshot_providers(app_database: &Path, output: &Path) -> Result<BTreeMap<Str
             private_new(&output.join("providers"))?;
         }
         let destination = output.join("providers").join(name);
-        snapshot_database(&source, &destination)?;
+        snapshot_database(&source, &destination)
+            .with_context(|| format!("provider database {name}"))?;
         providers.insert((*name).into(), database_digest(&destination)?);
     }
     Ok(providers)
@@ -225,23 +309,9 @@ pub fn take(instance_path: &Path, app: &str, output: &Path) -> Result<Manifest> 
     );
     private_new(output)?;
     let database = output.join("app.sqlite");
-    let source = Connection::open_with_flags(runtime.db(), OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    let mut destination = Connection::open(&database)?;
-    let backup = Backup::new(&source, &mut destination)?;
     let start = Instant::now();
-    loop {
-        ensure!(
-            start.elapsed() < Duration::from_secs(15),
-            "online backup deadline"
-        );
-        match backup.step(256)? {
-            StepResult::Done => break,
-            StepResult::More => {}
-            StepResult::Busy | StepResult::Locked => std::thread::sleep(Duration::from_millis(10)),
-            _ => anyhow::bail!("unsupported backup result"),
-        }
-    }
-    drop(backup);
+    let mut destination = online_snapshot(runtime.db(), &database, ONLINE, || start.elapsed())
+        .context("app database")?;
     // Read binding and grants from the completed snapshot itself. The desired
     // file and a separately sampled runtime may change during online backup.
     let active = authority_state::current(&destination)?;
@@ -803,6 +873,160 @@ mod tests {
         Connection::open(&unrelated)?.execute("CREATE TABLE private(value TEXT)", [])?;
         std::os::unix::fs::symlink(&unrelated, source.join("carta.synthetic.sqlite"))?;
         assert!(snapshot_providers(&source.join("app.sqlite"), &output).is_err());
+        Ok(())
+    }
+
+    /// Appends `rows` one-page rows in one transaction that keeps `total`
+    /// equal to the row count, so a torn snapshot is detectable.
+    fn append(connection: &Connection, rows: i64) -> rusqlite::Result<()> {
+        connection.execute_batch("BEGIN IMMEDIATE")?;
+        connection.execute(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?1) INSERT INTO entries(body) SELECT randomblob(4000) FROM n",
+            [rows],
+        )?;
+        connection.execute("UPDATE total SET n = n + ?1", [rows])?;
+        connection.execute_batch("COMMIT")
+    }
+
+    fn ledger(path: &Path, journal: &str, rows: i64) -> Result<Connection> {
+        let connection = Connection::open(path)?;
+        connection.pragma_update(None, "journal_mode", journal)?;
+        connection.execute_batch("CREATE TABLE entries(id INTEGER PRIMARY KEY, body BLOB NOT NULL); CREATE TABLE total(n INTEGER NOT NULL); INSERT INTO total VALUES(0);")?;
+        append(&connection, rows)?;
+        Ok(connection)
+    }
+
+    /// Rows of an intact, internally consistent copy.
+    fn consistent_rows(path: &Path) -> Result<i64> {
+        integrity(path)?;
+        let copy = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let (rows, total): (i64, i64) = copy.query_row(
+            "SELECT (SELECT COUNT(*) FROM entries), (SELECT n FROM total)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(rows, total, "torn snapshot");
+        Ok(rows)
+    }
+
+    #[test]
+    fn slow_large_snapshots_are_bounded_by_progress_and_size_not_a_fixed_budget() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let source = directory.path().join("large.sqlite");
+        drop(ledger(&source, "WAL", 256)?);
+        // About 1 MiB in 16-page steps, against a floor of 32 KiB/s: the bound
+        // is 15 s + ~33 s. The injected clock charges simulated seconds per step.
+        let pace = Pace {
+            step_pages: 16,
+            floor_bytes_per_second: 32 << 10,
+            ..ONLINE
+        };
+        let mut simulated = Duration::ZERO;
+        // 64 KiB per second, twice the floor: well past the old fixed 15 s.
+        let mut steady = || {
+            simulated += Duration::from_secs(1);
+            simulated
+        };
+        let copy = directory.path().join("copy.sqlite");
+        drop(online_snapshot(&source, &copy, pace, &mut steady)?);
+        assert!(simulated > Duration::from_secs(15));
+        assert_eq!(consistent_rows(&copy)?, 256);
+        // Below the floor (16 pages per 3 s) the copy fails at its size bound.
+        let mut simulated = Duration::ZERO;
+        let mut crawling = || {
+            simulated += Duration::from_secs(3);
+            simulated
+        };
+        let slow = directory.path().join("slow.sqlite");
+        let error = online_snapshot(&source, &slow, pace, &mut crawling).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("online backup too slow"),
+            "{error:#}"
+        );
+        assert!(
+            simulated > Duration::from_secs(45) && simulated < Duration::from_secs(55),
+            "{simulated:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn commits_between_every_step_neither_restart_nor_tear_the_snapshot() -> Result<()> {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::SeqCst};
+        let directory = tempfile::tempdir()?;
+        let source = directory.path().join("busy.sqlite");
+        let writer = ledger(&source, "WAL", 512)?;
+        let (commits, stop) = (AtomicU64::new(0), AtomicBool::new(false));
+        let copy = directory.path().join("copy.sqlite");
+        let (snapshot, during) = std::thread::scope(|scope| {
+            let (commits, stop) = (&commits, &stop);
+            let app = scope.spawn(move || -> rusqlite::Result<()> {
+                while !stop.load(SeqCst) {
+                    append(&writer, 1)?;
+                    commits.fetch_add(1, SeqCst);
+                }
+                Ok(())
+            });
+            // Each step waits for another app commit, so the source changes
+            // between every pair of steps: an online backup without its own
+            // read transaction restarts on each one and never finishes.
+            let started = Instant::now();
+            let mut after_a_commit = || {
+                let (seen, waited) = (commits.load(SeqCst), Instant::now());
+                while commits.load(SeqCst) == seen {
+                    assert!(!app.is_finished(), "the app writer stopped");
+                    assert!(waited.elapsed() < Duration::from_secs(10));
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                started.elapsed()
+            };
+            let before = commits.load(SeqCst);
+            let pace = Pace {
+                step_pages: 8,
+                ..ONLINE
+            };
+            let snapshot = online_snapshot(&source, &copy, pace, &mut after_a_commit);
+            let during = commits.load(SeqCst) - before;
+            stop.store(true, SeqCst);
+            app.join().unwrap().unwrap();
+            (snapshot, during)
+        });
+        drop(snapshot?);
+        // 512 rows take ~64 steps, one app commit apart. The copy is the
+        // consistent state when its snapshot began, without those commits.
+        assert!(during >= 60, "{during} commits during the snapshot");
+        let rows = consistent_rows(&copy)?;
+        let later = consistent_rows(&source)?;
+        assert!(rows >= 512 && later - rows >= 60, "{rows} of {later}");
+        Ok(())
+    }
+
+    #[test]
+    fn a_source_locked_by_a_writer_that_never_releases_fails_within_the_stall_bound() -> Result<()>
+    {
+        let directory = tempfile::tempdir()?;
+        let source = directory.path().join("locked.sqlite");
+        // A rollback-journal writer's exclusive lock keeps every reader out.
+        let writer = ledger(&source, "DELETE", 16)?;
+        writer.execute_batch("BEGIN EXCLUSIVE; UPDATE total SET n = n;")?;
+        let pace = Pace {
+            stall: Duration::from_millis(200),
+            ..ONLINE
+        };
+        let started = Instant::now();
+        let copy = directory.path().join("copy.sqlite");
+        let error = online_snapshot(&source, &copy, pace, || started.elapsed()).unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(
+            format!("{error:#}").contains("online backup stalled: the source stayed locked"),
+            "{error:#}"
+        );
+        writer.execute_batch("ROLLBACK")?;
+        let retry = directory.path().join("retry.sqlite");
+        drop(online_snapshot(&source, &retry, pace, || {
+            started.elapsed()
+        })?);
+        assert_eq!(consistent_rows(&retry)?, 16);
         Ok(())
     }
 }
