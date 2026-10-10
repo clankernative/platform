@@ -231,8 +231,15 @@ day2-backup INSTANCE_JSON APP NEW_OUTPUT_DIRECTORY [--upload-gcs BUCKET --object
 It runs the same native operations as `day2 platform backup`
 (`ops/Backup.roc`), in the same order and with no logic of its own: an online
 snapshot of the app database and its local provider stores through SQLite's
-backup API over read-only connections (15 s deadline each), a copy of the
-active artifact, then verification of the stored bundle. It does not take the
+backup API over read-only connections, a copy of the active artifact, then
+verification of the stored bundle. Each store is copied inside one read
+transaction, so the copy is the consistent state when it began: the app's
+concurrent commits neither appear in it nor restart it (in WAL mode they are
+not blocked either; checkpoints wait until the copy ends). A copy fails after
+15 s without progress, for example while a writer holds a rollback-journal
+store's lock, or once it has taken 15 s plus its size at 8 MiB/s (about 5.5
+minutes for 2.5 GiB). Digests stream each file, so memory does not grow with
+the database. It does not take the
 `.state/<app>.serve.lock` lease, so it runs beside a serving `day2-serve` on the
 same state volume; the volume must be writable because SQLite maintains the
 WAL's shared-memory file even for readers. The output directory must be new.
