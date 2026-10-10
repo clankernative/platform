@@ -363,7 +363,7 @@ does every native action with `kubectl` and the registry API. Operations:
 | `inspect` | Reads the active authority stamp and policy | restored |
 | `backup` | Verified backup, copied to `~/day2-backups/<namespace>/<stamp>/` | restored |
 | `authority-apply` | Backup, then applies the policy in the current ConfigMap, after a typed `apply` | restored |
-| `activate` | Backup, migration plan, typed `activate`, migration, fresh activation of the target artifact, then the `day2.dev/activated-artifact` stamp | stopped: release the target artifact next (release-managed), otherwise apply day2-app for the new image |
+| `activate` | Backup, migration plan, the target's store admission on a rehearsed copy, typed `activate`, migration, fresh activation of the target artifact, then the `day2.dev/activated-artifact` stamp | stopped: release the target artifact next (release-managed), otherwise apply day2-app for the new image |
 | `mark-activated` | Recovery when `activate`'s stamp step failed: reads the database's active artifact and, only if it is the target, stamps the stopped StatefulSet | stopped, as `activate` leaves it |
 
 The request file names the target exactly:
@@ -403,8 +403,23 @@ What the session guarantees, whatever the recipe does:
 - Before the migration fence, any failure restores the StatefulSet's replicas on
   its original image. After the fence the old image is never restarted on the
   migrated volume; the session prints the two ways forward instead.
-- The fence needs a verified local backup, a migration plan and a confirmation
-  from the same session, and `migration apply` refuses to run without it.
+- Before it asks for the confirmation, `activate` rehearses the fence's work on
+  a disposable copy in the pod: the verified backup under the target instance
+  (`/srv/day2/admission/`, on the pod's scratch volume, never the app's), the
+  shown migration plan applied, the target activated, then `day2 admit` from
+  the target build's tooling image. `day2 admit` is the store admission
+  `day2-serve` runs at startup (`deployment::admit_store`: storage binding and
+  authority, platform upgrades, the private credential schema, the authority's
+  security requirements, and the private OAuth schema of an app with OAuth
+  connections). If the target would not open the store, for example a
+  credential unit older than its schema (`unsupported credential schema
+  version`), the session stops with `target_store_admission_refused` and the
+  cause, records `target-admission-refused` in the journal, and restores the
+  app on its image. Host checks (kernel, sandbox, security runtime evidence)
+  still run only when the new pod starts.
+- The fence needs a verified local backup, a migration plan, the target's store
+  admission and a confirmation from the same session, and `migration apply`
+  refuses to run without it.
 - Artifacts come from the digest-pinned app images: manifest, layer, artifact
   identity and worker digests are checked, and links or devices are refused.
 - The local backup copy must match a SHA-256 manifest computed in the pod; a
