@@ -266,14 +266,41 @@ impl Registry {
     }
 }
 
+/// Context data from the actual runtime/pending and current strict instance.
+/// Existing Registry::resolve and native final writers separately check active
+/// authority. This never loads provider keys or turns desired pins into proof.
+pub(crate) fn fresh_intent(
+    runtime: &Runtime,
+    pending: &Pending,
+    identity: &iap::Verified,
+) -> Result<crate::oauth::fresh_auth::FreshIntent> {
+    let instance = Instance::load(runtime.instance_path())?;
+    ensure!(
+        instance.scope(runtime.app())? == runtime.scope(),
+        "credential fresh scope changed"
+    );
+    let (_, app) = instance.edge(runtime.app())?;
+    let (_, shell) = instance.security_edge()?;
+    crate::oauth::fresh_auth::FreshIntent::credential(
+        runtime,
+        pending,
+        identity,
+        &app.origin,
+        &shell.origin,
+    )
+}
+
 pub(crate) fn confirm(
     runtime: &Runtime,
     pending: &Pending,
     identity: &iap::Verified,
     session: &str,
-    authenticated_at: i64,
+    human_proof: &crate::oauth::fresh_auth::VerifiedAuthTime,
     now: i64,
 ) -> Result<crate::protocol::Outcome> {
+    human_proof.require_intent(&fresh_intent(runtime, pending, identity)?, identity)?;
+    human_proof.require_current(now)?;
+    let authenticated_at = human_proof.authenticated_at();
     ensure!(
         identity.email == pending.actor
             && authenticated_at > pending.created_at
@@ -300,6 +327,8 @@ pub(crate) fn confirm(
         &identity.subject,
         now,
     )?;
+    let now = human_proof.observe_current(now)?;
+    human_proof.require_intent(&fresh_intent(runtime, pending, identity)?, identity)?;
     drop(db);
     let mut db = open(runtime.db())?;
     let tx = crate::write_queue::immediate(&mut db)?;
@@ -329,6 +358,7 @@ pub(crate) fn confirm(
         &ready,
         now,
     )?;
+    human_proof.require_current(now)?;
     if let Some(proof) = issuance::load(&tx, &pending.invocation)? {
         ensure!(
             proof.session == session
@@ -353,7 +383,7 @@ pub(crate) fn confirm(
             security_epoch: ready.security_epoch,
             authenticated_at,
             approved_at: now,
-            expires_at: pending.expires_at.min(authenticated_at + 300),
+            expires_at: pending.expires_at.min(human_proof.deadline()?),
         };
         tx.execute(
             "INSERT INTO day2_credential_confirmations VALUES (?1,?2)",
@@ -361,6 +391,8 @@ pub(crate) fn confirm(
         )?;
     }
     tx.commit()?;
+    let now = human_proof.observe_current(now)?;
+    human_proof.require_intent(&fresh_intent(runtime, pending, identity)?, identity)?;
     runtime.invoke_verified(
         &pending.operation,
         RequestIdentity {
@@ -379,9 +411,12 @@ pub(crate) fn deliver(
     pending: &Pending,
     identity: &iap::Verified,
     session: &str,
+    human_proof: &crate::oauth::fresh_auth::VerifiedAuthTime,
     now: i64,
     acknowledge: bool,
 ) -> Result<Option<String>> {
+    human_proof.require_intent(&fresh_intent(runtime, pending, identity)?, identity)?;
+    human_proof.require_current(now)?;
     let mut db = open(runtime.db())?;
     let tx = crate::write_queue::immediate(&mut db)?;
     let active = authority_state::authorize_in(&tx, runtime, &pending.operation, &identity.email)?;
@@ -417,6 +452,7 @@ pub(crate) fn deliver(
             acknowledge && succeeded && !matches!(proof.intent, Intent::Issue { .. }),
             "credential delivery unavailable"
         );
+        human_proof.require_current(now)?;
         tx.commit()?;
         return Ok(None);
     }
@@ -427,6 +463,12 @@ pub(crate) fn deliver(
         &identity.subject,
         now,
     )?;
+    let now = human_proof.observe_current(now)?;
+    human_proof.require_intent(&fresh_intent(runtime, pending, identity)?, identity)?;
+    ensure!(
+        now < proof.expires_at,
+        "credential delivery approval expired during preparation"
+    );
     ensure!(
         epoch == proof.security_epoch,
         "credential security epoch changed"
@@ -441,6 +483,7 @@ pub(crate) fn deliver(
     if acknowledge {
         // Recipient/session checks above bind closure to the original approval.
         store::close_delivery(&tx, &version, "acknowledged")?;
+        human_proof.require_current(now)?;
         tx.commit()?;
         return Ok(None);
     }
@@ -469,5 +512,7 @@ pub(crate) fn deliver(
         &permit,
         now,
     )?;
+    human_proof.require_current(now)?;
+    human_proof.require_intent(&fresh_intent(runtime, pending, identity)?, identity)?;
     Ok(Some(permit.into_response_body(&keys)?))
 }

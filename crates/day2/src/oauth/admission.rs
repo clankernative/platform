@@ -258,10 +258,11 @@ impl super::shell_transport::ApprovalSigner for ArtifactShellSigner {
     fn attest(
         &self,
         view: &super::shell_transport::ApprovalView,
-        session: Digest,
-        authenticated_at: i64,
+        session: &super::security_shell::ShellSession,
         now: i64,
     ) -> Result<super::external::FreshExternalApproval> {
+        session.require_approval(view, now)?;
+        let authenticated_at = session.authenticated_at();
         view.validate(&crate::iap::Verified {
             email: view.human().into(),
             subject: view.subject.clone(),
@@ -334,6 +335,8 @@ impl super::shell_transport::ApprovalSigner for ArtifactShellSigner {
             .as_ref()
             .context("OAuth shell key provider missing")?
             .load(reference, ApprovalKeyPurpose::ShellAttestation)?;
+        let now = session.observe_current(now)?;
+        session.require_approval(view, now)?;
         ensure!(
             key.binding == reference.binding
                 && key.version == reference.version
@@ -346,7 +349,13 @@ impl super::shell_transport::ApprovalSigner for ArtifactShellSigner {
             view.claim.security_origin.clone(),
             view.claim.approval.clone(),
         )?
-        .attest_view(&view.claim, view.digest()?, session, authenticated_at, now)
+        .attest_view(
+            &view.claim,
+            view.digest()?,
+            session.digest(),
+            authenticated_at,
+            now,
+        )
     }
 }
 
@@ -3063,171 +3072,246 @@ pub(super) mod tests {
     #[test]
     fn shell_signer_loads_only_attestation_and_rejects_changed_selected_presentation_before_keys()
     -> Result<()> {
+        use super::super::security_shell::FreshAuthenticator;
         use super::super::shell_transport::{ApprovalSigner, ApprovalView};
-        struct OnlyShell(AtomicUsize);
-        impl ApprovalKeyProvider for OnlyShell {
-            fn load(
-                &self,
-                reference: &ApprovalKeyRef,
-                purpose: ApprovalKeyPurpose,
-            ) -> Result<ApprovalKeyMaterial> {
-                assert_eq!(
-                    purpose,
-                    ApprovalKeyPurpose::ShellAttestation,
-                    "shell must never acquire custody keys"
-                );
-                self.0.fetch_add(1, Ordering::SeqCst);
-                Keys::default().load(reference, purpose)
+        let clock = super::super::simulation::World::new(905);
+        super::super::effects::scope(clock.clone(), || {
+            struct OnlyShell(AtomicUsize);
+            impl ApprovalKeyProvider for OnlyShell {
+                fn load(
+                    &self,
+                    reference: &ApprovalKeyRef,
+                    purpose: ApprovalKeyPurpose,
+                ) -> Result<ApprovalKeyMaterial> {
+                    assert_eq!(
+                        purpose,
+                        ApprovalKeyPurpose::ShellAttestation,
+                        "shell must never acquire custody keys"
+                    );
+                    self.0.fetch_add(1, Ordering::SeqCst);
+                    Keys::default().load(reference, purpose)
+                }
             }
-        }
-        let mut facts = fixture(AccountBindingPolicy::ExplicitExternalAccount)?;
-        facts.intent.owner = "ada@example.com".into();
-        let slot = ConnectionSlotKey {
-            installation: name("company"),
-            environment: name("production"),
-            app: name("workspace"),
-            requirement: "work_calendar".into(),
-            owner: SlotOwner::Human {
-                subject: facts.intent.owner.clone(),
-            },
-        };
-        let selected = facts.qualify()?;
-        let choice = &selected.entries[&("workspace".into(), "calendar".into())];
-        let filtered = ArtifactShellSigner::keys(&selected, Arc::new(NoTokens))?.unwrap();
-        for (reference, purpose) in [
-            (
-                &choice.custody_verifier,
-                ApprovalKeyPurpose::CustodyVerifier,
-            ),
-            (
-                &choice.custody_encryption,
-                ApprovalKeyPurpose::CustodyEncryption,
-            ),
-        ] {
-            assert!(
-                filtered.load(reference, purpose).is_err(),
-                "custody is not registered in the shell key provider"
-            );
-        }
-        let observed = super::super::account::ProviderAccount {
-            issuer: choice.reviewed.issuer_url.clone(),
-            subject: "provider-subject".into(),
-            tenant: "external-tenant".into(),
-            display_email: "external@example.net".into(),
-        };
-        let permission = choice.permission.consent_digest(&choice.requirement)?;
-        let scopes = choice
-            .permission
-            .action_scopes
-            .values()
-            .flatten()
-            .cloned()
-            .collect();
-        let mut view = ApprovalView {
-            app: "workspace".into(),
-            subject: "accounts.google.com:12345".into(),
-            requirement: choice.binding.requirement.clone(),
-            permission: permission.clone(),
-            logical_id: choice.requirement.logical_id.clone(),
-            usage: choice.requirement.usage.clone(),
-            scopes,
-            observed: observed.clone(),
-            binding_namespace: binding_namespace(&choice.binding)?,
-            terms: Digest::of(&"app-owned current readiness terms")?,
-            shell_origin: "https://security.example.com/".into(),
-            app_origin: "https://app.example.com/".into(),
-            claim: super::super::external::ApprovalClaim {
-                attempt: super::super::shell_transport::scoped_attempt(
-                    "company",
-                    "production",
-                    "workspace",
-                )?,
-                slot: slot.id(&choice.requirement)?.as_str().into(),
-                generation: 1,
-                human: facts.intent.owner.clone(),
-                account: super::super::account::provider_account_digest(&observed)?
-                    .as_str()
-                    .into(),
-                scope_evidence: String::new(),
-                challenge: Digest::of(&"one pending challenge")?,
-                security_origin: choice.binding.security_shell.clone(),
-                approval: choice.binding.account_binding.clone(),
-                quarantined_at: 4,
-            },
-        };
-        view.claim.scope_evidence =
-            Digest::of(&("oauth-accepted-scopes-v1", &permission, &view.scopes))?
-                .as_str()
-                .into();
-        let keys = Arc::new(OnlyShell(AtomicUsize::new(0)));
-        let signer = ArtifactShellSigner {
-            state: RwLock::new(AuthorityState {
-                selected,
-                keys: Some(keys.clone()),
-            }),
-        };
-        let session = Digest::of(&"fresh shell session")?;
-        let proof = signer.attest(&view, session.clone(), 5, 6)?;
-        assert_eq!(proof.preview, Some(view.digest()?));
-        assert_eq!(keys.0.load(Ordering::SeqCst), 1);
-        for mutation in 0..7 {
-            let mut wrong = view.clone();
-            match mutation {
-                0 => wrong.usage = "Changed consent wording".into(),
-                1 => wrong.claim.slot = Digest::of(&"another human slot")?.as_str().into(),
-                2 => wrong.binding_namespace = "retired_namespace".into(),
-                3 => wrong.app_origin = "https://other.example/".into(),
-                4 => wrong.claim.approval = pin("other_approval"),
-                5 => {
-                    wrong.scopes.insert("calendar.write".into());
-                    wrong.claim.scope_evidence = Digest::of(&(
-                        "oauth-accepted-scopes-v1",
-                        &wrong.permission,
-                        &wrong.scopes,
-                    ))?
+            let mut facts = fixture(AccountBindingPolicy::ExplicitExternalAccount)?;
+            facts.intent.owner = "ada@example.com".into();
+            let slot = ConnectionSlotKey {
+                installation: name("company"),
+                environment: name("production"),
+                app: name("workspace"),
+                requirement: "work_calendar".into(),
+                owner: SlotOwner::Human {
+                    subject: facts.intent.owner.clone(),
+                },
+            };
+            let selected = facts.qualify()?;
+            let choice = &selected.entries[&("workspace".into(), "calendar".into())];
+            let filtered = ArtifactShellSigner::keys(&selected, Arc::new(NoTokens))?.unwrap();
+            for (reference, purpose) in [
+                (
+                    &choice.custody_verifier,
+                    ApprovalKeyPurpose::CustodyVerifier,
+                ),
+                (
+                    &choice.custody_encryption,
+                    ApprovalKeyPurpose::CustodyEncryption,
+                ),
+            ] {
+                assert!(
+                    filtered.load(reference, purpose).is_err(),
+                    "custody is not registered in the shell key provider"
+                );
+            }
+            let observed = super::super::account::ProviderAccount {
+                issuer: choice.reviewed.issuer_url.clone(),
+                subject: "provider-subject".into(),
+                tenant: "external-tenant".into(),
+                display_email: "external@example.net".into(),
+            };
+            let permission = choice.permission.consent_digest(&choice.requirement)?;
+            let scopes = choice
+                .permission
+                .action_scopes
+                .values()
+                .flatten()
+                .cloned()
+                .collect();
+            let mut view = ApprovalView {
+                app: "workspace".into(),
+                subject: "accounts.google.com:12345".into(),
+                requirement: choice.binding.requirement.clone(),
+                permission: permission.clone(),
+                logical_id: choice.requirement.logical_id.clone(),
+                usage: choice.requirement.usage.clone(),
+                scopes,
+                observed: observed.clone(),
+                binding_namespace: binding_namespace(&choice.binding)?,
+                terms: Digest::of(&"app-owned current readiness terms")?,
+                shell_origin: "https://security.example.com/".into(),
+                app_origin: "https://app.example.com/".into(),
+                claim: super::super::external::ApprovalClaim {
+                    attempt: super::super::shell_transport::scoped_attempt(
+                        "company",
+                        "production",
+                        "workspace",
+                    )?,
+                    slot: slot.id(&choice.requirement)?.as_str().into(),
+                    generation: 1,
+                    human: facts.intent.owner.clone(),
+                    account: super::super::account::provider_account_digest(&observed)?
+                        .as_str()
+                        .into(),
+                    scope_evidence: String::new(),
+                    challenge: Digest::of(&"one pending challenge")?,
+                    security_origin: choice.binding.security_shell.clone(),
+                    approval: choice.binding.account_binding.clone(),
+                    quarantined_at: 4,
+                },
+            };
+            view.claim.scope_evidence =
+                Digest::of(&("oauth-accepted-scopes-v1", &permission, &view.scopes))?
                     .as_str()
                     .into();
+            let keys = Arc::new(OnlyShell(AtomicUsize::new(0)));
+            let signer = ArtifactShellSigner {
+                state: RwLock::new(AuthorityState {
+                    selected,
+                    keys: Some(keys.clone()),
+                }),
+            };
+            let session = Digest::of(&"fresh shell session")?;
+            let identity = crate::iap::Verified {
+                email: view.human().into(),
+                subject: view.subject.clone(),
+            };
+            let intent = super::super::fresh_auth::FreshIntent::approval(&view, &identity)?;
+            let (authenticator, headers, callback) =
+                super::super::shell_oidc::fixture_login(&identity, intent, 5, 5, 5)?;
+            let identity = authenticator.identify(&headers, 5)?;
+            let google = authenticator.complete(&callback, &identity, 5)?;
+            let fresh = super::super::security_shell::ShellSession::approval_signed_fixture(
+                &view,
+                &identity,
+                google,
+                session.clone(),
+                5,
+            )?;
+            // A refused original lifetime is terminal. Keep this negative control's
+            // proof separate from the retirement and post-key-load controls below.
+            let intent = super::super::fresh_auth::FreshIntent::approval(&view, &identity)?;
+            let (authenticator, headers, callback) =
+                super::super::shell_oidc::fixture_login(&identity, intent, 5, 5, 5)?;
+            let identity = authenticator.identify(&headers, 5)?;
+            let google = authenticator.complete(&callback, &identity, 5)?;
+            let future_entry = super::super::security_shell::ShellSession::approval_signed_fixture(
+                &view,
+                &identity,
+                google,
+                session.clone(),
+                5,
+            )?;
+            clock.advance(1);
+            let proof = signer.attest(&view, &fresh, 6)?;
+            assert_eq!(proof.preview, Some(view.digest()?));
+            assert_eq!(keys.0.load(Ordering::SeqCst), 1);
+            for mutation in 0..7 {
+                let mut wrong = view.clone();
+                match mutation {
+                    0 => wrong.usage = "Changed consent wording".into(),
+                    1 => wrong.claim.slot = Digest::of(&"another human slot")?.as_str().into(),
+                    2 => wrong.binding_namespace = "retired_namespace".into(),
+                    3 => wrong.app_origin = "https://other.example/".into(),
+                    4 => wrong.claim.approval = pin("other_approval"),
+                    5 => {
+                        wrong.scopes.insert("calendar.write".into());
+                        wrong.claim.scope_evidence = Digest::of(&(
+                            "oauth-accepted-scopes-v1",
+                            &wrong.permission,
+                            &wrong.scopes,
+                        ))?
+                        .as_str()
+                        .into();
+                    }
+                    6 => {
+                        wrong.claim.attempt = super::super::shell_transport::scoped_attempt(
+                            "company",
+                            "staging",
+                            "workspace",
+                        )?
+                    }
+                    _ => unreachable!(),
                 }
-                6 => {
-                    wrong.claim.attempt = super::super::shell_transport::scoped_attempt(
-                        "company",
-                        "staging",
-                        "workspace",
-                    )?
-                }
-                _ => unreachable!(),
+                assert!(
+                    signer.attest(&wrong, &fresh, 6).is_err(),
+                    "mutation {mutation}"
+                );
             }
-            assert!(
-                signer.attest(&wrong, session.clone(), 5, 6).is_err(),
-                "mutation {mutation}"
+            let stale = super::super::security_shell::ShellSession::approval_fixture(
+                &view,
+                &identity,
+                4,
+                session.clone(),
+            )?;
+            assert!(signer.attest(&view, &stale, 6).is_err());
+            assert!(signer.attest(&view, &future_entry, 306).is_err());
+            assert_eq!(keys.0.load(Ordering::SeqCst), 1);
+            let expiry_selected = facts.qualify()?;
+            facts
+                .instance
+                .apps
+                .get_mut("workspace")
+                .unwrap()
+                .oauth_connections
+                .clear();
+            facts.instance.oauth_runtime = None;
+            facts.instance.oauth_clients = None;
+            facts
+                .instance
+                .control
+                .as_mut()
+                .unwrap()
+                .security_epochs
+                .clear();
+            signer.replace_with_gcp(facts.qualify()?, Arc::new(NoTokens))?;
+            assert!(signer.attest(&view, &fresh, 6).is_err());
+            assert_eq!(keys.0.load(Ordering::SeqCst), 1);
+            // The preview digest includes the human's immutable IAP subject too.
+            let original_view = view.clone();
+            let digest = view.digest()?;
+            view.subject = "accounts.google.com:replacement".into();
+            assert_ne!(view.digest()?, digest);
+            struct ExpiringKey {
+                clock: Arc<super::super::simulation::World>,
+                calls: AtomicUsize,
+            }
+            impl ApprovalKeyProvider for ExpiringKey {
+                fn load(
+                    &self,
+                    reference: &ApprovalKeyRef,
+                    purpose: ApprovalKeyPurpose,
+                ) -> Result<ApprovalKeyMaterial> {
+                    assert_eq!(purpose, ApprovalKeyPurpose::ShellAttestation);
+                    self.calls.fetch_add(1, Ordering::SeqCst);
+                    self.clock.advance(300);
+                    Keys::default().load(reference, purpose)
+                }
+            }
+            let delayed = Arc::new(ExpiringKey {
+                clock: clock.clone(),
+                calls: AtomicUsize::new(0),
+            });
+            let expiring = ArtifactShellSigner {
+                state: RwLock::new(AuthorityState {
+                    selected: expiry_selected,
+                    keys: Some(delayed.clone()),
+                }),
+            };
+            assert!(expiring.attest(&original_view, &fresh, 6).is_err());
+            assert_eq!(
+                delayed.calls.load(Ordering::SeqCst),
+                1,
+                "control must reach actual key load before refusing expired original proof"
             );
-        }
-        assert!(signer.attest(&view, session.clone(), 4, 6).is_err());
-        assert!(signer.attest(&view, session.clone(), 5, 306).is_err());
-        assert_eq!(keys.0.load(Ordering::SeqCst), 1);
-        facts
-            .instance
-            .apps
-            .get_mut("workspace")
-            .unwrap()
-            .oauth_connections
-            .clear();
-        facts.instance.oauth_runtime = None;
-        facts.instance.oauth_clients = None;
-        facts
-            .instance
-            .control
-            .as_mut()
-            .unwrap()
-            .security_epochs
-            .clear();
-        signer.replace_with_gcp(facts.qualify()?, Arc::new(NoTokens))?;
-        assert!(signer.attest(&view, session, 5, 6).is_err());
-        assert_eq!(keys.0.load(Ordering::SeqCst), 1);
-        // The preview digest includes the human's immutable IAP subject too.
-        let digest = view.digest()?;
-        view.subject = "accounts.google.com:replacement".into();
-        assert_ne!(view.digest()?, digest);
-        Ok(())
+            Ok(())
+        })
     }
 }
