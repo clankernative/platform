@@ -190,18 +190,18 @@ fn integrity(path: &Path) -> Result<()> {
 }
 
 /// Copies `source` into the new database `destination` as one consistent
-/// online snapshot (see [`Pace`]) and returns the open destination. `clock`
-/// is `Instant::now` outside tests.
+/// online snapshot (see [`Pace`]) and returns the open destination.
+/// `elapsed` is the time since the caller started the snapshot.
 fn online_snapshot(
     source: &Path,
     destination: &Path,
     pace: Pace,
-    mut clock: impl FnMut() -> Instant,
+    mut elapsed: impl FnMut() -> Duration,
 ) -> Result<Connection> {
     let mut source = Connection::open_with_flags(source, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    // Waiting for the lock that starts the snapshot is bounded by the stall.
+    // SQLite waits for a source lock up to this long before it reports busy,
+    // both to start the snapshot and in a step, so a busy result is a stall.
     source.busy_timeout(pace.stall)?;
-    let start = clock();
     let snapshot = source.transaction()?;
     // The first read starts the snapshot; the transaction keeps it until the end.
     let value =
@@ -217,36 +217,35 @@ fn online_snapshot(
         pace.stall + Duration::from_secs_f64(bytes as f64 / pace.floor_bytes_per_second as f64);
     let mut destination = Connection::open(destination)?;
     let backup = Backup::new(&snapshot, &mut destination)?;
-    let (mut remaining, mut advanced) = (c_int::MAX, start);
+    let (mut remaining, mut advanced) = (c_int::MAX, Duration::ZERO);
     loop {
         let result = backup.step(pace.step_pages)?;
-        let now = clock();
+        let now = elapsed();
         let progress = backup.progress();
         match result {
             StepResult::Done => break,
             StepResult::More if progress.remaining < remaining => {
                 (remaining, advanced) = (progress.remaining, now);
             }
-            StepResult::More | StepResult::Busy | StepResult::Locked => {}
+            StepResult::More | StepResult::Busy => {}
+            // Only a write through the backup's own source connection (or a
+            // shared cache) reports locked; this read-only connection has none.
             _ => bail!("unsupported online backup result"),
         }
         ensure!(
-            now.duration_since(advanced) < pace.stall,
+            now.saturating_sub(advanced) < pace.stall,
             "online backup stalled: no page copied for {} s ({} of {} pages left)",
             pace.stall.as_secs_f64(),
             progress.remaining,
             progress.pagecount
         );
         ensure!(
-            now.duration_since(start) < bound,
+            now < bound,
             "online backup too slow: {} of {} pages left after {} s, the bound for {bytes} bytes",
             progress.remaining,
             progress.pagecount,
             bound.as_secs_f64()
         );
-        if !matches!(result, StepResult::More) {
-            std::thread::sleep(Duration::from_millis(10));
-        }
     }
     drop(backup);
     Ok(destination)
@@ -257,7 +256,10 @@ fn snapshot_database(source: &Path, destination: &Path) -> Result<()> {
         fs::symlink_metadata(source)?.file_type().is_file(),
         "provider database must be a regular file"
     );
-    drop(online_snapshot(source, destination, ONLINE, Instant::now)?);
+    let start = Instant::now();
+    drop(online_snapshot(source, destination, ONLINE, || {
+        start.elapsed()
+    })?);
     integrity(destination)
 }
 
@@ -307,8 +309,9 @@ pub fn take(instance_path: &Path, app: &str, output: &Path) -> Result<Manifest> 
     );
     private_new(output)?;
     let database = output.join("app.sqlite");
-    let mut destination =
-        online_snapshot(runtime.db(), &database, ONLINE, Instant::now).context("app database")?;
+    let start = Instant::now();
+    let mut destination = online_snapshot(runtime.db(), &database, ONLINE, || start.elapsed())
+        .context("app database")?;
     // Read binding and grants from the completed snapshot itself. The desired
     // file and a separately sampled runtime may change during online backup.
     let active = authority_state::current(&destination)?;
@@ -918,8 +921,7 @@ mod tests {
             floor_bytes_per_second: 32 << 10,
             ..ONLINE
         };
-        let begun = Instant::now();
-        let mut simulated = begun;
+        let mut simulated = Duration::ZERO;
         // 64 KiB per second, twice the floor: well past the old fixed 15 s.
         let mut steady = || {
             simulated += Duration::from_secs(1);
@@ -927,10 +929,10 @@ mod tests {
         };
         let copy = directory.path().join("copy.sqlite");
         drop(online_snapshot(&source, &copy, pace, &mut steady)?);
-        assert!(simulated - begun > Duration::from_secs(15));
+        assert!(simulated > Duration::from_secs(15));
         assert_eq!(consistent_rows(&copy)?, 256);
         // Below the floor (16 pages per 3 s) the copy fails at its size bound.
-        let mut simulated = begun;
+        let mut simulated = Duration::ZERO;
         let mut crawling = || {
             simulated += Duration::from_secs(3);
             simulated
@@ -941,10 +943,9 @@ mod tests {
             format!("{error:#}").contains("online backup too slow"),
             "{error:#}"
         );
-        let elapsed = simulated - begun;
         assert!(
-            elapsed > Duration::from_secs(45) && elapsed < Duration::from_secs(55),
-            "{elapsed:?}"
+            simulated > Duration::from_secs(45) && simulated < Duration::from_secs(55),
+            "{simulated:?}"
         );
         Ok(())
     }
@@ -969,6 +970,7 @@ mod tests {
             // Each step waits for another app commit, so the source changes
             // between every pair of steps: an online backup without its own
             // read transaction restarts on each one and never finishes.
+            let started = Instant::now();
             let mut after_a_commit = || {
                 let (seen, waited) = (commits.load(SeqCst), Instant::now());
                 while commits.load(SeqCst) == seen {
@@ -976,7 +978,7 @@ mod tests {
                     assert!(waited.elapsed() < Duration::from_secs(10));
                     std::thread::sleep(Duration::from_millis(1));
                 }
-                Instant::now()
+                started.elapsed()
             };
             let before = commits.load(SeqCst);
             let pace = Pace {
@@ -1013,7 +1015,7 @@ mod tests {
         };
         let started = Instant::now();
         let copy = directory.path().join("copy.sqlite");
-        let error = online_snapshot(&source, &copy, pace, Instant::now).unwrap_err();
+        let error = online_snapshot(&source, &copy, pace, || started.elapsed()).unwrap_err();
         assert!(started.elapsed() < Duration::from_secs(5));
         assert!(
             format!("{error:#}").contains("online backup stalled: the source stayed locked"),
@@ -1021,7 +1023,9 @@ mod tests {
         );
         writer.execute_batch("ROLLBACK")?;
         let retry = directory.path().join("retry.sqlite");
-        drop(online_snapshot(&source, &retry, pace, Instant::now)?);
+        drop(online_snapshot(&source, &retry, pace, || {
+            started.elapsed()
+        })?);
         assert_eq!(consistent_rows(&retry)?, 16);
         Ok(())
     }
