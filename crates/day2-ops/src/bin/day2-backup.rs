@@ -6,9 +6,11 @@
 //! The same native operations as `day2 platform backup` (ops/Backup.roc), with
 //! no backup logic of its own: `backup::take` snapshots the app database and
 //! its local provider stores through SQLite's online backup API over read-only
-//! connections, each bounded by a 15 s deadline, and copies the active
-//! artifact; `backup::verify` then re-checks the stored bundle. Neither takes
-//! day2-serve's lock, so this runs beside a serving pod on the same state
+//! connections, each copied inside one read transaction (a consistent snapshot
+//! that the app's concurrent commits cannot restart) and failing after 15 s
+//! without progress or after 15 s plus its size at 8 MiB/s, and copies the
+//! active artifact; `backup::verify` then re-checks the stored bundle. Neither
+//! takes day2-serve's lock, so this runs beside a serving pod on the same state
 //! volume. The output directory must not exist. A partial directory carries no
 //! backup.json and is not a backup.
 //!
