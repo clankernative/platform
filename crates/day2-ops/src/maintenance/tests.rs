@@ -111,6 +111,10 @@ struct FakeCluster {
     active_artifact: String,
     /// The bytes the in-pod backup takes of the app's store.
     store: &'static [u8],
+    /// What `stat` reports for the files at the top of the state volume.
+    volume: Vec<(&'static str, u64)>,
+    /// Every manifest applied, in order.
+    applied: Rc<RefCell<Vec<String>>>,
 }
 
 /// A store whose credential unit predates the target's schema.
@@ -201,11 +205,15 @@ impl Cluster for FakeCluster {
     fn kubectl(
         &mut self,
         args: &[String],
-        _stdin: Option<&[u8]>,
+        stdin: Option<&[u8]>,
         _timeout: Duration,
     ) -> Result<String> {
         self.calls.borrow_mut().push(args.to_vec());
         assert_eq!(&args[..2], ["-n", NAMESPACE]);
+        if args[2] == "apply" {
+            let manifest = String::from_utf8(stdin.unwrap_or_default().to_vec())?;
+            self.applied.borrow_mut().push(manifest);
+        }
         let joined = args.join(" ");
         if let Some(fail) = &self.fail_on
             && joined.contains(fail.as_str())
@@ -233,6 +241,9 @@ impl Cluster for FakeCluster {
             }
             ["get", "configmap", _, "-o", "json"] => json!({"data": {"instance.json": self.instance}}).to_string(),
             ["get", "pod", _, "--ignore-not-found", "-o", "name"] => String::new(),
+            ["get", "pod", _, "-o", "json"] => json!({"status": {"conditions": [{"type": "PodScheduled", "status": "False",
+                "message": "0/3 nodes are available: 3 Insufficient ephemeral-storage."}]}})
+            .to_string(),
             ["scale" | "apply" | "wait" | "delete" | "rollout", ..] => String::new(),
             ["cp", "--retries=5", from, to] => {
                 if let Some((_, remote)) = to.split_once(':') {
@@ -260,11 +271,24 @@ impl Cluster for FakeCluster {
                 Self::copy(&self.pod_path(from), &self.pod_path(to))?;
                 String::new()
             }
-            ["exec", _, "--", "rm", "-rf", path] => {
-                fs::remove_dir_all(self.pod_path(path))?;
+            ["exec", _, "--", "rm", "-rf", paths @ ..] => {
+                for path in paths {
+                    fs::remove_dir_all(self.pod_path(path))?;
+                }
+                String::new()
+            }
+            ["exec", _, "--", "mv", from, to] => {
+                fs::rename(self.pod_path(from), self.pod_path(to))?;
                 String::new()
             }
             ["exec", _, "--", DAY2, "admit", instance, app] => self.admit(instance, app)?,
+            ["exec", pod, "--", "find", STATE, "-maxdepth", "1", "-type", "f", "-exec", "stat", "-c", "%s %n", "{}", "+"] => {
+                assert!(pod.ends_with("-measure"), "measured from the probe");
+                self.volume
+                    .iter()
+                    .map(|(name, size)| format!("{size} {STATE}/{name}\n"))
+                    .collect()
+            }
             ["exec", _, "--", "find", root, ..] => self.sums(root)?,
             ["exec", _, "--", "sha256sum", file] => {
                 format!("{}  {file}\n", day2::digest(&fs::read(self.pod_path(file))?).trim_start_matches("sha256:"))
@@ -286,6 +310,7 @@ struct Harness {
     calls: Rc<RefCell<Vec<Vec<String>>>>,
     annotations: Rc<RefCell<BTreeMap<String, String>>>,
     asked: Rc<RefCell<usize>>,
+    applied: Rc<RefCell<Vec<String>>>,
     running: Image,
     target: Image,
 }
@@ -297,6 +322,7 @@ impl Harness {
             calls: Rc::default(),
             annotations: Rc::default(),
             asked: Rc::default(),
+            applied: Rc::default(),
             running: image(b"old worker", None),
             target: image(b"new worker", None),
         }
@@ -345,6 +371,12 @@ impl Harness {
             replicas: 1,
             active_artifact: "sha256:a".into(),
             store: b"database",
+            volume: vec![
+                ("example_app.sqlite", 8),
+                ("example_app.sqlite-shm", 32_768),
+                ("unrelated.bin", 1 << 40),
+            ],
+            applied: self.applied.clone(),
         };
         configure(&mut cluster);
         Tools {
@@ -377,6 +409,7 @@ impl Harness {
             .map(|call| match call[2].as_str() {
                 "exec" => format!("exec {}", call[5].rsplit('/').next().unwrap()),
                 "scale" => format!("scale {}", call[5]),
+                "delete" if call[4].ends_with("-measure") => "delete probe".to_owned(),
                 verb => verb.to_owned(),
             })
             .collect()
@@ -415,6 +448,7 @@ impl Harness {
 fn prepare(session: &mut Session) -> Result<()> {
     session.artifacts()?;
     session.stop()?;
+    session.measure()?;
     session.start_pod()?;
     Ok(())
 }
@@ -653,12 +687,16 @@ fn activate_leaves_the_app_stopped_for_the_new_image() -> Result<()> {
             && at_call(&format!("admit {ADMISSION_INSTANCE}"))
                 < at_call(&format!("migration-apply {TARGET}"))
     );
+    // The rehearsal moved the in-pod backup into its copy and removed both.
+    let scratch: Vec<String> = fs::read_dir(harness.directory.path().join("pod/srv/day2"))?
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
     assert!(
-        !harness
-            .directory
-            .path()
-            .join("pod/srv/day2/admission")
-            .exists()
+        !scratch
+            .iter()
+            .any(|name| name == "admission" || name.starts_with("backup-")),
+        "{scratch:?}"
     );
     assert_eq!(
         *harness.annotations.borrow(),
@@ -682,6 +720,199 @@ fn activate_leaves_the_app_stopped_for_the_new_image() -> Result<()> {
             && at("authority-activated") < at("mark-activated")
             && at("mark-activated") < at("activation-marked")
     );
+    Ok(())
+}
+
+/// The `sizeLimit` and ephemeral-storage values of an applied manifest.
+fn sizes(manifest: &str) -> (String, Vec<String>) {
+    let value = |line: &str, key: &str| {
+        line.split_once(key).map(|(_, rest)| {
+            rest.trim_start_matches(' ')
+                .split([' ', ',', '}'])
+                .next()
+                .unwrap()
+                .to_owned()
+        })
+    };
+    let limit = manifest
+        .lines()
+        .find_map(|line| value(line, "sizeLimit:"))
+        .unwrap();
+    let ephemeral = manifest
+        .lines()
+        .filter_map(|line| value(line, "ephemeral-storage:"))
+        .collect();
+    (limit, ephemeral)
+}
+
+#[test]
+fn scratch_holds_the_operations_copies_of_the_store() {
+    let gib = 1 << 30;
+    let store = 5 * gib / 2;
+    let artifacts = 64 * MIB;
+    // activate: the backup (then the rehearsal's copy) and the migration's
+    // WAL and temporary files, a quarter more, the artifacts twice, slack.
+    let activate = scratch_bytes(Operation::Activate.store_copies(), store, artifacts);
+    assert_eq!(activate, (5_120 + 1_280 + 128 + 256) * MIB);
+    assert!(activate >= 2 * store + 2 * artifacts);
+    assert_eq!(
+        scratch_bytes(Operation::Backup.store_copies(), store, artifacts),
+        (2_560 + 640 + 128 + 256) * MIB
+    );
+    // Operations that copy no store, and small stores, keep the floor.
+    for operation in [Operation::Inspect, Operation::MarkActivated] {
+        assert_eq!(
+            scratch_bytes(operation.store_copies(), store, artifacts),
+            SCRATCH_FLOOR
+        );
+    }
+    assert_eq!(scratch_bytes(2, 8 << 20, 1 << 20), SCRATCH_FLOOR);
+    // Whole MiB, rounded up.
+    assert_eq!(scratch_bytes(1, SCRATCH_FLOOR, 1) % MIB, 0);
+    assert!(scratch_bytes(1, SCRATCH_FLOOR, 1) > SCRATCH_FLOOR + SCRATCH_FLOOR / 4 + SCRATCH_SLACK);
+}
+
+#[test]
+fn activate_sizes_the_pod_from_a_large_store() -> Result<()> {
+    let harness = Harness::new();
+    let mut session = harness.open(
+        Operation::Activate,
+        |cluster| {
+            // 2.5 GiB of stores: the database, its WAL and a provider store.
+            cluster.volume = vec![
+                ("example_app.sqlite", 2_336 * MIB),
+                ("example_app.sqlite-wal", 160 * MIB),
+                ("example_app.sqlite-shm", 32_768),
+                ("notifications.sqlite", 64 * MIB),
+                ("lost+found.bin", 1 << 40),
+            ];
+        },
+        true,
+    )?;
+    session.artifacts()?;
+    ensure!(
+        session.measure().is_err(),
+        "the store is measured once stopped"
+    );
+    session.stop()?;
+    ensure!(session.start_pod().is_err(), "the pod is sized first");
+    let sized = session.measure()?;
+    ensure!(session.measure().is_err(), "measured once");
+    assert_eq!(
+        sized["stores"],
+        json!({"example_app.sqlite": 2_336 * MIB, "example_app.sqlite-wal": 160 * MIB,
+            "notifications.sqlite": 64 * MIB})
+    );
+    let artifacts = sized["artifacts"].as_u64().unwrap();
+    assert!(artifacts > 0 && artifacts < MIB);
+    // 2 × 2.5 GiB, a quarter more and 256 MiB, the artifacts' bytes rounding up a MiB.
+    assert_eq!(sized["scratch"], "6657Mi");
+    assert_eq!(sized["ephemeral_storage"], "6721Mi");
+    session.start_pod()?;
+    let applied = harness.applied.borrow().clone();
+    assert_eq!(applied.len(), 2);
+    // The probe, small, then the maintenance pod with the derived size as its
+    // scratch limit and its ephemeral-storage request and limit.
+    assert!(applied[0].contains("-measure\n"));
+    assert_eq!(sizes(&applied[0]), ("64Mi".into(), vec!["128Mi".into(); 2]));
+    assert!(!applied[1].contains("-measure"));
+    assert_eq!(
+        sizes(&applied[1]),
+        ("6657Mi".into(), vec!["6721Mi".into(); 2])
+    );
+    assert!(applied[1].contains("{ name: SQLITE_TMPDIR, value: /srv/day2 }"));
+    drop(session);
+    let verbs = harness.verbs();
+    let at = |verb: &str| verbs.iter().position(|v| v == verb).unwrap();
+    let applies: Vec<usize> = (0..verbs.len()).filter(|i| verbs[*i] == "apply").collect();
+    assert!(at("scale --replicas=0") < applies[0]);
+    assert!(applies[0] < at("delete probe") && at("delete probe") < applies[1]);
+    assert!(harness.deleted_pod() && harness.scaled_up());
+    let steps = harness.journal();
+    let at = |step: &str| steps.iter().position(|s| s == step).unwrap();
+    assert!(
+        at("stop") < at("measure") && at("measure") < at("scratch") && at("scratch") < at("pod")
+    );
+    Ok(())
+}
+
+#[test]
+fn a_small_store_keeps_the_floor_and_inspect_measures_nothing() -> Result<()> {
+    let harness = Harness::new();
+    let mut session = harness.open(Operation::Backup, |_| {}, true)?;
+    prepare(&mut session)?;
+    drop(session);
+    let applied = harness.applied.borrow().clone();
+    assert_eq!(
+        sizes(&applied[1]),
+        ("1024Mi".into(), vec!["1088Mi".into(); 2])
+    );
+    let harness = Harness::new();
+    let mut session = harness.open(Operation::Inspect, |_| {}, true)?;
+    session.artifacts()?;
+    session.stop()?;
+    let sized = session.measure()?;
+    assert_eq!(
+        (sized["copies"].clone(), sized["scratch"].clone()),
+        (json!(0), json!("1024Mi"))
+    );
+    session.start_pod()?;
+    drop(session);
+    assert_eq!(harness.applied.borrow().len(), 1, "no probe");
+    assert!(!harness.verbs().contains(&"delete probe".to_owned()));
+    Ok(())
+}
+
+#[test]
+fn a_store_that_cannot_be_measured_stops_before_the_pod_and_restores_the_app() -> Result<()> {
+    for configure in [
+        (|cluster: &mut FakeCluster| cluster.volume = vec![("other_app.sqlite", 8)])
+            as fn(&mut FakeCluster),
+        |cluster| cluster.fail_on = Some("%s %n".into()),
+    ] {
+        let harness = Harness::new();
+        let mut session = harness.open(Operation::Activate, configure, true)?;
+        session.artifacts()?;
+        session.stop()?;
+        let error = format!("{:#}", session.measure().unwrap_err());
+        assert!(
+            error.starts_with("maintenance_scratch_unmeasured: the stores of example_app on data")
+                && (error.contains("no example_app.sqlite on the state volume")
+                    || error.contains("injected")),
+            "{error}"
+        );
+        ensure!(session.start_pod().is_err(), "an unsized pod never starts");
+        drop(session);
+        assert_eq!(harness.applied.borrow().len(), 1, "only the probe");
+        let verbs = harness.verbs();
+        assert!(verbs.iter().filter(|verb| *verb == "delete probe").count() >= 1);
+        assert!(!verbs.iter().any(|verb| verb == "delete") && harness.scaled_up());
+        let steps = harness.journal();
+        assert!(!steps.contains(&"scratch".to_owned()) && !steps.contains(&"pod".to_owned()));
+        assert_eq!(steps.last().map(String::as_str), Some("aborted"));
+    }
+    Ok(())
+}
+
+#[test]
+fn a_pod_no_node_can_hold_names_its_size_and_the_schedulers_reason() -> Result<()> {
+    let harness = Harness::new();
+    let mut session = harness.open(
+        Operation::Backup,
+        // The maintenance pod's wait, not the probe's.
+        |cluster| cluster.fail_on = Some("z --timeout=600s".into()),
+        true,
+    )?;
+    session.artifacts()?;
+    session.stop()?;
+    session.measure()?;
+    let error = format!("{:#}", session.start_pod().unwrap_err());
+    assert!(
+        error.contains("requests 1088Mi of ephemeral storage (1024Mi scratch); not scheduled: 0/3 nodes are available: 3 Insufficient ephemeral-storage."),
+        "{error}"
+    );
+    drop(session);
+    assert!(harness.deleted_pod() && harness.scaled_up());
     Ok(())
 }
 
@@ -992,6 +1223,11 @@ fn artifacts_are_extracted_read_only_and_verified() -> Result<()> {
     )?;
     assert_eq!(receipt["files"], 2);
     let worker = output.path().join(&good.artifact_id).join("worker");
+    let manifest = output.path().join(&good.artifact_id).join("artifact.json");
+    assert_eq!(
+        receipt["bytes"],
+        fs::metadata(&worker)?.len() + fs::metadata(&manifest)?.len()
+    );
     use std::os::unix::fs::PermissionsExt;
     assert_eq!(fs::metadata(&worker)?.permissions().mode() & 0o222, 0);
     assert!(!output.path().join("other").exists());
@@ -1054,6 +1290,8 @@ fn the_reviewed_pod_template_renders_completely() -> Result<()> {
         ),
         ("DAY2_MAINT_SERVICE_LABEL_VALUE", "background"),
         ("DAY2_MAINT_DEADLINE_SECONDS", "3600"),
+        ("DAY2_MAINT_SCRATCH", "6657Mi"),
+        ("DAY2_MAINT_EPHEMERAL_STORAGE", "6721Mi"),
     ];
     let rendered = render_template(POD_TEMPLATE, &values)?;
     assert!(!rendered.contains("${"));
@@ -1061,8 +1299,12 @@ fn the_reviewed_pod_template_renders_completely() -> Result<()> {
         rendered.contains("claimName: data")
             && rendered.contains("automountServiceAccountToken: false")
     );
+    assert_eq!(
+        sizes(&rendered),
+        ("6657Mi".into(), vec!["6721Mi".into(); 2])
+    );
     assert!(
-        render_template(POD_TEMPLATE, &values[..6]).is_err(),
+        render_template(POD_TEMPLATE, &values[..8]).is_err(),
         "every placeholder must be filled"
     );
     assert!(render_template("${DAY2_MAINT_POD} ${UNKNOWN}", &values).is_err());

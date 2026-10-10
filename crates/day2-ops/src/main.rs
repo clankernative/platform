@@ -557,6 +557,7 @@ impl Operations {
             }
             "maintenance-artifacts" => self.maintenance()?.artifacts(),
             "maintenance-stop" => self.maintenance()?.stop(),
+            "maintenance-measure" => self.maintenance()?.measure(),
             "maintenance-pod" => self.maintenance()?.start_pod(),
             "maintenance-workflow" => {
                 #[derive(Deserialize)]

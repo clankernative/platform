@@ -11,6 +11,8 @@ Maintain :: [].{
 		_ = Capability.call!("maintenance-open", Json.to_str({ operation, request }), host!)?
 		_ = Capability.call!("maintenance-artifacts", "{}", host!)?
 		_ = Capability.call!("maintenance-stop", "{}", host!)?
+		# The pod's scratch is sized from the store on the stopped volume.
+		_ = Capability.call!("maintenance-measure", "{}", host!)?
 		_ = Capability.call!("maintenance-pod", "{}", host!)?
 		_ = match operation {
 			"inspect" => workflow!("authority-inspect", host!)?
