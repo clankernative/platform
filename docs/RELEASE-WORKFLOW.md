@@ -113,7 +113,11 @@ template's `day2.dev/artifact`:
   the same configuration.
 
 `maintain activate` stamps that annotation only after the fresh activation of
-the target artifact succeeds, and leaves the app at zero replicas. The same
+the target artifact succeeds, and leaves the app at zero replicas. Before its
+migration fence it opens a migrated, activated copy of the store with the
+target build's own startup store admission, so a store the target would refuse
+stops the activation with `target_store_admission_refused` and the app keeps
+serving on its image. The same
 conditional patch that rolls the template then restores `spec.replicas` to the
 profile's one replica and removes the stamp, so it cannot authorize a later
 change. A lost acknowledgment reconciles as before: the markers, template and

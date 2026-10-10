@@ -577,6 +577,7 @@ impl Operations {
                 let step = input::<Input>(&request)?.step;
                 self.maintenance()?.migration(&step)
             }
+            "maintenance-admission" => self.maintenance()?.admission(),
             "maintenance-confirm" => self.maintenance()?.confirm(),
             "maintenance-fence" => self.maintenance()?.fence(),
             "maintenance-mark-activated" => self.maintenance()?.mark_activated(),

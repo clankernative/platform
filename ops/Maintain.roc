@@ -24,6 +24,9 @@ Maintain :: [].{
 			"activate" => {
 				_ = backup!(host!)?
 				_ = Capability.call!("maintenance-migration", Json.to_str({ step: "plan" }), host!)?
+				# The target build opens a migrated, activated copy of the backup
+				# as day2-serve would; a store it refuses stops here, restored.
+				_ = Capability.call!("maintenance-admission", "{}", host!)?
 				_ = Capability.call!("maintenance-confirm", "{}", host!)?
 				# Past the fence the old image never restarts on this volume.
 				_ = Capability.call!("maintenance-fence", "{}", host!)?

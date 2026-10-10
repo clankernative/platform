@@ -109,7 +109,12 @@ struct FakeCluster {
     replicas: u64,
     /// What `authority inspect` reports the database activates.
     active_artifact: String,
+    /// The bytes the in-pod backup takes of the app's store.
+    store: &'static [u8],
 }
+
+/// A store whose credential unit predates the target's schema.
+const OLD_CREDENTIAL_STORE: &[u8] = b"day2_credential_schema_version=1";
 
 impl FakeCluster {
     fn pod_path(&self, remote: &str) -> PathBuf {
@@ -141,6 +146,30 @@ impl FakeCluster {
         Ok(out)
     }
 
+    /// `day2 admit`: what the target build reports opening the store beside
+    /// the instance, refusing the credential unit it does not support.
+    fn admit(&self, instance: &str, app: &str) -> Result<String> {
+        let instance = self.pod_path(instance);
+        let store = fs::read(
+            instance
+                .parent()
+                .unwrap()
+                .join(".state")
+                .join(format!("{app}.sqlite")),
+        )?;
+        ensure!(
+            store != OLD_CREDENTIAL_STORE,
+            "Error: unsupported credential schema version"
+        );
+        let desired: Value = serde_json::from_slice(&fs::read(&instance)?)?;
+        let artifact = desired["apps"][app]["artifact"]
+            .as_str()
+            .unwrap()
+            .trim_start_matches("artifacts/")
+            .to_owned();
+        Ok(json!({"admitted": true, "scope": "exampleco/production/example_app", "artifact": format!("sha256:{artifact}")}).to_string())
+    }
+
     fn host(&self, request: &str) -> Result<String> {
         let request: Value = serde_json::from_str(request)?;
         let args: Vec<String> = serde_json::from_str(request["input"].as_str().unwrap())?;
@@ -148,7 +177,7 @@ impl FakeCluster {
             "backup" => {
                 let output = self.pod_path(&args[3]);
                 fs::create_dir_all(output.join("artifacts"))?;
-                fs::write(output.join("app.sqlite"), b"database")?;
+                fs::write(output.join("app.sqlite"), self.store)?;
                 fs::write(output.join("backup.json"), b"{}")?;
                 fs::write(output.join("artifacts/marker"), b"artifact")?;
                 json!({"verified": true})
@@ -221,6 +250,21 @@ impl Cluster for FakeCluster {
                 fs::create_dir_all(self.pod_path(path))?;
                 String::new()
             }
+            ["exec", _, "--", "mkdir", paths @ ..] => {
+                for path in paths {
+                    fs::create_dir(self.pod_path(path))?;
+                }
+                String::new()
+            }
+            ["exec", _, "--", "cp", from, to] => {
+                Self::copy(&self.pod_path(from), &self.pod_path(to))?;
+                String::new()
+            }
+            ["exec", _, "--", "rm", "-rf", path] => {
+                fs::remove_dir_all(self.pod_path(path))?;
+                String::new()
+            }
+            ["exec", _, "--", DAY2, "admit", instance, app] => self.admit(instance, app)?,
             ["exec", _, "--", "find", root, ..] => self.sums(root)?,
             ["exec", _, "--", "sha256sum", file] => {
                 format!("{}  {file}\n", day2::digest(&fs::read(self.pod_path(file))?).trim_start_matches("sha256:"))
@@ -300,6 +344,7 @@ impl Harness {
             annotations: self.annotations.clone(),
             replicas: 1,
             active_artifact: "sha256:a".into(),
+            store: b"database",
         };
         configure(&mut cluster);
         Tools {
@@ -471,17 +516,69 @@ fn a_failure_before_the_fence_removes_the_pod_and_restores_the_app() -> Result<(
 }
 
 #[test]
-fn after_the_fence_the_old_image_is_never_restarted() -> Result<()> {
+fn a_store_the_target_refuses_stops_activate_before_the_fence_and_restores_the_app() -> Result<()> {
     let harness = Harness::new();
     let mut session = harness.open(
         Operation::Activate,
-        |cluster| cluster.fail_on = Some(r#"\"activate\""#.into()),
+        |cluster| cluster.store = OLD_CREDENTIAL_STORE,
         true,
     )?;
     prepare(&mut session)?;
     session.workflow("backup")?;
     session.copy_backup()?;
     session.migration("plan")?;
+    let error = format!("{:#}", session.admission().unwrap_err());
+    assert!(
+        error.starts_with("target_store_admission_refused")
+            && error.contains(&harness.target.artifact_id)
+            && error.contains("unsupported credential schema version"),
+        "{error}"
+    );
+    ensure!(
+        session.admission().is_err()
+            && session.confirm().is_err()
+            && session.fence().is_err()
+            && session.migration("apply").is_err(),
+        "a refused store is never confirmed, fenced or migrated"
+    );
+    drop(session);
+    assert!(harness.deleted_pod() && harness.scaled_up());
+    assert_eq!(*harness.asked.borrow(), 0);
+    assert!(harness.annotations.borrow().is_empty());
+    // Only the copy was migrated and activated; the instance over the app's
+    // volume was never touched.
+    for call in harness.calls.borrow().iter() {
+        let call = call.join(" ");
+        if call.contains("migration-apply") || call.contains(r#"\"activate\""#) {
+            assert!(call.contains(ADMISSION_INSTANCE), "{call}");
+        }
+    }
+    let steps = harness.journal();
+    assert!(
+        steps.contains(&"target-admission-refused".to_owned())
+            && !steps
+                .iter()
+                .any(|step| step == "confirmed" || step == "fence"),
+        "{steps:?}"
+    );
+    assert_eq!(steps.last().map(String::as_str), Some("aborted"));
+    Ok(())
+}
+
+#[test]
+fn after_the_fence_the_old_image_is_never_restarted() -> Result<()> {
+    let harness = Harness::new();
+    let mut session = harness.open(
+        Operation::Activate,
+        // Only the real activation; the rehearsal activates its copy.
+        |cluster| cluster.fail_on = Some(format!(r#"\"activate\",\"{TARGET}\""#)),
+        true,
+    )?;
+    prepare(&mut session)?;
+    session.workflow("backup")?;
+    session.copy_backup()?;
+    session.migration("plan")?;
+    session.admission()?;
     session.confirm()?;
     session.fence()?;
     session.migration("apply")?;
@@ -513,6 +610,12 @@ fn activate_leaves_the_app_stopped_for_the_new_image() -> Result<()> {
     session.workflow("backup")?;
     session.copy_backup()?;
     session.migration("plan")?;
+    let admitted = session.admission()?;
+    assert_eq!(
+        admitted["artifact"],
+        format!("sha256:{}", harness.target.artifact_id)
+    );
+    ensure!(session.admission().is_err(), "admitted once");
     session.confirm()?;
     session.fence()?;
     session.migration("apply")?;
@@ -531,9 +634,32 @@ fn activate_leaves_the_app_stopped_for_the_new_image() -> Result<()> {
     ensure!(session.mark_activated().is_err(), "marked once");
     let receipt = session.finish()?;
     assert_eq!(receipt["replicas_restored"], false);
+    assert_eq!(receipt["target_admission"], admitted);
     drop(session);
     assert!(harness.deleted_pod() && !harness.scaled_up());
     assert_eq!(*harness.asked.borrow(), 1);
+    // The rehearsal migrated and activated its copy, then removed it, before
+    // the real steps ran on the instance over the app's volume.
+    let calls: Vec<String> = harness
+        .calls
+        .borrow()
+        .iter()
+        .map(|call| call.join(" "))
+        .collect();
+    let at_call = |needle: &str| calls.iter().position(|call| call.contains(needle)).unwrap();
+    assert!(
+        at_call(&format!("migration-apply {ADMISSION_INSTANCE}"))
+            < at_call(&format!("admit {ADMISSION_INSTANCE}"))
+            && at_call(&format!("admit {ADMISSION_INSTANCE}"))
+                < at_call(&format!("migration-apply {TARGET}"))
+    );
+    assert!(
+        !harness
+            .directory
+            .path()
+            .join("pod/srv/day2/admission")
+            .exists()
+    );
     assert_eq!(
         *harness.annotations.borrow(),
         BTreeMap::from([(
@@ -543,7 +669,13 @@ fn activate_leaves_the_app_stopped_for_the_new_image() -> Result<()> {
     );
     let steps = harness.journal();
     let at = |step: &str| steps.iter().position(|s| s == step).unwrap();
-    assert!(at("backup-copied") < at("confirmed") && at("confirmed") < at("fence"));
+    assert!(
+        at("backup-copied") < at("migration-plan")
+            && at("migration-plan") < at("target-admission")
+            && at("target-admission") < at("target-admitted")
+            && at("target-admitted") < at("confirmed")
+            && at("confirmed") < at("fence")
+    );
     assert!(
         at("fence") < at("migration-applied")
             && at("migration-applied") < at("authority-activated")
@@ -565,6 +697,7 @@ fn a_failed_activation_mark_names_the_recovery_command() -> Result<()> {
     session.workflow("backup")?;
     session.copy_backup()?;
     session.migration("plan")?;
+    session.admission()?;
     session.confirm()?;
     session.fence()?;
     session.migration("apply")?;
@@ -726,17 +859,26 @@ fn the_fence_and_migration_apply_refuse_steps_out_of_order() -> Result<()> {
         "fence needs a plan and a confirmation"
     );
     ensure!(session.migration("apply").is_err(), "apply needs the fence");
+    ensure!(session.admission().is_err(), "admission needs the plan");
     session.migration("plan")?;
+    ensure!(
+        session.confirm().is_err(),
+        "confirm after the target admitted the store"
+    );
+    ensure!(
+        session.fence().is_err(),
+        "fence needs the target's admission"
+    );
+    session.admission()?;
     ensure!(session.fence().is_err(), "fence needs a confirmation");
     ensure!(session.migration("apply").is_err(), "apply needs the fence");
     drop(session);
     assert!(harness.scaled_up());
     assert!(
-        !harness
-            .calls
-            .borrow()
-            .iter()
-            .any(|call| call.iter().any(|arg| arg == "migration-apply"))
+        !harness.calls.borrow().iter().any(|call| call
+            .join(" ")
+            .contains(&format!("migration-apply {TARGET}"))),
+        "only the rehearsal's copy was migrated"
     );
     Ok(())
 }
@@ -749,16 +891,16 @@ fn a_refused_confirmation_changes_nothing_and_restores_the_app() -> Result<()> {
     session.workflow("backup")?;
     session.copy_backup()?;
     session.migration("plan")?;
+    session.admission()?;
     ensure!(session.confirm().is_err(), "the operator said no");
     ensure!(session.fence().is_err(), "no fence without a confirmation");
     drop(session);
     assert!(harness.scaled_up() && harness.deleted_pod());
     assert!(
-        !harness
-            .calls
-            .borrow()
-            .iter()
-            .any(|call| call.iter().any(|arg| arg == "migration-apply"))
+        !harness.calls.borrow().iter().any(|call| call
+            .join(" ")
+            .contains(&format!("migration-apply {TARGET}"))),
+        "only the rehearsal's copy was migrated"
     );
     Ok(())
 }
@@ -779,6 +921,10 @@ fn authority_apply_needs_a_backup_a_stamp_and_a_confirmation() -> Result<()> {
         "confirm after reading the stamp"
     );
     session.workflow("authority-inspect")?;
+    ensure!(
+        session.admission().is_err(),
+        "store admission belongs to activate"
+    );
     session.confirm()?;
     session.workflow("authority-apply")?;
     let receipt = session.finish()?;

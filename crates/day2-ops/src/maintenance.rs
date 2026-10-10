@@ -5,9 +5,14 @@
 //!
 //! - the maintenance pod is removed on every exit;
 //! - before the migration fence, any failure restores the app on its image;
+//! - before the confirmation and the fence, `activate` rehearses the migration
+//!   and activation on a copy of the verified backup and opens the copy with
+//!   the target build's own store admission (what day2-serve runs at startup);
+//!   a store the target would refuse is refused there, nothing else changed;
 //! - after the fence, the old image is never restarted on the migrated volume;
-//! - the fence needs a verified local backup and a confirmation from this
-//!   session, and `migration apply` refuses to run without it;
+//! - the fence needs a verified local backup, the target's admission of the
+//!   store and a confirmation from this session, and `migration apply` refuses
+//!   to run without it;
 //! - one session per namespace; closed sets of workflows and kubectl verbs;
 //! - only a successful fresh activation stamps the StatefulSet with the
 //!   activated artifact, the release workflow's precondition for changing it;
@@ -41,6 +46,10 @@ const ROOT: &str = "/srv/day2";
 const CURRENT: &str = "/srv/day2/current-instance.json";
 const TARGET: &str = "/srv/day2/instance.json";
 const PLAN: &str = "/srv/day2/migration-plan.json";
+/// A disposable installation beside the real one (on the pod's scratch volume,
+/// not the app's): the target instance over a copy of the verified backup.
+const ADMISSION: &str = "/srv/day2/admission";
+const ADMISSION_INSTANCE: &str = "/srv/day2/admission/instance.json";
 const HOST: &str = "/workspace/platform/cli/day2-host";
 const DAY2: &str = "/workspace/platform/target/debug/day2";
 const OUTPUT_LIMIT: usize = 16 << 20;
@@ -798,8 +807,14 @@ struct State {
     pod: bool,
     pod_backup: bool,
     backup: Option<PathBuf>,
+    /// Local provider stores the in-pod backup holds beside app.sqlite.
+    providers: Vec<String>,
     stamp: Option<Value>,
     plan: Option<Value>,
+    /// The rehearsal runs once per session, refused or not.
+    rehearsed: bool,
+    /// What the target build reported opening the rehearsed copy.
+    admission: Option<Value>,
     confirmed: bool,
     fenced: bool,
     migrated: bool,
@@ -1383,6 +1398,11 @@ impl Session {
         )?;
         private(&destination)?;
         eprintln!("   verified backup copied to {}", destination.display());
+        self.state.providers = ours
+            .keys()
+            .filter_map(|path| path.strip_prefix("providers/"))
+            .map(str::to_owned)
+            .collect();
         self.state.backup = Some(destination.clone());
         self.record(
             "backup-copied",
@@ -1441,12 +1461,119 @@ impl Session {
         }
     }
 
+    /// Rehearse what the fence would commit to on a disposable copy, then open
+    /// the copy with the target build's store admission (`day2 admit`, the code
+    /// day2-serve runs on its store at startup). The copy is the verified
+    /// in-pod backup under the target instance; it is migrated with the shown
+    /// plan and activated for the target exactly as the real steps will be.
+    /// Nothing outside the copy changes. A refusal fails the session before
+    /// the confirmation and the fence, so the app is restored on its image.
+    pub fn admission(&mut self) -> Result<Value> {
+        ensure!(
+            self.operation == Operation::Activate
+                && self.state.plan.is_some()
+                && !self.state.rehearsed
+                && !self.state.confirmed,
+            "the target's store admission follows the migration plan, once, before the confirmation"
+        );
+        let target = self.request.target.clone().context("target")?;
+        eprintln!(
+            "== store admission by {} (a migrated, activated copy of the backup)",
+            target.artifact_id
+        );
+        self.state.rehearsed = true;
+        self.record(
+            "target-admission",
+            json!({"artifact": target.artifact_id, "copy": ADMISSION}),
+        )?;
+        match self.rehearse(&target) {
+            Ok(admitted) => {
+                self.state.admission = Some(admitted.clone());
+                self.record("target-admitted", admitted.clone())?;
+                Ok(admitted)
+            }
+            Err(error) => {
+                let cause = format!("{error:#}");
+                self.record("target-admission-refused", json!({"error": cause}))?;
+                bail!(
+                    "target_store_admission_refused: artifact {} would not open the store of {}; nothing was migrated or activated and {} is restored on its image: {cause}",
+                    target.artifact_id,
+                    self.request.app,
+                    self.request.statefulset
+                )
+            }
+        }
+    }
+
+    fn rehearse(&mut self, target: &Target) -> Result<Value> {
+        let app = self.request.app.clone();
+        let operator = self.request.operator.clone();
+        let request_id = self.request.request_id.clone().unwrap_or_default();
+        let artifact = format!("{ROOT}/artifacts/{}", target.artifact_id);
+        let backup = format!("{ROOT}/backup-{}", self.stamp);
+        let state = format!("{ADMISSION}/.state");
+        // No -p: a leftover copy is refused, never reused.
+        self.exec(&["mkdir", ADMISSION, &state], Duration::from_secs(60))?;
+        self.exec(&["cp", TARGET, ADMISSION_INSTANCE], Duration::from_secs(60))?;
+        let mut stores = vec![("app.sqlite".to_owned(), format!("{app}.sqlite"))];
+        for name in self.state.providers.clone() {
+            ensure!(
+                day2::capabilities::LOCAL_PROVIDER_DATABASES.contains(&name.as_str()),
+                "unknown provider store {name} in the backup"
+            );
+            stores.push((format!("providers/{name}"), name));
+        }
+        for (from, to) in stores {
+            self.exec(
+                &["cp", &format!("{backup}/{from}"), &format!("{state}/{to}")],
+                Duration::from_secs(600),
+            )?;
+        }
+        self.exec(
+            &[
+                DAY2,
+                "migration-apply",
+                ADMISSION_INSTANCE,
+                &app,
+                &artifact,
+                PLAN,
+            ],
+            Duration::from_secs(1_800),
+        )?;
+        let inspected = self.host_workflow(&["authority", "inspect", ADMISSION_INSTANCE, &app])?;
+        let stamp = &inspected["active"]["stamp"];
+        ensure!(stamp.is_object(), "no active authority stamp in the copy");
+        let expected = serde_json::to_string(stamp)?;
+        self.host_workflow(&[
+            "authority",
+            "activate",
+            ADMISSION_INSTANCE,
+            &app,
+            &artifact,
+            &operator,
+            &expected,
+            &request_id,
+        ])?;
+        let output = self.exec(
+            &[DAY2, "admit", ADMISSION_INSTANCE, &app],
+            Duration::from_secs(600),
+        )?;
+        let admitted: Value = serde_json::from_str(output.trim()).context("day2 admit output")?;
+        ensure!(
+            admitted["admitted"] == true
+                && admitted["artifact"] == format!("sha256:{}", target.artifact_id),
+            "the activated copy did not open with the target artifact: {admitted}"
+        );
+        self.exec(&["rm", "-rf", ADMISSION], Duration::from_secs(300))?;
+        Ok(admitted)
+    }
+
     pub fn confirm(&mut self) -> Result<Value> {
         let (question, word) = match self.operation {
             Operation::Activate => {
                 ensure!(
-                    self.state.plan.is_some(),
-                    "confirm the migration plan after it is shown"
+                    self.state.plan.is_some() && self.state.admission.is_some(),
+                    "confirm the migration plan after it is shown and the target admitted the store"
                 );
                 let target = self.request.target.as_ref().context("target")?;
                 (
@@ -1490,9 +1617,10 @@ impl Session {
             self.operation == Operation::Activate
                 && self.state.backup.is_some()
                 && self.state.plan.is_some()
+                && self.state.admission.is_some()
                 && self.state.confirmed
                 && !self.state.fenced,
-            "the fence needs this session's verified backup, migration plan and confirmation"
+            "the fence needs this session's verified backup, migration plan, target store admission and confirmation"
         );
         // Recorded before the flag: a journal that stops here means "maybe migrated".
         self.record("fence", json!({"backup": self.state.backup}))?;
@@ -1649,6 +1777,7 @@ impl Session {
             "statefulset": self.request.statefulset,
             "backup": self.state.backup,
             "migration_plan": self.state.plan,
+            "target_admission": self.state.admission,
             "result": self.state.result,
             "replicas_restored": restored,
             "journal": self.journal,

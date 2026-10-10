@@ -1,7 +1,7 @@
 //! Startup composition owned by the native provider host. Static instance
 //! parsing cannot supply either reviewed code or independently live readiness.
 
-use super::{admission, approval_keys, approval_registry, connect, shell_transport};
+use super::{admission, approval_keys, approval_registry, shell_transport};
 use crate::{artifact::Instance, store::Runtime};
 use anyhow::{Context, Result, ensure};
 use std::sync::Arc;
@@ -116,9 +116,8 @@ pub(crate) fn app_receiver(
         providers.readiness.clone(),
         Arc::new(tokens),
     )?);
-    runtime.initialize()?;
-    let db = crate::store::open(runtime.db())?;
-    super::schema::admit_with_runtime_hook(&db, connect::install_schema)?;
+    // Serving admitted the store, including this app's private OAuth schema,
+    // in `deployment::admit_store` before it builds the receiver.
     let backend = Arc::new(approval_registry::StoredAppApprovals::new(
         runtime.app().into(),
         runtime.db().to_path_buf(),

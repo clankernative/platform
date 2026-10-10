@@ -42,6 +42,13 @@ fn main() -> Result<()> {
             runtime.initialize()?;
             serde_json::json!({"scope": runtime.scope(), "database": runtime.db(), "artifact": runtime.artifact().id()})
         }
+        // What day2-serve admits about the store before it serves, without
+        // serving. Maintenance runs it on a migrated and activated copy.
+        ["admit", instance, app] => {
+            let runtime = Runtime::load(Path::new(instance), app)?;
+            day2::deployment::admit_store(&runtime)?;
+            serde_json::json!({"admitted": true, "scope": runtime.scope(), "artifact": runtime.artifact().id()})
+        }
         ["invoke", instance, app, operation, actor, id, input] => {
             let runtime = Runtime::load(Path::new(instance), app)?;
             let now = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())?;
@@ -161,7 +168,7 @@ fn main() -> Result<()> {
             )?
         }
         _ => bail!(
-            "usage: day2 init INSTANCE APP | invoke INSTANCE APP OPERATION ACTOR ID JSON | resume INSTANCE APP ID | inspect INSTANCE APP | audit-events INSTANCE APP ACTOR BEFORE | describe INSTANCE APP | check-properties INSTANCE APP EVIDENCE_DIR | replay-properties ARTIFACT EVIDENCE | trace INSTANCE APP ID | replay ARTIFACT TRACE | migration-plan INSTANCE APP TARGET PLAN_FILE | migration-apply INSTANCE APP TARGET PLAN_FILE | activate INSTANCE APP TARGET LOCAL_OPERATOR EXPECTED_STAMP_JSON REQUEST_ID | lab-crash INSTANCE APP ID WRITE_INDEX"
+            "usage: day2 init INSTANCE APP | admit INSTANCE APP | invoke INSTANCE APP OPERATION ACTOR ID JSON | resume INSTANCE APP ID | inspect INSTANCE APP | audit-events INSTANCE APP ACTOR BEFORE | describe INSTANCE APP | check-properties INSTANCE APP EVIDENCE_DIR | replay-properties ARTIFACT EVIDENCE | trace INSTANCE APP ID | replay ARTIFACT TRACE | migration-plan INSTANCE APP TARGET PLAN_FILE | migration-apply INSTANCE APP TARGET PLAN_FILE | activate INSTANCE APP TARGET LOCAL_OPERATOR EXPECTED_STAMP_JSON REQUEST_ID | lab-crash INSTANCE APP ID WRITE_INDEX"
         ),
     };
     println!("{}", serde_json::to_string_pretty(&output)?);
