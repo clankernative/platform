@@ -3906,3 +3906,5 @@ mod rollup_read_tests {
         Ok(())
     }
 }
+
+// Temporary source edit for the hosted compilation-cache benchmark.
