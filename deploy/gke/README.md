@@ -363,7 +363,7 @@ does every native action with `kubectl` and the registry API. Operations:
 | `inspect` | Reads the active authority stamp and policy | restored |
 | `backup` | Verified backup, copied to `~/day2-backups/<namespace>/<stamp>/` | restored |
 | `authority-apply` | Backup, then applies the policy in the current ConfigMap, after a typed `apply` | restored |
-| `activate` | Backup, migration plan, typed `activate`, migration, fresh activation of the target artifact, then the `day2.dev/activated-artifact` stamp | stopped: release the target artifact next (release-managed), otherwise apply day2-app for the new image |
+| `activate` | Backup, migration plan, the target's store admission on a rehearsed copy, typed `activate`, migration, fresh activation of the target artifact, then the `day2.dev/activated-artifact` stamp | stopped: release the target artifact next (release-managed), otherwise apply day2-app for the new image |
 | `mark-activated` | Recovery when `activate`'s stamp step failed: reads the database's active artifact and, only if it is the target, stamps the stopped StatefulSet | stopped, as `activate` leaves it |
 
 The request file names the target exactly:
@@ -400,11 +400,37 @@ What the session guarantees, whatever the recipe does:
 - The maintenance pod ([k8s/maintenance-pod.yaml](k8s/maintenance-pod.yaml),
   rendered from a fixed placeholder set) is removed on every exit, including
   Ctrl-C; its one-hour deadline is the backstop.
+- The pod's `/srv/day2` scratch volume is sized from the store it maintains
+  (below), and the container requests that much ephemeral storage, so it is
+  scheduled only onto a node with room for it.
+  A store that cannot be measured stops the session with
+  `maintenance_scratch_unmeasured` before the maintenance pod exists, and the
+  app is restored on its image.
 - Before the migration fence, any failure restores the StatefulSet's replicas on
   its original image. After the fence the old image is never restarted on the
   migrated volume; the session prints the two ways forward instead.
-- The fence needs a verified local backup, a migration plan and a confirmation
-  from the same session, and `migration apply` refuses to run without it.
+- Before it asks for the confirmation, `activate` rehearses the fence's work on
+  a disposable copy in the pod: the in-pod backup, moved under the target
+  instance once its verified local copy exists (`/srv/day2/admission/`, on the
+  pod's scratch volume, never the app's) and removed with it afterwards, the
+  shown migration plan applied, the target activated, then `day2 admit` from
+  the target build's tooling image. `day2 admit` is the store admission
+  `day2-serve` runs at startup (`deployment::admit_store`: storage binding and
+  authority, platform upgrades, the private credential schema, the authority's
+  security requirements, and the private OAuth schema of an app with OAuth
+  connections). The store admission replaces an empty version-1 credential
+  unit, which every store written before the version-2 unit holds (GoLinks'
+  among them), with the current one; see
+  [OAUTH-SIMULATION.md](../../docs/OAUTH-SIMULATION.md#current-schema-admission).
+  If the target would not open the store, for example a credential unit with
+  credential rows that is older than its schema (`unsupported credential schema
+  version`), the session stops with `target_store_admission_refused` and the
+  cause, records `target-admission-refused` in the journal, and restores the
+  app on its image. Host checks (kernel, sandbox, security runtime evidence)
+  still run only when the new pod starts.
+- The fence needs a verified local backup, a migration plan, the target's store
+  admission and a confirmation from the same session, and `migration apply`
+  refuses to run without it.
 - Artifacts come from the digest-pinned app images: manifest, layer, artifact
   identity and worker digests are checked, and links or devices are refused.
 - The local backup copy must match a SHA-256 manifest computed in the pod; a
@@ -423,8 +449,39 @@ What the session guarantees, whatever the recipe does:
 - Every step is journalled to `~/day2-backups/<namespace>/<stamp>.session.json`
   before it runs, for recovery after the operator's machine dies mid-session.
 
-`deploy/gke/scripts/day2-maintain.sh` remains until this command has run a
-production activation; it will then be removed.
+#### The maintenance pod's scratch volume
+
+The backup, the rehearsal's copy and SQLite's temporary files (the pod sets
+`SQLITE_TMPDIR=/srv/day2`; the 256 MiB memory-backed `/tmp` holds only the
+worker executables day2 materializes) live on the pod's `/srv/day2` emptyDir,
+on the node's disk. After stopping the app, the session measures the app's
+database, every local provider store the backup takes and their WALs on the
+stopped volume, from a short-lived pod of the same template
+(`day2-maintenance-<stamp>-measure`, removed before the maintenance pod
+starts: the volume is ReadWriteOnce), and journals the result as `scratch`.
+The scratch volume is then
+
+```text
+max(1 GiB, copies × stores × 1.25 + 2 × artifacts + 256 MiB), in whole MiB
+```
+
+where `copies` is the most the operation holds at once: none for `inspect` and
+`mark-activated` (nothing is measured), one backup for `backup` and
+`authority-apply`, and two for `activate` (the backup, which the rehearsal
+then migrates as its copy, and the WAL and temporary files that migration
+grows; the real migration's WAL is on the app's volume). `artifacts` are the
+running and target artifacts copied in, counted twice because a backup holds
+the running one again. The emptyDir's `sizeLimit` is that size, and the
+container's ephemeral-storage request and limit are 64 MiB more.
+
+A 2.5 GiB store therefore needs about 6.5 GiB for `activate` and 3.4 GiB for
+`backup`. The namespace's guardrails must admit it: `app-edge`'s
+`resource_guardrails` default to 8 GiB per container
+(`container_max.ephemeral_storage`) and a 4 GiB ephemeral-storage request
+quota for the namespace, so an app with a large store raises them in its
+`app-edge` configuration first. A pod the namespace refuses, or no node can
+hold, fails the session before the fence with its size and the scheduler's
+reason, and the app is restored on its image.
 
 #### Activation and the day2-app stack
 
@@ -550,13 +607,16 @@ backup first (`day2 platform maintain backup REQUEST_JSON`, which also copies
 it off-cluster). Then, with the app stopped
 (`kubectl -n NS scale statefulset day2-APP --replicas=0`, wait for the pod to
 terminate; backup runs cannot start without it), attach the maintenance pod
-from [k8s/maintenance-pod.yaml](k8s/maintenance-pod.yaml) rendered exactly as
-`day2-maintain.sh` renders it, and in it:
+from [k8s/maintenance-pod.yaml](k8s/maintenance-pod.yaml) with its placeholders
+filled as `day2 platform maintain` fills them (`DAY2_MAINT_SCRATCH` at least
+twice the downloaded snapshot plus 1 GiB, for the snapshot and the restored
+copy; `DAY2_MAINT_EPHEMERAL_STORAGE` 64 MiB more), and in it:
 
 1. `kubectl cp` the downloaded, checked `snapshot/` to `/srv/day2/restore-in`, the current
    desired `instance.json` (ConfigMap `day2-APP-instance`) to
-   `/srv/day2/instance.json`, and the running artifact (as `day2-maintain.sh`
-   fetches it) to `/srv/day2/artifacts/ARTIFACT_ID`;
+   `/srv/day2/instance.json`, and the running artifact (as
+   `day2 platform maintain` fetches it from the app image's top layer) to
+   `/srv/day2/artifacts/ARTIFACT_ID`;
 2. `/workspace/platform/cli/day2 platform restore /srv/day2/restore-in /srv/day2/restored`;
 3. remove the app's current `.state/APP.sqlite`, `.state/APP.sqlite-wal` and
    `.state/APP.sqlite-shm` (and the same three files of every provider store in
@@ -566,11 +626,11 @@ from [k8s/maintenance-pod.yaml](k8s/maintenance-pod.yaml) rendered exactly as
    workflow `authority activate /srv/day2/instance.json APP
    /srv/day2/artifacts/ARTIFACT_ID OPERATOR EXPECTED_STAMP REQUEST_ID`, where
    `EXPECTED_STAMP` is the restored database's stamp from `authority inspect`
-   (both as `day2-maintain.sh` invokes them; always check `.ok`);
+   (both as `crates/day2-ops/src/maintenance.rs` invokes them; always check `.ok`);
 5. delete the maintenance pod and scale the StatefulSet back to one replica.
 
 Linux qualification exercises this restore-then-fresh-activation sequence
-(`linux-runtime-restore`); `day2-maintain.sh` has no `restore` operation yet,
+(`linux-runtime-restore`); `day2 platform maintain` has no `restore` operation yet,
 and this in-cluster procedure has not been exercised on GKE.
 
 ## The rendered instance.json

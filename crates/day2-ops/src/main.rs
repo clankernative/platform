@@ -557,6 +557,7 @@ impl Operations {
             }
             "maintenance-artifacts" => self.maintenance()?.artifacts(),
             "maintenance-stop" => self.maintenance()?.stop(),
+            "maintenance-measure" => self.maintenance()?.measure(),
             "maintenance-pod" => self.maintenance()?.start_pod(),
             "maintenance-workflow" => {
                 #[derive(Deserialize)]
@@ -577,6 +578,7 @@ impl Operations {
                 let step = input::<Input>(&request)?.step;
                 self.maintenance()?.migration(&step)
             }
+            "maintenance-admission" => self.maintenance()?.admission(),
             "maintenance-confirm" => self.maintenance()?.confirm(),
             "maintenance-fence" => self.maintenance()?.fence(),
             "maintenance-mark-activated" => self.maintenance()?.mark_activated(),

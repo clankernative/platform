@@ -4,10 +4,18 @@
 //! recipe can skip:
 //!
 //! - the maintenance pod is removed on every exit;
+//! - its scratch volume and ephemeral-storage request are sized from the
+//!   store measured on the stopped volume, or the session stops, restored,
+//!   before the pod exists;
 //! - before the migration fence, any failure restores the app on its image;
+//! - before the confirmation and the fence, `activate` rehearses the migration
+//!   and activation on a copy of the verified backup and opens the copy with
+//!   the target build's own store admission (what day2-serve runs at startup);
+//!   a store the target would refuse is refused there, nothing else changed;
 //! - after the fence, the old image is never restarted on the migrated volume;
-//! - the fence needs a verified local backup and a confirmation from this
-//!   session, and `migration apply` refuses to run without it;
+//! - the fence needs a verified local backup, the target's admission of the
+//!   store and a confirmation from this session, and `migration apply` refuses
+//!   to run without it;
 //! - one session per namespace; closed sets of workflows and kubectl verbs;
 //! - only a successful fresh activation stamps the StatefulSet with the
 //!   activated artifact, the release workflow's precondition for changing it;
@@ -38,9 +46,15 @@ const POD_TEMPLATE: &str = include_str!("../../../deploy/gke/k8s/maintenance-pod
 const POD_DEADLINE_SECONDS: u32 = 3_600;
 const MAINTENANCE_LABEL: &str = "app.kubernetes.io/name=day2-maintenance";
 const ROOT: &str = "/srv/day2";
+/// The app's state volume in the pod.
+const STATE: &str = "/srv/day2/.state";
 const CURRENT: &str = "/srv/day2/current-instance.json";
 const TARGET: &str = "/srv/day2/instance.json";
 const PLAN: &str = "/srv/day2/migration-plan.json";
+/// A disposable installation beside the real one (on the pod's scratch volume,
+/// not the app's): the target instance over a copy of the verified backup.
+const ADMISSION: &str = "/srv/day2/admission";
+const ADMISSION_INSTANCE: &str = "/srv/day2/admission/instance.json";
 const HOST: &str = "/workspace/platform/cli/day2-host";
 const DAY2: &str = "/workspace/platform/target/debug/day2";
 const OUTPUT_LIMIT: usize = 16 << 20;
@@ -48,6 +62,19 @@ const LAYER_LIMIT: u64 = 1 << 30;
 /// day2-gke-release changes a release-managed app's artifact only to the one
 /// this annotation names, and removes it when it does.
 const ACTIVATED: &str = "day2.dev/activated-artifact";
+
+// The pod's /srv/day2 scratch volume is sized from the store it maintains; see
+// `scratch_bytes`.
+const MIB: u64 = 1 << 20;
+/// The smallest scratch volume, whatever the store.
+const SCRATCH_FLOOR: u64 = 1 << 30;
+/// Instance files, the migration plan and rounding.
+const SCRATCH_SLACK: u64 = 256 * MIB;
+/// The container's own writes beside its volumes (its root is read-only):
+/// added to the scratch for its ephemeral-storage request and limit.
+const CONTAINER_EPHEMERAL: u64 = 64 * MIB;
+/// The short-lived pod that measures the store writes nothing.
+const PROBE_SCRATCH: u64 = 64 * MIB;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Operation {
@@ -87,6 +114,69 @@ impl Operation {
     fn targeted(self) -> bool {
         matches!(self, Self::Activate | Self::MarkActivated)
     }
+
+    /// How many times the app's stores fit on the pod's scratch volume at the
+    /// operation's peak.
+    fn store_copies(self) -> u64 {
+        match self {
+            Self::Inspect | Self::MarkActivated => 0,
+            // The verified backup.
+            Self::Backup | Self::AuthorityApply => 1,
+            // The backup, which the rehearsal then migrates as its copy, and
+            // the WAL and SQLite temporary files that migration grows. The
+            // real migration's WAL is on the app's volume; its temporary files
+            // reuse the space the removed rehearsal freed.
+            Self::Activate => 2,
+        }
+    }
+}
+
+/// The scratch volume for `copies` of stores measuring `stores` bytes, with a
+/// quarter more for their growth, beside `artifacts` bytes of artifacts copied
+/// in (counted twice: a backup holds the running one again). Whole MiB, at
+/// least `SCRATCH_FLOOR`.
+fn scratch_bytes(copies: u64, stores: u64, artifacts: u64) -> u64 {
+    let stores = copies.saturating_mul(stores);
+    let bytes = stores
+        .saturating_add(stores / 4)
+        .saturating_add(artifacts.saturating_mul(2))
+        .saturating_add(SCRATCH_SLACK)
+        .max(SCRATCH_FLOOR);
+    bytes.div_ceil(MIB).saturating_mul(MIB)
+}
+
+/// The store files the session copies, from `stat -c '%s %n'` of the regular
+/// files at the top of the state volume: the app's database and every local
+/// provider store the backup takes, each with its WAL.
+fn store_sizes(listing: &str, app: &str) -> Result<BTreeMap<String, u64>> {
+    let database = format!("{app}.sqlite");
+    let mut wanted = vec![database.clone()];
+    wanted.extend(
+        day2::capabilities::LOCAL_PROVIDER_DATABASES
+            .iter()
+            .map(|name| (*name).to_owned()),
+    );
+    let mut sizes = BTreeMap::new();
+    for line in listing.lines().filter(|line| !line.is_empty()) {
+        let (size, path) = line.split_once(' ').context("unexpected stat output")?;
+        let name = path
+            .strip_prefix(STATE)
+            .and_then(|name| name.strip_prefix('/'))
+            .context("stat path outside the state volume")?;
+        let store = name.strip_suffix("-wal").unwrap_or(name);
+        if wanted.iter().any(|wanted| wanted == store) {
+            sizes.insert(name.to_owned(), size.parse::<u64>().context("stat size")?);
+        }
+    }
+    ensure!(
+        sizes.contains_key(&database),
+        "no {database} on the state volume"
+    );
+    Ok(sizes)
+}
+
+fn mebibytes(bytes: u64) -> String {
+    format!("{}Mi", bytes.div_ceil(MIB))
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -631,14 +721,17 @@ pub fn fetch_artifact(
         LAYER_LIMIT,
         &layer_digest,
     )?;
-    let files = extract_artifact(&blob, artifact_id, output)?;
-    Ok(json!({"image": image, "artifact": artifact_id, "layer": layer_digest, "files": files}))
+    let (files, bytes) = extract_artifact(&blob, artifact_id, output)?;
+    Ok(
+        json!({"image": image, "artifact": artifact_id, "layer": layer_digest, "files": files, "bytes": bytes}),
+    )
 }
 
 /// Extract `srv/day2/artifacts/<id>/` from a (gzip or plain) tar layer into
 /// `output/<id>`, read-only, refusing links, devices and escaping paths, then
-/// check the artifact's own identity and worker digest.
-pub fn extract_artifact(layer: &[u8], artifact_id: &str, output: &Path) -> Result<usize> {
+/// check the artifact's own identity and worker digest. Returns the number of
+/// files and their bytes.
+pub fn extract_artifact(layer: &[u8], artifact_id: &str, output: &Path) -> Result<(usize, u64)> {
     let reader: Box<dyn Read> = match layer {
         [0x1f, 0x8b, ..] => Box::new(flate2::read::GzDecoder::new(layer)),
         [0x28, 0xb5, 0x2f, 0xfd, ..] => bail!("zstd image layers are not supported"),
@@ -648,7 +741,7 @@ pub fn extract_artifact(layer: &[u8], artifact_id: &str, output: &Path) -> Resul
     let destination = output.join(artifact_id);
     ensure!(!destination.exists(), "artifact output already exists");
     let mut archive = tar::Archive::new(reader);
-    let mut files = 0_usize;
+    let (mut files, mut size) = (0_usize, 0_u64);
     let mut directories = Vec::new();
     for entry in archive.entries()? {
         let mut entry = entry?;
@@ -673,6 +766,7 @@ pub fn extract_artifact(layer: &[u8], artifact_id: &str, output: &Path) -> Resul
             fs::create_dir_all(path.parent().context("artifact file parent")?)?;
             let mut bytes = Vec::new();
             entry.read_to_end(&mut bytes)?;
+            size += bytes.len() as u64;
             fs::write(&path, bytes)?;
             // day2 requires artifacts write-protected; keep only read and execute bits.
             let mode = entry.header().mode()? & 0o555;
@@ -701,7 +795,7 @@ pub fn extract_artifact(layer: &[u8], artifact_id: &str, output: &Path) -> Resul
     for directory in directories {
         fs::set_permissions(&directory, fs::Permissions::from_mode(0o555))?;
     }
-    Ok(files)
+    Ok((files, size))
 }
 
 // ---------------------------------------------------------------------------
@@ -795,11 +889,23 @@ fn private(path: &Path) -> Result<()> {
 struct State {
     artifacts: bool,
     stopped: bool,
+    /// The pod measuring the store may exist.
+    probe: bool,
+    /// Bytes of the artifacts the pod holds.
+    artifact_bytes: u64,
+    /// The pod's scratch volume in bytes, once the store is measured.
+    scratch: Option<u64>,
     pod: bool,
     pod_backup: bool,
     backup: Option<PathBuf>,
+    /// Local provider stores the in-pod backup holds beside app.sqlite.
+    providers: Vec<String>,
     stamp: Option<Value>,
     plan: Option<Value>,
+    /// The rehearsal runs once per session, refused or not.
+    rehearsed: bool,
+    /// What the target build reported opening the rehearsed copy.
+    admission: Option<Value>,
     confirmed: bool,
     fenced: bool,
     migrated: bool,
@@ -1026,6 +1132,10 @@ impl Session {
             fs::write(self.work.path().join("instance.json"), text)?;
         }
         self.state.artifacts = true;
+        self.state.artifact_bytes = fetched
+            .iter()
+            .filter_map(|receipt| receipt["bytes"].as_u64())
+            .sum();
         self.record("artifacts", json!(fetched))?;
         Ok(json!({"artifacts": fetched}))
     }
@@ -1070,11 +1180,12 @@ impl Session {
         Ok(json!({"stopped": statefulset}))
     }
 
-    fn render_pod(&self) -> Result<String> {
+    fn render_pod(&self, pod: &str, scratch: u64) -> Result<String> {
         let deadline = POD_DEADLINE_SECONDS.to_string();
+        let (ephemeral, scratch) = (mebibytes(scratch + CONTAINER_EPHEMERAL), mebibytes(scratch));
         let values = [
             ("DAY2_MAINT_NAMESPACE", self.request.namespace.as_str()),
-            ("DAY2_MAINT_POD", self.pod.as_str()),
+            ("DAY2_MAINT_POD", pod),
             (
                 "DAY2_MAINT_TOOLING_IMAGE",
                 self.request.tooling_image.as_str(),
@@ -1089,30 +1200,30 @@ impl Session {
                 self.request.pod_label.value.as_str(),
             ),
             ("DAY2_MAINT_DEADLINE_SECONDS", deadline.as_str()),
+            ("DAY2_MAINT_SCRATCH", scratch.as_str()),
+            ("DAY2_MAINT_EPHEMERAL_STORAGE", ephemeral.as_str()),
         ];
         render_template(POD_TEMPLATE, &values)
     }
 
-    pub fn start_pod(&mut self) -> Result<Value> {
-        ensure!(
-            self.state.stopped && !self.state.pod,
-            "the pod follows the stop, once"
-        );
-        eprintln!("== maintenance pod {}", self.pod);
-        let manifest = self.render_pod()?;
-        // Recorded first: from here any exit deletes the pod.
-        self.state.pod = true;
-        self.record(
-            "pod",
-            json!({"pod": self.pod, "tooling_image": self.request.tooling_image}),
-        )?;
+    /// Apply a rendered pod and wait until it runs. A pod that never starts
+    /// fails with the scheduler's reason, e.g. no node with the ephemeral
+    /// storage it requests.
+    fn run_pod(&mut self, pod: &str, manifest: &str, scratch: u64) -> Result<()> {
+        let size = || {
+            format!(
+                "pod {pod} requests {} of ephemeral storage ({} scratch)",
+                mebibytes(scratch + CONTAINER_EPHEMERAL),
+                mebibytes(scratch)
+            )
+        };
         self.kubectl(
             &["apply", "-f", "-"],
             Some(manifest.as_bytes()),
             Duration::from_secs(60),
-        )?;
-        let pod = self.pod.clone();
-        self.kubectl(
+        )
+        .with_context(|| format!("{}; the namespace's LimitRange and ResourceQuota (app-edge resource_guardrails) must admit it", size()))?;
+        let waited = self.kubectl(
             &[
                 "wait",
                 "--for=condition=Ready",
@@ -1121,7 +1232,144 @@ impl Session {
             ],
             None,
             Duration::from_secs(660),
+        );
+        if let Err(error) = waited {
+            let scheduling = self
+                .kubectl(
+                    &["get", "pod", pod, "-o", "json"],
+                    None,
+                    Duration::from_secs(60),
+                )
+                .ok()
+                .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+                .and_then(|status| {
+                    status["status"]["conditions"]
+                        .as_array()?
+                        .iter()
+                        .find(|condition| {
+                            condition["type"] == "PodScheduled" && condition["status"] != "True"
+                        })
+                        .and_then(|condition| condition["message"].as_str().map(str::to_owned))
+                });
+            return Err(match scheduling {
+                Some(reason) => error.context(format!("{}; not scheduled: {reason}", size())),
+                None => error.context(size()),
+            });
+        }
+        Ok(())
+    }
+
+    /// Size the pod's scratch volume from the store it will copy. Operations
+    /// that copy none get the floor; the others measure the app's database,
+    /// provider stores and their WALs on the stopped volume, from a
+    /// short-lived pod of the same template (the volume is ReadWriteOnce and
+    /// nothing else may open it), removed before the maintenance pod starts.
+    pub fn measure(&mut self) -> Result<Value> {
+        ensure!(
+            self.state.stopped && !self.state.pod && self.state.scratch.is_none(),
+            "the store is measured after the stop, once, before the pod"
+        );
+        let copies = self.operation.store_copies();
+        let stores = if copies == 0 {
+            BTreeMap::new()
+        } else {
+            self.measure_stores().map_err(|error| {
+                anyhow::anyhow!(
+                    "maintenance_scratch_unmeasured: the stores of {} on {} could not be measured, so the maintenance pod cannot be sized; nothing was migrated and {} is restored on its image: {error:#}",
+                    self.request.app,
+                    self.request.pvc,
+                    self.request.statefulset
+                )
+            })?
+        };
+        let artifacts = self.state.artifact_bytes;
+        let scratch = scratch_bytes(copies, stores.values().sum(), artifacts);
+        let sized = json!({
+            "stores": stores,
+            "copies": copies,
+            "artifacts": artifacts,
+            "scratch": mebibytes(scratch),
+            "ephemeral_storage": mebibytes(scratch + CONTAINER_EPHEMERAL),
+        });
+        eprintln!(
+            "   scratch {} for {} copies of {} bytes of stores",
+            mebibytes(scratch),
+            copies,
+            stores.values().sum::<u64>()
+        );
+        self.state.scratch = Some(scratch);
+        self.record("scratch", sized.clone())?;
+        Ok(sized)
+    }
+
+    fn probe(&self) -> String {
+        format!("{}-measure", self.pod)
+    }
+
+    fn measure_stores(&mut self) -> Result<BTreeMap<String, u64>> {
+        let probe = self.probe();
+        eprintln!(
+            "== measuring the stores of {} on {}",
+            self.request.app, self.request.pvc
+        );
+        let manifest = self.render_pod(&probe, PROBE_SCRATCH)?;
+        // Recorded first: from here any exit deletes the probe.
+        self.state.probe = true;
+        self.record("measure", json!({"pod": probe}))?;
+        self.run_pod(&probe, &manifest, PROBE_SCRATCH)?;
+        let listing = self.kubectl(
+            &[
+                "exec",
+                &probe,
+                "--",
+                "find",
+                STATE,
+                "-maxdepth",
+                "1",
+                "-type",
+                "f",
+                "-exec",
+                "stat",
+                "-c",
+                "%s %n",
+                "{}",
+                "+",
+            ],
+            None,
+            Duration::from_secs(300),
         )?;
+        self.kubectl(
+            &["delete", "pod", &probe, "--ignore-not-found", "--wait=true"],
+            None,
+            Duration::from_secs(300),
+        )?;
+        self.state.probe = false;
+        store_sizes(&listing, &self.request.app)
+    }
+
+    pub fn start_pod(&mut self) -> Result<Value> {
+        ensure!(
+            self.state.stopped && !self.state.pod,
+            "the pod follows the stop, once"
+        );
+        let scratch = self
+            .state
+            .scratch
+            .context("the pod follows the store's measurement")?;
+        eprintln!(
+            "== maintenance pod {} ({} scratch)",
+            self.pod,
+            mebibytes(scratch)
+        );
+        let pod = self.pod.clone();
+        let manifest = self.render_pod(&pod, scratch)?;
+        // Recorded first: from here any exit deletes the pod.
+        self.state.pod = true;
+        self.record(
+            "pod",
+            json!({"pod": self.pod, "tooling_image": self.request.tooling_image, "scratch": mebibytes(scratch)}),
+        )?;
+        self.run_pod(&pod, &manifest, scratch)?;
         self.exec(
             &["mkdir", "-p", &format!("{ROOT}/artifacts")],
             Duration::from_secs(60),
@@ -1383,6 +1631,11 @@ impl Session {
         )?;
         private(&destination)?;
         eprintln!("   verified backup copied to {}", destination.display());
+        self.state.providers = ours
+            .keys()
+            .filter_map(|path| path.strip_prefix("providers/"))
+            .map(str::to_owned)
+            .collect();
         self.state.backup = Some(destination.clone());
         self.record(
             "backup-copied",
@@ -1441,12 +1694,125 @@ impl Session {
         }
     }
 
+    /// Rehearse what the fence would commit to on a disposable copy, then open
+    /// the copy with the target build's store admission (`day2 admit`, the code
+    /// day2-serve runs on its store at startup). The copy is the verified
+    /// in-pod backup, moved under the target instance once its verified local
+    /// copy is the session's backup, and removed with it after the admission;
+    /// it is migrated with the shown plan and activated for the target exactly
+    /// as the real steps will be.
+    /// Nothing outside the copy changes. A refusal fails the session before
+    /// the confirmation and the fence, so the app is restored on its image.
+    pub fn admission(&mut self) -> Result<Value> {
+        ensure!(
+            self.operation == Operation::Activate
+                && self.state.plan.is_some()
+                && !self.state.rehearsed
+                && !self.state.confirmed,
+            "the target's store admission follows the migration plan, once, before the confirmation"
+        );
+        let target = self.request.target.clone().context("target")?;
+        eprintln!(
+            "== store admission by {} (a migrated, activated copy of the backup)",
+            target.artifact_id
+        );
+        self.state.rehearsed = true;
+        self.record(
+            "target-admission",
+            json!({"artifact": target.artifact_id, "copy": ADMISSION}),
+        )?;
+        match self.rehearse(&target) {
+            Ok(admitted) => {
+                self.state.admission = Some(admitted.clone());
+                self.record("target-admitted", admitted.clone())?;
+                Ok(admitted)
+            }
+            Err(error) => {
+                let cause = format!("{error:#}");
+                self.record("target-admission-refused", json!({"error": cause}))?;
+                bail!(
+                    "target_store_admission_refused: artifact {} would not open the store of {}; nothing was migrated or activated and {} is restored on its image: {cause}",
+                    target.artifact_id,
+                    self.request.app,
+                    self.request.statefulset
+                )
+            }
+        }
+    }
+
+    fn rehearse(&mut self, target: &Target) -> Result<Value> {
+        let app = self.request.app.clone();
+        let operator = self.request.operator.clone();
+        let request_id = self.request.request_id.clone().unwrap_or_default();
+        let artifact = format!("{ROOT}/artifacts/{}", target.artifact_id);
+        let backup = format!("{ROOT}/backup-{}", self.stamp);
+        let state = format!("{ADMISSION}/.state");
+        // No -p: a leftover copy is refused, never reused.
+        self.exec(&["mkdir", ADMISSION, &state], Duration::from_secs(60))?;
+        self.exec(&["cp", TARGET, ADMISSION_INSTANCE], Duration::from_secs(60))?;
+        let mut stores = vec![("app.sqlite".to_owned(), format!("{app}.sqlite"))];
+        for name in self.state.providers.clone() {
+            ensure!(
+                day2::capabilities::LOCAL_PROVIDER_DATABASES.contains(&name.as_str()),
+                "unknown provider store {name} in the backup"
+            );
+            stores.push((format!("providers/{name}"), name));
+        }
+        // Moved, not copied: the session's backup is the verified local copy,
+        // and the in-pod one is not read again, so the rehearsal needs no
+        // second copy of the store on the scratch volume.
+        for (from, to) in stores {
+            self.exec(
+                &["mv", &format!("{backup}/{from}"), &format!("{state}/{to}")],
+                Duration::from_secs(60),
+            )?;
+        }
+        self.exec(
+            &[
+                DAY2,
+                "migration-apply",
+                ADMISSION_INSTANCE,
+                &app,
+                &artifact,
+                PLAN,
+            ],
+            Duration::from_secs(1_800),
+        )?;
+        let inspected = self.host_workflow(&["authority", "inspect", ADMISSION_INSTANCE, &app])?;
+        let stamp = &inspected["active"]["stamp"];
+        ensure!(stamp.is_object(), "no active authority stamp in the copy");
+        let expected = serde_json::to_string(stamp)?;
+        self.host_workflow(&[
+            "authority",
+            "activate",
+            ADMISSION_INSTANCE,
+            &app,
+            &artifact,
+            &operator,
+            &expected,
+            &request_id,
+        ])?;
+        let output = self.exec(
+            &[DAY2, "admit", ADMISSION_INSTANCE, &app],
+            Duration::from_secs(600),
+        )?;
+        let admitted: Value = serde_json::from_str(output.trim()).context("day2 admit output")?;
+        ensure!(
+            admitted["admitted"] == true
+                && admitted["artifact"] == format!("sha256:{}", target.artifact_id),
+            "the activated copy did not open with the target artifact: {admitted}"
+        );
+        // Free the scratch volume for the real migration's temporary files.
+        self.exec(&["rm", "-rf", ADMISSION, &backup], Duration::from_secs(300))?;
+        Ok(admitted)
+    }
+
     pub fn confirm(&mut self) -> Result<Value> {
         let (question, word) = match self.operation {
             Operation::Activate => {
                 ensure!(
-                    self.state.plan.is_some(),
-                    "confirm the migration plan after it is shown"
+                    self.state.plan.is_some() && self.state.admission.is_some(),
+                    "confirm the migration plan after it is shown and the target admitted the store"
                 );
                 let target = self.request.target.as_ref().context("target")?;
                 (
@@ -1490,9 +1856,10 @@ impl Session {
             self.operation == Operation::Activate
                 && self.state.backup.is_some()
                 && self.state.plan.is_some()
+                && self.state.admission.is_some()
                 && self.state.confirmed
                 && !self.state.fenced,
-            "the fence needs this session's verified backup, migration plan and confirmation"
+            "the fence needs this session's verified backup, migration plan, target store admission and confirmation"
         );
         // Recorded before the flag: a journal that stops here means "maybe migrated".
         self.record("fence", json!({"backup": self.state.backup}))?;
@@ -1649,6 +2016,7 @@ impl Session {
             "statefulset": self.request.statefulset,
             "backup": self.state.backup,
             "migration_plan": self.state.plan,
+            "target_admission": self.state.admission,
             "result": self.state.result,
             "replicas_restored": restored,
             "journal": self.journal,
@@ -1667,8 +2035,14 @@ impl Session {
     fn close(&mut self) -> Result<bool> {
         self.tools.cluster.unstoppable();
         let mut failures = Vec::new();
+        let mut pods = Vec::new();
+        if self.state.probe {
+            pods.push(self.probe());
+        }
         if self.state.pod {
-            let pod = self.pod.clone();
+            pods.push(self.pod.clone());
+        }
+        for pod in pods {
             if let Err(error) = self.kubectl(
                 &["delete", "pod", &pod, "--ignore-not-found", "--wait=true"],
                 None,
