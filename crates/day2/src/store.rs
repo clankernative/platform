@@ -674,6 +674,9 @@ impl Runtime {
         upgrade_selection_cursors(&tx)?;
         crate::authority_state::upgrade(&tx)?;
         crate::oauth::schema::admit_with_runtime_hook(&tx, |db| {
+            // GoLinks' persisted links are the one data migration AGENTS.md
+            // allows; this replaces only an empty version-1 credential unit.
+            crate::managed_credentials::store::replace_empty_version_1_unit(db)?;
             crate::managed_credentials::store::install_schema(db)?;
             crate::managed_credentials::issuance::install(db)?;
             // Newly installed peers are admitted under the same cumulative

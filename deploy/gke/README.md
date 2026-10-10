@@ -411,8 +411,12 @@ What the session guarantees, whatever the recipe does:
   `day2-serve` runs at startup (`deployment::admit_store`: storage binding and
   authority, platform upgrades, the private credential schema, the authority's
   security requirements, and the private OAuth schema of an app with OAuth
-  connections). If the target would not open the store, for example a
-  credential unit older than its schema (`unsupported credential schema
+  connections). The store admission replaces an empty version-1 credential
+  unit, which every store written before the version-2 unit holds (GoLinks'
+  among them), with the current one; see
+  [OAUTH-SIMULATION.md](../../docs/OAUTH-SIMULATION.md#current-schema-admission).
+  If the target would not open the store, for example a credential unit with
+  credential rows that is older than its schema (`unsupported credential schema
   version`), the session stops with `target_store_admission_refused` and the
   cause, records `target-admission-refused` in the journal, and restores the
   app on its image. Host checks (kernel, sandbox, security runtime evidence)
