@@ -12,7 +12,7 @@ pub(crate) mod verification;
 #[cfg(test)]
 mod effects_guard;
 #[cfg(test)]
-mod simulation;
+pub(crate) mod simulation;
 
 use crate::{
     authority_state::{self, ActiveAuthority},

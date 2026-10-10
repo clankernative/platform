@@ -3513,6 +3513,1870 @@ mod tests {
         );
     }
 
+    mod signed_replay {
+        use super::*;
+        use crate::managed_credentials::effects as credential_effects;
+        use serde::{Deserialize, Serialize};
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        /// Separate ID and private synthetic-secret tracks, coupled clocks.
+        /// Scoped domains are genuine unique handles, never replay authority.
+        struct Clock {
+            oauth: Arc<crate::oauth::simulation::World>,
+            credentials: Arc<crate::managed_credentials::simulation::World>,
+            time: Mutex<(i64, Duration)>,
+        }
+
+        impl Clock {
+            fn new() -> Arc<Self> {
+                Arc::new(Self {
+                    oauth: crate::oauth::simulation::World::new(17),
+                    credentials: crate::managed_credentials::simulation::World::new(17),
+                    time: Mutex::new((1_000, Duration::ZERO)),
+                })
+            }
+
+            fn wall(&self) -> i64 {
+                self.time.lock().unwrap().0
+            }
+
+            fn complete(&self) {
+                self.time.lock().unwrap().0 = 1_001;
+            }
+
+            fn expire_ticks(&self) -> Result<()> {
+                let mut time = self.time.lock().unwrap();
+                time.1 = time
+                    .1
+                    .checked_add(Duration::from_secs(300))
+                    .context("replay ticks overflow")?;
+                Ok(())
+            }
+        }
+
+        impl effects::Hooks for Clock {
+            fn domain(&self) -> u64 {
+                effects::Hooks::domain(self.oauth.as_ref())
+            }
+            fn wall_time(&self) -> Result<i64> {
+                Ok(self.wall())
+            }
+            fn monotonic(&self) -> Duration {
+                self.time.lock().unwrap().1
+            }
+            fn fill(&self, bytes: &mut [u8]) -> Result<()> {
+                effects::Hooks::fill(self.oauth.as_ref(), bytes)
+            }
+            fn send(&self, _: reqwest::blocking::Request) -> Result<effects::Response> {
+                anyhow::bail!("mounted replay has no network transport")
+            }
+        }
+
+        impl credential_effects::Hooks for Clock {
+            fn domain(&self) -> u64 {
+                effects::Hooks::domain(self)
+            }
+            fn wall_time(&self) -> Result<i64> {
+                Ok(self.wall())
+            }
+            fn monotonic(&self) -> Duration {
+                self.time.lock().unwrap().1
+            }
+            fn fill_id(&self, bytes: &mut [u8]) -> Result<()> {
+                credential_effects::Hooks::fill_id(self.credentials.as_ref(), bytes)
+            }
+            fn fill_secret(&self, bytes: &mut [u8]) -> Result<()> {
+                credential_effects::Hooks::fill_secret(self.credentials.as_ref(), bytes)
+            }
+        }
+
+        struct Host {
+            original: crate::store::Runtime,
+            clock: Arc<Clock>,
+        }
+
+        impl crate::host::Host for Host {
+            fn entropy(&self, scope: &str, invocation: &str) -> Result<[u8; 32]> {
+                self.original.host().entropy(scope, invocation)
+            }
+            fn now_ms(&self) -> Result<i64> {
+                self.clock
+                    .wall()
+                    .checked_mul(1_000)
+                    .context("replay wall overflow")
+            }
+            fn worker_action(
+                &self,
+                phase: crate::protocol::Phase,
+                request: &crate::protocol::Request,
+            ) -> Result<crate::host::WorkerAction> {
+                self.original.host().worker_action(phase, request)
+            }
+            fn record_exchange(
+                &self,
+                phase: crate::protocol::Phase,
+                request: &crate::protocol::Request,
+                result: &Result<crate::protocol::Response>,
+            ) -> Result<()> {
+                self.original.host().record_exchange(phase, request, result)
+            }
+            fn deadline(
+                &self,
+                phase: crate::protocol::Phase,
+                started: std::time::Instant,
+            ) -> Result<()> {
+                // Existing Simulation modeled Host boundary. The physical
+                // Worker watchdog is unchanged; real elapsed is not replayed.
+                self.original.host().deadline(phase, started)
+            }
+        }
+
+        struct CredentialKeys {
+            counts: Mutex<[usize; 2]>,
+            selected: Vec<(ApprovalKeyRef, ApprovalKeyPurpose)>,
+            delay: AtomicBool,
+            clock: Arc<Clock>,
+        }
+
+        impl ApprovalKeyProvider for CredentialKeys {
+            fn load(
+                &self,
+                reference: &ApprovalKeyRef,
+                purpose: ApprovalKeyPurpose,
+            ) -> Result<ApprovalKeyMaterial> {
+                ensure!(
+                    self.selected
+                        .iter()
+                        .any(|(expected, role)| expected == reference && *role == purpose),
+                    "credential replay selected binding/version/purpose changed"
+                );
+                let (index, version, byte) = match purpose {
+                    ApprovalKeyPurpose::CustodyVerifier => (0, "verifier_1", 29),
+                    ApprovalKeyPurpose::CustodyEncryption => (1, "encryption_1", 41),
+                    _ => anyhow::bail!("credential replay attempted shell key access"),
+                };
+                ensure!(
+                    reference.version == version,
+                    "credential replay selected key version changed"
+                );
+                self.counts.lock().unwrap()[index] += 1;
+                if self.delay.swap(false, Ordering::SeqCst) {
+                    self.clock.expire_ticks()?;
+                }
+                Ok(ApprovalKeyMaterial {
+                    binding: reference.binding.clone(),
+                    version: version.into(),
+                    purpose,
+                    bytes: [byte; 32],
+                })
+            }
+        }
+
+        struct CredentialWorld {
+            _directory: tempfile::TempDir,
+            runtime: crate::store::Runtime,
+            registry: Arc<credentials::Registry>,
+            keys: Arc<CredentialKeys>,
+            pending: credentials::Pending,
+            foreign: credentials::Pending,
+            namespace: day2_capabilities::credentials::Namespace,
+            family_contract: Digest,
+        }
+
+        fn credential_world(clock: Arc<Clock>) -> Result<CredentialWorld> {
+            use std::io::Write;
+            let artifact = PathBuf::from(
+                std::env::var_os("DAY2_TEST_CREDENTIAL_METADATA_ARTIFACT").context(
+                    "signed replay requires the normal checked Credential Metadata artifact",
+                )?,
+            );
+            let mut instance = crate::development::verification_instance_data(
+                &artifact,
+                None,
+                "alice@example.com",
+            )?;
+            let app = instance.apps.get_mut("app").context("replay app")?;
+            app.readers.insert("credential_client:client_keys".into());
+            app.writers.insert("credential_client:client_keys".into());
+            for operation in ["credential_metadata.ping", "credential_metadata.record_use"] {
+                app.authority
+                    .as_mut()
+                    .context("replay authority")?
+                    .operations
+                    .get_mut(operation)
+                    .context("replay operation")?
+                    .actors
+                    .insert("credential_client:client_keys".into());
+            }
+            let admitted = crate::artifact::LoadedArtifact::load(&artifact)?;
+            crate::development::repin_credential_verification_data(&mut instance, &admitted)?;
+            let instance = Instance::from_bytes(&serde_json::to_vec(&instance)?)?;
+            let desired_binding = instance.apps["app"]
+                .credential_families
+                .get("client_keys")
+                .context("replay original desired family binding")?
+                .clone();
+            let desired_contract = admitted
+                .contract()
+                .credential_manifest
+                .iter()
+                .find(|family| family.id.as_str() == "client_keys")
+                .context("replay original artifact family contract")?
+                .contract
+                .clone();
+            let directory = tempfile::tempdir()?;
+            std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))?;
+            let path = directory.path().join("instance.json");
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&path)?;
+            file.write_all(&serde_json::to_vec(&instance)?)?;
+            file.sync_all()?;
+            let runtime = crate::store::Runtime::load(&path, "app")?;
+            ensure!(
+                !runtime.db().exists(),
+                "replay database was already initialized"
+            );
+            let simulation = crate::simulation::Simulation::new(runtime, [17; 32], 1_000_000)?;
+            let original = simulation.runtime().clone();
+            let runtime = original.clone().with_host(Arc::new(Host {
+                original,
+                clock: clock.clone(),
+            }));
+            runtime.initialize()?;
+            let active = crate::authority_state::current(&open(runtime.db())?)?;
+            ensure!(
+                active.stamp.revision == 1,
+                "replay must have one fresh authority initialization"
+            );
+            let selected_family = active
+                .document
+                .credentials
+                .get("client_keys")
+                .context("replay declared client family")?;
+            ensure!(
+                selected_family.binding == desired_binding
+                    && selected_family.qualification.family_contract == desired_contract,
+                "replay initialized authority differs from original admitted DATA"
+            );
+            let namespace = selected_family.binding.namespace.clone();
+            let family_contract = selected_family.qualification.family_contract.clone();
+            let selections: Vec<_> = active
+                .document
+                .credentials
+                .values()
+                .map(|family| Selection {
+                    binding: family.binding.clone(),
+                    management: family.management.clone(),
+                    security_origin: "https://security.example.com".into(),
+                    verifier: ApprovalKeyRef {
+                        binding: family.binding.verifier.clone(),
+                        version: "verifier_1".into(),
+                    },
+                    encryption: ApprovalKeyRef {
+                        binding: family.binding.custody.clone(),
+                        version: "encryption_1".into(),
+                    },
+                    security_epoch: 1,
+                    observed_at: 998,
+                    ready_until: 1_298,
+                    grant_until: 8_200,
+                    max_active_lineages: 1,
+                    issuers: BTreeMap::from([(
+                        "alice@example.com".into(),
+                        "accounts.google.com:google-alice".into(),
+                    )]),
+                })
+                .collect();
+            let selected = selections
+                .iter()
+                .flat_map(|entry| {
+                    [
+                        (entry.verifier.clone(), ApprovalKeyPurpose::CustodyVerifier),
+                        (
+                            entry.encryption.clone(),
+                            ApprovalKeyPurpose::CustodyEncryption,
+                        ),
+                    ]
+                })
+                .collect();
+            let keys = Arc::new(CredentialKeys {
+                counts: Mutex::new([0; 2]),
+                selected,
+                delay: AtomicBool::new(false),
+                clock,
+            });
+            let authority = Arc::new(SelectedAuthority::new(selections, keys.clone())?);
+            let runtime = runtime.with_credential_authority(authority.clone());
+            let registry = Arc::new(credentials::Registry::new(
+                &instance,
+                vec![runtime.clone()],
+                authority,
+            )?);
+            let identity = identity();
+            let start = |invocation: &str, label: &str| -> Result<credentials::Pending> {
+                let location = credentials::start(
+                    &runtime,
+                    "credential_metadata.create_client",
+                    &identity.email,
+                    invocation,
+                    &serde_json::json!({"label":label}),
+                    None,
+                    1_000,
+                )?;
+                let url = url::Url::parse(&location)?;
+                let attempt = url
+                    .path()
+                    .strip_prefix(credentials::PREFIX)
+                    .context("replay pending path")?;
+                Ok(registry
+                    .resolve(attempt, &identity, 1_000)?
+                    .context("replay actual pending")?
+                    .1)
+            };
+            let pending = start("signed-replay-target", "Replay client")?;
+            let foreign = start("signed-replay-foreign", "Untouched foreign client")?;
+            ensure!(
+                pending.family == "client_keys"
+                    && pending.operation == "credential_metadata.create_client"
+                    && pending.actor == "alice@example.com"
+                    && pending.input == serde_json::json!({"label":"Replay client"})
+                    && pending.invocation == "signed-replay-target"
+                    && pending.artifact == runtime.artifact().id()
+                    && pending.authority == active.stamp
+                    && pending.binding == Digest::of(&desired_binding)?
+                    && pending.created_at == 1_000
+                    && pending.expires_at == 1_300,
+                "replay original desired owner/family/operation/authority/binding"
+            );
+            Ok(CredentialWorld {
+                _directory: directory,
+                runtime,
+                registry,
+                keys,
+                pending,
+                foreign,
+                namespace,
+                family_contract,
+            })
+        }
+
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+        enum Consumer {
+            OAuth,
+            Credential,
+        }
+
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+        enum Case {
+            Positive,
+            WrongSubject,
+            OppositePurpose,
+            Invalidate,
+            TicksExpired,
+            KeyDelay,
+            Restart,
+        }
+
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+        enum Step {
+            Begin,
+            Reuse,
+            OppositePurpose,
+            Invalidate,
+            Callback,
+            View,
+            ExpireTicks,
+            DelayKey,
+            Restart,
+            Confirm,
+            Reveal,
+            Acknowledge,
+            Duplicate,
+        }
+
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+        enum Disposition {
+            Ok,
+            Redirect,
+            NotFound,
+            Unauthorized,
+            Refused,
+        }
+
+        #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+        struct PublicState {
+            wall: i64,
+            ticks: u64,
+            sessions: usize,
+            google_pending: usize,
+            activation: i64,
+            product: i64,
+            receipts: i64,
+            product_rows: i64,
+            delivery_closed: i64,
+            response_verified: bool,
+            oauth_keys: admission::tests::ReplayKeyCounts,
+            credential_keys: [usize; 2],
+            providers: shell_oidc::ReplayProviderCounts,
+        }
+
+        /// Independent finite state machine: literal transitions and counts,
+        /// no production transition/result boolean is used for prediction.
+        struct Model {
+            consumer: Consumer,
+            case: Case,
+            state: PublicState,
+            restarted: bool,
+        }
+
+        impl Model {
+            fn new(consumer: Consumer, case: Case) -> Self {
+                Self {
+                    consumer,
+                    case,
+                    restarted: false,
+                    state: PublicState {
+                        wall: 1_000,
+                        ticks: 0,
+                        sessions: 0,
+                        google_pending: 0,
+                        activation: 0,
+                        product: 0,
+                        receipts: 0,
+                        product_rows: 0,
+                        delivery_closed: 0,
+                        response_verified: false,
+                        oauth_keys: Default::default(),
+                        credential_keys: [0; 2],
+                        providers: Default::default(),
+                    },
+                }
+            }
+
+            fn app_lookup(&mut self) {
+                if self.consumer == Consumer::OAuth {
+                    self.state.oauth_keys.app_verifier += 1;
+                    self.state.oauth_keys.app_encryption += 1;
+                    self.state.oauth_keys.app_attestation += 1;
+                }
+            }
+
+            fn step(&mut self, step: Step) -> Disposition {
+                match step {
+                    Step::Begin => {
+                        self.app_lookup();
+                        self.state.providers.iap_keys += 1;
+                        self.state.google_pending = 1;
+                        Disposition::Redirect
+                    }
+                    Step::Reuse => {
+                        self.app_lookup();
+                        Disposition::Redirect
+                    }
+                    Step::OppositePurpose => Disposition::Refused,
+                    Step::Invalidate | Step::DelayKey => Disposition::Ok,
+                    Step::ExpireTicks => {
+                        self.state.ticks += 300;
+                        Disposition::Ok
+                    }
+                    Step::Restart => {
+                        self.restarted = true;
+                        self.state.sessions = 0;
+                        self.state.google_pending = 0;
+                        Disposition::Ok
+                    }
+                    Step::Callback => {
+                        self.state.wall = 1_001;
+                        self.state.google_pending = 0;
+                        if self.restarted {
+                            self.state.providers.iap_keys += 1;
+                            return Disposition::Refused;
+                        }
+                        if self.case == Case::WrongSubject {
+                            return Disposition::Refused;
+                        }
+                        self.state.providers.google_keys += 1;
+                        self.state.providers.exchanges += 1;
+                        if self.case == Case::Invalidate {
+                            return if self.consumer == Consumer::OAuth {
+                                Disposition::NotFound
+                            } else {
+                                Disposition::Refused
+                            };
+                        }
+                        self.app_lookup();
+                        self.state.sessions = 1;
+                        Disposition::Redirect
+                    }
+                    Step::View => {
+                        self.app_lookup();
+                        Disposition::Ok
+                    }
+                    Step::Confirm => {
+                        self.app_lookup();
+                        if self.case == Case::TicksExpired {
+                            return Disposition::Refused;
+                        }
+                        if self.case == Case::Restart {
+                            self.state.providers.iap_keys += 1;
+                            return if self.consumer == Consumer::OAuth {
+                                Disposition::Unauthorized
+                            } else {
+                                Disposition::Refused
+                            };
+                        }
+                        match self.consumer {
+                            Consumer::OAuth => {
+                                self.state.sessions = 0;
+                                self.state.oauth_keys.shell_attestation += 1;
+                                if self.case == Case::KeyDelay {
+                                    self.state.ticks += 300;
+                                    return Disposition::Refused;
+                                }
+                                self.app_lookup();
+                                self.state.activation = 1;
+                                Disposition::Ok
+                            }
+                            Consumer::Credential => {
+                                self.state.credential_keys = [1; 2];
+                                if self.case == Case::KeyDelay {
+                                    self.state.ticks += 300;
+                                    return Disposition::Refused;
+                                }
+                                // Browser prepare and ordinary invoke prepare own distinct leases.
+                                self.state.credential_keys = [2; 2];
+                                self.state.product = 1;
+                                self.state.receipts = 1;
+                                self.state.product_rows = 1;
+                                Disposition::Redirect
+                            }
+                        }
+                    }
+                    Step::Reveal => {
+                        self.state.credential_keys = [3; 2];
+                        self.state.response_verified = true;
+                        Disposition::Ok
+                    }
+                    Step::Acknowledge => {
+                        self.state.sessions = 0;
+                        self.state.delivery_closed = 1;
+                        Disposition::Redirect
+                    }
+                    Step::Duplicate => {
+                        if self.case == Case::WrongSubject
+                            || self.case == Case::Invalidate
+                            || self.case == Case::Restart
+                        {
+                            Disposition::Refused
+                        } else if self.consumer == Consumer::OAuth {
+                            Disposition::NotFound
+                        } else {
+                            Disposition::Refused
+                        }
+                    }
+                }
+            }
+        }
+
+        type OAuthReplayWorld = (
+            tempfile::TempDir,
+            admission::tests::MountedReplayFixture,
+            admission::tests::MountedReplayFixture,
+            PathBuf,
+            PathBuf,
+            Vec<Table>,
+        );
+
+        struct World {
+            clock: Arc<Clock>,
+            consumer: Consumer,
+            login: shell_oidc::ReplayLogin,
+            previous_providers: shell_oidc::ReplayProviderCounts,
+            shell: Arc<SecurityShell>,
+            oauth: Option<OAuthReplayWorld>,
+            credential: Option<CredentialWorld>,
+            path: String,
+            headers: HeaderMap,
+            callback: Option<String>,
+            session: Option<ShellSession>,
+            original_intent: Option<FreshIntent>,
+            original_authorization: Option<Digest>,
+            response_verified: bool,
+            response_identity: Option<Digest>,
+            invalidated: bool,
+            acknowledged: bool,
+            response_status: Mutex<Option<u16>>,
+        }
+
+        impl World {
+            fn new(consumer: Consumer, clock: Arc<Clock>) -> Result<Self> {
+                let (oauth, credential, audience, client, path) = match consumer {
+                    Consumer::OAuth => {
+                        let directory = tempfile::tempdir()?;
+                        std::fs::set_permissions(
+                            directory.path(),
+                            std::fs::Permissions::from_mode(0o700),
+                        )?;
+                        let database = directory.path().join("target.sqlite");
+                        let foreign_database = directory.path().join("foreign.sqlite");
+                        let delay_clock = clock.clone();
+                        let target = admission::tests::mounted_replay_fixture(
+                            &database,
+                            Arc::new(move || delay_clock.expire_ticks()),
+                        )?;
+                        let foreign = admission::tests::mounted_replay_fixture(
+                            &foreign_database,
+                            Arc::new(|| anyhow::bail!("foreign key delay is forbidden")),
+                        )?;
+                        let before = snapshot(&foreign_database)?;
+                        let audience = target.audience.clone();
+                        let client = target.client.clone();
+                        let path = path_for(&target.attempt);
+                        (
+                            Some((
+                                directory,
+                                target,
+                                foreign,
+                                database,
+                                foreign_database,
+                                before,
+                            )),
+                            None,
+                            audience,
+                            client,
+                            path,
+                        )
+                    }
+                    Consumer::Credential => {
+                        let world = credential_world(clock.clone())?;
+                        let path = world.pending.path();
+                        (
+                            None,
+                            Some(world),
+                            "/projects/1/global/backendServices/2".into(),
+                            "123.apps.googleusercontent.com".into(),
+                            path,
+                        )
+                    }
+                };
+                let login = shell_oidc::ReplayLogin::new(
+                    &identity(),
+                    &audience,
+                    &client,
+                    "https://security.example.com/",
+                    1_001,
+                    1_001,
+                    1_301,
+                )?;
+                let shell = Self::mount(&login, oauth.as_ref(), credential.as_ref())?;
+                let mut headers = login.headers(&identity(), 1_000)?;
+                headers.extend(credential_headers());
+                Ok(Self {
+                    clock,
+                    consumer,
+                    login,
+                    previous_providers: Default::default(),
+                    shell,
+                    oauth,
+                    credential,
+                    path,
+                    headers,
+                    callback: None,
+                    session: None,
+                    original_intent: None,
+                    original_authorization: None,
+                    response_verified: false,
+                    response_identity: None,
+                    invalidated: false,
+                    acknowledged: false,
+                    response_status: Mutex::new(None),
+                })
+            }
+
+            fn mount(
+                login: &shell_oidc::ReplayLogin,
+                oauth: Option<&OAuthReplayWorld>,
+                credential: Option<&CredentialWorld>,
+            ) -> Result<Arc<SecurityShell>> {
+                if let Some((_, target, _, _, _, _)) = oauth {
+                    return SecurityShell::with_transport(
+                        "https://security.example.com/".into(),
+                        Arc::new(approval_registry::LocalShellApprovals(
+                            target.registry.clone(),
+                        )),
+                        target.signer.clone(),
+                        login.authenticator.clone(),
+                    );
+                }
+                let world = credential.context("replay credential world")?;
+                let no_oauth = Arc::new(NoOAuth);
+                SecurityShell::with_transport(
+                    "https://security.example.com/".into(),
+                    no_oauth.clone(),
+                    no_oauth,
+                    login.authenticator.clone(),
+                )?
+                .with_credentials(world.registry.clone())
+            }
+
+            fn dispatch(
+                &self,
+                method: Method,
+                path: &str,
+                query: Option<&str>,
+                body: &[u8],
+            ) -> Result<Response> {
+                let response = self.shell.dispatch(
+                    &method,
+                    path,
+                    query,
+                    &self.headers,
+                    body,
+                    self.clock.wall(),
+                )?;
+                *self.response_status.lock().unwrap() = Some(response.status().as_u16());
+                Ok(response)
+            }
+
+            fn capture_intent(&mut self) -> Result<()> {
+                self.original_intent = Some(self.login.pending_intent()?);
+                self.original_authorization = Some(self.login.authorization_identity()?);
+                Ok(())
+            }
+
+            fn original_session_binding(&self) -> Result<String> {
+                let token = cookie_token(&self.headers)?
+                    .context("replay original signed cookie missing")?;
+                Ok(format!(
+                    "shell-{}",
+                    Digest::new(token.as_bytes())
+                        .as_str()
+                        .trim_start_matches("sha256:")
+                ))
+            }
+
+            fn credential_relations(
+                &self,
+                db: &rusqlite::Connection,
+                world: &CredentialWorld,
+            ) -> Result<Option<crate::managed_credentials::crypto::MaterialIdentity>> {
+                use rusqlite::OptionalExtension;
+                let raw: String = db.query_row(
+                    "SELECT intent FROM day2_credential_browser WHERE invocation=?1",
+                    [&world.pending.invocation],
+                    |row| row.get(0),
+                )?;
+                let mut expected = serde_json::to_value(&world.pending)?;
+                // This sole scheduled replacement is the causal negative
+                // input. All other original owner/authority fields stay fixed.
+                let actual: serde_json::Value = crate::json::decode(raw.as_bytes())?;
+                if self.invalidated {
+                    expected["input"]["label"] = serde_json::json!("Replaced current intent");
+                }
+                ensure!(
+                    actual == expected && world.pending.artifact == world.runtime.artifact().id(),
+                    "replay original credential pending/artifact/authority/binding changed"
+                );
+                let confirmation: Option<String> = db.query_row("SELECT confirmation FROM day2_credential_confirmations WHERE invocation=?1",
+                    [&world.pending.invocation],|row| row.get(0)).optional()?;
+                let Some(confirmation) = confirmation else {
+                    let count: i64 = db.query_row("SELECT (SELECT count(*) FROM day2_credential_lineages)
+                        +(SELECT count(*) FROM day2_credential_versions)+(SELECT count(*) FROM day2_credential_material)
+                        +(SELECT count(*) FROM day2_credential_deliveries)+(SELECT count(*) FROM day2_credential_receipts)
+                        +(SELECT count(*) FROM day2_credential_confirmations)",[],|row| row.get(0))?;
+                    ensure!(
+                        count == 0,
+                        "replay credential writer ran without original confirmation"
+                    );
+                    return Ok(None);
+                };
+                let confirmation: serde_json::Value = crate::json::decode(confirmation.as_bytes())?;
+                let original = serde_json::to_value(&world.pending)?;
+                for key in [
+                    "invocation",
+                    "operation",
+                    "actor",
+                    "input",
+                    "family",
+                    "intent",
+                    "artifact",
+                    "authority",
+                    "binding",
+                ] {
+                    ensure!(
+                        confirmation[key] == original[key],
+                        "replay credential confirmation retargeted original DATA"
+                    );
+                }
+                let session = self.original_session_binding()?;
+                ensure!(
+                    confirmation["subject"] == "accounts.google.com:google-alice"
+                        && confirmation["session"] == session
+                        && confirmation["security_epoch"] == 1
+                        && confirmation["authenticated_at"] == 1_001
+                        && confirmation["approved_at"] == 1_001
+                        && confirmation["expires_at"] == world.pending.expires_at.min(1_301),
+                    "replay credential confirmation wrong subject/session/epoch/lifetime"
+                );
+                let namespace = Digest::of(&("credential-namespace-v1", &world.namespace))?;
+                let principal = format!(
+                    "client/client_keys/{}",
+                    Digest::of(&(
+                        "credential-client-v1",
+                        &world.namespace,
+                        &world.pending.invocation
+                    ))?
+                    .as_str()
+                    .trim_start_matches("sha256:")
+                );
+                let exact: i64 = db.query_row("SELECT count(*) FROM day2_credential_receipts r
+                    JOIN day2_credential_lineages l ON l.id=r.lineage JOIN day2_credential_versions v ON v.id=r.version
+                    JOIN day2_credential_material m ON m.version=v.id JOIN day2_credential_deliveries d ON d.version=v.id
+                    JOIN day2_invocations i ON i.id=r.invocation
+                    WHERE r.namespace=?1 AND r.invocation=?2 AND r.family_contract=?3 AND r.action='issue'
+                      AND l.namespace=?1 AND l.family='client_keys' AND l.family_contract=?3
+                      AND l.principal=?4 AND l.creator='alice@example.com' AND l.label='Replay client'
+                      AND l.recipient='alice@example.com' AND l.session=?5 AND l.security_epoch=1 AND l.state='active'
+                      AND l.revision=1 AND l.head=v.id AND v.lineage=l.id AND v.predecessor IS NULL
+                      AND v.security_epoch=1 AND v.verifier_key_version='verifier_1' AND v.issued_at=1001
+                      AND v.state='active' AND v.grant_digest=l.grant_digest
+                      AND m.material_revision=1 AND m.envelope_revision=1 AND m.encryption_key_version='encryption_1'
+                      AND d.recipient=l.recipient AND d.session=l.session
+                      AND d.state=?8 AND d.closed_reason=?9
+                      AND i.status='success' AND i.operation=?6 AND i.actor='alice@example.com' AND i.artifact=?7",
+                    rusqlite::params![namespace.as_str(),world.pending.invocation,world.family_contract.as_str(),principal,session,
+                        world.pending.operation,world.pending.artifact,
+                        if self.acknowledged {"closed"} else {"available"},
+                        if self.acknowledged {"acknowledged"} else {""}],|row| row.get(0))?;
+                ensure!(
+                    exact == 1,
+                    "replay wrong original credential receipt/lineage/version/delivery/writer relationship"
+                );
+                for table in [
+                    "day2_credential_confirmations",
+                    "day2_credential_lineages",
+                    "day2_credential_versions",
+                    "day2_credential_material",
+                    "day2_credential_deliveries",
+                    "day2_credential_receipts",
+                ] {
+                    let count: i64 =
+                        db.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                            row.get(0)
+                        })?;
+                    ensure!(count == 1, "replay extra foreign credential writer rows");
+                }
+                let (lineage,version,namespace_json,identity_json):(String,String,String,String) = db.query_row(
+                    "SELECT l.id,v.id,l.namespace_json,m.identity_json FROM day2_credential_receipts r
+                     JOIN day2_credential_lineages l ON l.id=r.lineage JOIN day2_credential_versions v ON v.id=r.version
+                     JOIN day2_credential_material m ON m.version=v.id WHERE r.invocation=?1",
+                    [&world.pending.invocation],|row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)))?;
+                ensure!(
+                    crate::json::decode::<day2_capabilities::credentials::Namespace>(
+                        namespace_json.as_bytes()
+                    )? == world.namespace,
+                    "replay wrong original credential namespace"
+                );
+                let identity = crate::managed_credentials::crypto::MaterialIdentity {
+                    namespace: world.namespace.clone(),
+                    family: "client_keys".into(),
+                    lineage,
+                    version,
+                    recipient: "alice@example.com".into(),
+                    security_epoch: 1,
+                    material_revision: 1,
+                };
+                ensure!(
+                    crate::json::decode::<crate::managed_credentials::crypto::MaterialIdentity>(
+                        identity_json.as_bytes()
+                    )? == identity,
+                    "replay material retargeted original owner/family/epoch/version"
+                );
+                use base64::Engine as _;
+                let reference = format!(
+                    "cr1_clients_{}",
+                    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(
+                        &day2_capabilities::credentials::LineageRef {
+                            namespace: world.namespace.clone(),
+                            family: day2_capabilities::Name::try_from("client_keys".to_owned())?,
+                            id: identity.lineage.clone()
+                        }
+                    )?)
+                );
+                let entry: String =
+                    db.query_row("SELECT note FROM entries", [], |row| row.get(0))?;
+                let product: (String, String, String, Vec<u8>) = db.query_row(
+                    "SELECT family,lineage,head,revision FROM key_receipts",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )?;
+                let product_count: i64 =
+                    db.query_row("SELECT count(*) FROM key_receipts", [], |row| row.get(0))?;
+                ensure!(
+                    entry == reference
+                        && product
+                            == (
+                                "clients".into(),
+                                reference,
+                                identity.version.clone(),
+                                1_u64.to_be_bytes().to_vec()
+                            )
+                        && product_count == 1,
+                    "replay app row does not refer to original issued lineage/version"
+                );
+                Ok(Some(identity))
+            }
+
+            fn verify_private_response(&mut self, response: Response) -> Result<()> {
+                let world = self.credential.as_ref().context("replay reveal consumer")?;
+                let bytes = tokio::runtime::Builder::new_current_thread()
+                    .build()?
+                    .block_on(to_bytes(response.into_body(), 8192))?;
+                let html = std::str::from_utf8(&bytes)?;
+                ensure!(
+                    html.matches("<pre>").count() == 1,
+                    "replay private reveal shape"
+                );
+                let token = html
+                    .split_once("<pre>")
+                    .context("replay private reveal missing")?
+                    .1
+                    .split_once("</pre>")
+                    .context("replay private reveal incomplete")?
+                    .0;
+                // No body/token is returned, logged, or included in evidence.
+                // This validates the real delivered secret using the original
+                // fixed verifier lease; provider counters do not change.
+                let mut connection = open(world.runtime.db())?;
+                let db = connection
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)?;
+                let identity = self
+                    .credential_relations(&db, world)?
+                    .context("replay original issued material absent")?;
+                let (selector,verifier,key):(String,Vec<u8>,String) = db.query_row(
+                    "SELECT selector,verifier,verifier_key_version FROM day2_credential_versions WHERE id=?1",
+                    [&identity.version],|row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)))?;
+                let lease = crate::managed_credentials::crypto::VerifierLease::new(
+                    &[29; 32],
+                    "verifier_1".into(),
+                )?;
+                ensure!(
+                    crate::managed_credentials::crypto::token_selector(token)? == selector
+                        && crate::managed_credentials::crypto::verify_managed(
+                            &lease, &identity, &selector, &verifier, &key, token
+                        )?,
+                    "replay private reveal did not match original material/verifier"
+                );
+                self.response_identity = Some(Digest::of(&(
+                    "verified-original-private-reveal-v2",
+                    &identity,
+                    token.len(),
+                    Digest::new(token.as_bytes()),
+                ))?);
+                self.response_verified = true;
+                Ok(())
+            }
+
+            fn step(&mut self, step: Step, case: Case) -> Result<Disposition> {
+                *self.response_status.lock().unwrap() = None;
+                match step {
+                    Step::Begin | Step::Reuse => {
+                        let response = self.dispatch(Method::GET, &self.path, None, &[])?;
+                        let location = response
+                            .headers()
+                            .get(header::LOCATION)
+                            .context("replay expected redirect Location absent")?;
+                        self.callback = Some(self.login.capture_authorization(location.to_str()?)?);
+                        if step == Step::Begin {
+                            self.capture_intent()?;
+                        }
+                        Ok(disposition(response.status()))
+                    }
+                    Step::OppositePurpose => {
+                        let intent = if self.consumer == Consumer::OAuth {
+                            let world = credential_world(self.clock.clone())?;
+                            let mut pending = world.pending.clone();
+                            pending.attempt =
+                                self.original_intent.as_ref().unwrap().attempt().into();
+                            credentials::fresh_intent(&world.runtime, &pending, &identity())?
+                        } else {
+                            let world = self.credential.as_ref().unwrap();
+                            FreshIntent::fixture_oauth(
+                                &identity(),
+                                &world.pending.attempt,
+                                &world.pending.challenge()?,
+                                "https://security.example.com/",
+                            )?
+                        };
+                        ensure!(
+                            self.login
+                                .authenticator
+                                .begin(&identity(), intent, self.clock.wall())
+                                .is_err(),
+                            "opposite purpose accepted"
+                        );
+                        Ok(Disposition::Refused)
+                    }
+                    Step::Invalidate => {
+                        if let Some((_, target, _, database, _, _)) = &self.oauth {
+                            ensure!(
+                                connect::cancel(&mut open(database)?, &target.attempt, |_| Ok(()))?,
+                                "replay cancel failed"
+                            );
+                        } else {
+                            let world = self.credential.as_ref().unwrap();
+                            let mut changed = world.pending.clone();
+                            changed.input["label"] = serde_json::json!("Replaced current intent");
+                            ensure!(open(world.runtime.db())?.execute(
+                                "UPDATE day2_credential_browser SET intent=?1,expires_at=?2 WHERE attempt=?3",
+                                rusqlite::params![serde_json::to_string(&changed)?,changed.expires_at,changed.attempt])? == 1,
+                                "replay current pending replacement");
+                        }
+                        self.invalidated = true;
+                        Ok(Disposition::Ok)
+                    }
+                    Step::Callback | Step::Duplicate
+                        if self.session.is_none()
+                            || case == Case::WrongSubject
+                            || case == Case::Invalidate
+                            || case == Case::Restart =>
+                    {
+                        self.clock.complete();
+                        if case == Case::WrongSubject {
+                            let mut subject = identity();
+                            if step == Step::Callback {
+                                subject.subject = "accounts.google.com:alternate".into();
+                            }
+                            let assertion = self.login.headers(&subject, self.clock.wall())?;
+                            self.headers.insert(
+                                iap::ASSERTION_HEADER,
+                                assertion[iap::ASSERTION_HEADER].clone(),
+                            );
+                            self.original_authorization =
+                                Some(self.login.authorization_identity()?);
+                        }
+                        let response = self.dispatch(
+                            Method::GET,
+                            shell_oidc::GoogleOidc::callback_path(),
+                            self.callback.as_deref(),
+                            &[],
+                        );
+                        if let Ok(response) = response {
+                            let status = response.status();
+                            if let Some(cookie) = response.headers().get(header::SET_COOKIE) {
+                                self.headers.insert(
+                                    header::COOKIE,
+                                    cookie
+                                        .to_str()?
+                                        .split(';')
+                                        .next()
+                                        .context("replay cookie")?
+                                        .parse()?,
+                                );
+                                self.session =
+                                    self.shell.read_session(&self.headers, self.clock.wall())?;
+                                let session =
+                                    self.session.as_ref().context("replay signed session")?;
+                                session.proof.require_intent(
+                                    self.original_intent.as_ref().unwrap(),
+                                    &identity(),
+                                )?;
+                            }
+                            Ok(disposition(status))
+                        } else {
+                            Ok(Disposition::Refused)
+                        }
+                    }
+                    Step::View => Ok(disposition(
+                        self.dispatch(Method::GET, &self.path, None, &[])?.status(),
+                    )),
+                    Step::ExpireTicks => {
+                        self.clock.expire_ticks()?;
+                        Ok(Disposition::Ok)
+                    }
+                    Step::DelayKey => {
+                        if let Some((_, target, _, _, _, _)) = &self.oauth {
+                            target.delay_next_attestation();
+                        } else {
+                            self.credential
+                                .as_ref()
+                                .unwrap()
+                                .keys
+                                .delay
+                                .store(true, Ordering::SeqCst);
+                        }
+                        Ok(Disposition::Ok)
+                    }
+                    Step::Restart => {
+                        self.previous_providers = self.login.counts();
+                        let (audience, client) = if let Some((_, target, _, _, _, _)) = &self.oauth
+                        {
+                            (target.audience.as_str(), target.client.as_str())
+                        } else {
+                            (
+                                "/projects/1/global/backendServices/2",
+                                "123.apps.googleusercontent.com",
+                            )
+                        };
+                        self.login = shell_oidc::ReplayLogin::new(
+                            &identity(),
+                            audience,
+                            client,
+                            "https://security.example.com/",
+                            1_001,
+                            1_001,
+                            1_301,
+                        )?;
+                        self.shell = Self::mount(
+                            &self.login,
+                            self.oauth.as_ref(),
+                            self.credential.as_ref(),
+                        )?;
+                        Ok(Disposition::Ok)
+                    }
+                    Step::Confirm | Step::Reveal | Step::Acknowledge | Step::Duplicate => {
+                        let session = self
+                            .session
+                            .as_ref()
+                            .context("replay original session missing")?;
+                        let body = if self.consumer == Consumer::OAuth {
+                            url::form_urlencoded::Serializer::new(String::new())
+                                .append_pair("challenge", session.challenge.as_str())
+                                .append_pair("csrf", &session.csrf)
+                                .finish()
+                                .into_bytes()
+                        } else {
+                            credential_body(
+                                session,
+                                match step {
+                                    Step::Acknowledge => "acknowledge",
+                                    Step::Confirm => "confirm",
+                                    _ => "reveal",
+                                },
+                            )
+                        };
+                        let result = self.dispatch(Method::POST, &self.path, None, &body);
+                        match result {
+                            Ok(response) => {
+                                let status = response.status();
+                                if step == Step::Reveal && status == StatusCode::OK {
+                                    self.verify_private_response(response)?;
+                                }
+                                if step == Step::Acknowledge && status == StatusCode::SEE_OTHER {
+                                    self.acknowledged = true;
+                                }
+                                Ok(disposition(status))
+                            }
+                            Err(_) => Ok(Disposition::Refused),
+                        }
+                    }
+                    _ => anyhow::bail!("replay program precondition"),
+                }
+            }
+
+            fn observe(&self) -> Result<(PublicState, Digest, Vec<Table>, Vec<Table>)> {
+                let mut providers = self.login.counts();
+                providers.iap_keys += self.previous_providers.iap_keys;
+                providers.google_keys += self.previous_providers.google_keys;
+                providers.exchanges += self.previous_providers.exchanges;
+                let mut state = PublicState {
+                    wall: self.clock.wall(),
+                    ticks: effects::Hooks::monotonic(self.clock.as_ref()).as_secs(),
+                    sessions: self.shell.sessions.lock().unwrap().len(),
+                    google_pending: self.login.pending_count(),
+                    activation: 0,
+                    product: 0,
+                    receipts: 0,
+                    product_rows: 0,
+                    delivery_closed: 0,
+                    response_verified: self.response_verified,
+                    oauth_keys: Default::default(),
+                    credential_keys: [0; 2],
+                    providers,
+                };
+                if let Some((_, target, foreign, database, foreign_database, before)) = &self.oauth
+                {
+                    state.oauth_keys = target.key_counts();
+                    let mut db = open(database)?;
+                    let read =
+                        db.transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)?;
+                    state.activation = read.query_row(
+                        "SELECT count(*) FROM oauth_connection_slots WHERE status='active'",
+                        [],
+                        |row| row.get(0),
+                    )?;
+                    let exact: i64 = read.query_row("SELECT count(*) FROM oauth_connection_slots
+                        WHERE slot=?1 AND generation=1 AND token_version=1 AND security_epoch=1 AND status='active'",
+                        [&target.slot],|row| row.get(0))?;
+                    ensure!(
+                        exact == state.activation,
+                        "replay wrong OAuth slot/generation/epoch publication"
+                    );
+                    ensure!(
+                        foreign.key_counts() == Default::default(),
+                        "foreign authority accessed"
+                    );
+                    let foreign_snapshot = snapshot(foreign_database)?;
+                    ensure!(
+                        foreign_snapshot == *before,
+                        "foreign OAuth database changed"
+                    );
+                    let relation = target.verify_rows(&read)?;
+                    Ok((state, relation, snapshot_in(&read)?, foreign_snapshot))
+                } else {
+                    let world = self.credential.as_ref().unwrap();
+                    state.credential_keys = *world.keys.counts.lock().unwrap();
+                    let mut connection = open(world.runtime.db())?;
+                    let db = connection
+                        .transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)?;
+                    state.product = db.query_row(
+                        "SELECT count(*) FROM day2_invocations WHERE status='success'",
+                        [],
+                        |row| row.get(0),
+                    )?;
+                    state.receipts =
+                        db.query_row("SELECT count(*) FROM day2_credential_receipts", [], |row| {
+                            row.get(0)
+                        })?;
+                    state.product_rows =
+                        db.query_row("SELECT count(*) FROM entries", [], |row| row.get(0))?;
+                    state.delivery_closed = db.query_row(
+                        "SELECT count(*) FROM day2_credential_deliveries WHERE state='closed'",
+                        [],
+                        |row| row.get(0),
+                    )?;
+                    let exact: i64 = db.query_row("SELECT count(*) FROM day2_credential_receipts WHERE invocation=?1 AND action='issue'",
+                        [&world.pending.invocation],|row| row.get(0))?;
+                    ensure!(exact == state.receipts, "replay foreign credential receipt");
+                    let foreign: (String,String,String,i64) = db.query_row(
+                        "SELECT invocation,attempt,intent,expires_at FROM day2_credential_browser WHERE invocation=?1",
+                        [&world.foreign.invocation],|row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)))?;
+                    ensure!(
+                        foreign
+                            == (
+                                world.foreign.invocation.clone(),
+                                world.foreign.attempt.clone(),
+                                serde_json::to_string(&world.foreign)?,
+                                world.foreign.expires_at
+                            ),
+                        "foreign credential browser row changed"
+                    );
+                    let raw: String = db.query_row(
+                        "SELECT intent FROM day2_credential_browser WHERE invocation=?1",
+                        [&world.pending.invocation],
+                        |row| row.get(0),
+                    )?;
+                    let mut expected_pending = serde_json::to_value(&world.pending)?;
+                    if self.invalidated {
+                        expected_pending["input"]["label"] =
+                            serde_json::json!("Replaced current intent");
+                    }
+                    ensure!(
+                        crate::json::decode::<serde_json::Value>(raw.as_bytes())?
+                            == expected_pending,
+                        "replay credential scheduled pending replacement changed other fields"
+                    );
+                    let material = self.credential_relations(&db, world)?;
+                    let relation = Digest::of(&(
+                        "original-credential-owner-relations-v2",
+                        &world.pending,
+                        &world.namespace,
+                        &world.family_contract,
+                        &material,
+                        &self.response_identity,
+                    ))?;
+                    Ok((state, relation, snapshot_in(&db)?, Vec::new()))
+                }
+            }
+        }
+
+        fn disposition(status: StatusCode) -> Disposition {
+            match status {
+                StatusCode::OK => Disposition::Ok,
+                StatusCode::SEE_OTHER => Disposition::Redirect,
+                StatusCode::NOT_FOUND => Disposition::NotFound,
+                StatusCode::UNAUTHORIZED => Disposition::Unauthorized,
+                _ => Disposition::Refused,
+            }
+        }
+
+        fn program(consumer: Consumer, case: Case) -> Vec<Step> {
+            let mut steps = vec![Step::Begin];
+            if case == Case::OppositePurpose {
+                steps.push(Step::OppositePurpose);
+            }
+            steps.push(Step::Reuse);
+            if case == Case::Invalidate {
+                steps.push(Step::Invalidate);
+            }
+            steps.push(Step::Callback);
+            if matches!(case, Case::WrongSubject | Case::Invalidate) {
+                steps.push(Step::Duplicate);
+                return steps;
+            }
+            steps.push(Step::View);
+            match case {
+                Case::TicksExpired => steps.push(Step::ExpireTicks),
+                Case::KeyDelay => steps.push(Step::DelayKey),
+                Case::Restart => steps.push(Step::Restart),
+                _ => {}
+            }
+            steps.push(Step::Confirm);
+            if matches!(case, Case::TicksExpired | Case::KeyDelay) {
+                return steps;
+            }
+            if consumer == Consumer::Credential && case != Case::Restart {
+                steps.extend([Step::Reveal, Step::Acknowledge]);
+            }
+            steps.push(Step::Duplicate);
+            steps
+        }
+
+        #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+        struct Observation {
+            step: Step,
+            expected: Disposition,
+            actual: Disposition,
+            response_status: Option<u16>,
+            expected_state: PublicState,
+            actual_state: PublicState,
+            authorization: Digest,
+            original_relations: Digest,
+            response_identity: Option<Digest>,
+            target: Vec<Table>,
+            foreign: Vec<Table>,
+        }
+
+        #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+        struct Failure {
+            category: String,
+            index: Option<usize>,
+            step: Option<Step>,
+            field: String,
+            protected_detail: Option<Digest>,
+            response_status: Option<u16>,
+        }
+
+        impl Failure {
+            fn error(
+                category: &str,
+                index: Option<usize>,
+                step: Option<Step>,
+                error: &anyhow::Error,
+            ) -> Self {
+                Self {
+                    category: category.into(),
+                    index,
+                    step,
+                    field: category.into(),
+                    protected_detail: Some(Digest::new(format!("{error:#}").as_bytes())),
+                    response_status: None,
+                }
+            }
+
+            fn signature(&self) -> (&str, Option<Step>, &str) {
+                (&self.category, self.step, &self.field)
+            }
+        }
+
+        #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+        struct Trace {
+            version: u32,
+            consumer: Consumer,
+            case: Case,
+            program: Vec<Step>,
+            sources: BTreeMap<String, Digest>,
+            toolchain: Digest,
+            artifact: Option<String>,
+            fixture: Digest,
+            observations: Vec<Observation>,
+            first_failure: Option<Failure>,
+            refusals: Vec<Failure>,
+        }
+
+        impl Trace {
+            fn refuse(&mut self, failure: Failure) {
+                if self.first_failure.is_none() {
+                    self.first_failure = Some(failure.clone());
+                }
+                self.refusals.push(failure);
+            }
+        }
+
+        const TRACE_BYTES: usize = 4 * 1_024 * 1_024;
+        const SNAPSHOT_BYTES: usize = 96 * 1_024;
+
+        fn execute(consumer: Consumer, case: Case, steps: &[Step]) -> Trace {
+            let mut trace = Trace {version:2,consumer,case,program:steps.to_vec(),
+                sources:BTreeMap::from([
+                    ("crates/day2/src/development.rs".into(),Digest::new(include_bytes!("../development.rs"))),
+                    ("crates/day2/src/oauth/admission.rs".into(),Digest::new(include_bytes!("admission.rs"))),
+                    ("crates/day2/src/oauth/shell_oidc.rs".into(),Digest::new(include_bytes!("shell_oidc.rs"))),
+                    ("crates/day2/src/oauth/security_shell.rs".into(),Digest::new(include_bytes!("security_shell.rs"))),
+                ]),toolchain:Digest::new(include_bytes!("../../../../toolchain.json")),artifact:None,
+                fixture:Digest::new(b"signed-google-replay-v2;seed=17;wall=1000;complete=1001;exp=1301;fixed-reviewed-keys;modeled-host-deadline"),
+                observations:Vec::new(),first_failure:None,refusals:Vec::new()};
+            if steps.is_empty() || steps.len() > 16 || !prerequisites(consumer, case, steps) {
+                trace.refuse(Failure {
+                    category: "program_refusal".into(),
+                    index: None,
+                    step: None,
+                    field: "program".into(),
+                    protected_detail: None,
+                    response_status: None,
+                });
+                return trace;
+            }
+            let clock = Clock::new();
+            effects::scope(clock.clone(), || {
+                credential_effects::scope(clock.clone(), || {
+                    let mut world = match World::new(consumer, clock) {
+                        Ok(world) => world,
+                        Err(error) => {
+                            trace.refuse(Failure::error("setup_refusal", None, None, &error));
+                            return trace;
+                        }
+                    };
+                    trace.artifact = world
+                        .credential
+                        .as_ref()
+                        .map(|world| world.runtime.artifact().id().to_owned());
+                    let mut model = Model::new(consumer, case);
+                    for (index, step) in steps.iter().copied().enumerate() {
+                        let expected = model.step(step);
+                        let actual = match world.step(step, case) {
+                            Ok(actual) => actual,
+                            Err(error) => {
+                                let mut failure =
+                                    Failure::error("step_refusal", Some(index), Some(step), &error);
+                                failure.response_status = *world.response_status.lock().unwrap();
+                                trace.refuse(failure);
+                                // Capture the complete post-error state too: a
+                                // failing action may already have committed writes.
+                                Disposition::Refused
+                            }
+                        };
+                        let (actual_state, original_relations, target, foreign) =
+                            match world.observe() {
+                                Ok(value) => value,
+                                Err(error) => {
+                                    trace.refuse(Failure::error(
+                                        "snapshot_or_relation_refusal",
+                                        Some(index),
+                                        Some(step),
+                                        &error,
+                                    ));
+                                    break;
+                                }
+                            };
+                        // The original begin and exact unsigned claim inputs are
+                        // retained even when a restart discards volatile verifier state.
+                        let Some(authorization) = world.original_authorization.clone() else {
+                            trace.refuse(Failure {
+                                category: "authorization_refusal".into(),
+                                index: Some(index),
+                                step: Some(step),
+                                field: "original_authorization".into(),
+                                protected_detail: None,
+                                response_status: *world.response_status.lock().unwrap(),
+                            });
+                            break;
+                        };
+                        let observation = Observation {
+                            step,
+                            expected,
+                            actual,
+                            response_status: *world.response_status.lock().unwrap(),
+                            expected_state: model.state.clone(),
+                            actual_state: actual_state.clone(),
+                            authorization,
+                            original_relations,
+                            response_identity: world.response_identity.clone(),
+                            target,
+                            foreign,
+                        };
+                        let admitted = serde_json::to_vec(&observation).ok();
+                        let existing = serde_json::to_vec(&trace).ok();
+                        if !matches!((&admitted,&existing),(Some(next),Some(old)) if old.len()+next.len()+4096 <= TRACE_BYTES)
+                        {
+                            trace.refuse(Failure {
+                                category: "trace_envelope_refusal".into(),
+                                index: Some(index),
+                                step: Some(step),
+                                field: "complete_observation".into(),
+                                protected_detail: admitted.as_ref().map(|bytes| Digest::new(bytes)),
+                                response_status: *world.response_status.lock().unwrap(),
+                            });
+                            break;
+                        }
+                        trace.observations.push(observation);
+                        if actual != expected || actual_state != model.state {
+                            let (field, detail) = if actual != expected {
+                                ("disposition".into(), Digest::of(&(expected, actual)).ok())
+                            } else {
+                                let expected =
+                                    serde_json::to_value(&model.state).expect("literal model JSON");
+                                let actual = serde_json::to_value(&actual_state)
+                                    .expect("observed public JSON");
+                                (
+                                    first_difference(&expected, &actual, "actual_state")
+                                        .unwrap_or_else(|| "actual_state".into()),
+                                    Digest::of(&(&expected, &actual)).ok(),
+                                )
+                            };
+                            trace.refuse(Failure {
+                                category: "model_mismatch".into(),
+                                index: Some(index),
+                                step: Some(step),
+                                field,
+                                protected_detail: detail,
+                                response_status: *world.response_status.lock().unwrap(),
+                            });
+                            break;
+                        }
+                        if trace.first_failure.is_some() {
+                            break;
+                        }
+                    }
+                    trace
+                })
+            })
+        }
+
+        fn prerequisites(consumer: Consumer, case: Case, steps: &[Step]) -> bool {
+            // Preserve the original owner's begin/callback, the actual
+            // negative trigger, final post and one-use probe. Reduction can
+            // remove only the two optional observations, never manufacture a
+            // refusal by deleting its causal action or lifetime boundary.
+            let declared = program(consumer, case);
+            let essential = |steps: &[Step]| {
+                steps
+                    .iter()
+                    .copied()
+                    .filter(|step| !matches!(step, Step::Reuse | Step::View))
+                    .collect::<Vec<_>>()
+            };
+            if essential(steps) != essential(&declared) {
+                return false;
+            }
+            let mut cursor = 0;
+            for step in steps {
+                let Some(offset) = declared[cursor..].iter().position(|actual| actual == step)
+                else {
+                    return false;
+                };
+                cursor += offset + 1;
+            }
+            let mut begun = false;
+            let mut callback = false;
+            let mut confirmed = false;
+            let mut revealed = false;
+            for step in steps {
+                match step {
+                    Step::Begin if !begun => begun = true,
+                    Step::Reuse | Step::OppositePurpose | Step::Invalidate
+                        if begun && !callback => {}
+                    Step::Callback if begun && !callback => callback = true,
+                    Step::View | Step::ExpireTicks | Step::DelayKey | Step::Restart if callback => {
+                    }
+                    Step::Confirm if callback && !confirmed => confirmed = true,
+                    Step::Reveal if confirmed && !revealed => revealed = true,
+                    Step::Acknowledge if revealed => {}
+                    Step::Duplicate if callback => {}
+                    _ => return false,
+                }
+            }
+            begun && callback
+        }
+
+        fn first_difference(
+            left: &serde_json::Value,
+            right: &serde_json::Value,
+            path: &str,
+        ) -> Option<String> {
+            if left == right {
+                return None;
+            }
+            match (left, right) {
+                (serde_json::Value::Object(left), serde_json::Value::Object(right)) => {
+                    for key in left
+                        .keys()
+                        .chain(right.keys())
+                        .collect::<std::collections::BTreeSet<_>>()
+                    {
+                        let next = format!("{path}.{key}");
+                        match (left.get(key), right.get(key)) {
+                            (Some(left), Some(right)) => {
+                                if let Some(path) = first_difference(left, right, &next) {
+                                    return Some(path);
+                                }
+                            }
+                            _ => return Some(next),
+                        }
+                    }
+                }
+                (serde_json::Value::Array(left), serde_json::Value::Array(right)) => {
+                    for index in 0..left.len().max(right.len()) {
+                        let next = format!("{path}[{index}]");
+                        match (left.get(index), right.get(index)) {
+                            (Some(left), Some(right)) => {
+                                if let Some(path) = first_difference(left, right, &next) {
+                                    return Some(path);
+                                }
+                            }
+                            _ => return Some(next),
+                        }
+                    }
+                }
+                _ => {}
+            }
+            Some(path.into())
+        }
+
+        fn persist_failure(first: &Trace, second: &Trace) -> Result<()> {
+            use std::io::Write;
+            let directory = tempfile::Builder::new()
+                .prefix("day2roc-signed-replay-failure-")
+                .tempdir()?;
+            std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))?;
+            // Keep the directory BEFORE any fallible write/reduction. Failed
+            // reduction or storage cannot delete previously saved originals.
+            let path = directory.keep();
+            eprintln!("private signed replay failure evidence: {}", path.display());
+            let write = |name: &str, bytes: &[u8]| -> Result<()> {
+                let limit = if matches!(name, "first.json" | "second.json" | "reduced.json") {
+                    TRACE_BYTES
+                } else {
+                    65_536
+                };
+                ensure!(
+                    bytes.len() <= limit,
+                    "replay complete trace storage envelope"
+                );
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(path.join(name))?;
+                file.write_all(bytes)?;
+                file.sync_all()?;
+                Ok(())
+            };
+            write("first.json", &serde_json::to_vec(first)?)?;
+            write("second.json", &serde_json::to_vec(second)?)?;
+            let difference = first_difference(
+                &serde_json::to_value(first)?,
+                &serde_json::to_value(second)?,
+                "trace",
+            );
+            write(
+                "original-difference.json",
+                &serde_json::to_vec(&serde_json::json!({"first_differing_safe_field":difference,
+                "first_failure":first.first_failure,"second_failure":second.first_failure,
+                "source_artifact_tool_fixture_binding":"in both complete original traces"}))?,
+            )?;
+            let original = if first.first_failure.is_some() {
+                first
+            } else {
+                second
+            };
+            let mut reduced = original.clone();
+            let mut attempts = 0usize;
+            let mut refusals = Vec::new();
+            if let Some(category) = original.first_failure.as_ref() {
+                let mut index = 1;
+                while index < reduced.program.len() && attempts < 64 {
+                    let mut candidate = reduced.program.clone();
+                    candidate.remove(index);
+                    if !prerequisites(first.consumer, first.case, &candidate) {
+                        index += 1;
+                        continue;
+                    }
+                    attempts += 1;
+                    let actual = execute(first.consumer, first.case, &candidate);
+                    let actual_failure = actual.first_failure.clone();
+                    // Preserve exact original failed field AND protected
+                    // counterexample values, not merely a generic refusal.
+                    if actual.first_failure.as_ref().is_some_and(|failure| {
+                        failure.signature() == category.signature()
+                            && failure.protected_detail == category.protected_detail
+                            && failure.response_status == category.response_status
+                    }) {
+                        reduced = actual;
+                    } else {
+                        index += 1;
+                    }
+                    refusals.push(serde_json::json!({"attempt":attempts,"program":candidate,"actual_failure":actual_failure}));
+                }
+            }
+            write("reduced.json", &serde_json::to_vec(&reduced)?)?;
+            write(
+                "reduction.json",
+                &serde_json::to_vec(&serde_json::json!({
+                    "version":2,"classification":"synthetic-local-signed-replay-only",
+                    "reduction_attempts":attempts,"actual_attempt_refusals":refusals,
+                    "equality_only_divergence":"original pair retained without speculative reduction",
+                    "saved_corpus_input":"absent; this is a newly retained actual divergence",
+                }))?,
+            )?;
+            Ok(())
+        }
+
+        fn compare(consumer: Consumer, case: Case) -> Result<()> {
+            let steps = program(consumer, case);
+            ensure!(
+                prerequisites(consumer, case, &steps),
+                "signed replay declared prerequisites"
+            );
+            let first = execute(consumer, case, &steps);
+            let second = execute(consumer, case, &steps);
+            if first.first_failure.is_some() || second.first_failure.is_some() || first != second {
+                persist_failure(&first, &second)?;
+                anyhow::bail!(
+                    "signed replay model or exact-state divergence; private evidence retained"
+                );
+            }
+            ensure!(
+                first.observations.len() == steps.len(),
+                "signed replay incomplete trace"
+            );
+            Ok(())
+        }
+
+        #[test]
+        fn signed_google_replay_two_positive_owner_histories() -> Result<()> {
+            for consumer in [Consumer::OAuth, Consumer::Credential] {
+                compare(consumer, Case::Positive)?;
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn signed_google_replay_six_paired_negative_owner_histories() -> Result<()> {
+            for case in [
+                Case::WrongSubject,
+                Case::OppositePurpose,
+                Case::Invalidate,
+                Case::TicksExpired,
+                Case::KeyDelay,
+                Case::Restart,
+            ] {
+                for consumer in [Consumer::OAuth, Consumer::Credential] {
+                    compare(consumer, case)?;
+                }
+            }
+            Ok(())
+        }
+
+        fn identity() -> iap::Verified {
+            iap::Verified {
+                email: "alice@example.com".into(),
+                subject: "accounts.google.com:google-alice".into(),
+            }
+        }
+
+        // Every value in every user-table column is protected regardless of
+        // its name. Type, length and SHA256 bind all exact bytes, including
+        // integer/REAL bits; no column is dropped or normalized. Public model
+        // counts are a separate projection. Bounds cover produced payload,
+        // not Vec capacity or total allocator overhead.
+        #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+        struct Table {
+            name: String,
+            definition: Digest,
+            columns: Vec<String>,
+            rows: Vec<Vec<serde_json::Value>>,
+        }
+
+        fn snapshot(path: &Path) -> Result<Vec<Table>> {
+            let mut db = open(path)?;
+            let read = db.transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)?;
+            snapshot_in(&read)
+        }
+
+        fn snapshot_in(db: &rusqlite::Connection) -> Result<Vec<Table>> {
+            let mut total = 0usize;
+            let mut catalog = db.prepare("SELECT name,sql FROM sqlite_master WHERE type='table' AND name NOT GLOB 'sqlite_*' ORDER BY name LIMIT 257")?;
+            let definitions = catalog
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            ensure!(definitions.len() <= 256, "replay table budget");
+            let mut tables = Vec::new();
+            for (name, sql) in definitions {
+                total = total
+                    .checked_add(name.len())
+                    .and_then(|size| size.checked_add(sql.len()))
+                    .context("replay catalog byte overflow")?;
+                ensure!(total <= 4 * 1_024 * 1_024, "replay catalog byte budget");
+                let quoted = format!("\"{}\"", name.replace('"', "\"\""));
+                let mut statement = db.prepare(&format!("SELECT * FROM {quoted} LIMIT 129"))?;
+                let columns = statement
+                    .column_names()
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>();
+                ensure!(columns.len() <= 64, "replay column budget");
+                let mut query = statement.query([])?;
+                let mut rows = Vec::new();
+                while let Some(row) = query.next()? {
+                    ensure!(rows.len() < 128, "replay row budget");
+                    let mut values = Vec::new();
+                    for index in 0..columns.len() {
+                        use rusqlite::types::ValueRef;
+                        let value = match row.get_ref(index)? {
+                            ValueRef::Null => serde_json::json!(["null"]),
+                            ValueRef::Integer(value) => {
+                                serde_json::json!(["integer", 8, Digest::new(&value.to_le_bytes())])
+                            }
+                            ValueRef::Real(value) => serde_json::json!([
+                                "real_bits",
+                                8,
+                                Digest::new(&value.to_bits().to_le_bytes())
+                            ]),
+                            ValueRef::Text(bytes) | ValueRef::Blob(bytes) => {
+                                ensure!(bytes.len() <= 65_536, "replay field budget");
+                                total = total
+                                    .checked_add(bytes.len())
+                                    .context("replay byte overflow")?;
+                                ensure!(total <= 4 * 1_024 * 1_024, "replay byte budget");
+                                let kind = if matches!(row.get_ref(index)?, ValueRef::Text(_)) {
+                                    "text"
+                                } else {
+                                    "blob"
+                                };
+                                serde_json::json!([kind, bytes.len(), Digest::new(bytes)])
+                            }
+                        };
+                        total = total
+                            .checked_add(serde_json::to_vec(&value)?.len())
+                            .context("replay payload byte overflow")?;
+                        ensure!(total <= 4 * 1_024 * 1_024, "replay produced payload budget");
+                        values.push(value);
+                    }
+                    rows.push(values);
+                }
+                // Complete typed row keys, with duplicates preserved.
+                rows.sort_by_key(|row| serde_json::to_vec(row).expect("replay JSON row"));
+                tables.push(Table {
+                    name,
+                    definition: Digest::new(sql.as_bytes()),
+                    columns,
+                    rows,
+                });
+            }
+            ensure!(
+                serde_json::to_vec(&tables)?.len() <= SNAPSHOT_BYTES,
+                "replay complete snapshot payload budget"
+            );
+            Ok(tables)
+        }
+    }
+
     #[test]
     fn confirmation_session_is_bound_to_every_displayed_preview_field() {
         use crate::oauth::profiles::tests as fixtures;

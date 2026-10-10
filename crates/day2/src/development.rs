@@ -1524,6 +1524,36 @@ fn create_verification_for_with_imports(
     create_selected_instance(instance, directory, imports)
 }
 
+/// Desired disposable test data only. The caller must admit the complete
+/// instance and install its owned Host before initializing a fresh database.
+#[cfg(test)]
+pub(crate) fn verification_instance_data(
+    artifact_path: &Path,
+    policy: Option<Policy>,
+    actor: &str,
+) -> Result<Instance> {
+    let artifact_path = artifact_path.canonicalize()?;
+    let artifact = LoadedArtifact::load(&artifact_path)
+        .context("disposable verification artifact admission")?;
+    let mut instance = instance_for_artifact(&artifact_path, &artifact, policy, actor, &[])?;
+    if !artifact.contract().credential_manifest.is_empty() {
+        instance.identity = Some(crate::artifact::IdentityProvider {
+            scheme: crate::artifact::IdentityScheme::GoogleIap,
+            hosted_domain: "example.com".into(),
+        });
+        instance.security_shell = Some(crate::artifact::Edge {
+            origin: "https://security.example.com".into(),
+            iap_audience: "/projects/1/global/backendServices/2".into(),
+        });
+        instance.apps.get_mut("app").unwrap().edge = Some(crate::artifact::Edge {
+            origin: "https://app.example.com".into(),
+            iap_audience: "/projects/1/global/backendServices/3".into(),
+        });
+        credential_verification_selection(&mut instance, &artifact)?;
+    }
+    Instance::from_bytes(&serde_json::to_vec(&instance)?)
+}
+
 fn instance_for_artifact(
     artifact_path: &Path,
     artifact: &LoadedArtifact,
