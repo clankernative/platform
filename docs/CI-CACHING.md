@@ -17,6 +17,10 @@ including workspace libraries that Cargo recompiles after a fresh checkout.
 remains disabled. Linked binaries, test executables and proc macros are outside
 sccache's Rust cache coverage; their compilation and linking still run.
 
+The hosted job disables sccache's idle shutdown so its compiler statistics survive
+the long runtime campaigns. This setting is confined to the disposable CI runner;
+it does not change compiler inputs, the cache namespace or local configuration.
+
 Both actions are pinned to immutable commits. The sccache executable version is
 pinned separately. The setup action checks its release archive's SHA-256 checksum.
 The repository's `rust-toolchain.toml` remains the Rust version authority.
@@ -58,7 +62,9 @@ For each run, record its exact head, runner/toolchain, all verification outcomes
 total verify job duration, initial Cargo preparation, the 28 recipe step timings,
 cache restore/save durations and archive size. The compiler cache action publishes
 hits, misses, non-cacheable requests, cache errors and read/write timings in its
-post-job log and summary. Include that overhead in the total, and report failures
+post-job log and summary. An idle server restart can reset these counters; an
+empty or partial report does not establish whole-job hit, miss or error counts.
+Include that overhead in the total, and report failures
 or weak cache reuse rather than attributing every timing difference to caching.
 
 Compare total CI time as well as compilation time. Native fixture compilation,
@@ -68,4 +74,5 @@ gate establishes correctness; a cache hit rate alone does not establish faster C
 References: [Cargo cache action](https://github.com/Swatinem/rust-cache),
 [sccache action](https://github.com/mozilla-actions/sccache-action),
 [Rust cache coverage](https://github.com/mozilla/sccache/blob/main/docs/Rust.md),
+[Pinned server idle behavior](https://github.com/mozilla/sccache/blob/v0.18.0/src/server.rs),
 [GitHub cache scope](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching).

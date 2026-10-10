@@ -55,6 +55,8 @@ jobs:
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: 'true'
       SCCACHE_GHA_VERSION: day2-platform-ci-v2
+      # Preserve compiler statistics through the long runtime campaigns.
+      SCCACHE_IDLE_TIMEOUT: '0'
       DAY2_TEMPORAL_CLI: /tmp/day2-tools/temporal
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
