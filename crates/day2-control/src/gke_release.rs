@@ -5,10 +5,10 @@ use crate::{
     journal::{Journal, RecoveryMode},
     kubernetes_conformance::{GkeKubernetesProbe, GkeServingBinding},
     provider_evidence::{DeploymentIncarnation, ReadBarrier, RevisionToken, StateEvidence},
-    release::{ReleaseApproval, SecretObservation},
+    release::{ReleaseApproval, ReleaseTarget, SecretObservation},
     release_execution::{
-        Capabilities, ProviderRefusal, ReleaseEffectResult, ReleaseExecutionPlan, ReleaseLease,
-        ReleaseObservation, ReleaseObserved, ReleaseOperation,
+        Capabilities, ProviderRefusal, ReleaseEffectResult, ReleaseExecutionHost,
+        ReleaseExecutionPlan, ReleaseLease, ReleaseObservation, ReleaseObserved, ReleaseOperation,
     },
     secrets::{AccessTokenProvider, SecretVersion},
     serving_publication::Publication,
@@ -1038,8 +1038,22 @@ impl GkeReleaseProvider {
         ))
     }
 
-    /// Conditional per-destination writes plus a final durable acknowledgment.
-    /// A crash after any destination leaves the activation intent retryable.
+    /// Accept `plan` through `host` and record this candidate's exact deployment
+    /// input, so later publications reach its serving ConfigMap while its
+    /// release is active, whether or not it is a candidate then.
+    pub fn accept(
+        &self,
+        host: &ReleaseExecutionHost,
+        plan: &ReleaseExecutionPlan,
+    ) -> Result<Digest> {
+        let execution = host.accept(plan)?;
+        Journal::open(&self.journal)?
+            .record_release_deployment_input(&execution, &serde_json::to_vec(&self.deployment)?)?;
+        Ok(execution)
+    }
+
+    /// One conditional destination write with exact readback; `publish_scope`
+    /// acknowledges the journal intent after every destination succeeds.
     pub fn publish(&self, publication: &Publication) -> Result<()> {
         publication.require_scope(&self.deployment.serving.target)?;
         publication
@@ -1132,6 +1146,41 @@ impl GkeReleaseProvider {
         );
         Ok(())
     }
+}
+
+/// Publish the scope's current serving snapshot to the serving ConfigMap of
+/// every app it selects (each app of `scope` with an active release), as that
+/// app's active release recorded it, then acknowledge the journal intent.
+/// Every destination is resolved before the first write. A failure leaves the
+/// intent pending; a rerun rewrites the same revision idempotently, and
+/// `GkeReleaseProvider::publish` refuses to replace a newer revision.
+pub fn publish_scope(
+    journal: &Path,
+    scope: &[ReleaseTarget],
+    publisher: impl Fn(Deployment) -> Result<GkeReleaseProvider>,
+) -> Result<Publication> {
+    let mut journal = Journal::open(journal)?;
+    let publication = journal.serving_publication(scope)?;
+    let mut destinations = Vec::new();
+    for selected in publication.snapshot.selections() {
+        let deployment: Deployment =
+            day2::json::decode(&journal.active_release_deployment_input(selected)?)?;
+        deployment.validate(&selected.binding.artifact)?;
+        ensure!(
+            deployment.serving.target == selected.binding.target
+                && deployment.serving.deployment == selected.binding.deployment,
+            "gke_publication_destination_changed"
+        );
+        destinations.push(publisher(deployment)?);
+    }
+    for destination in &destinations {
+        destination.publish(&publication)?;
+    }
+    ensure!(
+        journal.acknowledge_serving_publication(&publication)?,
+        "release_publication_superseded"
+    );
+    Ok(publication)
 }
 
 fn projected(

@@ -91,14 +91,14 @@ run "infrastructure_preserves_software_after_release_handoff" {
     } }
   }
   override_data {
-    target = data.kubernetes_resource.release
-    values = { object = {
+    target = data.kubernetes_resources.workload
+    values = { objects = [{
       metadata = { name = "day2-example-app", namespace = "app-example", annotations = {
         "day2.dev/release-effect"     = "effect-two", "day2.dev/release-id" = "release-two"
         "day2.dev/activated-artifact" = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
         "unrelated.example.com/note"  = "dropped"
       } }
-      spec = { template = {
+      spec = { replicas = 0, template = {
         metadata = { annotations = {
           "day2.dev/installation"    = "exampleco", "day2.dev/environment" = "production", "day2.dev/app" = "example_app"
           "day2.dev/artifact"        = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -109,7 +109,7 @@ run "infrastructure_preserves_software_after_release_handoff" {
           volumes    = [{ name = "instance", configMap = { name = "day2-release-two" } }]
         }
       } }
-    } }
+    }] }
   }
   assert {
     condition     = kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[0].image == "registry.example.com/app@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" && kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[0].env[0].value == "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -119,6 +119,13 @@ run "infrastructure_preserves_software_after_release_handoff" {
     condition     = kubernetes_stateful_set_v1.day2.metadata[0].annotations["day2.dev/activated-artifact"] == "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" && !contains(keys(kubernetes_stateful_set_v1.day2.metadata[0].annotations), "unrelated.example.com/note")
     error_message = "Infrastructure must keep a maintenance activation stamp until the release consumes it, and only the release-owned annotations."
   }
+  # The stamp names another artifact than the live one: the old image must not
+  # restart on the migrated state, and the plan says why it stays stopped.
+  assert {
+    condition     = kubernetes_stateful_set_v1.day2.spec[0].replicas == "0"
+    error_message = "A pending activation must hold a release-managed workload at its live zero replicas."
+  }
+  expect_failures = [check.maintenance_activation]
   assert {
     condition     = kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].volume[0].config_map[0].name == "day2-release-two" && kubernetes_stateful_set_v1.day2.metadata[0].annotations["day2.dev/release-effect"] == "effect-two" && kubernetes_stateful_set_v1.day2.spec[0].template[0].metadata[0].annotations["day2.dev/release-id"] == "release-two"
     error_message = "Infrastructure must preserve the immutable release instance and reconciliation markers."
@@ -126,6 +133,80 @@ run "infrastructure_preserves_software_after_release_handoff" {
   assert {
     condition     = output.release_deployment.credentials == null
     error_message = "An app without provider credentials releases no registration metadata."
+  }
+}
+
+# A directly deployed app (release_managed = false) between `day2 platform
+# maintain activate` and the apply that rolls it: stopped, stamped with the
+# build its database now runs, the old build still in the template.
+run "direct_apply_rolls_exactly_the_activated_build" {
+  command = plan
+  override_data {
+    target = data.kubernetes_resources.workload
+    values = { objects = [{
+      metadata = { name = "day2-example-app", namespace = "app-example", annotations = {
+        "day2.dev/artifact"           = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        "day2.dev/activated-artifact" = "sha256:9ef287e05cb53f593b35c140140e83306e8c487cca417ff9f23f58568340b6bb"
+      } }
+      spec = { replicas = 0, template = { metadata = { annotations = {
+        "day2.dev/artifact" = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      } } } }
+    }] }
+  }
+  assert {
+    condition     = local.activation_pending && kubernetes_stateful_set_v1.day2.spec[0].replicas == "1" && kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[0].image == var.image && kubernetes_stateful_set_v1.day2.spec[0].template[0].metadata[0].annotations["day2.dev/artifact"] == "sha256:9ef287e05cb53f593b35c140140e83306e8c487cca417ff9f23f58568340b6bb"
+    error_message = "Set to the activated build, the apply rolls it and restores the one replica."
+  }
+  assert {
+    condition     = !contains(keys(kubernetes_stateful_set_v1.day2.metadata[0].annotations), "day2.dev/activated-artifact")
+    error_message = "A directly deployed app never declares the stamp, so the rolling apply removes it."
+  }
+}
+
+run "direct_apply_refuses_a_build_other_than_the_activated_one" {
+  command = plan
+  override_data {
+    target = data.kubernetes_resources.workload
+    values = { objects = [{
+      metadata = { name = "day2-example-app", namespace = "app-example", annotations = {
+        "day2.dev/activated-artifact" = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      } }
+      spec = { replicas = 0, template = { metadata = { annotations = {
+        "day2.dev/artifact" = "sha256:9ef287e05cb53f593b35c140140e83306e8c487cca417ff9f23f58568340b6bb"
+      } } } }
+    }] }
+  }
+  expect_failures = [terraform_data.release_admission]
+}
+
+run "an_activation_stamp_equal_to_the_live_artifact_is_inert" {
+  command = plan
+  override_data {
+    target = data.kubernetes_resources.workload
+    values = { objects = [{
+      metadata = { name = "day2-example-app", namespace = "app-example", annotations = {
+        "day2.dev/activated-artifact" = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      } }
+      spec = { replicas = 1, template = { metadata = { annotations = {
+        "day2.dev/artifact" = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      } } } }
+    }] }
+  }
+  assert {
+    condition     = !local.activation_pending && kubernetes_stateful_set_v1.day2.spec[0].replicas == "1"
+    error_message = "A stamp the workload already runs authorizes and holds nothing."
+  }
+}
+
+run "first_install_plans_without_a_workload" {
+  command = plan
+  override_data {
+    target = data.kubernetes_resources.workload
+    values = { objects = [] }
+  }
+  assert {
+    condition     = local.live == null && !local.activation_pending && kubernetes_stateful_set_v1.day2.spec[0].replicas == "1"
+    error_message = "The first install reads no StatefulSet and plans the profile's one replica."
   }
 }
 
@@ -176,10 +257,12 @@ run "infrastructure_preserves_released_credential_registration" {
     } }
   }
   override_data {
-    target = data.kubernetes_resource.release
-    values = { object = {
+    target = data.kubernetes_resources.workload
+    values = { objects = [{
       metadata = { name = "day2-example-app", namespace = "app-example", annotations = {
         "day2.dev/release-effect" = "effect-two", "day2.dev/release-id" = "release-two"
+        # Equal to the live artifact: inert, nothing pending.
+        "day2.dev/activated-artifact" = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
       } }
       spec = { template = {
         metadata = { annotations = {
@@ -203,7 +286,7 @@ run "infrastructure_preserves_released_credential_registration" {
           ]
         }
       } }
-    } }
+    }] }
   }
   assert {
     condition = (
@@ -211,6 +294,10 @@ run "infrastructure_preserves_released_credential_registration" {
       kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[0].image == "registry.example.com/app@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
     )
     error_message = "Registration must keep the released image, which alone contains the released artifact."
+  }
+  assert {
+    condition     = !local.activation_pending && kubernetes_stateful_set_v1.day2.spec[0].replicas == "1"
+    error_message = "Without a pending activation a release-managed workload keeps the profile's one replica."
   }
   assert {
     condition = (
@@ -285,8 +372,8 @@ run "release_management_refuses_a_changed_credential_set" {
     } }
   }
   override_data {
-    target = data.kubernetes_resource.release
-    values = { object = {
+    target = data.kubernetes_resources.workload
+    values = { objects = [{
       metadata = { name = "day2-example-app", namespace = "app-example", annotations = {} }
       spec = { template = {
         metadata = { annotations = {
@@ -307,7 +394,7 @@ run "release_management_refuses_a_changed_credential_set" {
           ]
         }
       } }
-    } }
+    }] }
   }
   expect_failures = [terraform_data.release_admission]
 }
@@ -356,8 +443,8 @@ run "release_management_refuses_credentials_added_after_handoff" {
     } }
   }
   override_data {
-    target = data.kubernetes_resource.release
-    values = { object = {
+    target = data.kubernetes_resources.workload
+    values = { objects = [{
       metadata = { name = "day2-example-app", namespace = "app-example", annotations = {} }
       spec = { template = {
         metadata = { annotations = {
@@ -369,7 +456,7 @@ run "release_management_refuses_credentials_added_after_handoff" {
           volumes    = [{ name = "instance", configMap = { name = "day2-release-two" } }]
         }
       } }
-    } }
+    }] }
   }
   expect_failures = [terraform_data.release_admission]
 }
