@@ -33,7 +33,13 @@ Maintain :: [].{
 				# Only now may a release roll the app to the activated artifact.
 				Capability.call!("maintenance-mark-activated", "{}", host!)?
 			}
-			_ => return Err("maintain operation must be inspect, backup, authority-apply or activate")
+			"mark-activated" => {
+				# Recovery when activate's own mark failed: stamp only the
+				# artifact the database already activates.
+				_ = workflow!("authority-inspect", host!)?
+				Capability.call!("maintenance-mark-activated", "{}", host!)?
+			}
+			_ => return Err("maintain operation must be inspect, backup, authority-apply, activate or mark-activated")
 		}
 		Capability.call!("maintenance-finish", "{}", host!)
 	}

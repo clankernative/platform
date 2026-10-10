@@ -9,20 +9,35 @@ variable "release_managed" {
   default     = false
 }
 
-data "kubernetes_resource" "release" {
-  count       = var.release_managed ? 1 : 0
-  api_version = "apps/v1"
-  kind        = "StatefulSet"
-  metadata {
-    name      = local.workload_name
-    namespace = var.namespace
-  }
+# The live workload, read for every app: a list, so the first install (no
+# StatefulSet yet) reads empty instead of failing.
+data "kubernetes_resources" "workload" {
+  api_version    = "apps/v1"
+  kind           = "StatefulSet"
+  namespace      = var.namespace
+  field_selector = "metadata.name=${local.workload_name}"
 }
 
 locals {
-  released = var.release_managed ? data.kubernetes_resource.release[0].object : null
+  # Null before the first install.
+  live = try(one(data.kubernetes_resources.workload.objects), null)
+  # `day2 platform maintain activate` leaves the app at zero replicas and
+  # stamps the artifact its database now runs. Until the workload is rolled to
+  # it, the live (old) image must not restart on the migrated state. A stamp
+  # equal to the live artifact is inert.
+  activated_artifact = try(local.live.metadata.annotations["day2.dev/activated-artifact"], null)
+  activation_pending = local.activated_artifact != null && local.activated_artifact != try(local.live.spec.template.metadata.annotations["day2.dev/artifact"], null)
+  # A release-managed workload waits for day2-gke-release at its live replicas;
+  # an infrastructure apply never starts the old image. Otherwise the profile's one.
+  replicas = var.release_managed && local.activation_pending ? local.live.spec.replicas : 1
+
+  released = var.release_managed ? local.live : null
   # day2.dev/activated-artifact: `day2 platform maintain activate` stamps it and
-  # the release that rolls the workload to that artifact removes it.
+  # the release that rolls the workload to that artifact removes it. A directly
+  # deployed app never declares it: the kubernetes provider removes annotations
+  # the stack does not declare, so the apply that rolls the workload to the
+  # activated artifact consumes the stamp too. Were it kept, it would equal the
+  # live artifact and be inert.
   release_annotations = var.release_managed ? merge({ "day2.dev/release-managed" = "true" }, {
     for key, value in try(local.released.metadata.annotations, {}) : key => value
     if contains(["day2.dev/release-effect", "day2.dev/release-id", "day2.dev/activated-artifact"], key)
@@ -63,6 +78,13 @@ locals {
 
 resource "terraform_data" "release_admission" {
   lifecycle {
+    # A directly deployed app is rolled by this apply, so it must roll exactly
+    # the build the app's database activated, or wait.
+    precondition {
+      condition     = var.release_managed || !local.activation_pending || local.activated_artifact == "sha256:${var.artifact_id}"
+      error_message = "${var.app_id}: `day2 platform maintain activate` activated ${coalesce(local.activated_artifact, "-")} and stopped ${local.workload_name}; its database no longer runs the deployed build. Set image and artifact_id to that build (artifact_id = ${trimprefix(coalesce(local.activated_artifact, "-"), "sha256:")}) and apply again."
+    }
+
     precondition {
       condition = !var.release_managed || try(
         var.app_calls != null && var.oauth_instance_json == null &&
@@ -96,5 +118,12 @@ resource "terraform_data" "release_admission" {
       false)
       error_message = "A release-managed workload keeps its installed provider credential set, registrant and released registration image, and names credential versions by project number. Disable release_managed to add, remove or rotate a provider credential."
     }
+  }
+}
+
+check "maintenance_activation" {
+  assert {
+    condition     = !(var.release_managed && local.activation_pending)
+    error_message = "${var.app_id}: activation of ${coalesce(local.activated_artifact, "-")} pending; replicas held at ${try(local.live.spec.replicas, 0)} until day2-gke-release rolls it."
   }
 }

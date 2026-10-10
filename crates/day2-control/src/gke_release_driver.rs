@@ -2,7 +2,7 @@
 //! successful build records; the CLI's operator assertion is not forge authentication.
 use crate::{
     BindingRef, Digest, Name,
-    gke_release::{Deployment, GkeReleaseProvider},
+    gke_release::{Deployment, GkeReleaseProvider, publish_scope},
     journal::Journal,
     release::{ReleaseApproval, ReleaseAuthority, ReleaseTarget},
     release_execution::{ReleaseExecutionHost, ReleaseExecutionPlan, ReleaseTerminal},
@@ -154,13 +154,13 @@ impl Configuration {
 struct Execution {
     id: Digest,
     host: ReleaseExecutionHost,
-    provider: Arc<GkeReleaseProvider>,
 }
 
 pub struct Session {
     configuration: Configuration,
     scope: Vec<ReleaseTarget>,
     executions: Vec<Execution>,
+    tokens: Arc<dyn AccessTokenProvider>,
 }
 
 impl Session {
@@ -206,13 +206,14 @@ impl Session {
             )
             .with_catalog_store(configuration.artifact_store.clone())?
             .with_catalog_instance(configuration.instance.clone())?;
-            let id = host.accept(&plan)?;
-            executions.push(Execution { id, host, provider });
+            let id = provider.accept(&host, &plan)?;
+            executions.push(Execution { id, host });
         }
         Ok(Self {
             configuration,
             scope,
             executions,
+            tokens,
         })
     }
 
@@ -266,17 +267,12 @@ impl Session {
                 Ok(json!({}))
             }
             "gke-release-publish" => {
-                // Each candidate's ConfigMap gets the selections of every
-                // active app in the scope, not only this run's candidates.
-                let mut journal = Journal::open(&self.configuration.journal)?;
-                let publication = journal.serving_publication(&self.scope)?;
-                for execution in &self.executions {
-                    execution.provider.publish(&publication)?;
-                }
-                ensure!(
-                    journal.acknowledge_serving_publication(&publication)?,
-                    "release_publication_superseded"
-                );
+                // Every active app of the scope gets the selections of every
+                // other one, not only this run's candidates.
+                let journal = &self.configuration.journal;
+                let publication = publish_scope(journal, &self.scope, |deployment| {
+                    GkeReleaseProvider::new(journal.clone(), deployment, self.tokens.clone())
+                })?;
                 Ok(
                     json!({"version":1,"status":"activated_and_published","origin":"live_gke","revision":publication.revision,"snapshot":publication.digest,"executions":self.executions.iter().map(|execution| &execution.id).collect::<Vec<_>>()}),
                 )

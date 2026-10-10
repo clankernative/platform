@@ -71,6 +71,10 @@ impl ServingSnapshot {
         Ok(())
     }
 
+    pub fn selections(&self) -> &[SelectedServing] {
+        &self.selections
+    }
+
     pub fn selected(&self, target: &ReleaseTarget) -> Result<&SelectedServing> {
         self.selections
             .iter()

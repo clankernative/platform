@@ -117,8 +117,9 @@ the target artifact succeeds, and leaves the app at zero replicas. The same
 conditional patch that rolls the template then restores `spec.replicas` to the
 profile's one replica and removes the stamp, so it cannot authorize a later
 change. A lost acknowledgment reconciles as before: the markers, template and
-one replica identify the applied patch. Infrastructure plans keep an unconsumed
-stamp.
+one replica identify the applied patch. Until then, day2-app infrastructure
+plans keep the stamp, hold the live zero replicas and warn that the activation is
+pending ([deploy/gke/README.md](../deploy/gke/README.md#activation-and-the-day2-app-stack)).
 
 Fresh readback requires the prepared controller incarnation, ready current pod,
 actual immutable running image, artifact guard, scope and workload identity.
@@ -131,18 +132,24 @@ revocation guarantee. See [the provider contract](https://docs.cloud.google.com/
 
 Activation atomically queues a publication revision with its receipt. After the
 selected candidates are active, the driver publishes one coherent serving
-snapshot to each candidate's named ConfigMap with conditional writes and exact
-readback. The snapshot selects every app the catalog instance binds in the
-scope that has an active release, not only this run's candidates: a host
-resolves each call target in its own snapshot, so releasing one app keeps its
-callees selected. Apps without an active release are omitted; a ConfigMap never
-receives a snapshot that does not select its own app. Other apps' ConfigMaps are
-not written and keep their previous snapshot until they are released. Only then does it acknowledge the journal intent. A crash after partial
+snapshot with conditional writes and exact readback. The snapshot selects every
+app the catalog instance binds in the scope that has an active release, not only
+this run's candidates, and goes to the serving ConfigMap of each of those apps:
+releasing a callee also updates its callers' selection. Each destination is the
+namespace and ConfigMap of that app's active release, from the candidate
+`deployment` its release recorded in the journal when it was accepted (pinned by
+the plan's input digest); an active app without that record fails publication
+closed. Apps without an active release are neither selected nor written. Every
+destination is resolved before the first write, and the driver acknowledges the
+journal intent only after all of them succeed. A crash after partial
 publication retries safely; an old acknowledgment cannot erase a newer activation
 and an older publisher cannot overwrite a newer ConfigMap revision. Calls still
-probe physical serving bindings. A single-replica rollout can interrupt calls;
-neither deployment nor publication is an atomic cloud traffic switch. There is
-no cleanup of old immutable instance or credential ConfigMaps in this increment.
+probe physical serving bindings: until a caller's pod sees the updated ConfigMap
+(the kubelet's volume sync, usually within a minute or two), its calls to a newly
+released callee fail closed with `serving_binding_changed`. A single-replica
+rollout can interrupt calls; neither deployment nor publication is an atomic
+cloud traffic switch. There is no cleanup of old immutable instance or credential
+ConfigMaps in this increment.
 
 The normal path is:
 

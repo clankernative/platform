@@ -106,6 +106,9 @@ struct FakeCluster {
     fail_on: Option<String>,
     drop_on_copy_out: Option<String>,
     annotations: Rc<RefCell<BTreeMap<String, String>>>,
+    replicas: u64,
+    /// What `authority inspect` reports the database activates.
+    active_artifact: String,
 }
 
 impl FakeCluster {
@@ -152,7 +155,7 @@ impl FakeCluster {
             }
             "authority" if args[1] == "inspect" => json!({
                 "scope": "exampleco/production/example_app",
-                "active": {"stamp": {"epoch": "sha256:e", "revision": 3}, "artifact_id": "sha256:a",
+                "active": {"stamp": {"epoch": "sha256:e", "revision": 3}, "artifact_id": self.active_artifact,
                     "document": {"readers": ["domain:example.com"], "writers": [], "policy": {"operations": {"x": {}}}}}
             }),
             "authority" => json!({"receipt": {"stamp": {"revision": 4}}, "action": args[1]}),
@@ -184,7 +187,7 @@ impl Cluster for FakeCluster {
         Ok(match args.as_slice() {
             ["get", "statefulset", STATEFULSET, "-o", "json"] => json!({
                 "metadata": {"annotations": *self.annotations.borrow()},
-                "spec": {"replicas": 1, "template": {"spec": {"containers": [{"image": self.running_image}]}}}
+                "spec": {"replicas": self.replicas, "template": {"spec": {"containers": [{"image": self.running_image}]}}}
             })
             .to_string(),
             ["annotate", "--overwrite", "statefulset", STATEFULSET, annotation] => {
@@ -195,6 +198,10 @@ impl Cluster for FakeCluster {
                 String::new()
             }
             ["get", "pods", "-l", MAINTENANCE_LABEL, "-o", "name"] => self.other_sessions.clone(),
+            ["scale", "statefulset", STATEFULSET, replicas] => {
+                self.replicas = replicas.trim_start_matches("--replicas=").parse()?;
+                String::new()
+            }
             ["get", "configmap", _, "-o", "json"] => json!({"data": {"instance.json": self.instance}}).to_string(),
             ["get", "pod", _, "--ignore-not-found", "-o", "name"] => String::new(),
             ["scale" | "apply" | "wait" | "delete" | "rollout", ..] => String::new(),
@@ -267,10 +274,10 @@ impl Harness {
             "pod_label": {"key": "platform.example.com/service", "value": "background"},
             "backup_dir": self.directory.path().join("backups"),
         });
-        if matches!(operation, Operation::AuthorityApply | Operation::Activate) {
+        if operation == Operation::AuthorityApply || operation.targeted() {
             request["request_id"] = "release-1".into();
         }
-        if operation == Operation::Activate {
+        if operation.targeted() {
             request["target"] = json!({"instance": target_file, "app_image": self.target.reference,
                 "artifact_id": self.target.artifact_id});
         }
@@ -291,6 +298,8 @@ impl Harness {
             fail_on: None,
             drop_on_copy_out: None,
             annotations: self.annotations.clone(),
+            replicas: 1,
+            active_artifact: "sha256:a".into(),
         };
         configure(&mut cluster);
         Tools {
@@ -540,6 +549,163 @@ fn activate_leaves_the_app_stopped_for_the_new_image() -> Result<()> {
             && at("migration-applied") < at("authority-activated")
             && at("authority-activated") < at("mark-activated")
             && at("mark-activated") < at("activation-marked")
+    );
+    Ok(())
+}
+
+#[test]
+fn a_failed_activation_mark_names_the_recovery_command() -> Result<()> {
+    let harness = Harness::new();
+    let mut session = harness.open(
+        Operation::Activate,
+        |cluster| cluster.fail_on = Some("annotate".into()),
+        true,
+    )?;
+    prepare(&mut session)?;
+    session.workflow("backup")?;
+    session.copy_backup()?;
+    session.migration("plan")?;
+    session.confirm()?;
+    session.fence()?;
+    session.migration("apply")?;
+    session.workflow("authority-inspect")?;
+    session.workflow("authority-activate")?;
+    let error = format!("{:#}", session.mark_activated().unwrap_err());
+    let request = harness.directory.path().join("request.json");
+    assert!(
+        error.contains(&format!(
+            "day2 platform maintain mark-activated {}",
+            request.display()
+        )),
+        "{error}"
+    );
+    drop(session);
+    assert!(harness.deleted_pod() && !harness.scaled_up());
+    assert!(harness.annotations.borrow().is_empty());
+    Ok(())
+}
+
+/// What a failed stamp after a successful `activate` leaves: the old image
+/// stopped, and the database activating the target.
+fn activated(harness: &Harness) -> impl FnOnce(&mut FakeCluster) {
+    let artifact = format!("sha256:{}", harness.target.artifact_id);
+    move |cluster| {
+        cluster.replicas = 0;
+        cluster.active_artifact = artifact;
+    }
+}
+
+#[test]
+fn mark_activated_stamps_the_artifact_the_database_activated() -> Result<()> {
+    let harness = Harness::new();
+    let mut session = harness.open(Operation::MarkActivated, activated(&harness), true)?;
+    prepare(&mut session)?;
+    ensure!(
+        session.workflow("backup").is_err() && session.mark_activated().is_err(),
+        "no backup, and nothing is marked before the database is read"
+    );
+    session.workflow("authority-inspect")?;
+    let marked = session.mark_activated()?;
+    assert_eq!(marked["already_marked"], false);
+    ensure!(session.mark_activated().is_err(), "marked once");
+    let receipt = session.finish()?;
+    assert_eq!(receipt["replicas_restored"], false);
+    drop(session);
+    assert!(harness.deleted_pod() && !harness.scaled_up());
+    assert_eq!(*harness.asked.borrow(), 0);
+    let value = format!("sha256:{}", harness.target.artifact_id);
+    assert_eq!(
+        *harness.annotations.borrow(),
+        BTreeMap::from([(ACTIVATED.to_owned(), value.clone())])
+    );
+    let steps = harness.journal();
+    let at = |step: &str| steps.iter().position(|s| s == step).unwrap();
+    assert!(
+        at("open") < at("pod")
+            && at("pod") < at("authority-inspect")
+            && at("authority-inspect") < at("mark-activated")
+            && at("mark-activated") < at("activation-marked")
+            && at("activation-marked") < at("finish")
+    );
+    // A rerun on the stamped app changes nothing and succeeds.
+    let rerun = Harness::new();
+    rerun
+        .annotations
+        .borrow_mut()
+        .insert(ACTIVATED.into(), value.clone());
+    let mut session = rerun.open(Operation::MarkActivated, activated(&rerun), true)?;
+    prepare(&mut session)?;
+    session.workflow("authority-inspect")?;
+    assert_eq!(session.mark_activated()?["already_marked"], true);
+    session.finish()?;
+    drop(session);
+    assert!(!rerun.verbs().iter().any(|verb| verb == "annotate"));
+    assert_eq!(
+        *rerun.annotations.borrow(),
+        BTreeMap::from([(ACTIVATED.to_owned(), value)])
+    );
+    Ok(())
+}
+
+#[test]
+fn mark_activated_refuses_another_database_artifact_or_a_changed_workload() -> Result<()> {
+    let harness = Harness::new();
+    // The database still activates another artifact.
+    let artifact = harness.target.artifact_id.clone();
+    let mut session = harness.open(
+        Operation::MarkActivated,
+        |cluster| cluster.replicas = 0,
+        true,
+    )?;
+    prepare(&mut session)?;
+    session.workflow("authority-inspect")?;
+    let error = format!("{:#}", session.mark_activated().unwrap_err());
+    assert!(
+        error.contains("activates sha256:a") && error.contains(&artifact),
+        "{error}"
+    );
+    ensure!(
+        session.finish().is_err(),
+        "an unmarked session cannot finish"
+    );
+    drop(session);
+    assert!(harness.deleted_pod() && !harness.scaled_up());
+    assert!(harness.annotations.borrow().is_empty());
+    // A running app, another running image or another stamp: refused at open.
+    let calls = harness.calls.borrow().len();
+    let running = harness
+        .open(
+            Operation::MarkActivated,
+            |cluster| cluster.active_artifact = format!("sha256:{artifact}"),
+            true,
+        )
+        .err()
+        .context("running app")?;
+    assert!(format!("{running:#}").contains("0 replicas"));
+    let image = harness
+        .open(
+            Operation::MarkActivated,
+            |cluster| {
+                activated(&harness)(cluster);
+                cluster.running_image = harness.target.reference.clone();
+            },
+            true,
+        )
+        .err()
+        .context("another image")?;
+    assert!(format!("{image:#}").contains("the StatefulSet runs"));
+    harness
+        .annotations
+        .borrow_mut()
+        .insert(ACTIVATED.into(), "sha256:another".into());
+    let other = harness
+        .open(Operation::MarkActivated, activated(&harness), true)
+        .err()
+        .context("another stamp")?;
+    assert!(format!("{other:#}").contains("already marked activated for sha256:another"));
+    assert!(
+        harness.verbs()[calls..].iter().all(|verb| verb == "get"),
+        "refused before anything changed"
     );
     Ok(())
 }
