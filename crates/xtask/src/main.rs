@@ -713,6 +713,18 @@ fn main() -> Result<()> {
             ensure!(args.next().is_none(), "verify accepts no arguments");
             verification::execute(&root, "verify")?;
         }
+        "verify-prepare" | "verify-compose" => {
+            ensure!(
+                args.next().is_none(),
+                "verification stage accepts no arguments"
+            );
+            verification::execute(&root, &action)?;
+        }
+        "verify-shard" => {
+            let shard = args.next().context("usage: xtask verify-shard SHARD")?;
+            ensure!(args.next().is_none(), "usage: xtask verify-shard SHARD");
+            verification::execute(&root, &format!("verify-shard-{shard}"))?;
+        }
         "qualify-linux" => {
             let output = PathBuf::from(
                 args.next()

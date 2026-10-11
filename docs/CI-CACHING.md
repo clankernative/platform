@@ -1,8 +1,8 @@
 # CI compilation caches
 
 Platform CI restores two compilation caches before its first Cargo command.
-Every run still executes the existing full verification recipe. Cache hits are
-build inputs, never verification receipts or a reason to skip a step.
+Every gate retains the full verification recipe's checks. Cache hits are build
+inputs, never verification receipts or a reason to skip a step.
 
 `Swatinem/rust-cache` restores Cargo registry downloads, Git dependencies and
 compiled dependency outputs in the workspace target directory. Workspace crate
@@ -70,6 +70,39 @@ or weak cache reuse rather than attributing every timing difference to caching.
 Compare total CI time as well as compilation time. Native fixture compilation,
 control simulation and runtime campaigns remain substantial costs. A passing
 gate establishes correctness; a cache hit rate alone does not establish faster CI.
+
+## Hosted verification campaigns
+
+The CI preparation job runs the full recipe's formatting, CLI, twenty fixture
+builds and lint checks, then compiles the ordinary complete Cargo test package
+and target graph once. Documentation tests also run during preparation. The
+prepared binaries and fixtures travel in a permission-preserving archive scoped
+to one Actions run attempt; this is separate from the dependency/compiler caches.
+
+`Verify.roc` selects seven hosted campaigns: disjoint serial day2, control and
+remaining-package tests, control simulation, the reviewed four-thread compiler
+probes, isolated build and installation build. The test binaries receive the
+same libtest filters and fixture environment as ordinary full verification.
+Each binary runs from its Cargo package directory. Compiler inputs, package/target
+graph, worker limits and isolated-build environment remain unchanged.
+
+The required `verify` job fails if preparation or any campaign fails or skips.
+Its native admission also requires all seven receipts from the same checkout,
+source snapshot, workflow, run attempt, host and workspace path, plus unchanged
+test executable hashes and admitted fixtures. Missing test targets, effects or
+timings prevent a full receipt. It joins the original 28 steps and twenty fixtures;
+the combined workspace campaign retains its original 12,600-second budget.
+Rerun the entire workflow when retrying: partial job reruns cannot mix prepared
+artifacts and successful receipts from different attempts.
+
+Manual `Platform CI` dispatch supports `full` for the ordinary `xtask verify`
+recipe, `compare` for both pipelines on one checkout, and `diagnostics` for hosted
+formatting and admission inventories. Diagnostics provide no verification claim.
+Use complete prepare-to-join timestamps for sharded latency, including queue,
+archive, upload/download and setup costs. The short join job's duration is not
+the full gate duration; joined step timings sum campaign work across hosts.
+The additional runners also increase runner minutes. Qualify correctness and
+measure that cost before claiming a latency improvement.
 
 References: [Cargo cache action](https://github.com/Swatinem/rust-cache),
 [sccache action](https://github.com/mozilla-actions/sccache-action),
