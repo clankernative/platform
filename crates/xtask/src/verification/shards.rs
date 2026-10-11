@@ -1,8 +1,19 @@
 //! Exact-run transport and admission for the Verify.roc hosted campaigns.
 //! Cargo builds its ordinary full package/target graph once. The recipes select
 //! campaigns; this module admits their binaries and joins complete evidence.
-use super::*;
+use super::{WORKSPACE_TEST_ARGUMENTS, cached_fixture, configure_tests, required_steps, test_command};
+use crate::run_with_budget;
+use anyhow::{Context, Result, ensure};
+use day2::digest;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+    time::{Duration, Instant},
+};
 
 const PREPARED: &str = "artifacts/ci-prepared.json";
 const BINARIES: &str = "artifacts/ci-test-binaries.json";
@@ -107,11 +118,19 @@ pub(super) fn build(root: &Path) -> Result<()> {
     // Capture Cargo's authoritative executable inventory, including empty
     // binary harnesses. No package or target selection differs from `verify`.
     let capture = tempfile::NamedTempFile::new_in(root.join("artifacts"))?;
-    run_with_budget(root, Command::new("cargo")
+    let compilation = run_with_budget(root, Command::new("cargo")
         .args(["test", "--locked", "--no-run", "--message-format=json-render-diagnostics"])
         .args(WORKSPACE_TEST_ARGUMENTS).stdout(capture.as_file().try_clone()?),
-        Duration::from_secs(12600))?;
+        Duration::from_secs(12600));
     let output = fs::read(capture.path())?;
+    for line in output.split(|byte| *byte == b'\n').filter(|line| !line.is_empty()) {
+        let message: serde_json::Value = day2::json::decode(line)?;
+        if message["reason"] == "compiler-message"
+            && let Some(rendered) = message["message"]["rendered"].as_str() {
+            print!("{rendered}");
+        }
+    }
+    compilation?;
     let mut binaries = Vec::new();
     let mut observed = BTreeSet::new();
     let mut finished = false;
@@ -211,12 +230,13 @@ fn expected_binaries(prepared: &Prepared, shard: &str) -> BTreeSet<PathBuf> {
 }
 
 pub(super) fn tests(root: &Path, prepared: &Prepared, shard: &str,
-    fixtures: &BTreeMap<String, PathBuf>, budget: Duration) -> Result<()> {
+    fixtures: &BTreeMap<String, PathBuf>, budget: Duration) -> Result<BTreeSet<PathBuf>> {
     ensure!(valid(shard) && shard != "simulation", "test shard required");
     let suite = if shard.starts_with("workspace-") { "workspace-runtime" } else { shard };
     let cargo = test_command(suite)?;
     let arguments: Vec<_> = cargo.get_args().skip_while(|arg| *arg != "--").skip(1).collect();
     let started = Instant::now();
+    let mut executed = BTreeSet::new();
     for binary in prepared.binaries.iter().filter(|binary| selected(&binary.package, shard)) {
         let mut command = Command::new(root.join(&binary.executable));
         command.args(&arguments);
@@ -226,8 +246,10 @@ pub(super) fn tests(root: &Path, prepared: &Prepared, shard: &str,
         let remaining = budget.checked_sub(started.elapsed()).context("test campaign budget exhausted")?;
         println!("Prepared test {} / {} ({shard})", binary.package, binary.target);
         run_with_budget(&root.join(&binary.directory), &mut command, remaining)?;
+        ensure!(executed.insert(binary.executable.clone()), "duplicate test executable invocation");
     }
-    Ok(())
+    ensure!(executed == expected_binaries(prepared, shard), "test executable campaign incomplete");
+    Ok(executed)
 }
 
 fn effects(shard: &str) -> BTreeSet<String> {
@@ -235,11 +257,12 @@ fn effects(shard: &str) -> BTreeSet<String> {
 }
 
 pub(super) fn receipt(root: &Path, prepared: &Prepared, shard: &str,
-    passed: &BTreeSet<String>, timings: &BTreeMap<String, u64>) -> Result<()> {
+    passed: &BTreeSet<String>, timings: &BTreeMap<String, u64>, executed: &BTreeSet<PathBuf>) -> Result<()> {
     ensure!(valid(shard) && *passed == effects(shard)
-        && timings.keys().cloned().collect::<BTreeSet<_>>() == *passed, "incomplete verification shard");
+        && timings.keys().cloned().collect::<BTreeSet<_>>() == *passed
+        && *executed == expected_binaries(prepared, shard), "incomplete verification shard");
     let receipt = Receipt { prepared_digest: digest(&serde_json::to_vec(prepared)?), shard: shard.into(),
-        passed: passed.clone(), timings_ms: timings.clone(), binaries: expected_binaries(prepared, shard) };
+        passed: passed.clone(), timings_ms: timings.clone(), binaries: executed.clone() };
     fs::create_dir_all(root.join(RESULTS))?;
     fs::write(root.join(RESULTS).join(format!("{shard}.json")), serde_json::to_vec_pretty(&receipt)?)?;
     Ok(())

@@ -319,13 +319,18 @@ jobs:
       - run: cargo run --locked -p xtask -- configure-tofu
       - run: cargo run --locked -p xtask -- fmt
       - run: git diff --binary > /tmp/day2-format.patch
-      - run: cargo run --locked -p xtask -- architecture-inventory > /tmp/day2-architecture-inventory.json
-      - run: cargo run --locked -p xtask -- architecture-dependencies > /tmp/day2-architecture-dependencies.json
-      - run: cargo run --locked -p xtask -- architecture-proof-inventory > /tmp/day2-architecture-proofs.json
+      - run: target/debug/xtask architecture-inventory > /tmp/day2-architecture-inventory.json
+      - run: target/debug/xtask architecture-dependencies > /tmp/day2-architecture-dependencies.json
+      - run: target/debug/xtask architecture-proof-inventory > /tmp/day2-architecture-proofs.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ always() }}
         with:
           name: day2-verification-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
-          path: /tmp/day2-*
+          path: |
+            /tmp/day2-format.patch
+            /tmp/day2-architecture-inventory.json
+            /tmp/day2-architecture-dependencies.json
+            /tmp/day2-architecture-proofs.json
           if-no-files-found: error
           retention-days: 3
 

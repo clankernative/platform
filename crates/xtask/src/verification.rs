@@ -146,6 +146,7 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
     let runner = workflows::build(root)?;
     let mut fixtures: BTreeMap<String, PathBuf> = BTreeMap::new();
     let mut passed = BTreeSet::new();
+    let mut executed_binaries = BTreeSet::new();
     let mut simulation = None;
     let mut simulation_started = None;
     let mut timings = Timings::new();
@@ -197,7 +198,7 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
             let budget = campaign.budget()?;
             let started = Instant::now();
             if request.action == "verify-prebuilt-tests" {
-                shards::tests(root, prepared.as_ref().context("prepared test binaries required")?,
+                executed_binaries = shards::tests(root, prepared.as_ref().context("prepared test binaries required")?,
                     &campaign.suite, &fixtures, budget)?;
             } else {
                 tests(root, &campaign.suite, &fixtures, budget)?;
@@ -240,7 +241,7 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
                 let shard = value("shard")?;
                 ensure_stable(root, recipe, &snapshot)?;
                 shards::receipt(root, prepared.as_ref().context("prepared tests required")?,
-                    shard, &passed, &timings.steps_ms)?;
+                    shard, &passed, &timings.steps_ms, &executed_binaries)?;
                 return Ok(json!({}));
             }
             "verify-join" => {
@@ -1273,6 +1274,9 @@ mod tests {
             ("all-runtime", 3600),
             ("all-runtime", 9000),
             ("workspace-runtime", 12600),
+            ("workspace-day2", 12600),
+            ("workspace-control", 12600),
+            ("workspace-other", 12600),
             ("control", 3600),
             ("libraries", 600),
             ("control", 1),
@@ -1291,6 +1295,9 @@ mod tests {
             ("all-runtime", u64::MAX),
             ("workspace-runtime", 0),
             ("workspace-runtime", 12601),
+            ("workspace-day2", 12601),
+            ("workspace-control", 12601),
+            ("workspace-other", 12601),
             ("workspace-runtime", u64::MAX),
             ("libraries", 0),
             ("libraries", 601),

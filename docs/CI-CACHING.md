@@ -92,6 +92,8 @@ source snapshot, workflow, run attempt, host and workspace path, plus unchanged
 test executable hashes and admitted fixtures. Missing test targets, effects or
 timings prevent a full receipt. It joins the original 28 steps and twenty fixtures;
 the combined workspace campaign retains its original 12,600-second budget.
+Rerun the entire workflow when retrying: partial job reruns cannot mix prepared
+artifacts and successful receipts from different attempts.
 
 Manual `Platform CI` dispatch supports `full` for the ordinary `xtask verify`
 recipe, `compare` for both pipelines on one checkout, and `diagnostics` for hosted
