@@ -109,6 +109,9 @@ selection's cursor/page size, and collect inside the same transaction. The bound
 must be 1–256 rows. Overflow returns the platform's `collection_limit_exceeded`
 failure; callers never receive a truncated prefix. An invalid bound returns
 `invalid_collection_bound`. Ordinary paginated endpoints continue to use `page`.
+An invocation may record 64 steps, counting its prepared observations and each
+read, write and request; past that it fails with `transaction_step_budget`. Size
+pages that a command walks row by row to stay within that budget.
 
 Folders never register operations. An unregistered helper remains a helper, and
 deleting a registered dependency fails compilation. There is no second authored

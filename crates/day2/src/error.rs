@@ -107,6 +107,9 @@ failures! {
     WorkerTimeout => ("worker_timeout", Timeout),
     WorkerCrashed => ("worker_crashed", Internal),
     TransactionDeadline => ("transaction_budget_exceeded", Timeout),
+    // The pinned code asked one transaction for more steps than the host
+    // interprets. Replay asks again, so this is an outcome, never a retry.
+    TransactionStepBudget => ("transaction_step_budget", Internal),
     PreparationDeadline => ("preparation_deadline", Timeout),
     ExternalAmbiguous => ("external_outcome_ambiguous", Internal),
     StorageBusy => ("storage_busy", Unavailable),
