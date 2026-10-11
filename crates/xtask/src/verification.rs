@@ -877,6 +877,8 @@ fn tests(
             "oauth::security_shell::tests::credential_api_admits_only_current_tokens_and_rechecks_durable_execution",
             "oauth::security_shell::tests::credential_browser_requires_fresh_auth_and_current_readiness",
             "oauth::security_shell::tests::credential_signed_google_session_keeps_original_intent_across_three_roles",
+            "oauth::security_shell::tests::signed_replay::signed_google_replay_two_positive_owner_histories",
+            "oauth::security_shell::tests::signed_replay::signed_google_replay_six_paired_negative_owner_histories",
             "oauth::security_shell::tests::credential_app_navigation_only_freezes_canonical_intent",
         ] {
             command.args(["--skip", test]);

@@ -747,6 +747,9 @@ fn token_shape(value: &str) -> bool {
 pub(in crate::oauth) use signed_fixtures::fixture_login;
 
 #[cfg(test)]
+pub(in crate::oauth) use signed_fixtures::{ReplayLogin, ReplayProviderCounts};
+
+#[cfg(test)]
 mod signed_fixtures {
     use super::*;
     use ring::{
@@ -843,6 +846,372 @@ mod signed_fixtures {
         0xf9, 0x9a, 0x04, 0xdc, 0x3d, 0xb9, 0xea, 0x17, 0x74, 0x64, 0xe2, 0xd1, 0xdf, 0xc2, 0xb6,
         0xc1, 0x4c, 0x95,
     ];
+
+    // Published ring 0.17.14 P-256 TEST vector, not company key material.
+    // PKCS8 SHA256 d56f99994233d749d03315f5cb9797fad81d3e25f962d2cd543d4dfe7cdd1389.
+    const REPLAY_IAP_PKCS8: &[u8] = &[
+        0x30, 0x81, 0x87, 0x02, 0x01, 0x00, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d,
+        0x02, 0x01, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x04, 0x6d, 0x30,
+        0x6b, 0x02, 0x01, 0x01, 0x04, 0x20, 0x57, 0x83, 0x29, 0xbf, 0xf0, 0x57, 0xbf, 0x48, 0xc8,
+        0x4b, 0x9f, 0xc4, 0x62, 0x94, 0x0c, 0x57, 0xbb, 0x50, 0x9e, 0x77, 0xe4, 0x43, 0x22, 0x8d,
+        0xbd, 0x62, 0x70, 0x54, 0xa1, 0xfc, 0xe2, 0x83, 0xa1, 0x44, 0x03, 0x42, 0x00, 0x04, 0xfc,
+        0x11, 0x66, 0x98, 0xa3, 0xe3, 0x23, 0x65, 0x50, 0xc4, 0xc9, 0xef, 0xa9, 0xbd, 0x4d, 0x06,
+        0x19, 0x60, 0x2a, 0x65, 0xd2, 0x93, 0x0e, 0x91, 0x50, 0xab, 0x33, 0xe8, 0x4d, 0xbc, 0x83,
+        0xf8, 0xa6, 0xa6, 0xb9, 0x93, 0x3f, 0x35, 0xab, 0x59, 0x24, 0x5e, 0x5b, 0x5a, 0x7a, 0xf5,
+        0xdc, 0xa7, 0x6b, 0x33, 0xcb, 0xe7, 0xae, 0xee, 0x59, 0x81, 0xb3, 0xca, 0x35, 0x0b, 0xeb,
+        0xf5, 0x2e, 0xcd,
+    ];
+    const REPLAY_IAP_JWKS: &str = r#"{"keys":[{"alg":"ES256","crv":"P-256","kid":"owned-iap-replay-fixture","kty":"EC","use":"sig","x":"_BFmmKPjI2VQxMnvqb1NBhlgKmXSkw6RUKsz6E28g_g","y":"pqa5kz81q1kkXltaevXcp2szy-eu7lmBs8o1C-v1Ls0"}]}"#;
+
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+    pub(in crate::oauth) struct ReplayProviderCounts {
+        pub iap_keys: usize,
+        pub google_keys: usize,
+        pub exchanges: usize,
+    }
+
+    #[derive(Clone, PartialEq, Eq)]
+    struct ReplayAuthorization {
+        state: String,
+        nonce: String,
+        challenge: String,
+        fields: BTreeMap<String, String>,
+    }
+
+    struct ReplayKeys {
+        jwks: String,
+        counts: Arc<Mutex<ReplayProviderCounts>>,
+        iap: bool,
+    }
+
+    impl KeySource for ReplayKeys {
+        fn fetch(&self) -> Result<String> {
+            ensure!(!self.iap, "replay Google key role changed");
+            self.counts.lock().unwrap().google_keys += 1;
+            Ok(self.jwks.clone())
+        }
+    }
+
+    impl iap::KeySource for ReplayKeys {
+        fn fetch(&self) -> Result<String> {
+            ensure!(self.iap, "replay IAP key role changed");
+            self.counts.lock().unwrap().iap_keys += 1;
+            Ok(self.jwks.clone())
+        }
+    }
+
+    struct ReplayExchange {
+        key: Arc<RsaKeyPair>,
+        authorization: Arc<Mutex<Option<ReplayAuthorization>>>,
+        counts: Arc<Mutex<ReplayProviderCounts>>,
+        identity: iap::Verified,
+        client: String,
+        redirect: String,
+        authenticated_at: i64,
+        completed_at: i64,
+        expires_at: i64,
+    }
+
+    impl CodeExchange for ReplayExchange {
+        fn exchange(
+            &self,
+            code: &str,
+            verifier: &str,
+            redirect: &str,
+            client: &str,
+        ) -> Result<String> {
+            ensure!(
+                code == "signed-replay-code"
+                    && token_shape(verifier)
+                    && redirect == self.redirect
+                    && client == self.client,
+                "replay selected Google exchange changed"
+            );
+            let authorization = self
+                .authorization
+                .lock()
+                .unwrap()
+                .take()
+                .context("replay authorization already consumed")?;
+            ensure!(
+                URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
+                    == authorization.challenge,
+                "replay original PKCE changed"
+            );
+            self.counts.lock().unwrap().exchanges += 1;
+            let claims = serde_json::json!({
+                "iss":ISSUER,"aud":client,
+                "sub":self.identity.subject.strip_prefix("accounts.google.com:").context("replay Google subject")?,
+                "email":self.identity.email,"email_verified":true,"hd":"example.com",
+                "iat":self.completed_at,"exp":self.expires_at,
+                "nonce":authorization.nonce,"auth_time":self.authenticated_at,
+            });
+            let signed = format!(
+                "{}.{}",
+                URL_SAFE_NO_PAD.encode(br#"{"alg":"RS256","kid":"owned-google-fixture"}"#),
+                URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims)?)
+            );
+            let mut signature = vec![0; self.key.public().modulus_len()];
+            self.key
+                .sign(
+                    &RSA_PKCS1_SHA256,
+                    &SystemRandom::new(),
+                    signed.as_bytes(),
+                    &mut signature,
+                )
+                .map_err(|_| anyhow::anyhow!("replay Google signature failed"))?;
+            Ok(format!("{signed}.{}", URL_SAFE_NO_PAD.encode(signature)))
+        }
+    }
+
+    /// Fixed public keys and genuine signed parsers. The real mounted page must
+    /// begin the authorization; this constructor creates no Pending or proof.
+    pub(in crate::oauth) struct ReplayLogin {
+        pub authenticator: Arc<GoogleFreshAuthenticator>,
+        key: EcdsaKeyPair,
+        audience: String,
+        client: String,
+        email: String,
+        redirect: String,
+        authorization: Arc<Mutex<Option<ReplayAuthorization>>>,
+        original: Mutex<Option<ReplayAuthorization>>,
+        counts: Arc<Mutex<ReplayProviderCounts>>,
+        claim_identity: Digest,
+        iap_claims: Mutex<Vec<Digest>>,
+    }
+
+    impl ReplayLogin {
+        pub fn new(
+            identity: &iap::Verified,
+            audience: &str,
+            client: &str,
+            origin: &str,
+            authenticated_at: i64,
+            completed_at: i64,
+            expires_at: i64,
+        ) -> Result<Self> {
+            let key = EcdsaKeyPair::from_pkcs8(
+                &ECDSA_P256_SHA256_FIXED_SIGNING,
+                REPLAY_IAP_PKCS8,
+                &SystemRandom::new(),
+            )
+            .map_err(|_| anyhow::anyhow!("published replay IAP vector invalid"))?;
+            let point = key.public_key().as_ref();
+            let expected: serde_json::Value = serde_json::from_str(REPLAY_IAP_JWKS)?;
+            ensure!(
+                point.len() == 65
+                    && point[0] == 4
+                    && Some(URL_SAFE_NO_PAD.encode(&point[1..33]).as_str())
+                        == expected["keys"][0]["x"].as_str()
+                    && Some(URL_SAFE_NO_PAD.encode(&point[33..65]).as_str())
+                        == expected["keys"][0]["y"].as_str(),
+                "published replay IAP public identity changed"
+            );
+            let rsa = Arc::new(
+                RsaKeyPair::from_pkcs8(TEST_PKCS8)
+                    .map_err(|_| anyhow::anyhow!("published replay Google vector invalid"))?,
+            );
+            let mut bytes = rsa.public_key().as_ref();
+            let mut sequence = der(&mut bytes, 0x30)?;
+            let modulus = der(&mut sequence, 0x02)?;
+            let exponent = der(&mut sequence, 0x02)?;
+            ensure!(
+                bytes.is_empty() && sequence.is_empty(),
+                "replay RSA extra fields"
+            );
+            let google_keys = serde_json::json!({"keys":[{"kid":"owned-google-fixture",
+                "kty":"RSA","alg":"RS256","use":"sig",
+                "n":URL_SAFE_NO_PAD.encode(modulus.strip_prefix(&[0]).unwrap_or(modulus)),
+                "e":URL_SAFE_NO_PAD.encode(exponent)}]})
+            .to_string();
+            let counts = Arc::new(Mutex::new(ReplayProviderCounts::default()));
+            let authorization = Arc::new(Mutex::new(None));
+            let redirect = format!(
+                "{}{}",
+                url::Url::parse(origin)?.origin().ascii_serialization(),
+                GoogleOidc::callback_path()
+            );
+            let oidc = GoogleOidc::new(
+                client.into(),
+                "example.com".into(),
+                origin,
+                Box::new(ReplayExchange {
+                    key: rsa,
+                    authorization: authorization.clone(),
+                    counts: counts.clone(),
+                    identity: identity.clone(),
+                    client: client.into(),
+                    redirect: redirect.clone(),
+                    authenticated_at,
+                    completed_at,
+                    expires_at,
+                }),
+                Box::new(ReplayKeys {
+                    jwks: google_keys,
+                    counts: counts.clone(),
+                    iap: false,
+                }),
+            )?;
+            let authenticator = Arc::new(GoogleFreshAuthenticator {
+                iap: iap::Verifier::new(
+                    audience,
+                    "example.com",
+                    Box::new(ReplayKeys {
+                        jwks: REPLAY_IAP_JWKS.into(),
+                        counts: counts.clone(),
+                        iap: true,
+                    }),
+                )?,
+                oidc,
+            });
+            let claim_identity = Digest::of(&(
+                "signed-replay-claim-inputs-v1",
+                REPLAY_IAP_JWKS,
+                Digest::new(TEST_PKCS8),
+                identity.email.as_str(),
+                identity.subject.as_str(),
+                audience,
+                client,
+                redirect.as_str(),
+                authenticated_at,
+                completed_at,
+                expires_at,
+            ))?;
+            Ok(Self {
+                authenticator,
+                key,
+                audience: audience.into(),
+                client: client.into(),
+                email: identity.email.clone(),
+                redirect,
+                authorization,
+                original: Mutex::new(None),
+                counts,
+                claim_identity,
+                iap_claims: Mutex::new(Vec::new()),
+            })
+        }
+
+        pub fn headers(&self, identity: &iap::Verified, now: i64) -> Result<HeaderMap> {
+            let claims = serde_json::json!({"iss":"https://cloud.google.com/iap","aud":self.audience,
+                "iat":now,"exp":now.checked_add(600).context("replay IAP expiry")?,
+                "sub":identity.subject,"email":identity.email,"hd":"example.com"});
+            let mut inputs = self.iap_claims.lock().unwrap();
+            ensure!(inputs.len() < 16, "replay IAP input count budget");
+            inputs.push(Digest::of(&("ES256", "owned-iap-replay-fixture", &claims))?);
+            drop(inputs);
+            let signed = format!(
+                "{}.{}",
+                URL_SAFE_NO_PAD.encode(br#"{"alg":"ES256","kid":"owned-iap-replay-fixture"}"#),
+                URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims)?)
+            );
+            let signature = self
+                .key
+                .sign(&SystemRandom::new(), signed.as_bytes())
+                .map_err(|_| anyhow::anyhow!("replay IAP signature failed"))?;
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                iap::ASSERTION_HEADER,
+                format!("{signed}.{}", URL_SAFE_NO_PAD.encode(signature.as_ref())).parse()?,
+            );
+            Ok(headers)
+        }
+
+        pub fn capture_authorization(&self, location: &str) -> Result<String> {
+            let url = url::Url::parse(location)?;
+            let expected = url::Url::parse(AUTHORIZATION_URL)?;
+            ensure!(
+                url.origin() == expected.origin()
+                    && url.path() == expected.path()
+                    && url.username().is_empty()
+                    && url.password().is_none()
+                    && url.fragment().is_none(),
+                "replay authorization origin/path"
+            );
+            let mut fields = BTreeMap::new();
+            for (name, value) in url.query_pairs().into_owned() {
+                ensure!(
+                    fields.insert(name, value).is_none(),
+                    "replay duplicate authorization field"
+                );
+            }
+            ensure!(fields.len() == 12, "replay authorization field set");
+            for (name, value) in [
+                ("response_type", "code"),
+                ("scope", "openid email"),
+                ("client_id", self.client.as_str()),
+                ("redirect_uri", self.redirect.as_str()),
+                ("code_challenge_method", "S256"),
+                ("max_age", "0"),
+                ("claims", r#"{"id_token":{"auth_time":{"essential":true}}}"#),
+                ("hd", "example.com"),
+                ("login_hint", self.email.as_str()),
+            ] {
+                ensure!(
+                    fields.get(name).map(String::as_str) == Some(value),
+                    "replay original Google query changed"
+                );
+            }
+            for name in ["state", "nonce", "code_challenge"] {
+                ensure!(
+                    fields.get(name).is_some_and(|value| token_shape(value)),
+                    "replay original Google token shape"
+                );
+            }
+            let current = ReplayAuthorization {
+                state: fields.get("state").context("replay state")?.clone(),
+                nonce: fields.get("nonce").context("replay nonce")?.clone(),
+                challenge: fields.get("code_challenge").context("replay PKCE")?.clone(),
+                fields,
+            };
+            let mut original = self.original.lock().unwrap();
+            if let Some(previous) = original.as_ref() {
+                ensure!(
+                    *previous == current,
+                    "replay original authorization replaced"
+                );
+            } else {
+                *original = Some(current.clone());
+                *self.authorization.lock().unwrap() = Some(current.clone());
+            }
+            Ok(url::form_urlencoded::Serializer::new(String::new())
+                .append_pair("state", &current.state)
+                .append_pair("code", "signed-replay-code")
+                .append_pair("iss", ISSUER)
+                .finish())
+        }
+
+        pub fn counts(&self) -> ReplayProviderCounts {
+            *self.counts.lock().unwrap()
+        }
+
+        pub fn pending_count(&self) -> usize {
+            self.authenticator.oidc.pending.lock().unwrap().len()
+        }
+
+        pub fn pending_intent(&self) -> Result<FreshIntent> {
+            let pending = self.authenticator.oidc.pending.lock().unwrap();
+            ensure!(
+                pending.len() == 1,
+                "replay needs exactly one original Google intent"
+            );
+            Ok(pending.values().next().unwrap().intent.clone())
+        }
+
+        /// Unsigned original claim inputs remain exact; random signatures and
+        /// private wire strings never enter a public replay trace.
+        pub fn authorization_identity(&self) -> Result<Digest> {
+            let original = self.original.lock().unwrap();
+            let original = original.as_ref().context("replay has no authorization")?;
+            Digest::of(&(
+                &self.claim_identity,
+                &*self.iap_claims.lock().unwrap(),
+                &self.client,
+                &self.redirect,
+                &original.fields,
+            ))
+        }
+    }
 
     struct Keys(String);
 
