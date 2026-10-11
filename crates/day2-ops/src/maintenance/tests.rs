@@ -69,6 +69,33 @@ fn image(worker: &[u8], extra: Option<(&str, tar::EntryType)>) -> Image {
     }
 }
 
+/// Another app image of `image`'s artifact: the same artifact layer over
+/// another runtime layer, as baking the same artifact into a new platform
+/// build's runtime produces.
+fn rebased(image: &Image) -> Image {
+    let (_, layer) = image
+        .blobs
+        .iter()
+        .find(|(path, _)| path.contains("/blobs/"))
+        .unwrap();
+    let layer_digest = day2::digest(layer);
+    let manifest = serde_json::to_vec(&json!({"schemaVersion": 2, "layers": [
+        {"digest": day2::digest(b"another runtime")}, {"digest": layer_digest}]}))
+    .unwrap();
+    let manifest_digest = day2::digest(&manifest);
+    Image {
+        reference: format!("registry.test/day2/example@{manifest_digest}"),
+        artifact_id: image.artifact_id.clone(),
+        blobs: BTreeMap::from([
+            (
+                format!("day2/example/manifests/{manifest_digest}"),
+                manifest,
+            ),
+            (format!("day2/example/blobs/{layer_digest}"), layer.clone()),
+        ]),
+    }
+}
+
 struct FakeRegistry(BTreeMap<String, Vec<u8>>);
 
 impl Registry for FakeRegistry {
@@ -700,10 +727,7 @@ fn activate_leaves_the_app_stopped_for_the_new_image() -> Result<()> {
     );
     assert_eq!(
         *harness.annotations.borrow(),
-        BTreeMap::from([(
-            ACTIVATED.to_owned(),
-            format!("sha256:{}", harness.target.artifact_id)
-        )])
+        BTreeMap::from([(ACTIVATED.to_owned(), harness.target.reference.clone())])
     );
     let steps = harness.journal();
     let at = |step: &str| steps.iter().position(|s| s == step).unwrap();
@@ -720,6 +744,97 @@ fn activate_leaves_the_app_stopped_for_the_new_image() -> Result<()> {
             && at("authority-activated") < at("mark-activated")
             && at("mark-activated") < at("activation-marked")
     );
+    Ok(())
+}
+
+/// A new image of the running artifact carries another day2-serve, whose store
+/// admission is just as unknown as a new artifact's: `activate` rehearses it
+/// the same way and stamps the new image.
+#[test]
+fn activate_takes_a_new_image_of_the_running_artifact() -> Result<()> {
+    let mut harness = Harness::new();
+    harness.target = rebased(&harness.running);
+    assert_ne!(harness.target.reference, harness.running.reference);
+    let mut session = harness.open(Operation::Activate, |_| {}, true)?;
+    prepare(&mut session)?;
+    // The pod holds the one artifact both images carry.
+    let artifacts: Vec<String> =
+        fs::read_dir(harness.directory.path().join("pod/srv/day2/artifacts"))?
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+    assert_eq!(artifacts, [harness.running.artifact_id.clone()]);
+    session.workflow("backup")?;
+    session.copy_backup()?;
+    session.migration("plan")?;
+    let admitted = session.admission()?;
+    assert_eq!(
+        admitted["artifact"],
+        format!("sha256:{}", harness.running.artifact_id)
+    );
+    session.confirm()?;
+    session.fence()?;
+    session.migration("apply")?;
+    session.workflow("authority-inspect")?;
+    session.workflow("authority-activate")?;
+    let marked = session.mark_activated()?;
+    assert_eq!(marked["activated_image"], harness.target.reference);
+    session.finish()?;
+    drop(session);
+    assert!(harness.deleted_pod() && !harness.scaled_up());
+    assert_eq!(
+        *harness.annotations.borrow(),
+        BTreeMap::from([(ACTIVATED.to_owned(), harness.target.reference.clone())])
+    );
+    Ok(())
+}
+
+/// The database activated the running artifact before any session, so
+/// `mark-activated` cannot show that a new image of it was rehearsed; a failed
+/// stamp names `activate` again instead.
+#[test]
+fn a_new_image_of_the_running_artifact_is_marked_only_by_activate() -> Result<()> {
+    let mut harness = Harness::new();
+    harness.target = rebased(&harness.running);
+    let refused = harness
+        .open(
+            Operation::MarkActivated,
+            |cluster| cluster.replicas = 0,
+            true,
+        )
+        .err()
+        .context("mark-activated for the running artifact")?;
+    assert!(
+        format!("{refused:#}").contains("cannot vouch"),
+        "{refused:#}"
+    );
+    assert!(harness.calls.borrow().is_empty(), "refused before kubectl");
+    let mut session = harness.open(
+        Operation::Activate,
+        |cluster| cluster.fail_on = Some("annotate".into()),
+        true,
+    )?;
+    prepare(&mut session)?;
+    session.workflow("backup")?;
+    session.copy_backup()?;
+    session.migration("plan")?;
+    session.admission()?;
+    session.confirm()?;
+    session.fence()?;
+    session.migration("apply")?;
+    session.workflow("authority-inspect")?;
+    session.workflow("authority-activate")?;
+    let error = format!("{:#}", session.mark_activated().unwrap_err());
+    let request = harness.directory.path().join("request.json");
+    assert!(
+        error.contains(&format!(
+            "day2 platform maintain activate {}",
+            request.display()
+        )),
+        "{error}"
+    );
+    drop(session);
+    assert!(harness.annotations.borrow().is_empty() && !harness.scaled_up());
     Ok(())
 }
 
@@ -977,7 +1092,7 @@ fn mark_activated_stamps_the_artifact_the_database_activated() -> Result<()> {
     drop(session);
     assert!(harness.deleted_pod() && !harness.scaled_up());
     assert_eq!(*harness.asked.borrow(), 0);
-    let value = format!("sha256:{}", harness.target.artifact_id);
+    let value = harness.target.reference.clone();
     assert_eq!(
         *harness.annotations.borrow(),
         BTreeMap::from([(ACTIVATED.to_owned(), value.clone())])
@@ -1206,6 +1321,16 @@ fn requests_are_validated_per_operation() {
     let mut untargeted = request.clone();
     untargeted.target = None;
     assert!(untargeted.validate(Operation::Activate).is_err());
+    // A target names another image; it may keep the running artifact, which
+    // only `activate` can then mark.
+    let mut running = request.clone();
+    running.target.as_mut().unwrap().app_image = request.app_image.clone();
+    assert!(running.validate(Operation::Activate).is_err());
+    let mut rebuilt = request.clone();
+    rebuilt.target.as_mut().unwrap().artifact_id = request.artifact_id.clone();
+    assert!(rebuilt.validate(Operation::Activate).is_ok());
+    assert!(rebuilt.validate(Operation::MarkActivated).is_err());
+    assert!(request.validate(Operation::MarkActivated).is_ok());
     let mut injected = request;
     injected.namespace = "app-example --all-namespaces".into();
     assert!(injected.validate(Operation::Activate).is_err());

@@ -35,12 +35,12 @@ Maintain :: [].{
 				_ = Capability.call!("maintenance-migration", Json.to_str({ step: "apply" }), host!)?
 				_ = workflow!("authority-inspect", host!)?
 				_ = workflow!("authority-activate", host!)?
-				# Only now may a release roll the app to the activated artifact.
+				# Only now may a release or an apply roll the app to the target image.
 				Capability.call!("maintenance-mark-activated", "{}", host!)?
 			}
 			"mark-activated" => {
-				# Recovery when activate's own mark failed: stamp only the
-				# artifact the database already activates.
+				# Recovery when activate's own mark failed for a new artifact: stamp
+				# the target image only if the database already activates its artifact.
 				_ = workflow!("authority-inspect", host!)?
 				Capability.call!("maintenance-mark-activated", "{}", host!)?
 			}

@@ -36,10 +36,11 @@ const REVISION: &str = "day2.dev/selection-revision";
 const SNAPSHOT: &str = "day2.dev/selection-digest";
 const CREDENTIALS_SHA256: &str = "day2.dev/credentials-sha256";
 const ARTIFACT: &str = "day2.dev/artifact";
-/// Stamped on the StatefulSet by `day2 platform maintain activate` once the
-/// target artifact is activated in the app's database. Only that artifact may
-/// replace the live one; the release that does so consumes the stamp.
-const ACTIVATED: &str = "day2.dev/activated-artifact";
+/// Stamped on the StatefulSet by `day2 platform maintain activate` with the
+/// target app image, once that image's build opened a rehearsed copy of the
+/// store and its artifact is activated in the app's database. Only that image
+/// may replace the live one; the release that does so consumes the stamp.
+const ACTIVATED: &str = "day2.dev/activated-image";
 const CSI_DRIVER: &str = "secrets-store-gke.csi.k8s.io";
 const OPERATOR_INSTANCE: &str = "operator-instance.json";
 const PROVISIONING: &str = "provisioning.json";
@@ -591,15 +592,28 @@ impl GkeReleaseProvider {
     }
 
     /// Before any write: once initialized, the app's database (not the
-    /// instance) selects the served artifact, so a release may change the
-    /// artifact only onto state activated for it. Returns whether the release
-    /// consumes the activation stamp and restores the profile's one replica.
+    /// instance) selects the served artifact, and the image's day2-serve
+    /// admits and upgrades the store when it starts. A new image, even of the
+    /// live artifact (another platform build), may therefore replace the live
+    /// one only after `maintain activate` rehearsed its store admission and
+    /// activated its artifact. Returns whether the release consumes the
+    /// activation stamp and restores the profile's one replica.
     fn admit(&self, controller: &Value, lease: &ReleaseLease) -> Result<bool> {
         let candidate = lease.approval.artifact.as_str();
+        let image = self.deployment.image.as_str();
         let live = controller["spec"]["template"]["metadata"]["annotations"][ARTIFACT]
             .as_str()
             .context("gke_release_artifact_annotation_missing")?;
-        if live == candidate {
+        let live_image = controller["spec"]["template"]["spec"]["containers"]
+            .as_array()
+            .and_then(|containers| {
+                containers
+                    .iter()
+                    .find(|container| container["name"] == "day2")
+            })
+            .and_then(|container| container["image"].as_str())
+            .context("gke_release_container_missing")?;
+        if live_image == image && live == candidate {
             ensure!(
                 controller["spec"]["replicas"] == 1,
                 "gke_release_topology_changed"
@@ -607,9 +621,9 @@ impl GkeReleaseProvider {
             return Ok(false);
         }
         let activated = controller["metadata"]["annotations"][ACTIVATED].as_str();
-        if activated != Some(candidate) {
+        if activated != Some(image) {
             return Err(ProviderRefusal(format!(
-                "release_artifact_requires_activation: {} serves {live}{}; run `day2 platform maintain activate` for {candidate} first",
+                "release_image_requires_activation: {} serves {live_image} ({live}){}; run `day2 platform maintain activate` for {image} ({candidate}) first",
                 self.deployment.serving.target.app.as_str(),
                 activated.map_or_else(String::new, |other| format!(
                     " and is activated for {other}"
@@ -1304,9 +1318,9 @@ impl Capabilities for GkeReleaseProvider {
                     if activated {
                         // Activation left the app stopped. Consume the stamp the
                         // resourceVersion test pins, so it cannot authorize a
-                        // later artifact change.
+                        // later image change.
                         patch.extend([
-                            json!({"op":"remove","path":"/metadata/annotations/day2.dev~1activated-artifact"}),
+                            json!({"op":"remove","path":"/metadata/annotations/day2.dev~1activated-image"}),
                             json!({"op":"replace","path":"/spec/replicas","value":1}),
                         ]);
                     }
