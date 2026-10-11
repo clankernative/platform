@@ -105,10 +105,18 @@ Verify :: [].{
 		_ = match shard {
 			"simulation" => Simulation.campaign!(3_664_912_422, 32, host!)
 			"workspace-day2" | "workspace-control" | "workspace-other" =>
-				Capability.call!("verify-prebuilt-tests", Json.to_str({ suite: shard, budget_seconds: 12_600.U64 }), host!)
+				Capability.call!(
+					"verify-prebuilt-tests",
+					Json.to_str({ suite: shard, budget_seconds: 12_600.U64 }),
+					host!,
+				)
 			"parallel-runtime" => Capability.call!("verify-prebuilt-tests", Json.to_str({ suite: shard }), host!)
 			"isolated-build" | "installation-build" =>
-				Capability.call!("verify-prebuilt-tests", Json.to_str({ suite: shard, budget_seconds: 1800.U64 }), host!)
+				Capability.call!(
+					"verify-prebuilt-tests",
+					Json.to_str({ suite: shard, budget_seconds: 1800.U64 }),
+					host!,
+				)
 			_ => Err("unknown verification shard")
 		}?
 		Capability.call!("verify-shard-receipt", Json.to_str({ shard: shard }), host!)

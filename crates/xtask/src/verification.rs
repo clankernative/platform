@@ -124,7 +124,9 @@ impl TestCampaign {
     fn budget(&self) -> Result<std::time::Duration> {
         let maximum = match self.suite.as_str() {
             "all-runtime" => 9000,
-            "workspace-runtime" | "workspace-day2" | "workspace-control" | "workspace-other" => 12600,
+            "workspace-runtime" | "workspace-day2" | "workspace-control" | "workspace-other" => {
+                12600
+            }
             "control" => 3600,
             "isolated-build" | "installation-build" => 1800,
             _ => DEFAULT_CAMPAIGN_BUDGET_SECONDS,
@@ -158,7 +160,8 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
     } else {
         None
     };
-    let arguments = recipe.strip_prefix("verify-shard-")
+    let arguments = recipe
+        .strip_prefix("verify-shard-")
         .map_or_else(|| vec![recipe], |shard| vec!["verify-shard", shard]);
     day2::automation::run(&runner, &arguments, |request| {
         if request.action.starts_with("simulation-") {
@@ -198,8 +201,15 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
             let budget = campaign.budget()?;
             let started = Instant::now();
             if request.action == "verify-prebuilt-tests" {
-                executed_binaries = shards::tests(root, prepared.as_ref().context("prepared test binaries required")?,
-                    &campaign.suite, &fixtures, budget)?;
+                executed_binaries = shards::tests(
+                    root,
+                    prepared
+                        .as_ref()
+                        .context("prepared test binaries required")?,
+                    &campaign.suite,
+                    &fixtures,
+                    budget,
+                )?;
             } else {
                 tests(root, &campaign.suite, &fixtures, budget)?;
             }
@@ -226,9 +236,14 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
             }
             "verify-test-docs" => {
                 ensure!(parameters.is_empty(), "doc tests accept no overrides");
-                run_with_budget(root, Command::new("cargo").args(["test", "--locked", "--doc"])
-                    .args(WORKSPACE_TEST_ARGUMENTS).args(["--", "--test-threads=1"]),
-                    Duration::from_secs(12600))?;
+                run_with_budget(
+                    root,
+                    Command::new("cargo")
+                        .args(["test", "--locked", "--doc"])
+                        .args(WORKSPACE_TEST_ARGUMENTS)
+                        .args(["--", "--test-threads=1"]),
+                    Duration::from_secs(12600),
+                )?;
                 "test-docs".into()
             }
             "verify-prepared" => {
@@ -240,14 +255,20 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
             "verify-shard-receipt" => {
                 let shard = value("shard")?;
                 ensure_stable(root, recipe, &snapshot)?;
-                shards::receipt(root, prepared.as_ref().context("prepared tests required")?,
-                    shard, &passed, &timings.steps_ms, &executed_binaries)?;
+                shards::receipt(
+                    root,
+                    prepared.as_ref().context("prepared tests required")?,
+                    shard,
+                    &passed,
+                    &timings.steps_ms,
+                    &executed_binaries,
+                )?;
                 return Ok(json!({}));
             }
             "verify-join" => {
                 ensure!(parameters.is_empty(), "join accepts no overrides");
-                (passed, timings.steps_ms) = shards::join(root,
-                    prepared.as_ref().context("prepared tests required")?)?;
+                (passed, timings.steps_ms) =
+                    shards::join(root, prepared.as_ref().context("prepared tests required")?)?;
                 return Ok(json!({}));
             }
             "verify-format" => {
@@ -509,7 +530,13 @@ fn recipe_scope(recipe: &str) -> Result<&'static str> {
         "verify-fast" => Ok("fast"),
         "verify-reports" => Ok("reports"),
         "verify" | "verify-prepare" | "verify-compose" => Ok("all"),
-        shard if shard.strip_prefix("verify-shard-").is_some_and(shards::valid) => Ok("all"),
+        shard
+            if shard
+                .strip_prefix("verify-shard-")
+                .is_some_and(shards::valid) =>
+        {
+            Ok("all")
+        }
         "control-verify" => Ok("control"),
         _ => bail!("unknown verification recipe: {recipe}"),
     }
@@ -593,7 +620,11 @@ fn verification_source_file(label: &str, relative: &Path) -> bool {
 }
 
 fn ensure_stable(root: &Path, recipe: &str, expected: &str) -> Result<()> {
-    let recipe = if recipe_scope(recipe)? == "all" { "verify" } else { recipe };
+    let recipe = if recipe_scope(recipe)? == "all" {
+        "verify"
+    } else {
+        recipe
+    };
     ensure!(
         verification_snapshot(root, recipe)? == expected,
         "verification inputs changed; rerun from one stable snapshot"
@@ -1139,7 +1170,7 @@ fn receipt(
         );
         report.insert(
             "timings_ms".into(),
-            json!({"steps":timings_ms,"total":total_ms}),
+            json!({"steps":timings_ms,"total":total_ms,"total_scope":"elapsed on this receipt host; distributed campaign work is recorded per step"}),
         );
         fs::write(
             root.join("artifacts/verification.json"),
@@ -1158,7 +1189,7 @@ fn receipt(
             "effects":passed,"cli_protocol":1,"tofu":"1.11.5, built-in terraform_data only",
             "host":std::env::consts::OS,"architecture":std::env::consts::ARCH,
             "input_snapshot":snapshot,
-            "timings_ms":{"steps":timings_ms,"total":total_ms},
+            "timings_ms":{"steps":timings_ms,"total":total_ms,"total_scope":"elapsed on this receipt host; distributed campaign work is recorded per step"},
             "completed_at_unix":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs()
         });
         fs::write(

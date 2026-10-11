@@ -709,7 +709,10 @@ fn main() -> Result<()> {
             verification::execute(&root, "verify")?;
         }
         "verify-prepare" | "verify-compose" => {
-            ensure!(args.next().is_none(), "verification stage accepts no arguments");
+            ensure!(
+                args.next().is_none(),
+                "verification stage accepts no arguments"
+            );
             verification::execute(&root, &action)?;
         }
         "verify-shard" => {
