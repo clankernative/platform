@@ -389,8 +389,9 @@ fn combine_parts(mut inputs: Prepared, tests: Prepared, expected: &Identity) -> 
 }
 
 pub(super) fn combine(root: &Path, snapshot: &str) -> Result<()> {
-    let inputs: Prepared =
-        day2::json::decode(&fs::read(root.join("artifacts/ci-preparation-inputs.json"))?)?;
+    let inputs: Prepared = day2::json::decode(&fs::read(
+        root.join("artifacts/ci-preparation-inputs.json"),
+    )?)?;
     let tests: Prepared =
         day2::json::decode(&fs::read(root.join("artifacts/ci-preparation-tests.json"))?)?;
     let prepared = combine_parts(inputs, tests, &identity(root, snapshot)?)?;

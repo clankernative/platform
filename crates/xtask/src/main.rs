@@ -721,8 +721,13 @@ fn main() -> Result<()> {
             verification::execute(&root, &action)?;
         }
         "verify-prepare-part" => {
-            let part = args.next().context("usage: xtask verify-prepare-part PART")?;
-            ensure!(args.next().is_none(), "usage: xtask verify-prepare-part PART");
+            let part = args
+                .next()
+                .context("usage: xtask verify-prepare-part PART")?;
+            ensure!(
+                args.next().is_none(),
+                "usage: xtask verify-prepare-part PART"
+            );
             verification::execute(&root, &format!("verify-prepare-part-{part}"))?;
         }
         "verify-shard" => {

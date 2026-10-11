@@ -253,7 +253,14 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
             "verify-prepared" => {
                 ensure!(parameters.is_empty(), "preparation accepts no overrides");
                 ensure_stable(root, recipe, &snapshot)?;
-                shards::save(root, &snapshot, &fixtures, &passed, &timings.steps_ms, "all")?;
+                shards::save(
+                    root,
+                    &snapshot,
+                    &fixtures,
+                    &passed,
+                    &timings.steps_ms,
+                    "all",
+                )?;
                 return Ok(json!({}));
             }
             "verify-prepared-part" => {
@@ -267,7 +274,10 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
                 return Ok(json!({}));
             }
             "verify-preparation-join" => {
-                ensure!(parameters.is_empty(), "preparation join accepts no overrides");
+                ensure!(
+                    parameters.is_empty(),
+                    "preparation join accepts no overrides"
+                );
                 ensure_stable(root, recipe, &snapshot)?;
                 shards::combine(root, &snapshot)?;
                 return Ok(json!({}));
@@ -549,8 +559,12 @@ fn recipe_scope(recipe: &str) -> Result<&'static str> {
     match recipe {
         "verify-fast" => Ok("fast"),
         "verify-reports" => Ok("reports"),
-        "verify" | "verify-prepare" | "verify-prepare-join" | "verify-compose"
-        | "verify-prepare-part-inputs" | "verify-prepare-part-tests" => Ok("all"),
+        "verify"
+        | "verify-prepare"
+        | "verify-prepare-join"
+        | "verify-compose"
+        | "verify-prepare-part-inputs"
+        | "verify-prepare-part-tests" => Ok("all"),
         shard
             if shard
                 .strip_prefix("verify-shard-")
