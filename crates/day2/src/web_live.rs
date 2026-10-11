@@ -103,6 +103,60 @@ struct SubscriptionState {
     refresh: Option<Duration>,
 }
 
+/// Observations and rendering only; refresh ordering and authorization stay shared.
+trait RefreshInputs {
+    fn session(&self, wall: i64) -> Result<Session>;
+
+    fn authority(&self, actor: &str) -> Result<AuthorityStamp>;
+
+    fn revision(&self) -> Result<i64>;
+
+    fn render(&self, session: &Session, wall: i64) -> Result<BTreeMap<String, String>>;
+}
+
+struct NativeRefreshInputs<'a> {
+    host: &'a Host,
+    page: &'a str,
+    input: &'a Value,
+    headers: &'a HeaderMap,
+}
+
+impl RefreshInputs for NativeRefreshInputs<'_> {
+    fn session(&self, wall: i64) -> Result<Session> {
+        ensure!(
+            self.host.admitting.load(Ordering::Acquire),
+            Failure::ArtifactBindingChanged
+        );
+        self.host.appearance.check_binding(&self.host.runtime)?;
+        security::session(
+            &self.host.runtime,
+            self.headers,
+            &self.host.cookie_name,
+            wall,
+        )
+    }
+
+    fn authority(&self, actor: &str) -> Result<AuthorityStamp> {
+        let operation = &self.host.runtime.artifact().page(self.page)?.operation;
+        Ok(self
+            .host
+            .runtime
+            .authority_snapshot(operation, actor)?
+            .stamp)
+    }
+
+    fn revision(&self) -> Result<i64> {
+        crate::live::revision(&open(self.host.runtime.db())?)
+    }
+
+    fn render(&self, session: &Session, wall: i64) -> Result<BTreeMap<String, String>> {
+        let markup = self
+            .host
+            .page(self.page, self.input, session, wall, None, None)?;
+        web_templates::live_regions(&markup.into_string())
+    }
+}
+
 impl Host {
     pub(super) fn live_initializer(&self, name: &str, input: &Value) -> Result<Markup> {
         if !self.runtime.artifact().page(name)?.live {
@@ -208,11 +262,9 @@ impl Host {
             },
         };
         // Recheck after rendering before any app data is released.
-        let (_, current) = subscription.authorize(self, self.wall_seconds()?)?;
-        ensure!(
-            current == subscription.state.authority,
-            Failure::AuthorityPolicyChanged
-        );
+        subscription
+            .state
+            .authorize_current(&subscription.inputs(self), self.wall_seconds()?)?;
         let (sender, receiver) = mpsc::channel(1);
         let (terminal_sender, terminal) = oneshot::channel();
         let initial = format!(
@@ -262,6 +314,33 @@ impl SubscriptionState {
         Ok(())
     }
 
+    fn authorize_current(&self, inputs: &dyn RefreshInputs, wall: i64) -> Result<Session> {
+        let session = inputs.session(wall)?;
+        self.authorize_session(&session, wall)?;
+        let authority = inputs.authority(&self.actor)?;
+        self.authorize(&session, &authority, wall)?;
+        Ok(session)
+    }
+
+    /// Production and simulation execute this same pre-render / post-render fence.
+    fn refresh(&mut self, inputs: &dyn RefreshInputs, clock: &dyn Clock) -> Result<Option<String>> {
+        let wall = || -> Result<i64> { Ok(clock.wall_time()?.as_secs().try_into()?) };
+        let session = self.authorize_current(inputs, wall()?)?;
+        // Sample before rendering so a concurrent business commit forces another pass.
+        let revision = inputs.revision()?;
+        if !self.needs_refresh(revision, clock.monotonic()) {
+            return Ok(None);
+        }
+        let regions = inputs.render(&session, wall()?)?;
+        ensure!(
+            regions.keys().eq(self.regions.keys()),
+            "live_region_set_changed"
+        );
+        // Fresh session, wall time and authority are mandatory before publishing state.
+        self.authorize_current(inputs, wall()?)?;
+        self.rendered(revision, clock.monotonic(), regions)
+    }
+
     fn needs_refresh(&self, revision: i64, monotonic: Duration) -> bool {
         revision != self.revision
             || self
@@ -292,48 +371,25 @@ impl SubscriptionState {
 }
 
 impl Subscription {
-    fn authorize(&self, host: &Host, wall: i64) -> Result<(Session, AuthorityStamp)> {
-        ensure!(
-            host.admitting.load(Ordering::Acquire),
-            Failure::ArtifactBindingChanged
-        );
-        host.appearance.check_binding(&host.runtime)?;
-        let session = security::session(&host.runtime, &self.headers, &host.cookie_name, wall)?;
-        self.state.authorize_session(&session, wall)?;
-        let operation = &host.runtime.artifact().page(&self.page)?.operation;
-        let authority = host
-            .runtime
-            .authority_snapshot(operation, &self.state.actor)?
-            .stamp;
-        self.state.authorize(&session, &authority, wall)?;
-        Ok((session, authority))
+    fn inputs<'a>(&'a self, host: &'a Host) -> NativeRefreshInputs<'a> {
+        NativeRefreshInputs {
+            host,
+            page: &self.page,
+            input: &self.input,
+            headers: &self.headers,
+        }
     }
 
     fn refresh(&mut self, host: &Host) -> Result<Option<String>> {
-        let (session, authority) = self.authorize(host, host.wall_seconds()?)?;
-        let revision = crate::live::revision(&open(host.runtime.db())?)?;
-        if !self.state.needs_refresh(revision, host.clock.monotonic()) {
-            return Ok(None);
-        }
-        let markup = host.page(
-            &self.page,
-            &self.input,
-            &session,
-            host.wall_seconds()?,
-            None,
-            None,
-        )?;
-        let regions = web_templates::live_regions(&markup.into_string())?;
-        ensure!(
-            regions.keys().eq(self.state.regions.keys()),
-            "live_region_set_changed"
-        );
-        // Reobserve wall time and authority after rendering, before committing a patch.
-        let (_, current) = self.authorize(host, host.wall_seconds()?)?;
-        ensure!(current == authority, Failure::AuthorityPolicyChanged);
+        let inputs = NativeRefreshInputs {
+            host,
+            page: &self.page,
+            input: &self.input,
+            headers: &self.headers,
+        };
         Ok(self
             .state
-            .rendered(revision, host.clock.monotonic(), regions)?
+            .refresh(&inputs, host.clock.as_ref())?
             .map(|changed| elements(&changed, "outer")))
     }
 
