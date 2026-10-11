@@ -104,7 +104,9 @@ fn identity(root: &Path, snapshot: &str) -> Result<Identity> {
 
 fn packages() -> BTreeSet<&'static str> {
     WORKSPACE_TEST_ARGUMENTS
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| pair[1])
         .collect()
 }
