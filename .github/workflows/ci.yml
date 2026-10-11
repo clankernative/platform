@@ -258,6 +258,7 @@ jobs:
 
   verify-shards:
     needs: verify-prepare
+    if: ${{ !cancelled() && needs.verify-prepare.result == 'success' }}
     runs-on: macos-15
     timeout-minutes: 240
     strategy:
