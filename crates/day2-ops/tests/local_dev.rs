@@ -86,6 +86,51 @@ fn native_session_preserves_data_and_port_recovers_failed_candidate_and_stops_cl
     let first = call(&mut session, "local-status", json!({}))?;
     assert_eq!(first["actor"], options.actor);
     assert_eq!(first["state"], "ready");
+    let contracts_path = PathBuf::from(
+        first["contracts"]["path"]
+            .as_str()
+            .context("contracts path")?,
+    );
+    let contracts_bytes = fs::read(&contracts_path)?;
+    assert_eq!(first["contracts"]["artifact"], first["artifact"]);
+    assert_eq!(
+        first["contracts"]["sha256"],
+        day2::digest(&contracts_bytes)[7..]
+    );
+    let contracts: Value = serde_json::from_slice(&contracts_bytes)?;
+    assert_eq!(contracts["artifact"], first["artifact"]);
+    assert_eq!(contracts["queries"]["reports.list"]["api"]["method"], "GET");
+    assert_eq!(
+        contracts["commands"]["reports.submit"]["api"]["method"],
+        "POST"
+    );
+    assert_eq!(
+        contracts["commands"]["reports.submit"]["inputSchema"]["properties"]["title"]["kind"],
+        "string"
+    );
+    assert_eq!(
+        contracts["commands"]["reports.revise"]["edit"]["version_field"],
+        "expected_version"
+    );
+    assert_eq!(contracts["routes"]["reports"]["query"], "reports.list");
+    assert_eq!(contracts["schedules"]["sweep"]["command"], "reports.sweep");
+    assert!(
+        contracts["forms"]
+            .as_array()
+            .context("exported forms")?
+            .iter()
+            .any(|form| {
+                form["command"] == "reports.submit"
+                    && form["fields"]
+                        .as_array()
+                        .is_some_and(|fields| fields.iter().any(|field| field["name"] == "title"))
+            })
+    );
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(
+        fs::metadata(&contracts_path)?.permissions().mode() & 0o777,
+        0o600
+    );
     let instance = PathBuf::from(first["instance"].as_str().context("instance")?);
     let runtime = Runtime::load(&instance, "app")?;
     let snapshot = runtime.inspect()?;

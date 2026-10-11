@@ -161,6 +161,26 @@ pub(crate) fn verify_csrf(secret: &[u8], session: &Session, raw: &str) -> Result
     );
     Ok(())
 }
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) enum NativeMode {
+    BooleanCheckbox,
+    ListCheckbox,
+    SetCheckbox,
+    Radio,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct NativeField {
+    pub mode: NativeMode,
+    /// Signed omission value: false for a Boolean checkbox, empty collection for
+    /// an admitted checkbox collection, and the empty string for an unselected radio.
+    pub omitted: Value,
+    /// Values admitted by this concrete rendered radio/checkbox group.
+    pub choices: Vec<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Ticket {
@@ -175,6 +195,8 @@ pub(crate) struct Ticket {
     pub form_id: Option<String>,
     pub bound: Value,
     pub editable: Vec<String>,
+    #[serde(default)]
+    pub native: BTreeMap<String, NativeField>,
     pub nonce: String,
     pub issued: i64,
     pub expires: i64,

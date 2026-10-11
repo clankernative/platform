@@ -1,0 +1,1954 @@
+{
+  "abi": "ui-binding",
+  "version": 2,
+  "cases": [
+    {
+      "id": "compare-signed-large-negative",
+      "helper": "ui_compare",
+      "args": [
+        {
+          "type": "i64",
+          "value": "-9007199254740993"
+        },
+        {
+          "type": "f64",
+          "value": "-9007199254740992"
+        }
+      ],
+      "expect": {
+        "ok": -1
+      }
+    },
+    {
+      "id": "compare-signed-large-negative-reversed",
+      "helper": "ui_compare",
+      "args": [
+        {
+          "type": "f64",
+          "value": "-9007199254740992"
+        },
+        {
+          "type": "i64",
+          "value": "-9007199254740993"
+        }
+      ],
+      "expect": {
+        "ok": 1
+      }
+    },
+    {
+      "id": "compare-large-positive",
+      "helper": "ui_compare",
+      "args": [
+        {
+          "type": "u64",
+          "value": "9007199254740993"
+        },
+        {
+          "type": "f64",
+          "value": "9007199254740992"
+        }
+      ],
+      "expect": {
+        "ok": 1
+      }
+    },
+    {
+      "id": "compare-u64-rounded",
+      "helper": "ui_compare",
+      "args": [
+        {
+          "type": "u64",
+          "value": "9223372036854775807"
+        },
+        {
+          "type": "f64",
+          "value": "9223372036854775808"
+        }
+      ],
+      "expect": {
+        "ok": -1
+      }
+    },
+    {
+      "id": "compare-u64-exact",
+      "helper": "ui_compare",
+      "args": [
+        {
+          "type": "u64",
+          "value": "9223372036854775808"
+        },
+        {
+          "type": "f64",
+          "value": "9223372036854775808"
+        }
+      ],
+      "expect": {
+        "ok": 0
+      }
+    },
+    {
+      "id": "compare-u64-above",
+      "helper": "ui_compare",
+      "args": [
+        {
+          "type": "u64",
+          "value": "9223372036854775809"
+        },
+        {
+          "type": "f64",
+          "value": "9223372036854775808"
+        }
+      ],
+      "expect": {
+        "ok": 1
+      }
+    },
+    {
+      "id": "compare-negative-fraction",
+      "helper": "ui_compare",
+      "args": [
+        {
+          "type": "i64",
+          "value": "-1"
+        },
+        {
+          "type": "f64",
+          "value": "-0.5"
+        }
+      ],
+      "expect": {
+        "ok": -1
+      }
+    },
+    {
+      "id": "compare-zero-positive-fraction",
+      "helper": "ui_compare",
+      "args": [
+        {
+          "type": "i64",
+          "value": "0"
+        },
+        {
+          "type": "f64",
+          "value": "0.1"
+        }
+      ],
+      "expect": {
+        "ok": -1
+      }
+    },
+    {
+      "id": "compare-zero-negative-fraction",
+      "helper": "ui_compare",
+      "args": [
+        {
+          "type": "i64",
+          "value": "0"
+        },
+        {
+          "type": "f64",
+          "value": "-0.1"
+        }
+      ],
+      "expect": {
+        "ok": 1
+      }
+    },
+    {
+      "id": "compare-negative-zero",
+      "helper": "ui_compare",
+      "args": [
+        {
+          "type": "i64",
+          "value": "0"
+        },
+        {
+          "type": "f64_bits",
+          "value": "8000000000000000"
+        }
+      ],
+      "expect": {
+        "ok": 0
+      }
+    },
+    {
+      "id": "compare-smallest-subnormal",
+      "helper": "ui_compare",
+      "args": [
+        {
+          "type": "i64",
+          "value": "0"
+        },
+        {
+          "type": "f64_bits",
+          "value": "0000000000000001"
+        }
+      ],
+      "expect": {
+        "ok": -1
+      }
+    },
+    {
+      "id": "compare-negative-subnormal",
+      "helper": "ui_compare",
+      "args": [
+        {
+          "type": "i64",
+          "value": "0"
+        },
+        {
+          "type": "f64_bits",
+          "value": "8000000000000001"
+        }
+      ],
+      "expect": {
+        "ok": 1
+      }
+    },
+    {
+      "id": "compare-integral-float",
+      "helper": "ui_compare",
+      "args": [
+        {
+          "type": "i64",
+          "value": "1"
+        },
+        {
+          "type": "f64",
+          "value": "1"
+        }
+      ],
+      "expect": {
+        "ok": 0
+      }
+    },
+    {
+      "id": "compare-i128-min-rounded",
+      "helper": "ui_compare",
+      "args": [
+        {
+          "type": "i128",
+          "value": "-170141183460469231731687303715884105728"
+        },
+        {
+          "type": "f64",
+          "value": "-170141183460469231731687303715884105728"
+        }
+      ],
+      "expect": {
+        "ok": 0
+      }
+    },
+    {
+      "id": "compare-u128-max-rounded",
+      "helper": "ui_compare",
+      "args": [
+        {
+          "type": "u128",
+          "value": "340282366920938463463374607431768211455"
+        },
+        {
+          "type": "f64",
+          "value": "340282366920938463463374607431768211456"
+        }
+      ],
+      "expect": {
+        "ok": -1
+      }
+    },
+    {
+      "id": "compare-left-string",
+      "helper": "ui_compare",
+      "args": [
+        {
+          "type": "string",
+          "value": "1"
+        },
+        {
+          "type": "i64",
+          "value": "2"
+        }
+      ],
+      "expect": {
+        "error": "ui_compare_number_required"
+      }
+    },
+    {
+      "id": "compare-right-string",
+      "helper": "ui_compare",
+      "args": [
+        {
+          "type": "i64",
+          "value": "1"
+        },
+        {
+          "type": "string",
+          "value": "2"
+        }
+      ],
+      "expect": {
+        "error": "ui_compare_number_required"
+      }
+    },
+    {
+      "id": "compare-both-strings",
+      "helper": "ui_compare",
+      "args": [
+        {
+          "type": "string",
+          "value": "-9007199254740993"
+        },
+        {
+          "type": "string",
+          "value": "-9007199254740992"
+        }
+      ],
+      "expect": {
+        "error": "ui_compare_number_required"
+      }
+    },
+    {
+      "id": "compare-boolean",
+      "helper": "ui_compare",
+      "args": [
+        {
+          "type": "bool",
+          "value": "true"
+        },
+        {
+          "type": "i64",
+          "value": "1"
+        }
+      ],
+      "expect": {
+        "error": "ui_compare_number_required"
+      }
+    },
+    {
+      "id": "compare-none",
+      "helper": "ui_compare",
+      "args": [
+        {
+          "type": "none"
+        },
+        {
+          "type": "i64",
+          "value": "1"
+        }
+      ],
+      "expect": {
+        "error": "ui_compare_number_required"
+      }
+    },
+    {
+      "id": "compare-nan",
+      "helper": "ui_compare",
+      "args": [
+        {
+          "type": "f64_bits",
+          "value": "7ff8000000000000"
+        },
+        {
+          "type": "i64",
+          "value": "0"
+        }
+      ],
+      "expect": {
+        "error": "ui_number_invalid"
+      }
+    },
+    {
+      "id": "number-float-nan",
+      "helper": "ui_number",
+      "args": [
+        {
+          "type": "f64_bits",
+          "value": "7ff8000000000000"
+        },
+        {
+          "type": "none"
+        },
+        {
+          "type": "none"
+        },
+        {
+          "type": "bool",
+          "value": "false"
+        }
+      ],
+      "expect": {
+        "error": "ui_number_invalid"
+      }
+    },
+    {
+      "id": "compare-infinity",
+      "helper": "ui_compare",
+      "args": [
+        {
+          "type": "f64_bits",
+          "value": "7ff0000000000000"
+        },
+        {
+          "type": "i64",
+          "value": "0"
+        }
+      ],
+      "expect": {
+        "error": "ui_number_invalid"
+      }
+    },
+    {
+      "id": "number-infinity",
+      "helper": "ui_number",
+      "args": [
+        {
+          "type": "f64_bits",
+          "value": "7ff0000000000000"
+        },
+        {
+          "type": "none"
+        },
+        {
+          "type": "none"
+        },
+        {
+          "type": "bool",
+          "value": "false"
+        }
+      ],
+      "expect": {
+        "error": "ui_number_invalid"
+      }
+    },
+    {
+      "id": "compare-negative-infinity",
+      "helper": "ui_compare",
+      "args": [
+        {
+          "type": "f64_bits",
+          "value": "fff0000000000000"
+        },
+        {
+          "type": "i64",
+          "value": "0"
+        }
+      ],
+      "expect": {
+        "error": "ui_number_invalid"
+      }
+    },
+    {
+      "id": "number-negative-infinity",
+      "helper": "ui_number",
+      "args": [
+        {
+          "type": "f64_bits",
+          "value": "fff0000000000000"
+        },
+        {
+          "type": "none"
+        },
+        {
+          "type": "none"
+        },
+        {
+          "type": "bool",
+          "value": "false"
+        }
+      ],
+      "expect": {
+        "error": "ui_number_invalid"
+      }
+    },
+    {
+      "id": "number-signed-large-negative",
+      "helper": "ui_number",
+      "args": [
+        {
+          "type": "i64",
+          "value": "-9007199254740993"
+        },
+        {
+          "type": "string",
+          "value": "-9007199254740993"
+        },
+        {
+          "type": "string",
+          "value": "-9007199254740993"
+        },
+        {
+          "type": "bool",
+          "value": "false"
+        }
+      ],
+      "expect": {
+        "ok": "-9007199254740993"
+      }
+    },
+    {
+      "id": "number-signed-string",
+      "helper": "ui_number",
+      "args": [
+        {
+          "type": "string",
+          "value": "-9007199254740993"
+        },
+        {
+          "type": "none"
+        },
+        {
+          "type": "none"
+        },
+        {
+          "type": "bool",
+          "value": "false"
+        }
+      ],
+      "expect": {
+        "ok": "-9007199254740993"
+      }
+    },
+    {
+      "id": "number-decimal-canonical",
+      "helper": "ui_number",
+      "args": [
+        {
+          "type": "string",
+          "value": "+001.5000e+0"
+        },
+        {
+          "type": "string",
+          "value": "1.5"
+        },
+        {
+          "type": "string",
+          "value": "2"
+        },
+        {
+          "type": "bool",
+          "value": "false"
+        }
+      ],
+      "expect": {
+        "ok": "1.5"
+      }
+    },
+    {
+      "id": "number-exponent-canonical",
+      "helper": "ui_number",
+      "args": [
+        {
+          "type": "string",
+          "value": "1e20"
+        },
+        {
+          "type": "none"
+        },
+        {
+          "type": "none"
+        },
+        {
+          "type": "bool",
+          "value": "false"
+        }
+      ],
+      "expect": {
+        "ok": "100000000000000000000"
+      }
+    },
+    {
+      "id": "number-tiny-decimal",
+      "helper": "ui_number",
+      "args": [
+        {
+          "type": "string",
+          "value": "-12.50e-4"
+        },
+        {
+          "type": "none"
+        },
+        {
+          "type": "none"
+        },
+        {
+          "type": "bool",
+          "value": "false"
+        }
+      ],
+      "expect": {
+        "ok": "-0.00125"
+      }
+    },
+    {
+      "id": "number-decimal-negative-zero",
+      "helper": "ui_number",
+      "args": [
+        {
+          "type": "string",
+          "value": "-0.000e10000"
+        },
+        {
+          "type": "none"
+        },
+        {
+          "type": "none"
+        },
+        {
+          "type": "bool",
+          "value": "false"
+        }
+      ],
+      "expect": {
+        "ok": "0"
+      }
+    },
+    {
+      "id": "number-float-negative-zero",
+      "helper": "ui_number",
+      "args": [
+        {
+          "type": "f64_bits",
+          "value": "8000000000000000"
+        },
+        {
+          "type": "string",
+          "value": "0"
+        },
+        {
+          "type": "string",
+          "value": "0"
+        },
+        {
+          "type": "bool",
+          "value": "false"
+        }
+      ],
+      "expect": {
+        "ok": "0"
+      }
+    },
+    {
+      "id": "number-float-shortest-canonical",
+      "helper": "ui_number",
+      "args": [
+        {
+          "type": "f64",
+          "value": "0.1"
+        },
+        {
+          "type": "string",
+          "value": "0.1"
+        },
+        {
+          "type": "none"
+        },
+        {
+          "type": "bool",
+          "value": "true"
+        }
+      ],
+      "expect": {
+        "ok": "0.1"
+      }
+    },
+    {
+      "id": "number-exact-fraction",
+      "helper": "ui_number",
+      "args": [
+        {
+          "type": "f64",
+          "value": "0.125"
+        },
+        {
+          "type": "string",
+          "value": "0.125"
+        },
+        {
+          "type": "string",
+          "value": "0.125"
+        },
+        {
+          "type": "bool",
+          "value": "false"
+        }
+      ],
+      "expect": {
+        "ok": "0.125"
+      }
+    },
+    {
+      "id": "number-integer-bound-exponent",
+      "helper": "ui_number",
+      "args": [
+        {
+          "type": "i64",
+          "value": "100"
+        },
+        {
+          "type": "string",
+          "value": "1e2"
+        },
+        {
+          "type": "string",
+          "value": "100.00"
+        },
+        {
+          "type": "bool",
+          "value": "false"
+        }
+      ],
+      "expect": {
+        "ok": "100"
+      }
+    },
+    {
+      "id": "number-exclusive-equality",
+      "helper": "ui_number",
+      "args": [
+        {
+          "type": "string",
+          "value": "1.5"
+        },
+        {
+          "type": "string",
+          "value": "1.5"
+        },
+        {
+          "type": "none"
+        },
+        {
+          "type": "bool",
+          "value": "true"
+        }
+      ],
+      "expect": {
+        "error": "ui_number_below_minimum"
+      }
+    },
+    {
+      "id": "number-float-above-exact-decimal",
+      "helper": "ui_number",
+      "args": [
+        {
+          "type": "f64",
+          "value": "0.1"
+        },
+        {
+          "type": "none"
+        },
+        {
+          "type": "string",
+          "value": "0.1"
+        },
+        {
+          "type": "bool",
+          "value": "false"
+        }
+      ],
+      "expect": {
+        "error": "ui_number_above_maximum"
+      }
+    },
+    {
+      "id": "number-float-below-exact-decimal",
+      "helper": "ui_number",
+      "args": [
+        {
+          "type": "f64",
+          "value": "-0.1"
+        },
+        {
+          "type": "string",
+          "value": "-0.1"
+        },
+        {
+          "type": "none"
+        },
+        {
+          "type": "bool",
+          "value": "false"
+        }
+      ],
+      "expect": {
+        "error": "ui_number_below_minimum"
+      }
+    },
+    {
+      "id": "number-signed-rounded-bound",
+      "helper": "ui_number",
+      "args": [
+        {
+          "type": "i64",
+          "value": "-9007199254740993"
+        },
+        {
+          "type": "string",
+          "value": "-9007199254740992"
+        },
+        {
+          "type": "none"
+        },
+        {
+          "type": "bool",
+          "value": "false"
+        }
+      ],
+      "expect": {
+        "error": "ui_number_below_minimum"
+      }
+    },
+    {
+      "id": "number-large-rounded-bound",
+      "helper": "ui_number",
+      "args": [
+        {
+          "type": "f64",
+          "value": "9223372036854775808"
+        },
+        {
+          "type": "string",
+          "value": "9223372036854775809"
+        },
+        {
+          "type": "none"
+        },
+        {
+          "type": "bool",
+          "value": "false"
+        }
+      ],
+      "expect": {
+        "error": "ui_number_below_minimum"
+      }
+    },
+    {
+      "id": "number-invalid-min",
+      "helper": "ui_number",
+      "args": [
+        {
+          "type": "i64",
+          "value": "1"
+        },
+        {
+          "type": "string",
+          "value": "NaN"
+        },
+        {
+          "type": "none"
+        },
+        {
+          "type": "bool",
+          "value": "false"
+        }
+      ],
+      "expect": {
+        "error": "ui_number_invalid"
+      }
+    },
+    {
+      "id": "number-invalid-max",
+      "helper": "ui_number",
+      "args": [
+        {
+          "type": "i64",
+          "value": "1"
+        },
+        {
+          "type": "none"
+        },
+        {
+          "type": "string",
+          "value": "inf"
+        },
+        {
+          "type": "bool",
+          "value": "false"
+        }
+      ],
+      "expect": {
+        "error": "ui_number_invalid"
+      }
+    },
+    {
+      "id": "number-reversed-bounds",
+      "helper": "ui_number",
+      "args": [
+        {
+          "type": "i64",
+          "value": "1"
+        },
+        {
+          "type": "string",
+          "value": "2"
+        },
+        {
+          "type": "string",
+          "value": "0"
+        },
+        {
+          "type": "bool",
+          "value": "false"
+        }
+      ],
+      "expect": {
+        "error": "ui_number_below_minimum"
+      }
+    },
+    {
+      "id": "number-empty",
+      "helper": "ui_number",
+      "args": [
+        {
+          "type": "string",
+          "value": ""
+        },
+        {
+          "type": "none"
+        },
+        {
+          "type": "none"
+        },
+        {
+          "type": "bool",
+          "value": "false"
+        }
+      ],
+      "expect": {
+        "error": "ui_number_invalid"
+      }
+    },
+    {
+      "id": "number-whitespace",
+      "helper": "ui_number",
+      "args": [
+        {
+          "type": "string",
+          "value": " 1"
+        },
+        {
+          "type": "none"
+        },
+        {
+          "type": "none"
+        },
+        {
+          "type": "bool",
+          "value": "false"
+        }
+      ],
+      "expect": {
+        "error": "ui_number_invalid"
+      }
+    },
+    {
+      "id": "number-nan",
+      "helper": "ui_number",
+      "args": [
+        {
+          "type": "string",
+          "value": "NaN"
+        },
+        {
+          "type": "none"
+        },
+        {
+          "type": "none"
+        },
+        {
+          "type": "bool",
+          "value": "false"
+        }
+      ],
+      "expect": {
+        "error": "ui_number_invalid"
+      }
+    },
+    {
+      "id": "number-inf",
+      "helper": "ui_number",
+      "args": [
+        {
+          "type": "string",
+          "value": "inf"
+        },
+        {
+          "type": "none"
+        },
+        {
+          "type": "none"
+        },
+        {
+          "type": "bool",
+          "value": "false"
+        }
+      ],
+      "expect": {
+        "error": "ui_number_invalid"
+      }
+    },
+    {
+      "id": "number-big-exponent",
+      "helper": "ui_number",
+      "args": [
+        {
+          "type": "string",
+          "value": "1e10001"
+        },
+        {
+          "type": "none"
+        },
+        {
+          "type": "none"
+        },
+        {
+          "type": "bool",
+          "value": "false"
+        }
+      ],
+      "expect": {
+        "error": "ui_number_invalid"
+      }
+    },
+    {
+      "id": "number-negative-big-exponent",
+      "helper": "ui_number",
+      "args": [
+        {
+          "type": "string",
+          "value": "1e-10001"
+        },
+        {
+          "type": "none"
+        },
+        {
+          "type": "none"
+        },
+        {
+          "type": "bool",
+          "value": "false"
+        }
+      ],
+      "expect": {
+        "error": "ui_number_invalid"
+      }
+    },
+    {
+      "id": "number-too-long",
+      "helper": "ui_number",
+      "args": [
+        {
+          "type": "string",
+          "value": "11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
+        },
+        {
+          "type": "none"
+        },
+        {
+          "type": "none"
+        },
+        {
+          "type": "bool",
+          "value": "false"
+        }
+      ],
+      "expect": {
+        "error": "ui_number_invalid"
+      }
+    },
+    {
+      "id": "number-malformed",
+      "helper": "ui_number",
+      "args": [
+        {
+          "type": "string",
+          "value": "1.2.3"
+        },
+        {
+          "type": "none"
+        },
+        {
+          "type": "none"
+        },
+        {
+          "type": "bool",
+          "value": "false"
+        }
+      ],
+      "expect": {
+        "error": "ui_number_invalid"
+      }
+    },
+    {
+      "id": "number-no-digits",
+      "helper": "ui_number",
+      "args": [
+        {
+          "type": "string",
+          "value": "."
+        },
+        {
+          "type": "none"
+        },
+        {
+          "type": "none"
+        },
+        {
+          "type": "bool",
+          "value": "false"
+        }
+      ],
+      "expect": {
+        "error": "ui_number_invalid"
+      }
+    },
+    {
+      "id": "number-double-exponent",
+      "helper": "ui_number",
+      "args": [
+        {
+          "type": "string",
+          "value": "1e2e3"
+        },
+        {
+          "type": "none"
+        },
+        {
+          "type": "none"
+        },
+        {
+          "type": "bool",
+          "value": "false"
+        }
+      ],
+      "expect": {
+        "error": "ui_number_invalid"
+      }
+    },
+    {
+      "id": "integer-signed-large",
+      "helper": "ui_integer",
+      "args": [
+        {
+          "type": "i64",
+          "value": "-9007199254740993"
+        },
+        {
+          "type": "string",
+          "value": "-9007199254740994"
+        },
+        {
+          "type": "string",
+          "value": "-9007199254740992"
+        }
+      ],
+      "expect": {
+        "ok": "-9007199254740993"
+      }
+    },
+    {
+      "id": "integer-u64-max",
+      "helper": "ui_integer",
+      "args": [
+        {
+          "type": "u64",
+          "value": "18446744073709551615"
+        },
+        {
+          "type": "string",
+          "value": "0"
+        },
+        {
+          "type": "string",
+          "value": "18446744073709551615"
+        }
+      ],
+      "expect": {
+        "ok": "18446744073709551615"
+      }
+    },
+    {
+      "id": "integer-i128-min",
+      "helper": "ui_integer",
+      "args": [
+        {
+          "type": "i128",
+          "value": "-170141183460469231731687303715884105728"
+        },
+        {
+          "type": "string",
+          "value": "-170141183460469231731687303715884105728"
+        },
+        {
+          "type": "string",
+          "value": "0"
+        }
+      ],
+      "expect": {
+        "ok": "-170141183460469231731687303715884105728"
+      }
+    },
+    {
+      "id": "integer-u128-max",
+      "helper": "ui_integer",
+      "args": [
+        {
+          "type": "u128",
+          "value": "340282366920938463463374607431768211455"
+        },
+        {
+          "type": "string",
+          "value": "0"
+        },
+        {
+          "type": "string",
+          "value": "340282366920938463463374607431768211455"
+        }
+      ],
+      "expect": {
+        "ok": "340282366920938463463374607431768211455"
+      }
+    },
+    {
+      "id": "integer-decimal-integral-bounds",
+      "helper": "ui_integer",
+      "args": [
+        {
+          "type": "i64",
+          "value": "10"
+        },
+        {
+          "type": "string",
+          "value": "+0010.00"
+        },
+        {
+          "type": "string",
+          "value": "1e1"
+        }
+      ],
+      "expect": {
+        "ok": "10"
+      }
+    },
+    {
+      "id": "integer-float-integral",
+      "helper": "ui_integer",
+      "args": [
+        {
+          "type": "f64",
+          "value": "1"
+        },
+        {
+          "type": "string",
+          "value": "0"
+        },
+        {
+          "type": "string",
+          "value": "2"
+        }
+      ],
+      "expect": {
+        "error": "ui_integer_number_required"
+      }
+    },
+    {
+      "id": "integer-string",
+      "helper": "ui_integer",
+      "args": [
+        {
+          "type": "string",
+          "value": "1"
+        },
+        {
+          "type": "string",
+          "value": "0"
+        },
+        {
+          "type": "string",
+          "value": "2"
+        }
+      ],
+      "expect": {
+        "error": "ui_integer_number_required"
+      }
+    },
+    {
+      "id": "integer-bool",
+      "helper": "ui_integer",
+      "args": [
+        {
+          "type": "bool",
+          "value": "true"
+        },
+        {
+          "type": "string",
+          "value": "0"
+        },
+        {
+          "type": "string",
+          "value": "2"
+        }
+      ],
+      "expect": {
+        "error": "ui_integer_number_required"
+      }
+    },
+    {
+      "id": "integer-fractional-bound",
+      "helper": "ui_integer",
+      "args": [
+        {
+          "type": "i64",
+          "value": "1"
+        },
+        {
+          "type": "string",
+          "value": "0.5"
+        },
+        {
+          "type": "string",
+          "value": "2"
+        }
+      ],
+      "expect": {
+        "error": "ui_integer_integral_required"
+      }
+    },
+    {
+      "id": "integer-out-of-bounds",
+      "helper": "ui_integer",
+      "args": [
+        {
+          "type": "i64",
+          "value": "4"
+        },
+        {
+          "type": "string",
+          "value": "0"
+        },
+        {
+          "type": "string",
+          "value": "3"
+        }
+      ],
+      "expect": {
+        "error": "ui_integer_out_of_bounds"
+      }
+    },
+    {
+      "id": "integer-reversed-bounds",
+      "helper": "ui_integer",
+      "args": [
+        {
+          "type": "i64",
+          "value": "1"
+        },
+        {
+          "type": "string",
+          "value": "2"
+        },
+        {
+          "type": "string",
+          "value": "0"
+        }
+      ],
+      "expect": {
+        "error": "ui_integer_out_of_bounds"
+      }
+    },
+    {
+      "id": "integer-invalid-bound",
+      "helper": "ui_integer",
+      "args": [
+        {
+          "type": "i64",
+          "value": "1"
+        },
+        {
+          "type": "string",
+          "value": "NaN"
+        },
+        {
+          "type": "string",
+          "value": "2"
+        }
+      ],
+      "expect": {
+        "error": "ui_number_invalid"
+      }
+    },
+    {
+      "id": "text-graphemes",
+      "helper": "ui_text",
+      "args": [
+        {
+          "type": "string",
+          "value": "A👩‍🚀é"
+        },
+        {
+          "type": "string",
+          "value": "nonblank"
+        },
+        {
+          "type": "u64",
+          "value": "3"
+        },
+        {
+          "type": "u64",
+          "value": "3"
+        }
+      ],
+      "expect": {
+        "ok": "A👩‍🚀é"
+      }
+    },
+    {
+      "id": "text-multiline",
+      "helper": "ui_text",
+      "args": [
+        {
+          "type": "string",
+          "value": "\tline\n"
+        },
+        {
+          "type": "string",
+          "value": "multiline"
+        },
+        {
+          "type": "u64",
+          "value": "0"
+        },
+        {
+          "type": "u64",
+          "value": "0"
+        }
+      ],
+      "expect": {
+        "ok": "\tline\n"
+      }
+    },
+    {
+      "id": "text-plain-empty",
+      "helper": "ui_text",
+      "args": [
+        {
+          "type": "string",
+          "value": ""
+        },
+        {
+          "type": "string",
+          "value": "plain"
+        },
+        {
+          "type": "u64",
+          "value": "0"
+        },
+        {
+          "type": "u64",
+          "value": "0"
+        }
+      ],
+      "expect": {
+        "ok": ""
+      }
+    },
+    {
+      "id": "text-numeric",
+      "helper": "ui_text",
+      "args": [
+        {
+          "type": "i64",
+          "value": "-9007199254740993"
+        },
+        {
+          "type": "string",
+          "value": "plain"
+        },
+        {
+          "type": "u64",
+          "value": "0"
+        },
+        {
+          "type": "u64",
+          "value": "0"
+        }
+      ],
+      "expect": {
+        "ok": "-9007199254740993"
+      }
+    },
+    {
+      "id": "text-unbounded",
+      "helper": "ui_text",
+      "args": [
+        {
+          "type": "string",
+          "value": "abc"
+        },
+        {
+          "type": "string",
+          "value": "nonblank"
+        },
+        {
+          "type": "u64",
+          "value": "0"
+        },
+        {
+          "type": "u64",
+          "value": "0"
+        }
+      ],
+      "expect": {
+        "ok": "abc"
+      }
+    },
+    {
+      "id": "text-huge-upper-bound",
+      "helper": "ui_text",
+      "args": [
+        {
+          "type": "string",
+          "value": "abc"
+        },
+        {
+          "type": "string",
+          "value": "plain"
+        },
+        {
+          "type": "u64",
+          "value": "0"
+        },
+        {
+          "type": "u64",
+          "value": "18446744073709551615"
+        }
+      ],
+      "expect": {
+        "ok": "abc"
+      }
+    },
+    {
+      "id": "text-control",
+      "helper": "ui_text",
+      "args": [
+        {
+          "type": "string",
+          "value": "x\n"
+        },
+        {
+          "type": "string",
+          "value": "plain"
+        },
+        {
+          "type": "u64",
+          "value": "0"
+        },
+        {
+          "type": "u64",
+          "value": "0"
+        }
+      ],
+      "expect": {
+        "error": "ui_text_control_character"
+      }
+    },
+    {
+      "id": "text-blank",
+      "helper": "ui_text",
+      "args": [
+        {
+          "type": "string",
+          "value": " \t"
+        },
+        {
+          "type": "string",
+          "value": "multiline"
+        },
+        {
+          "type": "u64",
+          "value": "0"
+        },
+        {
+          "type": "u64",
+          "value": "0"
+        }
+      ],
+      "expect": {
+        "error": "ui_text_blank"
+      }
+    },
+    {
+      "id": "text-policy",
+      "helper": "ui_text",
+      "args": [
+        {
+          "type": "string",
+          "value": "x"
+        },
+        {
+          "type": "string",
+          "value": "html"
+        },
+        {
+          "type": "u64",
+          "value": "0"
+        },
+        {
+          "type": "u64",
+          "value": "0"
+        }
+      ],
+      "expect": {
+        "error": "ui_text_policy"
+      }
+    },
+    {
+      "id": "text-min",
+      "helper": "ui_text",
+      "args": [
+        {
+          "type": "string",
+          "value": "x"
+        },
+        {
+          "type": "string",
+          "value": "plain"
+        },
+        {
+          "type": "u64",
+          "value": "2"
+        },
+        {
+          "type": "u64",
+          "value": "0"
+        }
+      ],
+      "expect": {
+        "error": "ui_text_below_minimum_graphemes"
+      }
+    },
+    {
+      "id": "text-max",
+      "helper": "ui_text",
+      "args": [
+        {
+          "type": "string",
+          "value": "ab"
+        },
+        {
+          "type": "string",
+          "value": "plain"
+        },
+        {
+          "type": "u64",
+          "value": "0"
+        },
+        {
+          "type": "u64",
+          "value": "1"
+        }
+      ],
+      "expect": {
+        "error": "ui_text_above_maximum_graphemes"
+      }
+    },
+    {
+      "id": "text-huge-min",
+      "helper": "ui_text",
+      "args": [
+        {
+          "type": "string",
+          "value": "x"
+        },
+        {
+          "type": "string",
+          "value": "plain"
+        },
+        {
+          "type": "u64",
+          "value": "1000001"
+        },
+        {
+          "type": "u64",
+          "value": "0"
+        }
+      ],
+      "expect": {
+        "error": "ui_text_below_minimum_graphemes"
+      }
+    },
+    {
+      "id": "key-ascii",
+      "helper": "ui_key",
+      "args": [
+        {
+          "type": "string",
+          "value": "task_42-Z"
+        }
+      ],
+      "expect": {
+        "ok": "task_42-Z"
+      }
+    },
+    {
+      "id": "key-numeric",
+      "helper": "ui_key",
+      "args": [
+        {
+          "type": "u64",
+          "value": "9007199254740993"
+        }
+      ],
+      "expect": {
+        "ok": "9007199254740993"
+      }
+    },
+    {
+      "id": "key-length128",
+      "helper": "ui_key",
+      "args": [
+        {
+          "type": "string",
+          "value": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        }
+      ],
+      "expect": {
+        "ok": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "id": "key-empty",
+      "helper": "ui_key",
+      "args": [
+        {
+          "type": "string",
+          "value": ""
+        }
+      ],
+      "expect": {
+        "error": "ui_key_invalid"
+      }
+    },
+    {
+      "id": "key-colon",
+      "helper": "ui_key",
+      "args": [
+        {
+          "type": "string",
+          "value": "a:b"
+        }
+      ],
+      "expect": {
+        "error": "ui_key_invalid"
+      }
+    },
+    {
+      "id": "key-unicode",
+      "helper": "ui_key",
+      "args": [
+        {
+          "type": "string",
+          "value": "é"
+        }
+      ],
+      "expect": {
+        "error": "ui_key_invalid"
+      }
+    },
+    {
+      "id": "key-length129",
+      "helper": "ui_key",
+      "args": [
+        {
+          "type": "string",
+          "value": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        }
+      ],
+      "expect": {
+        "error": "ui_key_invalid"
+      }
+    },
+    {
+      "id": "key-markup",
+      "helper": "ui_key",
+      "args": [
+        {
+          "type": "string",
+          "value": "<b>"
+        }
+      ],
+      "expect": {
+        "error": "ui_key_invalid"
+      }
+    },
+    {
+      "id": "image-https",
+      "helper": "ui_image",
+      "args": [
+        {
+          "type": "string",
+          "value": "https://cdn.example.test/a.png"
+        }
+      ],
+      "expect": {
+        "ok": "https://cdn.example.test/a.png"
+      }
+    },
+    {
+      "id": "image-preserve-case",
+      "helper": "ui_image",
+      "args": [
+        {
+          "type": "string",
+          "value": "HTTPS://CDN.example.test:443/a"
+        }
+      ],
+      "expect": {
+        "ok": "HTTPS://CDN.example.test:443/a"
+      }
+    },
+    {
+      "id": "image-preserve-encoding",
+      "helper": "ui_image",
+      "args": [
+        {
+          "type": "string",
+          "value": "https://cdn.example.test/%61"
+        }
+      ],
+      "expect": {
+        "ok": "https://cdn.example.test/%61"
+      }
+    },
+    {
+      "id": "image-space-encoded",
+      "helper": "ui_image",
+      "args": [
+        {
+          "type": "string",
+          "value": "https://cdn.example.test/a%20b"
+        }
+      ],
+      "expect": {
+        "ok": "https://cdn.example.test/a%20b"
+      }
+    },
+    {
+      "id": "image-http",
+      "helper": "ui_image",
+      "args": [
+        {
+          "type": "string",
+          "value": "http://cdn.example.test/a"
+        }
+      ],
+      "expect": {
+        "error": "ui_image_https_required"
+      }
+    },
+    {
+      "id": "image-credentials",
+      "helper": "ui_image",
+      "args": [
+        {
+          "type": "string",
+          "value": "https://u:p@cdn.example.test/a"
+        }
+      ],
+      "expect": {
+        "error": "ui_image_https_required"
+      }
+    },
+    {
+      "id": "image-wildcard",
+      "helper": "ui_image",
+      "args": [
+        {
+          "type": "string",
+          "value": "https://*.example.test/a"
+        }
+      ],
+      "expect": {
+        "error": "ui_image_host_invalid"
+      }
+    },
+    {
+      "id": "image-leading-space",
+      "helper": "ui_image",
+      "args": [
+        {
+          "type": "string",
+          "value": " https://cdn.example.test/a"
+        }
+      ],
+      "expect": {
+        "error": "ui_image_invalid_url"
+      }
+    },
+    {
+      "id": "image-embedded-space",
+      "helper": "ui_image",
+      "args": [
+        {
+          "type": "string",
+          "value": "https://cdn.example.test/a b"
+        }
+      ],
+      "expect": {
+        "error": "ui_image_invalid_url"
+      }
+    },
+    {
+      "id": "image-backslash",
+      "helper": "ui_image",
+      "args": [
+        {
+          "type": "string",
+          "value": "https://x.test/a\\b"
+        }
+      ],
+      "expect": {
+        "error": "ui_image_invalid_url"
+      }
+    },
+    {
+      "id": "image-local-asset",
+      "helper": "ui_image",
+      "args": [
+        {
+          "type": "string",
+          "value": "/assets/app/a"
+        }
+      ],
+      "expect": {
+        "error": "ui_image_invalid_url"
+      }
+    },
+    {
+      "id": "image-empty",
+      "helper": "ui_image",
+      "args": [
+        {
+          "type": "string",
+          "value": ""
+        }
+      ],
+      "expect": {
+        "error": "ui_image_length"
+      }
+    },
+    {
+      "id": "image-length4097",
+      "helper": "ui_image",
+      "args": [
+        {
+          "type": "string",
+          "value": "https://x.test/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ],
+      "expect": {
+        "error": "ui_image_length"
+      }
+    }
+  ]
+}
