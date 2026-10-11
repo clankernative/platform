@@ -160,9 +160,13 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
     } else {
         None
     };
-    let arguments = recipe
-        .strip_prefix("verify-shard-")
-        .map_or_else(|| vec![recipe], |shard| vec!["verify-shard", shard]);
+    let arguments = if let Some(part) = recipe.strip_prefix("verify-prepare-part-") {
+        vec!["verify-prepare-part", part]
+    } else {
+        recipe
+            .strip_prefix("verify-shard-")
+            .map_or_else(|| vec![recipe], |shard| vec!["verify-shard", shard])
+    };
     day2::automation::run(&runner, &arguments, |request| {
         if request.action.starts_with("simulation-") {
             if simulation.is_none() {
@@ -249,7 +253,23 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
             "verify-prepared" => {
                 ensure!(parameters.is_empty(), "preparation accepts no overrides");
                 ensure_stable(root, recipe, &snapshot)?;
-                shards::save(root, &snapshot, &fixtures, &passed, &timings.steps_ms)?;
+                shards::save(root, &snapshot, &fixtures, &passed, &timings.steps_ms, "all")?;
+                return Ok(json!({}));
+            }
+            "verify-prepared-part" => {
+                let part = value("part")?;
+                ensure!(
+                    recipe == format!("verify-prepare-part-{part}"),
+                    "preparation receipt must match the selected part"
+                );
+                ensure_stable(root, recipe, &snapshot)?;
+                shards::save(root, &snapshot, &fixtures, &passed, &timings.steps_ms, part)?;
+                return Ok(json!({}));
+            }
+            "verify-preparation-join" => {
+                ensure!(parameters.is_empty(), "preparation join accepts no overrides");
+                ensure_stable(root, recipe, &snapshot)?;
+                shards::combine(root, &snapshot)?;
                 return Ok(json!({}));
             }
             "verify-shard-receipt" => {
@@ -529,7 +549,8 @@ fn recipe_scope(recipe: &str) -> Result<&'static str> {
     match recipe {
         "verify-fast" => Ok("fast"),
         "verify-reports" => Ok("reports"),
-        "verify" | "verify-prepare" | "verify-compose" => Ok("all"),
+        "verify" | "verify-prepare" | "verify-prepare-join" | "verify-compose"
+        | "verify-prepare-part-inputs" | "verify-prepare-part-tests" => Ok("all"),
         shard
             if shard
                 .strip_prefix("verify-shard-")

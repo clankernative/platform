@@ -73,9 +73,14 @@ gate establishes correctness; a cache hit rate alone does not establish faster C
 
 ## Hosted verification campaigns
 
-The CI preparation job runs the full recipe's formatting, CLI, twenty fixture
-builds and lint checks, then compiles the ordinary complete Cargo test package
-and target graph once. Documentation tests also run during preparation. The
+CI preparation runs two jobs concurrently. The inputs job retains the full
+recipe's formatting, CLI, twenty fixture builds and lint checks, including all
+fixture dependency ordering. The tests job compiles the ordinary complete Cargo
+test package and target graph once, then runs documentation tests. The preparation
+join requires both exact current-run manifests, disjoint and exhaustive effects,
+all fixture identities and the complete executable inventory. It re-admits every
+transported executable digest and native fixture before publishing the combined
+workspace. Missing, swapped, incomplete or foreign parts fail preparation. The
 prepared binaries and fixtures travel in a permission-preserving archive scoped
 to one Actions run attempt; this is separate from the dependency/compiler caches.
 
@@ -95,7 +100,8 @@ the combined workspace campaign retains its original 12,600-second budget.
 Rerun the entire workflow when retrying: partial job reruns cannot mix prepared
 artifacts and successful receipts from different attempts.
 
-Manual `Platform CI` dispatch supports `full` for the ordinary `xtask verify`
+Manual `Platform CI` dispatch supports `serial-prepare` for the original sequential
+preparation followed by the same seven campaigns, `full` for the ordinary `xtask verify`
 recipe, `compare` for both pipelines on one checkout, and `diagnostics` for hosted
 formatting and admission inventories. Diagnostics provide no verification claim.
 Use complete prepare-to-join timestamps for sharded latency, including queue,
@@ -103,6 +109,12 @@ archive, upload/download and setup costs. The short join job's duration is not
 the full gate duration; joined step timings sum campaign work across hosts.
 The additional runners also increase runner minutes. Qualify correctness and
 measure that cost before claiming a latency improvement.
+
+Compare `serial-prepare` and `sharded` on the exact same checkout and cache scope,
+one complete workflow at a time. Start the preparation clock at the first selected
+preparation job, including the two-part join, queues and every artifact transfer.
+Include both preparation jobs in runner minutes. The parts are run-scoped outputs,
+not cross-run caches; no runtime outcome is reused by this change.
 
 References: [Cargo cache action](https://github.com/Swatinem/rust-cache),
 [sccache action](https://github.com/mozilla-actions/sccache-action),
