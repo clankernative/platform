@@ -11,6 +11,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod shards;
+
 const CACHE_FORMAT: u32 = 1;
 
 // Every test campaign in the full gate selects the same Cargo packages and
@@ -122,7 +124,7 @@ impl TestCampaign {
     fn budget(&self) -> Result<std::time::Duration> {
         let maximum = match self.suite.as_str() {
             "all-runtime" => 9000,
-            "workspace-runtime" => 12600,
+            "workspace-runtime" | "workspace-day2" | "workspace-control" | "workspace-other" => 12600,
             "control" => 3600,
             "isolated-build" | "installation-build" => 1800,
             _ => DEFAULT_CAMPAIGN_BUDGET_SECONDS,
@@ -140,7 +142,7 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
     architecture::check(root)?;
     architecture_dependencies::check(root)?;
     architecture_proofs::check(root)?;
-    let snapshot = verification_snapshot(root, recipe)?;
+    let snapshot = verification_snapshot(root, if scope == "all" { "verify" } else { recipe })?;
     let runner = workflows::build(root)?;
     let mut fixtures: BTreeMap<String, PathBuf> = BTreeMap::new();
     let mut passed = BTreeSet::new();
@@ -148,7 +150,16 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
     let mut simulation_started = None;
     let mut timings = Timings::new();
     let mut cache = load_cache(root, scope, &snapshot)?;
-    day2::automation::run(&runner, &[recipe], |request| {
+    let prepared = if recipe.starts_with("verify-shard-") || recipe == "verify-compose" {
+        let prepared = shards::load(root, &snapshot)?;
+        fixtures = shards::fixtures(root, &prepared)?;
+        Some(prepared)
+    } else {
+        None
+    };
+    let arguments = recipe.strip_prefix("verify-shard-")
+        .map_or_else(|| vec![recipe], |shard| vec!["verify-shard", shard]);
+    day2::automation::run(&runner, &arguments, |request| {
         if request.action.starts_with("simulation-") {
             if simulation.is_none() {
                 ensure!(
@@ -181,11 +192,16 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
             }
             return Ok(result);
         }
-        if request.action == "verify-tests" {
+        if ["verify-tests", "verify-prebuilt-tests"].contains(&request.action.as_str()) {
             let campaign: TestCampaign = request.decode()?;
             let budget = campaign.budget()?;
             let started = Instant::now();
-            tests(root, &campaign.suite, &fixtures, budget)?;
+            if request.action == "verify-prebuilt-tests" {
+                shards::tests(root, prepared.as_ref().context("prepared test binaries required")?,
+                    &campaign.suite, &fixtures, budget)?;
+            } else {
+                tests(root, &campaign.suite, &fixtures, budget)?;
+            }
             ensure_stable(root, recipe, &snapshot)?;
             let step = format!("test-{}", campaign.suite);
             ensure!(passed.insert(step.clone()), "duplicate verification effect");
@@ -202,6 +218,37 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
         };
         let started = Instant::now();
         let key = match request.action.as_str() {
+            "verify-test-build" => {
+                ensure!(parameters.is_empty(), "test build accepts no overrides");
+                shards::build(root)?;
+                "test-binaries".into()
+            }
+            "verify-test-docs" => {
+                ensure!(parameters.is_empty(), "doc tests accept no overrides");
+                run_with_budget(root, Command::new("cargo").args(["test", "--locked", "--doc"])
+                    .args(WORKSPACE_TEST_ARGUMENTS).args(["--", "--test-threads=1"]),
+                    Duration::from_secs(12600))?;
+                "test-docs".into()
+            }
+            "verify-prepared" => {
+                ensure!(parameters.is_empty(), "preparation accepts no overrides");
+                ensure_stable(root, recipe, &snapshot)?;
+                shards::save(root, &snapshot, &fixtures, &passed, &timings.steps_ms)?;
+                return Ok(json!({}));
+            }
+            "verify-shard-receipt" => {
+                let shard = value("shard")?;
+                ensure_stable(root, recipe, &snapshot)?;
+                shards::receipt(root, prepared.as_ref().context("prepared tests required")?,
+                    shard, &passed, &timings.steps_ms)?;
+                return Ok(json!({}));
+            }
+            "verify-join" => {
+                ensure!(parameters.is_empty(), "join accepts no overrides");
+                (passed, timings.steps_ms) = shards::join(root,
+                    prepared.as_ref().context("prepared tests required")?)?;
+                return Ok(json!({}));
+            }
             "verify-format" => {
                 let scope = value("scope")?;
                 if scope == "all" {
@@ -460,7 +507,8 @@ fn recipe_scope(recipe: &str) -> Result<&'static str> {
     match recipe {
         "verify-fast" => Ok("fast"),
         "verify-reports" => Ok("reports"),
-        "verify" => Ok("all"),
+        "verify" | "verify-prepare" | "verify-compose" => Ok("all"),
+        shard if shard.strip_prefix("verify-shard-").is_some_and(shards::valid) => Ok("all"),
         "control-verify" => Ok("control"),
         _ => bail!("unknown verification recipe: {recipe}"),
     }
@@ -544,6 +592,7 @@ fn verification_source_file(label: &str, relative: &Path) -> bool {
 }
 
 fn ensure_stable(root: &Path, recipe: &str, expected: &str) -> Result<()> {
+    let recipe = if recipe_scope(recipe)? == "all" { "verify" } else { recipe };
     ensure!(
         verification_snapshot(root, recipe)? == expected,
         "verification inputs changed; rerun from one stable snapshot"
@@ -817,6 +866,16 @@ fn tests(
     #[cfg(target_os = "linux")]
     prepare_linux_test_installation(root)?;
     let mut command = test_command(suite)?;
+    configure_tests(root, suite, fixtures, &mut command)?;
+    run_with_budget(root, &mut command, budget)
+}
+
+fn configure_tests(
+    root: &Path,
+    suite: &str,
+    fixtures: &BTreeMap<String, PathBuf>,
+    command: &mut Command,
+) -> Result<()> {
     if ["isolated-build", "installation-build"].contains(&suite) {
         let rust = Command::new("rustc")
             .args(["--print", "sysroot"])
@@ -924,7 +983,7 @@ fn tests(
             command.env(variable, path);
         }
     }
-    run_with_budget(root, &mut command, budget)
+    Ok(())
 }
 
 /// Cargo places integration tests in `deps`, while normal executables live one
