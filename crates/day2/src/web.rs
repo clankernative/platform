@@ -2024,7 +2024,10 @@ fn edge_refusal(json: bool, error: &anyhow::Error) -> Response {
     crate::web_api::record_failure(error);
     let failure = crate::error::classify(error);
     let (status, message) = match failure {
-        Failure::IdentityKeysUnavailable => (
+        // Storage is reached only after the assertion verified, so telling a
+        // busy database apart from a bad assertion reveals nothing to a forger.
+        // The same request succeeds once the writer is free.
+        Failure::IdentityKeysUnavailable | Failure::StorageBusy => (
             StatusCode::SERVICE_UNAVAILABLE,
             "Sign-in could not be checked right now. Retry shortly.",
         ),
@@ -2044,6 +2047,7 @@ fn edge_refusal(json: bool, error: &anyhow::Error) -> Response {
     };
     let code = match failure {
         Failure::IdentityKeysUnavailable
+        | Failure::StorageBusy
         | Failure::MachineCallerRequiresDelegation
         | Failure::PrincipalSubjectChanged
         | Failure::Forbidden => failure,
@@ -2136,6 +2140,33 @@ mod deployment_health_tests {
         let accepting = Arc::new(AtomicBool::new(true));
         Admission(accepting.clone()).stop();
         assert!(!accepting.load(Ordering::Acquire));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_busy_database_during_sign_in_asks_for_a_retry_not_a_new_sign_in() -> Result<()> {
+        let busy = anyhow::Error::new(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            None,
+        ))
+        .context("bind verified subject");
+        let response = edge_refusal(true, &busy);
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 4096).await?)?;
+        assert_eq!(body["error"]["code"], "storage_busy");
+        // Anything else that is not a typed refusal still reads as a failed
+        // assertion, so a forger learns nothing about which check failed.
+        for error in [
+            anyhow::anyhow!("malformed assertion"),
+            anyhow::Error::new(crate::error::Failure::InvalidIdentityAssertion),
+        ] {
+            let response = edge_refusal(true, &error);
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            let body: serde_json::Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 4096).await?)?;
+            assert_eq!(body["error"]["code"], "invalid_identity_assertion");
+        }
         Ok(())
     }
 }
