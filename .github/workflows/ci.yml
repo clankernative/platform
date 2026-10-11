@@ -93,7 +93,7 @@ jobs:
           key: ${{ hashFiles('Cargo.toml') }}
           cache-bin: 'false'
           cache-workspace-crates: 'false'
-          shared-key: verify
+          shared-key: ${{ hashFiles('Cargo.toml') }}-verify
       - run: cargo run --locked -p xtask -- source-check
       - run: cargo fetch --locked
       - run: cargo run --locked -p xtask -- notices
@@ -148,7 +148,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           prefix-key: day2-platform-ci-v2
-          shared-key: verify
+          shared-key: ${{ hashFiles('Cargo.toml') }}-verify
           key: ${{ hashFiles('Cargo.toml') }}
           cache-bin: 'false'
           cache-workspace-crates: 'false'
@@ -244,7 +244,7 @@ jobs:
           key: ${{ hashFiles('Cargo.toml') }}
           cache-bin: 'false'
           cache-workspace-crates: 'false'
-          shared-key: verify
+          shared-key: ${{ hashFiles('Cargo.toml') }}-verify
       - run: cargo run --locked -p xtask -- source-check
       - run: cargo fetch --locked
       - run: cargo run --locked -p xtask -- notices
@@ -305,7 +305,7 @@ jobs:
           key: ${{ hashFiles('Cargo.toml') }}
           cache-bin: 'false'
           cache-workspace-crates: 'false'
-          shared-key: verify
+          shared-key: ${{ hashFiles('Cargo.toml') }}-verify
           save-if: 'false'
       - run: cargo run --locked -p xtask -- source-check
       - run: cargo fetch --locked
