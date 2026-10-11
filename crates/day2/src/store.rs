@@ -1536,10 +1536,17 @@ impl Runtime {
                     });
                 }
                 Reply::Pending(step) => {
-                    ensure!(
-                        request.observations.len() < MAX_STEPS,
-                        "transaction_step_budget"
-                    );
+                    if request.observations.len() >= MAX_STEPS {
+                        // Replaying the same journal reaches the same step, so an
+                        // error here would leave the invocation pending and
+                        // retried forever. Refuse it: the caller rolls back the
+                        // transaction and records this failure as the outcome.
+                        return Ok(Outcome {
+                            status: "failure".into(),
+                            result: Value::Null,
+                            error: crate::error::Failure::TransactionStepBudget.code().into(),
+                        });
+                    }
                     self.check_authority(connection, request, policy)?;
                     let next_phase = phase.advance(step)?;
                     crate::credential_authority::check_step(
@@ -3812,6 +3819,16 @@ pub fn replay(artifact: &LoadedArtifact, trace: &Trace) -> Result<()> {
         ),
         (Completion::Failure(expected), Reply::Failed(error)) => {
             ensure!(error == expected, "replay_failure_mismatch")
+        }
+        // The host refused the step after a full budget; the pinned code must
+        // still be asking for it.
+        (Completion::Failure(expected), Reply::Pending(_))
+            if expected == crate::error::Failure::TransactionStepBudget.code() =>
+        {
+            ensure!(
+                request.observations.len() == MAX_STEPS,
+                "replay_step_budget_mismatch"
+            )
         }
         (Completion::Pending(_), _) => bail!("invalid_trace_outcome"),
         _ => bail!("replay_outcome_mismatch"),

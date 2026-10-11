@@ -13,6 +13,9 @@ verification still runs before this artifact is published.
 - `after_request` changes the captured row after requesting the child command.
 - A two-line document encodes another real row ID in its second line. Analysis
   performs an allowed target update and then attempts to write that other row.
+- `step_budget` creates a report and then keeps reading it in the same
+  transaction, past the host's 64-step budget. The host must record that
+  failure and roll back the create rather than retry the invocation forever.
 - Notification delivery sends twice; the second send consumes the first receipt.
   Recovery must reuse both receipts without duplicating either message.
 
