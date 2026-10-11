@@ -12,15 +12,25 @@ use serde_json::Value;
 use sha2::Sha256;
 use std::collections::BTreeMap;
 
-pub(crate) fn random() -> Result<String> {
+pub(crate) fn random(entropy: &dyn crate::host_inputs::Entropy) -> Result<String> {
     let mut bytes = [0; 32];
-    getrandom::fill(&mut bytes).map_err(|_| anyhow::anyhow!("entropy_unavailable"))?;
+    entropy.fill(&mut bytes)?;
     Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
-pub(crate) fn secret(runtime: &Runtime) -> Result<Vec<u8>> {
+pub(crate) fn secret(
+    runtime: &Runtime,
+    entropy: &dyn crate::host_inputs::Entropy,
+) -> Result<Vec<u8>> {
     let db = open(runtime.db())?;
+    secret_in(&db, entropy)
+}
+
+fn secret_in(
+    db: &rusqlite::Connection,
+    entropy: &dyn crate::host_inputs::Entropy,
+) -> Result<Vec<u8>> {
     let mut bytes = [0; 32];
-    getrandom::fill(&mut bytes).map_err(|_| anyhow::anyhow!("entropy_unavailable"))?;
+    entropy.fill(&mut bytes)?;
     db.execute(
         "INSERT OR IGNORE INTO day2_web_secret VALUES(1,?1)",
         [&bytes[..]],
@@ -95,9 +105,23 @@ pub(crate) fn session_for_token_in(
     ensure!(now < session.expires, crate::error::Failure::SignInRequired);
     Ok(session)
 }
-pub(crate) fn create_session(runtime: &Runtime, actor: &str, now: i64) -> Result<String> {
-    let token = random()?;
+pub(crate) fn create_session(
+    runtime: &Runtime,
+    actor: &str,
+    now: i64,
+    entropy: &dyn crate::host_inputs::Entropy,
+) -> Result<String> {
+    let token = random(entropy)?;
     let db = open(runtime.db())?;
+    create_session_in(&db, actor, now, token)
+}
+
+fn create_session_in(
+    db: &rusqlite::Connection,
+    actor: &str,
+    now: i64,
+    token: String,
+) -> Result<String> {
     db.execute("DELETE FROM day2_web_sessions WHERE expires<=?1", [now])?;
     db.execute(
         "INSERT INTO day2_web_sessions VALUES(?1,?2,?3)",
@@ -378,6 +402,71 @@ pub(crate) fn field_value(kind: &crate::schema::Kind, raw: &str) -> Result<Value
 #[cfg(test)]
 mod session_tests {
     use super::*;
+
+    #[test]
+    fn entropy_failure_does_not_install_a_secret_or_emit_a_nonce() -> Result<()> {
+        struct Unavailable;
+        impl crate::host_inputs::Entropy for Unavailable {
+            fn fill(&self, bytes: &mut [u8]) -> Result<()> {
+                bytes.fill(42);
+                anyhow::bail!("scripted entropy failure")
+            }
+        }
+        let db = rusqlite::Connection::open_in_memory()?;
+        db.execute_batch(
+            "CREATE TABLE day2_web_secret(id INTEGER PRIMARY KEY, secret BLOB NOT NULL)",
+        )?;
+        assert!(secret_in(&db, &Unavailable).is_err());
+        assert_eq!(
+            db.query_row("SELECT COUNT(*) FROM day2_web_secret", [], |row| row
+                .get::<_, i64>(0))?,
+            0
+        );
+        assert!(random(&Unavailable).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn seeded_secret_and_session_ports_conform_to_real_sqlite() -> Result<()> {
+        use crate::host_inputs::{
+            Clock,
+            simulation::{SeededEntropy, VirtualClock},
+        };
+        use std::{sync::Mutex, time::Duration};
+        let db = rusqlite::Connection::open_in_memory()?;
+        db.execute_batch("CREATE TABLE day2_web_secret(id INTEGER PRIMARY KEY, secret BLOB NOT NULL);
+            CREATE TABLE day2_web_sessions(hash TEXT PRIMARY KEY, actor TEXT NOT NULL, expires INTEGER NOT NULL)")?;
+        let entropy = SeededEntropy::new(130);
+        let secret = secret_in(&db, &entropy)?;
+        assert_eq!(secret.len(), 32);
+        // The insert-or-ignore adapter never replaces the installed secret.
+        assert_eq!(secret_in(&db, &SeededEntropy::new(999))?, secret);
+        let clock = VirtualClock(Mutex::new((Duration::from_secs(100), Duration::ZERO)));
+        let wall = || -> Result<i64> { Ok(clock.wall_time()?.as_secs().try_into()?) };
+        let token = create_session_in(&db, "alice", wall()?, random(&entropy)?)?;
+        assert_eq!(token.len(), 43);
+        assert_eq!(session_for_token_in(&db, &token, 28_899)?.expires, 28_900);
+        clock.0.lock().unwrap().0 = Duration::from_secs(28_900);
+        assert!(session_for_token_in(&db, &token, wall()?).is_err());
+        let replacement = create_session_in(&db, "alice", wall()?, random(&entropy)?)?;
+        assert_eq!(
+            session_for_token_in(&db, &replacement, wall()?)?.actor,
+            "alice"
+        );
+        assert_eq!(
+            db.query_row("SELECT COUNT(*) FROM day2_web_sessions", [], |row| row
+                .get::<_, i64>(0))?,
+            1
+        );
+        db.execute("DELETE FROM day2_web_sessions", [])?;
+        assert!(session_for_token_in(&db, &replacement, wall()?).is_err());
+        // Replay of the same entropy schedule generates the identical wire token.
+        let replay = SeededEntropy::new(130);
+        let mut consumed_secret = [0; 32];
+        crate::host_inputs::Entropy::fill(&replay, &mut consumed_secret)?;
+        assert_eq!(random(&replay)?, token);
+        Ok(())
+    }
 
     #[test]
     fn metadata_session_lookup_rechecks_current_row_and_expiry() -> Result<()> {

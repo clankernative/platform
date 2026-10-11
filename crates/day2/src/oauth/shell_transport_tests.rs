@@ -1229,7 +1229,9 @@ fn app_host_mounts_reserved_receiver_before_human_dispatch_and_drains_admission(
             "execution":{"model":"","id_field":"","version_field":"","effects":[]},"errors":[]
         }},"presentation":{"stylesheet":"","script":""},"identities":crate::identity::REGISTRY_FILE,"invariants":{"items":"Host route fixture state"},"domains":{},"errors":{}}
     }))?;
-    contract.identities.synchronize(&contract.schema.models)?;
+    contract
+        .identities
+        .synchronize(&contract.schema.models, &crate::host_inputs::SecureEntropy)?;
     contract.schema.bind_identities(&contract.identities)?;
     contract.api_docs = contract.app_contract.as_ref().unwrap().documentation();
     contract.operation_metadata = contract.app_contract.as_ref().unwrap().intents();
