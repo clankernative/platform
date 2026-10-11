@@ -362,6 +362,10 @@ references against the output, command and asset contracts, including included
 components and conditional branches. Undefined data and invalid rendered
 markup are rejected independently at runtime.
 
+`ui_key(field)` accepts scalar identity fields, including checked nominal `Ref(Model)`
+fields and typed loop items; constants, computed expressions and booleans are rejected.
+Normal output decoding still validates model prefixes and canonical UUIDv7 values.
+
 The supported template subset includes scalar field access, selected typed
 operators, `length`, `asset`, `if`, list `for` and literal includes, not full
 Jinja. Admission expands at most 256 structural variants and rejects larger
@@ -413,6 +417,26 @@ Formats 1 through 11 remain loadable for inspection, replay, and explicit operat
 recovery of accepted work. Upgrade requires draining accepted invocations and
 pending invocations, then explicit migration and activation. Company authority is
 still required for execution; loading a legacy artifact grants no permission.
+
+## App contract export
+
+Export a normally built, admitted artifact as deterministic typed JSON:
+
+```console
+cargo run --locked -p xtask -- app-contracts artifacts/ARTIFACT_DIGEST --output app-contracts.json
+```
+
+Schema 1 includes commands, all registered queries, routes, forms, schedules and
+redirects. Query input/output schemas and route `contextKey` describe template
+bindings; shared context such as `company` is separate. Named view types are not
+derived (`viewType: null`, `viewTypes: {}`). Export is limited to 4 MiB and does
+not execute operations or grant authority.
+
+The output parent must be operator-owned with no concurrent namespace mutation.
+Publication is private and atomic; initially absent outputs are no-clobber,
+existing regular outputs are replaced without truncating a hardlinked inode.
+Native local-dev also writes `app-contracts.json`; use `--status` and match its
+served artifact and file digest. An export error is not a current contract file.
 
 ## Redirect Routes
 
@@ -598,13 +622,30 @@ remote, computed, escaping and missing module imports; no npm, Node server or
 app build scripts run. The complete source graph and resource hashes are bound
 to the app artifact and verified again on load/serve. HTML templates and their
 include graph are separately admitted, hashed and rendered on the server;
-they are not browser module entrypoints. A general company library
-catalog is not implemented yet; Datastar is a fixed platform dependency.
+they are not browser module entrypoints. Datastar is a fixed platform dependency.
+
+### Optional UI assembly
+
+`ui/ui.lock.json` opts an app into build-time assembly. Without it, no provider
+is invoked. The lock pins package inputs, not executable authority: the operator
+separately approves a SHA-256-pinned tool using `DAY2_UI_PROVIDER_PIN_JSON`.
+
+The host captures the locked closure, invokes assembly in a private snapshot,
+then independently admits the returned templates/resources. Providers are never
+loaded while serving pages. App models, commands, routes and authorization remain
+app-owned; normal form, resource, CSP and runtime checks still apply.
+
+Only protocol 2 / binding ABI 2 with Minijinja 2.12.0 is accepted. See the released
+[protocol](https://github.com/clankernative/clanker-ui/blob/v0.1.0/docs/native-assembly-protocol.md)
+for the envelope and generic `ui_*` helpers. The approved local executable is
+trusted operator tooling, not a hostile-code sandbox.
 
 CSS is parsed with cssparser. Layout, custom properties and responsive media
-queries are allowed. This first asset pipeline does not admit CSS `@import`,
-external fonts/images or non-fragment URL references. HTML images use checked
-`{{ asset('name') }}` references to the admitted app image catalog.
+queries are allowed. CSS `@import` and external CSS font/image URLs are rejected;
+local WOFF2 fonts require admitted resource closure. HTML images use checked
+`{{ asset('name') }}` references to the admitted app image catalog. A generic
+`ui_image` capability also checks credential-free HTTPS image sources and retains
+host-owned provenance and CSP checks; it does not fetch an image.
 Browser JS is ordinary native code, not a capability sandbox. CSP restricts script
 sources to the admitted app resource prefix and pinned platform Datastar file;
 `unsafe-eval` is necessary for Datastar expressions. Import admission is dependency
