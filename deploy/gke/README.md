@@ -363,8 +363,8 @@ does every native action with `kubectl` and the registry API. Operations:
 | `inspect` | Reads the active authority stamp and policy | restored |
 | `backup` | Verified backup, copied to `~/day2-backups/<namespace>/<stamp>/` | restored |
 | `authority-apply` | Backup, then applies the policy in the current ConfigMap, after a typed `apply` | restored |
-| `activate` | Backup, migration plan, the target's store admission on a rehearsed copy, typed `activate`, migration, fresh activation of the target artifact, then the `day2.dev/activated-artifact` stamp | stopped: release the target artifact next (release-managed), otherwise apply day2-app for the new image |
-| `mark-activated` | Recovery when `activate`'s stamp step failed: reads the database's active artifact and, only if it is the target, stamps the stopped StatefulSet | stopped, as `activate` leaves it |
+| `activate` | Backup, migration plan, the target's store admission on a rehearsed copy, typed `activate`, migration, fresh activation of the target artifact, then the `day2.dev/activated-image` stamp naming the target image. The target may keep the running artifact (a new platform build of the same app build); its migration plan is then empty | stopped: release the target image next (release-managed), otherwise apply day2-app for the new image |
+| `mark-activated` | Recovery when `activate`'s stamp step failed for a target with a new artifact: reads the database's active artifact and, only if it is the target's, stamps the stopped StatefulSet with the target image. A target that keeps the running artifact is refused (the database proves nothing about it); rerun `activate` instead | stopped, as `activate` leaves it |
 
 The request file names the target exactly:
 
@@ -384,16 +384,22 @@ The request file names the target exactly:
 An initialized app serves only the artifact its database activated. An image
 whose artifact differs will not serve until `activate` has run for that
 artifact: `day2-serve` refuses with `active_artifact_unavailable`, naming the
-activated and the requested artifact. `day2-gke-release` does not activate; it
-refuses such a change with `release_artifact_requires_activation`, before any
-write, until `activate` has stamped the StatefulSet for that artifact (below).
+activated and the requested artifact. An image that keeps the artifact still
+runs its own platform build's `day2-serve`, which admits and upgrades the store
+when it starts: the artifact ID commits to the platform sources the artifact was
+built from, but nothing binds the runtime an image bakes it into to those
+sources. So every image change goes through `activate`, which opens a copy of
+the store with the target build first. `day2-gke-release` does not activate; it
+refuses an image change with `release_image_requires_activation`, before any
+write, until `activate` has stamped the StatefulSet for that image, and the
+day2-app stack refuses a direct apply of it (below).
 
 `request_id` is for `authority-apply`, `activate` and `mark-activated`; `target`
 (the desired instance, e.g. rendered from the day2-app plan) is for `activate`
 and `mark-activated`, which take the same request file;
 `backup_dir` and `"yes": true` (skip the typed confirmation, recorded) are
-optional. The tooling image must come from the same platform build as the app's
-artifact.
+optional. The tooling image must come from the same platform build as the
+target app image: its `day2 admit` is the store admission the rehearsal runs.
 
 What the session guarantees, whatever the recipe does:
 
@@ -437,15 +443,18 @@ What the session guarantees, whatever the recipe does:
   mismatching copy is renamed `<stamp>.INCOMPLETE` and refused.
 - One session per namespace; the running image must equal `app_image`.
 - Only a successful fresh activation stamps the StatefulSet with
-  `day2.dev/activated-artifact: sha256:<target artifact_id>`, after re-reading
-  it stopped on `app_image`. If that stamp step fails, the error prints the
-  exact `day2 platform maintain mark-activated REQUEST_JSON` command to run once
-  the cause is fixed. `mark-activated` stamps only when the database's active
-  artifact is the target, the StatefulSet is at 0 replicas on `app_image`, and it
-  is unstamped or stamped for the same target (then it changes nothing). For a
-  release-managed app, `day2-gke-release` changes the artifact only to the one
-  stamped, restores the replica and removes the stamp in the same patch (see
-  [the release workflow](../../docs/RELEASE-WORKFLOW.md#artifact-changes)).
+  `day2.dev/activated-image: <target app_image>`, after re-reading it stopped
+  on `app_image`. If that stamp step fails, the error prints the exact command
+  to run once the cause is fixed: `day2 platform maintain mark-activated
+  REQUEST_JSON` for a target with a new artifact, `day2 platform maintain
+  activate REQUEST_JSON` again for one that keeps the running artifact.
+  `mark-activated` stamps only when the target's artifact is new and the
+  database's active artifact is it, the StatefulSet is at 0 replicas on
+  `app_image`, and it is unstamped or stamped for the same target image (then it
+  changes nothing). For a release-managed app, `day2-gke-release` changes the
+  image only to the one stamped, restores the replica and removes the stamp in
+  the same patch (see
+  [the release workflow](../../docs/RELEASE-WORKFLOW.md#image-changes)).
 - Every step is journalled to `~/day2-backups/<namespace>/<stamp>.session.json`
   before it runs, for recovery after the operator's machine dies mid-session.
 
@@ -470,9 +479,10 @@ where `copies` is the most the operation holds at once: none for `inspect` and
 `authority-apply`, and two for `activate` (the backup, which the rehearsal
 then migrates as its copy, and the WAL and temporary files that migration
 grows; the real migration's WAL is on the app's volume). `artifacts` are the
-running and target artifacts copied in, counted twice because a backup holds
-the running one again. The emptyDir's `sizeLimit` is that size, and the
-container's ephemeral-storage request and limit are 64 MiB more.
+running and target artifacts copied in (one, when the target keeps the running
+artifact), counted twice because a backup holds the running one again. The
+emptyDir's `sizeLimit` is that size, and the container's ephemeral-storage
+request and limit are 64 MiB more.
 
 A 2.5 GiB store therefore needs about 6.5 GiB for `activate` and 3.4 GiB for
 `backup`. The namespace's guardrails must admit it: `app-edge`'s
@@ -487,23 +497,26 @@ reason, and the app is restored on its image.
 
 Every day2-app plan reads the live StatefulSet (none on the first install, which
 plans normally). An activation is pending while the StatefulSet carries
-`day2.dev/activated-artifact` and it differs from the template's
-`day2.dev/artifact`; a stamp equal to the live artifact is inert.
+`day2.dev/activated-image` and it differs from the image of the template's
+`day2` container; a stamp equal to the live image is inert.
 
 - Release-managed apps: a plan while an activation is pending keeps the live
   replicas (0) instead of 1 and warns
-  `activation of sha256:… pending; replicas held at 0 until day2-gke-release rolls it`.
-  Everything else applies normally. Release the activated artifact next.
+  `activation of REGISTRY/…@sha256:… pending; replicas held at 0 until day2-gke-release rolls it`.
+  Everything else applies normally. Release the activated image next.
 - Directly deployed apps (`release_managed = false`, e.g. GoLinks): the apply
-  rolls the app, so it is refused while an activation is pending unless
-  `artifact_id` (and the image carrying it) is the activated build. That apply
-  starts the new image at one replica and, since the stack does not declare the
-  stamp, removes it (were it kept, it would equal the live artifact: inert). The order for a new build is: open the tfvars change for
-  the new `image`/`artifact_id`, run `maintain activate` for it, then merge and
-  apply. Any other apply in between is refused, never restarting the old image
-  on the migrated state.
+  rolls the app, so it is refused while an activation is pending unless `image`
+  (with its `artifact_id`) is the activated build, and refused for any `image`
+  other than the live one while none is pending, even with the same
+  `artifact_id`. That apply starts the new image at one replica and, since the
+  stack does not declare the stamp, removes it (were it kept, it would equal
+  the live image: inert). The order for a new build is: open the tfvars change
+  for the new `image`/`artifact_id`, run `maintain activate` for it, then merge
+  and apply. Any other apply in between is refused, never restarting the old
+  image on the migrated state.
 
-To roll back code, plan the prior qualified image and configuration. After a schema
+To roll back code, plan the prior qualified image and configuration; that is an
+image change like any other, so `maintain activate` it first. After a schema
 migration, first prove backward compatibility or restore the matching backup;
 never point an old artifact at incompatible state. Node upgrades require rerunning
 the probe and a representative application acceptance campaign. Namespace/PVC

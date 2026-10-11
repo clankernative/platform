@@ -513,11 +513,10 @@ impl World {
         Ok(())
     }
     /// What `day2 platform maintain activate` leaves: the app stopped and
-    /// stamped with the artifact its database now activates.
-    fn mark_activated(&self, artifact: &Digest) {
+    /// stamped with the image whose artifact its database now activates.
+    fn mark_activated(&self, image: &str) {
         let mut cloud = self.fixture.cloud.lock().unwrap();
-        cloud.controller["metadata"]["annotations"]["day2.dev/activated-artifact"] =
-            json!(artifact);
+        cloud.controller["metadata"]["annotations"]["day2.dev/activated-image"] = json!(image);
         cloud.controller["spec"]["replicas"] = json!(0);
         let generation = cloud.controller["metadata"]["generation"].as_u64().unwrap() + 1;
         cloud.controller["metadata"]["generation"] = json!(generation);
@@ -530,14 +529,27 @@ impl World {
 
     /// Approve and accept a candidate with a new artifact and image.
     fn redeploy(&mut self) -> Result<()> {
+        self.redeploy_with(None)
+    }
+
+    /// Approve and accept a candidate with a new image, of `artifact` if given
+    /// (the same app build baked into another platform build's runtime).
+    fn redeploy_with(&mut self, artifact: Option<&Digest>) -> Result<()> {
         let mut journal = Journal::open(&self.journal)?;
         let generation = self.approval.expected_generation + 1;
         let app = self.approval.target.app.as_str().to_owned();
-        let mut approval = approve(
+        let revision = u8::try_from(generation + 1)?;
+        let mut target = target("alpha");
+        target.app = name(&app);
+        let mut build = plan("alpha", revision);
+        build.app = name(&app);
+        let mut approval = approval_for(
             &mut journal,
-            &app,
-            u8::try_from(generation + 1)?,
+            &target,
+            &build,
             generation,
+            day2_control::kernel::CredentialPresence::Absent,
+            artifact,
         );
         // Same key and infrastructure; only the actual app candidate changes.
         approval.secret = self.approval.secret.clone();
@@ -546,7 +558,10 @@ impl World {
             "artifacts/{}",
             approval.artifact.as_str().trim_start_matches("sha256:")
         ));
-        self.deployment.image = format!("registry.example/day2@sha256:{}", "2".repeat(64));
+        self.deployment.image = format!(
+            "registry.example/day2@sha256:{}",
+            format!("{revision:x}").repeat(64)
+        );
         assert_eq!(
             self.deployment.binding(name("deployment"))?,
             self.deployment.serving.deployment
@@ -613,7 +628,7 @@ fn redeploy_and_lost_publication_ack_are_durable_and_stale_publishers_cannot_rol
     assert!(!journal.serving_publication_pending(&world.approval.target)?);
     assert_eq!(first.revision, 1);
     world.redeploy()?;
-    world.mark_activated(&world.approval.artifact);
+    world.mark_activated(&world.deployment.image);
     world.activate()?;
     let second = journal.serving_publication(&[world.approval.target.clone()])?;
     assert_eq!(second.revision, 2);
@@ -707,7 +722,7 @@ fn publication_reaches_every_active_app_of_the_scope_not_only_the_candidates() -
     // Release only reports. Notifications calls it, so its ConfigMap must
     // select the new reports release too, without notifications being released.
     reports.redeploy()?;
-    reports.mark_activated(&reports.approval.artifact);
+    reports.mark_activated(&reports.deployment.image);
     reports.activate()?;
     // A destination that fails after the first one was written leaves the
     // intent pending; the rerun converges without a second write.
@@ -1195,18 +1210,22 @@ fn an_artifact_change_needs_the_candidates_maintenance_activation() -> Result<()
     world.activate()?;
     let live = world.approval.artifact.clone();
     let maps = world.fixture.cloud.lock().unwrap().maps.len();
+    let live_image = world.deployment.image.clone();
     world.redeploy()?;
     let candidate = world.approval.artifact.clone();
+    let image = world.deployment.image.clone();
     let error = world.step().unwrap_err().to_string();
     assert!(
-        error.starts_with("release_artifact_requires_activation: ")
+        error.starts_with("release_image_requires_activation: ")
             && error.contains(live.as_str())
+            && error.contains(&live_image)
             && error.contains(candidate.as_str())
+            && error.contains(&image)
             && error.contains("day2 platform maintain activate"),
         "{error}"
     );
-    // An activation for another artifact authorizes nothing either.
-    world.mark_activated(&Digest::new(b"another-activated-artifact"));
+    // An activation for another image authorizes nothing either.
+    world.mark_activated(&format!("registry.example/day2@sha256:{}", "f".repeat(64)));
     for _ in 0..4 {
         let _ = world.step();
     }
@@ -1221,15 +1240,69 @@ fn an_artifact_change_needs_the_candidates_maintenance_activation() -> Result<()
     }
     assert_ne!(world.host.inspect(&world.id)?.phase, ReleasePhase::Active);
     // The candidate's own activation lets the same execution continue.
-    world.mark_activated(&candidate);
+    world.mark_activated(&image);
     world.activate()?;
     let controller = world.controller();
     assert_eq!(world.fixture.cloud.lock().unwrap().patches, 2);
     assert_eq!(controller["spec"]["replicas"], 1);
-    assert!(controller["metadata"]["annotations"]["day2.dev/activated-artifact"].is_null());
+    assert!(controller["metadata"]["annotations"]["day2.dev/activated-image"].is_null());
     assert_eq!(
         controller["spec"]["template"]["metadata"]["annotations"]["day2.dev/artifact"],
         candidate.as_str()
+    );
+    assert_eq!(
+        controller["spec"]["template"]["spec"]["containers"][0]["image"],
+        image
+    );
+    Ok(())
+}
+
+/// The same artifact baked into another platform build's runtime is a new
+/// day2-serve on the same store: its startup admission and store upgrades are
+/// as unknown as a new artifact's, so it needs the same activation.
+#[test]
+fn a_new_image_of_the_live_artifact_needs_its_maintenance_activation() -> Result<()> {
+    let mut world = World::new()?;
+    world.activate()?;
+    let live = world.approval.artifact.clone();
+    let live_image = world.deployment.image.clone();
+    world.redeploy_with(Some(&live))?;
+    assert_eq!(world.approval.artifact, live);
+    let image = world.deployment.image.clone();
+    assert_ne!(image, live_image);
+    let error = world.step().unwrap_err().to_string();
+    assert!(
+        error.starts_with("release_image_requires_activation: ")
+            && error.contains(&live_image)
+            && error.contains(&image)
+            && error.contains("day2 platform maintain activate"),
+        "{error}"
+    );
+    for _ in 0..4 {
+        let _ = world.step();
+    }
+    {
+        let cloud = world.fixture.cloud.lock().unwrap();
+        assert_eq!(cloud.patches, 1);
+        assert_eq!(
+            cloud.controller["spec"]["template"]["spec"]["containers"][0]["image"],
+            live_image
+        );
+    }
+    assert_ne!(world.host.inspect(&world.id)?.phase, ReleasePhase::Active);
+    world.mark_activated(&image);
+    world.activate()?;
+    let controller = world.controller();
+    assert_eq!(world.fixture.cloud.lock().unwrap().patches, 2);
+    assert_eq!(controller["spec"]["replicas"], 1);
+    assert!(controller["metadata"]["annotations"]["day2.dev/activated-image"].is_null());
+    assert_eq!(
+        controller["spec"]["template"]["spec"]["containers"][0]["image"],
+        image
+    );
+    assert_eq!(
+        controller["spec"]["template"]["metadata"]["annotations"]["day2.dev/artifact"],
+        live.as_str()
     );
     Ok(())
 }
@@ -1239,18 +1312,18 @@ fn a_consumed_activation_reconciles_a_lost_ack_and_cannot_authorize_again() -> R
     let mut world = World::new()?;
     world.activate()?;
     world.redeploy()?;
-    world.mark_activated(&world.approval.artifact);
+    world.mark_activated(&world.deployment.image);
     world.fixture.cloud.lock().unwrap().drop_deployment_ack = true;
     world.activate()?;
     let controller = world.controller();
     assert_eq!(world.fixture.cloud.lock().unwrap().patches, 2);
     assert_eq!(controller["spec"]["replicas"], 1);
-    assert!(controller["metadata"]["annotations"]["day2.dev/activated-artifact"].is_null());
-    // The next artifact needs its own activation.
+    assert!(controller["metadata"]["annotations"]["day2.dev/activated-image"].is_null());
+    // The next image needs its own activation.
     world.redeploy()?;
     let error = world.step().unwrap_err().to_string();
     assert!(
-        error.starts_with("release_artifact_requires_activation: "),
+        error.starts_with("release_image_requires_activation: "),
         "{error}"
     );
     assert_eq!(world.fixture.cloud.lock().unwrap().patches, 2);

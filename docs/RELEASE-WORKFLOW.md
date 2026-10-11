@@ -91,39 +91,47 @@ controller UID and resourceVersion before replacing the template. A lost
 acknowledgment reconciles the exact release/effect markers and template; missing
 markers after an unknown write never authorize a blind second mutation.
 
-### Artifact changes
+### Image changes
 
 Journal activation does not activate the artifact in the app's own database.
 Once `.state/<app>.sqlite` is initialized, `day2-serve` runs only the artifact
 that database activated, not the one the instance names; a pod whose image
 carries a different artifact refuses with `active_artifact_unavailable`, naming
-both artifact IDs. The release workflow does not activate either; it changes
-the artifact only onto state that `day2 platform maintain activate`
+both artifact IDs. Every image's `day2-serve` also admits and upgrades the store
+when it starts (`deployment::admit_store`). That is the image's platform build,
+not only its artifact: the artifact ID commits to the platform sources it was
+built from, but nothing in the image binds its runtime to them, so the same
+artifact baked into another platform build's runtime image is another
+`day2-serve` with the same artifact ID. The release workflow activates neither;
+it changes the image only onto state that `day2 platform maintain activate`
 ([deploy/gke/README.md](../deploy/gke/README.md#maintenance-day2-platform-maintain))
 activated for it. Before any write (at dependency preparation and again before
-the deployment patch) the adapter compares the candidate artifact with the live
-template's `day2.dev/artifact`:
+the deployment patch) the adapter compares the candidate image and artifact
+with the live template's `day2` container image and `day2.dev/artifact`:
 
-- Equal: the release proceeds as before. The first release of the artifact the
-  day2-app stack bootstrapped is equal.
-- Different: the StatefulSet must carry `day2.dev/activated-artifact` naming
-  the candidate (`sha256:<id>`). Otherwise the release stops with
-  `release_artifact_requires_activation`, naming both artifacts, and writes
-  nothing. Run `day2 platform maintain activate` for the candidate, then rerun
-  the same configuration.
+- Both equal: the release proceeds as before. The first release of the image
+  and artifact the day2-app stack bootstrapped is equal.
+- Either different, including a new image of the live artifact: the
+  StatefulSet must carry `day2.dev/activated-image` naming the candidate image.
+  Otherwise the release stops with `release_image_requires_activation`, naming
+  both images and artifacts, and writes nothing. Run
+  `day2 platform maintain activate` with the candidate as its target, then
+  rerun the same configuration.
 
 `maintain activate` stamps that annotation only after the fresh activation of
 the target artifact succeeds, and leaves the app at zero replicas. Before its
 migration fence it opens a migrated, activated copy of the store with the
 target build's own startup store admission, so a store the target would refuse
 stops the activation with `target_store_admission_refused` and the app keeps
-serving on its image. The same
+serving on its image. A target that keeps the running artifact goes through the
+same steps with an empty migration plan. The same
 conditional patch that rolls the template then restores `spec.replicas` to the
 profile's one replica and removes the stamp, so it cannot authorize a later
 change. A lost acknowledgment reconciles as before: the markers, template and
 one replica identify the applied patch. Until then, day2-app infrastructure
 plans keep the stamp, hold the live zero replicas and warn that the activation is
 pending ([deploy/gke/README.md](../deploy/gke/README.md#activation-and-the-day2-app-stack)).
+
 
 Fresh readback requires the prepared controller incarnation, ready current pod,
 actual immutable running image, artifact guard, scope and workload identity.
