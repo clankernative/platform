@@ -763,6 +763,10 @@ impl World {
         let artifact = std::env::var_os("DAY2_TEST_HTTP_ARTIFACT")
             .map(PathBuf::from)
             .context("run xtask verify or set DAY2_TEST_HTTP_ARTIFACT")?;
+        Self::named_artifact(installation, &artifact)
+    }
+
+    fn named_artifact(installation: &str, artifact: &std::path::Path) -> Result<Self> {
         let directory = tempfile::tempdir()?;
         let instance = Instance {
             installation: installation.into(),
@@ -1756,6 +1760,81 @@ fn path_and_query_errors_fail_closed_without_implicit_routes() -> Result<()> {
         );
     }
     assert_eq!(world.count("day2_audit_changes")?, 1);
+    Ok(())
+}
+
+#[test]
+fn assembled_component_entry_is_loaded_and_served_only_with_provider_provenance() -> Result<()> {
+    let original = World::new()?;
+    let root = tempfile::tempdir()?;
+    for approved in [false, true] {
+        let staging = root.path().join("staging");
+        copy_artifact(original.runtime.artifact().directory(), &staging)?;
+        let ui = root.path().join("ui");
+        fs::create_dir_all(&ui)?;
+        fs::write(ui.join("ui-package.js"), "import './component.js';")?;
+        fs::write(
+            ui.join("component.js"),
+            "document.documentElement.dataset.component = 'ready';",
+        )?;
+        let resources = day2::web_resources::package(&ui, &staging)?;
+        let mut contract: Value =
+            serde_json::from_slice(&fs::read(staging.join("artifact.json"))?)?;
+        contract["web_resources"]
+            .as_object_mut()
+            .context("resources")?
+            .extend(
+                serde_json::to_value(&resources)?
+                    .as_object()
+                    .context("resources")?
+                    .clone(),
+            );
+        if approved {
+            contract["sources"]["ui-provider/executable"] =
+                json!(day2::digest(b"approved test provider"));
+        }
+        let bytes = serde_json::to_vec(&contract)?;
+        let artifact = root
+            .path()
+            .join(day2_assets::hash_part(&day2::digest(&bytes))?);
+        fs::write(staging.join("artifact.json"), &bytes)?;
+        fs::rename(staging, &artifact)?;
+        let world = World::named_artifact("componentco", &artifact)?;
+        let server = Server::start(world.runtime.clone(), "alice", 0)?;
+        let client = server.client()?;
+        let response = client.get(&server.origin).send()?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let csp = response.headers()["content-security-policy"]
+            .to_str()?
+            .to_owned();
+        let page = response.text()?;
+        let document = Html::parse_document(&page);
+        let entries = document
+            .select(&selector("script[src$='/ui-package.js']"))
+            .collect::<Vec<_>>();
+        assert_eq!(entries.len(), usize::from(approved));
+        if let Some(entry) = entries.first() {
+            assert_eq!(entry.value().attr("type"), Some("module"));
+            let url = entry.value().attr("src").context("component entry URL")?;
+            let prefix = url.strip_suffix("ui-package.js").context("UI prefix")?;
+            assert!(csp.contains(&format!("{}{prefix}", server.origin)));
+            for (path, resource) in resources {
+                let response = client
+                    .get(format!("{}{prefix}{path}", server.origin))
+                    .send()?;
+                assert_eq!(response.status(), StatusCode::OK);
+                assert_eq!(response.headers()["content-type"], resource.media_type);
+                assert_eq!(day2::digest(&response.bytes()?), resource.digest);
+            }
+            assert_eq!(
+                Client::new()
+                    .get(format!("{}{url}", server.origin))
+                    .send()?
+                    .status(),
+                StatusCode::UNAUTHORIZED
+            );
+        }
+    }
     Ok(())
 }
 
@@ -2755,28 +2834,29 @@ fn asset_cache_revalidation_requires_current_authority_and_session() -> Result<(
     Ok(())
 }
 
+fn copy_artifact(source: &std::path::Path, target: &std::path::Path) -> Result<()> {
+    fs::create_dir_all(target)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            copy_artifact(&entry.path(), &target.join(entry.file_name()))?;
+        } else {
+            fs::copy(entry.path(), target.join(entry.file_name()))?;
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn asset_cache_validators_do_not_bypass_blob_integrity_or_brand_binding() -> Result<()> {
     let mut world = World::new()?;
     // Keep corruption confined to this test's artifact copy.
-    fn copy_tree(source: &std::path::Path, target: &std::path::Path) -> Result<()> {
-        fs::create_dir_all(target)?;
-        for entry in fs::read_dir(source)? {
-            let entry = entry?;
-            if entry.file_type()?.is_dir() {
-                copy_tree(&entry.path(), &target.join(entry.file_name()))?;
-            } else {
-                fs::copy(entry.path(), target.join(entry.file_name()))?;
-            }
-        }
-        Ok(())
-    }
     let artifact = world
         .directory
         .path()
         .join("artifacts")
         .join(day2_assets::hash_part(world.runtime.artifact().id())?);
-    copy_tree(world.runtime.artifact().directory(), &artifact)?;
+    copy_artifact(world.runtime.artifact().directory(), &artifact)?;
     let mut instance = Instance::load(world.runtime.instance_path())?;
     instance.apps.get_mut("links").unwrap().artifact = artifact.to_string_lossy().into();
     fs::write(

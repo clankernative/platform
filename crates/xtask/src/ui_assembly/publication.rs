@@ -179,7 +179,7 @@ impl UiPublication for FilePublication<'_> {
                     directories.push((entry.path(), relative));
                 } else {
                     ensure!(kind.is_file(), "special captured UI source forbidden");
-                    let bytes = day2::assets::read_regular(&entry.path(), MAX_UI_FILE as u64)?;
+                    let bytes = day2_assets::read_regular(&entry.path(), MAX_UI_FILE as u64)?;
                     ensure!(bytes.len() <= MAX_UI_FILE, "captured UI file exceeds limit");
                     total = total
                         .checked_add(bytes.len())

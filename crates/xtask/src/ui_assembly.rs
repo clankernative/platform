@@ -154,7 +154,7 @@ fn checked(root: &Path, rel: &str) -> Result<Vec<u8>> {
         "invalid/oversized input: {}",
         p.display()
     );
-    let b = day2::assets::read_regular(&p, MAX_FILE as u64)?;
+    let b = day2_assets::read_regular(&p, MAX_FILE as u64)?;
     ensure!(
         b.len() <= MAX_FILE,
         "input grew beyond file limit: {}",
@@ -168,7 +168,7 @@ fn parse_lock(path: &Path) -> Result<Lock> {
         m.is_file() && !m.file_type().is_symlink() && m.len() <= MAX_FILE as u64,
         "invalid captured UI lock"
     );
-    let lock: Lock = serde_json::from_slice(&day2::assets::read_regular(path, MAX_FILE as u64)?)?;
+    let lock: Lock = serde_json::from_slice(&day2_assets::read_regular(path, MAX_FILE as u64)?)?;
     validate_lock(&lock)?;
     Ok(lock)
 }
@@ -357,7 +357,7 @@ fn pin_digest(pin: &Pin, path: &Path) -> Result<(Vec<u8>, String)> {
         meta.is_file() && !meta.file_type().is_symlink() && meta.len() <= MAX_FILE as u64 * 64,
         "invalid UI adapter executable"
     );
-    let bytes = day2::assets::read_regular(path, MAX_FILE as u64 * 64)?;
+    let bytes = day2_assets::read_regular(path, MAX_FILE as u64 * 64)?;
     ensure!(
         sha(&bytes) == target.digest,
         "UI adapter executable digest mismatch"
@@ -411,7 +411,7 @@ pub fn expand_with_pin(
             && pin_meta.len() <= MAX_FILE as u64,
         "invalid/oversized UI adapter pin"
     );
-    let pin_bytes = day2::assets::read_regular(pin_path, MAX_FILE as u64)
+    let pin_bytes = day2_assets::read_regular(pin_path, MAX_FILE as u64)
         .context("read explicit UI adapter pin")?;
     ensure!(
         pin_bytes.len() <= MAX_FILE,
@@ -565,7 +565,7 @@ fn copy_tree_checked(source: &Path, target: &Path) -> Result<()> {
                     meta.is_file() && meta.len() <= MAX_UI_FILE as u64,
                     "captured UI file exceeds limit"
                 );
-                let b = day2::assets::read_regular(&e.path(), MAX_UI_FILE as u64)?;
+                let b = day2_assets::read_regular(&e.path(), MAX_UI_FILE as u64)?;
                 ensure!(b.len() <= MAX_UI_FILE, "captured UI file grew beyond limit");
                 total += b.len();
                 ensure!(total <= MAX_TOTAL, "captured UI byte budget exceeded");

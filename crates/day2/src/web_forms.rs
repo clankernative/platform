@@ -377,13 +377,13 @@ fn validate_query_form_impl(
             "template_query_control_type_mismatch: {page}.{name}"
         );
         ensure!(
-            value.attr("disabled").is_none() && value.attr("multiple").is_none(),
+            !effectively_disabled(element) && value.attr("multiple").is_none(),
             "template_query_omitted_or_multiple_field"
         );
         if kind == &Kind::Boolean && input_type == "checkbox" {
             ensure!(
                 route.defaults.get(name) == Some(&Value::Bool(false))
-                    && value.attr("value").unwrap_or("true") == "true",
+                    && value.attr("value") == Some("true"),
                 "template_query_boolean_requires_false_default_and_true_value: {name}"
             );
         }
@@ -1104,6 +1104,43 @@ mod query_form_tests {
     }
 
     #[test]
+    fn query_forms_reject_browser_omission_and_noncanonical_checkbox_values() {
+        let catalog = routes(false);
+        for markup in [
+            r#"<form data-page="target"><input name="term"><input name="archived" type="checkbox"></form>"#,
+            r#"<form data-page="target"><input name="term"><input name="archived" type="checkbox" value="on"></form>"#,
+            r#"<form data-page="target"><fieldset disabled><input name="term"></fieldset></form>"#,
+            r#"<form data-page="target"><input name="term"><fieldset disabled><input name="archived" type="checkbox" value="true"></fieldset></form>"#,
+            r#"<form data-page="target"><fieldset disabled><legend>First</legend><legend><input name="term"></legend></fieldset></form>"#,
+        ] {
+            let document = Html::parse_fragment(markup);
+            let form = document.select(&selector("form")).next().unwrap();
+            assert!(
+                validate_query_form(form, &catalog, "target").is_err(),
+                "{markup}"
+            );
+            assert!(
+                validate_query_form_source(form, &catalog, "target").is_err(),
+                "{markup}"
+            );
+        }
+        let document = Html::parse_fragment(
+            r#"<form data-page="target"><fieldset disabled><legend><input name="term"></legend></fieldset><input name="archived" type="checkbox" value="true" checked></form>"#,
+        );
+        let form = document.select(&selector("form")).next().unwrap();
+        validate_query_form(form, &catalog, "target").unwrap();
+        validate_query_form_source(form, &catalog, "target").unwrap();
+        assert_eq!(
+            catalog
+                .resolve("/search", "term=acme&archived=true")
+                .unwrap()
+                .unwrap()
+                .1,
+            serde_json::json!({"term":"acme","archived":true,"page":1})
+        );
+    }
+
+    #[test]
     fn native_choices_exclude_disabled_options_from_editable_ticket_authority() {
         let list = Kind::InputShape {
             shape: crate::output_schema::Type::List(Box::new(crate::output_schema::Type::String)),
@@ -1183,7 +1220,7 @@ mod query_form_tests {
     fn query_selects_admit_only_closed_literal_scalar_options() {
         let route_catalog = routes(false);
         let valid = Html::parse_fragment(
-            r#"<form data-page="target"><select name="term"><option value="acme">Acme</option><option value="contoso">Contoso</option></select><input name="archived" type="checkbox"><input name="page" type="number"></form>"#,
+            r#"<form data-page="target"><select name="term"><option value="acme">Acme</option><option value="contoso">Contoso</option></select><input name="archived" type="checkbox" value="true"><input name="page" type="number"></form>"#,
         );
         validate_query_form(
             valid.select(&selector("form")).next().unwrap(),
@@ -1198,7 +1235,7 @@ mod query_form_tests {
             r#"<option value="valid">   </option>"#,
         ] {
             let markup = format!(
-                r#"<form data-page="target"><select name="term">{options}</select><input name="archived" type="checkbox"><input name="page" type="number"></form>"#
+                r#"<form data-page="target"><select name="term">{options}</select><input name="archived" type="checkbox" value="true"><input name="page" type="number"></form>"#
             );
             let document = Html::parse_fragment(&markup);
             assert!(
@@ -1219,14 +1256,14 @@ mod query_form_tests {
         for markup in [
             r#"<form data-page="target"><input name="term"><input name="unknown"></form>"#,
             r#"<form data-page="target"><input name="page" type="number"></form>"#,
-            r#"<form data-page="target"><input name="term"><input name="term"><input name="archived" type="checkbox"><input name="page" type="number"></form>"#,
-            r#"<form data-page="target" data-command="update"><input name="term"><input name="archived" type="checkbox"><input name="page" type="number"></form>"#,
-            r#"<form data-page="target" data-platform="sign-out"><input name="term"><input name="archived" type="checkbox"><input name="page" type="number"></form>"#,
-            r#"<form data-page="target" action="/actions"><input name="term"><input name="archived" type="checkbox"><input name="page" type="number"></form>"#,
-            r#"<form data-page="target" method="post"><input name="term"><input name="archived" type="checkbox"><input name="page" type="number"></form>"#,
-            r#"<form data-page="target" enctype="text/plain"><input name="term"><input name="archived" type="checkbox"><input name="page" type="number"></form>"#,
-            r#"<form data-page="target" target="_blank"><input name="term"><input name="archived" type="checkbox"><input name="page" type="number"></form>"#,
-            r#"<form data-page="target"><input name="term" type="checkbox"><input name="archived" type="checkbox"><input name="page" type="number"></form>"#,
+            r#"<form data-page="target"><input name="term"><input name="term"><input name="archived" type="checkbox" value="true"><input name="page" type="number"></form>"#,
+            r#"<form data-page="target" data-command="update"><input name="term"><input name="archived" type="checkbox" value="true"><input name="page" type="number"></form>"#,
+            r#"<form data-page="target" data-platform="sign-out"><input name="term"><input name="archived" type="checkbox" value="true"><input name="page" type="number"></form>"#,
+            r#"<form data-page="target" action="/actions"><input name="term"><input name="archived" type="checkbox" value="true"><input name="page" type="number"></form>"#,
+            r#"<form data-page="target" method="post"><input name="term"><input name="archived" type="checkbox" value="true"><input name="page" type="number"></form>"#,
+            r#"<form data-page="target" enctype="text/plain"><input name="term"><input name="archived" type="checkbox" value="true"><input name="page" type="number"></form>"#,
+            r#"<form data-page="target" target="_blank"><input name="term"><input name="archived" type="checkbox" value="true"><input name="page" type="number"></form>"#,
+            r#"<form data-page="target"><input name="term" type="checkbox"><input name="archived" type="checkbox" value="true"><input name="page" type="number"></form>"#,
         ] {
             let document = Html::parse_fragment(markup);
             let parsed = document.select(&selector("form")).next().unwrap();

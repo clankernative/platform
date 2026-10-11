@@ -988,7 +988,7 @@ mod tests {
                 Record {
                     fields: BTreeMap::from([(
                         "limit".into(),
-                        Kind::Unsigned(crate::numeric::Unsigned::U64),
+                        Kind::Unsigned(day2_contracts::numeric::Unsigned::U64),
                     )]),
                     roc_type: Some("Input".into()),
                     identity: None,
@@ -1564,7 +1564,7 @@ mod tests {
                 ),
                 (
                     "theme".into(),
-                    Kind::Unsigned(crate::numeric::Unsigned::U64),
+                    Kind::Unsigned(day2_contracts::numeric::Unsigned::U64),
                 ),
             ]),
             roc_type: Some("Input".into()),

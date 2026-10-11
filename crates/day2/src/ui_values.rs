@@ -341,8 +341,11 @@ pub(crate) fn validate_remote_image_source(value: &str) -> Result<()> {
         "ui_image_https_required"
     );
     ensure!(
-        url.host_str()
-            .is_some_and(|host| !host.contains('*') && host.len() <= 253),
+        url.host_str().is_some_and(|host| {
+            // This origin becomes a CSP source, so URL-valid host punctuation
+            // must not introduce policy delimiters or quoted keywords.
+            !host.contains(['*', ';', '\'', '"']) && host.len() <= 253
+        }),
         "ui_image_host_invalid"
     );
     Ok(())
@@ -776,14 +779,19 @@ mod tests {
             ui_image(&v("https://cdn.example.test/a.png")).unwrap().0,
             "https://cdn.example.test/a.png"
         );
+        assert!(ui_image(&v("https://cdn.example.test/a;v=1?label=%27")).is_ok());
         for bad in [
             "http://cdn.example.test/a",
             " https://cdn.example.test/a",
             "https://*.example.test/a",
             "https://u:p@cdn.example.test/a",
             "https://x.test/a\\b",
+            "https://cdn.example.test;script-src/a",
+            "https://cdn.example.test'/a",
+            "https://cdn.example.test\"/a",
+            "https://cdn.example.test%3bscript-src/a",
         ] {
-            assert!(ui_image(&v(bad)).is_err());
+            assert!(ui_image(&v(bad)).is_err(), "accepted {bad}");
         }
         assert_eq!(
             remote_image_origins(
@@ -791,6 +799,9 @@ mod tests {
             )
             .unwrap(),
             vec!["https://cdn.example.test"]
+        );
+        assert!(
+            remote_image_origins("<img src='https://cdn.example.test%3bscript-src/a'>").is_err()
         );
     }
     #[test]

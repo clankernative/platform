@@ -1,8 +1,8 @@
 use super::*;
 
 #[test]
-fn local_build_provider_without_ui_keeps_legacy_serialized_identity() {
-    let legacy = serde_json::json!({
+fn local_build_provider_requires_explicit_ui_configuration() {
+    let configuration = serde_json::json!({
         "kind": "local_macos",
         "platform_root": "/opt/platform",
         "toolchains": "/opt/toolchains",
@@ -10,8 +10,9 @@ fn local_build_provider_without_ui_keeps_legacy_serialized_identity() {
         "rust": "/opt/rust",
         "registry": "/opt/registry"
     });
-    let provider: BuildProvider = serde_json::from_value(legacy.clone()).unwrap();
-    assert_eq!(serde_json::to_value(provider).unwrap(), legacy);
+    let BuildProvider::LocalMacos { ui_assembly, .. } =
+        serde_json::from_value(configuration).unwrap();
+    assert!(ui_assembly.is_none());
 }
 
 #[test]

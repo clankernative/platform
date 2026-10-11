@@ -210,13 +210,23 @@ async fn replay(steps: &[Step]) -> Result<()> {
         );
         if let Some(patch) = patch {
             ensure!(!patch.contains("<form"), "live patch replaced draft");
-            let expected = if step.text != text { step.text.as_str() } else { "" };
+            let expected = if step.text != text {
+                step.text.as_str()
+            } else {
+                ""
+            };
             ensure!(patch.starts_with(expected), "wrong changed region");
             if step.new_origin != image_notice {
                 ensure!(
                     patch.contains("day2-live-status"),
                     "missing CSP refresh notice"
                 );
+                ensure!(
+                    patch.contains("Some new images need a page refresh") == step.new_origin,
+                    "wrong CSP refresh notice state"
+                );
+            } else {
+                ensure!(patch == expected, "unexpected changed markup");
             }
         }
         if due {

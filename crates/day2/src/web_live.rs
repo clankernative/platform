@@ -303,7 +303,10 @@ impl Host {
                 .values()
                 .cloned()
                 .collect::<String>(),
-            image_refresh_notice(subscription.state.needs_image_refresh, &subscription.state.refresh_url)
+            image_refresh_notice(
+                subscription.state.needs_image_refresh,
+                &subscription.state.refresh_url
+            )
         );
         sender
             .try_send(elements(&initial, "outer"))
@@ -415,7 +418,12 @@ impl SubscriptionState {
         );
         // Fresh session, wall time and authority are mandatory before publishing state.
         self.authorize_current(inputs, wall()?)?;
-        self.rendered(revision, clock.monotonic(), rendered.regions, &rendered.image_origins)
+        self.rendered(
+            revision,
+            clock.monotonic(),
+            rendered.regions,
+            &rendered.image_origins,
+        )
     }
 
     fn needs_refresh(&self, revision: i64, monotonic: Duration) -> bool {
@@ -444,7 +452,10 @@ impl SubscriptionState {
             .map(|(_, markup)| markup.as_str())
             .collect::<String>();
         if needs_image_refresh != self.needs_image_refresh {
-            changed.push_str(&image_refresh_notice(needs_image_refresh, &self.refresh_url));
+            changed.push_str(&image_refresh_notice(
+                needs_image_refresh,
+                &self.refresh_url,
+            ));
         }
         self.needs_image_refresh = needs_image_refresh;
         self.regions = regions;

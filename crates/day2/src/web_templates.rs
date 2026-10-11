@@ -2652,7 +2652,7 @@ mod tests {
             ("count".into(), Type::Integer),
             (
                 "ordinal".into(),
-                Type::Unsigned(crate::numeric::Unsigned::U64),
+                Type::Unsigned(day2_contracts::numeric::Unsigned::U64),
             ),
             ("reference".into(), reference.clone()),
             (

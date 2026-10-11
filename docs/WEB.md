@@ -640,6 +640,17 @@ Only protocol 2 / binding ABI 2 with Minijinja 2.12.0 is accepted. See the relea
 for the envelope and generic `ui_*` helpers. The approved local executable is
 trusted operator tooling, not a hostile-code sandbox.
 
+The host loads an admitted `ui-package.js` component entry only when assembly
+recorded the approved provider executable in the artifact's source identity.
+Live refresh rechecks authority after rendering images and regions through the
+same sequence used by the seeded simulations.
+
+Query forms require explicit `value="true"` for Boolean checkboxes and reject
+controls omitted by disabled fieldsets. Controls in a disabled fieldset's first
+legend retain HTML's normal exception.
+Remote image hosts must also be safe CSP source tokens; URL-valid policy
+delimiters are rejected before an origin enters the document policy.
+
 CSS is parsed with cssparser. Layout, custom properties and responsive media
 queries are allowed. CSS `@import` and external CSS font/image URLs are rejected;
 local WOFF2 fonts require admitted resource closure. HTML images use checked
