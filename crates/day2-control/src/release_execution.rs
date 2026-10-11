@@ -576,7 +576,7 @@ impl std::fmt::Display for ReleaseRejection {
 impl std::error::Error for ReleaseRejection {}
 
 /// A provider refusal that names the operator action it needs, such as an
-/// artifact change that needs a maintenance activation first. The host still
+/// image change that needs a maintenance activation first. The host still
 /// records a provider fault but returns this message instead of hiding it.
 /// Never put provider responses or secret material in one.
 #[derive(Debug)]
