@@ -54,6 +54,10 @@ SubmitReport :: [].{
 						.map(|_| { id: id, version: RowVersion.one })
 				}
 			}
+		} else if input.title.to_str() == "step_budget" {
+			Tx.create(Data.reports, value)
+				.and_then(|report| reread(report, 80))
+				.map(|report| { id: report.id, version: report.version })
 		} else {
 			Tx.create(Data.reports, value)
 				.and_then(
@@ -80,6 +84,17 @@ SubmitReport :: [].{
 								},
 							),
 				)
+		}
+	}
+
+	# One transaction that keeps reading its own row, past the host's step budget.
+	# The host must refuse it as a failure and roll back the create.
+	reread : Model.Entity(Models.Report), U64 -> Tx(Model.Entity(Models.Report))
+	reread = |report, remaining| {
+		if remaining == 0 {
+			Tx.succeed(report)
+		} else {
+			Tx.get(Data.reports, report.id).and_then(|row| reread(row, remaining - 1))
 		}
 	}
 
