@@ -156,33 +156,46 @@ fn admit_build_cache(
         (&cache.binaries, expected, false),
         (&cache.programs, expected_programs, true),
     ] {
-      let mut observed = BTreeSet::new();
-      for binary in binaries {
+        let mut observed = BTreeSet::new();
+        for binary in binaries {
+            ensure!(
+                observed.insert((
+                    binary.package.clone(),
+                    binary.target.clone(),
+                    binary.kind.clone()
+                )) && executables.insert(&binary.executable)
+                    && directories.get(&binary.package) == Some(&binary.directory),
+                "cached compiler target identity or package directory changed"
+            );
+            let directory = if programs {
+                "target/debug"
+            } else {
+                "target/debug/deps"
+            };
+            ensure!(
+                binary.executable.parent() == Some(Path::new(directory))
+                    && binary
+                        .executable
+                        .components()
+                        .all(|part| matches!(part, std::path::Component::Normal(_))),
+                "cached executable outside ordinary Cargo output"
+            );
+            let path = if programs {
+                ensure!(
+                    binary.executable == program_output(&binary.target),
+                    "ordinary Cargo program name required"
+                );
+                root.join(PROGRAM_CACHE)
+                    .join(binary.executable.file_name().context("program file name")?)
+            } else {
+                root.join(&binary.executable)
+            };
+            admit_executable(&path, &binary.digest)?;
+        }
         ensure!(
-            observed.insert((
-                binary.package.clone(),
-                binary.target.clone(),
-                binary.kind.clone()
-            )) && executables.insert(&binary.executable)
-                && directories.get(&binary.package) == Some(&binary.directory),
-            "cached compiler target identity or package directory changed"
+            observed == *targets,
+            "cached compiler inventory must cover every default target and supporting program"
         );
-        let directory = if programs { "target/debug" } else { "target/debug/deps" };
-        ensure!(
-            binary.executable.parent() == Some(Path::new(directory))
-                && binary
-                    .executable
-                    .components()
-                    .all(|part| matches!(part, std::path::Component::Normal(_))),
-            "cached executable outside ordinary Cargo output"
-        );
-        let path = if programs {
-            ensure!(binary.executable == program_output(&binary.target), "ordinary Cargo program name required");
-            root.join(PROGRAM_CACHE).join(binary.executable.file_name().context("program file name")?)
-        } else { root.join(&binary.executable) };
-        admit_executable(&path, &binary.digest)?;
-      }
-      ensure!(observed == *targets, "cached compiler inventory must cover every default target and supporting program");
     }
     Ok(())
 }
@@ -192,29 +205,63 @@ fn program_output(target: &str) -> PathBuf {
 }
 
 fn admit_executable(path: &Path, expected: &str) -> Result<()> {
-    ensure!(fs::symlink_metadata(path)?.file_type().is_file(), "compiler executable must be a regular file");
-    ensure!(path.canonicalize()? == path, "compiler output has a symlink ancestor");
-    ensure!(digest(&fs::read(path)?) == expected, "compiler executable bytes changed");
+    ensure!(
+        fs::symlink_metadata(path)?.file_type().is_file(),
+        "compiler executable must be a regular file"
+    );
+    ensure!(
+        path.canonicalize()? == path,
+        "compiler output has a symlink ancestor"
+    );
+    ensure!(
+        digest(&fs::read(path)?) == expected,
+        "compiler executable bytes changed"
+    );
     Ok(())
 }
 
 /// Copy only metadata-admitted normal programs, preserving executable permissions.
 /// Cache storage stays separate from ordinary Cargo outputs and run receipts.
 fn copy_programs(root: &Path, programs: &[Binary], restoring: bool) -> Result<()> {
-    let destination = root.join(if restoring { "target/debug" } else { PROGRAM_CACHE });
+    let destination = root.join(if restoring {
+        "target/debug"
+    } else {
+        PROGRAM_CACHE
+    });
     fs::create_dir_all(&destination)?;
-    ensure!(destination.canonicalize()? == destination, "program output directory has a symlink ancestor");
+    ensure!(
+        destination.canonicalize()? == destination,
+        "program output directory has a symlink ancestor"
+    );
     for program in programs {
-        ensure!(program.executable == program_output(&program.target)
-            && program.executable.parent() == Some(Path::new("target/debug"))
-            && program.executable.components().all(|part| matches!(part, std::path::Component::Normal(_))), "ordinary Cargo program path required");
+        ensure!(
+            program.executable == program_output(&program.target)
+                && program.executable.parent() == Some(Path::new("target/debug"))
+                && program
+                    .executable
+                    .components()
+                    .all(|part| matches!(part, std::path::Component::Normal(_))),
+            "ordinary Cargo program path required"
+        );
         let ordinary = root.join(&program.executable);
-        let cached = root.join(PROGRAM_CACHE).join(program.executable.file_name().context("program file name")?);
-        let (source, target) = if restoring { (cached, ordinary) } else { (ordinary, cached) };
+        let cached = root.join(PROGRAM_CACHE).join(
+            program
+                .executable
+                .file_name()
+                .context("program file name")?,
+        );
+        let (source, target) = if restoring {
+            (cached, ordinary)
+        } else {
+            (ordinary, cached)
+        };
         admit_executable(&source, &program.digest)?;
         match fs::symlink_metadata(&target) {
-            Ok(metadata) => ensure!(metadata.file_type().is_file(), "program copy destination must be a regular file"),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+            Ok(metadata) => ensure!(
+                metadata.file_type().is_file(),
+                "program copy destination must be a regular file"
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
         fs::copy(source, &target)?;
@@ -306,12 +353,26 @@ pub(super) fn build(root: &Path, snapshot: &str) -> Result<()> {
             (name.to_owned(), directory),
         );
         let targets = package["targets"].as_array().context("Cargo targets")?;
-        let integration_tests = targets.iter().any(|target| target["kind"].as_array().is_some_and(|kinds| kinds.iter().any(|kind| kind == "test")));
+        let integration_tests = targets.iter().any(|target| {
+            target["kind"]
+                .as_array()
+                .is_some_and(|kinds| kinds.iter().any(|kind| kind == "test"))
+        });
         for target in targets {
             let kind: Vec<String> = serde_json::from_value(target["kind"].clone())?;
             if integration_tests && kind == ["bin"] {
-                ensure!(target["test"] == true && target.get("required-features").is_none(), "review feature-gated or harness-disabled supporting program partition");
-                expected_programs.insert((name.to_owned(), target["name"].as_str().context("program target name")?.to_owned(), kind.clone()));
+                ensure!(
+                    target["test"] == true && target.get("required-features").is_none(),
+                    "review feature-gated or harness-disabled supporting program partition"
+                );
+                expected_programs.insert((
+                    name.to_owned(),
+                    target["name"]
+                        .as_str()
+                        .context("program target name")?
+                        .to_owned(),
+                    kind.clone(),
+                ));
             }
             if target["test"] == true && !kind.iter().any(|kind| kind == "bench") {
                 ensure!(
@@ -335,16 +396,27 @@ pub(super) fn build(root: &Path, snapshot: &str) -> Result<()> {
     if std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true") {
         let cached = (|| -> Result<BuildCache> {
             let cache: BuildCache = day2::json::decode(&fs::read(root.join(BUILD_CACHE))?)?;
-            admit_build_cache(root, &cache, &compiler, &expected, &expected_programs, &directories)?;
+            admit_build_cache(
+                root,
+                &cache,
+                &compiler,
+                &expected,
+                &expected_programs,
+                &directories,
+            )?;
             copy_programs(root, &cache.programs, true)?;
             Ok(cache)
         })();
         match cached {
             Ok(cache) => {
-                fs::write(root.join(BINARIES), serde_json::to_vec_pretty(&cache.binaries)?)?;
+                fs::write(
+                    root.join(BINARIES),
+                    serde_json::to_vec_pretty(&cache.binaries)?,
+                )?;
                 println!(
                     "Reusing {} admitted compiled test binaries and {} supporting programs; runtime campaigns and doc tests execute fresh",
-                    cache.binaries.len(), cache.programs.len()
+                    cache.binaries.len(),
+                    cache.programs.len()
                 );
                 return Ok(());
             }
@@ -400,8 +472,12 @@ pub(super) fn build(root: &Path, snapshot: &str) -> Result<()> {
         }
         let test = message["profile"]["test"] == true;
         let kind: Vec<String> = serde_json::from_value(message["target"]["kind"].clone())?;
-        if !test && (kind != ["bin"] || message["executable"].is_null()) { continue; }
-        let executable = message["executable"].as_str().context("compiler executable required")?;
+        if !test && (kind != ["bin"] || message["executable"].is_null()) {
+            continue;
+        }
+        let executable = message["executable"]
+            .as_str()
+            .context("compiler executable required")?;
         let (package, directory) = members
             .get(message["package_id"].as_str().context("artifact package")?)
             .context("test binary outside full-gate package graph")?;
@@ -410,12 +486,21 @@ pub(super) fn build(root: &Path, snapshot: &str) -> Result<()> {
             .context("test target name")?
             .to_owned();
         ensure!(
-            (if test { &mut observed } else { &mut observed_programs }).insert((package.clone(), target.clone(), kind.clone())),
+            (if test {
+                &mut observed
+            } else {
+                &mut observed_programs
+            })
+            .insert((package.clone(), target.clone(), kind.clone())),
             "duplicate Cargo compiler target"
         );
         let executable = Path::new(executable).strip_prefix(root)?.to_owned();
         ensure!(
-            if test { executable.parent() == Some(Path::new("target/debug/deps")) } else { executable == program_output(&target) },
+            if test {
+                executable.parent() == Some(Path::new("target/debug/deps"))
+            } else {
+                executable == program_output(&target)
+            },
             "ordinary full-gate compiler output required"
         );
         (if test { &mut binaries } else { &mut programs }).push(Binary {
@@ -440,11 +525,19 @@ pub(super) fn build(root: &Path, snapshot: &str) -> Result<()> {
         binaries: binaries.clone(),
         programs,
     };
-    admit_build_cache(root, &cache, &cache.identity, &expected, &expected_programs, &directories)?;
+    admit_build_cache(
+        root,
+        &cache,
+        &cache.identity,
+        &expected,
+        &expected_programs,
+        &directories,
+    )?;
     fs::write(root.join(BUILD_CACHE), serde_json::to_vec_pretty(&cache)?)?;
     println!(
         "Prepared {} test binaries and {} supporting programs from all {} full-gate packages",
-        binaries.len(), cache.programs.len(),
+        binaries.len(),
+        cache.programs.len(),
         packages().len()
     );
     Ok(())
@@ -501,9 +594,14 @@ pub(super) fn save(
     } else {
         day2::json::decode(&fs::read(root.join(BINARIES))?)?
     };
-    let programs = if part == "inputs" { Vec::new() } else {
+    let programs = if part == "inputs" {
+        Vec::new()
+    } else {
         let cache: BuildCache = day2::json::decode(&fs::read(root.join(BUILD_CACHE))?)?;
-        ensure!(cache.binaries == binaries, "current compiler and preparation inventories differ");
+        ensure!(
+            cache.binaries == binaries,
+            "current compiler and preparation inventories differ"
+        );
         cache.programs
     };
     let fixtures = fixtures
@@ -584,14 +682,38 @@ fn validate_preparation(prepared: &Prepared, part: &str) -> Result<()> {
             "prepared test paths must stay within the workspace"
         );
     }
-    let integration_packages: BTreeSet<_> = prepared.binaries.iter().filter(|binary| binary.kind == ["test"]).map(|binary| &binary.package).collect();
-    let expected_programs: BTreeSet<_> = prepared.binaries.iter().filter(|binary| binary.kind == ["bin"] && integration_packages.contains(&binary.package)).map(|binary| (&binary.package, &binary.target, &binary.directory)).collect();
-    let programs: BTreeSet<_> = prepared.programs.iter().map(|binary| (&binary.package, &binary.target, &binary.directory)).collect();
-    ensure!(programs == expected_programs && programs.len() == prepared.programs.len(), "prepared supporting program inventory incomplete or duplicated");
+    let integration_packages: BTreeSet<_> = prepared
+        .binaries
+        .iter()
+        .filter(|binary| binary.kind == ["test"])
+        .map(|binary| &binary.package)
+        .collect();
+    let expected_programs: BTreeSet<_> = prepared
+        .binaries
+        .iter()
+        .filter(|binary| binary.kind == ["bin"] && integration_packages.contains(&binary.package))
+        .map(|binary| (&binary.package, &binary.target, &binary.directory))
+        .collect();
+    let programs: BTreeSet<_> = prepared
+        .programs
+        .iter()
+        .map(|binary| (&binary.package, &binary.target, &binary.directory))
+        .collect();
+    ensure!(
+        programs == expected_programs && programs.len() == prepared.programs.len(),
+        "prepared supporting program inventory incomplete or duplicated"
+    );
     for program in &prepared.programs {
-        ensure!(program.kind == ["bin"] && program.executable == program_output(&program.target)
-            && program.executable.parent() == Some(Path::new("target/debug"))
-            && program.executable.components().all(|part| matches!(part, std::path::Component::Normal(_))), "prepared ordinary program path required");
+        ensure!(
+            program.kind == ["bin"]
+                && program.executable == program_output(&program.target)
+                && program.executable.parent() == Some(Path::new("target/debug"))
+                && program
+                    .executable
+                    .components()
+                    .all(|part| matches!(part, std::path::Component::Normal(_))),
+            "prepared ordinary program path required"
+        );
     }
     Ok(())
 }
@@ -993,49 +1115,140 @@ mod tests {
             BTreeSet::from([("example".into(), "example-test".into(), vec!["test".into()])]);
         let directories = BTreeMap::from([("example".into(), PathBuf::from("crates/example"))]);
         fs::create_dir_all(root.join(PROGRAM_CACHE))?;
-        fs::write(root.join(PROGRAM_CACHE).join("example"), b"supporting program")?;
+        fs::write(
+            root.join(PROGRAM_CACHE).join("example"),
+            b"supporting program",
+        )?;
         let program = Binary {
-            package: "example".into(), target: "example".into(), kind: vec!["bin".into()],
-            directory: "crates/example".into(), executable: program_output("example"),
+            package: "example".into(),
+            target: "example".into(),
+            kind: vec!["bin".into()],
+            directory: "crates/example".into(),
+            executable: program_output("example"),
             digest: digest(b"supporting program"),
         };
-        let expected_programs = BTreeSet::from([("example".into(), "example".into(), vec!["bin".into()])]);
+        let expected_programs =
+            BTreeSet::from([("example".into(), "example".into(), vec!["bin".into()])]);
         let cache = BuildCache {
             identity,
             binaries: vec![binary],
             programs: vec![program],
         };
-        admit_build_cache(&root, &cache, &cache.identity, &expected, &expected_programs, &directories)?;
+        admit_build_cache(
+            &root,
+            &cache,
+            &cache.identity,
+            &expected,
+            &expected_programs,
+            &directories,
+        )?;
         assert!(!root.join(program_output("example")).exists());
-        #[cfg(unix)] {
+        #[cfg(unix)]
+        {
             use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(root.join(PROGRAM_CACHE).join("example"), fs::Permissions::from_mode(0o755))?;
+            fs::set_permissions(
+                root.join(PROGRAM_CACHE).join("example"),
+                fs::Permissions::from_mode(0o755),
+            )?;
         }
         copy_programs(&root, &cache.programs, true)?;
-        assert_eq!(fs::read(root.join(program_output("example")))?, b"supporting program");
-        #[cfg(unix)] {
+        assert_eq!(
+            fs::read(root.join(program_output("example")))?,
+            b"supporting program"
+        );
+        #[cfg(unix)]
+        {
             use std::os::unix::fs::PermissionsExt;
-            assert_ne!(fs::metadata(root.join(program_output("example")))?.permissions().mode() & 0o111, 0);
+            assert_ne!(
+                fs::metadata(root.join(program_output("example")))?
+                    .permissions()
+                    .mode()
+                    & 0o111,
+                0
+            );
         }
-        for field in ["package", "target", "kind", "directory", "executable", "digest"] {
+        for field in [
+            "package",
+            "target",
+            "kind",
+            "directory",
+            "executable",
+            "digest",
+        ] {
             let mut value = serde_json::to_value(&cache)?;
-            value["programs"][0][field] = if field == "kind" { json!(["test"]) } else { json!("foreign") };
+            value["programs"][0][field] = if field == "kind" {
+                json!(["test"])
+            } else {
+                json!("foreign")
+            };
             let invalid = serde_json::from_value(value)?;
-            assert!(admit_build_cache(&root, &invalid, &cache.identity, &expected, &expected_programs, &directories).is_err());
+            assert!(
+                admit_build_cache(
+                    &root,
+                    &invalid,
+                    &cache.identity,
+                    &expected,
+                    &expected_programs,
+                    &directories
+                )
+                .is_err()
+            );
         }
         for programs in [json!([]), json!([&cache.programs[0], &cache.programs[0]])] {
-            let mut value = serde_json::to_value(&cache)?; value["programs"] = programs;
+            let mut value = serde_json::to_value(&cache)?;
+            value["programs"] = programs;
             let invalid = serde_json::from_value(value)?;
-            assert!(admit_build_cache(&root, &invalid, &cache.identity, &expected, &expected_programs, &directories).is_err());
+            assert!(
+                admit_build_cache(
+                    &root,
+                    &invalid,
+                    &cache.identity,
+                    &expected,
+                    &expected_programs,
+                    &directories
+                )
+                .is_err()
+            );
         }
         let cached_program = root.join(PROGRAM_CACHE).join("example");
         fs::write(&cached_program, b"tampered program")?;
-        assert!(admit_build_cache(&root, &cache, &cache.identity, &expected, &expected_programs, &directories).is_err());
+        assert!(
+            admit_build_cache(
+                &root,
+                &cache,
+                &cache.identity,
+                &expected,
+                &expected_programs,
+                &directories
+            )
+            .is_err()
+        );
         fs::remove_file(&cached_program)?;
-        assert!(admit_build_cache(&root, &cache, &cache.identity, &expected, &expected_programs, &directories).is_err());
-        #[cfg(unix)] {
+        assert!(
+            admit_build_cache(
+                &root,
+                &cache,
+                &cache.identity,
+                &expected,
+                &expected_programs,
+                &directories
+            )
+            .is_err()
+        );
+        #[cfg(unix)]
+        {
             std::os::unix::fs::symlink(root.join(program_output("example")), &cached_program)?;
-            assert!(admit_build_cache(&root, &cache, &cache.identity, &expected, &expected_programs, &directories).is_err());
+            assert!(
+                admit_build_cache(
+                    &root,
+                    &cache,
+                    &cache.identity,
+                    &expected,
+                    &expected_programs,
+                    &directories
+                )
+                .is_err()
+            );
             fs::remove_file(&cached_program)?;
         }
         fs::write(&cached_program, b"supporting program")?;
@@ -1055,15 +1268,30 @@ mod tests {
             value["identity"][field] = json!("foreign");
             let invalid = serde_json::from_value(value)?;
             assert!(
-                admit_build_cache(&root, &invalid, &cache.identity, &expected, &expected_programs, &directories)
-                    .is_err()
+                admit_build_cache(
+                    &root,
+                    &invalid,
+                    &cache.identity,
+                    &expected,
+                    &expected_programs,
+                    &directories
+                )
+                .is_err()
             );
         }
         let mut value = serde_json::to_value(&cache)?;
         value["identity"]["cargo_configuration"] = json!({".cargo/config.toml": "changed"});
         let invalid = serde_json::from_value(value)?;
         assert!(
-            admit_build_cache(&root, &invalid, &cache.identity, &expected, &expected_programs, &directories).is_err()
+            admit_build_cache(
+                &root,
+                &invalid,
+                &cache.identity,
+                &expected,
+                &expected_programs,
+                &directories
+            )
+            .is_err()
         );
         for (field, value) in [
             ("package", "foreign"),
@@ -1076,8 +1304,15 @@ mod tests {
             invalid["binaries"][0][field] = json!(value);
             let invalid = serde_json::from_value(invalid)?;
             assert!(
-                admit_build_cache(&root, &invalid, &cache.identity, &expected, &expected_programs, &directories)
-                    .is_err()
+                admit_build_cache(
+                    &root,
+                    &invalid,
+                    &cache.identity,
+                    &expected,
+                    &expected_programs,
+                    &directories
+                )
+                .is_err()
             );
         }
         for binaries in [json!([]), json!([&cache.binaries[0], &cache.binaries[0]])] {
@@ -1085,17 +1320,40 @@ mod tests {
             value["binaries"] = binaries;
             let invalid = serde_json::from_value(value)?;
             assert!(
-                admit_build_cache(&root, &invalid, &cache.identity, &expected, &expected_programs, &directories)
-                    .is_err()
+                admit_build_cache(
+                    &root,
+                    &invalid,
+                    &cache.identity,
+                    &expected,
+                    &expected_programs,
+                    &directories
+                )
+                .is_err()
             );
         }
         fs::write(root.join(&executable), b"tampered output")?;
         assert!(
-            admit_build_cache(&root, &cache, &cache.identity, &expected, &expected_programs, &directories).is_err()
+            admit_build_cache(
+                &root,
+                &cache,
+                &cache.identity,
+                &expected,
+                &expected_programs,
+                &directories
+            )
+            .is_err()
         );
         fs::remove_file(root.join(&executable))?;
         assert!(
-            admit_build_cache(&root, &cache, &cache.identity, &expected, &expected_programs, &directories).is_err()
+            admit_build_cache(
+                &root,
+                &cache,
+                &cache.identity,
+                &expected,
+                &expected_programs,
+                &directories
+            )
+            .is_err()
         );
         #[cfg(unix)]
         {
@@ -1103,7 +1361,15 @@ mod tests {
             fs::write(&outside, b"compiled output")?;
             std::os::unix::fs::symlink(&outside, root.join(&executable))?;
             assert!(
-                admit_build_cache(&root, &cache, &cache.identity, &expected, &expected_programs, &directories).is_err()
+                admit_build_cache(
+                    &root,
+                    &cache,
+                    &cache.identity,
+                    &expected,
+                    &expected_programs,
+                    &directories
+                )
+                .is_err()
             );
         }
         Ok(())
@@ -1215,16 +1481,31 @@ mod tests {
     }
 
     #[test]
-    fn preparation_join_requires_supporting_programs_without_expanding_test_partition() -> Result<()> {
+    fn preparation_join_requires_supporting_programs_without_expanding_test_partition() -> Result<()>
+    {
         let make_tests = || -> Result<Prepared> {
             let mut tests = sample_part("tests")?;
             for (target, kind, executable) in [
                 ("day2", "bin", "target/debug/deps/day2-harness"),
                 ("integration", "test", "target/debug/deps/integration"),
             ] {
-                tests.binaries.push(Binary { package: "day2".into(), target: target.into(), kind: vec![kind.into()], directory: "crates/day2".into(), executable: executable.into(), digest: "binary".into() });
+                tests.binaries.push(Binary {
+                    package: "day2".into(),
+                    target: target.into(),
+                    kind: vec![kind.into()],
+                    directory: "crates/day2".into(),
+                    executable: executable.into(),
+                    digest: "binary".into(),
+                });
             }
-            tests.programs.push(Binary { package: "day2".into(), target: "day2".into(), kind: vec!["bin".into()], directory: "crates/day2".into(), executable: program_output("day2"), digest: "program".into() });
+            tests.programs.push(Binary {
+                package: "day2".into(),
+                target: "day2".into(),
+                kind: vec!["bin".into()],
+                directory: "crates/day2".into(),
+                executable: program_output("day2"),
+                digest: "program".into(),
+            });
             Ok(tests)
         };
         let complete = combine_parts(sample_part("inputs")?, make_tests()?, &sample_identity())?;
@@ -1232,8 +1513,15 @@ mod tests {
         assert!(!expected_binaries(&complete, "workspace-day2").contains(&program_output("day2")));
         for field in ["programs", "executable", "target", "kind", "directory"] {
             let mut value = serde_json::to_value(make_tests()?)?;
-            if field == "programs" { value[field] = json!([]); }
-            else { value["programs"][0][field] = if field == "kind" { json!(["test"]) } else { json!("foreign") }; }
+            if field == "programs" {
+                value[field] = json!([]);
+            } else {
+                value["programs"][0][field] = if field == "kind" {
+                    json!(["test"])
+                } else {
+                    json!("foreign")
+                };
+            }
             let invalid = serde_json::from_value(value)?;
             assert!(combine_parts(sample_part("inputs")?, invalid, &sample_identity()).is_err());
         }
