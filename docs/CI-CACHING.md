@@ -77,8 +77,8 @@ gate establishes correctness; a cache hit rate alone does not establish faster C
 
 The secret scan and dependency audit finish before CI starts ordinary compilation
 or looks up a main-push queue receipt. If either fails, preparation and runtime
-campaigns do not allocate runners. The required `verify` job still runs and fails
-its admission check; skipped preparation cannot produce a successful full check.
+campaigns do not allocate runners. The required `verify` job runs its failure
+guard on Ubuntu; skipped preparation cannot produce a successful full check.
 This avoids spending macOS compilation time on already-rejected changes. Passing
 runs retain the full gate and incur the initial security-check wait.
 

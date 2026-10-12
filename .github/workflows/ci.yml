@@ -437,7 +437,8 @@ jobs:
   verify:
     needs: [secrets, dependencies, verify-queue-receipt, verify-prepare, verify-shards]
     if: ${{ always() && inputs.verification != 'full' && inputs.verification != 'diagnostics' }}
-    runs-on: macos-15
+    # A rejected source only needs the failure guard, not a macOS queue slot.
+    runs-on: ${{ needs.secrets.result == 'success' && needs.dependencies.result == 'success' && 'macos-15' || 'ubuntu-24.04' }}
     timeout-minutes: 20
     env:
       CARGO_INCREMENTAL: '0'
