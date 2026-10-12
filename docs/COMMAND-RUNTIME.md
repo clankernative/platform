@@ -219,6 +219,12 @@ code. Serialized application failures remain part of the admitted app contract.
 This is a local spike with bounded execution: 32 preparation observations, 32
 external effects, 64 total interpreter steps, 64 KiB observation results and eight
 child requests per invocation. Native computation retains the worker timeout.
+Every recorded observation counts as a step: preparation reads, local reads and
+writes, child requests and effect results. A transaction that asks for a 65th
+step fails with `transaction_step_budget`: the host rolls it back and records
+that failure as the invocation's outcome, because replaying the same journal
+would ask again. A command that loops over a page of rows must size the page to
+fit the budget.
 There is no HA scheduler, automatic worker classification, arbitrary hour-long
 backfill, public cancellation API for the new engine, timers, external signals,
 human approval waits or generic compensation engine yet. The SDK leaves room to

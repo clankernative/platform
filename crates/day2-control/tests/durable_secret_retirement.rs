@@ -1,7 +1,6 @@
 //! Persisted local Temporal, real SQLite and the compiled Roc retirement recipe.
 //! The independently persisted provider is synthetic, not a cloud qualification.
-#[path = "support/release.rs"]
-mod support;
+use crate::support::release as support;
 
 use anyhow::{Context, Result, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};

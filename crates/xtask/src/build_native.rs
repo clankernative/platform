@@ -16,7 +16,7 @@ struct Prepared {
     target: native_toolchain::Target,
     stage: PathBuf,
     hashes: BTreeMap<String, String>,
-    assets: day2::assets::Catalog,
+    assets: day2_assets::Catalog,
     web_resources: day2::web_resources::Catalog,
     templates: day2::web_templates::Catalog,
     namespace: String,
@@ -112,12 +112,12 @@ fn prepare(
         stage.join("app/SchemaSource.roc"),
         day2::app_inference::staged_schema_source(&stage.join("app"), &modules)?,
     )?;
-    let assets = day2::assets::package(&captured.join("assets"), &stage)?;
+    let assets = day2_assets::package(&captured.join("assets"), &stage)?;
     let web_resources = day2::web_resources::package(&captured.join("ui"), &stage)?;
     let templates = day2::web_templates::package(&captured.join("ui"), &stage)?;
     fs::write(
         stage.join("app/Assets.roc"),
-        day2::assets::roc_module(&assets)?,
+        day2_assets::roc_module(&assets)?,
     )?;
     hashes.extend(day2::sdk::stage(&root.join("sdk"), &stage.join("sdk"))?);
     let inference_sources = ["Path.roc", "Read.roc", "Write.roc"]
@@ -330,7 +330,7 @@ fn publish(root: &Path, prepared: &mut Prepared, bound: &Bound) -> Result<PathBu
                 && operation
                     .name
                     .split('.')
-                    .all(|part| day2::schema::identifier(part).is_ok()),
+                    .all(|part| day2_contracts::names::identifier(part).is_ok()),
             "invalid operation name"
         );
         ensure!(
@@ -440,7 +440,7 @@ fn publish_contract(
     _root: &Path,
     stage: &Path,
     _hashes: &BTreeMap<String, String>,
-    assets: &day2::assets::Catalog,
+    assets: &day2_assets::Catalog,
     web_resources: &day2::web_resources::Catalog,
     templates: &day2::web_templates::Catalog,
     schema: &Schema,
@@ -493,7 +493,7 @@ fn publish_contract(
     if !assets.is_empty() {
         fs::create_dir_all(directory.join("assets"))?;
         for asset in assets.values() {
-            let name = format!("{}.png", day2::assets::hash_part(&asset.digest)?);
+            let name = format!("{}.png", day2_assets::hash_part(&asset.digest)?);
             fs::copy(
                 stage.join("assets").join(&name),
                 directory.join("assets").join(name),
@@ -517,7 +517,8 @@ fn publish_contract(
         directory.join("schema.sql"),
         schema.ddl()?.join(";\n") + ";\n",
     )?;
-    day2::artifact::LoadedArtifact::load(&directory)?;
+    day2::artifact::LoadedArtifact::load(&directory)
+        .context("native build published candidate admission")?;
     println!("Built candidate; verifying required application obligations");
     Ok(directory)
 }
@@ -707,7 +708,8 @@ pub fn execute(
                         2,
                         runner,
                         &prepared.import_fixtures,
-                    )?;
+                    )
+                    .context("native build required application verification")?;
                     ensure!(
                         evidence.verification_complete,
                         "application verification obligations incomplete"
@@ -723,7 +725,8 @@ pub fn execute(
                         "verified application required before selection"
                     );
                     let artifact = published.as_ref().context("candidate required")?;
-                    let loaded = day2::artifact::LoadedArtifact::load(artifact)?;
+                    let loaded = day2::artifact::LoadedArtifact::load(artifact)
+                        .context("native build candidate selection admission")?;
                     ensure!(
                         platform_sources(root)? == prepared.platform_hashes,
                         "platform inputs changed during verification"
@@ -732,7 +735,8 @@ pub fn execute(
                         .join("artifacts")
                         .join(loaded.id().trim_start_matches("sha256:"));
                     if destination.exists() {
-                        let existing = day2::artifact::LoadedArtifact::load(&destination)?;
+                        let existing = day2::artifact::LoadedArtifact::load(&destination)
+                            .context("native build existing selection admission")?;
                         ensure!(existing.id() == loaded.id(), "existing artifact differs");
                         fs::copy(
                             artifact.join("verification.json"),

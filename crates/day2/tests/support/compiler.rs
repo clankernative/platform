@@ -131,7 +131,11 @@ fn exited_leader_does_not_leave_a_child_running() -> Result<()> {
         .context("set cleanup listener nonblocking")?;
     let result = output(
         Command::new(std::env::current_exe()?)
-            .args(["--exact", "compiler::exited_leader_fixture", "--nocapture"])
+            .args([
+                "--exact",
+                "support::compiler::exited_leader_fixture",
+                "--nocapture",
+            ])
             .env("DAY2_COMPILER_CLEANUP_ROLE", "leader")
             .env("DAY2_COMPILER_CLEANUP_SOCKET", &socket)
             .env("DAY2_COMPILER_CLEANUP_READY", &ready),
@@ -190,7 +194,11 @@ fn exited_leader_fixture() -> Result<()> {
     match role.as_str() {
         "leader" => {
             let mut child = Command::new(std::env::current_exe()?)
-                .args(["--exact", "compiler::exited_leader_fixture", "--nocapture"])
+                .args([
+                    "--exact",
+                    "support::compiler::exited_leader_fixture",
+                    "--nocapture",
+                ])
                 .env("DAY2_COMPILER_CLEANUP_ROLE", "descendant")
                 .spawn()?;
             let started = Instant::now();

@@ -1,12 +1,12 @@
 use anyhow::Result;
 use day2::{
     artifact::{Operation, Page},
-    assets,
     output_schema::Type,
     routing,
     schema::{Kind, Record, Schema},
     web_templates,
 };
+use day2_assets as assets;
 use scraper::Selector;
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, fs, path::PathBuf};

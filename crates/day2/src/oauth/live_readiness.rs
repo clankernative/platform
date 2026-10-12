@@ -105,10 +105,47 @@ pub(super) fn setup_selected(selected: &mut QualifiedConnections) -> Result<Valu
 }
 
 pub(crate) fn validate(instance: &Instance) -> Result<()> {
+    let has_connections = instance
+        .apps
+        .values()
+        .any(|binding| !binding.oauth_connections.is_empty());
     let Some(runtime) = &instance.oauth_runtime else {
+        ensure!(!has_connections, "OAuth runtime app selection missing");
         return Ok(());
     };
-    runtime.validate()?;
+    if runtime.apps.is_empty() {
+        runtime.validate_shared_shell_metadata()?;
+        let credentials = instance
+            .credential_runtime
+            .as_ref()
+            .context("empty OAuth runtime requires selected credentials")?;
+        ensure!(
+            !credentials.apps.is_empty(),
+            "empty OAuth runtime requires credential apps"
+        );
+        instance.validate_credential_runtime_metadata()?;
+        for (app, selected) in &credentials.apps {
+            let binding = instance
+                .apps
+                .get(app.as_str())
+                .context("credential runtime app missing")?;
+            ensure!(
+                !binding.credential_families.is_empty()
+                    && selected.families.len() == binding.credential_families.len(),
+                "credential-only shell requires complete selected families"
+            );
+        }
+        ensure!(
+            instance
+                .apps
+                .iter()
+                .all(|(app, binding)| binding.credential_families.is_empty()
+                    || credentials.apps.keys().any(|name| name.as_str() == app)),
+            "credential-only shell runtime coverage mismatch"
+        );
+    } else {
+        runtime.validate()?;
+    }
     instance.security_edge()?;
     ensure!(
         instance.oauth_clients.is_some() && instance.oauth_shell_transport.is_some(),
@@ -895,6 +932,32 @@ pub(crate) mod tests {
             "app-native@example-tools.iam.gserviceaccount.com"
         );
         assert!(instance.control.as_ref().unwrap().secrets.len() == 5);
+        let epoch = &instance.control.as_ref().unwrap().security_epochs
+            [&Name::try_from("app_epoch".to_owned())?];
+        assert_eq!(epoch.key_set, instance.security_key_set("example_app")?);
+        assert_eq!(
+            epoch.provider,
+            serde_json::from_value(json!({"kind":"firestore_native_v1",
+            "project":"example-tools","project_number":123456789012_u64,"database":"security",
+            "database_uid":"01234567-89ab-4cde-8fab-0123456789ab",
+            "iam_source":{"kind":"gke_workload_identity_v1","service_account":"app-native@example-tools.iam.gserviceaccount.com"}}))?
+        );
+        let mut missing_runtime = instance.clone();
+        missing_runtime.oauth_runtime = None;
+        assert_eq!(
+            missing_runtime.control.as_ref().unwrap().security_epochs,
+            instance.control.as_ref().unwrap().security_epochs
+        );
+        assert_eq!(
+            missing_runtime.security_key_set("example_app")?,
+            epoch.key_set
+        );
+        let error = Instance::from_bytes(&serde_json::to_vec(&missing_runtime)?).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("OAuth runtime app selection missing")
+        );
         for (path, value) in [
             ("/oauth_runtime/apps/example_app/ready", json!(true)),
             (
@@ -902,6 +965,19 @@ pub(crate) mod tests {
                 json!([]),
             ),
             ("/control/secrets/verifier/version", json!("latest")),
+            ("/control/security_epochs", json!({})),
+            (
+                "/control/security_epochs/app_epoch/scope/app",
+                json!("foreign"),
+            ),
+            (
+                "/control/security_epochs/app_epoch/provider/database_uid",
+                json!("unqualified"),
+            ),
+            (
+                "/control/security_epochs/app_epoch/key_set",
+                json!(Digest::new(b"wrong complete desired key set")),
+            ),
             ("/control/apps", json!({})),
         ] {
             let mut invalid: serde_json::Value = serde_json::from_slice(bytes)?;
@@ -990,6 +1066,11 @@ pub(crate) mod tests {
             .unwrap()
             .oauth_connections
             .insert("calendar".into(), connection.binding.clone());
+        crate::oauth::clients::tests::select_desired_epoch(
+            &mut selected.instance,
+            "workspace",
+            "app@company-tools.iam.gserviceaccount.com",
+        )?;
         Ok(selected)
     }
 

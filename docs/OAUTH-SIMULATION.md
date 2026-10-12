@@ -91,6 +91,17 @@ relationships. Earlier versions, partial units, missing guards, orphaned
 references and substituted schemas fail closed without repair. Admission does
 not migrate tables, restamp versions or disable foreign-key enforcement.
 
+There is one exception, kept only for GoLinks' persisted links (AGENTS.md).
+Builds before the version-2 credential unit installed a version-1 unit in every
+store, whether or not the app declares managed credentials. When
+`Runtime::initialize` opens a store whose credential unit is version 1, holds
+only objects a version-1 installer created and has no row in any credential
+table, it drops that unit, and the ordinary fresh installation then creates the
+current unit in the same transaction
+(`managed_credentials::store::replace_empty_version_1_unit`). A version-1 unit
+holding any credential row or any other object is refused, and every other
+version is refused as before. Nothing else is migrated.
+
 Current databases reject inserts and updates containing partial
 refresh receipts, partial account/scope evidence, empty required identities,
 fractional counters, invalid initial/replacement generation relationships,

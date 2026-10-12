@@ -2,9 +2,9 @@
 
 These public OpenTofu roots create a dedicated project foundation and Standard
 GKE cluster, then one IAP-protected edge and single-replica SQLite workload per
-app. They are the whole control plane of an instance: nothing is shared with
-another platform's infrastructure code. All company inputs
-come from a separate private instance repository; start with the
+app. They define the instance's runtime infrastructure, not its Git hosting,
+CI workflows or runner fleet. All company inputs come from a separate private
+instance repository; start with the
 [synthetic template](../../examples/instance/README.md).
 
 | Root | Ownership |
@@ -17,7 +17,6 @@ come from a separate private instance repository; start with the
 | [security-shell](stacks/security-shell/main.tf) | Separate stateless shell Deployment and read-only instance ConfigMap, consuming the resolved installation edge and exact selected secret-container contract |
 | [day2-app](stacks/day2-app/main.tf) | Instance ConfigMap, one-replica StatefulSet and the hourly off-cluster backup CronJob |
 | [qualification-runner](stacks/qualification-runner/main.tf) | Optional x86_64 native Docker VM, off by default, private IP and IAP SSH |
-| [gitea-instance-ci](stacks/gitea-instance-ci/main.tf) | Optional plan-on-PR / apply-on-main CI for an instance repository on Gitea |
 
 Installed app-call workloads can hand software deployment to the native
 `day2-gke-release` command by enabling `release_managed` in the day2-app root.
@@ -311,27 +310,25 @@ from the selected canary account and observe the owning app's acknowledgement.
 No live shell deployment or Google qualification has been performed by these
 source and mocked-plan tests.
 
-## Instance CI on Gitea
+## Instance-owned source and CI
 
-`stacks/gitea-instance-ci` gives an instance configuration repository on Gitea
-plan-on-pull-request, apply-on-main CI with no key:
+An instance chooses where its configuration and app repositories live and how
+its infrastructure is provisioned. GitHub Actions, GitLab CI, Gitea Actions and
+manual operator provisioning are independent choices; none is required by these
+runtime roots. App repositories may use different Git hosts from the instance
+configuration repository. The control plane's `remote_git` source binding reads
+exact commits over HTTPS from the selected host; see
+[source ownership](../../docs/CONTROL-PLANE.md#where-an-apps-source-lives).
 
-- a dedicated runner VM (no external IP; SSH through IAP), registered to that
-  one repository. Its controller is act_runner's Docker-in-Docker build, run
-  privileged as in the fleet runner profile; jobs run in its inner daemon in a
-  pinned slim image, with no Docker socket, privileges or host volumes;
-- a workload identity provider for workflow tokens from `git-oidc`, which
-  trusts only the repository's native Gitea ids and maps a pull-request run of
-  the plan workflow to a read-only plan identity it creates, and a
-  `push`/`workflow_dispatch` run of the apply workflow on `refs/heads/main` to
-  the instance's apply identity. Anything else maps to no role.
+Keep workflow triggers, runners, workload identity federation, approvals,
+backend inputs and credentials in the private instance repository. CI executes
+the platform's pinned operations and verification recipes, not a second app SDK
+or app-selected build callbacks. Source fetching does not imply equivalent
+provider-specific webhook, check-publication or deployment-CI support.
 
-Before the first apply, create the runner registration secret (the root reads
-it once) and enable Actions on the repository. `git-oidc` issues tokens for
-pull-request runs only for an explicitly trusted audience and workflow path, so
-the provider's canonical audience and the plan workflow must also be listed in
-its `trustedPullRequestPolicies`; main-branch runs need no entry. Workflows use
-the auth action's default audience, which is the provider's canonical URL.
+Reusable [provider integration examples](../integrations/README.md) are separate
+from these runtime roots and their apply order. Select one explicitly only when
+it matches the instance's provider and security requirements.
 
 ## Updates, rollback and data recovery
 
@@ -366,7 +363,8 @@ does every native action with `kubectl` and the registry API. Operations:
 | `inspect` | Reads the active authority stamp and policy | restored |
 | `backup` | Verified backup, copied to `~/day2-backups/<namespace>/<stamp>/` | restored |
 | `authority-apply` | Backup, then applies the policy in the current ConfigMap, after a typed `apply` | restored |
-| `activate` | Backup, migration plan, typed `activate`, migration, fresh activation of the target artifact | stopped: apply day2-app for the new image next |
+| `activate` | Backup, migration plan, the target's store admission on a rehearsed copy, typed `activate`, migration, fresh activation of the target artifact, then the `day2.dev/activated-image` stamp naming the target image. The target may keep the running artifact (a new platform build of the same app build); its migration plan is then empty | stopped: release the target image next (release-managed), otherwise apply day2-app for the new image |
+| `mark-activated` | Recovery when `activate`'s stamp step failed for a target with a new artifact: reads the database's active artifact and, only if it is the target's, stamps the stopped StatefulSet with the target image. A target that keeps the running artifact is refused (the database proves nothing about it); rerun `activate` instead | stopped, as `activate` leaves it |
 
 The request file names the target exactly:
 
@@ -384,39 +382,141 @@ The request file names the target exactly:
 ```
 
 An initialized app serves only the artifact its database activated. An image
-whose artifact differs, whether applied through day2-app or released with
-`day2-gke-release` (which does not activate), will not serve until `activate`
-has run for that artifact: `day2-serve` refuses with
-`active_artifact_unavailable`, naming the activated and the requested artifact.
+whose artifact differs will not serve until `activate` has run for that
+artifact: `day2-serve` refuses with `active_artifact_unavailable`, naming the
+activated and the requested artifact. An image that keeps the artifact still
+runs its own platform build's `day2-serve`, which admits and upgrades the store
+when it starts: the artifact ID commits to the platform sources the artifact was
+built from, but nothing binds the runtime an image bakes it into to those
+sources. So every image change goes through `activate`, which opens a copy of
+the store with the target build first. `day2-gke-release` does not activate; it
+refuses an image change with `release_image_requires_activation`, before any
+write, until `activate` has stamped the StatefulSet for that image, and the
+day2-app stack refuses a direct apply of it (below).
 
-`request_id` is for `authority-apply` and `activate`; `target` (the desired
-instance, e.g. rendered from the day2-app plan) is for `activate` only;
+`request_id` is for `authority-apply`, `activate` and `mark-activated`; `target`
+(the desired instance, e.g. rendered from the day2-app plan) is for `activate`
+and `mark-activated`, which take the same request file;
 `backup_dir` and `"yes": true` (skip the typed confirmation, recorded) are
-optional. The tooling image must come from the same platform build as the app's
-artifact.
+optional. The tooling image must come from the same platform build as the
+target app image: its `day2 admit` is the store admission the rehearsal runs.
 
 What the session guarantees, whatever the recipe does:
 
 - The maintenance pod ([k8s/maintenance-pod.yaml](k8s/maintenance-pod.yaml),
   rendered from a fixed placeholder set) is removed on every exit, including
   Ctrl-C; its one-hour deadline is the backstop.
+- The pod's `/srv/day2` scratch volume is sized from the store it maintains
+  (below), and the container requests that much ephemeral storage, so it is
+  scheduled only onto a node with room for it.
+  A store that cannot be measured stops the session with
+  `maintenance_scratch_unmeasured` before the maintenance pod exists, and the
+  app is restored on its image.
 - Before the migration fence, any failure restores the StatefulSet's replicas on
   its original image. After the fence the old image is never restarted on the
   migrated volume; the session prints the two ways forward instead.
-- The fence needs a verified local backup, a migration plan and a confirmation
-  from the same session, and `migration apply` refuses to run without it.
+- Before it asks for the confirmation, `activate` rehearses the fence's work on
+  a disposable copy in the pod: the in-pod backup, moved under the target
+  instance once its verified local copy exists (`/srv/day2/admission/`, on the
+  pod's scratch volume, never the app's) and removed with it afterwards, the
+  shown migration plan applied, the target activated, then `day2 admit` from
+  the target build's tooling image. `day2 admit` is the store admission
+  `day2-serve` runs at startup (`deployment::admit_store`: storage binding and
+  authority, platform upgrades, the private credential schema, the authority's
+  security requirements, and the private OAuth schema of an app with OAuth
+  connections). The store admission replaces an empty version-1 credential
+  unit, which every store written before the version-2 unit holds (GoLinks'
+  among them), with the current one; see
+  [OAUTH-SIMULATION.md](../../docs/OAUTH-SIMULATION.md#current-schema-admission).
+  If the target would not open the store, for example a credential unit with
+  credential rows that is older than its schema (`unsupported credential schema
+  version`), the session stops with `target_store_admission_refused` and the
+  cause, records `target-admission-refused` in the journal, and restores the
+  app on its image. Host checks (kernel, sandbox, security runtime evidence)
+  still run only when the new pod starts.
+- The fence needs a verified local backup, a migration plan, the target's store
+  admission and a confirmation from the same session, and `migration apply`
+  refuses to run without it.
 - Artifacts come from the digest-pinned app images: manifest, layer, artifact
   identity and worker digests are checked, and links or devices are refused.
 - The local backup copy must match a SHA-256 manifest computed in the pod; a
   mismatching copy is renamed `<stamp>.INCOMPLETE` and refused.
 - One session per namespace; the running image must equal `app_image`.
+- Only a successful fresh activation stamps the StatefulSet with
+  `day2.dev/activated-image: <target app_image>`, after re-reading it stopped
+  on `app_image`. If that stamp step fails, the error prints the exact command
+  to run once the cause is fixed: `day2 platform maintain mark-activated
+  REQUEST_JSON` for a target with a new artifact, `day2 platform maintain
+  activate REQUEST_JSON` again for one that keeps the running artifact.
+  `mark-activated` stamps only when the target's artifact is new and the
+  database's active artifact is it, the StatefulSet is at 0 replicas on
+  `app_image`, and it is unstamped or stamped for the same target image (then it
+  changes nothing). For a release-managed app, `day2-gke-release` changes the
+  image only to the one stamped, restores the replica and removes the stamp in
+  the same patch (see
+  [the release workflow](../../docs/RELEASE-WORKFLOW.md#image-changes)).
 - Every step is journalled to `~/day2-backups/<namespace>/<stamp>.session.json`
   before it runs, for recovery after the operator's machine dies mid-session.
 
-`deploy/gke/scripts/day2-maintain.sh` remains until this command has run a
-production activation; it will then be removed.
+#### The maintenance pod's scratch volume
 
-To roll back code, plan the prior qualified image and configuration. After a schema
+The backup, the rehearsal's copy and SQLite's temporary files (the pod sets
+`SQLITE_TMPDIR=/srv/day2`; the 256 MiB memory-backed `/tmp` holds only the
+worker executables day2 materializes) live on the pod's `/srv/day2` emptyDir,
+on the node's disk. After stopping the app, the session measures the app's
+database, every local provider store the backup takes and their WALs on the
+stopped volume, from a short-lived pod of the same template
+(`day2-maintenance-<stamp>-measure`, removed before the maintenance pod
+starts: the volume is ReadWriteOnce), and journals the result as `scratch`.
+The scratch volume is then
+
+```text
+max(1 GiB, copies × stores × 1.25 + 2 × artifacts + 256 MiB), in whole MiB
+```
+
+where `copies` is the most the operation holds at once: none for `inspect` and
+`mark-activated` (nothing is measured), one backup for `backup` and
+`authority-apply`, and two for `activate` (the backup, which the rehearsal
+then migrates as its copy, and the WAL and temporary files that migration
+grows; the real migration's WAL is on the app's volume). `artifacts` are the
+running and target artifacts copied in (one, when the target keeps the running
+artifact), counted twice because a backup holds the running one again. The
+emptyDir's `sizeLimit` is that size, and the container's ephemeral-storage
+request and limit are 64 MiB more.
+
+A 2.5 GiB store therefore needs about 6.5 GiB for `activate` and 3.4 GiB for
+`backup`. The namespace's guardrails must admit it: `app-edge`'s
+`resource_guardrails` default to 8 GiB per container
+(`container_max.ephemeral_storage`) and a 4 GiB ephemeral-storage request
+quota for the namespace, so an app with a large store raises them in its
+`app-edge` configuration first. A pod the namespace refuses, or no node can
+hold, fails the session before the fence with its size and the scheduler's
+reason, and the app is restored on its image.
+
+#### Activation and the day2-app stack
+
+Every day2-app plan reads the live StatefulSet (none on the first install, which
+plans normally). An activation is pending while the StatefulSet carries
+`day2.dev/activated-image` and it differs from the image of the template's
+`day2` container; a stamp equal to the live image is inert.
+
+- Release-managed apps: a plan while an activation is pending keeps the live
+  replicas (0) instead of 1 and warns
+  `activation of REGISTRY/…@sha256:… pending; replicas held at 0 until day2-gke-release rolls it`.
+  Everything else applies normally. Release the activated image next.
+- Directly deployed apps (`release_managed = false`, e.g. GoLinks): the apply
+  rolls the app, so it is refused while an activation is pending unless `image`
+  (with its `artifact_id`) is the activated build, and refused for any `image`
+  other than the live one while none is pending, even with the same
+  `artifact_id`. That apply starts the new image at one replica and, since the
+  stack does not declare the stamp, removes it (were it kept, it would equal
+  the live image: inert). The order for a new build is: open the tfvars change
+  for the new `image`/`artifact_id`, run `maintain activate` for it, then merge
+  and apply. Any other apply in between is refused, never restarting the old
+  image on the migrated state.
+
+To roll back code, plan the prior qualified image and configuration; that is an
+image change like any other, so `maintain activate` it first. After a schema
 migration, first prove backward compatibility or restore the matching backup;
 never point an old artifact at incompatible state. Node upgrades require rerunning
 the probe and a representative application acceptance campaign. Namespace/PVC
@@ -520,13 +620,16 @@ backup first (`day2 platform maintain backup REQUEST_JSON`, which also copies
 it off-cluster). Then, with the app stopped
 (`kubectl -n NS scale statefulset day2-APP --replicas=0`, wait for the pod to
 terminate; backup runs cannot start without it), attach the maintenance pod
-from [k8s/maintenance-pod.yaml](k8s/maintenance-pod.yaml) rendered exactly as
-`day2-maintain.sh` renders it, and in it:
+from [k8s/maintenance-pod.yaml](k8s/maintenance-pod.yaml) with its placeholders
+filled as `day2 platform maintain` fills them (`DAY2_MAINT_SCRATCH` at least
+twice the downloaded snapshot plus 1 GiB, for the snapshot and the restored
+copy; `DAY2_MAINT_EPHEMERAL_STORAGE` 64 MiB more), and in it:
 
 1. `kubectl cp` the downloaded, checked `snapshot/` to `/srv/day2/restore-in`, the current
    desired `instance.json` (ConfigMap `day2-APP-instance`) to
-   `/srv/day2/instance.json`, and the running artifact (as `day2-maintain.sh`
-   fetches it) to `/srv/day2/artifacts/ARTIFACT_ID`;
+   `/srv/day2/instance.json`, and the running artifact (as
+   `day2 platform maintain` fetches it from the app image's top layer) to
+   `/srv/day2/artifacts/ARTIFACT_ID`;
 2. `/workspace/platform/cli/day2 platform restore /srv/day2/restore-in /srv/day2/restored`;
 3. remove the app's current `.state/APP.sqlite`, `.state/APP.sqlite-wal` and
    `.state/APP.sqlite-shm` (and the same three files of every provider store in
@@ -536,11 +639,11 @@ from [k8s/maintenance-pod.yaml](k8s/maintenance-pod.yaml) rendered exactly as
    workflow `authority activate /srv/day2/instance.json APP
    /srv/day2/artifacts/ARTIFACT_ID OPERATOR EXPECTED_STAMP REQUEST_ID`, where
    `EXPECTED_STAMP` is the restored database's stamp from `authority inspect`
-   (both as `day2-maintain.sh` invokes them; always check `.ok`);
+   (both as `crates/day2-ops/src/maintenance.rs` invokes them; always check `.ok`);
 5. delete the maintenance pod and scale the StatefulSet back to one replica.
 
 Linux qualification exercises this restore-then-fresh-activation sequence
-(`linux-runtime-restore`); `day2-maintain.sh` has no `restore` operation yet,
+(`linux-runtime-restore`); `day2 platform maintain` has no `restore` operation yet,
 and this in-cluster procedure has not been exercised on GKE.
 
 ## The rendered instance.json
@@ -665,8 +768,13 @@ change with the candidate image and artifact, then enable it again. See
 Size the state volume for the app's invocation rate. A completed invocation keeps
 its full trace, which includes the authority it ran under, for 72 hours unless
 `journal_trace_hours` is set; an app with frequent schedules should set a few
-hours. Backups copy the database online within a fixed deadline, so a database
-that outgrows it stops the hourly backup before the disk fills.
+hours. The hourly backup copies the database online in time proportional to
+its size (bounded at 15 s plus 8 MiB/s, see the
+[Linux guide](../linux-sqlite/README.md#online-backup-in-the-runtime-image)),
+and its scratch volume holds a full copy: as the database grows, keep
+`backup_scratch_size_limit` above the database, provider stores and artifact
+together, and `backup_active_deadline_seconds` above the copy, integrity checks
+and upload.
 
 `app-edge.signed_webhook_paths` optionally routes exact `/ingress/<endpoint>`
 paths through a separate backend without IAP. This is for provider deliveries:

@@ -1,5 +1,4 @@
-#[path = "support/release.rs"]
-mod support;
+use crate::support::release as support;
 
 use anyhow::{Result, ensure};
 use day2_control::{

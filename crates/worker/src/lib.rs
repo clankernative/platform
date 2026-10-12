@@ -8,6 +8,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 #[rustfmt::skip]
 mod abi;
 
+#[cfg(target_os = "macos")]
+mod first_request;
+
 const MAX_FRAME: usize = 1_048_576;
 const MAX_HEAP: usize = 64 * 1_048_576;
 static HEAP: AtomicUsize = AtomicUsize::new(0);
@@ -128,6 +131,10 @@ extern "C" fn host_diagnostic(_: *mut abi::RocHost, _: *const u8, _: usize) {
 }
 
 fn run() -> io::Result<()> {
+    #[cfg(target_os = "macos")]
+    let mut observed = first_request::FirstRequest::new();
+    #[cfg(target_os = "macos")]
+    observed.emit(first_request::Milestone::Run, &mut io::stderr());
     let host = abi::RocHost {
         env: std::ptr::null_mut(),
         roc_alloc: host_alloc,
@@ -139,6 +146,8 @@ fn run() -> io::Result<()> {
     };
     let mut input = io::stdin().lock();
     let mut output = io::stdout().lock();
+    #[cfg(target_os = "macos")]
+    observed.emit(first_request::Milestone::Locked, &mut io::stderr());
     loop {
         let mut frame = Vec::new();
         loop {
@@ -166,17 +175,30 @@ fn run() -> io::Result<()> {
             fatal();
         }
         let source = std::str::from_utf8(&frame).unwrap_or_else(|_| fatal());
+        #[cfg(target_os = "macos")]
+        observed.emit(first_request::Milestone::Frame, &mut io::stderr());
         let argument = abi::RocStr::from_str(source, &host);
+        #[cfg(target_os = "macos")]
+        observed.emit(first_request::Milestone::Argument, &mut io::stderr());
         // Ownership of argument is transferred to Roc. The returned string is owned here.
         let answer = unsafe { abi::day2_step(argument) };
+        #[cfg(target_os = "macos")]
+        observed.emit(first_request::Milestone::Returned, &mut io::stderr());
         if answer.len() > MAX_FRAME {
             fatal();
         }
         let bytes = answer.as_slice();
         std::str::from_utf8(bytes).unwrap_or_else(|_| fatal());
+        #[cfg(target_os = "macos")]
+        observed.emit(first_request::Milestone::Answer, &mut io::stderr());
         output.write_all(bytes)?;
         output.write_all(b"\n")?;
         output.flush()?;
+        #[cfg(target_os = "macos")]
+        {
+            observed.emit(first_request::Milestone::Flushed, &mut io::stderr());
+            observed.finish();
+        }
         unsafe {
             answer.decref(&host);
         }

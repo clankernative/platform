@@ -13,10 +13,16 @@ the workflow source and executable pins are part of the CI build identity.
 Do not add shell, Python, Ruby, or JavaScript automation. The one exception is a
 VM first-boot script (a stack's GCE startup-script, today
 deploy/gke/stacks/qualification-runner/startup.sh and
-deploy/gke/stacks/gitea-instance-ci/startup.sh.tftpl): it runs before any day2
+deploy/integrations/gitea-instance-ci/startup.sh.tftpl): it runs before any day2
 tooling exists on the machine, so it may be shell. Keep it to installing and
 starting what the VM needs; anything after boot is an ops recipe. This is a local
 spike, not production admission. Never change the sibling day2 workspace.
+
+Git hosts, infrastructure CI workflows, runner fleets and provider credentials
+are instance-owned choices, never installation prerequisites. Keep reusable
+provider-specific deployment examples under deploy/integrations/, separate from
+the core runtime roots in deploy/gke/stacks/. Instance CI executes the existing
+platform recipes; do not add a second operational SDK or a generic CI abstraction.
 
 Nothing built on this platform has production users or external API consumers
 yet. Do not add legacy paths, compatibility shims, deprecation periods, dual

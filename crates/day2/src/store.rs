@@ -69,7 +69,7 @@ pub(crate) fn activated_artifact_unavailable(
         .file_name()
         .and_then(|name| name.to_str())
         .map(|name| format!("sha256:{name}"))
-        .filter(|id| crate::assets::hash_part(id).is_ok())
+        .filter(|id| day2_assets::hash_part(id).is_ok())
         .unwrap_or_else(|| desired.display().to_string());
     let requested = if requested == active.artifact_id {
         String::new()
@@ -195,7 +195,7 @@ mod observed_target_tests {
 #[cfg(test)]
 mod unsigned_storage_tests {
     use super::*;
-    use crate::numeric::Unsigned;
+    use day2_contracts::numeric::Unsigned;
     use std::collections::BTreeMap;
 
     #[test]
@@ -674,6 +674,9 @@ impl Runtime {
         upgrade_selection_cursors(&tx)?;
         crate::authority_state::upgrade(&tx)?;
         crate::oauth::schema::admit_with_runtime_hook(&tx, |db| {
+            // GoLinks' persisted links are the one data migration AGENTS.md
+            // allows; this replaces only an empty version-1 credential unit.
+            crate::managed_credentials::store::replace_empty_version_1_unit(db)?;
             crate::managed_credentials::store::install_schema(db)?;
             crate::managed_credentials::issuance::install(db)?;
             // Newly installed peers are admitted under the same cumulative
@@ -1533,10 +1536,17 @@ impl Runtime {
                     });
                 }
                 Reply::Pending(step) => {
-                    ensure!(
-                        request.observations.len() < MAX_STEPS,
-                        "transaction_step_budget"
-                    );
+                    if request.observations.len() >= MAX_STEPS {
+                        // Replaying the same journal reaches the same step, so an
+                        // error here would leave the invocation pending and
+                        // retried forever. Refuse it: the caller rolls back the
+                        // transaction and records this failure as the outcome.
+                        return Ok(Outcome {
+                            status: "failure".into(),
+                            result: Value::Null,
+                            error: crate::error::Failure::TransactionStepBudget.code().into(),
+                        });
+                    }
                     self.check_authority(connection, request, policy)?;
                     let next_phase = phase.advance(step)?;
                     crate::credential_authority::check_step(
@@ -1935,7 +1945,7 @@ fn read_row(row: &rusqlite::Row<'_>, record: &Record) -> rusqlite::Result<Row> {
                     .map_err(|_| rusqlite::Error::InvalidQuery)?;
                 json!(Id::from_uuid(prefix, bytes).map_err(|_| rusqlite::Error::InvalidQuery)?)
             }
-            Kind::Unsigned(crate::numeric::Unsigned::U64) => {
+            Kind::Unsigned(day2_contracts::numeric::Unsigned::U64) => {
                 let bytes: Vec<u8> = row.get(index + 3)?;
                 let bytes: [u8; 8] = bytes
                     .try_into()
@@ -2234,7 +2244,7 @@ fn sql_value(kind: &Kind, value: &Value) -> Result<SqlValue> {
                 .bytes_for(prefix)?
                 .to_vec(),
         ),
-        Kind::Unsigned(crate::numeric::Unsigned::U64) => SqlValue::Blob(
+        Kind::Unsigned(day2_contracts::numeric::Unsigned::U64) => SqlValue::Blob(
             value
                 .as_u64()
                 .context("invalid_unsigned_integer")?
@@ -2703,7 +2713,7 @@ mod selection_tests {
             ("active".into(), Kind::Boolean),
             (
                 "visits".into(),
-                Kind::Unsigned(crate::numeric::Unsigned::U64),
+                Kind::Unsigned(day2_contracts::numeric::Unsigned::U64),
             ),
             ("description".into(), Kind::OptionalText),
             ("unindexed".into(), Kind::Text),
@@ -3809,6 +3819,16 @@ pub fn replay(artifact: &LoadedArtifact, trace: &Trace) -> Result<()> {
         ),
         (Completion::Failure(expected), Reply::Failed(error)) => {
             ensure!(error == expected, "replay_failure_mismatch")
+        }
+        // The host refused the step after a full budget; the pinned code must
+        // still be asking for it.
+        (Completion::Failure(expected), Reply::Pending(_))
+            if expected == crate::error::Failure::TransactionStepBudget.code() =>
+        {
+            ensure!(
+                request.observations.len() == MAX_STEPS,
+                "replay_step_budget_mismatch"
+            )
         }
         (Completion::Pending(_), _) => bail!("invalid_trace_outcome"),
         _ => bail!("replay_outcome_mismatch"),

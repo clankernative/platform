@@ -8,6 +8,29 @@ use day2_capabilities::oauth::AccountBindingPolicy;
 use serde_json::{Value, json};
 use std::{fs, path::Path};
 
+/// Re-pin desired DATA after this fixture renames an installation/app/client.
+/// The synthetic provider UID stays unchanged; this supplies no live authority.
+fn select_fixture_epoch(draft: &mut Value, app: &str) -> Result<()> {
+    use day2_capabilities::security_epoch::AuthorityScope;
+    let instance: Instance = serde_json::from_value(draft.clone())?;
+    let alias = day2_capabilities::Name::try_from("app_epoch".to_owned())?;
+    let mut epoch = instance
+        .control
+        .as_ref()
+        .context("fixture control missing")?
+        .security_epochs[&alias]
+        .clone();
+    epoch.scope = AuthorityScope {
+        installation: instance.installation.clone().try_into()?,
+        environment: instance.environment.clone().try_into()?,
+        app: app.to_owned().try_into()?,
+    };
+    epoch.key_set = instance.security_key_set(app)?;
+    epoch.validate()?;
+    draft["control"]["security_epochs"] = json!({"app_epoch": epoch});
+    Ok(())
+}
+
 #[test]
 fn admitted_gitlab_declaration_selects_company_client_and_external_ceiling() -> Result<()> {
     let path = std::env::var_os("DAY2_TEST_OAUTH_GITLAB_ARTIFACT")
@@ -60,6 +83,7 @@ fn admitted_gitlab_declaration_selects_company_client_and_external_ceiling() -> 
             "client":{"kind":"gitlab","client_id":client,"credential":"calendar"},
             "canary":{"qualification_subject":"accounts.google.com:112233","provider_subject":"42","provider_tenant":"gitlab.com"}
         }});
+        select_fixture_epoch(&mut draft, "oauthgitlab")?;
         let bytes = serde_json::to_vec(&draft)?;
         fs::write(&path, &bytes)?;
         let prepared = oauth_setup(&path)?;
@@ -153,6 +177,7 @@ fn admitted_calendar_canary_prepares_reproducible_selection_without_live_authori
     draft["apps"]["oauthcalendar"]["authority"]["operations"] = json!({
         "oauthcalendar.inspect": {"actors":["qa@example.com"], "mode":{"kind":"read"}, "models":{}}
     });
+    select_fixture_epoch(&mut draft, "oauthcalendar")?;
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("instance.json");
     let bytes = serde_json::to_vec(&draft)?;
@@ -201,7 +226,26 @@ fn admitted_calendar_canary_prepares_reproducible_selection_without_live_authori
         replacement["registrations"][0]["scopes"],
         prepared["registrations"][0]["scopes"]
     );
-    assert_eq!(replacement["instance"]["control"], rotated["control"]);
+    let replacement_instance =
+        Instance::from_bytes(&serde_json::to_vec(&replacement["instance"])?)?;
+    let expected_key_set = replacement_instance.security_key_set("oauthcalendar")?;
+    let epoch_alias = day2_capabilities::Name::try_from("app_epoch".to_owned())?;
+    let selected_epoch = &replacement_instance
+        .control
+        .as_ref()
+        .context("prepared control missing")?
+        .security_epochs[&epoch_alias];
+    assert_eq!(selected_epoch.key_set, expected_key_set);
+    assert_ne!(
+        expected_key_set,
+        instance.security_key_set("oauthcalendar")?
+    );
+    let mut expected_control = rotated["control"].clone();
+    let expected_epoch_key = expected_control
+        .pointer_mut("/security_epochs/app_epoch/key_set")
+        .context("existing desired epoch key-set missing")?;
+    *expected_epoch_key = serde_json::to_value(&expected_key_set)?;
+    assert_eq!(replacement["instance"]["control"], expected_control);
     fs::write(&path, serde_json::to_vec(&prepared["instance"])?)?;
 
     let runtime = Runtime::load(&path, "oauthcalendar")?;

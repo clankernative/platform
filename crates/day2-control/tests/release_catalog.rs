@@ -2,8 +2,7 @@ use anyhow::Result;
 use day2_control::journal::Journal;
 use day2_control::kernel::CredentialPresence;
 
-#[path = "support/release.rs"]
-mod support;
+use crate::support::release as support;
 use support::*;
 
 #[test]

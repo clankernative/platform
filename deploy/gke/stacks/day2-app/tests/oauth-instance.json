@@ -52,6 +52,17 @@
       "calendar": {"kind": "gcp_version", "project_number": 123456789012, "secret": "google_calendar", "version": 7},
       "verifier": {"kind": "gcp_version", "project_number": 123456789012, "secret": "custody_verifier", "version": 9},
       "encryption": {"kind": "gcp_version", "project_number": 123456789012, "secret": "custody_encryption", "version": 11}
+    },
+    "security_epochs": {
+      "app_epoch": {
+        "scope": {"installation": "exampleco", "environment": "production", "app": "example_app"},
+        "provider": {
+          "kind": "firestore_native_v1", "project": "example-tools", "project_number": 123456789012,
+          "database": "security", "database_uid": "01234567-89ab-4cde-8fab-0123456789ab",
+          "iam_source": {"kind": "gke_workload_identity_v1", "service_account": "app-native@example-tools.iam.gserviceaccount.com"}
+        },
+        "key_set": "sha256:ff814a63b7aba9dd129eae26e51c3b4aa444401095ed45554f25d8ceb4ec0b3c", "max_lease_seconds": 30
+      }
     }
   }
 }

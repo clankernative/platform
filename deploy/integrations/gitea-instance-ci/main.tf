@@ -1,4 +1,5 @@
-# Gitea Actions CI for one instance configuration repository.
+# Optional Gitea Actions CI example for one private instance configuration
+# repository. Not a core GKE runtime root or an installation prerequisite.
 #
 # Pull requests plan every stack with a read-only identity; runs on the main
 # branch apply with the instance's apply identity. Both identities come from
@@ -6,12 +7,11 @@
 # repository's native Gitea ids and to one workflow file each. No key exists.
 #
 # The runner is a dedicated VM registered only to that repository. Its
-# controller runs its own Docker daemon (the fleet's privileged
-# Docker-in-Docker controller); jobs run in fresh, unprivileged containers of
-# that daemon without its socket, so a pull-request job cannot leave anything
-# for a later main-branch job. The VM's own
-# service account can read the runner registration secret and write logs,
-# nothing else: a job reaching the metadata server gains no authority.
+# controller runs its own Docker daemon in a privileged Docker-in-Docker
+# container; jobs run in fresh, unprivileged containers without its socket.
+# This is configuration, not a hostile-code containment qualification. The
+# VM's own service account can read the runner registration secret and write
+# logs; job provisioning identities are selected separately.
 #
 # Expects compute, iap, iam, iamcredentials, sts and secretmanager enabled,
 # the workload identity pool to exist, and the registration secret to exist

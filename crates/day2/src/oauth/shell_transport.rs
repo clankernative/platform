@@ -90,7 +90,7 @@ impl ApprovalView {
     }
 
     pub(crate) fn validate(&self, identity: &iap::Verified) -> Result<()> {
-        crate::schema::identifier(&self.app)?;
+        day2_contracts::names::identifier(&self.app)?;
         super::connect::identifier(&self.logical_id)?;
         super::connect::identifier(&self.binding_namespace)?;
         super::connect::identifier(&self.claim.slot)?;
@@ -190,8 +190,7 @@ pub(crate) trait ApprovalSigner: Send + Sync {
     fn attest(
         &self,
         view: &ApprovalView,
-        session: Digest,
-        authenticated_at: i64,
+        session: &super::security_shell::ShellSession,
         now: i64,
     ) -> Result<external::FreshExternalApproval>;
 }
@@ -795,7 +794,7 @@ pub(crate) fn scoped_attempt(installation: &str, environment: &str, app: &str) -
 
 pub(super) fn route_prefix(installation: &str, environment: &str, app: &str) -> Result<String> {
     for value in [installation, environment, app] {
-        crate::schema::identifier(value)?;
+        day2_contracts::names::identifier(value)?;
     }
     let digest = Digest::of(&(
         "oauth-shell-attempt-route-v1",
@@ -803,7 +802,7 @@ pub(super) fn route_prefix(installation: &str, environment: &str, app: &str) -> 
         environment,
         app,
     ))?;
-    Ok(format!("a_{}_", crate::assets::hash_part(digest.as_str())?))
+    Ok(format!("a_{}_", day2_assets::hash_part(digest.as_str())?))
 }
 
 pub(super) fn routed_attempt(id: &str, route: &str) -> Result<()> {

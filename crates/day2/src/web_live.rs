@@ -101,8 +101,72 @@ struct SubscriptionState {
     regions: BTreeMap<String, String>,
     document_image_origins: BTreeSet<String>,
     needs_image_refresh: bool,
+    refresh_url: String,
     refreshed: Duration,
     refresh: Option<Duration>,
+}
+
+/// Observations and rendering only; refresh ordering and authorization stay shared.
+struct RenderedPage {
+    regions: BTreeMap<String, String>,
+    image_origins: Vec<String>,
+}
+
+trait RefreshInputs {
+    fn session(&self, wall: i64) -> Result<Session>;
+
+    fn authority(&self, actor: &str) -> Result<AuthorityStamp>;
+
+    fn revision(&self) -> Result<i64>;
+
+    fn render(&self, session: &Session, wall: i64) -> Result<RenderedPage>;
+}
+
+struct NativeRefreshInputs<'a> {
+    host: &'a Host,
+    page: &'a str,
+    input: &'a Value,
+    headers: &'a HeaderMap,
+}
+
+impl RefreshInputs for NativeRefreshInputs<'_> {
+    fn session(&self, wall: i64) -> Result<Session> {
+        ensure!(
+            self.host.admitting.load(Ordering::Acquire),
+            Failure::ArtifactBindingChanged
+        );
+        self.host.appearance.check_binding(&self.host.runtime)?;
+        security::session(
+            &self.host.runtime,
+            self.headers,
+            &self.host.cookie_name,
+            wall,
+        )
+    }
+
+    fn authority(&self, actor: &str) -> Result<AuthorityStamp> {
+        let operation = &self.host.runtime.artifact().page(self.page)?.operation;
+        Ok(self
+            .host
+            .runtime
+            .authority_snapshot(operation, actor)?
+            .stamp)
+    }
+
+    fn revision(&self) -> Result<i64> {
+        crate::live::revision(&open(self.host.runtime.db())?)
+    }
+
+    fn render(&self, session: &Session, wall: i64) -> Result<RenderedPage> {
+        let markup = self
+            .host
+            .page(self.page, self.input, session, wall, None, None)?;
+        let markup = markup.into_string();
+        Ok(RenderedPage {
+            regions: web_templates::live_regions(&markup)?,
+            image_origins: web_templates::remote_image_origins(&markup)?,
+        })
+    }
 }
 
 impl Host {
@@ -206,6 +270,7 @@ impl Host {
         let regions = web_templates::live_regions(&markup)?;
         let rendered_origins = web_templates::remote_image_origins(&markup)?;
         let needs_image_refresh = has_new_image_origins(&document_image_origins, &rendered_origins);
+        let refresh_url = view::page_url(&self.runtime, &page, &input)?;
         let subscription = Subscription {
             page,
             input,
@@ -218,20 +283,18 @@ impl Host {
                 regions,
                 document_image_origins,
                 needs_image_refresh,
+                refresh_url,
                 refreshed: self.clock.monotonic(),
                 refresh: (definition.live_refresh_ms > 0)
                     .then(|| Duration::from_millis(definition.live_refresh_ms)),
             },
         };
         // Recheck after rendering before any app data is released.
-        let (_, current) = subscription.authorize(self, self.wall_seconds()?)?;
-        ensure!(
-            current == subscription.state.authority,
-            Failure::AuthorityPolicyChanged
-        );
+        subscription
+            .state
+            .authorize_current(&subscription.inputs(self), self.wall_seconds()?)?;
         let (sender, receiver) = mpsc::channel(1);
         let (terminal_sender, terminal) = oneshot::channel();
-        let refresh_url = view::page_url(&self.runtime, &subscription.page, &subscription.input)?;
         let initial = format!(
             "{}{}",
             subscription
@@ -240,7 +303,10 @@ impl Host {
                 .values()
                 .cloned()
                 .collect::<String>(),
-            image_refresh_notice(subscription.state.needs_image_refresh, &refresh_url)
+            image_refresh_notice(
+                subscription.state.needs_image_refresh,
+                &subscription.state.refresh_url
+            )
         );
         sender
             .try_send(elements(&initial, "outer"))
@@ -328,6 +394,38 @@ impl SubscriptionState {
         Ok(())
     }
 
+    fn authorize_current(&self, inputs: &dyn RefreshInputs, wall: i64) -> Result<Session> {
+        let session = inputs.session(wall)?;
+        self.authorize_session(&session, wall)?;
+        let authority = inputs.authority(&self.actor)?;
+        self.authorize(&session, &authority, wall)?;
+        Ok(session)
+    }
+
+    /// Production and simulation execute this same pre-render / post-render fence.
+    fn refresh(&mut self, inputs: &dyn RefreshInputs, clock: &dyn Clock) -> Result<Option<String>> {
+        let wall = || -> Result<i64> { Ok(clock.wall_time()?.as_secs().try_into()?) };
+        let session = self.authorize_current(inputs, wall()?)?;
+        // Sample before rendering so a concurrent business commit forces another pass.
+        let revision = inputs.revision()?;
+        if !self.needs_refresh(revision, clock.monotonic()) {
+            return Ok(None);
+        }
+        let rendered = inputs.render(&session, wall()?)?;
+        ensure!(
+            rendered.regions.keys().eq(self.regions.keys()),
+            "live_region_set_changed"
+        );
+        // Fresh session, wall time and authority are mandatory before publishing state.
+        self.authorize_current(inputs, wall()?)?;
+        self.rendered(
+            revision,
+            clock.monotonic(),
+            rendered.regions,
+            &rendered.image_origins,
+        )
+    }
+
     fn needs_refresh(&self, revision: i64, monotonic: Duration) -> bool {
         revision != self.revision
             || self
@@ -341,7 +439,6 @@ impl SubscriptionState {
         monotonic: Duration,
         regions: BTreeMap<String, String>,
         rendered_origins: &[String],
-        refresh_url: &str,
     ) -> Result<Option<String>> {
         ensure!(
             regions.keys().eq(self.regions.keys()),
@@ -355,60 +452,40 @@ impl SubscriptionState {
             .map(|(_, markup)| markup.as_str())
             .collect::<String>();
         if needs_image_refresh != self.needs_image_refresh {
-            changed.push_str(&image_refresh_notice(needs_image_refresh, refresh_url));
+            changed.push_str(&image_refresh_notice(
+                needs_image_refresh,
+                &self.refresh_url,
+            ));
         }
         self.needs_image_refresh = needs_image_refresh;
         self.regions = regions;
         self.revision = revision;
         self.refreshed = monotonic;
-        Ok((!changed.is_empty()).then(|| elements(&changed, "outer")))
+        Ok((!changed.is_empty()).then_some(changed))
     }
 }
 
 impl Subscription {
-    fn authorize(&self, host: &Host, wall: i64) -> Result<(Session, AuthorityStamp)> {
-        ensure!(
-            host.admitting.load(Ordering::Acquire),
-            Failure::ArtifactBindingChanged
-        );
-        host.appearance.check_binding(&host.runtime)?;
-        let session = security::session(&host.runtime, &self.headers, &host.cookie_name, wall)?;
-        self.state.authorize_session(&session, wall)?;
-        let operation = &host.runtime.artifact().page(&self.page)?.operation;
-        let authority = host
-            .runtime
-            .authority_snapshot(operation, &self.state.actor)?
-            .stamp;
-        self.state.authorize(&session, &authority, wall)?;
-        Ok((session, authority))
+    fn inputs<'a>(&'a self, host: &'a Host) -> NativeRefreshInputs<'a> {
+        NativeRefreshInputs {
+            host,
+            page: &self.page,
+            input: &self.input,
+            headers: &self.headers,
+        }
     }
 
     fn refresh(&mut self, host: &Host) -> Result<Option<String>> {
-        let wall = host.wall_seconds()?;
-        let (session, authority) = self.authorize(host, wall)?;
-        let revision = crate::live::revision(&open(host.runtime.db())?)?;
-        if !self.state.needs_refresh(revision, host.clock.monotonic()) {
-            return Ok(None);
-        }
-        let markup = host.page(&self.page, &self.input, &session, wall, None, None)?;
-        let markup = markup.into_string();
-        let regions = web_templates::live_regions(&markup)?;
-        let rendered_origins = web_templates::remote_image_origins(&markup)?;
-        ensure!(
-            regions.keys().eq(self.state.regions.keys()),
-            "live_region_set_changed"
-        );
-        // Reobserve wall time and authority after rendering, before committing a patch.
-        let (_, current) = self.authorize(host, host.wall_seconds()?)?;
-        ensure!(current == authority, Failure::AuthorityPolicyChanged);
-        let refresh_url = view::page_url(&host.runtime, &self.page, &self.input)?;
-        self.state.rendered(
-            revision,
-            host.clock.monotonic(),
-            regions,
-            &rendered_origins,
-            &refresh_url,
-        )
+        let inputs = NativeRefreshInputs {
+            host,
+            page: &self.page,
+            input: &self.input,
+            headers: &self.headers,
+        };
+        Ok(self
+            .state
+            .refresh(&inputs, host.clock.as_ref())?
+            .map(|changed| elements(&changed, "outer")))
     }
 
     async fn run(

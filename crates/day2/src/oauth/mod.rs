@@ -11,6 +11,7 @@ pub mod declaration;
 pub(crate) mod effects;
 pub mod exchange;
 pub mod external;
+pub(crate) mod fresh_auth;
 pub(crate) mod gitlab;
 pub(crate) mod google;
 pub(crate) mod host;

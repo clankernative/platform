@@ -42,15 +42,17 @@ impl Journal {
         )?)
     }
 
+    /// The current selections of every given target with an active release.
+    /// Pass every app of the scope, not just the ones being released: a host
+    /// resolves each call target in its one published snapshot.
     pub fn serving_publication(&self, targets: &[ReleaseTarget]) -> Result<Publication> {
         let first = targets
             .first()
             .ok_or_else(|| anyhow::anyhow!("publication_targets_missing"))?;
         let scope = scope(first)?;
         ensure!(
-            targets
-                .iter()
-                .all(|target| target.company == first.company
+            targets.len() <= 32
+                && targets.iter().all(|target| target.company == first.company
                     && target.environment == first.environment),
             "publication_scope_changed"
         );
@@ -60,7 +62,13 @@ impl Journal {
             [&scope],
             |row| row.get(0),
         )?;
-        let snapshot = self.serving_snapshot_in(&tx, targets)?;
+        let mut active = Vec::new();
+        for target in targets {
+            if crate::release::read_state(&tx, target)?.active.is_some() {
+                active.push(target.clone());
+            }
+        }
+        let snapshot = self.serving_snapshot_in(&tx, &active)?;
         let digest = Digest::of(&snapshot)?;
         tx.commit()?;
         Ok(Publication {

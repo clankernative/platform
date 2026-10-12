@@ -793,7 +793,7 @@ async fn http_history(seed: u64) -> Result<HttpTrace> {
                 .context("credential metadata artifact required")?,
         );
         let directory = tempfile::tempdir()?;
-        let runtime = crate::development::create_for(
+        let runtime = crate::development::create_verification_for(
             &artifact,
             &directory.path().join("instance"),
             None,
@@ -821,6 +821,7 @@ async fn http_history(seed: u64) -> Result<HttpTrace> {
                 .actors
                 .insert("credential_client:client_keys".into());
         }
+        crate::development::repin_credential_verification_data(&mut instance, runtime.artifact())?;
         std::fs::write(runtime.instance_path(), serde_json::to_vec(&instance)?)?;
         let runtime = crate::store::Runtime::load(runtime.instance_path(), runtime.app())?
             .with_credential_authority(Arc::new(HttpAuthority));

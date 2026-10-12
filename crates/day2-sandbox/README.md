@@ -37,7 +37,7 @@ Focused Linux checks, after building the workspace's host binaries:
 
 ```text
 cargo test --locked -p day2-sandbox --test isolation
-cargo test --locked -p day2 --test linux_worker
+cargo test --locked -p day2 --test day2_integration -- linux_worker::
 ```
 
 These are bounded local conformance checks, not proof of hostile multi-tenant

@@ -580,6 +580,7 @@ pub(super) mod tests {
     use crate::oauth::security_shell::{
         ApprovalRegistry, FreshAuthenticator, FreshHuman, ReauthStart, SecurityShell,
     };
+    use anyhow::Context as _;
     use axum::http::{HeaderMap, Method, StatusCode, header};
     use day2_capabilities::Name;
     use day2_capabilities::oauth::{ConnectionOwner, ProductReturnRef};
@@ -1294,8 +1295,7 @@ pub(super) mod tests {
         fn begin(
             &self,
             identity: &crate::iap::Verified,
-            _: &str,
-            _: &Digest,
+            _: crate::oauth::fresh_auth::FreshIntent,
             _: i64,
         ) -> Result<ReauthStart> {
             Ok(ReauthStart::Authenticated(FreshHuman {
@@ -1306,7 +1306,7 @@ pub(super) mod tests {
         }
     }
 
-    struct TestCallbackAuth(Digest);
+    struct TestCallbackAuth(std::sync::Mutex<Option<crate::oauth::fresh_auth::FreshIntent>>);
 
     impl FreshAuthenticator for TestCallbackAuth {
         fn identify(&self, _: &HeaderMap, _: i64) -> Result<crate::iap::Verified> {
@@ -1319,10 +1319,10 @@ pub(super) mod tests {
         fn begin(
             &self,
             _: &crate::iap::Verified,
-            _: &str,
-            _: &Digest,
+            intent: crate::oauth::fresh_auth::FreshIntent,
             _: i64,
         ) -> Result<ReauthStart> {
+            *self.0.lock().unwrap() = Some(intent);
             Ok(ReauthStart::Redirect(
                 "https://accounts.google.com/o/oauth2/v2/auth?state=opaque".into(),
             ))
@@ -1334,12 +1334,16 @@ pub(super) mod tests {
             _: &crate::iap::Verified,
             _: i64,
         ) -> Result<crate::oauth::shell_oidc::Reauthenticated> {
-            Ok(crate::oauth::shell_oidc::Reauthenticated {
-                attempt: "attempt_1".into(),
-                challenge: self.0.clone(),
-                human: "human_1".into(),
-                authenticated_at: 5,
-            })
+            Ok(crate::oauth::shell_oidc::Reauthenticated::fixture(
+                self.0
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .context("test callback intent unavailable")?,
+                "human_1".into(),
+                "accounts.google.com:test-human".into(),
+                5,
+            ))
         }
     }
 
@@ -1351,13 +1355,10 @@ pub(super) mod tests {
         let mut db = rusqlite::Connection::open(&path).unwrap();
         quarantine_external_fixture(&mut db, &fixture, &exchange_key());
         db.execute_batch(crate::audit::PRINCIPALS_DDL).unwrap();
-        let pending = external::load_pending_external(&db, fixture.input(), &exchange_key(), 5)
-            .unwrap()
-            .unwrap();
         let shell = SecurityShell::new(
             fixture.instance.shell.origin_url.clone(),
             test_registry(path, fixture),
-            std::sync::Arc::new(TestCallbackAuth(pending.challenge().clone())),
+            std::sync::Arc::new(TestCallbackAuth(std::sync::Mutex::new(None))),
         )
         .unwrap();
         let mut headers = HeaderMap::new();

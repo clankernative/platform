@@ -94,14 +94,22 @@ fn activated_credential_selection_pins_policy_family_and_artifact() -> Result<()
         let bindings = selected
             .map(|value| BTreeMap::from([("keys", value)]))
             .unwrap_or_default();
-        Instance::from_bytes(&serde_json::to_vec(&serde_json::json!({
+        let bytes = serde_json::to_vec(&serde_json::json!({
             "installation": "acme", "environment": "dev",
             "apps": {"reports": {"artifact": "unused", "readers": [], "writers": [],
                 "credential_families": bindings}},
             "resources": {"version": 1, "connections": {}, "resources": {}, "policies": {},
                 "credentials": {"management": {"managers": policy},
                     "approved_authority": {"approved": approved}}}
-        }))?)
+        }))?;
+        if selected.is_some() {
+            // Deliberately incomplete DATA for pure composition, not CURRENT.
+            let error = Instance::from_bytes(&bytes).unwrap_err();
+            assert!(error.to_string().contains("credential_runtime_missing"));
+            crate::json::decode(&bytes)
+        } else {
+            Instance::from_bytes(&bytes)
+        }
     };
     let selected = instance(Some(&binding), &policy)?;
     let active = resolve_credentials(

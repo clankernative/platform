@@ -1,7 +1,6 @@
 //! Real persisted Temporal, SQLite and compiled Roc; provider facts are synthetic.
 //! This qualifies delivery/restart wiring, not a cloud deployment adapter.
-#[path = "support/release.rs"]
-mod support;
+use crate::support::release as support;
 
 use anyhow::{Context, Result, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};

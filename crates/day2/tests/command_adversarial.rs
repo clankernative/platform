@@ -1,5 +1,4 @@
-#[path = "support/commands.rs"]
-mod support;
+use crate::support::commands as support;
 use anyhow::Result;
 use day2::{
     invocations,
@@ -106,5 +105,43 @@ fn an_internal_edit_cannot_change_another_row_or_keep_its_earlier_write_on_failu
     assert_eq!(detail["bytes"], 9);
     assert_eq!(detail["lines"], 1);
     assert_eq!(detail["version"], 2);
+    Ok(())
+}
+
+#[test]
+fn a_transaction_past_its_step_budget_fails_once_instead_of_staying_pending() -> Result<()> {
+    let world = world()?;
+    let before = world.runtime.inspect()?;
+    world.runtime.accept(
+        "reports.submit",
+        "alice",
+        "unbounded",
+        &json!({"title":"step_budget","text":"single line"}),
+        100,
+    )?;
+    // The scheduler's path. Replay reaches the same step every time, so the
+    // budget is the invocation's outcome, not an error that leaves it pending.
+    let completed = invocations::drain(&world.runtime, 8)?;
+    assert_eq!(completed.len(), 1);
+    assert_eq!(completed[0].id, "unbounded");
+    assert_eq!(completed[0].status, "failure");
+    assert_eq!(completed[0].error, "transaction_step_budget");
+    assert!(invocations::drain(&world.runtime, 8)?.is_empty());
+    assert_eq!(world.runtime.inspect()?, before);
+    assert_eq!(changes(&world)?, 0);
+    assert!(invocations::children(&world.runtime, "unbounded")?.is_empty());
+    let receipt = world.runtime.execute("unbounded", Fault::None)?;
+    assert_eq!(
+        (receipt.status.as_str(), receipt.error.as_str()),
+        ("failure", "transaction_step_budget")
+    );
+    let trace = world.runtime.trace("unbounded")?;
+    assert_eq!(trace.request.observations.len(), 64);
+    replay(world.runtime.artifact(), &trace)?;
+    // Replay accepts the refusal only where the pinned code really asked for
+    // one step more than the budget.
+    let mut short = trace;
+    short.request.observations.pop();
+    assert!(replay(world.runtime.artifact(), &short).is_err());
     Ok(())
 }

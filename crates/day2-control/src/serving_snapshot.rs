@@ -71,7 +71,11 @@ impl ServingSnapshot {
         Ok(())
     }
 
-    fn selected(&self, target: &ReleaseTarget) -> Result<&SelectedServing> {
+    pub fn selections(&self) -> &[SelectedServing] {
+        &self.selections
+    }
+
+    pub fn selected(&self, target: &ReleaseTarget) -> Result<&SelectedServing> {
         self.selections
             .iter()
             .find(|entry| &entry.binding.target == target)

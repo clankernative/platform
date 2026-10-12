@@ -8,8 +8,7 @@
 //! If a delivery can be processed twice, ingress is worse than no ingress, because
 //! the application cannot tell — the standard the schedule hold gate was held to.
 
-#[path = "support/commands.rs"]
-mod support;
+use crate::support::commands as support;
 use anyhow::Result;
 use day2::{
     ingress::{self, Endpoint, IdentitySource, Refused, Scheme, Signing},

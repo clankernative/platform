@@ -1,10 +1,5 @@
 use crate::{
-    artifact::Instance,
-    assets::{self, Asset},
-    branding::LoadedBrand,
-    digest,
-    store::Runtime,
-    web_security::Session,
+    artifact::Instance, branding::LoadedBrand, digest, store::Runtime, web_security::Session,
 };
 use anyhow::{Context, Result, ensure};
 use axum::{
@@ -12,6 +7,7 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
+use day2_assets::{self as assets, Asset};
 use maud::{Markup, html};
 
 pub(crate) struct Appearance {
@@ -138,7 +134,7 @@ impl Appearance {
     /// The generic loader imports admitted modules; it owns no component behavior.
     pub fn component_script_url(&self, runtime: &Runtime) -> Result<Option<String>> {
         let contract = runtime.artifact().contract();
-        (contract.sources.contains_key("ui-adapter/executable")
+        (contract.sources.contains_key("ui-provider/executable")
             && contract.web_resources.contains_key("ui-package.js"))
         .then(|| self.resource_url(runtime, "ui-package.js"))
         .transpose()

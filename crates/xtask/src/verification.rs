@@ -11,7 +11,53 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod shards;
+
 const CACHE_FORMAT: u32 = 1;
+
+// Every test campaign in the full gate selects the same Cargo packages and
+// targets. Only libtest filters change: selecting a narrower Cargo test target
+// can disable dev-dependency features and rebuild shared dependencies.
+const WORKSPACE_TEST_ARGUMENTS: &[&str] = &[
+    "-p",
+    "day2",
+    "-p",
+    "xtask",
+    "-p",
+    "day2-ops",
+    "-p",
+    "day2-cli-checks",
+    "-p",
+    "day2-control",
+    "-p",
+    "day2-assets",
+    "-p",
+    "day2-contracts",
+    "-p",
+    "day2-capabilities",
+    "-p",
+    "day2-kernel",
+    "-p",
+    "durable-temporal",
+];
+
+// These compiler probes own private staging directories and only read the
+// admitted fixtures/toolchain. Add individual cases after checking their I/O;
+// future tests in the same modules retain serial execution by default.
+const PARALLEL_RUNTIME_TESTS: &[&str] = &[
+    "app_inference::ordinary_reports_requires_its_complete_root_in_both_profiles",
+    "app_inference::separate_internal_commands_infer_independent_nominal_types_and_require_complete_definitions",
+    "app_inference::a_structural_request_alias_is_rejected_during_codec_binding",
+    "app_inference::resource_handles_and_issuance_context_cannot_be_forged_or_broadened",
+    "app_inference::omissions_stale_references_and_forged_factories_fail_compilation",
+    "app_contract::native_error_cases_preserve_typed_command_query_inputs_and_singleton_authoring",
+    "app_contract::native_required_all_rows_builders_preserve_typed_definitions",
+    "guards::checked_compiler_rejects_wrong_models_forged_values_and_unavailable_io",
+    "credential_metadata::native_compiler_preserves_family_types_and_seals_host_read_constructors",
+    "connection_declarations::native_connection_declarations_require_nominal_access_and_account_policy",
+    "numeric::native_generated_numeric_codecs_roundtrip_boundaries_and_reject_negative_values",
+    "schema::native_structured_inputs_reflect_and_roundtrip_without_flattening_records",
+];
 
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
@@ -78,7 +124,9 @@ impl TestCampaign {
     fn budget(&self) -> Result<std::time::Duration> {
         let maximum = match self.suite.as_str() {
             "all-runtime" => 9000,
-            "workspace-runtime" => 12600,
+            "workspace-runtime" | "workspace-day2" | "workspace-control" | "workspace-other" => {
+                12600
+            }
             "control" => 3600,
             "isolated-build" | "installation-build" => 1800,
             _ => DEFAULT_CAMPAIGN_BUDGET_SECONDS,
@@ -96,15 +144,30 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
     architecture::check(root)?;
     architecture_dependencies::check(root)?;
     architecture_proofs::check(root)?;
-    let snapshot = verification_snapshot(root, recipe)?;
+    let snapshot = verification_snapshot(root, if scope == "all" { "verify" } else { recipe })?;
     let runner = workflows::build(root)?;
     let mut fixtures: BTreeMap<String, PathBuf> = BTreeMap::new();
     let mut passed = BTreeSet::new();
+    let mut executed_binaries = BTreeSet::new();
     let mut simulation = None;
     let mut simulation_started = None;
     let mut timings = Timings::new();
     let mut cache = load_cache(root, scope, &snapshot)?;
-    day2::automation::run(&runner, &[recipe], |request| {
+    let prepared = if recipe.starts_with("verify-shard-") || recipe == "verify-compose" {
+        let prepared = shards::load(root, &snapshot)?;
+        fixtures = shards::fixtures(root, &prepared)?;
+        Some(prepared)
+    } else {
+        None
+    };
+    let arguments = if let Some(part) = recipe.strip_prefix("verify-prepare-part-") {
+        vec!["verify-prepare-part", part]
+    } else {
+        recipe
+            .strip_prefix("verify-shard-")
+            .map_or_else(|| vec![recipe], |shard| vec!["verify-shard", shard])
+    };
+    day2::automation::run(&runner, &arguments, |request| {
         if request.action.starts_with("simulation-") {
             if simulation.is_none() {
                 ensure!(
@@ -137,11 +200,23 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
             }
             return Ok(result);
         }
-        if request.action == "verify-tests" {
+        if ["verify-tests", "verify-prebuilt-tests"].contains(&request.action.as_str()) {
             let campaign: TestCampaign = request.decode()?;
             let budget = campaign.budget()?;
             let started = Instant::now();
-            tests(root, &campaign.suite, &fixtures, budget)?;
+            if request.action == "verify-prebuilt-tests" {
+                executed_binaries = shards::tests(
+                    root,
+                    prepared
+                        .as_ref()
+                        .context("prepared test binaries required")?,
+                    &campaign.suite,
+                    &fixtures,
+                    budget,
+                )?;
+            } else {
+                tests(root, &campaign.suite, &fixtures, budget)?;
+            }
             ensure_stable(root, recipe, &snapshot)?;
             let step = format!("test-{}", campaign.suite);
             ensure!(passed.insert(step.clone()), "duplicate verification effect");
@@ -158,6 +233,74 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
         };
         let started = Instant::now();
         let key = match request.action.as_str() {
+            "verify-test-build" => {
+                ensure!(parameters.is_empty(), "test build accepts no overrides");
+                shards::build(root)?;
+                "test-binaries".into()
+            }
+            "verify-test-docs" => {
+                ensure!(parameters.is_empty(), "doc tests accept no overrides");
+                run_with_budget(
+                    root,
+                    Command::new("cargo")
+                        .args(["test", "--locked", "--doc"])
+                        .args(WORKSPACE_TEST_ARGUMENTS)
+                        .args(["--", "--test-threads=1"]),
+                    Duration::from_secs(12600),
+                )?;
+                "test-docs".into()
+            }
+            "verify-prepared" => {
+                ensure!(parameters.is_empty(), "preparation accepts no overrides");
+                ensure_stable(root, recipe, &snapshot)?;
+                shards::save(
+                    root,
+                    &snapshot,
+                    &fixtures,
+                    &passed,
+                    &timings.steps_ms,
+                    "all",
+                )?;
+                return Ok(json!({}));
+            }
+            "verify-prepared-part" => {
+                let part = value("part")?;
+                ensure!(
+                    recipe == format!("verify-prepare-part-{part}"),
+                    "preparation receipt must match the selected part"
+                );
+                ensure_stable(root, recipe, &snapshot)?;
+                shards::save(root, &snapshot, &fixtures, &passed, &timings.steps_ms, part)?;
+                return Ok(json!({}));
+            }
+            "verify-preparation-join" => {
+                ensure!(
+                    parameters.is_empty(),
+                    "preparation join accepts no overrides"
+                );
+                ensure_stable(root, recipe, &snapshot)?;
+                shards::combine(root, &snapshot)?;
+                return Ok(json!({}));
+            }
+            "verify-shard-receipt" => {
+                let shard = value("shard")?;
+                ensure_stable(root, recipe, &snapshot)?;
+                shards::receipt(
+                    root,
+                    prepared.as_ref().context("prepared tests required")?,
+                    shard,
+                    &passed,
+                    &timings.steps_ms,
+                    &executed_binaries,
+                )?;
+                return Ok(json!({}));
+            }
+            "verify-join" => {
+                ensure!(parameters.is_empty(), "join accepts no overrides");
+                (passed, timings.steps_ms) =
+                    shards::join(root, prepared.as_ref().context("prepared tests required")?)?;
+                return Ok(json!({}));
+            }
             "verify-format" => {
                 let scope = value("scope")?;
                 if scope == "all" {
@@ -214,7 +357,8 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
                         build_fixture(root, fixture, &fixtures)?
                     }
                 };
-                let loaded = day2::artifact::LoadedArtifact::load(&artifact)?;
+                let loaded = day2::artifact::LoadedArtifact::load(&artifact)
+                    .context("verification fixture artifact admission")?;
                 cache
                     .fixtures
                     .insert(fixture.into(), loaded.id().to_owned());
@@ -415,7 +559,19 @@ fn recipe_scope(recipe: &str) -> Result<&'static str> {
     match recipe {
         "verify-fast" => Ok("fast"),
         "verify-reports" => Ok("reports"),
-        "verify" => Ok("all"),
+        "verify"
+        | "verify-prepare"
+        | "verify-prepare-join"
+        | "verify-compose"
+        | "verify-prepare-part-inputs"
+        | "verify-prepare-part-tests" => Ok("all"),
+        shard
+            if shard
+                .strip_prefix("verify-shard-")
+                .is_some_and(shards::valid) =>
+        {
+            Ok("all")
+        }
         "control-verify" => Ok("control"),
         _ => bail!("unknown verification recipe: {recipe}"),
     }
@@ -499,6 +655,11 @@ fn verification_source_file(label: &str, relative: &Path) -> bool {
 }
 
 fn ensure_stable(root: &Path, recipe: &str, expected: &str) -> Result<()> {
+    let recipe = if recipe_scope(recipe)? == "all" {
+        "verify"
+    } else {
+        recipe
+    };
     ensure!(
         verification_snapshot(root, recipe)? == expected,
         "verification inputs changed; rerun from one stable snapshot"
@@ -609,193 +770,179 @@ pub(super) fn linux_tests(root: &Path, suite: &str, artifact: &Path, probe: &Pat
     )
 }
 
+fn test_command(suite: &str) -> Result<Command> {
+    // Each crate links its integration tests into one binary. A module filter
+    // after `--` selects the tests of what used to be a separate test target.
+    let (arguments, modules): (&[&str], &[&str]) = match suite {
+        "libraries" => (
+            &["--workspace", "--exclude", "day2-roc-worker", "--lib"],
+            &[],
+        ),
+        // The compile-fail checks drive the Roc compiler for about a minute;
+        // workspace-runtime and libraries keep them in the full gates.
+        "fast-libraries" => (
+            &[
+                "--workspace",
+                "--exclude",
+                "day2-roc-worker",
+                "--exclude",
+                "day2-cli-checks",
+                "--lib",
+            ],
+            &[],
+        ),
+        "linux-sandbox" => (&["-p", "day2-sandbox", "--test", "isolation"], &[]),
+        "linux-worker" => (
+            &["-p", "day2", "--test", "day2_integration"],
+            &["linux_worker::"],
+        ),
+        "linux-delegation" => (
+            &["-p", "day2-control", "--test", "control_integration"],
+            &["release_execution::"],
+        ),
+        "linux-http" => (
+            &["-p", "day2", "--test", "day2_integration"],
+            &["reports_http::", "command_recovery::"],
+        ),
+        // Matches the online backup/restore test and the runtime image's
+        // day2-backup CLI test; a renamed test drops out of this filter.
+        "linux-backup" => (
+            &["-p", "day2-ops", "--test", "reports", "online_backup_"],
+            &[],
+        ),
+        "xtask" => (&["-p", "xtask", "--bin", "xtask"], &[]),
+        "operations" => (
+            &[
+                "-p",
+                "day2-ops",
+                "--test",
+                "reports",
+                "--test",
+                "local_dev",
+                "--test",
+                "backup_scale",
+            ],
+            &[],
+        ),
+        "reports-runtime" => (
+            &["-p", "day2", "--test", "day2_integration"],
+            &[
+                "admission::",
+                "assets::",
+                "authority::",
+                "instance_capabilities::",
+                "linux_worker::",
+                "numeric::",
+                "output_schema::",
+                "page_sdk::",
+                "pagination::",
+                "templates::",
+                "template_routes::",
+                "web_resources::",
+                "artifact_hardening::",
+                "app_contract::",
+                "owned_runtime::",
+                "owned_web::",
+                "app_inference::",
+                "operation_catalog::",
+                "api_docs::",
+                "routing::",
+                "command_atomicity::",
+                "command_adversarial::",
+                "command_recovery::",
+                "command_simulation::",
+                "migration_commands::",
+                "reports_http::",
+                "live_updates::",
+                // Shared helper cases the selected modules used to compile in.
+                "support::",
+            ],
+        ),
+        "all-runtime" => (
+            &[
+                "-p",
+                "day2",
+                "-p",
+                "xtask",
+                "-p",
+                "day2-ops",
+                "-p",
+                "day2-cli-checks",
+            ],
+            &[],
+        ),
+        "workspace-runtime" => (&[], &[]),
+        "parallel-runtime" => (&[], PARALLEL_RUNTIME_TESTS),
+        "control" => (
+            &[
+                "-p",
+                "day2-control",
+                "-p",
+                "day2-capabilities",
+                "-p",
+                "day2-kernel",
+                "-p",
+                "durable-temporal",
+            ],
+            &[],
+        ),
+        "isolated-build" => (
+            &[],
+            &[
+                "build::real_isolated_owned_links_build_produces_bound_evidence_and_recovers_receipt",
+            ],
+        ),
+        "installation-build" => (
+            &[],
+            &["control_service::real_installation_export_build_and_temporal_completion"],
+        ),
+        _ => bail!("unknown test suite"),
+    };
+    let mut command = Command::new("cargo");
+    command.args(["test", "--locked"]);
+    if [
+        "workspace-runtime",
+        "parallel-runtime",
+        "isolated-build",
+        "installation-build",
+    ]
+    .contains(&suite)
+    {
+        command.args(WORKSPACE_TEST_ARGUMENTS);
+    }
+    command.args(arguments).arg("--").args(modules);
+    // libtest applies --exact to both inclusion and skip filters. With no
+    // inclusion filters, the serial campaign still runs every other test.
+    if ["workspace-runtime", "parallel-runtime"].contains(&suite) {
+        command.arg("--exact");
+    }
+    if suite == "workspace-runtime" {
+        for test in PARALLEL_RUNTIME_TESTS {
+            command.args(["--skip", test]);
+        }
+    }
+    Ok(command)
+}
+
 fn tests(
     root: &Path,
     suite: &str,
     fixtures: &BTreeMap<String, PathBuf>,
     budget: std::time::Duration,
 ) -> Result<()> {
-    let arguments: &[&str] = match suite {
-        "libraries" => &["--workspace", "--exclude", "day2-roc-worker", "--lib"],
-        // The compile-fail checks drive the Roc compiler for about a minute;
-        // workspace-runtime and libraries keep them in the full gates.
-        "fast-libraries" => &[
-            "--workspace",
-            "--exclude",
-            "day2-roc-worker",
-            "--exclude",
-            "day2-cli-checks",
-            "--lib",
-        ],
-        "linux-sandbox" => &["-p", "day2-sandbox", "--test", "isolation"],
-        "linux-worker" => &["-p", "day2", "--test", "linux_worker"],
-        "linux-delegation" => &["-p", "day2-control", "--test", "release_execution"],
-        "linux-http" => &[
-            "-p",
-            "day2",
-            "--test",
-            "reports_http",
-            "--test",
-            "command_recovery",
-        ],
-        // Matches the online backup/restore test and the runtime image's
-        // day2-backup CLI test; a renamed test drops out of this filter.
-        "linux-backup" => &["-p", "day2-ops", "--test", "reports", "online_backup_"],
-        "xtask" => &["-p", "xtask", "--bin", "xtask"],
-        "operations" => &[
-            "-p",
-            "day2-ops",
-            "--test",
-            "reports",
-            "--test",
-            "local_dev",
-            "--test",
-            "backup_scale",
-        ],
-        "reports-runtime" => &[
-            "-p",
-            "day2",
-            "--test",
-            "admission",
-            "--test",
-            "assets",
-            "--test",
-            "authority",
-            "--test",
-            "instance_capabilities",
-            "--test",
-            "linux_worker",
-            "--test",
-            "numeric",
-            "--test",
-            "output_schema",
-            "--test",
-            "page_sdk",
-            "--test",
-            "pagination",
-            "--test",
-            "templates",
-            "--test",
-            "template_routes",
-            "--test",
-            "web_resources",
-            "--test",
-            "artifact_hardening",
-            "--test",
-            "app_contract",
-            "--test",
-            "owned_runtime",
-            "--test",
-            "owned_web",
-            "--test",
-            "app_inference",
-            "--test",
-            "operation_catalog",
-            "--test",
-            "api_docs",
-            "--test",
-            "routing",
-            "--test",
-            "command_atomicity",
-            "--test",
-            "command_adversarial",
-            "--test",
-            "command_recovery",
-            "--test",
-            "command_simulation",
-            "--test",
-            "migration_commands",
-            "--test",
-            "reports_http",
-            "--test",
-            "live_updates",
-        ],
-        "all-runtime" => &[
-            "-p",
-            "day2",
-            "-p",
-            "xtask",
-            "-p",
-            "day2-ops",
-            "-p",
-            "day2-cli-checks",
-        ],
-        // The full gate used to invoke this package set as separate
-        // `all-runtime` and `control` campaigns. Keeping it in one Cargo
-        // invocation preserves the tests and serial execution policy while
-        // avoiding a second, differently resolved compile/link graph.
-        "workspace-runtime" => &[
-            "-p",
-            "day2",
-            "-p",
-            "xtask",
-            "-p",
-            "day2-ops",
-            "-p",
-            "day2-cli-checks",
-            "-p",
-            "day2-control",
-            "-p",
-            "day2-capabilities",
-            "-p",
-            "day2-kernel",
-            "-p",
-            "durable-temporal",
-        ],
-        // Select the same package graph as `workspace-runtime`, but execute the
-        // two independently isolated integration binaries with bounded
-        // intra-binary parallelism. Matching the package graph lets Cargo reuse
-        // the already-linked test executables.
-        "parallel-runtime" => &[
-            "-p",
-            "day2",
-            "-p",
-            "xtask",
-            "-p",
-            "day2-ops",
-            "-p",
-            "day2-cli-checks",
-            "-p",
-            "day2-control",
-            "-p",
-            "day2-capabilities",
-            "-p",
-            "day2-kernel",
-            "-p",
-            "durable-temporal",
-            "--test",
-            "app_inference",
-        ],
-        "control" => &[
-            "-p",
-            "day2-control",
-            "-p",
-            "day2-capabilities",
-            "-p",
-            "day2-kernel",
-            "-p",
-            "durable-temporal",
-        ],
-        "isolated-build" => &[
-            "-p",
-            "day2-control",
-            "--test",
-            "build",
-            "real_isolated_owned_links_build_produces_bound_evidence_and_recovers_receipt",
-        ],
-        "installation-build" => &[
-            "-p",
-            "day2-control",
-            "--test",
-            "control_service",
-            "real_installation_export_build_and_temporal_completion",
-        ],
-        _ => bail!("unknown test suite"),
-    };
     #[cfg(target_os = "linux")]
     prepare_linux_test_installation(root)?;
-    let mut command = Command::new("cargo");
-    command.args(["test", "--locked"]).args(arguments).arg("--");
+    let mut command = test_command(suite)?;
+    configure_tests(root, suite, fixtures, &mut command)?;
+    run_with_budget(root, &mut command, budget)
+}
+
+fn configure_tests(
+    root: &Path,
+    suite: &str,
+    fixtures: &BTreeMap<String, PathBuf>,
+    command: &mut Command,
+) -> Result<()> {
     if ["isolated-build", "installation-build"].contains(&suite) {
         let rust = Command::new("rustc")
             .args(["--print", "sysroot"])
@@ -814,7 +961,7 @@ fn tests(
             .env("DAY2_TEST_BUILD_REGISTRY", cargo_cache.join("registry"));
     }
     // Library unit tests own their temporary state, so the fast gate uses
-    // libtest's default parallelism; runtime campaigns stay serial.
+    // libtest's default parallelism; the reviewed probes use four threads.
     match suite {
         "parallel-runtime" => {
             command.arg("--test-threads=4");
@@ -825,20 +972,6 @@ fn tests(
         }
     }
     command.env("DAY2_TEST_TOFU_CONFIG", root.join(".cache/tofu.json"));
-    if suite == "workspace-runtime" {
-        // These cases run in the explicitly bounded parallel campaign. Exact
-        // names make this coverage-safe: a renamed or new test stops matching
-        // here and therefore still runs in the serial workspace campaign.
-        for test in [
-            "ordinary_reports_requires_its_complete_root_in_both_profiles",
-            "separate_internal_commands_infer_independent_nominal_types_and_require_complete_definitions",
-            "a_structural_request_alias_is_rejected_during_codec_binding",
-            "resource_handles_and_issuance_context_cannot_be_forged_or_broadened",
-            "omissions_stale_references_and_forged_factories_fail_compilation",
-        ] {
-            command.args(["--skip", test]);
-        }
-    }
     if suite == "fast-libraries" {
         command.args([
             "--skip",
@@ -858,6 +991,7 @@ fn tests(
         for test in [
             "managed_credentials::simulation::actual_credential_http_inherits_ports_and_replays_exact_ids",
             "managed_credentials::store::tests::schema_native_runtime_initialization_reopens_with_installed_peers",
+            "unsecured_restore_refuses_declared_credentials_and_oauth_before_output_mutation",
             "managed_credentials::issuance::tests::native_issuance_rolls_back_and_recovers_the_same_public_receipt",
             "managed_credentials::issuance::tests::personal_issuance_uses_the_confirmed_subject_and_missing_readiness_denies",
             "managed_credentials::issuance::tests::hostile_issue_rejects_changed_label_family_principal_and_second_mutation",
@@ -868,10 +1002,19 @@ fn tests(
             "oauth::security_shell::tests::credential_browser_rotates_revokes_and_fences_accepted_work",
             "oauth::security_shell::tests::credential_api_admits_only_current_tokens_and_rechecks_durable_execution",
             "oauth::security_shell::tests::credential_browser_requires_fresh_auth_and_current_readiness",
+            "oauth::security_shell::tests::credential_signed_google_session_keeps_original_intent_across_three_roles",
+            "oauth::security_shell::tests::signed_replay::signed_google_replay_two_positive_owner_histories",
+            "oauth::security_shell::tests::signed_replay::signed_google_replay_six_paired_negative_owner_histories",
             "oauth::security_shell::tests::credential_app_navigation_only_freezes_canonical_intent",
         ] {
             command.args(["--skip", test]);
         }
+    }
+    if !fixtures.contains_key("oauth-calendar") && fixtures.contains_key("credential-metadata") {
+        command.args([
+            "--skip",
+            "unsecured_restore_refuses_declared_credentials_and_oauth_before_output_mutation",
+        ]);
     }
     for (fixture, variable) in [
         ("reports", "DAY2_TEST_REPORTS_ARTIFACT"),
@@ -907,7 +1050,7 @@ fn tests(
             command.env(variable, path);
         }
     }
-    run_with_budget(root, &mut command, budget)
+    Ok(())
 }
 
 /// Cargo places integration tests in `deps`, while normal executables live one
@@ -1062,7 +1205,7 @@ fn receipt(
         );
         report.insert(
             "timings_ms".into(),
-            json!({"steps":timings_ms,"total":total_ms}),
+            json!({"steps":timings_ms,"total":total_ms,"total_scope":"elapsed on this receipt host; distributed campaign work is recorded per step"}),
         );
         fs::write(
             root.join("artifacts/verification.json"),
@@ -1081,7 +1224,7 @@ fn receipt(
             "effects":passed,"cli_protocol":1,"tofu":"1.11.5, built-in terraform_data only",
             "host":std::env::consts::OS,"architecture":std::env::consts::ARCH,
             "input_snapshot":snapshot,
-            "timings_ms":{"steps":timings_ms,"total":total_ms},
+            "timings_ms":{"steps":timings_ms,"total":total_ms,"total_scope":"elapsed on this receipt host; distributed campaign work is recorded per step"},
             "completed_at_unix":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs()
         });
         fs::write(
@@ -1158,6 +1301,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn full_gate_filters_keep_the_same_cargo_package_and_target_graph() -> Result<()> {
+        let cargo_arguments = |command: &Command| {
+            command
+                .get_args()
+                .take_while(|argument| *argument != "--")
+                .map(|argument| argument.to_os_string())
+                .collect::<Vec<_>>()
+        };
+        let expected = cargo_arguments(&test_command("workspace-runtime")?);
+        assert!(expected.iter().any(|argument| argument == "day2"));
+        assert!(expected.iter().any(|argument| argument == "day2-control"));
+        assert!(!expected.iter().any(|argument| argument == "--test"));
+        for suite in ["parallel-runtime", "isolated-build", "installation-build"] {
+            let command = test_command(suite)?;
+            assert_eq!(cargo_arguments(&command), expected, "{suite}");
+        }
+        assert!(test_command("unknown").is_err());
+        Ok(())
+    }
+
+    #[test]
     fn test_campaign_budget_defaults_and_aggregate_override_are_bounded() -> Result<()> {
         for suite in [
             "all-runtime",
@@ -1176,6 +1340,9 @@ mod tests {
             ("all-runtime", 3600),
             ("all-runtime", 9000),
             ("workspace-runtime", 12600),
+            ("workspace-day2", 12600),
+            ("workspace-control", 12600),
+            ("workspace-other", 12600),
             ("control", 3600),
             ("libraries", 600),
             ("control", 1),
@@ -1194,6 +1361,9 @@ mod tests {
             ("all-runtime", u64::MAX),
             ("workspace-runtime", 0),
             ("workspace-runtime", 12601),
+            ("workspace-day2", 12601),
+            ("workspace-control", 12601),
+            ("workspace-other", 12601),
             ("workspace-runtime", u64::MAX),
             ("libraries", 0),
             ("libraries", 601),

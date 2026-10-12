@@ -8,7 +8,6 @@ pub mod app_contracts;
 pub mod app_inference;
 pub mod app_sources;
 pub mod artifact;
-pub mod assets;
 pub mod audit;
 pub mod authority;
 pub mod authority_state;
@@ -49,7 +48,6 @@ mod live;
 mod managed_credentials;
 pub mod mcp;
 pub mod migration;
-pub mod numeric;
 mod release_binding;
 // Protocol kernels are staged behind host-only verification and custody wiring.
 #[allow(dead_code)]

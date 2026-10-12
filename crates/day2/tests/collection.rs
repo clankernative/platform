@@ -8,10 +8,8 @@ use day2::{
 use serde_json::{Value, json};
 use std::{fs, path::PathBuf, time::Duration};
 
-#[path = "support/compiler.rs"]
-mod compiler;
-#[path = "support/evidence.rs"]
-mod evidence;
+use crate::support::compiler;
+use crate::support::evidence;
 
 struct World {
     runtime: Runtime,

@@ -24,6 +24,12 @@ has its own backend prefix. Backends, tfvars and kubeconfig belong privately;
 use application-default credentials or workload identity, never committed keys.
 The [deployment runbook](../../deploy/gke/README.md) explains apply order and IAM.
 
+Choose the instance repository's Git host and infrastructure CI independently
+of app source hosts. Keep CI workflows, runner configuration, provider identity
+and approvals here; no GitHub, GitLab or Gitea installation is a runtime
+prerequisite. Reusable [provider integration examples](../../deploy/integrations/README.md)
+are opt-in and are not part of the core GKE apply order.
+
 The optional `security-shell.tfvars.example` selects one security hostname for
 the installation. OAuth-enabled workload values refer to the resulting contract
 by namespace and ConfigMap name, as the runbook describes.

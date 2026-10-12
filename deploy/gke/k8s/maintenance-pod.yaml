@@ -3,8 +3,7 @@
 # operations (inspect, backup, authority apply/activate, migrations, import)
 # against the stopped app. Rendered and run by `day2 platform maintain`
 # (ops/Maintain.roc, crates/day2-ops/src/maintenance.rs), which stops the app's
-# StatefulSet first: never run it next to a serving pod. Until it is retired,
-# ../scripts/day2-maintain.sh renders the same placeholders.
+# StatefulSet first: never run it next to a serving pod.
 #
 # Placeholders (the renderer refuses an unknown or unfilled one):
 #   DAY2_MAINT_NAMESPACE      app namespace (app-<id>)
@@ -16,6 +15,12 @@
 #                             the tenancy service label for maintenance
 #                             workloads ("background")
 #   DAY2_MAINT_DEADLINE_SECONDS  hard stop for the pod
+#   DAY2_MAINT_SCRATCH        size limit of the /srv/day2 scratch volume,
+#                             derived from the measured store (backup,
+#                             rehearsal copy, SQLite temporary files, artifacts)
+#   DAY2_MAINT_EPHEMERAL_STORAGE  the container's ephemeral-storage request and
+#                             limit: the scratch plus a small allowance, so the
+#                             pod is scheduled only where the scratch fits
 apiVersion: v1
 kind: Pod
 metadata:
@@ -42,6 +47,11 @@ spec:
       imagePullPolicy: IfNotPresent
       command: ["sleep", "${DAY2_MAINT_DEADLINE_SECONDS}"]
       workingDir: /srv/day2
+      env:
+        # SQLite's temporary files (sorts, index builds, statement journals
+        # of a migration) on the sized scratch volume, not the small
+        # memory-backed /tmp.
+        - { name: SQLITE_TMPDIR, value: /srv/day2 }
       securityContext:
         runAsUser: 10001
         runAsGroup: 10001
@@ -53,21 +63,23 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       resources:
-        requests: { cpu: 100m, memory: 512Mi, ephemeral-storage: 1Gi }
-        limits: { cpu: "2", memory: 2Gi, ephemeral-storage: 4Gi }
+        requests: { cpu: 100m, memory: 512Mi, ephemeral-storage: ${DAY2_MAINT_EPHEMERAL_STORAGE} }
+        limits: { cpu: "2", memory: 2Gi, ephemeral-storage: ${DAY2_MAINT_EPHEMERAL_STORAGE} }
       volumeMounts:
         # /srv/day2 mirrors the serving pod: instance.json and
-        # artifacts/<id>/ are copied in; .state is the app's volume.
+        # artifacts/<id>/ are copied in; .state is the app's volume. The
+        # backup and the rehearsal's copy live on the scratch volume.
         - { name: work, mountPath: /srv/day2 }
         - { name: data, mountPath: /srv/day2/.state }
         - { name: tmp, mountPath: /tmp }
   volumes:
     - name: work
       emptyDir:
-        sizeLimit: 1Gi
+        sizeLimit: ${DAY2_MAINT_SCRATCH}
     - name: data
       persistentVolumeClaim:
         claimName: ${DAY2_MAINT_PVC}
+    # Only the worker executables day2 materializes; nothing sized by the store.
     - name: tmp
       emptyDir:
         medium: Memory

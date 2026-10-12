@@ -1,7 +1,11 @@
-use crate::{digest, schema::identifier};
+//! Bounded asset admission, normalization and content-addressed packaging.
+#![forbid(unsafe_code)]
+
 use anyhow::{Context, Result, bail, ensure};
+use day2_contracts::names::identifier;
 use image::{ImageFormat, ImageReader};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs,
@@ -363,7 +367,7 @@ pub fn roc_module(catalog: &Catalog) -> Result<String> {
     roc_module_profile(catalog, false)
 }
 
-pub(crate) fn admission_roc_module(catalog: &Catalog) -> Result<String> {
+pub fn admission_roc_module(catalog: &Catalog) -> Result<String> {
     roc_module_profile(catalog, true)
 }
 
@@ -377,4 +381,8 @@ fn roc_module_profile(catalog: &Catalog, admission: bool) -> Result<String> {
     }
     code.push_str("}\n");
     Ok(code)
+}
+
+fn digest(bytes: &[u8]) -> String {
+    format!("sha256:{:x}", Sha256::digest(bytes))
 }

@@ -4,34 +4,11 @@ use crate::{
     schema::{Kind, Record, Schema},
 };
 use anyhow::{Context, Result, ensure};
-use serde::{Deserialize, Serialize};
+use day2_contracts::text::TextRule;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct TextRule {
-    pub maximum_bytes: u64,
-    pub nonblank: bool,
-    pub description: String,
-}
 pub type Catalog = BTreeMap<String, TextRule>;
-
-impl TextRule {
-    pub fn validate(&self) -> Result<()> {
-        ensure!(
-            (1..=16384).contains(&self.maximum_bytes)
-                && !self.description.trim().is_empty()
-                && self.description.len() <= 1024,
-            "invalid required text domain rules"
-        );
-        Ok(())
-    }
-
-    pub fn accepts(&self, value: &str) -> bool {
-        value.len() as u64 <= self.maximum_bytes && (!self.nonblank || !value.trim().is_empty())
-    }
-}
 
 pub fn record(domains: &Catalog, record: &Record, value: &Value) -> Result<()> {
     for (field, kind) in &record.fields {

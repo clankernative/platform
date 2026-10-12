@@ -217,6 +217,128 @@ fn online_backup_restores_wal_data_into_a_new_instance_and_rejects_tampering() -
     Ok(())
 }
 
+/// Current backups remain bound to their admitted artifact. Ordinary disabled
+/// restore must read declarations before creating any output directory.
+#[test]
+fn unsecured_restore_refuses_declared_credentials_and_oauth_before_output_mutation() -> Result<()> {
+    for (variable, credentials) in [
+        ("DAY2_TEST_CREDENTIAL_METADATA_ARTIFACT", true),
+        ("DAY2_TEST_OAUTH_CALENDAR_ARTIFACT", false),
+    ] {
+        let selected = PathBuf::from(
+            std::env::var_os(variable)
+                .with_context(|| format!("required full-gate artifact {variable}"))?,
+        );
+        let artifact = LoadedArtifact::load(&selected)?;
+        if credentials {
+            assert!(!artifact.contract().credential_declarations.is_empty());
+        } else {
+            assert!(!artifact.contract().connection_declarations.is_empty());
+        }
+        let scratch = tempfile::tempdir()?;
+        let runtime = development::create_verification_for(
+            &selected,
+            &scratch.path().join("original"),
+            None,
+            development::ACTOR,
+        )?;
+        let snapshot = scratch.path().join("backup");
+        let mut manifest = backup::take(runtime.instance_path(), "app", &snapshot)?;
+        backup::verify(&snapshot)?;
+        let output = scratch.path().join("restored");
+        let error = backup::restore(&snapshot, &output).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("security_restore_preflight_required")
+        );
+        assert!(!output.exists());
+        // Removing selected metadata from current history cannot hide its
+        // actual artifact declarations or authorize ordinary disabled restore.
+        manifest
+            .instance
+            .apps
+            .get_mut("app")
+            .unwrap()
+            .credential_families
+            .clear();
+        manifest
+            .instance
+            .apps
+            .get_mut("app")
+            .unwrap()
+            .oauth_connections
+            .clear();
+        manifest.instance.control = None;
+        manifest.instance.resources = None;
+        manifest.instance.security_shell = None;
+        manifest.instance.oauth_shell_transport = None;
+        manifest.instance.oauth_clients = None;
+        manifest.instance.oauth_runtime = None;
+        manifest.instance.credential_runtime = None;
+        fs::write(
+            snapshot.join("backup.json"),
+            serde_json::to_vec_pretty(&manifest)?,
+        )?;
+        backup::verify(&snapshot)?;
+        let error = backup::restore(&snapshot, &output).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("security_restore_preflight_required")
+        );
+        assert!(!output.exists());
+        assert!(runtime.db().is_file());
+    }
+    Ok(())
+}
+
+#[test]
+fn unsecured_restore_refuses_target_runtime_only_history_before_output_mutation() -> Result<()> {
+    let selected = artifact()?;
+    for credentials in [true, false] {
+        let scratch = tempfile::tempdir()?;
+        let runtime = development::create(&selected, &scratch.path().join("original"), None)?;
+        let snapshot = scratch.path().join("backup");
+        let mut manifest = backup::take(runtime.instance_path(), "app", &snapshot)?;
+        assert!(manifest.instance.apps["app"].credential_families.is_empty());
+        assert!(manifest.instance.apps["app"].oauth_connections.is_empty());
+        if credentials {
+            manifest.instance.credential_runtime = Some(serde_json::from_value(
+                serde_json::json!({
+                    "version":1,"apps":{"app":{"service_account":"app@example-tools.iam.gserviceaccount.com",
+                        "attestation":{"id":"attestation","revision":day2_capabilities::Digest::new(b"historical desired selection")},
+                        "attestation_secret":"attest","families":{"clients":{"verifier_secret":"verify",
+                            "custody":{"kind":"verifier_only"},"max_active_lineages":12}}}}
+                }),
+            )?);
+        } else {
+            manifest.instance.oauth_runtime = Some(serde_json::from_value(serde_json::json!({
+                "version":1,"shell":{"project":"example-tools","backend_service":"shell","url_map":"shell",
+                    "https_proxy":"shell","forwarding_rule":"shell","kubernetes_service":"security/security-shell"},
+                "apps":{"app":{"service_account":"app@example-tools.iam.gserviceaccount.com",
+                    "accounts":{"calendar":{"kind":"iap_subject"}}}}
+            }))?);
+        }
+        // Snapshot evidence is not fresh desired admission or live authority.
+        fs::write(
+            snapshot.join("backup.json"),
+            serde_json::to_vec_pretty(&manifest)?,
+        )?;
+        backup::verify(&snapshot)?;
+        let output = scratch.path().join("restored");
+        let error = backup::restore(&snapshot, &output).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("security_restore_preflight_required")
+        );
+        assert!(!output.exists());
+        assert!(runtime.db().is_file());
+    }
+    Ok(())
+}
+
 /// The runtime image's day2-backup (scheduled GKE backups) runs beside a serving
 /// pod: it must not need the serve lock, and must leave a verified bundle that
 /// restores to the same domain and journal contents.

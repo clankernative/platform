@@ -72,7 +72,7 @@ pub fn validate_catalog(catalog: &Catalog) -> Result<()> {
     );
     let mut nodes = 0usize;
     for (name, contract) in catalog {
-        crate::schema::identifier(name)?;
+        day2_contracts::names::identifier(name)?;
         for shape in [&contract.input, &contract.output] {
             validate_shape(shape, 0, &mut nodes)?;
         }
@@ -95,7 +95,7 @@ fn validate_shape(shape: &Type, depth: usize, nodes: &mut usize) -> Result<()> {
         Type::Record(fields) => {
             ensure!(fields.len() <= 64, "presentation_field_budget");
             for (name, field) in fields {
-                crate::schema::identifier(name)?;
+                day2_contracts::names::identifier(name)?;
                 validate_shape(field, depth + 1, nodes)?;
             }
             Ok(())
@@ -162,7 +162,7 @@ fn validate_pin(required: &Catalog, pin_json: Option<&str>) -> Result<Pin> {
 
 fn load_from_pin(required: &Catalog, pin_json: Option<&str>) -> Result<Option<Arc<dyn Port>>> {
     let pin = validate_pin(required, pin_json)?;
-    let pinned_digest = crate::assets::hash_part(&pin.digest)?;
+    let pinned_digest = day2_assets::hash_part(&pin.digest)?;
     let metadata =
         fs::symlink_metadata(&pin.executable).context("presentation_executable_metadata")?;
     ensure!(

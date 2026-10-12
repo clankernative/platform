@@ -58,7 +58,7 @@ pub struct RuntimeSession {
 
 impl RuntimeSession {
     pub fn new(_root: &Path, output: &Path, artifact: &Path, image: &str) -> Result<Self> {
-        day2::assets::hash_part(image)?;
+        day2_assets::hash_part(image)?;
         let artifact = artifact.canonicalize()?;
         // Full artifact loading executes the worker contract. The orchestration
         // host may be macOS, so it only checks addressed bytes independently of
@@ -97,14 +97,14 @@ impl RuntimeSession {
             completed: BTreeSet::new(),
             helpers: BTreeSet::new(),
             sequence: 0,
-            identity: day2::assets::hash_part(&identity)?[..16].into(),
+            identity: day2_assets::hash_part(&identity)?[..16].into(),
             binary_hashes: BTreeMap::new(),
             strict_receipt: None,
         })
     }
 
     pub fn set_tooling_image(&mut self, image: &str) -> Result<()> {
-        day2::assets::hash_part(image)?;
+        day2_assets::hash_part(image)?;
         ensure!(self.tooling_image.is_none(), "tooling image already bound");
         self.tooling_image = Some(image.into());
         Ok(())
@@ -119,7 +119,7 @@ impl RuntimeSession {
             evidence["artifact"] == self.artifact_id && evidence["worker"] == self.artifact_worker,
             "host artifact bytes differ from native admission evidence"
         );
-        day2::assets::hash_part(
+        day2_assets::hash_part(
             evidence["platform_inventory"]
                 .as_str()
                 .context("native platform inventory")?,
@@ -406,7 +406,7 @@ impl RuntimeSession {
             .tooling_image
             .clone()
             .context("immutable tooling image required for native packaging")?;
-        let hash = day2::assets::hash_part(&self.artifact_id)?;
+        let hash = day2_assets::hash_part(&self.artifact_id)?;
         let native_artifact = format!("/qualification-artifacts/{hash}");
         let native_output = format!("/evidence/{company}");
         let directory = self.output.join("operator-output").join(company);
@@ -1243,7 +1243,7 @@ impl RuntimeSession {
         )?;
         let target = format!(
             "/srv/day2/artifacts/{}",
-            day2::assets::hash_part(&self.artifact_id)?
+            day2_assets::hash_part(&self.artifact_id)?
         );
         let activation = self.host(
             index,
@@ -1636,7 +1636,7 @@ pub fn provision(root: &Path, qualified: &Path, output: &Path) -> Result<()> {
     );
     let artifact = qualified
         .join("artifacts")
-        .join(day2::assets::hash_part(field("artifact")?)?);
+        .join(day2_assets::hash_part(field("artifact")?)?);
     let runner = super::workflows::build(root)?;
     provision_preflight(&runner)?;
     fs::create_dir(output).context("provisioning smoke output must be new")?;
@@ -1912,7 +1912,7 @@ pub fn strict(root: &Path, qualified: &Path, output: &Path) -> Result<()> {
     };
     let artifact = qualified
         .join("artifacts")
-        .join(day2::assets::hash_part(field("artifact")?)?);
+        .join(day2_assets::hash_part(field("artifact")?)?);
     let inspected = super::linux_qualification::inspect_artifact(&artifact)?;
     ensure!(
         inspected["artifact"] == receipt["artifact"] && inspected["worker"] == receipt["worker"],
@@ -1947,7 +1947,7 @@ pub fn strict(root: &Path, qualified: &Path, output: &Path) -> Result<()> {
     )?;
     runtime.strict_receipt = Some(input_copy.clone());
     for key in ["runtime_supervisor", "runtime_sandbox"] {
-        day2::assets::hash_part(field(key)?)?;
+        day2_assets::hash_part(field(key)?)?;
         runtime.binary_hashes.insert(key.into(), field(key)?.into());
     }
     let mut next = 0;
@@ -2117,10 +2117,10 @@ pub fn diagnose(
     let tooling_image = failure["tooling_image"]
         .as_str()
         .context("retained tooling image")?;
-    day2::assets::hash_part(image)?;
-    day2::assets::hash_part(original_runtime_image)?;
-    day2::assets::hash_part(tooling_image)?;
-    day2::assets::hash_part(
+    day2_assets::hash_part(image)?;
+    day2_assets::hash_part(original_runtime_image)?;
+    day2_assets::hash_part(tooling_image)?;
+    day2_assets::hash_part(
         failure["platform"]
             .as_str()
             .context("retained platform identity")?,
@@ -2135,7 +2135,7 @@ pub fn diagnose(
     let mut artifacts = Vec::new();
     for evidence in [&admitted, &probe] {
         let hash =
-            day2::assets::hash_part(evidence["artifact"].as_str().context("retained artifact")?)?;
+            day2_assets::hash_part(evidence["artifact"].as_str().context("retained artifact")?)?;
         let path = failed.join("artifacts").join(hash);
         let inspected = super::linux_qualification::inspect_artifact(&path)?;
         ensure!(
@@ -2482,7 +2482,7 @@ pub fn native_package(
     );
     let artifact = LoadedArtifact::load(artifact)?;
     artifact.require_current_api()?;
-    day2::schema::identifier(installation)?;
+    day2_contracts::names::identifier(installation)?;
     let mut policy: day2::authority::Policy = serde_json::from_str(include_str!(
         "../../../fixtures/authority-policies/reports.json"
     ))?;

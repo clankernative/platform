@@ -14,7 +14,7 @@ locals {
   apis = setunion(toset([
     # cluster: the day2 image repository.
     "artifactregistry.googleapis.com",
-    # cluster, app-edge, qualification-runner, gitea-instance-ci: VPC, NAT,
+    # cluster, app-edge, qualification-runner: VPC, NAT,
     # load balancer, persistent disks, VMs.
     "compute.googleapis.com",
     # cluster: GKE.
@@ -23,13 +23,13 @@ locals {
     "gkebackup.googleapis.com",
     # Service accounts and IAM policy, in every stack.
     "iam.googleapis.com",
-    # Workload identity federation: CI identities exchange OIDC tokens (sts)
-    # and impersonate their service account (iamcredentials).
+    # Runtime service-account signing and instance-selected provisioning
+    # identities, including workload identity federation when selected.
     "iamcredentials.googleapis.com",
     "sts.googleapis.com",
     # app-edge: IAP in front of each app; runner VMs: IAP TCP forwarding.
     "iap.googleapis.com",
-    # The shared secrets below, and the CI runner registration secret.
+    # The shared secrets below and instance-selected runtime secrets.
     "secretmanager.googleapis.com",
     # Service Usage itself, so this root can manage the others.
     "serviceusage.googleapis.com",

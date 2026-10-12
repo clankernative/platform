@@ -1,10 +1,10 @@
-#[path = "support/compiler.rs"]
-mod compiler;
+use crate::support::compiler;
 use anyhow::{Context, Result};
 use day2::{
-    admission, assets, output_schema, sandbox,
+    admission, output_schema, sandbox,
     schema::{Kind, Record, Schema},
 };
+use day2_assets as assets;
 use std::{collections::BTreeMap, fs, path::Path, time::Duration};
 
 #[test]

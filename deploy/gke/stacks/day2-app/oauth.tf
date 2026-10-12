@@ -2,7 +2,7 @@
 # closed OAuth contracts and their digests intact; deployment checks supplement
 # (and do not replace) native instance/artifact admission at startup.
 variable "oauth_instance_json" {
-  description = "Optional complete single-app canonical instance JSON. OAuth bindings, clients, runtime and control metadata are copied intact; URLs/identity must match the existing edge contracts. Contains secret references only."
+  description = "Optional complete single-app canonical instance JSON. OAuth bindings, clients, runtime and scoped immutable epoch/key-set selectors are copied intact. Desired metadata and secret references only; no current epoch or readiness."
   type        = string
   default     = null
   validation {
@@ -10,10 +10,11 @@ variable "oauth_instance_json" {
       length(var.oauth_instance_json) <= 524288 &&
       length(jsondecode(var.oauth_instance_json).apps) == 1 &&
       length(jsondecode(var.oauth_instance_json).oauth_runtime.apps) == 1 &&
+      length(jsondecode(var.oauth_instance_json).control.security_epochs) == 1 &&
       jsondecode(var.oauth_instance_json).oauth_runtime.version == 1 &&
       contains([1, 2], jsondecode(var.oauth_instance_json).oauth_clients.version),
     false)
-    error_message = "oauth_instance_json must be bounded single-app canonical instance JSON with version 1 OAuth runtime and version 1 or 2 OAuth client selections."
+    error_message = "oauth_instance_json must be bounded single-app canonical JSON with one scoped current authority selector, version 1 OAuth runtime and version 1 or 2 client selections."
   }
 }
 
@@ -49,6 +50,21 @@ locals {
 resource "terraform_data" "oauth_admission" {
   count = var.oauth_instance_json == null ? 0 : 1
   lifecycle {
+    precondition {
+      condition = try(alltrue([for epoch in values(local.oauth_selection.control.security_epochs) :
+        epoch.scope == { installation = var.installation, environment = var.environment, app = var.app_id } &&
+        epoch.provider.kind == "firestore_native_v1" &&
+        epoch.provider.project == local.contract["OAUTH_APP_PROJECT"] &&
+        tostring(epoch.provider.project_number) == split("/", local.iap_audience)[2] &&
+        epoch.provider.iam_source.kind == "gke_workload_identity_v1" &&
+        epoch.provider.iam_source.service_account == local.contract["OAUTH_APP_SERVICE_ACCOUNT"] &&
+        length(regexall("^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$", epoch.provider.database)) == 1 &&
+        length(regexall("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", epoch.provider.database_uid)) == 1 &&
+        length(regexall("^sha256:[0-9a-f]{64}$", epoch.key_set)) == 1 &&
+        epoch.max_lease_seconds >= 1 && epoch.max_lease_seconds <= 60 && epoch.max_lease_seconds == floor(epoch.max_lease_seconds)
+      ]), false)
+      error_message = "OAuth requires the exact app scope, project/workload identity, explicit immutable database UID and complete key-set digest. These selectors do not prove native authority or readiness."
+    }
     precondition {
       condition = try(
         var.security_shell_contract != null &&

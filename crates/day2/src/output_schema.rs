@@ -23,7 +23,7 @@ pub enum Type {
         domain: String,
     },
     Integer,
-    Unsigned(crate::numeric::Unsigned),
+    Unsigned(day2_contracts::numeric::Unsigned),
     RowVersion,
     ModelReference {
         roc_type: String,
@@ -107,7 +107,7 @@ impl Table {
             "integer" => (Type::Integer, "I64".into()),
             "unsigned" => (
                 Type::Unsigned(
-                    crate::numeric::Unsigned::from_roc(&node.name)
+                    day2_contracts::numeric::Unsigned::from_roc(&node.name)
                         .context("unsupported unsigned integer width")?,
                 ),
                 node.name.clone(),
@@ -269,7 +269,7 @@ impl Table {
                 let mut fields = BTreeMap::new();
                 let mut annotations = BTreeMap::new();
                 for field in &node.fields {
-                    crate::schema::identifier(&field.name)?;
+                    day2_contracts::names::identifier(&field.name)?;
                     let contract = self
                         .contract(field.type_id, active, nodes)
                         .with_context(|| format!("output field {}", field.name))?;
@@ -350,7 +350,7 @@ pub fn from_checked_types(bytes: &[u8]) -> Result<Catalog> {
     let mut catalog = Catalog::new();
     let mut nodes = 0;
     for field in &root.fields {
-        crate::schema::identifier(&field.name)?;
+        day2_contracts::names::identifier(&field.name)?;
         let contract = table.contract(field.type_id, &mut BTreeSet::new(), &mut nodes)?;
         ensure!(
             catalog.insert(field.name.clone(), contract).is_none(),
@@ -392,7 +392,7 @@ pub(crate) fn annotation_imports(annotation: &str) -> Result<BTreeSet<&str>> {
                 imports.insert(module);
             }
         } else {
-            crate::schema::identifier(token)?;
+            day2_contracts::names::identifier(token)?;
         }
     }
     Ok(imports)
@@ -402,7 +402,7 @@ pub fn validate(catalog: &Catalog) -> Result<()> {
     ensure!(catalog.len() <= 64, "output registration count budget");
     let mut nodes = 0;
     for (name, contract) in catalog {
-        crate::schema::identifier(name)?;
+        day2_contracts::names::identifier(name)?;
         contract.shape.validate_schema(0, &mut nodes)?;
         annotation_imports(&contract.roc_type)?;
     }
@@ -721,7 +721,7 @@ impl Type {
             Self::Record(fields) => {
                 ensure!(fields.len() <= MAX_FIELDS, "output field count budget");
                 for (name, field) in fields {
-                    crate::schema::identifier(name)?;
+                    day2_contracts::names::identifier(name)?;
                     field.validate_schema(depth + 1, nodes)?;
                 }
             }
@@ -792,7 +792,7 @@ impl Type {
             Self::Integer => ensure!(value.as_i64().is_some(), "expected i64 page output"),
             Self::Unsigned(unsigned) => ensure!(unsigned.valid(value), "invalid unsigned output"),
             Self::RowVersion => ensure!(
-                crate::numeric::valid_row_version(value),
+                day2_contracts::numeric::valid_row_version(value),
                 "invalid row version output"
             ),
             Self::Boolean => ensure!(value.is_boolean(), "expected boolean page output"),

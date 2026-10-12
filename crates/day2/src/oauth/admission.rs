@@ -62,13 +62,13 @@ impl ReviewedCatalog {
         ensure!(entries.len() <= 64, "OAuth reviewed catalog budget");
         let mut selected = BTreeMap::new();
         for entry in entries {
-            crate::schema::identifier(&entry.capability)?;
+            day2_contracts::names::identifier(&entry.capability)?;
             ensure!(
                 !entry.action_scopes.is_empty() && entry.action_scopes.len() <= 32,
                 "OAuth reviewed action budget"
             );
             for (action, scopes) in &entry.action_scopes {
-                crate::schema::identifier(action)?;
+                day2_contracts::names::identifier(action)?;
                 ensure!(
                     !scopes.is_empty() && scopes.len() <= 32,
                     "OAuth reviewed scope budget"
@@ -258,10 +258,11 @@ impl super::shell_transport::ApprovalSigner for ArtifactShellSigner {
     fn attest(
         &self,
         view: &super::shell_transport::ApprovalView,
-        session: Digest,
-        authenticated_at: i64,
+        session: &super::security_shell::ShellSession,
         now: i64,
     ) -> Result<super::external::FreshExternalApproval> {
+        session.require_approval(view, now)?;
+        let authenticated_at = session.authenticated_at();
         view.validate(&crate::iap::Verified {
             email: view.human().into(),
             subject: view.subject.clone(),
@@ -334,6 +335,8 @@ impl super::shell_transport::ApprovalSigner for ArtifactShellSigner {
             .as_ref()
             .context("OAuth shell key provider missing")?
             .load(reference, ApprovalKeyPurpose::ShellAttestation)?;
+        let now = session.observe_current(now)?;
+        session.require_approval(view, now)?;
         ensure!(
             key.binding == reference.binding
                 && key.version == reference.version
@@ -346,7 +349,13 @@ impl super::shell_transport::ApprovalSigner for ArtifactShellSigner {
             view.claim.security_origin.clone(),
             view.claim.approval.clone(),
         )?
-        .attest_view(&view.claim, view.digest()?, session, authenticated_at, now)
+        .attest_view(
+            &view.claim,
+            view.digest()?,
+            session.digest(),
+            authenticated_at,
+            now,
+        )
     }
 }
 
@@ -382,8 +391,15 @@ impl QualifiedConnections {
         if let Some(runtime) = &mut instance.oauth_runtime {
             runtime.apps.retain(|name, _| name.as_str() == app);
         }
+        instance.credential_runtime = instance.credential_runtime.take().and_then(|mut runtime| {
+            runtime.apps.retain(|name, _| name.as_str() == app);
+            (!runtime.apps.is_empty()).then_some(runtime)
+        });
         if let Some(control) = &mut instance.control {
             control.apps.retain(|name, _| name.as_str() == app);
+            control
+                .security_epochs
+                .retain(|_, store| store.scope.app.as_str() == app);
             control
                 .sources
                 .retain(|name, _| control.apps.values().any(|binding| binding.source == *name));
@@ -423,8 +439,111 @@ impl QualifiedConnections {
     /// Only the read-only setup command may replace desired pins. Serving
     /// constructors always compare the operator selection with admitted bytes.
     pub(super) fn prepare_instance_file(path: &Path) -> Result<Self> {
-        let (instance, artifacts) = Self::load_instance_artifacts(path)?;
+        use std::io::Read;
+        let path = path.canonicalize()?;
+        let mut bytes = Vec::new();
+        let file = std::fs::File::open(&path)?;
+        ensure!(
+            file.metadata()?.is_file(),
+            "OAuth setup requires a regular instance file"
+        );
+        file.take(1_048_577).read_to_end(&mut bytes)?;
+        let instance = Self::prepare_desired_bytes(&bytes)?;
+        let artifacts = Self::selected_artifacts(&path, &instance)?;
         Self::prepare_instance(instance, &artifacts)
+    }
+
+    /// Closed, bounded desired DATA only. Preserve the raw document so the full
+    /// loader still sees fields whose refusal occurs before typed decoding.
+    fn prepare_desired_bytes(bytes: &[u8]) -> Result<Instance> {
+        let mut raw: serde_json::Value = crate::json::decode(bytes)?;
+        let mut desired: Instance = serde_json::from_value(raw.clone())?;
+        Self::repin_desired_epochs(&mut desired)?;
+        for (app, binding) in &desired.apps {
+            if binding.oauth_connections.is_empty() {
+                continue;
+            }
+            let scope = day2_capabilities::security_epoch::AuthorityScope {
+                installation: desired.installation.clone().try_into()?,
+                environment: desired.environment.clone().try_into()?,
+                app: app.clone().try_into()?,
+            };
+            let (alias, epoch) = desired
+                .control
+                .as_ref()
+                .context("security_epoch_control_catalog_missing")?
+                .security_epochs
+                .iter()
+                .find(|(_, epoch)| epoch.scope == scope)
+                .context("security_epoch_store_missing")?;
+            raw["control"]["security_epochs"][alias.as_str()]["key_set"] =
+                serde_json::to_value(&epoch.key_set)?;
+            for (name, family) in &binding.credential_families {
+                raw["apps"][app]["credential_families"][name]["epoch_store"]["revision"] =
+                    serde_json::to_value(&family.epoch_store.revision)?;
+            }
+        }
+        Instance::from_bytes(&serde_json::to_vec(&raw)?)
+    }
+
+    /// Re-pin the selected desired digest; never create or change its authority
+    /// resource, scope, UID, IAM, alias, lease or any live epoch/readiness fact.
+    fn repin_desired_epochs(instance: &mut Instance) -> Result<()> {
+        if let Some(control) = &instance.control {
+            control.validate(instance.apps.keys().map(String::as_str))?;
+        }
+        let apps: Vec<_> = instance
+            .apps
+            .iter()
+            .filter(|(_, binding)| !binding.oauth_connections.is_empty())
+            .map(|(app, _)| app.clone())
+            .collect();
+        for app in apps {
+            let scope = day2_capabilities::security_epoch::AuthorityScope {
+                installation: instance.installation.clone().try_into()?,
+                environment: instance.environment.clone().try_into()?,
+                app: app.clone().try_into()?,
+            };
+            let selected: Vec<_> = instance
+                .control
+                .as_ref()
+                .context("security_epoch_control_catalog_missing")?
+                .security_epochs
+                .iter()
+                .filter(|(_, epoch)| epoch.scope == scope)
+                .map(|(alias, _)| alias.clone())
+                .collect();
+            ensure!(!selected.is_empty(), "security_epoch_store_missing");
+            ensure!(selected.len() == 1, "security_epoch_store_ambiguous");
+            let key_set = instance.security_key_set(&app)?;
+            let alias = &selected[0];
+            ensure!(
+                instance.apps[&app]
+                    .credential_families
+                    .values()
+                    .all(|family| family.epoch_store.id == *alias),
+                "credential_epoch_store_alias_mismatch"
+            );
+            let epoch = instance
+                .control
+                .as_mut()
+                .unwrap()
+                .security_epochs
+                .get_mut(alias)
+                .unwrap();
+            epoch.key_set = key_set;
+            let revision = Digest::of(epoch)?;
+            for family in instance
+                .apps
+                .get_mut(&app)
+                .unwrap()
+                .credential_families
+                .values_mut()
+            {
+                family.epoch_store.revision = revision.clone();
+            }
+        }
+        Ok(())
     }
 
     fn load_instance_artifacts(
@@ -432,6 +551,14 @@ impl QualifiedConnections {
     ) -> Result<(Instance, BTreeMap<String, LoadedArtifact>)> {
         let path = path.canonicalize()?;
         let instance = Instance::load(&path)?;
+        let artifacts = Self::selected_artifacts(&path, &instance)?;
+        Ok((instance, artifacts))
+    }
+
+    fn selected_artifacts(
+        path: &Path,
+        instance: &Instance,
+    ) -> Result<BTreeMap<String, LoadedArtifact>> {
         let parent = path.parent().context("OAuth instance directory missing")?;
         let mut artifacts = BTreeMap::new();
         for (app, selected) in &instance.apps {
@@ -443,14 +570,14 @@ impl QualifiedConnections {
                 LoadedArtifact::load(&parent.join(&selected.artifact))?,
             );
         }
-        Ok((instance, artifacts))
+        Ok(artifacts)
     }
 
     fn prepare_instance(
         instance: Instance,
         artifacts: &BTreeMap<String, LoadedArtifact>,
     ) -> Result<Self> {
-        let mut instance = Instance::from_bytes(&serde_json::to_vec(&instance)?)?;
+        let mut instance = Self::prepare_desired_bytes(&serde_json::to_vec(&instance)?)?;
         let shell = live::shell_selection(&instance)?;
         let mapping = live::Facts::mapping_revision(&instance)?;
         let mut prepared = BTreeMap::new();
@@ -520,6 +647,8 @@ impl QualifiedConnections {
                 .oauth_connections
                 .insert(name, binding);
         }
+        Self::repin_desired_epochs(&mut instance)?;
+        let instance = Instance::from_bytes(&serde_json::to_vec(&instance)?)?;
         Self::qualify(&instance, artifacts, &super::catalog::reviewed()?)
     }
 
@@ -874,7 +1003,7 @@ pub(crate) fn binding_namespace(binding: &OutboundConnectionBinding) -> Result<S
     ))?;
     Ok(format!(
         "oauth_binding_{}",
-        crate::assets::hash_part(digest.as_str())?
+        day2_assets::hash_part(digest.as_str())?
     ))
 }
 
@@ -1170,7 +1299,7 @@ pub(super) mod tests {
         credentials::Namespace,
         oauth::{
             ConnectionDeclaration, ConnectionOwner, ProductReturnRef, ProviderCallbackRef,
-            ProviderIssuerRef, SecurityOriginRef,
+            SecurityOriginRef,
         },
     };
     use serde_json::json;
@@ -1201,6 +1330,497 @@ pub(super) mod tests {
         }
     }
 
+    /// Exact test key roles remain separated: the mounted shell can load only
+    /// attestation; the app authority owns verifier, encryption and attestation.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+    pub(in crate::oauth) struct ReplayKeyCounts {
+        pub shell_attestation: usize,
+        pub app_verifier: usize,
+        pub app_encryption: usize,
+        pub app_attestation: usize,
+    }
+
+    struct ReplayMountedKeys {
+        shell: bool,
+        selected: Vec<(ApprovalKeyRef, ApprovalKeyPurpose)>,
+        counts: Arc<std::sync::Mutex<ReplayKeyCounts>>,
+        delay: Arc<std::sync::atomic::AtomicBool>,
+        advance: Arc<dyn Fn() -> Result<()> + Send + Sync>,
+    }
+
+    impl ApprovalKeyProvider for ReplayMountedKeys {
+        fn load(
+            &self,
+            reference: &ApprovalKeyRef,
+            purpose: ApprovalKeyPurpose,
+        ) -> Result<ApprovalKeyMaterial> {
+            ensure!(
+                self.selected
+                    .iter()
+                    .any(|(expected, role)| expected == reference && *role == purpose),
+                "replay selected key binding/version/purpose changed"
+            );
+            let mut counts = self.counts.lock().unwrap();
+            match (self.shell, purpose) {
+                (true, ApprovalKeyPurpose::ShellAttestation) => counts.shell_attestation += 1,
+                (false, ApprovalKeyPurpose::CustodyVerifier) => counts.app_verifier += 1,
+                (false, ApprovalKeyPurpose::CustodyEncryption) => counts.app_encryption += 1,
+                (false, ApprovalKeyPurpose::ShellAttestation) => counts.app_attestation += 1,
+                _ => anyhow::bail!("replay shell attempted custody access"),
+            }
+            drop(counts);
+            let material = Keys::default().load(reference, purpose)?;
+            if self.shell && self.delay.swap(false, Ordering::SeqCst) {
+                (self.advance)()?;
+            }
+            Ok(material)
+        }
+    }
+
+    pub(in crate::oauth) struct MountedReplayFixture {
+        pub signer: Arc<ArtifactShellSigner>,
+        pub registry: Arc<super::super::approval_registry::StoredApprovalRegistry>,
+        pub attempt: String,
+        pub slot: String,
+        pub audience: String,
+        pub client: String,
+        original: connect::ConnectIntent,
+        callback: connect::CallbackBinding,
+        exchange: super::super::exchange::ExchangeBinding,
+        expected_account: Digest,
+        expected_scopes: Digest,
+        expected_observed: super::super::account::ProviderAccount,
+        custody: crate::managed_credentials::crypto::KeyLease,
+        counts: Arc<std::sync::Mutex<ReplayKeyCounts>>,
+        delay: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl MountedReplayFixture {
+        pub fn key_counts(&self) -> ReplayKeyCounts {
+            *self.counts.lock().unwrap()
+        }
+
+        pub fn delay_next_attestation(&self) {
+            self.delay.store(true, Ordering::SeqCst);
+        }
+
+        /// Literal scheduled owner and admitted DATA remain independent of
+        /// the post's result. Key use here is private cryptographic observation
+        /// with the original fixture lease, not another provider acquisition.
+        pub fn verify_rows(&self, db: &rusqlite::Connection) -> Result<Digest> {
+            let (intent, state, account, scope): (
+                connect::ConnectIntent,
+                String,
+                Option<String>,
+                Option<String>,
+            ) = db.query_row(
+                "SELECT slot,expected_generation,expected_epoch,proposed_generation,owner,profile,
+                    registration,callback,consent,expires_at,state,account,scope_evidence
+                 FROM oauth_connect_attempts WHERE attempt=?1",
+                [&self.attempt],
+                |row| {
+                    Ok((
+                        connect::ConnectIntent {
+                            attempt: self.attempt.clone(),
+                            slot: row.get(0)?,
+                            expected_generation: row.get(1)?,
+                            expected_epoch: row.get(2)?,
+                            proposed_generation: row.get(3)?,
+                            owner: row.get(4)?,
+                            profile: row.get(5)?,
+                            registration: row.get(6)?,
+                            callback: row.get(7)?,
+                            consent: row.get(8)?,
+                            expires_at: row.get(9)?,
+                        },
+                        row.get(10)?,
+                        row.get(11)?,
+                        row.get(12)?,
+                    ))
+                },
+            )?;
+            ensure!(
+                intent == self.original
+                    && intent.owner == "alice@example.com"
+                    && intent.expected_epoch == 1
+                    && intent.proposed_generation == 1,
+                "replay original OAuth owner/intent/epoch changed"
+            );
+            ensure!(
+                super::super::exchange::load_binding(db, &self.attempt)?.as_ref()
+                    == Some(&self.exchange),
+                "replay original OAuth registration/callback/namespace exchange changed"
+            );
+            let stored_callback: String = db.query_row(
+                "SELECT binding FROM oauth_callback_bindings WHERE attempt=?1",
+                [&self.attempt],
+                |row| row.get(0),
+            )?;
+            ensure!(
+                crate::json::decode::<connect::CallbackBinding>(stored_callback.as_bytes())?
+                    == self.callback,
+                "replay original OAuth callback/session changed"
+            );
+            let has_account = matches!(state.as_str(), "awaiting_account_approval" | "activated");
+            ensure!(
+                (account.as_deref(), scope.as_deref())
+                    == if has_account {
+                        (
+                            Some(self.expected_account.as_str()),
+                            Some(self.expected_scopes.as_str()),
+                        )
+                    } else {
+                        (None, None)
+                    },
+                "replay wrong original OAuth provider account/scopes"
+            );
+            if state == "awaiting_account_approval" {
+                let pending = super::super::custody::load_pending_external_identity(
+                    db,
+                    &self.custody,
+                    &self.original,
+                    &self.exchange,
+                    self.expected_account.as_str(),
+                    self.expected_scopes.as_str(),
+                )?
+                .context("replay original OAuth quarantine missing")?;
+                ensure!(
+                    pending.observed == self.expected_observed && pending.quarantined_at == 999,
+                    "replay wrong original OAuth provider identity"
+                );
+            }
+            let active: i64 =
+                db.query_row("SELECT count(*) FROM oauth_connection_slots", [], |row| {
+                    row.get(0)
+                })?;
+            let token_count: i64 =
+                db.query_row("SELECT count(*) FROM oauth_private_tokens", [], |row| {
+                    row.get(0)
+                })?;
+            ensure!(
+                active == i64::from(state == "activated") && token_count == active,
+                "replay OAuth publication outside original activation"
+            );
+            if active == 1 {
+                let affinity = Digest::of(&(
+                    "oauth-connection-affinity-v1",
+                    &intent.owner,
+                    &intent.profile,
+                    &intent.registration,
+                    &intent.callback,
+                    &intent.consent,
+                    self.expected_account.as_str(),
+                    self.expected_scopes.as_str(),
+                    1i64,
+                    1i64,
+                ))?;
+                let exact: i64 = db.query_row("SELECT count(*) FROM oauth_connection_slots WHERE slot=?1 AND generation=1
+                    AND token_version=1 AND security_epoch=1 AND profile=?2 AND account=?3 AND affinity=?4 AND status='active'",
+                    rusqlite::params![self.slot,intent.profile,self.expected_account.as_str(),affinity.as_str()],|row| row.get(0))?;
+                ensure!(exact == 1, "replay wrong OAuth slot/affinity/owner link");
+                let (identity, key, nonce, ciphertext): (String, String, Vec<u8>, Vec<u8>) = db
+                    .query_row(
+                    "SELECT identity_digest,key_version,nonce,ciphertext FROM oauth_private_tokens
+                     WHERE reference=?1 AND slot=?2 AND generation=1 AND account=?3",
+                    rusqlite::params![
+                        self.exchange.token_slot_ref,
+                        self.slot,
+                        self.expected_account.as_str()
+                    ],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )?;
+                // Serialize the identity in the owning struct's declaration
+                // order: Value maps have a different byte ordering for AAD.
+                #[derive(serde::Serialize)]
+                struct TokenIdentity<'a> {
+                    purpose: &'a str,
+                    attempt: &'a str,
+                    slot: &'a str,
+                    generation: i64,
+                    security_epoch: i64,
+                    profile: &'a BindingRef,
+                    registration: &'a BindingRef,
+                    callback: &'a ProviderCallbackRef,
+                    custody: &'a BindingRef,
+                    account: Option<&'a str>,
+                }
+                let expected = TokenIdentity {
+                    purpose: "ConnectionTokens",
+                    attempt: &intent.attempt,
+                    slot: &intent.slot,
+                    generation: 1,
+                    security_epoch: 1,
+                    profile: &self.exchange.profile,
+                    registration: &self.exchange.registration,
+                    callback: &self.exchange.callback,
+                    custody: &self.exchange.custody,
+                    account: Some(self.expected_account.as_str()),
+                };
+                ensure!(
+                    identity
+                        == Digest::of(&("oauth-private-material-identity-v1", &expected))?.as_str()
+                        && key == self.custody.encryption_version,
+                    "replay wrong OAuth token material identity"
+                );
+                let aad =
+                    serde_json::to_vec(&("oauth-private-material-aes256gcm-v1", &expected, &key))?;
+                let mut plaintext =
+                    self.custody
+                        .open_oauth(&aad, nonce.as_slice().try_into()?, &ciphertext)?;
+                let token: serde_json::Value = crate::json::decode(&plaintext)?;
+                plaintext.fill(0);
+                ensure!(
+                    token
+                        == json!({"access_token":"private-replay-provider-token","refresh_token":"private-replay-provider-refresh-token","expires_in":3600}),
+                    "replay published wrong original provider token"
+                );
+            }
+            Digest::of(&(
+                "original-oauth-owner-relations-v2",
+                &intent.owner,
+                &intent.profile,
+                &intent.registration,
+                &intent.callback,
+                &intent.consent,
+                &self.callback,
+                &self.expected_account,
+                &self.expected_scopes,
+                &self.expected_observed,
+            ))
+        }
+    }
+
+    /// Synthetic current desired data and readiness, qualified normally. No
+    /// verified-human scalar or local fake signer is returned by this helper.
+    pub(in crate::oauth) fn mounted_replay_fixture(
+        database: &std::path::Path,
+        advance: Arc<dyn Fn() -> Result<()> + Send + Sync>,
+    ) -> Result<MountedReplayFixture> {
+        use super::super::{
+            approval_registry::ApprovalAuthority, exchange, profiles::OutboundQualification,
+        };
+        let mut facts = fixture(AccountBindingPolicy::ExplicitExternalAccount)?;
+        facts.intent.owner = "alice@example.com".into();
+        facts.intent.attempt =
+            super::super::shell_transport::scoped_attempt("company", "production", "workspace")?;
+        facts.intent.expires_at = 1_300;
+        let selected = facts.qualify()?;
+        let choice = selected
+            .entries
+            .values()
+            .next()
+            .context("replay selected connection")?;
+        let slot = ConnectionSlotKey {
+            installation: choice.binding.namespace.installation.clone(),
+            environment: choice.binding.namespace.environment.clone(),
+            app: choice.binding.namespace.app.clone(),
+            requirement: choice.requirement.logical_id.clone(),
+            owner: SlotOwner::Human {
+                subject: facts.intent.owner.clone(),
+            },
+        };
+        facts.intent.slot = slot.id(&choice.requirement)?.as_str().into();
+        if let profiles::AccountBindingEvidence::ExplicitExternal { owner, .. } =
+            &mut facts.evidence.account
+        {
+            *owner = facts.intent.owner.clone();
+        }
+        let counts = Arc::new(std::sync::Mutex::new(ReplayKeyCounts::default()));
+        let delay = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let app_keys = Arc::new(ReplayMountedKeys {
+            shell: false,
+            selected: vec![
+                (
+                    choice.custody_verifier.clone(),
+                    ApprovalKeyPurpose::CustodyVerifier,
+                ),
+                (
+                    choice.custody_encryption.clone(),
+                    ApprovalKeyPurpose::CustodyEncryption,
+                ),
+                (
+                    choice.shell_attestation.clone(),
+                    ApprovalKeyPurpose::ShellAttestation,
+                ),
+            ],
+            counts: counts.clone(),
+            delay: delay.clone(),
+            advance: advance.clone(),
+        });
+        let shell_keys = Arc::new(ReplayMountedKeys {
+            shell: true,
+            selected: vec![(
+                choice.shell_attestation.clone(),
+                ApprovalKeyPurpose::ShellAttestation,
+            )],
+            counts: counts.clone(),
+            delay: delay.clone(),
+            advance,
+        });
+        let readiness = Arc::new(Readiness {
+            runtime: Digest::of(
+                facts
+                    .instance
+                    .oauth_runtime
+                    .as_ref()
+                    .context("replay runtime data")?,
+            )?,
+            current: RwLock::new(Some(facts.evidence.clone())),
+            calls: AtomicUsize::new(0),
+        });
+        let authority = Arc::new(ArtifactApprovalAuthority::with_keys(
+            facts.qualify()?,
+            readiness,
+            app_keys,
+        ));
+        let terms = authority
+            .current("workspace", &facts.intent, &facts.callback, 1_000)?
+            .context("replay app selection unavailable")?;
+        let input = || OutboundQualification {
+            intent: &facts.intent,
+            binding: &facts.callback,
+            requirement: &terms.requirement,
+            permission: &terms.permission,
+            reviewed: &terms.reviewed,
+            instance: &terms.instance,
+        };
+        let mut db = crate::store::open(database)?;
+        // Same owning core definition used by mounted app-registry fixtures;
+        // this standalone OAuth DB has no Runtime initialization entrance.
+        db.execute_batch(crate::audit::PRINCIPALS_DDL)?;
+        connect::install_schema(&db)?;
+        let prepared = exchange::prepare_authorization(
+            input(),
+            &terms.custody_key,
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~",
+        )?;
+        let code_ref = prepared.code_ref().to_owned();
+        ensure!(prepared.begin(&mut db, 997)?, "replay pending begin");
+        let raw = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("state", "0123456789abcdefghijklmnopqrstuvwxyzABCDEF")
+            .append_pair("code", "private-replay-provider-code")
+            .append_pair("iss", &terms.reviewed.issuer_url)
+            .finish();
+        let outcome = exchange::handle_qualified_callback(
+            &mut db,
+            input(),
+            super::super::outbound::CallbackIngress {
+                attempt: &facts.intent.attempt,
+                raw_query: raw.as_bytes(),
+                route: &terms.instance.registration.callback,
+                session: facts.callback.session(),
+                issuer_binding: &terms.reviewed.issuer,
+                code_ref: &code_ref,
+                now: 998,
+            },
+            &terms.custody_key,
+        )?;
+        ensure!(
+            matches!(
+                outcome,
+                super::super::outbound::CallbackOutcome::CodeAccepted { .. }
+            ),
+            "replay provider callback"
+        );
+        let permit = exchange::authorize_and_commit_qualified_exchange(&mut db, input(), 999)?
+            .context("replay provider exchange permit")?;
+        let scopes: BTreeSet<String> = terms
+            .permission
+            .action_scopes
+            .values()
+            .flatten()
+            .cloned()
+            .collect();
+        let expected_scopes = Digest::of(&(
+            "oauth-accepted-scopes-v1",
+            terms.permission.consent_digest(&terms.requirement)?,
+            &scopes,
+        ))?;
+        let body = serde_json::to_vec(
+            &json!({"access_token":"private-replay-provider-token","refresh_token":"private-replay-provider-refresh-token",
+            "token_type":"Bearer","expires_in":3600,"scope":scopes.into_iter().collect::<Vec<_>>().join(" ")}),
+        )?;
+        let response = match permit.send(|_| {
+            Ok(exchange::TokenHttpResponse {
+                status: 200,
+                content_type: "application/json".into(),
+                body,
+            })
+        }) {
+            exchange::ExchangeObservation::Response(response) => response,
+            exchange::ExchangeObservation::Uncertain(_) => {
+                anyhow::bail!("replay provider exchange uncertain")
+            }
+        };
+        let observed = super::super::account::ProviderAccount {
+            issuer: terms.reviewed.issuer_url.clone(),
+            subject: "replay-provider-subject".into(),
+            tenant: "company".into(),
+            display_email: "external@example.net".into(),
+        };
+        let prepared = response
+            .validate_external(input(), &observed)?
+            .prepare_quarantine(&terms.custody_key, 999)?;
+        ensure!(
+            super::super::external::quarantine_external(&mut db, prepared, input(), 999)?,
+            "replay quarantine"
+        );
+        let expected_account = super::super::account::provider_account_digest(&observed)?;
+        let exchange = super::super::exchange::load_binding(&db, &facts.intent.attempt)?
+            .context("replay actual exchange binding")?;
+        ensure!(
+            exchange.profile == terms.permission.profile
+                && exchange.registration == terms.instance.registration.registration
+                && exchange.callback == terms.instance.registration.callback
+                && exchange.custody == terms.instance.custody,
+            "replay original admitted exchange selection changed"
+        );
+        drop(db);
+        *counts.lock().unwrap() = ReplayKeyCounts::default();
+        let signer = Arc::new(ArtifactShellSigner {
+            state: RwLock::new(AuthorityState {
+                selected: facts.qualify()?,
+                keys: Some(shell_keys),
+            }),
+        });
+        let registry = Arc::new(
+            super::super::approval_registry::StoredApprovalRegistry::new(
+                BTreeMap::from([("workspace".into(), database.to_path_buf())]),
+                authority,
+            )?,
+        );
+        Ok(MountedReplayFixture {
+            signer,
+            registry,
+            attempt: facts.intent.attempt.clone(),
+            slot: facts.intent.slot.clone(),
+            audience: facts
+                .instance
+                .security_shell
+                .as_ref()
+                .unwrap()
+                .iap_audience
+                .clone(),
+            client: facts
+                .instance
+                .oauth_clients
+                .as_ref()
+                .unwrap()
+                .reauthentication
+                .client_id
+                .clone(),
+            original: facts.intent,
+            callback: facts.callback,
+            exchange,
+            expected_account,
+            expected_scopes,
+            expected_observed: observed,
+            custody: terms.custody_key,
+            counts,
+            delay,
+        })
+    }
+
     fn reviewed_google_fixture() -> Result<Fixture> {
         let mut fixture = fixture(AccountBindingPolicy::ExplicitExternalAccount)?;
         fixture.catalog = super::super::google::catalog()?;
@@ -1226,14 +1846,6 @@ pub(super) mod tests {
     pub(in crate::oauth) fn publication_fixture()
     -> Result<(QualifiedConnections, profiles::SecurityShellEvidence)> {
         let mut fixture = reviewed_google_fixture()?;
-        let control = fixture.instance.control.as_mut().unwrap();
-        control.secrets.insert(name("reauth_client"), serde_json::from_value(json!({"kind":"gcp_version","project_number":12345,"secret":"google_reauth","version":3}))?);
-        control.secrets.insert(name("calendar_client"), serde_json::from_value(json!({"kind":"gcp_version","project_number":12345,"secret":"google_client_secret","version":7}))?);
-        fixture.instance.oauth_clients = Some(serde_json::from_value(json!({
-            "version":1,"reauthentication":{"client_id":"123-reauth.apps.googleusercontent.com","credential":"reauth_client"},
-            "registrations":{"calendar_registration":{"client":{"client_id":"12345-fixture.apps.googleusercontent.com","credential":"calendar_client"},
-                "canary_subject":"google-canary-subject","canary_tenant":"example.com"}}
-        }))?);
         let target = fixture
             .qualify()?
             .registration_targets(&fixture.evidence.shell)?
@@ -1308,6 +1920,11 @@ pub(super) mod tests {
                 contract,
             ),
         );
+        crate::oauth::clients::tests::select_desired_epoch(
+            &mut instance,
+            "workspace",
+            "app@company-tools.iam.gserviceaccount.com",
+        )?;
         Ok((instance, baseline.artifacts))
     }
 
@@ -1408,6 +2025,11 @@ pub(super) mod tests {
                     .unwrap()
                     .namespace
                     .installation = name("other_company");
+                crate::oauth::clients::tests::select_desired_epoch(
+                    &mut other,
+                    "workspace",
+                    "app@company-tools.iam.gserviceaccount.com",
+                )?;
                 let mut other = QualifiedConnections::prepare_instance(other, &artifacts)?;
                 live::setup_selected(&mut other)?;
                 let prior = keys.calls();
@@ -1563,6 +2185,11 @@ pub(super) mod tests {
             "registrations":{registration:{"client":{"client_id":"123-calendar.apps.googleusercontent.com","credential":"calendar_client"},
                 "canary_subject":"112233","canary_tenant":"example.com"}}
         }))?);
+        crate::oauth::clients::tests::select_desired_epoch(
+            &mut fixture.instance,
+            "workspace",
+            "app@company-tools.iam.gserviceaccount.com",
+        )?;
         let selected = fixture.qualify()?;
         let targets = selected.registration_targets(&fixture.evidence.shell)?;
         assert_eq!(targets.len(), 1);
@@ -1601,6 +2228,11 @@ pub(super) mod tests {
         let old_credential = setup["client_credential"].clone();
         fixture.instance.control.as_mut().unwrap().secrets.insert(name("calendar_client"),
             serde_json::from_value(json!({"kind":"gcp_version","project_number":12345,"secret":"google_calendar","version":4}))?);
+        crate::oauth::clients::tests::select_desired_epoch(
+            &mut fixture.instance,
+            "workspace",
+            "app@company-tools.iam.gserviceaccount.com",
+        )?;
         let changed = fixture
             .qualify()?
             .registration_targets(&fixture.evidence.shell)?;
@@ -1669,6 +2301,11 @@ pub(super) mod tests {
                 "sibling_registration":{"client":{"client_id":"123-sibling.apps.googleusercontent.com","credential":"sibling_client"},"canary_subject":"112233","canary_tenant":"example.com"}
             }
         }))?);
+        crate::oauth::clients::tests::select_desired_epoch(
+            &mut fixture.instance,
+            "workspace",
+            "app@company-tools.iam.gserviceaccount.com",
+        )?;
         let all = Instance::from_bytes(&serde_json::to_vec(&fixture.instance)?)?;
         let selected = QualifiedConnections::app_instance(all, "workspace")?;
         assert_eq!(selected.apps.len(), 1);
@@ -1699,6 +2336,134 @@ pub(super) mod tests {
         Ok(())
     }
 
+    fn multi_app_security_projection_fixture() -> Result<Instance> {
+        // Reuse complete desired credential/OAuth metadata. This supplies no
+        // native key, artifact or epoch readiness proof.
+        let mut instance = crate::oauth::clients::tests::security_instance("sibling", true)?;
+        let control = instance.control.as_mut().unwrap();
+        control.sources.insert(
+            name("sibling_source"),
+            day2_capabilities::SourceProvider::LocalGit {
+                repository: "/unmounted/sibling/source".into(),
+            },
+        );
+        control.apps.get_mut(&name("sibling")).unwrap().source = name("sibling_source");
+        let mut epoch = control.security_epochs[&name("credential-epoch")].clone();
+        epoch.scope.app = name("workspace");
+        epoch.key_set = instance.security_key_set("workspace")?;
+        let control = instance.control.as_mut().unwrap();
+        control
+            .security_epochs
+            .retain(|_, selected| selected.scope.app.as_str() != "workspace");
+        control
+            .security_epochs
+            .insert(name("workspace_epoch"), epoch);
+        Instance::from_bytes(&serde_json::to_vec(&instance)?)
+    }
+
+    #[test]
+    fn app_projection_reloads_complete_selected_credential_and_epoch_catalogs() -> Result<()> {
+        let all = multi_app_security_projection_fixture()?;
+        assert_eq!(all.apps.len(), 2);
+        assert_eq!(all.control.as_ref().unwrap().sources.len(), 2);
+        assert_eq!(all.control.as_ref().unwrap().security_epochs.len(), 2);
+        for app in ["workspace", "sibling"] {
+            let projected = QualifiedConnections::app_instance(all.clone(), app)?;
+            let reloaded = Instance::from_bytes(&serde_json::to_vec(&projected)?)?;
+            assert_eq!(reloaded.apps.len(), 1);
+            assert_eq!(
+                serde_json::to_value(&reloaded.apps[app])?,
+                serde_json::to_value(&all.apps[app])?
+            );
+            let control = reloaded.control.as_ref().unwrap();
+            let source = &all.control.as_ref().unwrap().apps[&name(app)].source;
+            assert_eq!(control.sources.len(), 1);
+            assert_eq!(
+                control.sources[source],
+                all.control.as_ref().unwrap().sources[source]
+            );
+            assert_eq!(control.security_epochs.len(), 1);
+            let (alias, epoch) = control.security_epochs.iter().next().unwrap();
+            assert_eq!(epoch.scope.app.as_str(), app);
+            assert_eq!(epoch, &all.control.as_ref().unwrap().security_epochs[alias]);
+            if app == "workspace" {
+                assert!(reloaded.credential_runtime.is_none());
+                assert!(
+                    serde_json::to_value(&reloaded)?
+                        .get("credential_runtime")
+                        .is_none()
+                );
+                assert_eq!(reloaded.oauth_runtime.as_ref().unwrap().apps.len(), 1);
+            } else {
+                let selected = reloaded.credential_runtime.as_ref().unwrap();
+                assert_eq!(selected.apps.len(), 1);
+                assert_eq!(
+                    selected.apps[&name(app)],
+                    all.credential_runtime.as_ref().unwrap().apps[&name(app)]
+                );
+                assert!(reloaded.oauth_runtime.as_ref().unwrap().apps.is_empty());
+                assert_eq!(
+                    reloaded.oauth_runtime.as_ref().unwrap().shell,
+                    all.oauth_runtime.as_ref().unwrap().shell
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn app_projection_refuses_foreign_or_stale_security_selectors() -> Result<()> {
+        let all = multi_app_security_projection_fixture()?;
+        let projected = QualifiedConnections::app_instance(all.clone(), "workspace")?;
+        let mut changed = projected.clone();
+        changed.credential_runtime = all.credential_runtime.clone();
+        let error = Instance::from_bytes(&serde_json::to_vec(&changed)?).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("credential_runtime_app_selection_incomplete"),
+            "{error:#}"
+        );
+        let mut changed = projected.clone();
+        changed.control.as_mut().unwrap().security_epochs.insert(
+            name("credential-epoch"),
+            all.control.as_ref().unwrap().security_epochs[&name("credential-epoch")].clone(),
+        );
+        let error = Instance::from_bytes(&serde_json::to_vec(&changed)?).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("security_epoch_app_not_installed"),
+            "{error:#}"
+        );
+        let mut changed = projected;
+        changed
+            .control
+            .as_mut()
+            .unwrap()
+            .security_epochs
+            .get_mut(&name("workspace_epoch"))
+            .unwrap()
+            .key_set = Digest::of(&"substituted selected key set")?;
+        let error = Instance::from_bytes(&serde_json::to_vec(&changed)?).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("security_epoch_complete_key_set_mismatch"),
+            "{error:#}"
+        );
+        let mut changed = QualifiedConnections::app_instance(all, "sibling")?;
+        changed
+            .credential_runtime
+            .as_mut()
+            .unwrap()
+            .apps
+            .get_mut(&name("sibling"))
+            .unwrap()
+            .attestation
+            .revision = Digest::of(&"stale credential attestation")?;
+        let error = Instance::from_bytes(&serde_json::to_vec(&changed)?).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("credential attestation revision mismatch"),
+            "{error:#}"
+        );
+        Ok(())
+    }
+
     #[test]
     fn setup_prepares_initial_and_rotated_pins_while_serving_refuses_old_selection() -> Result<()> {
         let fixture = fixture(AccountBindingPolicy::ExplicitExternalAccount)?;
@@ -1724,6 +2489,7 @@ pub(super) mod tests {
         let mut prepared =
             QualifiedConnections::prepare_instance(draft.clone(), &fixture.artifacts)?;
         live::setup_selected(&mut prepared)?;
+        Instance::from_bytes(&serde_json::to_vec(&prepared.instance)?)?;
         assert_eq!(
             prepared.instance.apps["workspace"].oauth_connections,
             instance.apps["workspace"].oauth_connections
@@ -1743,7 +2509,17 @@ pub(super) mod tests {
             instance.apps["workspace"].oauth_connections["calendar"].custody
         );
         assert!(QualifiedConnections::qualify(&draft, &fixture.artifacts, &catalog).is_err());
-        assert_eq!(rotated.instance.control, draft.control);
+        let mut expected_control = draft.control.clone();
+        let expected_epochs = &mut expected_control.as_mut().unwrap().security_epochs;
+        for (alias, epoch) in &rotated.instance.control.as_ref().unwrap().security_epochs {
+            assert_eq!(
+                epoch.key_set,
+                rotated.instance.security_key_set("workspace")?
+            );
+            expected_epochs.get_mut(alias).unwrap().key_set = epoch.key_set.clone();
+        }
+        assert_eq!(rotated.instance.control, expected_control);
+        Instance::from_bytes(&serde_json::to_vec(&rotated.instance)?)?;
         assert_eq!(
             serde_json::to_value(&rotated.instance.apps["workspace"].edge)?,
             serde_json::to_value(&draft.apps["workspace"].edge)?
@@ -1752,6 +2528,122 @@ pub(super) mod tests {
             rotated.instance.apps["workspace"].oauth_connections["calendar"].product_return,
             draft.apps["workspace"].oauth_connections["calendar"].product_return
         );
+        Ok(())
+    }
+
+    #[test]
+    fn setup_requires_existing_unique_exact_scoped_epoch_and_preserves_raw_refusals() -> Result<()>
+    {
+        let fixture = fixture(AccountBindingPolicy::ExplicitExternalAccount)?;
+        let instance = live::tests::selected()?.instance;
+        let valid = QualifiedConnections::prepare_instance(instance.clone(), &fixture.artifacts)?;
+        Instance::from_bytes(&serde_json::to_vec(&valid.instance)?)?;
+        for mutation in 0..3 {
+            let mut invalid = instance.clone();
+            let control = invalid.control.as_mut().unwrap();
+            let (alias, epoch) = control.security_epochs.iter().next().unwrap();
+            let alias = alias.clone();
+            let mut epoch = epoch.clone();
+            match mutation {
+                0 => control.security_epochs.clear(),
+                1 => {
+                    control
+                        .security_epochs
+                        .insert(name("duplicate-epoch"), epoch);
+                }
+                2 => {
+                    epoch.scope.environment = name("foreign");
+                    control.security_epochs.insert(alias, epoch);
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                QualifiedConnections::prepare_instance(invalid, &fixture.artifacts).is_err(),
+                "normalized forbidden epoch mutation {mutation}"
+            );
+        }
+        let mut raw = serde_json::to_value(&instance)?;
+        raw["apps"]["workspace"]["auditors"] = json!(["not-an-owner@example.com"]);
+        let error =
+            QualifiedConnections::prepare_desired_bytes(&serde_json::to_vec(&raw)?).unwrap_err();
+        assert!(error.to_string().contains("auditors is retired"));
+        raw["apps"]["workspace"]
+            .as_object_mut()
+            .unwrap()
+            .remove("auditors");
+        raw["control"]["security_epochs"]
+            .as_object_mut()
+            .unwrap()
+            .remove(
+                instance
+                    .control
+                    .as_ref()
+                    .unwrap()
+                    .security_epochs
+                    .keys()
+                    .next()
+                    .unwrap()
+                    .as_str(),
+            );
+        assert!(QualifiedConnections::prepare_desired_bytes(&serde_json::to_vec(&raw)?).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn setup_repins_combined_family_after_final_complete_key_selection() -> Result<()> {
+        let fixture = fixture(AccountBindingPolicy::ExplicitExternalAccount)?;
+        let mut desired = crate::oauth::clients::tests::security_instance("workspace", true)?;
+        let mut foreign = desired.clone();
+        foreign
+            .apps
+            .get_mut("workspace")
+            .unwrap()
+            .credential_families
+            .get_mut("agents")
+            .unwrap()
+            .epoch_store
+            .id = name("foreign-epoch");
+        let error = QualifiedConnections::prepare_instance(foreign, &fixture.artifacts)
+            .err()
+            .context("foreign epoch alias was admitted")?;
+        assert!(
+            error
+                .to_string()
+                .contains("credential_epoch_store_alias_mismatch")
+        );
+        let control_before = desired.control.clone();
+        let SecretProvider::GcpVersion { version, .. } = desired
+            .control
+            .as_mut()
+            .unwrap()
+            .secrets
+            .get_mut(&name("encryption"))
+            .unwrap();
+        *version = std::num::NonZeroU64::new(version.get() + 1).unwrap();
+        let prepared = QualifiedConnections::prepare_instance(desired.clone(), &fixture.artifacts)?;
+        let instance = Instance::from_bytes(&serde_json::to_vec(&prepared.instance)?)?;
+        let epoch = &instance.control.as_ref().unwrap().security_epochs[&name("credential-epoch")];
+        assert_eq!(epoch.key_set, instance.security_key_set("workspace")?);
+        assert_eq!(
+            instance.apps["workspace"].credential_families["agents"].epoch_store,
+            BindingRef {
+                id: name("credential-epoch"),
+                revision: Digest::of(epoch)?
+            }
+        );
+        let original = &control_before.as_ref().unwrap().security_epochs[&name("credential-epoch")];
+        assert_eq!(epoch.scope, original.scope);
+        assert_eq!(epoch.provider, original.provider);
+        assert_eq!(epoch.max_lease_seconds, original.max_lease_seconds);
+        let mut expected = desired.control.clone();
+        expected
+            .as_mut()
+            .unwrap()
+            .security_epochs
+            .get_mut(&name("credential-epoch"))
+            .unwrap()
+            .key_set = epoch.key_set.clone();
+        assert_eq!(instance.control, expected);
         Ok(())
     }
 
@@ -1806,6 +2698,28 @@ pub(super) mod tests {
                     "attestation":{"kind":"gcp_version","project_number":12345,"secret":"oauth_attestation","version":11}
                 }}
         }))?)?;
+        let control = instance.control.as_mut().unwrap();
+        control.secrets.insert(name("reauth_client"), serde_json::from_value(json!({"kind":"gcp_version","project_number":12345,"secret":"google_reauth","version":3}))?);
+        control.secrets.insert(name("calendar_client"), serde_json::from_value(json!({"kind":"gcp_version","project_number":12345,"secret":"google_client_secret","version":7}))?);
+        instance.oauth_clients = Some(serde_json::from_value(json!({
+            "version":1,"reauthentication":{"client_id":"123-reauth.apps.googleusercontent.com","credential":"reauth_client"},
+            "registrations":{"calendar_registration":{"client":{"client_id":"12345-fixture.apps.googleusercontent.com","credential":"calendar_client"},
+                "canary_subject":"google-canary-subject","canary_tenant":"example.com"}}
+        }))?);
+        let account = match &policy {
+            AccountBindingPolicy::MappedHuman => json!({"kind":"iap_subject"}),
+            AccountBindingPolicy::ExplicitExternalAccount => json!({"kind":"external_accounts",
+                "allowed_tenants":["example.com"],"allowed_subjects":null}),
+            AccountBindingPolicy::InstallationAccount => unreachable!(),
+        };
+        instance.oauth_runtime = Some(serde_json::from_value(json!({
+            "version":1,"shell":{"project":"company-tools","backend_service":"shell-backend","url_map":"shell-map",
+                "https_proxy":"shell-proxy","forwarding_rule":"shell-https","kubernetes_service":"tools/security-shell"},
+            "apps":{"workspace":{"service_account":"app@company-tools.iam.gserviceaccount.com","accounts":{"calendar":account}}}
+        }))?);
+        instance.oauth_shell_transport = Some(day2_capabilities::oauth::ShellTransport {
+            service_account: "shell@company-tools.iam.gserviceaccount.com".into(),
+        });
         let requirement = ConnectionRequirement {
             logical_id: "work_calendar".into(),
             revision: 1,
@@ -1815,50 +2729,9 @@ pub(super) mod tests {
             account_policy: policy.clone(),
             usage: "Read availability.".into(),
         };
-        let action_scopes = BTreeMap::from([
-            (
-                "list_events".into(),
-                BTreeSet::from(["calendar.read".into()]),
-            ),
-            (
-                "create_event".into(),
-                BTreeSet::from(["calendar.write".into()]),
-            ),
-        ]);
-        let mut reviewed = profiles::ReviewedBrowserCodeProfile {
-            protocol: profiles::ConfidentialPkceProfile::NoRefresh(profiles::BrowserCodeIdentity {
-                binding: pin("calendar_profile"),
-                scope_interpretation: Digest::of(&(
-                    "oauth-semantic-scope-map-v1",
-                    &requirement.capability,
-                    &action_scopes,
-                ))?,
-            }),
-            issuer: ProviderIssuerRef(pin("calendar_issuer")),
-            issuer_url: "https://issuer.example/tenant".into(),
-            authorization_endpoint: "https://issuer.example/authorize".into(),
-            token_endpoint: "https://tokens.example/token".into(),
-            adapter: pin("calendar_adapter"),
-            simulator: pin("calendar_simulator"),
-            conformance: pin("calendar_conformance"),
-            account_evidence: match policy {
-                AccountBindingPolicy::MappedHuman => profiles::AccountEvidenceContract::MappedHuman,
-                AccountBindingPolicy::ExplicitExternalAccount => {
-                    profiles::AccountEvidenceContract::ExternalAccount
-                }
-                AccountBindingPolicy::InstallationAccount => unreachable!(),
-            },
-        };
-        let revision = reviewed.review_revision()?;
-        let profiles::ConfidentialPkceProfile::NoRefresh(identity) = &mut reviewed.protocol else {
-            unreachable!()
-        };
-        identity.binding.revision = revision;
-        let catalog = ReviewedCatalog::new(vec![ReviewedAccess {
-            profile: reviewed.clone(),
-            capability: requirement.capability.clone(),
-            action_scopes,
-        }])?;
+        let access = super::super::google::reviewed(&policy)?;
+        let reviewed = access.profile.clone();
+        let catalog = ReviewedCatalog::new(vec![access])?;
         let profile = reviewed.protocol.identity().binding.clone();
         let (_, permission) = catalog.resolve(&requirement, &profile)?;
         let instance_ref = instance_identity(&instance)?;
@@ -1925,7 +2798,11 @@ pub(super) mod tests {
         let callback_ref = ProviderCallbackRef::derive(&security_shell, &profile, &namespace)?;
         let callback_url = profiles::derived_callback_url(&shell_url, &callback_ref)?;
         let confirmation = Digest::of(&"synthetic-provider-confirmation")?;
-        let client_credential = pin("client_credential");
+        let client = instance.oauth_clients.as_ref().unwrap().registrations
+            [&name("calendar_registration")]
+            .client();
+        let client_credential =
+            super::super::clients::selected_provider_credential(&instance, &client)?;
         let class = profiles::ClientRegistrationClass::ConfidentialPkceS256;
         selection.registration.revision = Digest::of(&(
             "oauth-provider-registration-evidence-v1",
@@ -2024,6 +2901,11 @@ pub(super) mod tests {
             .unwrap()
             .oauth_connections
             .insert("calendar".into(), selection);
+        crate::oauth::clients::tests::select_desired_epoch(
+            &mut instance,
+            "workspace",
+            "app@company-tools.iam.gserviceaccount.com",
+        )?;
         let mut artifact: Artifact = serde_json::from_value(json!({
             "format":14,"namespace":"workspace","roc_version":"test","worker_digest":"test","schema_digest":"test",
             "sources":{},"admission":"local-spike-only","schema":{"models":{},"inputs":{},"foreign_keys":[]},
@@ -2060,7 +2942,11 @@ pub(super) mod tests {
             selected.permission.action_scopes,
             BTreeMap::from([(
                 "list_events".into(),
-                BTreeSet::from(["calendar.read".into()])
+                BTreeSet::from([
+                    "https://www.googleapis.com/auth/calendar.events.readonly".into(),
+                    "https://www.googleapis.com/auth/userinfo.email".into(),
+                    "openid".into(),
+                ])
             )])
         );
         assert_eq!(qualified.key_bindings.len(), 3);
@@ -2079,14 +2965,34 @@ pub(super) mod tests {
     #[test]
     fn startup_requires_a_reviewed_provider_host_and_dedicated_edge() -> Result<()> {
         let mut facts = fixture(AccountBindingPolicy::ExplicitExternalAccount)?;
+        // Complete runtime metadata selects native composition, not live readiness.
+        assert!(super::super::host::require_providers(
+            &facts.instance,
+            "workspace",
+            true,
+            None
+        )?);
+        let runtime = facts
+            .instance
+            .oauth_runtime
+            .take()
+            .context("fixture runtime")?;
         assert!(
             super::super::host::require_providers(&facts.instance, "workspace", true, None)
                 .is_err()
         );
+        assert_eq!(
+            super::super::host::require_providers(&facts.instance, "workspace", true, None)
+                .unwrap_err()
+                .to_string(),
+            "OAuth provider host is not published"
+        );
+        facts.instance.oauth_runtime = Some(runtime);
         let providers = super::super::host::Providers {
             catalog: ReviewedCatalog::new(Vec::new())?,
             registrations: None,
             readiness: Arc::new(Readiness {
+                runtime: Digest::of(facts.instance.oauth_runtime.as_ref().unwrap())?,
                 current: RwLock::new(None),
                 calls: AtomicUsize::new(0),
             }),
@@ -2100,6 +3006,7 @@ pub(super) mod tests {
             )
             .is_err()
         );
+        facts.instance.oauth_shell_transport = None;
         assert!(
             super::super::host::require_providers(
                 &facts.instance,
@@ -2108,6 +3015,17 @@ pub(super) mod tests {
                 Some(&providers)
             )
             .is_err()
+        );
+        assert_eq!(
+            super::super::host::require_providers(
+                &facts.instance,
+                "workspace",
+                true,
+                Some(&providers)
+            )
+            .unwrap_err()
+            .to_string(),
+            "OAuth shell transport missing"
         );
         facts.instance.oauth_shell_transport = Some(day2_capabilities::oauth::ShellTransport {
             service_account: "security@company.iam.gserviceaccount.com".into(),
@@ -2262,10 +3180,15 @@ pub(super) mod tests {
     }
 
     struct Readiness {
+        runtime: Digest,
         current: RwLock<Option<profiles::OutboundInstanceEvidence>>,
         calls: AtomicUsize,
     }
     impl OutboundReadiness for Readiness {
+        fn selected_runtime(&self) -> Result<Option<Digest>> {
+            Ok(Some(self.runtime.clone()))
+        }
+
         fn current(
             &self,
             _: &OutboundConnectionBinding,
@@ -2367,6 +3290,7 @@ pub(super) mod tests {
     fn authority_rechecks_readiness_and_exact_keys_then_revokes_removed_selection() -> Result<()> {
         let mut fixture = fixture(AccountBindingPolicy::ExplicitExternalAccount)?;
         let readiness = Arc::new(Readiness {
+            runtime: Digest::of(fixture.instance.oauth_runtime.as_ref().unwrap())?,
             current: RwLock::new(Some(fixture.evidence.clone())),
             calls: AtomicUsize::new(0),
         });
@@ -2400,6 +3324,15 @@ pub(super) mod tests {
             .unwrap()
             .oauth_connections
             .clear();
+        fixture.instance.oauth_runtime = None;
+        fixture.instance.oauth_clients = None;
+        fixture
+            .instance
+            .control
+            .as_mut()
+            .unwrap()
+            .security_epochs
+            .clear();
         authority.replace_with_gcp(fixture.qualify()?, Arc::new(NoTokens))?;
         assert!(
             authority
@@ -2432,6 +3365,7 @@ pub(super) mod tests {
         }
         let fixture = fixture(AccountBindingPolicy::ExplicitExternalAccount)?;
         let readiness = Arc::new(Readiness {
+            runtime: Digest::of(fixture.instance.oauth_runtime.as_ref().unwrap())?,
             current: RwLock::new(Some(fixture.evidence.clone())),
             calls: AtomicUsize::new(0),
         });
@@ -2472,6 +3406,7 @@ pub(super) mod tests {
     -> Result<()> {
         let mut fixture = fixture(AccountBindingPolicy::ExplicitExternalAccount)?;
         let readiness = Arc::new(Readiness {
+            runtime: Digest::of(fixture.instance.oauth_runtime.as_ref().unwrap())?,
             current: RwLock::new(Some(fixture.evidence.clone())),
             calls: AtomicUsize::new(0),
         });
@@ -2534,6 +3469,11 @@ pub(super) mod tests {
             .unwrap()
             .namespace
             .binding_generation += 1;
+        crate::oauth::clients::tests::select_desired_epoch(
+            &mut fixture.instance,
+            "workspace",
+            "app@company-tools.iam.gserviceaccount.com",
+        )?;
         let next = fixture.qualify()?;
         authority.replace_with_gcp(next, Arc::new(NoTokens))?;
         assert!(
@@ -2549,6 +3489,7 @@ pub(super) mod tests {
     fn changed_client_credential_refuses_old_readiness_before_reading_keys() -> Result<()> {
         let fixture = fixture(AccountBindingPolicy::ExplicitExternalAccount)?;
         let readiness = Arc::new(Readiness {
+            runtime: Digest::of(fixture.instance.oauth_runtime.as_ref().unwrap())?,
             current: RwLock::new(Some(fixture.evidence.clone())),
             calls: AtomicUsize::new(0),
         });
@@ -2588,6 +3529,7 @@ pub(super) mod tests {
     fn mapped_human_selection_does_not_enter_external_account_approval() -> Result<()> {
         let fixture = fixture(AccountBindingPolicy::MappedHuman)?;
         let readiness = Arc::new(Readiness {
+            runtime: Digest::of(fixture.instance.oauth_runtime.as_ref().unwrap())?,
             current: RwLock::new(Some(fixture.evidence.clone())),
             calls: AtomicUsize::new(0),
         });
@@ -2621,162 +3563,246 @@ pub(super) mod tests {
     #[test]
     fn shell_signer_loads_only_attestation_and_rejects_changed_selected_presentation_before_keys()
     -> Result<()> {
+        use super::super::security_shell::FreshAuthenticator;
         use super::super::shell_transport::{ApprovalSigner, ApprovalView};
-        struct OnlyShell(AtomicUsize);
-        impl ApprovalKeyProvider for OnlyShell {
-            fn load(
-                &self,
-                reference: &ApprovalKeyRef,
-                purpose: ApprovalKeyPurpose,
-            ) -> Result<ApprovalKeyMaterial> {
-                assert_eq!(
-                    purpose,
-                    ApprovalKeyPurpose::ShellAttestation,
-                    "shell must never acquire custody keys"
-                );
-                self.0.fetch_add(1, Ordering::SeqCst);
-                Keys::default().load(reference, purpose)
+        let clock = super::super::simulation::World::new(905);
+        super::super::effects::scope(clock.clone(), || {
+            struct OnlyShell(AtomicUsize);
+            impl ApprovalKeyProvider for OnlyShell {
+                fn load(
+                    &self,
+                    reference: &ApprovalKeyRef,
+                    purpose: ApprovalKeyPurpose,
+                ) -> Result<ApprovalKeyMaterial> {
+                    assert_eq!(
+                        purpose,
+                        ApprovalKeyPurpose::ShellAttestation,
+                        "shell must never acquire custody keys"
+                    );
+                    self.0.fetch_add(1, Ordering::SeqCst);
+                    Keys::default().load(reference, purpose)
+                }
             }
-        }
-        let mut facts = fixture(AccountBindingPolicy::ExplicitExternalAccount)?;
-        facts.intent.owner = "ada@example.com".into();
-        let slot = ConnectionSlotKey {
-            installation: name("company"),
-            environment: name("production"),
-            app: name("workspace"),
-            requirement: "work_calendar".into(),
-            owner: SlotOwner::Human {
-                subject: facts.intent.owner.clone(),
-            },
-        };
-        let selected = facts.qualify()?;
-        let choice = &selected.entries[&("workspace".into(), "calendar".into())];
-        let filtered = ArtifactShellSigner::keys(&selected, Arc::new(NoTokens))?.unwrap();
-        for (reference, purpose) in [
-            (
-                &choice.custody_verifier,
-                ApprovalKeyPurpose::CustodyVerifier,
-            ),
-            (
-                &choice.custody_encryption,
-                ApprovalKeyPurpose::CustodyEncryption,
-            ),
-        ] {
-            assert!(
-                filtered.load(reference, purpose).is_err(),
-                "custody is not registered in the shell key provider"
-            );
-        }
-        let observed = super::super::account::ProviderAccount {
-            issuer: choice.reviewed.issuer_url.clone(),
-            subject: "provider-subject".into(),
-            tenant: "external-tenant".into(),
-            display_email: "external@example.net".into(),
-        };
-        let permission = choice.permission.consent_digest(&choice.requirement)?;
-        let scopes = choice
-            .permission
-            .action_scopes
-            .values()
-            .flatten()
-            .cloned()
-            .collect();
-        let mut view = ApprovalView {
-            app: "workspace".into(),
-            subject: "accounts.google.com:12345".into(),
-            requirement: choice.binding.requirement.clone(),
-            permission: permission.clone(),
-            logical_id: choice.requirement.logical_id.clone(),
-            usage: choice.requirement.usage.clone(),
-            scopes,
-            observed: observed.clone(),
-            binding_namespace: binding_namespace(&choice.binding)?,
-            terms: Digest::of(&"app-owned current readiness terms")?,
-            shell_origin: "https://security.example.com/".into(),
-            app_origin: "https://app.example.com/".into(),
-            claim: super::super::external::ApprovalClaim {
-                attempt: super::super::shell_transport::scoped_attempt(
-                    "company",
-                    "production",
-                    "workspace",
-                )?,
-                slot: slot.id(&choice.requirement)?.as_str().into(),
-                generation: 1,
-                human: facts.intent.owner.clone(),
-                account: super::super::account::provider_account_digest(&observed)?
-                    .as_str()
-                    .into(),
-                scope_evidence: String::new(),
-                challenge: Digest::of(&"one pending challenge")?,
-                security_origin: choice.binding.security_shell.clone(),
-                approval: choice.binding.account_binding.clone(),
-                quarantined_at: 4,
-            },
-        };
-        view.claim.scope_evidence =
-            Digest::of(&("oauth-accepted-scopes-v1", &permission, &view.scopes))?
-                .as_str()
-                .into();
-        let keys = Arc::new(OnlyShell(AtomicUsize::new(0)));
-        let signer = ArtifactShellSigner {
-            state: RwLock::new(AuthorityState {
-                selected,
-                keys: Some(keys.clone()),
-            }),
-        };
-        let session = Digest::of(&"fresh shell session")?;
-        let proof = signer.attest(&view, session.clone(), 5, 6)?;
-        assert_eq!(proof.preview, Some(view.digest()?));
-        assert_eq!(keys.0.load(Ordering::SeqCst), 1);
-        for mutation in 0..7 {
-            let mut wrong = view.clone();
-            match mutation {
-                0 => wrong.usage = "Changed consent wording".into(),
-                1 => wrong.claim.slot = Digest::of(&"another human slot")?.as_str().into(),
-                2 => wrong.binding_namespace = "retired_namespace".into(),
-                3 => wrong.app_origin = "https://other.example/".into(),
-                4 => wrong.claim.approval = pin("other_approval"),
-                5 => {
-                    wrong.scopes.insert("calendar.write".into());
-                    wrong.claim.scope_evidence = Digest::of(&(
-                        "oauth-accepted-scopes-v1",
-                        &wrong.permission,
-                        &wrong.scopes,
-                    ))?
+            let mut facts = fixture(AccountBindingPolicy::ExplicitExternalAccount)?;
+            facts.intent.owner = "ada@example.com".into();
+            let slot = ConnectionSlotKey {
+                installation: name("company"),
+                environment: name("production"),
+                app: name("workspace"),
+                requirement: "work_calendar".into(),
+                owner: SlotOwner::Human {
+                    subject: facts.intent.owner.clone(),
+                },
+            };
+            let selected = facts.qualify()?;
+            let choice = &selected.entries[&("workspace".into(), "calendar".into())];
+            let filtered = ArtifactShellSigner::keys(&selected, Arc::new(NoTokens))?.unwrap();
+            for (reference, purpose) in [
+                (
+                    &choice.custody_verifier,
+                    ApprovalKeyPurpose::CustodyVerifier,
+                ),
+                (
+                    &choice.custody_encryption,
+                    ApprovalKeyPurpose::CustodyEncryption,
+                ),
+            ] {
+                assert!(
+                    filtered.load(reference, purpose).is_err(),
+                    "custody is not registered in the shell key provider"
+                );
+            }
+            let observed = super::super::account::ProviderAccount {
+                issuer: choice.reviewed.issuer_url.clone(),
+                subject: "provider-subject".into(),
+                tenant: "external-tenant".into(),
+                display_email: "external@example.net".into(),
+            };
+            let permission = choice.permission.consent_digest(&choice.requirement)?;
+            let scopes = choice
+                .permission
+                .action_scopes
+                .values()
+                .flatten()
+                .cloned()
+                .collect();
+            let mut view = ApprovalView {
+                app: "workspace".into(),
+                subject: "accounts.google.com:12345".into(),
+                requirement: choice.binding.requirement.clone(),
+                permission: permission.clone(),
+                logical_id: choice.requirement.logical_id.clone(),
+                usage: choice.requirement.usage.clone(),
+                scopes,
+                observed: observed.clone(),
+                binding_namespace: binding_namespace(&choice.binding)?,
+                terms: Digest::of(&"app-owned current readiness terms")?,
+                shell_origin: "https://security.example.com/".into(),
+                app_origin: "https://app.example.com/".into(),
+                claim: super::super::external::ApprovalClaim {
+                    attempt: super::super::shell_transport::scoped_attempt(
+                        "company",
+                        "production",
+                        "workspace",
+                    )?,
+                    slot: slot.id(&choice.requirement)?.as_str().into(),
+                    generation: 1,
+                    human: facts.intent.owner.clone(),
+                    account: super::super::account::provider_account_digest(&observed)?
+                        .as_str()
+                        .into(),
+                    scope_evidence: String::new(),
+                    challenge: Digest::of(&"one pending challenge")?,
+                    security_origin: choice.binding.security_shell.clone(),
+                    approval: choice.binding.account_binding.clone(),
+                    quarantined_at: 4,
+                },
+            };
+            view.claim.scope_evidence =
+                Digest::of(&("oauth-accepted-scopes-v1", &permission, &view.scopes))?
                     .as_str()
                     .into();
+            let keys = Arc::new(OnlyShell(AtomicUsize::new(0)));
+            let signer = ArtifactShellSigner {
+                state: RwLock::new(AuthorityState {
+                    selected,
+                    keys: Some(keys.clone()),
+                }),
+            };
+            let session = Digest::of(&"fresh shell session")?;
+            let identity = crate::iap::Verified {
+                email: view.human().into(),
+                subject: view.subject.clone(),
+            };
+            let intent = super::super::fresh_auth::FreshIntent::approval(&view, &identity)?;
+            let (authenticator, headers, callback) =
+                super::super::shell_oidc::fixture_login(&identity, intent, 5, 5, 5)?;
+            let identity = authenticator.identify(&headers, 5)?;
+            let google = authenticator.complete(&callback, &identity, 5)?;
+            let fresh = super::super::security_shell::ShellSession::approval_signed_fixture(
+                &view,
+                &identity,
+                google,
+                session.clone(),
+                5,
+            )?;
+            // A refused original lifetime is terminal. Keep this negative control's
+            // proof separate from the retirement and post-key-load controls below.
+            let intent = super::super::fresh_auth::FreshIntent::approval(&view, &identity)?;
+            let (authenticator, headers, callback) =
+                super::super::shell_oidc::fixture_login(&identity, intent, 5, 5, 5)?;
+            let identity = authenticator.identify(&headers, 5)?;
+            let google = authenticator.complete(&callback, &identity, 5)?;
+            let future_entry = super::super::security_shell::ShellSession::approval_signed_fixture(
+                &view,
+                &identity,
+                google,
+                session.clone(),
+                5,
+            )?;
+            clock.advance(1);
+            let proof = signer.attest(&view, &fresh, 6)?;
+            assert_eq!(proof.preview, Some(view.digest()?));
+            assert_eq!(keys.0.load(Ordering::SeqCst), 1);
+            for mutation in 0..7 {
+                let mut wrong = view.clone();
+                match mutation {
+                    0 => wrong.usage = "Changed consent wording".into(),
+                    1 => wrong.claim.slot = Digest::of(&"another human slot")?.as_str().into(),
+                    2 => wrong.binding_namespace = "retired_namespace".into(),
+                    3 => wrong.app_origin = "https://other.example/".into(),
+                    4 => wrong.claim.approval = pin("other_approval"),
+                    5 => {
+                        wrong.scopes.insert("calendar.write".into());
+                        wrong.claim.scope_evidence = Digest::of(&(
+                            "oauth-accepted-scopes-v1",
+                            &wrong.permission,
+                            &wrong.scopes,
+                        ))?
+                        .as_str()
+                        .into();
+                    }
+                    6 => {
+                        wrong.claim.attempt = super::super::shell_transport::scoped_attempt(
+                            "company",
+                            "staging",
+                            "workspace",
+                        )?
+                    }
+                    _ => unreachable!(),
                 }
-                6 => {
-                    wrong.claim.attempt = super::super::shell_transport::scoped_attempt(
-                        "company",
-                        "staging",
-                        "workspace",
-                    )?
-                }
-                _ => unreachable!(),
+                assert!(
+                    signer.attest(&wrong, &fresh, 6).is_err(),
+                    "mutation {mutation}"
+                );
             }
-            assert!(
-                signer.attest(&wrong, session.clone(), 5, 6).is_err(),
-                "mutation {mutation}"
+            let stale = super::super::security_shell::ShellSession::approval_fixture(
+                &view,
+                &identity,
+                4,
+                session.clone(),
+            )?;
+            assert!(signer.attest(&view, &stale, 6).is_err());
+            assert!(signer.attest(&view, &future_entry, 306).is_err());
+            assert_eq!(keys.0.load(Ordering::SeqCst), 1);
+            let expiry_selected = facts.qualify()?;
+            facts
+                .instance
+                .apps
+                .get_mut("workspace")
+                .unwrap()
+                .oauth_connections
+                .clear();
+            facts.instance.oauth_runtime = None;
+            facts.instance.oauth_clients = None;
+            facts
+                .instance
+                .control
+                .as_mut()
+                .unwrap()
+                .security_epochs
+                .clear();
+            signer.replace_with_gcp(facts.qualify()?, Arc::new(NoTokens))?;
+            assert!(signer.attest(&view, &fresh, 6).is_err());
+            assert_eq!(keys.0.load(Ordering::SeqCst), 1);
+            // The preview digest includes the human's immutable IAP subject too.
+            let original_view = view.clone();
+            let digest = view.digest()?;
+            view.subject = "accounts.google.com:replacement".into();
+            assert_ne!(view.digest()?, digest);
+            struct ExpiringKey {
+                clock: Arc<super::super::simulation::World>,
+                calls: AtomicUsize,
+            }
+            impl ApprovalKeyProvider for ExpiringKey {
+                fn load(
+                    &self,
+                    reference: &ApprovalKeyRef,
+                    purpose: ApprovalKeyPurpose,
+                ) -> Result<ApprovalKeyMaterial> {
+                    assert_eq!(purpose, ApprovalKeyPurpose::ShellAttestation);
+                    self.calls.fetch_add(1, Ordering::SeqCst);
+                    self.clock.advance(300);
+                    Keys::default().load(reference, purpose)
+                }
+            }
+            let delayed = Arc::new(ExpiringKey {
+                clock: clock.clone(),
+                calls: AtomicUsize::new(0),
+            });
+            let expiring = ArtifactShellSigner {
+                state: RwLock::new(AuthorityState {
+                    selected: expiry_selected,
+                    keys: Some(delayed.clone()),
+                }),
+            };
+            assert!(expiring.attest(&original_view, &fresh, 6).is_err());
+            assert_eq!(
+                delayed.calls.load(Ordering::SeqCst),
+                1,
+                "control must reach actual key load before refusing expired original proof"
             );
-        }
-        assert!(signer.attest(&view, session.clone(), 4, 6).is_err());
-        assert!(signer.attest(&view, session.clone(), 5, 306).is_err());
-        assert_eq!(keys.0.load(Ordering::SeqCst), 1);
-        facts
-            .instance
-            .apps
-            .get_mut("workspace")
-            .unwrap()
-            .oauth_connections
-            .clear();
-        signer.replace_with_gcp(facts.qualify()?, Arc::new(NoTokens))?;
-        assert!(signer.attest(&view, session, 5, 6).is_err());
-        assert_eq!(keys.0.load(Ordering::SeqCst), 1);
-        // The preview digest includes the human's immutable IAP subject too.
-        let digest = view.digest()?;
-        view.subject = "accounts.google.com:replacement".into();
-        assert_ne!(view.digest()?, digest);
-        Ok(())
+            Ok(())
+        })
     }
 }

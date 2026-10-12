@@ -60,7 +60,7 @@ pub(super) struct Prepared {
 /// and secret projection path.
 pub fn reference_key(reference: &VersionRef) -> Result<String> {
     reference.validate()?;
-    Ok(crate::assets::hash_part(&crate::digest(&serde_json::to_vec(reference)?))?.into())
+    Ok(day2_assets::hash_part(&crate::digest(&serde_json::to_vec(reference)?))?.into())
 }
 
 /// Where a reference's secret is mounted in tooling and runtime.
@@ -242,6 +242,7 @@ fn prepare_connections(
         builders: BTreeMap::new(),
         runtimes: BTreeMap::new(),
         secrets: BTreeMap::new(),
+        security_epochs: BTreeMap::new(),
     });
     let operator = serde_json::to_vec_pretty(&operator)?;
     Instance::from_bytes(&operator)?;

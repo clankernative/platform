@@ -14,7 +14,7 @@ fn external_provider_matches_expected_outputs() {
     let captured = tempfile::tempdir().unwrap();
     copy_tree_checked(&fixture.join("app/ui"), &captured.path().join("ui")).unwrap();
     let expected: Envelope = serde_json::from_slice(
-        &day2::assets::read_regular(&fixture.join("response.json"), MAX_STDOUT as u64).unwrap(),
+        &day2_assets::read_regular(&fixture.join("response.json"), MAX_STDOUT as u64).unwrap(),
     )
     .unwrap();
     assert!(expected.ok && expected.command == "assemble");

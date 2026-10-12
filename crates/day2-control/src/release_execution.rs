@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc};
 
 pub const LEASE_MILLIS: u64 = 20_000;
+const DEPLOYMENT_INPUT_BYTES: usize = 4_194_304;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -398,10 +399,13 @@ impl ReleaseExecutionHost {
                 Err(ReleaseRejection::InvalidFact.into())
             }
             Ok(result) => Ok(result),
-            Err(_) => {
+            Err(error) => {
                 let _=journal.connection.execute("INSERT INTO release_events(target,kind,body) VALUES(?1,'workflow_host_fault',?2)",
                     params![serde_json::to_string(&stored.snapshot.target)?,serde_json::to_string(&(&stored.snapshot.id,"provider"))?]);
-                Err(anyhow::anyhow!("release provider host fault"))
+                match error.downcast::<ProviderRefusal>() {
+                    Ok(refusal) => Err(refusal.into()),
+                    Err(_) => Err(anyhow::anyhow!("release provider host fault")),
+                }
             }
         }
     }
@@ -570,6 +574,21 @@ impl std::fmt::Display for ReleaseRejection {
     }
 }
 impl std::error::Error for ReleaseRejection {}
+
+/// A provider refusal that names the operator action it needs, such as an
+/// image change that needs a maintenance activation first. The host still
+/// records a provider fault but returns this message instead of hiding it.
+/// Never put provider responses or secret material in one.
+#[derive(Debug)]
+pub struct ProviderRefusal(pub String);
+
+impl std::fmt::Display for ProviderRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ProviderRefusal {}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -884,7 +903,15 @@ impl Journal {
         tx.execute_batch(
             "CREATE TABLE IF NOT EXISTS release_serving_publications(
             scope TEXT PRIMARY KEY, revision INTEGER NOT NULL CHECK(revision>0),
-            published_revision INTEGER NOT NULL DEFAULT 0, published_digest TEXT);",
+            published_revision INTEGER NOT NULL DEFAULT 0, published_digest TEXT);
+            CREATE TABLE IF NOT EXISTS release_deployment_inputs(
+            execution TEXT PRIMARY KEY REFERENCES release_workflows(id), body TEXT NOT NULL);
+            CREATE TRIGGER IF NOT EXISTS release_deployment_inputs_no_update
+                BEFORE UPDATE ON release_deployment_inputs
+                BEGIN SELECT RAISE(ABORT,'release deployment inputs are immutable'); END;
+            CREATE TRIGGER IF NOT EXISTS release_deployment_inputs_no_delete
+                BEFORE DELETE ON release_deployment_inputs
+                BEGIN SELECT RAISE(ABORT,'release deployment inputs are immutable'); END;",
         )?;
         tx.commit()?;
         Ok(())
@@ -961,6 +988,81 @@ impl Journal {
 
     pub fn release_execution(&self, id: &Digest) -> Result<ReleaseSnapshot> {
         Ok(read_execution(&self.connection, id)?.snapshot)
+    }
+
+    /// Keep the exact deployment input whose digest the accepted plan pins.
+    /// Publication reads it back to reach the app of an active release that is
+    /// not among the current candidates. Recording is idempotent and immutable.
+    pub fn record_release_deployment_input(
+        &mut self,
+        execution: &Digest,
+        input: &[u8],
+    ) -> Result<()> {
+        ensure!(
+            input.len() <= DEPLOYMENT_INPUT_BYTES,
+            "release deployment input budget"
+        );
+        let body = std::str::from_utf8(input)?;
+        let tx = day2::write_queue::immediate(&mut self.connection)?;
+        let plan = read_execution(&tx, execution)?.snapshot.plan;
+        ensure!(
+            plan.deployment_input == Some(Digest::new(input)),
+            "release deployment input differs from the accepted plan"
+        );
+        tx.execute(
+            "INSERT OR IGNORE INTO release_deployment_inputs(execution,body) VALUES(?1,?2)",
+            params![execution.as_str(), body],
+        )?;
+        let recorded: String = tx.query_row(
+            "SELECT body FROM release_deployment_inputs WHERE execution=?1",
+            [execution.as_str()],
+            |row| row.get(0),
+        )?;
+        ensure!(recorded == body, "release deployment input cannot change");
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The deployment input recorded for the release `selected` names, which
+    /// must still be its target's active selection.
+    pub fn active_release_deployment_input(&self, selected: &SelectedServing) -> Result<Vec<u8>> {
+        let tx = self.connection.unchecked_transaction()?;
+        let target = &selected.binding.target;
+        let (activation, generation, binding) = selected_active_serving_in(&tx, target)?;
+        ensure!(
+            activation == selected.activation
+                && generation == selected.generation
+                && binding == selected.binding,
+            "publication selection is no longer active"
+        );
+        let active = release::read_state(&tx, target)?
+            .active
+            .ok_or_else(|| anyhow::anyhow!("serving release is not active"))?;
+        let execution = Digest::of(&("day2-release-workflow-v1", &active.release))?;
+        let pinned = read_execution(&tx, &execution)?
+            .snapshot
+            .plan
+            .deployment_input
+            .ok_or_else(|| anyhow::anyhow!("active release pins no deployment input"))?;
+        let body: String = tx
+            .query_row(
+                "SELECT body FROM release_deployment_inputs WHERE execution=?1",
+                [execution.as_str()],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "release_deployment_input_unrecorded: {} has no recorded deployment input; release it again",
+                    target.app.as_str()
+                )
+            })?;
+        ensure!(
+            Digest::new(body.as_bytes()) == pinned,
+            "release deployment input differs from the accepted plan"
+        );
+        tx.commit()?;
+        Ok(body.into_bytes())
     }
 
     pub fn release_execution_approval(&self, id: &Digest) -> Result<ReleaseApproval> {

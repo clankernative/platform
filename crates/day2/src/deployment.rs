@@ -345,7 +345,7 @@ fn layout(instance_path: &Path, app: &str) -> Result<(PathBuf, RuntimeProfile, P
     if let Some(active) = active {
         ensure!(
             artifact.file_name().and_then(|name| name.to_str())
-                == Some(crate::assets::hash_part(&active.artifact_id)?),
+                == Some(day2_assets::hash_part(&active.artifact_id)?),
             "active deployment artifact address mismatch"
         );
     }
@@ -357,7 +357,7 @@ fn layout(instance_path: &Path, app: &str) -> Result<(PathBuf, RuntimeProfile, P
 
 fn replica_lock(state: &Path, app: &str) -> Result<File> {
     use std::os::unix::fs::OpenOptionsExt;
-    crate::schema::identifier(app)?;
+    day2_contracts::names::identifier(app)?;
     let path = state.join(format!("{app}.serve.lock"));
     if let Ok(metadata) = fs::symlink_metadata(&path) {
         ensure!(metadata.is_file(), "invalid runtime lease file");
@@ -442,6 +442,33 @@ pub async fn serve(instance_path: &Path, app: &str, access: Access<'_>) -> Resul
     serve_with_oauth(instance_path, app, access, None).await
 }
 
+/// Everything serving admits about an app's state store before it configures
+/// adapters or accepts a request: `Runtime::initialize` (storage binding,
+/// current authority, the platform upgrades and the private credential schema),
+/// the active authority's security requirements against the selected artifact,
+/// and, for an app with OAuth connections, its private OAuth schema. Serving
+/// runs it on the live store. `day2 admit` runs the same code, so
+/// `day2 platform maintain activate` can open a migrated and activated copy of
+/// the store with the target build before its migration fence. Host evidence
+/// (`Requirements::require_runtime`) stays with the caller that serves.
+pub fn admit_store(runtime: &Runtime) -> Result<Option<crate::security_admission::Requirements>> {
+    runtime.initialize()?;
+    let db = crate::store::open(runtime.db())?;
+    let authority = crate::authority_state::current(&db)?;
+    if let Some(requirements) = &authority.document.security {
+        requirements.validate(runtime.artifact())?;
+    }
+    let instance = Instance::load(runtime.instance_path())?;
+    let binding = instance
+        .apps
+        .get(runtime.app())
+        .context("app_not_installed")?;
+    if !binding.oauth_connections.is_empty() {
+        crate::oauth::schema::admit_with_runtime_hook(&db, crate::oauth::connect::install_schema)?;
+    }
+    Ok(authority.document.security)
+}
+
 /// The enforcing container lifecycle with host-owned adapter installation.
 /// Configuration runs after the runtime and its active authority are checked,
 /// before either HTTP admission or background execution starts.
@@ -507,19 +534,17 @@ async fn serve_configured(
             .directory()
             .file_name()
             .and_then(|name| name.to_str())
-            == Some(crate::assets::hash_part(runtime.artifact().id())?),
+            == Some(day2_assets::hash_part(runtime.artifact().id())?),
         "active deployment artifact address mismatch"
     );
-    runtime.initialize()?;
+    let security = admit_store(&runtime)?;
     if let Ok(expected) = std::env::var("DAY2_EXPECTED_ARTIFACT") {
         ensure!(
             expected == runtime.artifact().id(),
             "deployment_artifact_changed"
         );
     }
-    let authority = crate::authority_state::current(&crate::store::open(runtime.db())?)?;
-    if let Some(requirements) = &authority.document.security {
-        requirements.validate(runtime.artifact())?;
+    if let Some(requirements) = &security {
         requirements.require_runtime()?;
     }
     let runtime = tokio::task::spawn_blocking(move || configure(runtime)).await??;

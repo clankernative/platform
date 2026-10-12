@@ -141,6 +141,7 @@ pub fn inventory(root: &Path) -> Result<Inventory> {
         paths.len() <= MAX_SOURCES,
         "architecture source limit exceeded"
     );
+    require_declared_integration_tests(root, &paths)?;
     let mut parsed = BTreeMap::new();
     for path in &paths {
         if integration_or_generated(path) {
@@ -277,6 +278,41 @@ fn read_regular(path: &Path, limit: usize) -> Result<Vec<u8>> {
         path.display()
     );
     Ok(bytes)
+}
+
+/// A crate with tests/main.rs links its integration tests into that one target,
+/// so a file beside it compiles only when main.rs declares it as a module.
+/// Refuse a test file that no target would build or run.
+fn require_declared_integration_tests(root: &Path, paths: &[String]) -> Result<()> {
+    for main in paths
+        .iter()
+        .filter(|path| integration_or_generated(path) && path.ends_with("/tests/main.rs"))
+    {
+        let directory = &main[..main.len() - "main.rs".len()];
+        let bytes = read_regular(&root.join(main), MAX_SOURCE_BYTES)?;
+        let source = std::str::from_utf8(&bytes).with_context(|| format!("UTF-8 {main}"))?;
+        let syntax = syn::parse_file(source).with_context(|| format!("parse {main}"))?;
+        let declared: BTreeSet<_> = syntax
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Mod(module) if module.content.is_none() => {
+                    Some(format!("{directory}{}.rs", module.ident))
+                }
+                _ => None,
+            })
+            .collect();
+        for path in paths.iter().filter(|path| {
+            path.strip_prefix(directory)
+                .is_some_and(|name| !name.contains('/') && name != "main.rs")
+        }) {
+            ensure!(
+                declared.contains(path),
+                "{path} is not declared in {main}, so no test target compiles it"
+            );
+        }
+    }
+    Ok(())
 }
 
 fn integration_or_generated(path: &str) -> bool {
@@ -8512,6 +8548,27 @@ mod tests {
             result
                 .sources
                 .contains(&"crates/fixture/tests/runtime.rs".to_owned())
+        );
+    }
+
+    #[test]
+    fn integration_test_files_must_be_declared_by_their_crate_main() {
+        let directory = fixture("fn pure() {}");
+        let tests = directory.path().join("crates/fixture/tests");
+        fs::create_dir_all(tests.join("support")).unwrap();
+        fs::write(
+            tests.join("main.rs"),
+            "mod declared;\nmod support {\n    pub mod helper;\n}\n",
+        )
+        .unwrap();
+        fs::write(tests.join("declared.rs"), "#[test]\nfn runs() {}\n").unwrap();
+        fs::write(tests.join("support/helper.rs"), "pub fn help() {}\n").unwrap();
+        inventory(directory.path()).unwrap();
+        fs::write(tests.join("forgotten.rs"), "#[test]\nfn never_runs() {}\n").unwrap();
+        let error = inventory(directory.path()).unwrap_err().to_string();
+        assert!(
+            error.contains("crates/fixture/tests/forgotten.rs is not declared"),
+            "{error}"
         );
     }
 

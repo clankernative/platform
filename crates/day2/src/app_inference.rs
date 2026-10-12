@@ -143,7 +143,7 @@ pub fn namespace(source: &str) -> Result<String> {
                 };
                 let value: String =
                     serde_json::from_str(literal).context("invalid namespace literal")?;
-                crate::schema::identifier(&value)?;
+                day2_contracts::names::identifier(&value)?;
                 namespace = Some(value);
             }
             _ => {}
@@ -236,7 +236,7 @@ pub fn declares_connections(source: &str) -> Result<bool> {
 }
 
 pub fn identity_module(namespace: &str) -> Result<String> {
-    crate::schema::identifier(namespace)?;
+    day2_contracts::names::identifier(namespace)?;
     Ok(format!(
         "AppIdentity :: [].{{\n\tnamespace : Str\n\tnamespace = \"{namespace}\"\n}}\n"
     ))
@@ -622,7 +622,7 @@ fn text_domains(sources: &BTreeMap<String, String>) -> Result<BTreeMap<String, S
             }
             name.push(ch.to_ascii_lowercase());
         }
-        crate::schema::identifier(&name)?;
+        day2_contracts::names::identifier(&name)?;
         ensure!(
             domains.insert(name, domain).is_none(),
             "duplicate text domain name"
@@ -765,7 +765,7 @@ pub fn provisional_modules(sources: &[String]) -> Result<BTreeMap<String, String
             }
             if let Token::Word(name) = token
                 && (exposed || at > 0 && tokens[at - 1] == Token::Punct(b'.'))
-                && crate::schema::identifier(name).is_ok()
+                && day2_contracts::names::identifier(name).is_ok()
                 && *name != "exposing"
                 && *name != "as"
             {
@@ -841,7 +841,7 @@ pub fn provisional_modules(sources: &[String]) -> Result<BTreeMap<String, String
                     .take_while(|token| **token != Token::Punct(b']'))
                 {
                     if let Token::Word(name) = token
-                        && crate::schema::identifier(name).is_ok()
+                        && day2_contracts::names::identifier(name).is_ok()
                     {
                         credential_names.insert(*name);
                     }

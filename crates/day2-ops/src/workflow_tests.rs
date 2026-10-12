@@ -575,18 +575,101 @@ fn maintain_activate_runs_every_guarded_step_in_order() -> Result<()> {
             "open",
             "artifacts",
             "stop",
+            "measure",
             "pod",
             "workflow:backup",
             "copy-backup",
             "migration:plan",
+            "admission",
             "confirm",
             "fence",
             "migration:apply",
             "workflow:authority-inspect",
             "workflow:authority-activate",
+            "mark-activated",
             "finish",
         ]
     );
+    Ok(())
+}
+
+#[test]
+fn maintain_mark_activated_reads_the_database_before_it_marks() -> Result<()> {
+    let mut effects = Vec::new();
+    automation::run(
+        &automation::runner()?,
+        &["platform", "maintain", "mark-activated", "request.json"],
+        |request| {
+            let step = match request.action.as_str() {
+                "maintenance-workflow" => format!(
+                    "workflow:{}",
+                    request.decode::<Value>()?["workflow"]
+                        .as_str()
+                        .unwrap_or_default()
+                ),
+                "maintenance-open" => {
+                    assert_eq!(
+                        request.decode::<Value>()?,
+                        json!({"operation": "mark-activated", "request": "request.json"})
+                    );
+                    "open".into()
+                }
+                other => other.trim_start_matches("maintenance-").to_owned(),
+            };
+            effects.push(step);
+            Ok(json!({}))
+        },
+    )?;
+    assert_eq!(
+        effects,
+        [
+            "open",
+            "artifacts",
+            "stop",
+            "measure",
+            "pod",
+            "workflow:authority-inspect",
+            "mark-activated",
+            "finish",
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn maintain_stops_at_a_refused_store_admission_before_the_confirmation() -> Result<()> {
+    let mut effects = Vec::new();
+    let result = automation::run(
+        &automation::runner()?,
+        &["platform", "maintain", "activate", "request.json"],
+        |request| {
+            effects.push(request.action.clone());
+            if request.action == "maintenance-admission" {
+                bail!("target_store_admission_refused: unsupported credential schema version");
+            }
+            Ok(json!({}))
+        },
+    );
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("target_store_admission_refused")
+    );
+    let at = |name: &str| effects.iter().position(|effect| effect == name);
+    assert!(at("maintenance-migration") < at("maintenance-admission"));
+    assert_eq!(
+        effects.last().map(String::as_str),
+        Some("maintenance-admission")
+    );
+    assert!(!effects.iter().any(|name| {
+        [
+            "maintenance-confirm",
+            "maintenance-fence",
+            "maintenance-finish",
+        ]
+        .contains(&name.as_str())
+    }));
     Ok(())
 }
 

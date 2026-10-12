@@ -5,10 +5,10 @@ use crate::{
     journal::{Journal, RecoveryMode},
     kubernetes_conformance::{GkeKubernetesProbe, GkeServingBinding},
     provider_evidence::{DeploymentIncarnation, ReadBarrier, RevisionToken, StateEvidence},
-    release::{ReleaseApproval, SecretObservation},
+    release::{ReleaseApproval, ReleaseTarget, SecretObservation},
     release_execution::{
-        Capabilities, ReleaseEffectResult, ReleaseExecutionPlan, ReleaseLease, ReleaseObservation,
-        ReleaseObserved, ReleaseOperation,
+        Capabilities, ProviderRefusal, ReleaseEffectResult, ReleaseExecutionHost,
+        ReleaseExecutionPlan, ReleaseLease, ReleaseObservation, ReleaseObserved, ReleaseOperation,
     },
     secrets::{AccessTokenProvider, SecretVersion},
     serving_publication::Publication,
@@ -35,6 +35,12 @@ const RELEASE: &str = "day2.dev/release-id";
 const REVISION: &str = "day2.dev/selection-revision";
 const SNAPSHOT: &str = "day2.dev/selection-digest";
 const CREDENTIALS_SHA256: &str = "day2.dev/credentials-sha256";
+const ARTIFACT: &str = "day2.dev/artifact";
+/// Stamped on the StatefulSet by `day2 platform maintain activate` with the
+/// target app image, once that image's build opened a rehearsed copy of the
+/// store and its artifact is activated in the app's database. Only that image
+/// may replace the live one; the release that does so consumes the stamp.
+const ACTIVATED: &str = "day2.dev/activated-image";
 const CSI_DRIVER: &str = "secrets-store-gke.csi.k8s.io";
 const OPERATOR_INSTANCE: &str = "operator-instance.json";
 const PROVISIONING: &str = "provisioning.json";
@@ -549,8 +555,11 @@ impl GkeReleaseProvider {
                 && controller["metadata"]["deletionTimestamp"].is_null(),
             "gke_release_controller_changed"
         );
+        // Zero only after a maintenance activation; see `admit`.
         ensure!(
-            controller["spec"]["replicas"] == 1
+            controller["spec"]["replicas"]
+                .as_u64()
+                .is_some_and(|replicas| replicas <= 1)
                 && controller["spec"]["template"]["spec"]["serviceAccountName"] == "runtime"
                 && controller["metadata"]["annotations"]["day2.dev/release-managed"] == "true",
             "gke_release_topology_changed"
@@ -580,6 +589,49 @@ impl GkeReleaseProvider {
             "gke_release_resource_version_missing"
         );
         Ok(controller)
+    }
+
+    /// Before any write: once initialized, the app's database (not the
+    /// instance) selects the served artifact, and the image's day2-serve
+    /// admits and upgrades the store when it starts. A new image, even of the
+    /// live artifact (another platform build), may therefore replace the live
+    /// one only after `maintain activate` rehearsed its store admission and
+    /// activated its artifact. Returns whether the release consumes the
+    /// activation stamp and restores the profile's one replica.
+    fn admit(&self, controller: &Value, lease: &ReleaseLease) -> Result<bool> {
+        let candidate = lease.approval.artifact.as_str();
+        let image = self.deployment.image.as_str();
+        let live = controller["spec"]["template"]["metadata"]["annotations"][ARTIFACT]
+            .as_str()
+            .context("gke_release_artifact_annotation_missing")?;
+        let live_image = controller["spec"]["template"]["spec"]["containers"]
+            .as_array()
+            .and_then(|containers| {
+                containers
+                    .iter()
+                    .find(|container| container["name"] == "day2")
+            })
+            .and_then(|container| container["image"].as_str())
+            .context("gke_release_container_missing")?;
+        if live_image == image && live == candidate {
+            ensure!(
+                controller["spec"]["replicas"] == 1,
+                "gke_release_topology_changed"
+            );
+            return Ok(false);
+        }
+        let activated = controller["metadata"]["annotations"][ACTIVATED].as_str();
+        if activated != Some(image) {
+            return Err(ProviderRefusal(format!(
+                "release_image_requires_activation: {} serves {live_image} ({live}){}; run `day2 platform maintain activate` for {image} ({candidate}) first",
+                self.deployment.serving.target.app.as_str(),
+                activated.map_or_else(String::new, |other| format!(
+                    " and is activated for {other}"
+                )),
+            ))
+            .into());
+        }
+        Ok(true)
     }
 
     fn secret(&self, lease: &ReleaseLease) -> Result<SecretObservation> {
@@ -877,7 +929,7 @@ impl GkeReleaseProvider {
         let annotations = template["metadata"]["annotations"]
             .as_object_mut()
             .context("gke_release_annotations_missing")?;
-        annotations.insert("day2.dev/artifact".into(), json!(lease.approval.artifact));
+        annotations.insert(ARTIFACT.into(), json!(lease.approval.artifact));
         annotations.insert(
             "day2.dev/instance-sha256".into(),
             json!(
@@ -925,6 +977,7 @@ impl GkeReleaseProvider {
         if !(controller["metadata"]["annotations"][EFFECT] == lease.effect.as_str()
             && controller["metadata"]["annotations"][RELEASE]
                 == lease.execution.plan.release.as_str()
+            && controller["spec"]["replicas"] == 1
             && controller["spec"]["template"] == self.template(controller, lease)?)
         {
             return Ok(false);
@@ -950,6 +1003,7 @@ impl GkeReleaseProvider {
             before["metadata"]["annotations"][EFFECT] == prepared.effect.as_str()
                 && before["metadata"]["annotations"][RELEASE]
                     == lease.execution.plan.release.as_str()
+                && before["spec"]["replicas"] == 1
                 && before["spec"]["template"] == self.template(&before, lease)?,
             "gke_release_preparation_changed"
         );
@@ -998,13 +1052,31 @@ impl GkeReleaseProvider {
         ))
     }
 
-    /// Conditional per-destination writes plus a final durable acknowledgment.
-    /// A crash after any destination leaves the activation intent retryable.
+    /// Accept `plan` through `host` and record this candidate's exact deployment
+    /// input, so later publications reach its serving ConfigMap while its
+    /// release is active, whether or not it is a candidate then.
+    pub fn accept(
+        &self,
+        host: &ReleaseExecutionHost,
+        plan: &ReleaseExecutionPlan,
+    ) -> Result<Digest> {
+        let execution = host.accept(plan)?;
+        Journal::open(&self.journal)?
+            .record_release_deployment_input(&execution, &serde_json::to_vec(&self.deployment)?)?;
+        Ok(execution)
+    }
+
+    /// One conditional destination write with exact readback; `publish_scope`
+    /// acknowledges the journal intent after every destination succeeds.
     pub fn publish(&self, publication: &Publication) -> Result<()> {
         publication.require_scope(&self.deployment.serving.target)?;
         publication
             .snapshot
             .require_scope(&self.deployment.serving.target)?;
+        // Never publish to an app a snapshot its own calls cannot select from.
+        publication
+            .snapshot
+            .selected(&self.deployment.serving.target)?;
         ensure!(
             Digest::of(&publication.snapshot)? == publication.digest,
             "gke_publication_digest_changed"
@@ -1088,6 +1160,41 @@ impl GkeReleaseProvider {
         );
         Ok(())
     }
+}
+
+/// Publish the scope's current serving snapshot to the serving ConfigMap of
+/// every app it selects (each app of `scope` with an active release), as that
+/// app's active release recorded it, then acknowledge the journal intent.
+/// Every destination is resolved before the first write. A failure leaves the
+/// intent pending; a rerun rewrites the same revision idempotently, and
+/// `GkeReleaseProvider::publish` refuses to replace a newer revision.
+pub fn publish_scope(
+    journal: &Path,
+    scope: &[ReleaseTarget],
+    publisher: impl Fn(Deployment) -> Result<GkeReleaseProvider>,
+) -> Result<Publication> {
+    let mut journal = Journal::open(journal)?;
+    let publication = journal.serving_publication(scope)?;
+    let mut destinations = Vec::new();
+    for selected in publication.snapshot.selections() {
+        let deployment: Deployment =
+            day2::json::decode(&journal.active_release_deployment_input(selected)?)?;
+        deployment.validate(&selected.binding.artifact)?;
+        ensure!(
+            deployment.serving.target == selected.binding.target
+                && deployment.serving.deployment == selected.binding.deployment,
+            "gke_publication_destination_changed"
+        );
+        destinations.push(publisher(deployment)?);
+    }
+    for destination in &destinations {
+        destination.publish(&publication)?;
+    }
+    ensure!(
+        journal.acknowledge_serving_publication(&publication)?,
+        "release_publication_superseded"
+    );
+    Ok(publication)
 }
 
 fn projected(
@@ -1179,7 +1286,9 @@ impl Capabilities for GkeReleaseProvider {
         let outcome = match lease.step.operation {
             ReleaseOperation::PrepareDependency => {
                 // Refuse an installed workload this candidate cannot be released into.
-                self.template(&self.controller(&api)?, lease)?;
+                let controller = self.controller(&api)?;
+                self.admit(&controller, lease)?;
+                self.template(&controller, lease)?;
                 self.projection(&api)?;
                 ReleaseObserved::DependencyPrepared {}
             }
@@ -1195,16 +1304,27 @@ impl Capabilities for GkeReleaseProvider {
                     if lease.recovery == RecoveryMode::Reconcile {
                         return Ok(ReleaseEffectResult::Ambiguous {});
                     }
+                    let activated = self.admit(&controller, lease)?;
                     self.secret(lease)?;
                     self.projection(&api)?;
                     self.instance(&api, lease)?;
-                    let patch = json!([
-                        {"op":"test","path":"/metadata/uid","value":controller["metadata"]["uid"]},
-                        {"op":"test","path":"/metadata/resourceVersion","value":controller["metadata"]["resourceVersion"]},
-                        {"op":"add","path":"/metadata/annotations/day2.dev~1release-effect","value":lease.effect},
-                        {"op":"add","path":"/metadata/annotations/day2.dev~1release-id","value":lease.execution.plan.release},
-                        {"op":"replace","path":"/spec/template","value":self.template(&controller, lease)?}
-                    ]);
+                    let mut patch = vec![
+                        json!({"op":"test","path":"/metadata/uid","value":controller["metadata"]["uid"]}),
+                        json!({"op":"test","path":"/metadata/resourceVersion","value":controller["metadata"]["resourceVersion"]}),
+                        json!({"op":"add","path":"/metadata/annotations/day2.dev~1release-effect","value":lease.effect}),
+                        json!({"op":"add","path":"/metadata/annotations/day2.dev~1release-id","value":lease.execution.plan.release}),
+                        json!({"op":"replace","path":"/spec/template","value":self.template(&controller, lease)?}),
+                    ];
+                    if activated {
+                        // Activation left the app stopped. Consume the stamp the
+                        // resourceVersion test pins, so it cannot authorize a
+                        // later image change.
+                        patch.extend([
+                            json!({"op":"remove","path":"/metadata/annotations/day2.dev~1activated-image"}),
+                            json!({"op":"replace","path":"/spec/replicas","value":1}),
+                        ]);
+                    }
+                    let patch = Value::Array(patch);
                     let write =
                         api.request(Method::PATCH, &self.controller_path(), Some(&patch), true);
                     match write {

@@ -14,8 +14,7 @@ use std::{
 };
 use tempfile::TempDir;
 
-#[path = "support/evidence.rs"]
-mod evidence;
+use crate::support::evidence;
 
 fn artifact() -> PathBuf {
     std::env::var_os("DAY2_TEST_RELATIONAL_ARTIFACT")
@@ -70,6 +69,7 @@ impl World {
             oauth_shell_transport: None,
             oauth_clients: None,
             oauth_runtime: None,
+            credential_runtime: None,
         };
         let path = directory.path().join("instance.json");
         fs::write(&path, serde_json::to_vec(&instance)?)?;

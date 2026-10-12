@@ -56,8 +56,7 @@ fn settled(runtime: &Runtime, seconds: u64) -> Result<(String, u64)> {
 #[test]
 fn http_durable_acceptance_exposes_actor_scoped_status_and_resumes_without_a_job_api() -> Result<()>
 {
-    #[path = "support/commands.rs"]
-    mod support;
+    use crate::support::commands as support;
     let world = support::World::new()?;
     let server = Server::start(world.runtime.instance_path(), world.directory.path())?;
     let client = server.client()?;

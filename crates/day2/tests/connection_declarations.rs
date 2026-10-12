@@ -3,8 +3,7 @@ use day2::{artifact::LoadedArtifact, connection_declaration as declaration};
 use day2_capabilities::oauth::AccountBindingPolicy;
 use std::{fs, path::Path, time::Duration};
 
-#[path = "support/compiler.rs"]
-mod compiler;
+use crate::support::compiler;
 
 #[test]
 fn native_registration_derives_the_admitted_artifact_contract() -> Result<()> {
