@@ -165,3 +165,43 @@ References: [Completed output cache action](https://github.com/actions/cache/blo
 [Rust cache coverage](https://github.com/mozilla/sccache/blob/main/docs/Rust.md),
 [Pinned server idle behavior](https://github.com/mozilla/sccache/blob/v0.18.0/src/server.rs),
 [GitHub cache scope](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching).
+
+## Exact merge-group receipt reuse
+
+PR and merge-group workflows always execute the complete gate. A main push first
+looks for the latest merge-group run of this repository's active `ci.yml` workflow
+at the exact checked-out SHA and tree. A different SHA with an identical tree is
+insufficient. Authenticated GitHub metadata must show a completed successful
+latest attempt, all ten successful required jobs and their actual GitHub Actions
+app15368 checks, and its unexpired immutable full-receipt artifact. This job has
+only contents, Actions and checks read permissions; it accepts no caller-selected
+repository, URL, workflow, run, artifact or source override.
+
+The small receipt artifact carries both preparation parts, prepared inventory,
+compiler-input manifest, seven-campaign join and original full verification
+receipt. Native admission requires the exact current snapshot and Roc/CI workflow,
+host/architecture, canonical workspace, compiler/config/profile identity, fresh
+Cargo metadata for all default targets and supporting programs, exhaustive fixture
+and campaign evidence, original step timings and campaign budgets. Downloaded
+proof is read as confined bounded JSON; its executables are never downloaded or
+run. The authenticated latest run is checked again after artifact admission.
+
+Missing, expired, foreign, incomplete, changed or unavailable proof selects
+ordinary complete preparation and all seven fresh campaigns. A setup, lookup,
+download, admission or reuse-artifact upload failure also selects that fallback.
+The required `verify` job succeeds only after either the full preparation and all
+campaigns succeed, or the exact receipt-admission job succeeds and its proof is
+transported. The other nine required checks always run on the current source.
+
+Reused evidence is named `reused-trusted-merge-group-full` and retains the original
+run/attempt and all original receipts alongside the current run identity. It
+explicitly records that this main push did not execute fresh runtime campaigns;
+it is not a new full execution or a cross-source performance result. Actual
+end-to-end reuse must be observed after an explicitly user-queued eligible PR
+lands. A passing PR full gate or synthetic admission test alone does not establish
+that runtime receipt. No unrelated merge is needed to qualify the implementation.
+
+The [workflow-run API](https://docs.github.com/en/rest/actions/workflow-runs),
+[artifact API](https://docs.github.com/en/rest/actions/artifacts) and pinned
+[artifact download action](https://github.com/actions/download-artifact/tree/d3f86a106a0bac45b974a628896c90dbdf5c8093)
+provide the authenticated metadata and cross-run artifact transport.
