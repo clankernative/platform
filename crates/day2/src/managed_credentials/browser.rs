@@ -298,20 +298,128 @@ pub(crate) fn confirm(
     human_proof: &crate::oauth::fresh_auth::VerifiedAuthTime,
     now: i64,
 ) -> Result<crate::protocol::Outcome> {
-    human_proof.require_intent(&fresh_intent(runtime, pending, identity)?, identity)?;
-    human_proof.require_current(now)?;
+    confirm_inner(
+        runtime,
+        pending,
+        identity,
+        session,
+        human_proof,
+        now,
+        #[cfg(test)]
+        None,
+    )
+}
+
+#[cfg(test)]
+pub(crate) enum ConfirmationFault {
+    AfterConfirmationCommit,
+}
+
+#[cfg(test)]
+pub(crate) fn confirm_with_fault(
+    runtime: &Runtime,
+    pending: &Pending,
+    identity: &iap::Verified,
+    session: &str,
+    human_proof: &crate::oauth::fresh_auth::VerifiedAuthTime,
+    now: i64,
+    fault: ConfirmationFault,
+) -> Result<crate::protocol::Outcome> {
+    confirm_inner(
+        runtime,
+        pending,
+        identity,
+        session,
+        human_proof,
+        now,
+        Some(fault),
+    )
+}
+
+fn checked_browser_confirmation(
+    db: &rusqlite::Connection,
+    runtime: &Runtime,
+    pending: &Pending,
+    identity: &iap::Verified,
+    session: &str,
+    original: &crate::oauth::fresh_auth::CredentialContextData,
+    now: i64,
+) -> Result<Option<issuance::StoredConfirmation>> {
+    if issuance::load(db, &pending.invocation)?.is_none() {
+        let exists: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM day2_invocations WHERE id=?1)",
+            [&pending.invocation],
+            |row| row.get(0),
+        )?;
+        ensure!(!exists, "credential invocation approval missing");
+        return Ok(None);
+    }
+    let record = issuance::require_runtime_record(db, runtime, &pending.invocation)?;
+    let issuance::ConfirmationOrigin::Credential(context) = &record.original else {
+        anyhow::bail!("genuine credential approval required");
+    };
+    let proof = &record.confirmation;
+    ensure!(
+        proof.approved_at <= now && now < proof.expires_at,
+        "credential approval not current"
+    );
+    ensure!(
+        context == original
+            && proof.operation == pending.operation
+            && proof.actor == pending.actor
+            && proof.actor == identity.email
+            && proof.subject == identity.subject
+            && proof.session == session
+            && proof.input == pending.input
+            && proof.family == pending.family
+            && proof.intent == pending.intent
+            && proof.artifact == pending.artifact
+            && proof.authority == pending.authority
+            && proof.binding == pending.binding,
+        "credential approval cannot be retargeted"
+    );
+    Ok(Some(record))
+}
+
+fn confirm_inner(
+    runtime: &Runtime,
+    pending: &Pending,
+    identity: &iap::Verified,
+    session: &str,
+    human_proof: &crate::oauth::fresh_auth::VerifiedAuthTime,
+    now: i64,
+    #[cfg(test)] fault: Option<ConfirmationFault>,
+) -> Result<crate::protocol::Outcome> {
+    let original = human_proof.credential_confirmation_context(
+        &fresh_intent(runtime, pending, identity)?,
+        identity,
+        now,
+    )?;
+    let now = human_proof.observe_current(now)?;
     let authenticated_at = human_proof.authenticated_at();
     ensure!(
         identity.email == pending.actor
             && authenticated_at > pending.created_at
             && authenticated_at <= now
-            && now - authenticated_at <= 300
+            && now
+                .checked_sub(authenticated_at)
+                .is_some_and(|seconds| seconds <= 300)
             && now < pending.expires_at,
         "fresh credential authentication required"
     );
     // Key-provider I/O completes before acquiring the business writer lock.
     let mut db = open(runtime.db())?;
     let read = db.transaction()?;
+    let current = load(&read, &pending.attempt)?.context("credential intent missing")?;
+    ensure!(
+        current.challenge()? == pending.challenge()?,
+        "credential intent changed"
+    );
+    // Unknown initial commit is reconciled by the approval row FIRST. An absent
+    // invocation alone never authorizes replacement or a renewed approval.
+    let captured =
+        checked_browser_confirmation(&read, runtime, pending, identity, session, &original, now)?
+            .map(|record| record.commitment);
     let active =
         authority_state::authorize_in(&read, runtime, &pending.operation, &identity.email)?;
     let selected = active
@@ -319,6 +427,12 @@ pub(crate) fn confirm(
         .credentials
         .get(&pending.family)
         .context("credential family inactive")?;
+    ensure!(
+        active.stamp == pending.authority
+            && runtime.artifact().id() == pending.artifact
+            && Digest::of(&selected.binding)? == pending.binding,
+        "credential authority changed"
+    );
     read.commit()?;
     let ready = runtime.credential_authority()?.prepare(
         &selected.binding,
@@ -359,15 +473,23 @@ pub(crate) fn confirm(
         now,
     )?;
     human_proof.require_current(now)?;
-    if let Some(proof) = issuance::load(&tx, &pending.invocation)? {
+    if let Some(record) =
+        checked_browser_confirmation(&tx, runtime, pending, identity, session, &original, now)?
+    {
+        let proof = &record.confirmation;
         ensure!(
-            proof.session == session
-                && proof.subject == identity.subject
+            captured
+                .as_ref()
+                .is_none_or(|digest| digest == &record.commitment)
                 && proof.binding == ready.binding
                 && proof.security_epoch == ready.security_epoch,
             "credential approval cannot be retargeted"
         );
     } else {
+        ensure!(
+            captured.is_none(),
+            "credential approval disappeared during preparation"
+        );
         let confirmation = Confirmation {
             invocation: pending.invocation.clone(),
             operation: pending.operation.clone(),
@@ -386,11 +508,21 @@ pub(crate) fn confirm(
             expires_at: pending.expires_at.min(human_proof.deadline()?),
         };
         tx.execute(
-            "INSERT INTO day2_credential_confirmations VALUES (?1,?2)",
-            params![pending.invocation, serde_json::to_string(&confirmation)?],
+            "INSERT INTO day2_credential_confirmations (invocation,confirmation) VALUES (?1,?2)",
+            params![
+                pending.invocation,
+                issuance::encode_record(
+                    confirmation,
+                    issuance::ConfirmationOrigin::Credential(original),
+                )?
+            ],
         )?;
     }
     tx.commit()?;
+    #[cfg(test)]
+    if matches!(fault, Some(ConfirmationFault::AfterConfirmationCommit)) {
+        anyhow::bail!("simulated_process_loss");
+    }
     let now = human_proof.observe_current(now)?;
     human_proof.require_intent(&fresh_intent(runtime, pending, identity)?, identity)?;
     runtime.invoke_verified(
@@ -416,7 +548,7 @@ pub(crate) fn deliver(
     acknowledge: bool,
 ) -> Result<Option<String>> {
     human_proof.require_intent(&fresh_intent(runtime, pending, identity)?, identity)?;
-    human_proof.require_current(now)?;
+    let now = human_proof.observe_current(now)?;
     let mut db = open(runtime.db())?;
     let tx = crate::write_queue::immediate(&mut db)?;
     let active = authority_state::authorize_in(&tx, runtime, &pending.operation, &identity.email)?;
@@ -425,7 +557,15 @@ pub(crate) fn deliver(
         .credentials
         .get(&pending.family)
         .context("credential family inactive")?;
-    let proof = issuance::load(&tx, &pending.invocation)?.context("credential approval missing")?;
+    let original = human_proof.credential_confirmation_context(
+        &fresh_intent(runtime, pending, identity)?,
+        identity,
+        now,
+    )?;
+    let record =
+        checked_browser_confirmation(&tx, runtime, pending, identity, session, &original, now)?
+            .context("credential approval missing")?;
+    let proof = &record.confirmation;
     ensure!(
         active.stamp == proof.authority
             && proof.artifact == runtime.artifact().id()

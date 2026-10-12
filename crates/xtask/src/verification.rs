@@ -1017,6 +1017,11 @@ fn configure_tests(
             "managed_credentials::issuance::tests::expired_confirmation_prevents_issuance_but_completed_receipt_is_recoverable",
             "managed_credentials::issuance::tests::native_lifecycle_is_atomic_terminal_and_recovers_after_reopen",
             "managed_credentials::issuance::tests::native_lifecycle_rejects_changed_target_and_personal_subject",
+            "managed_credentials::issuance::tests::final_selected_role_refuses_disposable_history_including_terminal_reuse",
+            "managed_credentials::issuance::tests::provider_pause_rehash_and_expiry_refuse_actual_business_commit",
+            "managed_credentials::issuance::tests::captured_fence_is_required_even_without_a_lifecycle_observation",
+            "managed_credentials::issuance::tests::two_real_executors_reuse_one_record_and_one_business_transition",
+            "managed_credentials::issuance::tests::compiled_worker_reply_corruption_rolls_back_exact_staging_and_recovers",
             "oauth::security_shell::tests::credential_browser_issues_native_product_commands_and_protects_delivery",
             "oauth::security_shell::tests::credential_browser_rotates_revokes_and_fences_accepted_work",
             "oauth::security_shell::tests::credential_api_admits_only_current_tokens_and_rechecks_durable_execution",
@@ -1024,6 +1029,7 @@ fn configure_tests(
             "oauth::security_shell::tests::credential_signed_google_session_keeps_original_intent_across_three_roles",
             "oauth::security_shell::tests::signed_replay::signed_google_replay_two_positive_owner_histories",
             "oauth::security_shell::tests::signed_replay::signed_google_replay_six_paired_negative_owner_histories",
+            "oauth::security_shell::tests::signed_replay::signed_credential_initial_commit_loss_retains_original_record_and_deadline",
             "oauth::security_shell::tests::credential_app_navigation_only_freezes_canonical_intent",
         ] {
             command.args(["--skip", test]);
