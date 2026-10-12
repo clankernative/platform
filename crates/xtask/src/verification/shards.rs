@@ -32,6 +32,8 @@ const SHARDS: &[&str] = &[
     "installation-build",
 ];
 
+pub(super) mod reuse;
+
 #[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Identity {
@@ -328,7 +330,13 @@ fn packages() -> BTreeSet<&'static str> {
         .collect()
 }
 
-pub(super) fn build(root: &Path, snapshot: &str) -> Result<()> {
+struct Targets {
+    tests: BTreeSet<(String, String, Vec<String>)>,
+    programs: BTreeSet<(String, String, Vec<String>)>,
+    members: BTreeMap<String, (String, PathBuf)>,
+}
+
+fn compiler_targets(root: &Path) -> Result<Targets> {
     let metadata = Command::new("cargo")
         .args(["metadata", "--locked", "--no-deps", "--format-version=1"])
         .current_dir(root)
@@ -391,6 +399,19 @@ pub(super) fn build(root: &Path, snapshot: &str) -> Result<()> {
         members.len() == packages().len(),
         "complete full-gate Cargo package graph required"
     );
+    Ok(Targets {
+        tests: expected,
+        programs: expected_programs,
+        members,
+    })
+}
+
+pub(super) fn build(root: &Path, snapshot: &str) -> Result<()> {
+    let Targets {
+        tests: expected,
+        programs: expected_programs,
+        members,
+    } = compiler_targets(root)?;
     let compiler = build_identity(root, snapshot)?;
     let directories = members.values().cloned().collect();
     if std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true") {
@@ -901,28 +922,29 @@ fn validate_receipt(prepared: &Prepared, receipt: &Receipt, shard: &str) -> Resu
     Ok(())
 }
 
-pub(super) fn join(
-    root: &Path,
-    prepared: &Prepared,
-) -> Result<(BTreeSet<String>, BTreeMap<String, u64>)> {
-    let files = fs::read_dir(root.join(RESULTS))?.collect::<std::io::Result<Vec<_>>>()?;
+fn admit_join(prepared: &Prepared, receipts: &[Receipt]) -> Result<BTreeMap<String, u64>> {
     ensure!(
-        files.len() == SHARDS.len(),
+        receipts.len() == SHARDS.len(),
         "exact complete shard receipt set required"
     );
     let mut timings = prepared.timings_ms.clone();
-    let mut receipts = Vec::new();
     for shard in SHARDS {
-        let receipt: Receipt =
-            day2::json::decode(&fs::read(root.join(RESULTS).join(format!("{shard}.json")))?)?;
-        validate_receipt(prepared, &receipt, shard)?;
+        let matching: Vec<_> = receipts
+            .iter()
+            .filter(|receipt| receipt.shard == *shard)
+            .collect();
+        ensure!(
+            matching.len() == 1,
+            "exactly one receipt per shard required"
+        );
+        let receipt = matching[0];
+        validate_receipt(prepared, receipt, shard)?;
         for (step, elapsed) in &receipt.timings_ms {
             ensure!(
                 timings.insert(step.clone(), *elapsed).is_none(),
                 "duplicate verification effect"
             );
         }
-        receipts.push(receipt);
     }
     let mut workspace = 0u64;
     for step in [
@@ -954,6 +976,26 @@ pub(super) fn join(
                 .collect(),
         "joined receipt must cover exactly the ordinary full recipe"
     );
+    Ok(timings)
+}
+
+pub(super) fn join(
+    root: &Path,
+    prepared: &Prepared,
+) -> Result<(BTreeSet<String>, BTreeMap<String, u64>)> {
+    let files = fs::read_dir(root.join(RESULTS))?.collect::<std::io::Result<Vec<_>>>()?;
+    ensure!(
+        files.len() == SHARDS.len(),
+        "exact complete shard receipt set required"
+    );
+    let mut receipts = Vec::new();
+    for shard in SHARDS {
+        let receipt: Receipt =
+            day2::json::decode(&fs::read(root.join(RESULTS).join(format!("{shard}.json")))?)?;
+        receipts.push(receipt);
+    }
+    let timings = admit_join(prepared, &receipts)?;
+    let passed: BTreeSet<_> = timings.keys().cloned().collect();
     fs::write(
         root.join("artifacts/ci-verification.json"),
         serde_json::to_vec_pretty(&json!({
@@ -977,7 +1019,7 @@ pub(super) fn join(
 mod tests {
     use super::*;
 
-    fn sample_identity() -> Identity {
+    pub(super) fn sample_identity() -> Identity {
         Identity {
             checkout: "a".repeat(40),
             workspace: "/workspace/platform".into(),
@@ -990,7 +1032,7 @@ mod tests {
         }
     }
 
-    fn sample_part(part: &str) -> Result<Prepared> {
+    pub(super) fn sample_part(part: &str) -> Result<Prepared> {
         let passed = part_steps(part)?;
         Ok(Prepared {
             identity: sample_identity(),

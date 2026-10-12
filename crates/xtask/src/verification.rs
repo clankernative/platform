@@ -120,6 +120,24 @@ fn default_test_budget_seconds() -> u64 {
     DEFAULT_CAMPAIGN_BUDGET_SECONDS
 }
 
+pub fn queue_receipt(root: &Path, recipe: &str) -> Result<()> {
+    let snapshot = verification_snapshot(root, "verify")?;
+    let runner = workflows::build(root)?;
+    day2::automation::run(&runner, &[recipe], |request| {
+        let parameters: BTreeMap<String, String> = request.decode()?;
+        ensure!(
+            parameters.is_empty() && request.action == recipe,
+            "closed queue admission capability required"
+        );
+        match request.action.as_str() {
+            "verify-queue-find" => shards::reuse::find(root, &snapshot),
+            "verify-queue-admit" => shards::reuse::admit(root, &snapshot),
+            _ => bail!("unknown queue receipt capability"),
+        }
+    })?;
+    ensure_stable(root, "verify", &snapshot)
+}
+
 impl TestCampaign {
     fn budget(&self) -> Result<std::time::Duration> {
         let maximum = match self.suite.as_str() {
