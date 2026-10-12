@@ -249,18 +249,47 @@ fn preparation_steps() -> Result<BTreeSet<String>> {
     Ok(steps)
 }
 
+fn part_steps(part: &str) -> Result<BTreeSet<String>> {
+    ensure!(
+        ["all", "inputs", "tests"].contains(&part),
+        "unknown preparation part"
+    );
+    Ok(preparation_steps()?
+        .into_iter()
+        .filter(|step| match part {
+            "inputs" => !step.starts_with("test-"),
+            "tests" => step.starts_with("test-"),
+            _ => true,
+        })
+        .collect())
+}
+
+fn preparation_path(part: &str) -> Result<&'static str> {
+    match part {
+        "all" => Ok(PREPARED),
+        "inputs" => Ok("artifacts/ci-preparation-inputs.json"),
+        "tests" => Ok("artifacts/ci-preparation-tests.json"),
+        _ => anyhow::bail!("unknown preparation part"),
+    }
+}
+
 pub(super) fn save(
     root: &Path,
     snapshot: &str,
     fixtures: &BTreeMap<String, PathBuf>,
     passed: &BTreeSet<String>,
     timings: &BTreeMap<String, u64>,
+    part: &str,
 ) -> Result<()> {
     ensure!(
-        *passed == preparation_steps()?,
+        *passed == part_steps(part)?,
         "incomplete hosted verification preparation"
     );
-    let binaries: Vec<Binary> = day2::json::decode(&fs::read(root.join(BINARIES))?)?;
+    let binaries: Vec<Binary> = if part == "inputs" {
+        Vec::new()
+    } else {
+        day2::json::decode(&fs::read(root.join(BINARIES))?)?
+    };
     let fixtures = fixtures
         .iter()
         .map(|(name, path)| {
@@ -277,14 +306,17 @@ pub(super) fn save(
         passed: passed.clone(),
         timings_ms: timings.clone(),
     };
-    validate_preparation(&prepared)?;
-    fs::write(root.join(PREPARED), serde_json::to_vec_pretty(&prepared)?)?;
+    validate_preparation(&prepared, part)?;
+    fs::write(
+        root.join(preparation_path(part)?),
+        serde_json::to_vec_pretty(&prepared)?,
+    )?;
     Ok(())
 }
 
-fn validate_preparation(prepared: &Prepared) -> Result<()> {
+fn validate_preparation(prepared: &Prepared, part: &str) -> Result<()> {
     ensure!(
-        prepared.passed == preparation_steps()?
+        prepared.passed == part_steps(part)?
             && prepared.timings_ms.keys().cloned().collect::<BTreeSet<_>>() == prepared.passed,
         "complete preparation effects and timings required"
     );
@@ -308,7 +340,11 @@ fn validate_preparation(prepared: &Prepared) -> Result<()> {
             .iter()
             .map(|binary| binary.package.as_str())
             .collect::<BTreeSet<_>>()
-            == packages(),
+            == if part == "inputs" {
+                BTreeSet::new()
+            } else {
+                packages()
+            },
         "all full-gate test packages required"
     );
     let unique: BTreeSet<_> = prepared
@@ -334,13 +370,47 @@ fn validate_preparation(prepared: &Prepared) -> Result<()> {
     Ok(())
 }
 
+fn combine_parts(mut inputs: Prepared, tests: Prepared, expected: &Identity) -> Result<Prepared> {
+    ensure!(
+        inputs.identity == *expected && tests.identity == *expected,
+        "preparation parts belong to another checkout, run, attempt or host"
+    );
+    validate_preparation(&inputs, "inputs")?;
+    validate_preparation(&tests, "tests")?;
+    ensure!(
+        inputs.passed.is_disjoint(&tests.passed),
+        "preparation effects must be disjoint"
+    );
+    inputs.binaries = tests.binaries;
+    inputs.passed.extend(tests.passed);
+    inputs.timings_ms.extend(tests.timings_ms);
+    validate_preparation(&inputs, "all")?;
+    Ok(inputs)
+}
+
+pub(super) fn combine(root: &Path, snapshot: &str) -> Result<()> {
+    let inputs: Prepared = day2::json::decode(&fs::read(
+        root.join("artifacts/ci-preparation-inputs.json"),
+    )?)?;
+    let tests: Prepared =
+        day2::json::decode(&fs::read(root.join("artifacts/ci-preparation-tests.json"))?)?;
+    let prepared = combine_parts(inputs, tests, &identity(root, snapshot)?)?;
+    fs::write(root.join(PREPARED), serde_json::to_vec_pretty(&prepared)?)?;
+    // Admit all transported executable bytes and every native fixture before
+    // the workflow can publish the complete workspace to runtime campaigns.
+    let prepared = load(root, snapshot)?;
+    fixtures(root, &prepared)?;
+    println!("Joined both preparation parts with all fixtures and test executables");
+    Ok(())
+}
+
 pub(super) fn load(root: &Path, snapshot: &str) -> Result<Prepared> {
     let prepared: Prepared = day2::json::decode(&fs::read(root.join(PREPARED))?)?;
     ensure!(
         prepared.identity == identity(root, snapshot)?,
         "prepared verification belongs to another checkout, run, attempt or host"
     );
-    validate_preparation(&prepared)?;
+    validate_preparation(&prepared, "all")?;
     for binary in &prepared.binaries {
         ensure!(
             digest(&fs::read(root.join(&binary.executable))?) == binary.digest,
@@ -560,6 +630,111 @@ pub(super) fn join(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample_identity() -> Identity {
+        Identity {
+            checkout: "a".repeat(40),
+            workspace: "/workspace/platform".into(),
+            run: "123".into(),
+            attempt: "1".into(),
+            host: "macos".into(),
+            architecture: "aarch64".into(),
+            workflow: "workflow".into(),
+            snapshot: "snapshot".into(),
+        }
+    }
+
+    fn sample_part(part: &str) -> Result<Prepared> {
+        let passed = part_steps(part)?;
+        Ok(Prepared {
+            identity: sample_identity(),
+            binaries: if part == "tests" {
+                packages()
+                    .into_iter()
+                    .map(|package| Binary {
+                        package: package.into(),
+                        target: package.into(),
+                        kind: vec!["lib".into()],
+                        directory: format!("crates/{package}").into(),
+                        executable: format!("target/debug/deps/{package}-test").into(),
+                        digest: "binary".into(),
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            },
+            fixtures: passed
+                .iter()
+                .filter_map(|step| step.strip_prefix("build-"))
+                .map(|fixture| (fixture.into(), "artifact".into()))
+                .collect(),
+            timings_ms: passed.iter().map(|step| (step.clone(), 100)).collect(),
+            passed,
+        })
+    }
+
+    #[test]
+    fn preparation_join_rejects_foreign_identity_and_incomplete_or_swapped_parts() -> Result<()> {
+        let complete = combine_parts(
+            sample_part("inputs")?,
+            sample_part("tests")?,
+            &sample_identity(),
+        )?;
+        assert_eq!(complete.passed, preparation_steps()?);
+        assert_eq!(complete.fixtures.len(), 20);
+        for field in [
+            "checkout",
+            "workspace",
+            "run",
+            "attempt",
+            "host",
+            "architecture",
+            "workflow",
+            "snapshot",
+        ] {
+            for part in ["inputs", "tests"] {
+                let mut value = serde_json::to_value(sample_part(part)?)?;
+                value["identity"][field] = json!("foreign");
+                let invalid = serde_json::from_value(value)?;
+                let (inputs, tests) = if part == "inputs" {
+                    (invalid, sample_part("tests")?)
+                } else {
+                    (sample_part("inputs")?, invalid)
+                };
+                assert!(combine_parts(inputs, tests, &sample_identity()).is_err());
+            }
+        }
+        for (part, field) in [
+            ("inputs", "fixtures"),
+            ("inputs", "passed"),
+            ("tests", "binaries"),
+            ("tests", "timings_ms"),
+        ] {
+            let mut value = serde_json::to_value(sample_part(part)?)?;
+            value[field] = if ["fixtures", "timings_ms"].contains(&field) {
+                json!({})
+            } else {
+                json!([])
+            };
+            let invalid = serde_json::from_value(value)?;
+            let (inputs, tests) = if part == "inputs" {
+                (invalid, sample_part("tests")?)
+            } else {
+                (sample_part("inputs")?, invalid)
+            };
+            assert!(combine_parts(inputs, tests, &sample_identity()).is_err());
+        }
+        assert!(
+            combine_parts(
+                sample_part("tests")?,
+                sample_part("inputs")?,
+                &sample_identity()
+            )
+            .is_err()
+        );
+        assert!(part_steps("unknown").is_err());
+        Ok(())
+    }
 
     #[test]
     fn workspace_partition_is_disjoint_and_exhaustive() {

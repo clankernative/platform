@@ -100,6 +100,22 @@ Verify :: [].{
 		Capability.call!("verify-prepared", "{}", host!)
 	}
 
+	prepare_part! : Str, (Str => Try(Str, Str)) => Try(Str, Str)
+	prepare_part! = |part, host!| {
+		_ = match part {
+			"inputs" => inputs!(host!)
+			"tests" => {
+				_ = Capability.call!("verify-test-build", "{}", host!)?
+				Capability.call!("verify-test-docs", "{}", host!)
+			}
+			_ => Err("unknown verification preparation part")
+		}?
+		Capability.call!("verify-prepared-part", Json.to_str({ part: part }), host!)
+	}
+
+	prepare_join! : (Str => Try(Str, Str)) => Try(Str, Str)
+	prepare_join! = |host!| Capability.call!("verify-preparation-join", "{}", host!)
+
 	shard! : Str, (Str => Try(Str, Str)) => Try(Str, Str)
 	shard! = |shard, host!| {
 		_ = match shard {

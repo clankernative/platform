@@ -739,12 +739,22 @@ fn main() -> Result<()> {
             ensure!(args.next().is_none(), "verify accepts no arguments");
             verification::execute(&root, "verify")?;
         }
-        "verify-prepare" | "verify-compose" => {
+        "verify-prepare" | "verify-prepare-join" | "verify-compose" => {
             ensure!(
                 args.next().is_none(),
                 "verification stage accepts no arguments"
             );
             verification::execute(&root, &action)?;
+        }
+        "verify-prepare-part" => {
+            let part = args
+                .next()
+                .context("usage: xtask verify-prepare-part PART")?;
+            ensure!(
+                args.next().is_none(),
+                "usage: xtask verify-prepare-part PART"
+            );
+            verification::execute(&root, &format!("verify-prepare-part-{part}"))?;
         }
         "verify-shard" => {
             let shard = args.next().context("usage: xtask verify-shard SHARD")?;
