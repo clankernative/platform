@@ -20,6 +20,7 @@ use std::{
 const PREPARED: &str = "artifacts/ci-prepared.json";
 const BINARIES: &str = "artifacts/ci-test-binaries.json";
 const BUILD_CACHE: &str = "artifacts/ci-test-build-cache.json";
+// Temporary source-edit benchmark; reverted after the hosted full measurement.
 const PROGRAM_CACHE: &str = "artifacts/ci-test-programs";
 const RESULTS: &str = "artifacts/ci-results";
 const SHARDS: &[&str] = &[
