@@ -19,6 +19,7 @@ use std::{
 
 const PREPARED: &str = "artifacts/ci-prepared.json";
 const BINARIES: &str = "artifacts/ci-test-binaries.json";
+const BUILD_CACHE: &str = "artifacts/ci-test-build-cache.json";
 const RESULTS: &str = "artifacts/ci-results";
 const SHARDS: &[&str] = &[
     "workspace-day2",
@@ -43,7 +44,7 @@ struct Identity {
     snapshot: String,
 }
 
-#[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Binary {
     package: String,
@@ -52,6 +53,99 @@ struct Binary {
     directory: PathBuf,
     executable: PathBuf,
     digest: String,
+}
+
+/// Completed compiler outputs, without any runtime outcome or run receipt.
+#[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct BuildIdentity {
+    snapshot: String,
+    workflow: String,
+    workspace: PathBuf,
+    host: String,
+    architecture: String,
+    rustc: String,
+    cargo: String,
+    cc: String,
+    environment: String,
+    cargo_configuration: BTreeMap<String, Option<String>>,
+    ci_workflow: String,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct BuildCache {
+    identity: BuildIdentity,
+    binaries: Vec<Binary>,
+}
+
+fn build_identity(root: &Path, snapshot: &str) -> Result<BuildIdentity> {
+    let version = |tool: &str, verbose: bool| -> Result<String> {
+        let mut command = Command::new(tool);
+        command.arg("--version").current_dir(root);
+        if verbose { command.arg("--verbose"); }
+        let output = command.output()?;
+        ensure!(output.status.success(), "compiler cache tool identity");
+        Ok(String::from_utf8(output.stdout)?)
+    };
+    // Hash values rather than exporting compiler environment or credential data.
+    let environment: BTreeMap<_, _> = std::env::vars().filter(|(name, _)| {
+        ["CARGO", "RUST", "CC", "CXX", "CFLAGS", "CPPFLAGS", "CMAKE", "LDFLAGS", "SDKROOT", "MACOSX_DEPLOYMENT_TARGET", "DEVELOPER_DIR", "SOURCE_DATE_EPOCH", "ImageOS", "ImageVersion"]
+            .iter().any(|prefix| name.starts_with(prefix))
+    }).collect();
+    let mut cargo_configuration = BTreeMap::new();
+    for name in [".cargo/config", ".cargo/config.toml"] {
+        let contents = match fs::read(root.join(name)) {
+            Ok(bytes) => Some(digest(&bytes)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        cargo_configuration.insert(name.into(), contents);
+    }
+    Ok(BuildIdentity {
+        snapshot: snapshot.into(),
+        workflow: day2::automation::source_digest(),
+        workspace: root.canonicalize()?,
+        host: std::env::consts::OS.into(),
+        architecture: std::env::consts::ARCH.into(),
+        rustc: version("rustc", true)?,
+        cargo: version("cargo", true)?,
+        cc: version("cc", false)?,
+        environment: digest(&serde_json::to_vec(&environment)?),
+        cargo_configuration,
+        ci_workflow: digest(&fs::read(root.join(".github/workflows/ci.yml"))?),
+    })
+}
+
+fn admit_build_cache(
+    root: &Path,
+    cache: &BuildCache,
+    identity: &BuildIdentity,
+    expected: &BTreeSet<(String, String, Vec<String>)>,
+    directories: &BTreeMap<String, PathBuf>,
+) -> Result<()> {
+    ensure!(cache.identity == *identity, "cached test compiler inputs changed");
+    let mut observed = BTreeSet::new();
+    let mut executables = BTreeSet::new();
+    for binary in &cache.binaries {
+        ensure!(
+            observed.insert((binary.package.clone(), binary.target.clone(), binary.kind.clone()))
+                && executables.insert(&binary.executable)
+                && directories.get(&binary.package) == Some(&binary.directory),
+            "cached test target identity or package directory changed"
+        );
+        ensure!(
+            binary.executable.parent() == Some(Path::new("target/debug/deps"))
+                && binary.executable.components().all(|part| matches!(part, std::path::Component::Normal(_))),
+            "cached test executable outside ordinary Cargo output"
+        );
+        let path = root.join(&binary.executable);
+        ensure!(fs::symlink_metadata(&path)?.file_type().is_file(), "cached test executable must be a regular file");
+        ensure!(path.canonicalize()? == path, "cached test output has a symlink ancestor");
+        ensure!(digest(&fs::read(path)?) == binary.digest, "cached test executable bytes changed");
+    }
+    ensure!(observed == *expected, "cached test inventory must cover every default target");
+    Ok(())
 }
 
 #[derive(Deserialize, Serialize)]
@@ -111,7 +205,7 @@ fn packages() -> BTreeSet<&'static str> {
         .collect()
 }
 
-pub(super) fn build(root: &Path) -> Result<()> {
+pub(super) fn build(root: &Path, snapshot: &str) -> Result<()> {
     let metadata = Command::new("cargo")
         .args(["metadata", "--locked", "--no-deps", "--format-version=1"])
         .current_dir(root)
@@ -153,6 +247,23 @@ pub(super) fn build(root: &Path) -> Result<()> {
         members.len() == packages().len(),
         "complete full-gate Cargo package graph required"
     );
+    let compiler = build_identity(root, snapshot)?;
+    let directories = members.values().cloned().collect();
+    if std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true") {
+        let cached = (|| -> Result<Vec<Binary>> {
+            let cache: BuildCache = day2::json::decode(&fs::read(root.join(BUILD_CACHE))?)?;
+            admit_build_cache(root, &cache, &compiler, &expected, &directories)?;
+            Ok(cache.binaries)
+        })();
+        match cached {
+            Ok(binaries) => {
+                fs::write(root.join(BINARIES), serde_json::to_vec_pretty(&binaries)?)?;
+                println!("Reusing {} admitted compiled test binaries; runtime campaigns and doc tests execute fresh", binaries.len());
+                return Ok(());
+            }
+            Err(error) => eprintln!("Completed test-output cache unavailable or invalid; compiling every default target: {error:#}"),
+        }
+    }
     // Capture Cargo's authoritative executable inventory, including empty
     // binary harnesses. No package or target selection differs from `verify`.
     let capture = tempfile::NamedTempFile::new_in(root.join("artifacts"))?;
@@ -231,6 +342,9 @@ pub(super) fn build(root: &Path) -> Result<()> {
     );
     binaries.sort_by(|left, right| left.executable.cmp(&right.executable));
     fs::write(root.join(BINARIES), serde_json::to_vec_pretty(&binaries)?)?;
+    let cache = BuildCache { identity: compiler, binaries: binaries.clone() };
+    admit_build_cache(root, &cache, &cache.identity, &expected, &directories)?;
+    fs::write(root.join(BUILD_CACHE), serde_json::to_vec_pretty(&cache)?)?;
     println!(
         "Prepared {} test binaries from all {} full-gate packages",
         binaries.len(),
@@ -630,6 +744,63 @@ pub(super) fn join(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completed_test_cache_rejects_changed_inputs_targets_paths_and_bytes() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let root = temporary.path().canonicalize()?;
+        fs::create_dir_all(root.join("target/debug/deps"))?;
+        let executable = PathBuf::from("target/debug/deps/example-test");
+        fs::write(root.join(&executable), b"compiled output")?;
+        let identity = BuildIdentity {
+            snapshot: "snapshot".into(), workflow: "workflow".into(), workspace: root.clone(),
+            host: "macos".into(), architecture: "aarch64".into(), rustc: "rustc pinned".into(),
+            cargo: "cargo pinned".into(), cc: "cc pinned".into(), environment: "environment".into(),
+            cargo_configuration: BTreeMap::from([(".cargo/config.toml".into(), None)]),
+            ci_workflow: "ci-workflow".into(),
+        };
+        let binary = Binary {
+            package: "example".into(), target: "example-test".into(), kind: vec!["test".into()],
+            directory: "crates/example".into(), executable: executable.clone(), digest: digest(b"compiled output"),
+        };
+        let expected = BTreeSet::from([("example".into(), "example-test".into(), vec!["test".into()])]);
+        let directories = BTreeMap::from([("example".into(), PathBuf::from("crates/example"))]);
+        let cache = BuildCache { identity, binaries: vec![binary] };
+        admit_build_cache(&root, &cache, &cache.identity, &expected, &directories)?;
+        for field in ["snapshot", "workflow", "workspace", "host", "architecture", "rustc", "cargo", "cc", "environment", "ci_workflow"] {
+            let mut value = serde_json::to_value(&cache)?;
+            value["identity"][field] = json!("foreign");
+            let invalid = serde_json::from_value(value)?;
+            assert!(admit_build_cache(&root, &invalid, &cache.identity, &expected, &directories).is_err());
+        }
+        let mut value = serde_json::to_value(&cache)?;
+        value["identity"]["cargo_configuration"] = json!({".cargo/config.toml": "changed"});
+        let invalid = serde_json::from_value(value)?;
+        assert!(admit_build_cache(&root, &invalid, &cache.identity, &expected, &directories).is_err());
+        for (field, value) in [("package", "foreign"), ("target", "foreign"), ("directory", "crates/foreign"), ("executable", "../outside"), ("digest", "changed")] {
+            let mut invalid = serde_json::to_value(&cache)?;
+            invalid["binaries"][0][field] = json!(value);
+            let invalid = serde_json::from_value(invalid)?;
+            assert!(admit_build_cache(&root, &invalid, &cache.identity, &expected, &directories).is_err());
+        }
+        for binaries in [json!([]), json!([&cache.binaries[0], &cache.binaries[0]])] {
+            let mut value = serde_json::to_value(&cache)?;
+            value["binaries"] = binaries;
+            let invalid = serde_json::from_value(value)?;
+            assert!(admit_build_cache(&root, &invalid, &cache.identity, &expected, &directories).is_err());
+        }
+        fs::write(root.join(&executable), b"tampered output")?;
+        assert!(admit_build_cache(&root, &cache, &cache.identity, &expected, &directories).is_err());
+        fs::remove_file(root.join(&executable))?;
+        assert!(admit_build_cache(&root, &cache, &cache.identity, &expected, &directories).is_err());
+        #[cfg(unix)] {
+            let outside = temporary.path().join("outside");
+            fs::write(&outside, b"compiled output")?;
+            std::os::unix::fs::symlink(&outside, root.join(&executable))?;
+            assert!(admit_build_cache(&root, &cache, &cache.identity, &expected, &directories).is_err());
+        }
+        Ok(())
+    }
 
     fn sample_identity() -> Identity {
         Identity {

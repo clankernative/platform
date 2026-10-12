@@ -235,7 +235,7 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
         let key = match request.action.as_str() {
             "verify-test-build" => {
                 ensure!(parameters.is_empty(), "test build accepts no overrides");
-                shards::build(root)?;
+                shards::build(root, &snapshot)?;
                 "test-binaries".into()
             }
             "verify-test-docs" => {
