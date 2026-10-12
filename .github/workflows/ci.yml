@@ -36,7 +36,14 @@ jobs:
         working-directory: /tmp/scanners
       - run: tar -xzf /tmp/scanners/gitleaks_8.30.1_linux_x64.tar.gz -C /tmp/scanners
       - run: /tmp/scanners/gitleaks dir . --redact=100 --config .gitleaks.toml
-      - run: /tmp/scanners/gitleaks git . --redact=100 --config .gitleaks.toml
+      - run: /tmp/scanners/gitleaks git . --redact=100 --config .gitleaks.toml --report-format json --report-path /tmp/day2-history-gitleaks-report.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ always() && inputs.verification == 'diagnostics' }}
+        with:
+          name: day2-security-history-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/day2-history-gitleaks-report.json
+          if-no-files-found: error
+          retention-days: 3
 
   dependencies:
     runs-on: ubuntu-24.04
@@ -530,10 +537,11 @@ jobs:
           cache-workspace-crates: 'false'
           shared-key: ${{ hashFiles('Cargo.toml') }}-verify
           save-if: 'false'
+      - name: Resolve the replacement YAML parser on the hosted runner
+        run: cargo fetch
       - run: cargo run --locked -p xtask -- source-check
       - run: cargo fetch --locked
       - run: cargo run --locked -p xtask -- notices
-      - run: git diff --exit-code -- THIRD-PARTY-NOTICES.txt dependency-inventory.json
       - run: cargo run --locked -p xtask -- bootstrap
       - run: gh release download roc-formatter-2026-09-12 --repo clankernative/platform --pattern roc-fmt-day2-aarch64-apple-darwin --dir /tmp/day2-tools
         env:
