@@ -61,7 +61,7 @@ Use complete hosted verification runs on fresh runners:
    compiler, manifests, lockfile, features and profile fixed.
 
 For each run, record its exact head, runner/toolchain, all verification outcomes,
-total verify job duration, initial Cargo preparation, the 28 recipe step timings,
+total verify job duration, initial Cargo preparation, the 29 recipe step timings,
 cache restore/save durations and archive size. The compiler cache action publishes
 hits, misses, non-cacheable requests, cache errors and read/write timings in its
 post-job log and summary. An idle server restart can reset these counters; an
@@ -87,7 +87,7 @@ generate and review a dependency repair when the original lockfile fails audit.
 Diagnostics never qualify a source or replace any required check.
 
 CI preparation runs two jobs concurrently. The inputs job retains the full
-recipe's formatting, CLI, twenty fixture builds and lint checks, including all
+recipe's formatting, CLI, twenty-one fixture builds and lint checks, including all
 fixture dependency ordering. The tests job compiles the ordinary complete Cargo
 test package and target graph once, then runs documentation tests. The preparation
 join requires both exact current-run manifests, disjoint and exhaustive effects,
@@ -108,7 +108,7 @@ The required `verify` job fails if preparation or any campaign fails or skips.
 Its native admission also requires all seven receipts from the same checkout,
 source snapshot, workflow, run attempt, host and workspace path, plus unchanged
 test executable hashes and admitted fixtures. Missing test targets, effects or
-timings prevent a full receipt. It joins the original 28 steps and twenty fixtures;
+timings prevent a full receipt. It joins all 29 steps and twenty-one fixtures;
 the combined workspace campaign retains its original 12,600-second budget.
 Rerun the entire workflow when retrying: partial job reruns cannot mix prepared
 artifacts and successful receipts from different attempts.
