@@ -75,6 +75,17 @@ gate establishes correctness; a cache hit rate alone does not establish faster C
 
 ## Hosted verification campaigns
 
+The secret scan and dependency audit finish before CI starts ordinary compilation
+or looks up a main-push queue receipt. If either fails, preparation and runtime
+campaigns do not allocate runners. The required `verify` job still runs and fails
+its admission check; skipped preparation cannot produce a successful full check.
+This avoids spending macOS compilation time on already-rejected changes. Passing
+runs retain the full gate and incur the initial security-check wait.
+
+Hosted `diagnostics` remains independent of those checks so maintainers can
+generate and review a dependency repair when the original lockfile fails audit.
+Diagnostics never qualify a source or replace any required check.
+
 CI preparation runs two jobs concurrently. The inputs job retains the full
 recipe's formatting, CLI, twenty fixture builds and lint checks, including all
 fixture dependency ordering. The tests job compiles the ordinary complete Cargo
