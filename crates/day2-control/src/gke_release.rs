@@ -5,10 +5,10 @@ use crate::{
     journal::{Journal, RecoveryMode},
     kubernetes_conformance::{GkeKubernetesProbe, GkeServingBinding},
     provider_evidence::{DeploymentIncarnation, ReadBarrier, RevisionToken, StateEvidence},
-    release::{ReleaseApproval, SecretObservation},
+    release::{ReleaseApproval, ReleaseTarget, SecretObservation},
     release_execution::{
-        Capabilities, ProviderRefusal, ReleaseEffectResult, ReleaseExecutionPlan, ReleaseLease,
-        ReleaseObservation, ReleaseObserved, ReleaseOperation,
+        Capabilities, ProviderRefusal, ReleaseEffectResult, ReleaseExecutionHost,
+        ReleaseExecutionPlan, ReleaseLease, ReleaseObservation, ReleaseObserved, ReleaseOperation,
     },
     secrets::{AccessTokenProvider, SecretVersion},
     serving_publication::Publication,
@@ -36,10 +36,11 @@ const REVISION: &str = "day2.dev/selection-revision";
 const SNAPSHOT: &str = "day2.dev/selection-digest";
 const CREDENTIALS_SHA256: &str = "day2.dev/credentials-sha256";
 const ARTIFACT: &str = "day2.dev/artifact";
-/// Stamped on the StatefulSet by `day2 platform maintain activate` once the
-/// target artifact is activated in the app's database. Only that artifact may
-/// replace the live one; the release that does so consumes the stamp.
-const ACTIVATED: &str = "day2.dev/activated-artifact";
+/// Stamped on the StatefulSet by `day2 platform maintain activate` with the
+/// target app image, once that image's build opened a rehearsed copy of the
+/// store and its artifact is activated in the app's database. Only that image
+/// may replace the live one; the release that does so consumes the stamp.
+const ACTIVATED: &str = "day2.dev/activated-image";
 const CSI_DRIVER: &str = "secrets-store-gke.csi.k8s.io";
 const OPERATOR_INSTANCE: &str = "operator-instance.json";
 const PROVISIONING: &str = "provisioning.json";
@@ -591,15 +592,28 @@ impl GkeReleaseProvider {
     }
 
     /// Before any write: once initialized, the app's database (not the
-    /// instance) selects the served artifact, so a release may change the
-    /// artifact only onto state activated for it. Returns whether the release
-    /// consumes the activation stamp and restores the profile's one replica.
+    /// instance) selects the served artifact, and the image's day2-serve
+    /// admits and upgrades the store when it starts. A new image, even of the
+    /// live artifact (another platform build), may therefore replace the live
+    /// one only after `maintain activate` rehearsed its store admission and
+    /// activated its artifact. Returns whether the release consumes the
+    /// activation stamp and restores the profile's one replica.
     fn admit(&self, controller: &Value, lease: &ReleaseLease) -> Result<bool> {
         let candidate = lease.approval.artifact.as_str();
+        let image = self.deployment.image.as_str();
         let live = controller["spec"]["template"]["metadata"]["annotations"][ARTIFACT]
             .as_str()
             .context("gke_release_artifact_annotation_missing")?;
-        if live == candidate {
+        let live_image = controller["spec"]["template"]["spec"]["containers"]
+            .as_array()
+            .and_then(|containers| {
+                containers
+                    .iter()
+                    .find(|container| container["name"] == "day2")
+            })
+            .and_then(|container| container["image"].as_str())
+            .context("gke_release_container_missing")?;
+        if live_image == image && live == candidate {
             ensure!(
                 controller["spec"]["replicas"] == 1,
                 "gke_release_topology_changed"
@@ -607,9 +621,9 @@ impl GkeReleaseProvider {
             return Ok(false);
         }
         let activated = controller["metadata"]["annotations"][ACTIVATED].as_str();
-        if activated != Some(candidate) {
+        if activated != Some(image) {
             return Err(ProviderRefusal(format!(
-                "release_artifact_requires_activation: {} serves {live}{}; run `day2 platform maintain activate` for {candidate} first",
+                "release_image_requires_activation: {} serves {live_image} ({live}){}; run `day2 platform maintain activate` for {image} ({candidate}) first",
                 self.deployment.serving.target.app.as_str(),
                 activated.map_or_else(String::new, |other| format!(
                     " and is activated for {other}"
@@ -1038,8 +1052,22 @@ impl GkeReleaseProvider {
         ))
     }
 
-    /// Conditional per-destination writes plus a final durable acknowledgment.
-    /// A crash after any destination leaves the activation intent retryable.
+    /// Accept `plan` through `host` and record this candidate's exact deployment
+    /// input, so later publications reach its serving ConfigMap while its
+    /// release is active, whether or not it is a candidate then.
+    pub fn accept(
+        &self,
+        host: &ReleaseExecutionHost,
+        plan: &ReleaseExecutionPlan,
+    ) -> Result<Digest> {
+        let execution = host.accept(plan)?;
+        Journal::open(&self.journal)?
+            .record_release_deployment_input(&execution, &serde_json::to_vec(&self.deployment)?)?;
+        Ok(execution)
+    }
+
+    /// One conditional destination write with exact readback; `publish_scope`
+    /// acknowledges the journal intent after every destination succeeds.
     pub fn publish(&self, publication: &Publication) -> Result<()> {
         publication.require_scope(&self.deployment.serving.target)?;
         publication
@@ -1132,6 +1160,41 @@ impl GkeReleaseProvider {
         );
         Ok(())
     }
+}
+
+/// Publish the scope's current serving snapshot to the serving ConfigMap of
+/// every app it selects (each app of `scope` with an active release), as that
+/// app's active release recorded it, then acknowledge the journal intent.
+/// Every destination is resolved before the first write. A failure leaves the
+/// intent pending; a rerun rewrites the same revision idempotently, and
+/// `GkeReleaseProvider::publish` refuses to replace a newer revision.
+pub fn publish_scope(
+    journal: &Path,
+    scope: &[ReleaseTarget],
+    publisher: impl Fn(Deployment) -> Result<GkeReleaseProvider>,
+) -> Result<Publication> {
+    let mut journal = Journal::open(journal)?;
+    let publication = journal.serving_publication(scope)?;
+    let mut destinations = Vec::new();
+    for selected in publication.snapshot.selections() {
+        let deployment: Deployment =
+            day2::json::decode(&journal.active_release_deployment_input(selected)?)?;
+        deployment.validate(&selected.binding.artifact)?;
+        ensure!(
+            deployment.serving.target == selected.binding.target
+                && deployment.serving.deployment == selected.binding.deployment,
+            "gke_publication_destination_changed"
+        );
+        destinations.push(publisher(deployment)?);
+    }
+    for destination in &destinations {
+        destination.publish(&publication)?;
+    }
+    ensure!(
+        journal.acknowledge_serving_publication(&publication)?,
+        "release_publication_superseded"
+    );
+    Ok(publication)
 }
 
 fn projected(
@@ -1255,9 +1318,9 @@ impl Capabilities for GkeReleaseProvider {
                     if activated {
                         // Activation left the app stopped. Consume the stamp the
                         // resourceVersion test pins, so it cannot authorize a
-                        // later artifact change.
+                        // later image change.
                         patch.extend([
-                            json!({"op":"remove","path":"/metadata/annotations/day2.dev~1activated-artifact"}),
+                            json!({"op":"remove","path":"/metadata/annotations/day2.dev~1activated-image"}),
                             json!({"op":"replace","path":"/spec/replicas","value":1}),
                         ]);
                     }

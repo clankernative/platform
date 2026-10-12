@@ -11,6 +11,8 @@ Maintain :: [].{
 		_ = Capability.call!("maintenance-open", Json.to_str({ operation, request }), host!)?
 		_ = Capability.call!("maintenance-artifacts", "{}", host!)?
 		_ = Capability.call!("maintenance-stop", "{}", host!)?
+		# The pod's scratch is sized from the store on the stopped volume.
+		_ = Capability.call!("maintenance-measure", "{}", host!)?
 		_ = Capability.call!("maintenance-pod", "{}", host!)?
 		_ = match operation {
 			"inspect" => workflow!("authority-inspect", host!)?
@@ -24,16 +26,25 @@ Maintain :: [].{
 			"activate" => {
 				_ = backup!(host!)?
 				_ = Capability.call!("maintenance-migration", Json.to_str({ step: "plan" }), host!)?
+				# The target build opens a migrated, activated copy of the backup
+				# as day2-serve would; a store it refuses stops here, restored.
+				_ = Capability.call!("maintenance-admission", "{}", host!)?
 				_ = Capability.call!("maintenance-confirm", "{}", host!)?
 				# Past the fence the old image never restarts on this volume.
 				_ = Capability.call!("maintenance-fence", "{}", host!)?
 				_ = Capability.call!("maintenance-migration", Json.to_str({ step: "apply" }), host!)?
 				_ = workflow!("authority-inspect", host!)?
 				_ = workflow!("authority-activate", host!)?
-				# Only now may a release roll the app to the activated artifact.
+				# Only now may a release or an apply roll the app to the target image.
 				Capability.call!("maintenance-mark-activated", "{}", host!)?
 			}
-			_ => return Err("maintain operation must be inspect, backup, authority-apply or activate")
+			"mark-activated" => {
+				# Recovery when activate's own mark failed for a new artifact: stamp
+				# the target image only if the database already activates its artifact.
+				_ = workflow!("authority-inspect", host!)?
+				Capability.call!("maintenance-mark-activated", "{}", host!)?
+			}
+			_ => return Err("maintain operation must be inspect, backup, authority-apply, activate or mark-activated")
 		}
 		Capability.call!("maintenance-finish", "{}", host!)
 	}

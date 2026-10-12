@@ -258,10 +258,11 @@ impl super::shell_transport::ApprovalSigner for ArtifactShellSigner {
     fn attest(
         &self,
         view: &super::shell_transport::ApprovalView,
-        session: Digest,
-        authenticated_at: i64,
+        session: &super::security_shell::ShellSession,
         now: i64,
     ) -> Result<super::external::FreshExternalApproval> {
+        session.require_approval(view, now)?;
+        let authenticated_at = session.authenticated_at();
         view.validate(&crate::iap::Verified {
             email: view.human().into(),
             subject: view.subject.clone(),
@@ -334,6 +335,8 @@ impl super::shell_transport::ApprovalSigner for ArtifactShellSigner {
             .as_ref()
             .context("OAuth shell key provider missing")?
             .load(reference, ApprovalKeyPurpose::ShellAttestation)?;
+        let now = session.observe_current(now)?;
+        session.require_approval(view, now)?;
         ensure!(
             key.binding == reference.binding
                 && key.version == reference.version
@@ -346,7 +349,13 @@ impl super::shell_transport::ApprovalSigner for ArtifactShellSigner {
             view.claim.security_origin.clone(),
             view.claim.approval.clone(),
         )?
-        .attest_view(&view.claim, view.digest()?, session, authenticated_at, now)
+        .attest_view(
+            &view.claim,
+            view.digest()?,
+            session.digest(),
+            authenticated_at,
+            now,
+        )
     }
 }
 
@@ -1319,6 +1328,497 @@ pub(super) mod tests {
         fn qualify(&self) -> Result<QualifiedConnections> {
             QualifiedConnections::qualify(&self.instance, &self.artifacts, &self.catalog)
         }
+    }
+
+    /// Exact test key roles remain separated: the mounted shell can load only
+    /// attestation; the app authority owns verifier, encryption and attestation.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+    pub(in crate::oauth) struct ReplayKeyCounts {
+        pub shell_attestation: usize,
+        pub app_verifier: usize,
+        pub app_encryption: usize,
+        pub app_attestation: usize,
+    }
+
+    struct ReplayMountedKeys {
+        shell: bool,
+        selected: Vec<(ApprovalKeyRef, ApprovalKeyPurpose)>,
+        counts: Arc<std::sync::Mutex<ReplayKeyCounts>>,
+        delay: Arc<std::sync::atomic::AtomicBool>,
+        advance: Arc<dyn Fn() -> Result<()> + Send + Sync>,
+    }
+
+    impl ApprovalKeyProvider for ReplayMountedKeys {
+        fn load(
+            &self,
+            reference: &ApprovalKeyRef,
+            purpose: ApprovalKeyPurpose,
+        ) -> Result<ApprovalKeyMaterial> {
+            ensure!(
+                self.selected
+                    .iter()
+                    .any(|(expected, role)| expected == reference && *role == purpose),
+                "replay selected key binding/version/purpose changed"
+            );
+            let mut counts = self.counts.lock().unwrap();
+            match (self.shell, purpose) {
+                (true, ApprovalKeyPurpose::ShellAttestation) => counts.shell_attestation += 1,
+                (false, ApprovalKeyPurpose::CustodyVerifier) => counts.app_verifier += 1,
+                (false, ApprovalKeyPurpose::CustodyEncryption) => counts.app_encryption += 1,
+                (false, ApprovalKeyPurpose::ShellAttestation) => counts.app_attestation += 1,
+                _ => anyhow::bail!("replay shell attempted custody access"),
+            }
+            drop(counts);
+            let material = Keys::default().load(reference, purpose)?;
+            if self.shell && self.delay.swap(false, Ordering::SeqCst) {
+                (self.advance)()?;
+            }
+            Ok(material)
+        }
+    }
+
+    pub(in crate::oauth) struct MountedReplayFixture {
+        pub signer: Arc<ArtifactShellSigner>,
+        pub registry: Arc<super::super::approval_registry::StoredApprovalRegistry>,
+        pub attempt: String,
+        pub slot: String,
+        pub audience: String,
+        pub client: String,
+        original: connect::ConnectIntent,
+        callback: connect::CallbackBinding,
+        exchange: super::super::exchange::ExchangeBinding,
+        expected_account: Digest,
+        expected_scopes: Digest,
+        expected_observed: super::super::account::ProviderAccount,
+        custody: crate::managed_credentials::crypto::KeyLease,
+        counts: Arc<std::sync::Mutex<ReplayKeyCounts>>,
+        delay: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl MountedReplayFixture {
+        pub fn key_counts(&self) -> ReplayKeyCounts {
+            *self.counts.lock().unwrap()
+        }
+
+        pub fn delay_next_attestation(&self) {
+            self.delay.store(true, Ordering::SeqCst);
+        }
+
+        /// Literal scheduled owner and admitted DATA remain independent of
+        /// the post's result. Key use here is private cryptographic observation
+        /// with the original fixture lease, not another provider acquisition.
+        pub fn verify_rows(&self, db: &rusqlite::Connection) -> Result<Digest> {
+            let (intent, state, account, scope): (
+                connect::ConnectIntent,
+                String,
+                Option<String>,
+                Option<String>,
+            ) = db.query_row(
+                "SELECT slot,expected_generation,expected_epoch,proposed_generation,owner,profile,
+                    registration,callback,consent,expires_at,state,account,scope_evidence
+                 FROM oauth_connect_attempts WHERE attempt=?1",
+                [&self.attempt],
+                |row| {
+                    Ok((
+                        connect::ConnectIntent {
+                            attempt: self.attempt.clone(),
+                            slot: row.get(0)?,
+                            expected_generation: row.get(1)?,
+                            expected_epoch: row.get(2)?,
+                            proposed_generation: row.get(3)?,
+                            owner: row.get(4)?,
+                            profile: row.get(5)?,
+                            registration: row.get(6)?,
+                            callback: row.get(7)?,
+                            consent: row.get(8)?,
+                            expires_at: row.get(9)?,
+                        },
+                        row.get(10)?,
+                        row.get(11)?,
+                        row.get(12)?,
+                    ))
+                },
+            )?;
+            ensure!(
+                intent == self.original
+                    && intent.owner == "alice@example.com"
+                    && intent.expected_epoch == 1
+                    && intent.proposed_generation == 1,
+                "replay original OAuth owner/intent/epoch changed"
+            );
+            ensure!(
+                super::super::exchange::load_binding(db, &self.attempt)?.as_ref()
+                    == Some(&self.exchange),
+                "replay original OAuth registration/callback/namespace exchange changed"
+            );
+            let stored_callback: String = db.query_row(
+                "SELECT binding FROM oauth_callback_bindings WHERE attempt=?1",
+                [&self.attempt],
+                |row| row.get(0),
+            )?;
+            ensure!(
+                crate::json::decode::<connect::CallbackBinding>(stored_callback.as_bytes())?
+                    == self.callback,
+                "replay original OAuth callback/session changed"
+            );
+            let has_account = matches!(state.as_str(), "awaiting_account_approval" | "activated");
+            ensure!(
+                (account.as_deref(), scope.as_deref())
+                    == if has_account {
+                        (
+                            Some(self.expected_account.as_str()),
+                            Some(self.expected_scopes.as_str()),
+                        )
+                    } else {
+                        (None, None)
+                    },
+                "replay wrong original OAuth provider account/scopes"
+            );
+            if state == "awaiting_account_approval" {
+                let pending = super::super::custody::load_pending_external_identity(
+                    db,
+                    &self.custody,
+                    &self.original,
+                    &self.exchange,
+                    self.expected_account.as_str(),
+                    self.expected_scopes.as_str(),
+                )?
+                .context("replay original OAuth quarantine missing")?;
+                ensure!(
+                    pending.observed == self.expected_observed && pending.quarantined_at == 999,
+                    "replay wrong original OAuth provider identity"
+                );
+            }
+            let active: i64 =
+                db.query_row("SELECT count(*) FROM oauth_connection_slots", [], |row| {
+                    row.get(0)
+                })?;
+            let token_count: i64 =
+                db.query_row("SELECT count(*) FROM oauth_private_tokens", [], |row| {
+                    row.get(0)
+                })?;
+            ensure!(
+                active == i64::from(state == "activated") && token_count == active,
+                "replay OAuth publication outside original activation"
+            );
+            if active == 1 {
+                let affinity = Digest::of(&(
+                    "oauth-connection-affinity-v1",
+                    &intent.owner,
+                    &intent.profile,
+                    &intent.registration,
+                    &intent.callback,
+                    &intent.consent,
+                    self.expected_account.as_str(),
+                    self.expected_scopes.as_str(),
+                    1i64,
+                    1i64,
+                ))?;
+                let exact: i64 = db.query_row("SELECT count(*) FROM oauth_connection_slots WHERE slot=?1 AND generation=1
+                    AND token_version=1 AND security_epoch=1 AND profile=?2 AND account=?3 AND affinity=?4 AND status='active'",
+                    rusqlite::params![self.slot,intent.profile,self.expected_account.as_str(),affinity.as_str()],|row| row.get(0))?;
+                ensure!(exact == 1, "replay wrong OAuth slot/affinity/owner link");
+                let (identity, key, nonce, ciphertext): (String, String, Vec<u8>, Vec<u8>) = db
+                    .query_row(
+                    "SELECT identity_digest,key_version,nonce,ciphertext FROM oauth_private_tokens
+                     WHERE reference=?1 AND slot=?2 AND generation=1 AND account=?3",
+                    rusqlite::params![
+                        self.exchange.token_slot_ref,
+                        self.slot,
+                        self.expected_account.as_str()
+                    ],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )?;
+                // Serialize the identity in the owning struct's declaration
+                // order: Value maps have a different byte ordering for AAD.
+                #[derive(serde::Serialize)]
+                struct TokenIdentity<'a> {
+                    purpose: &'a str,
+                    attempt: &'a str,
+                    slot: &'a str,
+                    generation: i64,
+                    security_epoch: i64,
+                    profile: &'a BindingRef,
+                    registration: &'a BindingRef,
+                    callback: &'a ProviderCallbackRef,
+                    custody: &'a BindingRef,
+                    account: Option<&'a str>,
+                }
+                let expected = TokenIdentity {
+                    purpose: "ConnectionTokens",
+                    attempt: &intent.attempt,
+                    slot: &intent.slot,
+                    generation: 1,
+                    security_epoch: 1,
+                    profile: &self.exchange.profile,
+                    registration: &self.exchange.registration,
+                    callback: &self.exchange.callback,
+                    custody: &self.exchange.custody,
+                    account: Some(self.expected_account.as_str()),
+                };
+                ensure!(
+                    identity
+                        == Digest::of(&("oauth-private-material-identity-v1", &expected))?.as_str()
+                        && key == self.custody.encryption_version,
+                    "replay wrong OAuth token material identity"
+                );
+                let aad =
+                    serde_json::to_vec(&("oauth-private-material-aes256gcm-v1", &expected, &key))?;
+                let mut plaintext =
+                    self.custody
+                        .open_oauth(&aad, nonce.as_slice().try_into()?, &ciphertext)?;
+                let token: serde_json::Value = crate::json::decode(&plaintext)?;
+                plaintext.fill(0);
+                ensure!(
+                    token
+                        == json!({"access_token":"private-replay-provider-token","refresh_token":"private-replay-provider-refresh-token","expires_in":3600}),
+                    "replay published wrong original provider token"
+                );
+            }
+            Digest::of(&(
+                "original-oauth-owner-relations-v2",
+                &intent.owner,
+                &intent.profile,
+                &intent.registration,
+                &intent.callback,
+                &intent.consent,
+                &self.callback,
+                &self.expected_account,
+                &self.expected_scopes,
+                &self.expected_observed,
+            ))
+        }
+    }
+
+    /// Synthetic current desired data and readiness, qualified normally. No
+    /// verified-human scalar or local fake signer is returned by this helper.
+    pub(in crate::oauth) fn mounted_replay_fixture(
+        database: &std::path::Path,
+        advance: Arc<dyn Fn() -> Result<()> + Send + Sync>,
+    ) -> Result<MountedReplayFixture> {
+        use super::super::{
+            approval_registry::ApprovalAuthority, exchange, profiles::OutboundQualification,
+        };
+        let mut facts = fixture(AccountBindingPolicy::ExplicitExternalAccount)?;
+        facts.intent.owner = "alice@example.com".into();
+        facts.intent.attempt =
+            super::super::shell_transport::scoped_attempt("company", "production", "workspace")?;
+        facts.intent.expires_at = 1_300;
+        let selected = facts.qualify()?;
+        let choice = selected
+            .entries
+            .values()
+            .next()
+            .context("replay selected connection")?;
+        let slot = ConnectionSlotKey {
+            installation: choice.binding.namespace.installation.clone(),
+            environment: choice.binding.namespace.environment.clone(),
+            app: choice.binding.namespace.app.clone(),
+            requirement: choice.requirement.logical_id.clone(),
+            owner: SlotOwner::Human {
+                subject: facts.intent.owner.clone(),
+            },
+        };
+        facts.intent.slot = slot.id(&choice.requirement)?.as_str().into();
+        if let profiles::AccountBindingEvidence::ExplicitExternal { owner, .. } =
+            &mut facts.evidence.account
+        {
+            *owner = facts.intent.owner.clone();
+        }
+        let counts = Arc::new(std::sync::Mutex::new(ReplayKeyCounts::default()));
+        let delay = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let app_keys = Arc::new(ReplayMountedKeys {
+            shell: false,
+            selected: vec![
+                (
+                    choice.custody_verifier.clone(),
+                    ApprovalKeyPurpose::CustodyVerifier,
+                ),
+                (
+                    choice.custody_encryption.clone(),
+                    ApprovalKeyPurpose::CustodyEncryption,
+                ),
+                (
+                    choice.shell_attestation.clone(),
+                    ApprovalKeyPurpose::ShellAttestation,
+                ),
+            ],
+            counts: counts.clone(),
+            delay: delay.clone(),
+            advance: advance.clone(),
+        });
+        let shell_keys = Arc::new(ReplayMountedKeys {
+            shell: true,
+            selected: vec![(
+                choice.shell_attestation.clone(),
+                ApprovalKeyPurpose::ShellAttestation,
+            )],
+            counts: counts.clone(),
+            delay: delay.clone(),
+            advance,
+        });
+        let readiness = Arc::new(Readiness {
+            runtime: Digest::of(
+                facts
+                    .instance
+                    .oauth_runtime
+                    .as_ref()
+                    .context("replay runtime data")?,
+            )?,
+            current: RwLock::new(Some(facts.evidence.clone())),
+            calls: AtomicUsize::new(0),
+        });
+        let authority = Arc::new(ArtifactApprovalAuthority::with_keys(
+            facts.qualify()?,
+            readiness,
+            app_keys,
+        ));
+        let terms = authority
+            .current("workspace", &facts.intent, &facts.callback, 1_000)?
+            .context("replay app selection unavailable")?;
+        let input = || OutboundQualification {
+            intent: &facts.intent,
+            binding: &facts.callback,
+            requirement: &terms.requirement,
+            permission: &terms.permission,
+            reviewed: &terms.reviewed,
+            instance: &terms.instance,
+        };
+        let mut db = crate::store::open(database)?;
+        // Same owning core definition used by mounted app-registry fixtures;
+        // this standalone OAuth DB has no Runtime initialization entrance.
+        db.execute_batch(crate::audit::PRINCIPALS_DDL)?;
+        connect::install_schema(&db)?;
+        let prepared = exchange::prepare_authorization(
+            input(),
+            &terms.custody_key,
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~",
+        )?;
+        let code_ref = prepared.code_ref().to_owned();
+        ensure!(prepared.begin(&mut db, 997)?, "replay pending begin");
+        let raw = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("state", "0123456789abcdefghijklmnopqrstuvwxyzABCDEF")
+            .append_pair("code", "private-replay-provider-code")
+            .append_pair("iss", &terms.reviewed.issuer_url)
+            .finish();
+        let outcome = exchange::handle_qualified_callback(
+            &mut db,
+            input(),
+            super::super::outbound::CallbackIngress {
+                attempt: &facts.intent.attempt,
+                raw_query: raw.as_bytes(),
+                route: &terms.instance.registration.callback,
+                session: facts.callback.session(),
+                issuer_binding: &terms.reviewed.issuer,
+                code_ref: &code_ref,
+                now: 998,
+            },
+            &terms.custody_key,
+        )?;
+        ensure!(
+            matches!(
+                outcome,
+                super::super::outbound::CallbackOutcome::CodeAccepted { .. }
+            ),
+            "replay provider callback"
+        );
+        let permit = exchange::authorize_and_commit_qualified_exchange(&mut db, input(), 999)?
+            .context("replay provider exchange permit")?;
+        let scopes: BTreeSet<String> = terms
+            .permission
+            .action_scopes
+            .values()
+            .flatten()
+            .cloned()
+            .collect();
+        let expected_scopes = Digest::of(&(
+            "oauth-accepted-scopes-v1",
+            terms.permission.consent_digest(&terms.requirement)?,
+            &scopes,
+        ))?;
+        let body = serde_json::to_vec(
+            &json!({"access_token":"private-replay-provider-token","refresh_token":"private-replay-provider-refresh-token",
+            "token_type":"Bearer","expires_in":3600,"scope":scopes.into_iter().collect::<Vec<_>>().join(" ")}),
+        )?;
+        let response = match permit.send(|_| {
+            Ok(exchange::TokenHttpResponse {
+                status: 200,
+                content_type: "application/json".into(),
+                body,
+            })
+        }) {
+            exchange::ExchangeObservation::Response(response) => response,
+            exchange::ExchangeObservation::Uncertain(_) => {
+                anyhow::bail!("replay provider exchange uncertain")
+            }
+        };
+        let observed = super::super::account::ProviderAccount {
+            issuer: terms.reviewed.issuer_url.clone(),
+            subject: "replay-provider-subject".into(),
+            tenant: "company".into(),
+            display_email: "external@example.net".into(),
+        };
+        let prepared = response
+            .validate_external(input(), &observed)?
+            .prepare_quarantine(&terms.custody_key, 999)?;
+        ensure!(
+            super::super::external::quarantine_external(&mut db, prepared, input(), 999)?,
+            "replay quarantine"
+        );
+        let expected_account = super::super::account::provider_account_digest(&observed)?;
+        let exchange = super::super::exchange::load_binding(&db, &facts.intent.attempt)?
+            .context("replay actual exchange binding")?;
+        ensure!(
+            exchange.profile == terms.permission.profile
+                && exchange.registration == terms.instance.registration.registration
+                && exchange.callback == terms.instance.registration.callback
+                && exchange.custody == terms.instance.custody,
+            "replay original admitted exchange selection changed"
+        );
+        drop(db);
+        *counts.lock().unwrap() = ReplayKeyCounts::default();
+        let signer = Arc::new(ArtifactShellSigner {
+            state: RwLock::new(AuthorityState {
+                selected: facts.qualify()?,
+                keys: Some(shell_keys),
+            }),
+        });
+        let registry = Arc::new(
+            super::super::approval_registry::StoredApprovalRegistry::new(
+                BTreeMap::from([("workspace".into(), database.to_path_buf())]),
+                authority,
+            )?,
+        );
+        Ok(MountedReplayFixture {
+            signer,
+            registry,
+            attempt: facts.intent.attempt.clone(),
+            slot: facts.intent.slot.clone(),
+            audience: facts
+                .instance
+                .security_shell
+                .as_ref()
+                .unwrap()
+                .iap_audience
+                .clone(),
+            client: facts
+                .instance
+                .oauth_clients
+                .as_ref()
+                .unwrap()
+                .reauthentication
+                .client_id
+                .clone(),
+            original: facts.intent,
+            callback: facts.callback,
+            exchange,
+            expected_account,
+            expected_scopes,
+            expected_observed: observed,
+            custody: terms.custody_key,
+            counts,
+            delay,
+        })
     }
 
     fn reviewed_google_fixture() -> Result<Fixture> {
@@ -3063,171 +3563,246 @@ pub(super) mod tests {
     #[test]
     fn shell_signer_loads_only_attestation_and_rejects_changed_selected_presentation_before_keys()
     -> Result<()> {
+        use super::super::security_shell::FreshAuthenticator;
         use super::super::shell_transport::{ApprovalSigner, ApprovalView};
-        struct OnlyShell(AtomicUsize);
-        impl ApprovalKeyProvider for OnlyShell {
-            fn load(
-                &self,
-                reference: &ApprovalKeyRef,
-                purpose: ApprovalKeyPurpose,
-            ) -> Result<ApprovalKeyMaterial> {
-                assert_eq!(
-                    purpose,
-                    ApprovalKeyPurpose::ShellAttestation,
-                    "shell must never acquire custody keys"
-                );
-                self.0.fetch_add(1, Ordering::SeqCst);
-                Keys::default().load(reference, purpose)
+        let clock = super::super::simulation::World::new(905);
+        super::super::effects::scope(clock.clone(), || {
+            struct OnlyShell(AtomicUsize);
+            impl ApprovalKeyProvider for OnlyShell {
+                fn load(
+                    &self,
+                    reference: &ApprovalKeyRef,
+                    purpose: ApprovalKeyPurpose,
+                ) -> Result<ApprovalKeyMaterial> {
+                    assert_eq!(
+                        purpose,
+                        ApprovalKeyPurpose::ShellAttestation,
+                        "shell must never acquire custody keys"
+                    );
+                    self.0.fetch_add(1, Ordering::SeqCst);
+                    Keys::default().load(reference, purpose)
+                }
             }
-        }
-        let mut facts = fixture(AccountBindingPolicy::ExplicitExternalAccount)?;
-        facts.intent.owner = "ada@example.com".into();
-        let slot = ConnectionSlotKey {
-            installation: name("company"),
-            environment: name("production"),
-            app: name("workspace"),
-            requirement: "work_calendar".into(),
-            owner: SlotOwner::Human {
-                subject: facts.intent.owner.clone(),
-            },
-        };
-        let selected = facts.qualify()?;
-        let choice = &selected.entries[&("workspace".into(), "calendar".into())];
-        let filtered = ArtifactShellSigner::keys(&selected, Arc::new(NoTokens))?.unwrap();
-        for (reference, purpose) in [
-            (
-                &choice.custody_verifier,
-                ApprovalKeyPurpose::CustodyVerifier,
-            ),
-            (
-                &choice.custody_encryption,
-                ApprovalKeyPurpose::CustodyEncryption,
-            ),
-        ] {
-            assert!(
-                filtered.load(reference, purpose).is_err(),
-                "custody is not registered in the shell key provider"
-            );
-        }
-        let observed = super::super::account::ProviderAccount {
-            issuer: choice.reviewed.issuer_url.clone(),
-            subject: "provider-subject".into(),
-            tenant: "external-tenant".into(),
-            display_email: "external@example.net".into(),
-        };
-        let permission = choice.permission.consent_digest(&choice.requirement)?;
-        let scopes = choice
-            .permission
-            .action_scopes
-            .values()
-            .flatten()
-            .cloned()
-            .collect();
-        let mut view = ApprovalView {
-            app: "workspace".into(),
-            subject: "accounts.google.com:12345".into(),
-            requirement: choice.binding.requirement.clone(),
-            permission: permission.clone(),
-            logical_id: choice.requirement.logical_id.clone(),
-            usage: choice.requirement.usage.clone(),
-            scopes,
-            observed: observed.clone(),
-            binding_namespace: binding_namespace(&choice.binding)?,
-            terms: Digest::of(&"app-owned current readiness terms")?,
-            shell_origin: "https://security.example.com/".into(),
-            app_origin: "https://app.example.com/".into(),
-            claim: super::super::external::ApprovalClaim {
-                attempt: super::super::shell_transport::scoped_attempt(
-                    "company",
-                    "production",
-                    "workspace",
-                )?,
-                slot: slot.id(&choice.requirement)?.as_str().into(),
-                generation: 1,
-                human: facts.intent.owner.clone(),
-                account: super::super::account::provider_account_digest(&observed)?
-                    .as_str()
-                    .into(),
-                scope_evidence: String::new(),
-                challenge: Digest::of(&"one pending challenge")?,
-                security_origin: choice.binding.security_shell.clone(),
-                approval: choice.binding.account_binding.clone(),
-                quarantined_at: 4,
-            },
-        };
-        view.claim.scope_evidence =
-            Digest::of(&("oauth-accepted-scopes-v1", &permission, &view.scopes))?
-                .as_str()
-                .into();
-        let keys = Arc::new(OnlyShell(AtomicUsize::new(0)));
-        let signer = ArtifactShellSigner {
-            state: RwLock::new(AuthorityState {
-                selected,
-                keys: Some(keys.clone()),
-            }),
-        };
-        let session = Digest::of(&"fresh shell session")?;
-        let proof = signer.attest(&view, session.clone(), 5, 6)?;
-        assert_eq!(proof.preview, Some(view.digest()?));
-        assert_eq!(keys.0.load(Ordering::SeqCst), 1);
-        for mutation in 0..7 {
-            let mut wrong = view.clone();
-            match mutation {
-                0 => wrong.usage = "Changed consent wording".into(),
-                1 => wrong.claim.slot = Digest::of(&"another human slot")?.as_str().into(),
-                2 => wrong.binding_namespace = "retired_namespace".into(),
-                3 => wrong.app_origin = "https://other.example/".into(),
-                4 => wrong.claim.approval = pin("other_approval"),
-                5 => {
-                    wrong.scopes.insert("calendar.write".into());
-                    wrong.claim.scope_evidence = Digest::of(&(
-                        "oauth-accepted-scopes-v1",
-                        &wrong.permission,
-                        &wrong.scopes,
-                    ))?
+            let mut facts = fixture(AccountBindingPolicy::ExplicitExternalAccount)?;
+            facts.intent.owner = "ada@example.com".into();
+            let slot = ConnectionSlotKey {
+                installation: name("company"),
+                environment: name("production"),
+                app: name("workspace"),
+                requirement: "work_calendar".into(),
+                owner: SlotOwner::Human {
+                    subject: facts.intent.owner.clone(),
+                },
+            };
+            let selected = facts.qualify()?;
+            let choice = &selected.entries[&("workspace".into(), "calendar".into())];
+            let filtered = ArtifactShellSigner::keys(&selected, Arc::new(NoTokens))?.unwrap();
+            for (reference, purpose) in [
+                (
+                    &choice.custody_verifier,
+                    ApprovalKeyPurpose::CustodyVerifier,
+                ),
+                (
+                    &choice.custody_encryption,
+                    ApprovalKeyPurpose::CustodyEncryption,
+                ),
+            ] {
+                assert!(
+                    filtered.load(reference, purpose).is_err(),
+                    "custody is not registered in the shell key provider"
+                );
+            }
+            let observed = super::super::account::ProviderAccount {
+                issuer: choice.reviewed.issuer_url.clone(),
+                subject: "provider-subject".into(),
+                tenant: "external-tenant".into(),
+                display_email: "external@example.net".into(),
+            };
+            let permission = choice.permission.consent_digest(&choice.requirement)?;
+            let scopes = choice
+                .permission
+                .action_scopes
+                .values()
+                .flatten()
+                .cloned()
+                .collect();
+            let mut view = ApprovalView {
+                app: "workspace".into(),
+                subject: "accounts.google.com:12345".into(),
+                requirement: choice.binding.requirement.clone(),
+                permission: permission.clone(),
+                logical_id: choice.requirement.logical_id.clone(),
+                usage: choice.requirement.usage.clone(),
+                scopes,
+                observed: observed.clone(),
+                binding_namespace: binding_namespace(&choice.binding)?,
+                terms: Digest::of(&"app-owned current readiness terms")?,
+                shell_origin: "https://security.example.com/".into(),
+                app_origin: "https://app.example.com/".into(),
+                claim: super::super::external::ApprovalClaim {
+                    attempt: super::super::shell_transport::scoped_attempt(
+                        "company",
+                        "production",
+                        "workspace",
+                    )?,
+                    slot: slot.id(&choice.requirement)?.as_str().into(),
+                    generation: 1,
+                    human: facts.intent.owner.clone(),
+                    account: super::super::account::provider_account_digest(&observed)?
+                        .as_str()
+                        .into(),
+                    scope_evidence: String::new(),
+                    challenge: Digest::of(&"one pending challenge")?,
+                    security_origin: choice.binding.security_shell.clone(),
+                    approval: choice.binding.account_binding.clone(),
+                    quarantined_at: 4,
+                },
+            };
+            view.claim.scope_evidence =
+                Digest::of(&("oauth-accepted-scopes-v1", &permission, &view.scopes))?
                     .as_str()
                     .into();
+            let keys = Arc::new(OnlyShell(AtomicUsize::new(0)));
+            let signer = ArtifactShellSigner {
+                state: RwLock::new(AuthorityState {
+                    selected,
+                    keys: Some(keys.clone()),
+                }),
+            };
+            let session = Digest::of(&"fresh shell session")?;
+            let identity = crate::iap::Verified {
+                email: view.human().into(),
+                subject: view.subject.clone(),
+            };
+            let intent = super::super::fresh_auth::FreshIntent::approval(&view, &identity)?;
+            let (authenticator, headers, callback) =
+                super::super::shell_oidc::fixture_login(&identity, intent, 5, 5, 5)?;
+            let identity = authenticator.identify(&headers, 5)?;
+            let google = authenticator.complete(&callback, &identity, 5)?;
+            let fresh = super::super::security_shell::ShellSession::approval_signed_fixture(
+                &view,
+                &identity,
+                google,
+                session.clone(),
+                5,
+            )?;
+            // A refused original lifetime is terminal. Keep this negative control's
+            // proof separate from the retirement and post-key-load controls below.
+            let intent = super::super::fresh_auth::FreshIntent::approval(&view, &identity)?;
+            let (authenticator, headers, callback) =
+                super::super::shell_oidc::fixture_login(&identity, intent, 5, 5, 5)?;
+            let identity = authenticator.identify(&headers, 5)?;
+            let google = authenticator.complete(&callback, &identity, 5)?;
+            let future_entry = super::super::security_shell::ShellSession::approval_signed_fixture(
+                &view,
+                &identity,
+                google,
+                session.clone(),
+                5,
+            )?;
+            clock.advance(1);
+            let proof = signer.attest(&view, &fresh, 6)?;
+            assert_eq!(proof.preview, Some(view.digest()?));
+            assert_eq!(keys.0.load(Ordering::SeqCst), 1);
+            for mutation in 0..7 {
+                let mut wrong = view.clone();
+                match mutation {
+                    0 => wrong.usage = "Changed consent wording".into(),
+                    1 => wrong.claim.slot = Digest::of(&"another human slot")?.as_str().into(),
+                    2 => wrong.binding_namespace = "retired_namespace".into(),
+                    3 => wrong.app_origin = "https://other.example/".into(),
+                    4 => wrong.claim.approval = pin("other_approval"),
+                    5 => {
+                        wrong.scopes.insert("calendar.write".into());
+                        wrong.claim.scope_evidence = Digest::of(&(
+                            "oauth-accepted-scopes-v1",
+                            &wrong.permission,
+                            &wrong.scopes,
+                        ))?
+                        .as_str()
+                        .into();
+                    }
+                    6 => {
+                        wrong.claim.attempt = super::super::shell_transport::scoped_attempt(
+                            "company",
+                            "staging",
+                            "workspace",
+                        )?
+                    }
+                    _ => unreachable!(),
                 }
-                6 => {
-                    wrong.claim.attempt = super::super::shell_transport::scoped_attempt(
-                        "company",
-                        "staging",
-                        "workspace",
-                    )?
-                }
-                _ => unreachable!(),
+                assert!(
+                    signer.attest(&wrong, &fresh, 6).is_err(),
+                    "mutation {mutation}"
+                );
             }
-            assert!(
-                signer.attest(&wrong, session.clone(), 5, 6).is_err(),
-                "mutation {mutation}"
+            let stale = super::super::security_shell::ShellSession::approval_fixture(
+                &view,
+                &identity,
+                4,
+                session.clone(),
+            )?;
+            assert!(signer.attest(&view, &stale, 6).is_err());
+            assert!(signer.attest(&view, &future_entry, 306).is_err());
+            assert_eq!(keys.0.load(Ordering::SeqCst), 1);
+            let expiry_selected = facts.qualify()?;
+            facts
+                .instance
+                .apps
+                .get_mut("workspace")
+                .unwrap()
+                .oauth_connections
+                .clear();
+            facts.instance.oauth_runtime = None;
+            facts.instance.oauth_clients = None;
+            facts
+                .instance
+                .control
+                .as_mut()
+                .unwrap()
+                .security_epochs
+                .clear();
+            signer.replace_with_gcp(facts.qualify()?, Arc::new(NoTokens))?;
+            assert!(signer.attest(&view, &fresh, 6).is_err());
+            assert_eq!(keys.0.load(Ordering::SeqCst), 1);
+            // The preview digest includes the human's immutable IAP subject too.
+            let original_view = view.clone();
+            let digest = view.digest()?;
+            view.subject = "accounts.google.com:replacement".into();
+            assert_ne!(view.digest()?, digest);
+            struct ExpiringKey {
+                clock: Arc<super::super::simulation::World>,
+                calls: AtomicUsize,
+            }
+            impl ApprovalKeyProvider for ExpiringKey {
+                fn load(
+                    &self,
+                    reference: &ApprovalKeyRef,
+                    purpose: ApprovalKeyPurpose,
+                ) -> Result<ApprovalKeyMaterial> {
+                    assert_eq!(purpose, ApprovalKeyPurpose::ShellAttestation);
+                    self.calls.fetch_add(1, Ordering::SeqCst);
+                    self.clock.advance(300);
+                    Keys::default().load(reference, purpose)
+                }
+            }
+            let delayed = Arc::new(ExpiringKey {
+                clock: clock.clone(),
+                calls: AtomicUsize::new(0),
+            });
+            let expiring = ArtifactShellSigner {
+                state: RwLock::new(AuthorityState {
+                    selected: expiry_selected,
+                    keys: Some(delayed.clone()),
+                }),
+            };
+            assert!(expiring.attest(&original_view, &fresh, 6).is_err());
+            assert_eq!(
+                delayed.calls.load(Ordering::SeqCst),
+                1,
+                "control must reach actual key load before refusing expired original proof"
             );
-        }
-        assert!(signer.attest(&view, session.clone(), 4, 6).is_err());
-        assert!(signer.attest(&view, session.clone(), 5, 306).is_err());
-        assert_eq!(keys.0.load(Ordering::SeqCst), 1);
-        facts
-            .instance
-            .apps
-            .get_mut("workspace")
-            .unwrap()
-            .oauth_connections
-            .clear();
-        facts.instance.oauth_runtime = None;
-        facts.instance.oauth_clients = None;
-        facts
-            .instance
-            .control
-            .as_mut()
-            .unwrap()
-            .security_epochs
-            .clear();
-        signer.replace_with_gcp(facts.qualify()?, Arc::new(NoTokens))?;
-        assert!(signer.attest(&view, session, 5, 6).is_err());
-        assert_eq!(keys.0.load(Ordering::SeqCst), 1);
-        // The preview digest includes the human's immutable IAP subject too.
-        let digest = view.digest()?;
-        view.subject = "accounts.google.com:replacement".into();
-        assert_ne!(view.digest()?, digest);
-        Ok(())
+            Ok(())
+        })
     }
 }

@@ -91,34 +91,47 @@ controller UID and resourceVersion before replacing the template. A lost
 acknowledgment reconciles the exact release/effect markers and template; missing
 markers after an unknown write never authorize a blind second mutation.
 
-### Artifact changes
+### Image changes
 
 Journal activation does not activate the artifact in the app's own database.
 Once `.state/<app>.sqlite` is initialized, `day2-serve` runs only the artifact
 that database activated, not the one the instance names; a pod whose image
 carries a different artifact refuses with `active_artifact_unavailable`, naming
-both artifact IDs. The release workflow does not activate either; it changes
-the artifact only onto state that `day2 platform maintain activate`
+both artifact IDs. Every image's `day2-serve` also admits and upgrades the store
+when it starts (`deployment::admit_store`). That is the image's platform build,
+not only its artifact: the artifact ID commits to the platform sources it was
+built from, but nothing in the image binds its runtime to them, so the same
+artifact baked into another platform build's runtime image is another
+`day2-serve` with the same artifact ID. The release workflow activates neither;
+it changes the image only onto state that `day2 platform maintain activate`
 ([deploy/gke/README.md](../deploy/gke/README.md#maintenance-day2-platform-maintain))
 activated for it. Before any write (at dependency preparation and again before
-the deployment patch) the adapter compares the candidate artifact with the live
-template's `day2.dev/artifact`:
+the deployment patch) the adapter compares the candidate image and artifact
+with the live template's `day2` container image and `day2.dev/artifact`:
 
-- Equal: the release proceeds as before. The first release of the artifact the
-  day2-app stack bootstrapped is equal.
-- Different: the StatefulSet must carry `day2.dev/activated-artifact` naming
-  the candidate (`sha256:<id>`). Otherwise the release stops with
-  `release_artifact_requires_activation`, naming both artifacts, and writes
-  nothing. Run `day2 platform maintain activate` for the candidate, then rerun
-  the same configuration.
+- Both equal: the release proceeds as before. The first release of the image
+  and artifact the day2-app stack bootstrapped is equal.
+- Either different, including a new image of the live artifact: the
+  StatefulSet must carry `day2.dev/activated-image` naming the candidate image.
+  Otherwise the release stops with `release_image_requires_activation`, naming
+  both images and artifacts, and writes nothing. Run
+  `day2 platform maintain activate` with the candidate as its target, then
+  rerun the same configuration.
 
 `maintain activate` stamps that annotation only after the fresh activation of
-the target artifact succeeds, and leaves the app at zero replicas. The same
+the target artifact succeeds, and leaves the app at zero replicas. Before its
+migration fence it opens a migrated, activated copy of the store with the
+target build's own startup store admission, so a store the target would refuse
+stops the activation with `target_store_admission_refused` and the app keeps
+serving on its image. A target that keeps the running artifact goes through the
+same steps with an empty migration plan. The same
 conditional patch that rolls the template then restores `spec.replicas` to the
 profile's one replica and removes the stamp, so it cannot authorize a later
 change. A lost acknowledgment reconciles as before: the markers, template and
-one replica identify the applied patch. Infrastructure plans keep an unconsumed
-stamp.
+one replica identify the applied patch. Until then, day2-app infrastructure
+plans keep the stamp, hold the live zero replicas and warn that the activation is
+pending ([deploy/gke/README.md](../deploy/gke/README.md#activation-and-the-day2-app-stack)).
+
 
 Fresh readback requires the prepared controller incarnation, ready current pod,
 actual immutable running image, artifact guard, scope and workload identity.
@@ -131,18 +144,24 @@ revocation guarantee. See [the provider contract](https://docs.cloud.google.com/
 
 Activation atomically queues a publication revision with its receipt. After the
 selected candidates are active, the driver publishes one coherent serving
-snapshot to each candidate's named ConfigMap with conditional writes and exact
-readback. The snapshot selects every app the catalog instance binds in the
-scope that has an active release, not only this run's candidates: a host
-resolves each call target in its own snapshot, so releasing one app keeps its
-callees selected. Apps without an active release are omitted; a ConfigMap never
-receives a snapshot that does not select its own app. Other apps' ConfigMaps are
-not written and keep their previous snapshot until they are released. Only then does it acknowledge the journal intent. A crash after partial
+snapshot with conditional writes and exact readback. The snapshot selects every
+app the catalog instance binds in the scope that has an active release, not only
+this run's candidates, and goes to the serving ConfigMap of each of those apps:
+releasing a callee also updates its callers' selection. Each destination is the
+namespace and ConfigMap of that app's active release, from the candidate
+`deployment` its release recorded in the journal when it was accepted (pinned by
+the plan's input digest); an active app without that record fails publication
+closed. Apps without an active release are neither selected nor written. Every
+destination is resolved before the first write, and the driver acknowledges the
+journal intent only after all of them succeed. A crash after partial
 publication retries safely; an old acknowledgment cannot erase a newer activation
 and an older publisher cannot overwrite a newer ConfigMap revision. Calls still
-probe physical serving bindings. A single-replica rollout can interrupt calls;
-neither deployment nor publication is an atomic cloud traffic switch. There is
-no cleanup of old immutable instance or credential ConfigMaps in this increment.
+probe physical serving bindings: until a caller's pod sees the updated ConfigMap
+(the kubelet's volume sync, usually within a minute or two), its calls to a newly
+released callee fail closed with `serving_binding_changed`. A single-replica
+rollout can interrupt calls; neither deployment nor publication is an atomic
+cloud traffic switch. There is no cleanup of old immutable instance or credential
+ConfigMaps in this increment.
 
 The normal path is:
 

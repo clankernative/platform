@@ -402,7 +402,6 @@ impl LocalServer {
         host.oauth = Some(receiver);
         Ok(())
     }
-
     pub async fn serve(self, shutdown: impl Future<Output = ()> + Send + 'static) -> Result<()> {
         let (stop, stopped) = tokio::sync::watch::channel(false);
         let background = tokio::spawn(crate::host_loop::run(
@@ -420,7 +419,6 @@ impl LocalServer {
             .with_graceful_shutdown(async move {
                 shutdown.await;
                 shutdown_admission.store(false, Ordering::Release);
-                // Stop pumps immediately, not only after HTTP has drained.
                 let _ = shutdown_stop.send(true);
             })
             .await;
@@ -1447,8 +1445,28 @@ impl Host {
         }
         let stylesheet = self.appearance.stylesheet_url(&self.runtime)?;
         let script = self.appearance.script_url(&self.runtime)?;
+        let component_script = self.appearance.component_script_url(&self.runtime)?;
+        let font_policy = if self
+            .runtime
+            .artifact()
+            .contract()
+            .web_resources
+            .values()
+            .any(|resource| resource.media_type == "font/woff2")
+        {
+            format!(
+                " font-src {}{};",
+                self.origin,
+                self.appearance.resource_prefix()
+            )
+        } else {
+            String::new()
+        };
         let theme = self.appearance.theme_url()?;
-        let live = self.live_initializer(name, input)?;
+        let image_origins =
+            crate::web_templates::remote_image_origins(&content.clone().into_string())?;
+        let live = self.live_initializer(name, input, &image_origins)?;
+        let image_sources = image_origins.join(" ");
         let mut response = html_response(
             status,
             html! {
@@ -1462,6 +1480,8 @@ impl Host {
                         script type="module" src="/assets/platform/datastar-1.0.1.js" {}
                         script type="module" src="/assets/platform/forms.js" {}
                         @if let Some(script) = script { script type="module" src=(script) {} }
+                        // Component behavior has a separate admitted entrypoint.
+                        @if let Some(script) = component_script { script type="module" src=(script) {} }
                     }
                     body { (live) (content) }
                 }
@@ -1472,8 +1492,8 @@ impl Host {
         response.headers_mut().insert(
             header::CONTENT_SECURITY_POLICY,
             format!(
-                "default-src 'none'; script-src 'unsafe-eval' {}/assets/platform/datastar-1.0.1.js {}/assets/platform/forms.js {}{}; script-src-attr 'none'; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'; worker-src 'none'",
-                self.origin, self.origin, self.origin, self.appearance.resource_prefix()
+                "default-src 'none'; script-src 'unsafe-eval' {}/assets/platform/datastar-1.0.1.js {}/assets/platform/forms.js {}{}; script-src-attr 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' {};{} connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'; worker-src 'none'",
+                self.origin, self.origin, self.origin, self.appearance.resource_prefix(), image_sources, font_policy
             ).parse()?,
         );
         Ok(response)
@@ -1624,6 +1644,55 @@ impl Host {
                 }
             }
         }
+        for (name, native) in &ticket.native {
+            ensure!(
+                ticket.editable.iter().any(|editable| editable == name),
+                crate::error::Failure::InvalidTicket
+            );
+            let kind = record
+                .fields
+                .get(name)
+                .context(crate::error::Failure::InvalidTicket)?;
+            let compatible = match native.mode {
+                security::NativeMode::BooleanCheckbox => {
+                    *kind == crate::schema::Kind::Boolean && native.omitted == Value::Bool(false)
+                }
+                security::NativeMode::ListCheckbox => {
+                    crate::web_forms::scalar_list(kind)
+                        && native.omitted == Value::Array(Vec::new())
+                }
+                security::NativeMode::SetCheckbox => {
+                    crate::web_forms::carrier(kind) == crate::web_forms::Carrier::Set
+                        && native.omitted == serde_json::json!({"members": []})
+                }
+                security::NativeMode::Radio => {
+                    matches!(
+                        kind,
+                        crate::schema::Kind::Text | crate::schema::Kind::StandardText { .. }
+                    ) && native.omitted == Value::String(String::new())
+                }
+            };
+            ensure!(
+                compatible
+                    && !native.choices.is_empty()
+                    && native.choices.iter().all(|choice| !choice.is_empty())
+                    && native
+                        .choices
+                        .iter()
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .len()
+                        == native.choices.len(),
+                crate::error::Failure::InvalidTicket
+            );
+            if let Some(values) = fields.get(name) {
+                ensure!(
+                    values.iter().all(|value| native.choices.contains(value)),
+                    crate::error::Failure::UnknownFields
+                );
+            } else {
+                fields.insert(name.clone(), vec![]);
+            }
+        }
         let names: std::collections::BTreeSet<&str> = fields
             .keys()
             .chain(keyed.keys())
@@ -1641,13 +1710,21 @@ impl Host {
         let validation: Result<()> = (|| {
             for (name, value) in &fields {
                 ensure!(input.get(name).is_none(), "bound_field_override");
-                input[name] = security::field_values(
-                    record
-                        .fields
+                if value.is_empty() {
+                    let default = ticket
+                        .native
                         .get(name)
-                        .context(crate::error::Failure::UnknownFields)?,
-                    value,
-                )?;
+                        .context(crate::error::Failure::UnknownFields)?;
+                    input[name] = default.omitted.clone();
+                } else {
+                    input[name] = security::field_values(
+                        record
+                            .fields
+                            .get(name)
+                            .context(crate::error::Failure::UnknownFields)?,
+                        value,
+                    )?;
+                }
             }
             for (name, entries) in &keyed {
                 ensure!(input.get(name).is_none(), "bound_field_override");
@@ -1930,7 +2007,10 @@ fn edge_refusal(json: bool, error: &anyhow::Error) -> Response {
     crate::web_api::record_failure(error);
     let failure = crate::error::classify(error);
     let (status, message) = match failure {
-        Failure::IdentityKeysUnavailable => (
+        // Storage is reached only after the assertion verified, so telling a
+        // busy database apart from a bad assertion reveals nothing to a forger.
+        // The same request succeeds once the writer is free.
+        Failure::IdentityKeysUnavailable | Failure::StorageBusy => (
             StatusCode::SERVICE_UNAVAILABLE,
             "Sign-in could not be checked right now. Retry shortly.",
         ),
@@ -1950,6 +2030,7 @@ fn edge_refusal(json: bool, error: &anyhow::Error) -> Response {
     };
     let code = match failure {
         Failure::IdentityKeysUnavailable
+        | Failure::StorageBusy
         | Failure::MachineCallerRequiresDelegation
         | Failure::PrincipalSubjectChanged
         | Failure::Forbidden => failure,
@@ -2043,6 +2124,33 @@ mod deployment_health_tests {
         let accepting = Arc::new(AtomicBool::new(true));
         Admission(accepting.clone()).stop();
         assert!(!accepting.load(Ordering::Acquire));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_busy_database_during_sign_in_asks_for_a_retry_not_a_new_sign_in() -> Result<()> {
+        let busy = anyhow::Error::new(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            None,
+        ))
+        .context("bind verified subject");
+        let response = edge_refusal(true, &busy);
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 4096).await?)?;
+        assert_eq!(body["error"]["code"], "storage_busy");
+        // Anything else that is not a typed refusal still reads as a failed
+        // assertion, so a forger learns nothing about which check failed.
+        for error in [
+            anyhow::anyhow!("malformed assertion"),
+            anyhow::Error::new(crate::error::Failure::InvalidIdentityAssertion),
+        ] {
+            let response = edge_refusal(true, &error);
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            let body: serde_json::Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 4096).await?)?;
+            assert_eq!(body["error"]["code"], "invalid_identity_assertion");
+        }
         Ok(())
     }
 }

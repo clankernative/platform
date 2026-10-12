@@ -307,8 +307,8 @@ run "release_management_refuses_oauth_runtime" {
     } }
   }
   override_data {
-    target = data.kubernetes_resource.release
-    values = { object = {
+    target = data.kubernetes_resources.workload
+    values = { objects = [{
       metadata = { name = "day2-example-app", namespace = "app-example", annotations = {} }
       spec = { template = {
         metadata = { annotations = {
@@ -320,7 +320,7 @@ run "release_management_refuses_oauth_runtime" {
           volumes    = [{ name = "instance", configMap = { name = "day2-release-two" } }]
         }
       } }
-    } }
+    }] }
   }
   expect_failures = [terraform_data.release_admission]
 }

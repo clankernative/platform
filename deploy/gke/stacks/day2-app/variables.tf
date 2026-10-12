@@ -286,7 +286,7 @@ variable "backup_starting_deadline_seconds" {
 }
 
 variable "backup_active_deadline_seconds" {
-  description = "Hard limit of one backup Job, including a pod left Pending because the app pod is not running."
+  description = "Hard limit of one backup Job, including a pod left Pending because the app pod is not running. It must cover the online copy of each database (day2-backup fails one after 15 s without progress or after 15 s plus its size at 8 MiB/s), integrity checks, verification and upload."
   type        = number
   default     = 1800
 
@@ -303,7 +303,7 @@ variable "backup_scratch_size_limit" {
 }
 
 variable "backup_memory" {
-  description = "Memory limit of the day2-backup container. Digesting reads each database (up to 256 MiB) into memory; uploads stream."
+  description = "Memory limit of the day2-backup container. Copies, digests and uploads stream, so it does not grow with the database."
   type        = string
   default     = "1Gi"
 }

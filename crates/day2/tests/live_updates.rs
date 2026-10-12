@@ -57,16 +57,21 @@ fn live_queries_fan_out_cross_process_commits_and_reconnect_with_current_state()
 #[test]
 fn live_queries_ignore_rolled_back_duplicate_and_query_only_writes() -> Result<()> {
     let world = World::new()?;
-    let server = Server::start(&world)?;
-    let client = server.client()?;
-    let stream = Stream::open(&client, &server.live_url(&client, "/")?)?;
-    stream.until("No reports yet.")?;
+    // Faults belong to this executor. Finish the rollback before the HTTP
+    // scheduler can claim the accepted command without that fault.
+    let revision = live_revision(&world)?;
     assert_eq!(
         world
             .submit("rolled-back", Fault::FailAfterWrite(1))?
             .status,
         "failure"
     );
+    assert_eq!(live_revision(&world)?, revision);
+    assert_eq!(world.runtime.inspect()?["reports"], json!([]));
+    let server = Server::start(&world)?;
+    let client = server.client()?;
+    let stream = Stream::open(&client, &server.live_url(&client, "/")?)?;
+    stream.until("No reports yet.")?;
     let query = world.runtime.invoke(
         "reports.list",
         "alice",
@@ -396,6 +401,14 @@ fn assert_regions_only(patch: &str) {
         !patch.contains("id=\"day2-live\""),
         "live update replaced subscription: {patch}"
     );
+}
+
+fn live_revision(world: &World) -> Result<i64> {
+    Ok(rusqlite::Connection::open(world.runtime.db())?.query_row(
+        "SELECT revision FROM day2_live_revision WHERE id=1",
+        [],
+        |row| row.get(0),
+    )?)
 }
 
 fn list_query_receipts(world: &World) -> Result<i64> {

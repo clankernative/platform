@@ -576,18 +576,24 @@ impl shell_transport::ApprovalSigner for LocalShellApprovals {
     fn attest(
         &self,
         view: &shell_transport::ApprovalView,
-        session: day2_capabilities::Digest,
-        authenticated_at: i64,
+        session: &security_shell::ShellSession,
         now: i64,
     ) -> Result<external::FreshExternalApproval> {
         use security_shell::ApprovalRegistry;
+        session.require_approval(view, now)?;
         let context = self
             .0
             .resolve(view.attempt(), now)?
             .context("OAuth test approval disappeared")?;
-        context
-            .shell_key
-            .attest_view(&view.claim, view.digest()?, session, authenticated_at, now)
+        let now = session.observe_current(now)?;
+        session.require_approval(view, now)?;
+        context.shell_key.attest_view(
+            &view.claim,
+            view.digest()?,
+            session.digest(),
+            session.authenticated_at(),
+            now,
+        )
     }
 }
 

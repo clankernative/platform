@@ -39,8 +39,8 @@ Verify :: [].{
 		Capability.call!("verify-receipt", Json.to_str({ scope: "reports" }), host!)
 	}
 
-	all! : (Str => Try(Str, Str)) => Try(Str, Str)
-	all! = |host!| {
+	inputs! : (Str => Try(Str, Str)) => Try(Str, Str)
+	inputs! = |host!| {
 		_ = Capability.call!("verify-format", Json.to_str({ scope: "all" }), host!)?
 		_ = Capability.call!("verify-cli", "{}", host!)?
 		for fixture in [
@@ -68,6 +68,12 @@ Verify :: [].{
 			_ = Capability.call!("verify-build", Json.to_str({ fixture: fixture }), host!)?
 		}
 		_ = Capability.call!("verify-lint", "{}", host!)?
+		Ok("{}")
+	}
+
+	all! : (Str => Try(Str, Str)) => Try(Str, Str)
+	all! = |host!| {
+		_ = inputs!(host!)?
 		_ = Simulation.campaign!(3_664_912_422, 32, host!)?
 		# One Cargo invocation covers the former all-runtime and control package sets.
 		# Tests remain serial; the combined allowance preserves their former 9000s + 3600s ceilings.
@@ -83,6 +89,58 @@ Verify :: [].{
 		for suite in ["isolated-build", "installation-build"] {
 			_ = Capability.call!("verify-tests", Json.to_str({ suite: suite, budget_seconds: 1800.U64 }), host!)?
 		}
+		Capability.call!("verify-receipt", Json.to_str({ scope: "all" }), host!)
+	}
+
+	prepare! : (Str => Try(Str, Str)) => Try(Str, Str)
+	prepare! = |host!| {
+		_ = inputs!(host!)?
+		_ = Capability.call!("verify-test-build", "{}", host!)?
+		_ = Capability.call!("verify-test-docs", "{}", host!)?
+		Capability.call!("verify-prepared", "{}", host!)
+	}
+
+	prepare_part! : Str, (Str => Try(Str, Str)) => Try(Str, Str)
+	prepare_part! = |part, host!| {
+		_ = match part {
+			"inputs" => inputs!(host!)
+			"tests" => {
+				_ = Capability.call!("verify-test-build", "{}", host!)?
+				Capability.call!("verify-test-docs", "{}", host!)
+			}
+			_ => Err("unknown verification preparation part")
+		}?
+		Capability.call!("verify-prepared-part", Json.to_str({ part: part }), host!)
+	}
+
+	prepare_join! : (Str => Try(Str, Str)) => Try(Str, Str)
+	prepare_join! = |host!| Capability.call!("verify-preparation-join", "{}", host!)
+
+	shard! : Str, (Str => Try(Str, Str)) => Try(Str, Str)
+	shard! = |shard, host!| {
+		_ = match shard {
+			"simulation" => Simulation.campaign!(3_664_912_422, 32, host!)
+			"workspace-day2" | "workspace-control" | "workspace-other" =>
+				Capability.call!(
+					"verify-prebuilt-tests",
+					Json.to_str({ suite: shard, budget_seconds: 12_600.U64 }),
+					host!,
+				)
+			"parallel-runtime" => Capability.call!("verify-prebuilt-tests", Json.to_str({ suite: shard }), host!)
+			"isolated-build" | "installation-build" =>
+				Capability.call!(
+					"verify-prebuilt-tests",
+					Json.to_str({ suite: shard, budget_seconds: 1800.U64 }),
+					host!,
+				)
+			_ => Err("unknown verification shard")
+		}?
+		Capability.call!("verify-shard-receipt", Json.to_str({ shard: shard }), host!)
+	}
+
+	compose! : (Str => Try(Str, Str)) => Try(Str, Str)
+	compose! = |host!| {
+		_ = Capability.call!("verify-join", "{}", host!)?
 		Capability.call!("verify-receipt", Json.to_str({ scope: "all" }), host!)
 	}
 

@@ -204,8 +204,9 @@ resource "kubernetes_stateful_set_v1" "day2" {
   spec {
     # day2's runtime profile fixes replicas at 1, and day2-serve holds an
     # exclusive lock on .state/<app>.serve.lock. A StatefulSet never starts a
-    # replacement pod while the old one may still be running.
-    replicas              = 1
+    # replacement pod while the old one may still be running. A pending
+    # maintenance activation holds a release-managed app stopped (release.tf).
+    replicas              = local.replicas
     service_name          = local.service_name
     pod_management_policy = "OrderedReady"
 

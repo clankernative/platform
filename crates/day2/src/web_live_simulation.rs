@@ -5,7 +5,11 @@ use crate::host_inputs::{
     simulation::{SeededEntropy, VirtualClock},
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::VecDeque, sync::Mutex};
+use std::{
+    cell::{Cell, RefCell},
+    collections::VecDeque,
+    sync::Mutex,
+};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -17,6 +21,7 @@ struct Step {
     before: u64,
     after: u64,
     text: String,
+    new_origin: bool,
 }
 
 struct ScriptedTicks {
@@ -60,6 +65,9 @@ fn state() -> SubscriptionState {
             revision: 1,
         },
         regions: BTreeMap::from([("data".into(), "initial".into())]),
+        document_image_origins: BTreeSet::new(),
+        needs_image_refresh: false,
+        refresh_url: "/reports".into(),
         refreshed: Duration::ZERO,
         refresh: Some(Duration::from_secs(5)),
     }
@@ -81,24 +89,57 @@ fn stamp(revision: u64) -> AuthorityStamp {
     }
 }
 
-// The same pre-render / post-render authority fences as the native pump, with
-// observed values instead of database and renderer effects.
-fn evaluate(
-    state: &mut SubscriptionState,
-    step: &Step,
-    clock: &dyn Clock,
-) -> Result<Option<String>> {
-    let wall = clock.wall_time()?.as_secs().try_into()?;
-    state.authorize(&session(), &stamp(step.before), wall)?;
-    if !state.needs_refresh(step.revision, clock.monotonic()) {
-        return Ok(None);
+struct ScriptedRefreshInputs<'a> {
+    step: &'a Step,
+    clock: &'a VirtualClock,
+    rendered: Cell<bool>,
+    observations: RefCell<Vec<&'static str>>,
+}
+
+impl<'a> ScriptedRefreshInputs<'a> {
+    fn new(step: &'a Step, clock: &'a VirtualClock) -> Self {
+        Self {
+            step,
+            clock,
+            rendered: Cell::new(false),
+            observations: RefCell::new(Vec::new()),
+        }
     }
-    state.authorize(&session(), &stamp(step.after), step.wall_after.try_into()?)?;
-    state.rendered(
-        step.revision,
-        clock.monotonic(),
-        BTreeMap::from([("data".into(), step.text.clone())]),
-    )
+}
+
+impl RefreshInputs for ScriptedRefreshInputs<'_> {
+    fn session(&self, _: i64) -> Result<Session> {
+        self.observations.borrow_mut().push("session");
+        Ok(session())
+    }
+
+    fn authority(&self, _: &str) -> Result<AuthorityStamp> {
+        self.observations.borrow_mut().push("authority");
+        Ok(stamp(if self.rendered.get() {
+            self.step.after
+        } else {
+            self.step.before
+        }))
+    }
+
+    fn revision(&self) -> Result<i64> {
+        self.observations.borrow_mut().push("revision");
+        Ok(self.step.revision)
+    }
+
+    fn render(&self, _: &Session, _: i64) -> Result<RenderedPage> {
+        self.observations.borrow_mut().push("render");
+        self.rendered.set(true);
+        self.clock.0.lock().unwrap().0 = Duration::from_secs(self.step.wall_after);
+        Ok(RenderedPage {
+            regions: BTreeMap::from([("data".into(), self.step.text.clone())]),
+            image_origins: if self.step.new_origin {
+                vec!["https://new.example.test".into()]
+            } else {
+                vec![]
+            },
+        })
+    }
 }
 
 const MAX_STEPS: usize = 48;
@@ -128,15 +169,18 @@ async fn replay(steps: &[Step]) -> Result<()> {
     let mut actual = state();
     // Independent reference expectations: integer deadlines and explicit fence
     // order. It never calls needs_refresh/rendered/authorize to derive answers.
-    let (mut revision, mut refreshed_ms, mut text) = (1, 0, "initial".to_owned());
+    let (mut revision, mut refreshed_ms, mut text, mut image_notice) =
+        (1, 0, "initial".to_owned(), false);
     for step in steps {
         ticks.next().await;
         let before = serde_json::to_value((
             &actual.regions,
             actual.revision,
             actual.refreshed.as_millis(),
+            actual.needs_image_refresh,
         ))?;
-        let result = evaluate(&mut actual, step, clock.as_ref());
+        let inputs = ScriptedRefreshInputs::new(step, clock.as_ref());
+        let result = actual.refresh(&inputs, clock.as_ref());
         let due =
             step.revision != revision || step.monotonic_ms.saturating_sub(refreshed_ms) >= 5000;
         let refused = step.wall >= 700
@@ -152,30 +196,50 @@ async fn replay(steps: &[Step]) -> Result<()> {
                     &actual.regions,
                     actual.revision,
                     actual.refreshed.as_millis(),
+                    actual.needs_image_refresh
                 ))? == before,
                 "refusal mutated subscription state"
             );
             break;
         }
         let patch = result?;
-        let changed = due && (step.text != text);
+        let changed = due && (step.text != text || step.new_origin != image_notice);
         ensure!(
             patch.is_some() == changed,
             "patch decision diverged: {step:?}"
         );
         if let Some(patch) = patch {
             ensure!(!patch.contains("<form"), "live patch replaced draft");
-            ensure!(patch == step.text, "wrong changed region");
+            let expected = if step.text != text {
+                step.text.as_str()
+            } else {
+                ""
+            };
+            ensure!(patch.starts_with(expected), "wrong changed region");
+            if step.new_origin != image_notice {
+                ensure!(
+                    patch.contains("day2-live-status"),
+                    "missing CSP refresh notice"
+                );
+                ensure!(
+                    patch.contains("Some new images need a page refresh") == step.new_origin,
+                    "wrong CSP refresh notice state"
+                );
+            } else {
+                ensure!(patch == expected, "unexpected changed markup");
+            }
         }
         if due {
             revision = step.revision;
             refreshed_ms = step.monotonic_ms;
             text = step.text.clone();
+            image_notice = step.new_origin;
         }
         ensure!(
             actual.revision == revision
                 && actual.refreshed.as_millis() == u128::from(refreshed_ms)
-                && actual.regions["data"] == text,
+                && actual.regions["data"] == text
+                && actual.needs_image_refresh == image_notice,
             "reference state diverged: {step:?}"
         );
     }
@@ -212,6 +276,7 @@ fn schedule(seed: u64) -> Result<Vec<Step>> {
                 1
             },
             text: format!("version-{revision}"),
+            new_origin: bytes[3] % 2 == 0,
         });
     }
     Ok(steps)
@@ -283,6 +348,7 @@ async fn virtual_wall_expiration_monotonic_refresh_and_post_render_revocation_or
         before: 1,
         after: 1,
         text: "fresh".into(),
+        new_origin: false,
     };
     let steps = [
         base.clone(),
@@ -323,7 +389,7 @@ async fn virtual_wall_expiration_monotonic_refresh_and_post_render_revocation_or
     let original = actual.regions.clone();
     assert!(
         actual
-            .rendered(2, Duration::from_secs(10), BTreeMap::new())
+            .rendered(2, Duration::from_secs(10), BTreeMap::new(), &[])
             .is_err()
     );
     assert_eq!(actual.regions, original);
@@ -359,5 +425,62 @@ fn development_grant_uses_explicit_entropy_and_exact_600_second_wall_deadline() 
     assert!(grant.accepts(&token, 699));
     assert!(!grant.accepts(&token, 700));
     assert!(!grant.accepts("wrong", 100));
+    Ok(())
+}
+
+#[test]
+fn shared_refresh_rejects_revocation_and_expiry_during_render_before_publishing() -> Result<()> {
+    for (after, wall_after, expected_observations) in [
+        (
+            2,
+            699,
+            vec![
+                "session",
+                "authority",
+                "revision",
+                "render",
+                "session",
+                "authority",
+            ],
+        ),
+        (
+            1,
+            700,
+            vec!["session", "authority", "revision", "render", "session"],
+        ),
+    ] {
+        let step = Step {
+            wall: 699,
+            wall_after,
+            monotonic_ms: 5000,
+            revision: 2,
+            before: 1,
+            after,
+            text: "must not escape".into(),
+            new_origin: true,
+        };
+        let clock = VirtualClock(Mutex::new((
+            Duration::from_secs(step.wall),
+            Duration::from_millis(step.monotonic_ms),
+        )));
+        let inputs = ScriptedRefreshInputs::new(&step, &clock);
+        let mut actual = state();
+        let original = actual.regions.clone();
+        let error = actual.refresh(&inputs, &clock).unwrap_err();
+        assert_eq!(
+            crate::error::classify(&error).category(),
+            if after != 1 {
+                crate::error::Category::Conflict
+            } else {
+                crate::error::Category::Authentication
+            }
+        );
+        assert!(inputs.rendered.get());
+        assert_eq!(*inputs.observations.borrow(), expected_observations);
+        assert_eq!(actual.regions, original);
+        assert_eq!(actual.revision, 1);
+        assert_eq!(actual.refreshed, Duration::ZERO);
+        assert!(!actual.needs_image_refresh);
+    }
     Ok(())
 }

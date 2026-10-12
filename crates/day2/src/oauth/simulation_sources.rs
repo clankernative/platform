@@ -16,6 +16,7 @@ pub(super) const SOURCES: &[(&str, &str)] = &[
     ("effects.rs", include_str!("effects.rs")),
     ("exchange.rs", include_str!("exchange.rs")),
     ("external.rs", include_str!("external.rs")),
+    ("fresh_auth.rs", include_str!("fresh_auth.rs")),
     ("gitlab.rs", include_str!("gitlab.rs")),
     ("google.rs", include_str!("google.rs")),
     ("host.rs", include_str!("host.rs")),

@@ -26,9 +26,15 @@ pages/Routes.roc                     # typed routes and template bindings
 pages/Redirects.roc                  # optional redirect routes bound to commands
 ui/pages/                           # HTML templates
 ui/app.css                          # presentation resources
+.ui-dependencies/vanilla/            # optional explicitly locked build-only package
 assets/                             # admitted images
 model-identities.json                # committed identity history
+.clanker/                            # optional design-tool data; never captured
 ```
+
+Root-level `.clanker/` tool metadata and `.ui-dependencies/` are excluded from
+ordinary source capture. Optional assembly captures only the package closure
+explicitly locked by `ui/ui.lock.json`; raw dependency files are not served.
 
 Each operation has its own folder. The main module keeps its handler, contract,
 typed example and verification together; an adjacent `SubmitReportTypes.roc`
@@ -109,6 +115,9 @@ selection's cursor/page size, and collect inside the same transaction. The bound
 must be 1–256 rows. Overflow returns the platform's `collection_limit_exceeded`
 failure; callers never receive a truncated prefix. An invalid bound returns
 `invalid_collection_bound`. Ordinary paginated endpoints continue to use `page`.
+An invocation may record 64 steps, counting its prepared observations and each
+read, write and request; past that it fails with `transaction_step_budget`. Size
+pages that a command walks row by row to stay within that budget.
 
 Folders never register operations. An unregistered helper remains a helper, and
 deleting a registered dependency fails compilation. There is no second authored
@@ -197,19 +206,13 @@ authority change during the call fails the read closed, even when the old
 artifact still exports the pinned contract. Simulated build verification uses
 its recorded world and does not consult a live release journal.
 
-## Future app creation
+## App creation
 
-The platform's future app-creation workflow must initialize this layout and a complete
-`App.definition`. Use the canonical Reports modules as the authoring reference,
-not a fixture as a production dependency. Scaffold operation-specific request
-types, definitions, contract fields, examples and verification in the operation's folder;
-register each complete definition once. Register model identities through the
-existing identity authoring capability. Add pages, internal commands and demos only when used.
-
-Scaffolding belongs in the platform's Roc operational workflow and must invoke
-the same ordinary build and required verification. A placeholder description or
-unfinished check must not gain a bypass. There is no app-creation workflow yet; this
-is its required output convention, not an additional runtime manifest.
+Apps are currently authored manually using this layout and Reports as the canonical
+reference. Register complete operations once in `App.definition`, author model
+identities through the existing capability, and use ordinary build and required
+verification. Automated app scaffolding is deferred; optional UI assembly works
+with existing or manually authored apps.
 
 ## Connection intent
 
