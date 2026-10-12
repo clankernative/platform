@@ -27,8 +27,9 @@ The repository's `rust-toolchain.toml` remains the Rust version authority.
 
 The dependency cache is saved only after a successful job. Compiler outputs can
 be cached as compilation finishes, regardless of later test outcomes. Neither
-cache stores runtime state, exported installations, fixture artifacts or completed
-verification receipts. Isolated builds retain their cleared environment, private
+cache stores runtime state, exported installations or completed verification
+receipts. Separate source-bound caches below store completed fixture and test
+compiler outputs. Isolated builds retain their cleared environment, private
 target directories and offline Cargo inputs; they receive no cache service token
 or compiler wrapper from the outer job.
 
@@ -116,7 +117,50 @@ preparation job, including the two-part join, queues and every artifact transfer
 Include both preparation jobs in runner minutes. The parts are run-scoped outputs,
 not cross-run caches; no runtime outcome is reused by this change.
 
-References: [Cargo cache action](https://github.com/Swatinem/rust-cache),
+## Completed build outputs
+
+Preparation jobs use separate `day2-fixtures-v1` and `day2-test-outputs-v1`
+GitHub caches. Their immutable action pin and content keys include the host,
+architecture, workflow and complete reviewed source directories, manifests,
+lockfile and toolchain inputs. They have no prefix restore keys or commit/run
+IDs. Each selected preparation job saves its own outputs only on job success;
+the dependency and compiler cache namespaces remain unchanged.
+
+The fixture cache contains only content-addressed artifact directories and the
+existing source-snapshot fixture index. That index is admitted against its
+format, scope and current full input snapshot. Each selected artifact is loaded
+again, its identity checked, and complete successful artifact verification
+required. Missing, stale or invalid entries rebuild through the original fixture
+recipe. CLI checks, formatting and lint still execute.
+
+The test cache contains completed ordinary test harnesses, the normal programs
+Cargo builds for integration tests, and their compilation manifest, without run
+receipts or runtime state. Cargo’s authoritative compiler messages and fresh
+metadata must close both inventories. Supporting programs are cached separately
+from Cargo’s ordinary output directory; only admitted programs are restored to
+the exact `CARGO_BIN_EXE_*` paths with executable permissions preserved. The
+current-run preparation join and every campaign re-admit their byte digests. Native admission checks the
+current full source snapshot, embedded workflow, canonical workspace, host and
+architecture, actual Rust/Cargo/C compiler versions, compiler/profile environment
+digest and repository Cargo configuration. Fresh Cargo metadata must match every
+default target and package directory. Every executable must be unique, regular,
+within the ordinary Cargo output directory and match its recorded byte digest.
+An unavailable or invalid cache compiles the original complete target graph.
+Valid outputs produce a new current-run inventory and preparation receipt;
+documentation tests and all seven runtime campaigns execute fresh. Source changes
+invalidate the completed-output proof. No source timestamps are rewritten to
+claim Cargo freshness, and isolated/private-target builds remain uncached.
+
+These caches can reduce repeated compilation on unchanged sources, including
+queue/push checkouts with the same inputs. A small source edit may still rebuild
+the completed outputs; the existing library/compiler cache handles matching
+compilation requests. Measure complete cold/warm runs, a nonfunctional Rust edit
+and restored-tree final qualification in one cache scope before reporting a
+speedup. Retain archive sizes, save/restore costs, current-source admission,
+coverage, compiler counters and complete pipeline latency and runner work.
+
+References: [Completed output cache action](https://github.com/actions/cache/blob/0057852bfaa89a56745cba8c7296529d2fc39830/README.md),
+[Cargo cache action](https://github.com/Swatinem/rust-cache),
 [sccache action](https://github.com/mozilla-actions/sccache-action),
 [Rust cache coverage](https://github.com/mozilla/sccache/blob/main/docs/Rust.md),
 [Pinned server idle behavior](https://github.com/mozilla/sccache/blob/v0.18.0/src/server.rs),

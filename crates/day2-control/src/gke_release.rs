@@ -1197,6 +1197,25 @@ pub fn publish_scope(
     Ok(publication)
 }
 
+fn parse_projected(yaml: &str) -> Result<BTreeMap<String, String>> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct Projected {
+        resource_name: String,
+        path: String,
+    }
+    let projected: Vec<Projected> = serde_saphyr::from_str(yaml)
+        .map_err(|_| anyhow::anyhow!("gke_release_projection_invalid"))?;
+    let mut names = BTreeMap::new();
+    for value in projected {
+        ensure!(
+            names.insert(value.path, value.resource_name).is_none(),
+            "gke_release_projection_changed"
+        );
+    }
+    Ok(names)
+}
+
 fn projected(
     api: &Api<'_>,
     namespace: &str,
@@ -1212,25 +1231,11 @@ fn projected(
         projection["spec"]["provider"] == "gke",
         "gke_release_projection_changed"
     );
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase", deny_unknown_fields)]
-    struct Projected {
-        resource_name: String,
-        path: String,
-    }
-    let projected: Vec<Projected> = serde_yaml::from_str(
+    let names = parse_projected(
         projection["spec"]["parameters"]["secrets"]
             .as_str()
             .context("gke_release_projection_invalid")?,
-    )
-    .map_err(|_| anyhow::anyhow!("gke_release_projection_invalid"))?;
-    let mut names = BTreeMap::new();
-    for value in projected {
-        ensure!(
-            names.insert(value.path, value.resource_name).is_none(),
-            "gke_release_projection_changed"
-        );
-    }
+    )?;
     ensure!(names == expected, "gke_release_projection_versions_changed");
     Ok(())
 }
@@ -1370,5 +1375,52 @@ impl Capabilities for GkeReleaseProvider {
     fn verify_activation(&self, lease: &ReleaseLease) -> Result<()> {
         self.ready(lease)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod projection_tests {
+    use super::parse_projected;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn gke_projection_yaml_accepts_provider_yaml_and_json() {
+        let expected = BTreeMap::from([
+            (
+                "workload".into(),
+                "projects/12345/secrets/workload/versions/4".into(),
+            ),
+            (
+                "issuer".into(),
+                "projects/12345/secrets/issuer/versions/5".into(),
+            ),
+        ]);
+        let yaml = "- resourceName: projects/12345/secrets/workload/versions/4\n  path: workload\n- resourceName: projects/12345/secrets/issuer/versions/5\n  path: issuer\n";
+        assert_eq!(parse_projected(yaml).unwrap(), expected);
+        let json = serde_json::to_string(&serde_json::json!([
+            {"resourceName":"projects/12345/secrets/workload/versions/4","path":"workload"},
+            {"resourceName":"projects/12345/secrets/issuer/versions/5","path":"issuer"}
+        ]))
+        .unwrap();
+        assert_eq!(parse_projected(&json).unwrap(), expected);
+    }
+
+    #[test]
+    fn gke_projection_yaml_rejects_ambiguous_or_invalid_rows() {
+        for yaml in [
+            "- resourceName: pinned\n  resourceName: changed\n  path: workload\n",
+            "- resourceName: pinned\n  path: workload\n  unexpected: value\n",
+            "- resourceName: pinned\n",
+            "- resourceName: pinned\n  path: workload\n- resourceName: changed\n  path: workload\n",
+            "resourceName: pinned\npath: workload\n",
+            "- resourceName: [pinned]\n  path: workload\n",
+            "- resourceName: pinned\n  path: workload\n---\n- resourceName: changed\n  path: issuer\n",
+            "- resourceName: [\n",
+        ] {
+            assert!(
+                parse_projected(yaml).is_err(),
+                "accepted invalid projection: {yaml}"
+            );
+        }
     }
 }
