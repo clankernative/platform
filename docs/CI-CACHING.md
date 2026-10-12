@@ -133,8 +133,13 @@ again, its identity checked, and complete successful artifact verification
 required. Missing, stale or invalid entries rebuild through the original fixture
 recipe. CLI checks, formatting and lint still execute.
 
-The test cache contains completed ordinary test executables and their compilation
-manifest, without run receipts or runtime state. Native admission checks the
+The test cache contains completed ordinary test harnesses, the normal programs
+Cargo builds for integration tests, and their compilation manifest, without run
+receipts or runtime state. Cargo’s authoritative compiler messages and fresh
+metadata must close both inventories. Supporting programs are cached separately
+from Cargo’s ordinary output directory; only admitted programs are restored to
+the exact `CARGO_BIN_EXE_*` paths with executable permissions preserved. The
+current-run preparation join and every campaign re-admit their byte digests. Native admission checks the
 current full source snapshot, embedded workflow, canonical workspace, host and
 architecture, actual Rust/Cargo/C compiler versions, compiler/profile environment
 digest and repository Cargo configuration. Fresh Cargo metadata must match every

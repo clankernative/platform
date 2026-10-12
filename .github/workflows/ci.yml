@@ -118,6 +118,7 @@ jobs:
           key: day2-test-outputs-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', '.dockerignore', 'rust-toolchain.toml', '.cargo/**', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**', 'cli/**', 'fixtures/**', 'examples/**') }}
           path: |
             artifacts/ci-test-build-cache.json
+            artifacts/ci-test-programs
             target/debug/deps/*
             !target/debug/deps/*.rlib
             !target/debug/deps/*.rmeta
@@ -217,6 +218,7 @@ jobs:
           key: day2-test-outputs-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', '.dockerignore', 'rust-toolchain.toml', '.cargo/**', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**', 'cli/**', 'fixtures/**', 'examples/**') }}
           path: |
             artifacts/ci-test-build-cache.json
+            artifacts/ci-test-programs
             target/debug/deps/*
             !target/debug/deps/*.rlib
             !target/debug/deps/*.rmeta
