@@ -83,16 +83,36 @@ fn build_identity(root: &Path, snapshot: &str) -> Result<BuildIdentity> {
     let version = |tool: &str, verbose: bool| -> Result<String> {
         let mut command = Command::new(tool);
         command.arg("--version").current_dir(root);
-        if verbose { command.arg("--verbose"); }
+        if verbose {
+            command.arg("--verbose");
+        }
         let output = command.output()?;
         ensure!(output.status.success(), "compiler cache tool identity");
         Ok(String::from_utf8(output.stdout)?)
     };
     // Hash values rather than exporting compiler environment or credential data.
-    let environment: BTreeMap<_, _> = std::env::vars().filter(|(name, _)| {
-        ["CARGO", "RUST", "CC", "CXX", "CFLAGS", "CPPFLAGS", "CMAKE", "LDFLAGS", "SDKROOT", "MACOSX_DEPLOYMENT_TARGET", "DEVELOPER_DIR", "SOURCE_DATE_EPOCH", "ImageOS", "ImageVersion"]
-            .iter().any(|prefix| name.starts_with(prefix))
-    }).collect();
+    let environment: BTreeMap<_, _> = std::env::vars()
+        .filter(|(name, _)| {
+            [
+                "CARGO",
+                "RUST",
+                "CC",
+                "CXX",
+                "CFLAGS",
+                "CPPFLAGS",
+                "CMAKE",
+                "LDFLAGS",
+                "SDKROOT",
+                "MACOSX_DEPLOYMENT_TARGET",
+                "DEVELOPER_DIR",
+                "SOURCE_DATE_EPOCH",
+                "ImageOS",
+                "ImageVersion",
+            ]
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+        })
+        .collect();
     let mut cargo_configuration = BTreeMap::new();
     for name in [".cargo/config", ".cargo/config.toml"] {
         let contents = match fs::read(root.join(name)) {
@@ -124,27 +144,48 @@ fn admit_build_cache(
     expected: &BTreeSet<(String, String, Vec<String>)>,
     directories: &BTreeMap<String, PathBuf>,
 ) -> Result<()> {
-    ensure!(cache.identity == *identity, "cached test compiler inputs changed");
+    ensure!(
+        cache.identity == *identity,
+        "cached test compiler inputs changed"
+    );
     let mut observed = BTreeSet::new();
     let mut executables = BTreeSet::new();
     for binary in &cache.binaries {
         ensure!(
-            observed.insert((binary.package.clone(), binary.target.clone(), binary.kind.clone()))
-                && executables.insert(&binary.executable)
+            observed.insert((
+                binary.package.clone(),
+                binary.target.clone(),
+                binary.kind.clone()
+            )) && executables.insert(&binary.executable)
                 && directories.get(&binary.package) == Some(&binary.directory),
             "cached test target identity or package directory changed"
         );
         ensure!(
             binary.executable.parent() == Some(Path::new("target/debug/deps"))
-                && binary.executable.components().all(|part| matches!(part, std::path::Component::Normal(_))),
+                && binary
+                    .executable
+                    .components()
+                    .all(|part| matches!(part, std::path::Component::Normal(_))),
             "cached test executable outside ordinary Cargo output"
         );
         let path = root.join(&binary.executable);
-        ensure!(fs::symlink_metadata(&path)?.file_type().is_file(), "cached test executable must be a regular file");
-        ensure!(path.canonicalize()? == path, "cached test output has a symlink ancestor");
-        ensure!(digest(&fs::read(path)?) == binary.digest, "cached test executable bytes changed");
+        ensure!(
+            fs::symlink_metadata(&path)?.file_type().is_file(),
+            "cached test executable must be a regular file"
+        );
+        ensure!(
+            path.canonicalize()? == path,
+            "cached test output has a symlink ancestor"
+        );
+        ensure!(
+            digest(&fs::read(path)?) == binary.digest,
+            "cached test executable bytes changed"
+        );
     }
-    ensure!(observed == *expected, "cached test inventory must cover every default target");
+    ensure!(
+        observed == *expected,
+        "cached test inventory must cover every default target"
+    );
     Ok(())
 }
 
@@ -258,10 +299,15 @@ pub(super) fn build(root: &Path, snapshot: &str) -> Result<()> {
         match cached {
             Ok(binaries) => {
                 fs::write(root.join(BINARIES), serde_json::to_vec_pretty(&binaries)?)?;
-                println!("Reusing {} admitted compiled test binaries; runtime campaigns and doc tests execute fresh", binaries.len());
+                println!(
+                    "Reusing {} admitted compiled test binaries; runtime campaigns and doc tests execute fresh",
+                    binaries.len()
+                );
                 return Ok(());
             }
-            Err(error) => eprintln!("Completed test-output cache unavailable or invalid; compiling every default target: {error:#}"),
+            Err(error) => eprintln!(
+                "Completed test-output cache unavailable or invalid; compiling every default target: {error:#}"
+            ),
         }
     }
     // Capture Cargo's authoritative executable inventory, including empty
@@ -342,7 +388,10 @@ pub(super) fn build(root: &Path, snapshot: &str) -> Result<()> {
     );
     binaries.sort_by(|left, right| left.executable.cmp(&right.executable));
     fs::write(root.join(BINARIES), serde_json::to_vec_pretty(&binaries)?)?;
-    let cache = BuildCache { identity: compiler, binaries: binaries.clone() };
+    let cache = BuildCache {
+        identity: compiler,
+        binaries: binaries.clone(),
+    };
     admit_build_cache(root, &cache, &cache.identity, &expected, &directories)?;
     fs::write(root.join(BUILD_CACHE), serde_json::to_vec_pretty(&cache)?)?;
     println!(
@@ -753,51 +802,100 @@ mod tests {
         let executable = PathBuf::from("target/debug/deps/example-test");
         fs::write(root.join(&executable), b"compiled output")?;
         let identity = BuildIdentity {
-            snapshot: "snapshot".into(), workflow: "workflow".into(), workspace: root.clone(),
-            host: "macos".into(), architecture: "aarch64".into(), rustc: "rustc pinned".into(),
-            cargo: "cargo pinned".into(), cc: "cc pinned".into(), environment: "environment".into(),
+            snapshot: "snapshot".into(),
+            workflow: "workflow".into(),
+            workspace: root.clone(),
+            host: "macos".into(),
+            architecture: "aarch64".into(),
+            rustc: "rustc pinned".into(),
+            cargo: "cargo pinned".into(),
+            cc: "cc pinned".into(),
+            environment: "environment".into(),
             cargo_configuration: BTreeMap::from([(".cargo/config.toml".into(), None)]),
             ci_workflow: "ci-workflow".into(),
         };
         let binary = Binary {
-            package: "example".into(), target: "example-test".into(), kind: vec!["test".into()],
-            directory: "crates/example".into(), executable: executable.clone(), digest: digest(b"compiled output"),
+            package: "example".into(),
+            target: "example-test".into(),
+            kind: vec!["test".into()],
+            directory: "crates/example".into(),
+            executable: executable.clone(),
+            digest: digest(b"compiled output"),
         };
-        let expected = BTreeSet::from([("example".into(), "example-test".into(), vec!["test".into()])]);
+        let expected =
+            BTreeSet::from([("example".into(), "example-test".into(), vec!["test".into()])]);
         let directories = BTreeMap::from([("example".into(), PathBuf::from("crates/example"))]);
-        let cache = BuildCache { identity, binaries: vec![binary] };
+        let cache = BuildCache {
+            identity,
+            binaries: vec![binary],
+        };
         admit_build_cache(&root, &cache, &cache.identity, &expected, &directories)?;
-        for field in ["snapshot", "workflow", "workspace", "host", "architecture", "rustc", "cargo", "cc", "environment", "ci_workflow"] {
+        for field in [
+            "snapshot",
+            "workflow",
+            "workspace",
+            "host",
+            "architecture",
+            "rustc",
+            "cargo",
+            "cc",
+            "environment",
+            "ci_workflow",
+        ] {
             let mut value = serde_json::to_value(&cache)?;
             value["identity"][field] = json!("foreign");
             let invalid = serde_json::from_value(value)?;
-            assert!(admit_build_cache(&root, &invalid, &cache.identity, &expected, &directories).is_err());
+            assert!(
+                admit_build_cache(&root, &invalid, &cache.identity, &expected, &directories)
+                    .is_err()
+            );
         }
         let mut value = serde_json::to_value(&cache)?;
         value["identity"]["cargo_configuration"] = json!({".cargo/config.toml": "changed"});
         let invalid = serde_json::from_value(value)?;
-        assert!(admit_build_cache(&root, &invalid, &cache.identity, &expected, &directories).is_err());
-        for (field, value) in [("package", "foreign"), ("target", "foreign"), ("directory", "crates/foreign"), ("executable", "../outside"), ("digest", "changed")] {
+        assert!(
+            admit_build_cache(&root, &invalid, &cache.identity, &expected, &directories).is_err()
+        );
+        for (field, value) in [
+            ("package", "foreign"),
+            ("target", "foreign"),
+            ("directory", "crates/foreign"),
+            ("executable", "../outside"),
+            ("digest", "changed"),
+        ] {
             let mut invalid = serde_json::to_value(&cache)?;
             invalid["binaries"][0][field] = json!(value);
             let invalid = serde_json::from_value(invalid)?;
-            assert!(admit_build_cache(&root, &invalid, &cache.identity, &expected, &directories).is_err());
+            assert!(
+                admit_build_cache(&root, &invalid, &cache.identity, &expected, &directories)
+                    .is_err()
+            );
         }
         for binaries in [json!([]), json!([&cache.binaries[0], &cache.binaries[0]])] {
             let mut value = serde_json::to_value(&cache)?;
             value["binaries"] = binaries;
             let invalid = serde_json::from_value(value)?;
-            assert!(admit_build_cache(&root, &invalid, &cache.identity, &expected, &directories).is_err());
+            assert!(
+                admit_build_cache(&root, &invalid, &cache.identity, &expected, &directories)
+                    .is_err()
+            );
         }
         fs::write(root.join(&executable), b"tampered output")?;
-        assert!(admit_build_cache(&root, &cache, &cache.identity, &expected, &directories).is_err());
+        assert!(
+            admit_build_cache(&root, &cache, &cache.identity, &expected, &directories).is_err()
+        );
         fs::remove_file(root.join(&executable))?;
-        assert!(admit_build_cache(&root, &cache, &cache.identity, &expected, &directories).is_err());
-        #[cfg(unix)] {
+        assert!(
+            admit_build_cache(&root, &cache, &cache.identity, &expected, &directories).is_err()
+        );
+        #[cfg(unix)]
+        {
             let outside = temporary.path().join("outside");
             fs::write(&outside, b"compiled output")?;
             std::os::unix::fs::symlink(&outside, root.join(&executable))?;
-            assert!(admit_build_cache(&root, &cache, &cache.identity, &expected, &directories).is_err());
+            assert!(
+                admit_build_cache(&root, &cache, &cache.identity, &expected, &directories).is_err()
+            );
         }
         Ok(())
     }
