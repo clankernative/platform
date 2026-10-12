@@ -63,7 +63,7 @@ ListKeys :: [].{
 		verification: {
 			input: |_snapshot, _seed| Ok({ after: "", limit: 2 }),
 			check: |before, output, after| {
-				state = Data.snapshot(before)?
+				state = Data.verification_snapshot(before)?.live
 				# Creation and revocation each append a public receipt. Metadata lists
 				# lineages once, including terminal ones, rather than counting events.
 				clients = state.entries.keep_if(

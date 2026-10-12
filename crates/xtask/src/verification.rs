@@ -467,6 +467,7 @@ fn build_fixture(
             Some(&root.join("fixtures/http-conformance")),
         ),
         "relational" => build(root, &root.join("fixtures/relational-conformance")),
+        "lifecycle" => build(root, &root.join("fixtures/lifecycle-conformance")),
         "collection" => build(root, &root.join("fixtures/collection-conformance")),
         "credential-metadata" => {
             build(root, &root.join("fixtures/credential-metadata-conformance"))
@@ -1021,6 +1022,7 @@ fn configure_tests(
         ("reports", "DAY2_TEST_REPORTS_API_ARTIFACT"),
         ("reports-probe", "DAY2_TEST_REPORTS_PROBE_ARTIFACT"),
         ("relational", "DAY2_TEST_RELATIONAL_ARTIFACT"),
+        ("lifecycle", "DAY2_TEST_LIFECYCLE_ARTIFACT"),
         ("collection", "DAY2_TEST_COLLECTION_ARTIFACT"),
         ("delegation", "DAY2_TEST_DELEGATION_ARTIFACT"),
         (
@@ -1142,6 +1144,7 @@ fn receipt(
         let app_ownership = artifact("app-ownership")?;
         let notifications = artifact("notifications")?;
         let baseline = artifact("relational")?;
+        let lifecycle = artifact("lifecycle")?;
         let collection = artifact("collection")?;
         let next = artifact("relational-next")?;
         let owned = artifact("owned")?;
@@ -1154,6 +1157,7 @@ fn receipt(
         let mut report = serde_json::json!({
             "status":"passed", "scope":"all", "workflow":day2::automation::source_digest(),
             "relational":artifact_id(&baseline), "relational_next":artifact_id(&next), "http":artifact_id(&web),
+            "lifecycle":artifact_id(&lifecycle),
             "redirect":artifact_id(&redirect),
             "credential_metadata":artifact_id(&credential_metadata),
             "connection_declaration":artifact_id(&connection_declaration),
@@ -1287,6 +1291,7 @@ fn required_steps(scope: &str) -> Result<&'static [&'static str]> {
             "build-notifications",
             "build-redirect",
             "build-relational",
+            "build-lifecycle",
             "build-collection",
             "build-relational-next",
             "test-isolated-build",
@@ -1415,6 +1420,7 @@ mod tests {
             "build-oauth-gitlab",
             "build-redirect",
             "build-relational",
+            "build-lifecycle",
             "build-collection",
             "build-relational-next",
             "build-http",
@@ -1487,7 +1493,7 @@ mod tests {
     }
 
     #[test]
-    fn full_receipt_requires_and_pins_the_redirect_artifact() -> Result<()> {
+    fn full_receipt_requires_and_pins_lifecycle_and_redirect_artifacts() -> Result<()> {
         let directory = tempfile::tempdir()?;
         fs::create_dir_all(directory.path().join("artifacts"))?;
         let required = required_steps("all")?;
@@ -1501,22 +1507,29 @@ mod tests {
             })
             .collect();
         let redirect = "d".repeat(64);
+        let lifecycle = "e".repeat(64);
         fixtures.insert("redirect".into(), PathBuf::from(&redirect));
-        let mut missing = fixtures.clone();
-        missing.remove("redirect");
-        let error = receipt(
-            directory.path(),
-            "all",
-            &missing,
-            &passed,
-            "snapshot",
-            &BTreeMap::new(),
-            0,
-        )
-        .unwrap_err();
-        assert_eq!(error.to_string(), "missing verified fixture: redirect");
+        fixtures.insert("lifecycle".into(), PathBuf::from(&lifecycle));
         let path = directory.path().join("artifacts/verification.json");
-        assert!(!path.exists());
+        for name in ["redirect", "lifecycle"] {
+            let mut missing = fixtures.clone();
+            missing.remove(name);
+            let error = receipt(
+                directory.path(),
+                "all",
+                &missing,
+                &passed,
+                "snapshot",
+                &BTreeMap::new(),
+                0,
+            )
+            .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!("missing verified fixture: {name}")
+            );
+            assert!(!path.exists());
+        }
         receipt(
             directory.path(),
             "all",
@@ -1528,6 +1541,7 @@ mod tests {
         )?;
         let report: serde_json::Value = serde_json::from_slice(&fs::read(path)?)?;
         assert_eq!(report["redirect"], format!("sha256:{redirect}"));
+        assert_eq!(report["lifecycle"], format!("sha256:{lifecycle}"));
         Ok(())
     }
 

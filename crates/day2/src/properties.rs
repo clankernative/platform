@@ -1,6 +1,7 @@
 use crate::{
     artifact::LoadedArtifact,
     protocol::{Context as InvocationContext, Instruction, Request, Response, Row},
+    store::Runtime,
     worker::Worker,
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -120,31 +121,34 @@ pub fn evaluate(artifact: &LoadedArtifact, snapshot: &Value) -> Result<Evidence>
     })
 }
 
-pub fn require(
-    artifact: &LoadedArtifact,
-    snapshot: &Value,
-    evidence_dir: &Path,
-) -> Result<Evidence> {
-    let evidence = evaluate(artifact, snapshot)?;
-    let failures: Vec<_> = evidence
-        .checks
-        .iter()
-        .filter(|check| !check.passed)
-        .map(|check| check.name.as_str())
-        .collect();
-    if !failures.is_empty() {
-        let bytes = serde_json::to_vec_pretty(&evidence)?;
-        let hash = crate::digest(&bytes);
-        fs::create_dir_all(evidence_dir)?;
-        let path = evidence_dir.join(format!("{}.json", hash.trim_start_matches("sha256:")));
-        fs::write(&path, bytes)?;
-        bail!(
-            "properties failed: {}; evidence: {}",
-            failures.join(", "),
-            path.display()
-        );
+/// Ordinary property checks always capture complete live state themselves.
+/// Explicit snapshots belong to pure evaluation, corruption probes and replay.
+pub fn require(runtime: &Runtime, evidence_dir: &Path) -> Result<Evidence> {
+    evaluate(runtime.artifact(), &runtime.application_snapshot()?)?.require(evidence_dir)
+}
+
+impl Evidence {
+    pub fn require(self, evidence_dir: &Path) -> Result<Self> {
+        let failures: Vec<_> = self
+            .checks
+            .iter()
+            .filter(|check| !check.passed)
+            .map(|check| check.name.as_str())
+            .collect();
+        if !failures.is_empty() {
+            let bytes = serde_json::to_vec_pretty(&self)?;
+            let hash = crate::digest(&bytes);
+            fs::create_dir_all(evidence_dir)?;
+            let path = evidence_dir.join(format!("{}.json", hash.trim_start_matches("sha256:")));
+            fs::write(&path, bytes)?;
+            bail!(
+                "properties failed: {}; evidence: {}",
+                failures.join(", "),
+                path.display()
+            );
+        }
+        Ok(self)
     }
-    Ok(evidence)
 }
 
 pub fn replay(artifact: &LoadedArtifact, evidence: &Evidence) -> Result<Evidence> {

@@ -89,8 +89,8 @@ SweepReports :: [].{
 	# and never announces one that was not ready.
 	verify_result : Str, SweepReportsTypes.Result, Str -> Try(Bool, Str)
 	verify_result = |before, result, after| {
-		old = Data.snapshot(before)?
-		next = Data.snapshot(after)?
+		old = Data.verification_snapshot(before)?.live
+		next = Data.verification_snapshot(after)?.live
 		pending = |state| state.reports.keep_if(|row| row.value.ready and !row.value.announced).len()
 		Ok(
 			next.reports.len() == old.reports.len() and result.reconciled <= pending(old)

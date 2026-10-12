@@ -2159,7 +2159,8 @@ struct Active {
     outcome: crate::protocol::Outcome,
     before: Value,
     checks: BTreeSet<String>,
-    initial: Value,
+    application_initial: Value,
+    application_after: Value,
     obligation: bool,
 }
 
@@ -2232,11 +2233,7 @@ impl Campaign {
             .to_path_buf();
         match request.action.as_str() {
             "dev-properties" => {
-                properties::require(
-                    self.runtime.artifact(),
-                    &self.runtime.inspect()?,
-                    &evidence_dir,
-                )?;
+                properties::require(&self.runtime, &evidence_dir)?;
                 if let Some(active) = self.active.as_mut() {
                     let phase = if active.checks.contains("drain") {
                         "properties-after"
@@ -2358,7 +2355,7 @@ impl Campaign {
                         self.runtime.artifact(),
                         "input",
                         &sample.operation,
-                        &self.runtime.inspect()?,
+                        &self.runtime.verification_snapshot()?,
                         &json!({}),
                         &Value::Null,
                         sample.seed.parse()?,
@@ -2410,7 +2407,7 @@ impl Campaign {
                         now,
                     )?;
                 }
-                let initial = self.runtime.inspect()?;
+                let application_initial = self.runtime.verification_snapshot()?;
                 self.prepared = false;
                 // Internal definitions also have mandatory app-owned verification.
                 // Only this artifact-bound campaign can admit those generated samples.
@@ -2458,7 +2455,8 @@ impl Campaign {
                     outcome,
                     before: self.runtime.inspect()?,
                     checks: BTreeSet::new(),
-                    initial,
+                    application_initial,
+                    application_after: self.runtime.verification_snapshot()?,
                     obligation,
                 });
             }
@@ -2469,8 +2467,8 @@ impl Campaign {
                         self.runtime.artifact(),
                         "check",
                         &active.step.operation,
-                        &active.before,
-                        &active.initial,
+                        &active.application_after,
+                        &active.application_initial,
                         &active.outcome.result,
                         0,
                     )?;
@@ -2496,11 +2494,12 @@ impl Campaign {
                             let verification_key = error.verification_key(target);
                             for index in 0..self.evidence.requested_cases_per_generator {
                                 let before = self.runtime.inspect()?;
+                                let application_before = self.runtime.verification_snapshot()?;
                                 let input = verification(
                                     self.runtime.artifact(),
                                     "error-input",
                                     &verification_key,
-                                    &before,
+                                    &application_before,
                                     &json!({}),
                                     &Value::Null,
                                     self.evidence.seed.parse::<u64>()?.wrapping_add(index),
@@ -2549,11 +2548,7 @@ impl Campaign {
                                         && self.runtime.inspect()? == before,
                                     "application failure retry changed outcome or state"
                                 );
-                                properties::require(
-                                    self.runtime.artifact(),
-                                    &before,
-                                    &evidence_dir,
-                                )?;
+                                properties::require(&self.runtime, &evidence_dir)?;
                                 *self
                                     .evidence
                                     .obligations

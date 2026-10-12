@@ -57,6 +57,7 @@ Verify :: [].{
 			"notifications",
 			"redirect",
 			"relational",
+			"lifecycle",
 			"relational-next",
 			"collection",
 			"owned",

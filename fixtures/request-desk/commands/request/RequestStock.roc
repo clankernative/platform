@@ -90,8 +90,8 @@ RequestStock :: [].{
 
 	verify_result : Str, RequestStockTypes.Output, Str -> Try(Bool, Str)
 	verify_result = |before, output, after| {
-		old = Data.snapshot(before)?
-		next = Data.snapshot(after)?
+		old = Data.verification_snapshot(before)?.live
+		next = Data.verification_snapshot(after)?.live
 		Ok(
 			next.requests.len()
 				== old.requests.len() + 1

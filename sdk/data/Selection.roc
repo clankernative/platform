@@ -60,7 +60,7 @@ Selection(a) :: {
 	# has to say so here — which means the mistake an application can make is a
 	# missing row on a trash screen, never a deleted row surfacing as live.
 	including_deleted : Selection(a) -> Selection(a)
-	including_deleted = |selection| { ..selection, deleted: "include" }
+	including_deleted = |selection| { ..selection, deleted: "include", legacy: Bool.False }
 
 	# Soft-deleted rows only: the trash view.
 	#
@@ -69,7 +69,7 @@ Selection(a) :: {
 	# keeps deletion state off `Model.Entity`, which every operation returning a
 	# row would otherwise have to document.
 	only_deleted : Selection(a) -> Selection(a)
-	only_deleted = |selection| { ..selection, deleted: "only" }
+	only_deleted = |selection| { ..selection, deleted: "only", legacy: Bool.False }
 
 	order : Selection(a), List(Order(a)) -> Selection(a)
 	order = |selection, orders| { ..selection, orders, legacy: Bool.False }

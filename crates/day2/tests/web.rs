@@ -1522,11 +1522,7 @@ fn real_http_mpa_datastar_queries_forms_and_redacted_audit() -> Result<()> {
     );
     replay(world.runtime.artifact(), &world.runtime.trace(&id)?)?;
     let evidence = world.directory.path().join("properties");
-    day2::properties::require(
-        world.runtime.artifact(),
-        &world.runtime.inspect()?,
-        &evidence,
-    )?;
+    day2::properties::require(&world.runtime, &evidence)?;
     assert!(
         world
             .runtime
@@ -2510,11 +2506,7 @@ fn audit_is_atomic_append_only_redacted_and_fault_replayable() -> Result<()> {
             .to_string(),
         "forbidden"
     );
-    day2::properties::require(
-        world.runtime.artifact(),
-        &world.runtime.inspect()?,
-        &world.directory.path().join("properties"),
-    )?;
+    day2::properties::require(&world.runtime, &world.directory.path().join("properties"))?;
     Ok(())
 }
 

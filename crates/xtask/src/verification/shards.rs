@@ -1028,7 +1028,13 @@ mod tests {
             &sample_identity(),
         )?;
         assert_eq!(complete.passed, preparation_steps()?);
-        assert_eq!(complete.fixtures.len(), 20);
+        assert_eq!(complete.fixtures.len(), 21);
+        assert!(complete.fixtures.contains_key("lifecycle"));
+        let mut without_lifecycle = sample_part("inputs")?;
+        without_lifecycle.fixtures.remove("lifecycle");
+        assert!(
+            combine_parts(without_lifecycle, sample_part("tests")?, &sample_identity()).is_err()
+        );
         for field in [
             "checkout",
             "workspace",
@@ -1446,8 +1452,9 @@ mod tests {
                 .iter()
                 .filter(|step| step.starts_with("build-"))
                 .count(),
-            20
+            21
         );
+        assert!(steps.contains("build-lifecycle"));
         assert!(!steps.contains("test-workspace-runtime"));
         assert!(!steps.contains("control-simulation"));
         assert!(steps.contains("test-binaries") && steps.contains("test-docs"));
