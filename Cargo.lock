@@ -530,6 +530,7 @@ dependencies = [
  "time",
  "tokio",
  "tokio-stream",
+ "unicode-segmentation",
  "url",
 ]
 
