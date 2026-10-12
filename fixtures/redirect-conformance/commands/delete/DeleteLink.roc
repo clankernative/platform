@@ -49,13 +49,18 @@ DeleteLink :: [].{
 
 	verify_input : Str, U64 -> Try(DeleteLinkTypes.Input, Str)
 	verify_input = |snapshot, _seed| {
-		row = Data.snapshot(snapshot)?.links.first().map_err(|_| "seed a link first")?
+		row = Data.verification_snapshot(snapshot)?.live.links.first().map_err(|_| "seed a link first")?
 		Ok({ link_id: row.id })
 	}
 
 	verify_result : Str, LinkView.Saved, Str -> Try(Bool, Str)
 	verify_result = |_before, saved, after| {
-		row = Data.snapshot(after)?.links.find_first(|item| item.id == saved.id).map_err(|_| "deleted link missing")?
+		row =
+			Data.verification_snapshot(after)?
+				.live
+				.links
+				.find_first(|item| item.id == saved.id)
+				.map_err(|_| "deleted link missing")?
 		Ok(row.value.deleted)
 	}
 }

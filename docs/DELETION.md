@@ -37,6 +37,17 @@ permits `restore` — an app allowed to delete a row must be able to undo it,
 since the reverse asymmetry leaves an app able to break something it cannot
 repair.
 
+Both directions obey the operation's `Api.edit` target. The host may inspect a
+retained target for that guard only when the operation declares a lifecycle
+effect on the target model. It still checks current row authority and the exact
+caller revision. Ordinary edit guards and ordinary reads exclude deleted rows.
+Child-command requests use the callee's admitted scope and retain their observed
+target, policy and revision checks.
+
+Domain validation uses the authoritative before-image already resolved by the
+write executor, after effect declarations and row policy. Delete and restore
+carry no field edits; create and update validate their supplied values.
+
 ## What a deleted row does
 
 A deleted row is invisible to every read that does not name it:
@@ -53,6 +64,19 @@ Exclusion is the default everywhere, and it is not something an application
 does — there is no filter to forget. The worst mistake available is a trash
 screen that shows nothing, which is visible and harmless. The reverse default
 would put deleted work back in front of people silently.
+
+Ordinary property checks capture complete live state through
+`properties::require(runtime, evidence_directory)`. Retained inspection is for
+storage comparisons, never an implicit input to those checks. Pure property
+evaluation and artifact-bound replay can still use an explicitly saved snapshot.
+
+Operation verification receives a different, consistent snapshot. Generated
+`Data.verification_snapshot(raw)` returns `{ live, deleted }`, each containing
+the ordinary typed model lists. Input generators and before/after checks can
+explicitly select tombstones to prove restoration. Neither scope adds a deletion
+flag to `Model.Entity`; normal invariants continue to use `Data.snapshot` over
+live state. Every model list is complete within the 256-row bound; overflow
+fails instead of truncating, and both scopes are captured in one read transaction.
 
 `Model.Entity` carries no deletion field, and `Row` carries none on the wire.
 That is what `only_deleted` is for: a caller building a trash view knows every
@@ -83,7 +107,17 @@ because an instance can hold tables the current schema no longer names, and
 uses `ALTER TABLE ADD COLUMN` with a default, which SQLite applies as a
 metadata-only change.
 
-## Two invariants
+## Storage invariants
+
+**Live references resolve to live targets.** The write executor derives this
+guard from checked model references. It refuses to soft-delete a parent with
+live incoming references, and refuses to create, update or restore a live child
+whose target is absent or deleted, with `live_reference_conflict`. These checks
+run inside the same writer transaction as the mutation. There is no implicit
+cascade: a command explicitly hides children before their parent and restores
+the parent before its children. A self-reference disappears with its own row.
+Storage and backup validation also reject live references to deleted targets;
+SQLite's physical foreign-key check alone cannot detect them.
 
 **Uniqueness spans deleted rows.** A unique index is generated without any
 reference to `deleted_at`, so a deleted row keeps its unique value. If deletion

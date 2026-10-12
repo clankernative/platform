@@ -186,7 +186,7 @@ SaveConfiguration :: [].{
 
 	verify_input : Str, U64 -> Try(SaveConfigurationTypes.Input, Str)
 	verify_input = |snapshot, _seed| {
-		state = Data.snapshot(snapshot)?
+		state = Data.verification_snapshot(snapshot)?.live
 		revision =
 			match state
 				.definitions
@@ -199,8 +199,8 @@ SaveConfiguration :: [].{
 
 	verify_result : Str, SaveConfigurationTypes.Output, Str -> Try(Bool, Str)
 	verify_result = |before, output, after| {
-		old = Data.snapshot(before)?
-		next = Data.snapshot(after)?
+		old = Data.verification_snapshot(before)?.live
+		next = Data.verification_snapshot(after)?.live
 		Ok(
 			next.configuration_changes.len() == old.configuration_changes.len() + 1
 				and next.contract_versions.len() == old.contract_versions.len() + 1

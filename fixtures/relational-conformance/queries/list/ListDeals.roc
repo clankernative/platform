@@ -57,13 +57,13 @@ ListDeals :: [].{
 
 	verify_input : Str, U64 -> Try(ListDealsTypes.Input, Str)
 	verify_input = |snapshot, _seed| {
-		stage = Data.snapshot(snapshot)?.stages.first().map_err(|_| "initialize stages first")?
+		stage = Data.verification_snapshot(snapshot)?.live.stages.first().map_err(|_| "initialize stages first")?
 		Ok({ stage_id: stage.id, after: Cursor.start, limit: PageSize.default })
 	}
 
 	verify_result : Str, DealView.Page, Str -> Try(Bool, Str)
 	verify_result = |before, page, after| {
-		state = Data.snapshot(before)?
+		state = Data.verification_snapshot(before)?.live
 		Ok(
 			before == after
 				and page.items().all(|view| state.deals.any(|row|

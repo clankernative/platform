@@ -480,7 +480,10 @@ fn required_all_rows_denies_child_request_and_rolls_back_prior_parent_write() ->
         };
         let result = effect(
             &tx,
-            &fixture.runtime.artifact().contract().schema,
+            StorageContract {
+                schema: &fixture.runtime.artifact().contract().schema,
+                domains: &crate::domain::Catalog::new(),
+            },
             fixture.runtime.scope(),
             &origin,
             &update,

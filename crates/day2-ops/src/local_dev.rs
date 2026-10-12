@@ -1081,8 +1081,7 @@ impl Session {
                 }
                 let runtime = self.target()?;
                 day2::properties::require(
-                    runtime.artifact(),
-                    &runtime.application_snapshot()?,
+                    runtime,
                     runtime
                         .instance_path()
                         .parent()

@@ -45,15 +45,15 @@ RotateClient :: [].{
 		verification: {
 			input: |snapshot, _seed| {
 				row =
-					Data.snapshot(snapshot)?
+					Data.verification_snapshot(snapshot)?.live
 						.key_receipts
 						.find_first(|candidate| candidate.value.family == "clients")
 						.map_err(|_| "create a client first")?
 				Ok({ lineage: row.value.lineage, head: row.value.head, revision: row.value.revision })
 			},
 			check: |before, output, after| {
-				old = Data.snapshot(before)?
-				next = Data.snapshot(after)?
+				old = Data.verification_snapshot(before)?.live
+				next = Data.verification_snapshot(after)?.live
 				Ok(
 					if output.status == "conflict" {
 						before == after

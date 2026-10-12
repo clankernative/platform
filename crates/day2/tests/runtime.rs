@@ -127,8 +127,7 @@ impl World {
     fn assert_state(&self, stage: Id, version: i64, history: usize) -> Result<()> {
         let state = self.runtime.inspect()?;
         let evidence = day2::properties::require(
-            self.runtime.artifact(),
-            &state,
+            &self.runtime,
             &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../artifacts/property-failures"),
         )?;
         self.property_checks
@@ -521,7 +520,8 @@ fn typed_additive_migration_preserves_rows_and_fails_closed() -> Result<()> {
     assert_eq!(result.status, "success", "{result:?}");
     replay(migrated.artifact(), &migrated.trace("after-migration")?)?;
     let state = migrated.inspect()?;
-    let evidence = day2::properties::evaluate(migrated.artifact(), &state)?;
+    let evidence =
+        day2::properties::evaluate(migrated.artifact(), &migrated.application_snapshot()?)?;
     assert!(
         evidence.checks.iter().all(|check| check.passed),
         "{evidence:?}"
@@ -775,7 +775,10 @@ fn generated_indexed_query_is_bounded_paginated_and_projects_domain_values() -> 
             "invalid pagination must fail before app execution"
         );
     }
-    let report = day2::properties::evaluate(world.runtime.artifact(), &world.runtime.inspect()?)?;
+    let report = day2::properties::evaluate(
+        world.runtime.artifact(),
+        &world.runtime.application_snapshot()?,
+    )?;
     assert!(report.checks.iter().all(|check| check.passed));
     replay(
         world.runtime.artifact(),
@@ -789,7 +792,7 @@ fn app_properties_detect_corruption_and_persist_replayable_evidence() -> Result<
     use day2::properties;
     let world = World::new()?;
     world.move_deal("move", world.target, 1, Fault::None)?;
-    let state = world.runtime.inspect()?;
+    let state = world.runtime.application_snapshot()?;
     let report = properties::evaluate(world.runtime.artifact(), &state)?;
     assert_eq!(report.checks.len(), 3);
     assert!(report.checks.iter().all(|check| check.passed), "{report:?}");
@@ -834,7 +837,8 @@ fn app_properties_detect_corruption_and_persist_replayable_evidence() -> Result<
                 .unwrap()
                 .passed
         );
-        let error = properties::require(world.runtime.artifact(), &broken, evidence_dir.path())
+        let error = properties::evaluate(world.runtime.artifact(), &broken)?
+            .require(evidence_dir.path())
             .unwrap_err()
             .to_string();
         assert!(

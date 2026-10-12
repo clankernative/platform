@@ -229,11 +229,7 @@ fn hostile_edit_effects_cannot_escape_target_fields_or_commit_a_partial_write() 
         assert_eq!(retried, outcome);
         assert_eq!(world.changes()?, 3);
     }
-    day2::properties::require(
-        world.runtime.artifact(),
-        &world.runtime.inspect()?,
-        &world.directory.path().join("properties"),
-    )?;
+    day2::properties::require(&world.runtime, &world.directory.path().join("properties"))?;
     Ok(())
 }
 

@@ -56,8 +56,8 @@ CreateLink :: [].{
 
 	verify_result : Str, LinkView.Saved, Str -> Try(Bool, Str)
 	verify_result = |before, saved, after| {
-		old = Data.snapshot(before)?
-		next = Data.snapshot(after)?
+		old = Data.verification_snapshot(before)?.live
+		next = Data.verification_snapshot(after)?.live
 		Ok(
 			next.links.len()
 				== old.links.len() + 1

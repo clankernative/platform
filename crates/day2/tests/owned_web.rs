@@ -301,11 +301,7 @@ fn native_owner_edit_is_durable_and_retries_once() -> Result<()> {
     let audit = owner.page(&owner.client()?, "/audit?operation=links.edit")?;
     assert!(audit.contains("links.edit") && audit.contains("Values redacted."));
     assert!(!audit.contains("Owner edit"));
-    day2::properties::require(
-        world.runtime.artifact(),
-        &world.runtime.inspect()?,
-        &world.directory.path().join("properties"),
-    )?;
+    day2::properties::require(&world.runtime, &world.directory.path().join("properties"))?;
     Ok(())
 }
 

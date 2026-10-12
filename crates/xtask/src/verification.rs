@@ -467,6 +467,7 @@ fn build_fixture(
             Some(&root.join("fixtures/http-conformance")),
         ),
         "relational" => build(root, &root.join("fixtures/relational-conformance")),
+        "lifecycle" => build(root, &root.join("fixtures/lifecycle-conformance")),
         "collection" => build(root, &root.join("fixtures/collection-conformance")),
         "credential-metadata" => {
             build(root, &root.join("fixtures/credential-metadata-conformance"))
@@ -1021,6 +1022,7 @@ fn configure_tests(
         ("reports", "DAY2_TEST_REPORTS_API_ARTIFACT"),
         ("reports-probe", "DAY2_TEST_REPORTS_PROBE_ARTIFACT"),
         ("relational", "DAY2_TEST_RELATIONAL_ARTIFACT"),
+        ("lifecycle", "DAY2_TEST_LIFECYCLE_ARTIFACT"),
         ("collection", "DAY2_TEST_COLLECTION_ARTIFACT"),
         ("delegation", "DAY2_TEST_DELEGATION_ARTIFACT"),
         (

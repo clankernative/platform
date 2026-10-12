@@ -167,7 +167,10 @@ pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
         let result = if matches!(step, Step::Database(_)) {
             let result = store::effect(
                 &tx,
-                &runtime.artifact().contract().schema,
+                store::StorageContract {
+                    schema: &runtime.artifact().contract().schema,
+                    domains: &crate::domain::Catalog::new(),
+                },
                 runtime.scope(),
                 &request,
                 &instruction,
@@ -368,7 +371,10 @@ pub(crate) fn validate_local(
         {
             let current = store::effect(
                 connection,
-                &runtime.artifact().contract().schema,
+                store::StorageContract {
+                    schema: &runtime.artifact().contract().schema,
+                    domains: &crate::domain::Catalog::new(),
+                },
                 runtime.scope(),
                 request,
                 &observation.instruction,

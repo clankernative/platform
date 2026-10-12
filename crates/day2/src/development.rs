@@ -2233,11 +2233,7 @@ impl Campaign {
             .to_path_buf();
         match request.action.as_str() {
             "dev-properties" => {
-                properties::require(
-                    self.runtime.artifact(),
-                    &self.runtime.application_snapshot()?,
-                    &evidence_dir,
-                )?;
+                properties::require(&self.runtime, &evidence_dir)?;
                 if let Some(active) = self.active.as_mut() {
                     let phase = if active.checks.contains("drain") {
                         "properties-after"
@@ -2359,7 +2355,7 @@ impl Campaign {
                         self.runtime.artifact(),
                         "input",
                         &sample.operation,
-                        &self.runtime.application_snapshot()?,
+                        &self.runtime.verification_snapshot()?,
                         &json!({}),
                         &Value::Null,
                         sample.seed.parse()?,
@@ -2411,7 +2407,7 @@ impl Campaign {
                         now,
                     )?;
                 }
-                let application_initial = self.runtime.application_snapshot()?;
+                let application_initial = self.runtime.verification_snapshot()?;
                 self.prepared = false;
                 // Internal definitions also have mandatory app-owned verification.
                 // Only this artifact-bound campaign can admit those generated samples.
@@ -2460,7 +2456,7 @@ impl Campaign {
                     before: self.runtime.inspect()?,
                     checks: BTreeSet::new(),
                     application_initial,
-                    application_after: self.runtime.application_snapshot()?,
+                    application_after: self.runtime.verification_snapshot()?,
                     obligation,
                 });
             }
@@ -2498,7 +2494,7 @@ impl Campaign {
                             let verification_key = error.verification_key(target);
                             for index in 0..self.evidence.requested_cases_per_generator {
                                 let before = self.runtime.inspect()?;
-                                let application_before = self.runtime.application_snapshot()?;
+                                let application_before = self.runtime.verification_snapshot()?;
                                 let input = verification(
                                     self.runtime.artifact(),
                                     "error-input",
@@ -2552,11 +2548,7 @@ impl Campaign {
                                         && self.runtime.inspect()? == before,
                                     "application failure retry changed outcome or state"
                                 );
-                                properties::require(
-                                    self.runtime.artifact(),
-                                    &application_before,
-                                    &evidence_dir,
-                                )?;
+                                properties::require(&self.runtime, &evidence_dir)?;
                                 *self
                                     .evidence
                                     .obligations

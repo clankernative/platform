@@ -1168,7 +1168,10 @@ impl Schema {
             )),
             "typed artifacts require reference-derived relationships"
         );
-        let mut handles = std::collections::BTreeSet::from(["snapshot".to_string()]);
+        let mut handles = std::collections::BTreeSet::from([
+            "snapshot".to_string(),
+            "verification_snapshot".to_string(),
+        ]);
         for (model, record) in &self.models {
             ensure!(
                 handles.insert(model.clone()) && handles.insert(format!("all_{model}")),
