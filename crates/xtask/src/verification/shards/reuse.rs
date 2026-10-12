@@ -1,8 +1,8 @@
 //! Admit an authenticated merge-group full receipt for the exact landed commit.
 //! This never executes downloaded binaries or turns a PR receipt into queue proof.
 use super::{
-    BuildCache, BuildIdentity, Identity, Prepared, Receipt, Targets, admit_join,
-    build_identity, combine_parts, compiler_targets, identity,
+    BuildCache, BuildIdentity, Identity, Prepared, Receipt, Targets, admit_join, build_identity,
+    combine_parts, compiler_targets, identity,
 };
 use crate::run_with_budget;
 use anyhow::{Context, Result, ensure};
