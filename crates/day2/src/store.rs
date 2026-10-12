@@ -3482,7 +3482,29 @@ mod selection_tests {
                 let cursors = connection.prepare("SELECT token,boundary_key,boundary,expires_at FROM day2_selection_cursors ORDER BY token")?
                     .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, i64>(3)?)))?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
-                assert_eq!(cursors.len(), 3);
+                let expected_boundary_key = [
+                    "8c037529e5f852716a0ad4e4e914ac918a85e5992cfa6324187027c76655b6cf",
+                    "ee554659560fde426fcac10ed9dfac8fbfe40ec87c492299459846701f18fea5",
+                    "2dc6ed0a1b27b1b2a84644371e1cacc30eaf7d5e9a6b7f5063fcbe58db166ef1",
+                ];
+                let expected_values = [3, 6, 9];
+                let expected_cursors: Vec<_> = (0..3)
+                    .map(|page| {
+                        (
+                            format!(
+                                "sel1_{}",
+                                format!("{:02x}", seed + page as u8).repeat(32)
+                            ),
+                            expected_boundary_key[page].to_owned(),
+                            format!(
+                                "{{\"binding\":\"f241e92b389ae0e9109541177af3f41cdc69448faccfa2b2b7dba9de0b072d99\",\"values\":[{}]}}",
+                                expected_values[page]
+                            ),
+                            86_500,
+                        )
+                    })
+                    .collect();
+                assert_eq!(cursors, expected_cursors, "{}", path.display());
                 let trace = json!({"pages":trace,"cursors":cursors});
                 fs::write(&path, serde_json::to_vec(&trace)?)?;
                 traces.push(trace);

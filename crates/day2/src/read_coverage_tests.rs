@@ -343,24 +343,50 @@ fn fresh_runtime_id_seeds_are_scope_stable_and_simulation_clock_is_composed() ->
                 Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        assert_eq!(runtime.scope(), "coverage/test/app");
         assert_eq!(seeds.len(), 2);
-        for (id, seed) in &seeds {
-            assert_eq!(seed, &runtime.host().entropy(runtime.scope(), id)?.to_vec());
-            assert_ne!(
-                seed,
-                &runtime.host().entropy("different/scope/app", id)?.to_vec()
-            );
-        }
         assert_ne!(seeds[0].1, seeds[1].1);
-        let ids = seeds.iter().map(|(id, seed)| -> Result<Value> {
-            let seed: [u8; 32] = seed.as_slice().try_into()?;
-            Ok(json!({"invocation":id,"uuid":crate::identity::generate(&seed, 7000, "items", 0)?}))
-        }).collect::<Result<Vec<_>>>()?;
-        fs::write(
-            &path,
-            serde_json::to_vec(&json!({"seeds":seeds,"ids":ids}))?,
-        )?;
-        traces.push(json!({"seeds":seeds,"ids":ids}));
+        let alternate_scope_seeds = [
+            runtime.host().entropy("different/scope/app", "one")?,
+            runtime.host().entropy("different/scope/app", "two")?,
+        ];
+        assert_eq!(
+            alternate_scope_seeds,
+            [
+                [
+                    151, 61, 222, 67, 140, 211, 132, 139, 205, 19, 53, 98, 75, 7, 194, 66, 41, 14,
+                    254, 81, 53, 248, 68, 57, 133, 126, 107, 208, 205, 174, 88, 28
+                ],
+                [
+                    139, 154, 45, 152, 141, 34, 195, 75, 171, 233, 191, 208, 147, 91, 221, 183,
+                    189, 96, 74, 124, 127, 246, 231, 186, 120, 35, 8, 216, 87, 109, 61, 23
+                ],
+            ]
+        );
+        assert_ne!(seeds[0].1.as_slice(), alternate_scope_seeds[0]);
+        assert_ne!(seeds[1].1.as_slice(), alternate_scope_seeds[1]);
+        let ids = seeds
+            .iter()
+            .map(|(id, seed)| -> Result<Value> {
+                let seed: [u8; 32] = seed.as_slice().try_into()?;
+                Ok(json!({"invocation":id,"uuid":crate::identity::generate(&seed, 7000, "items", 0)?}))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let observation = json!({"scope":runtime.scope(),"seeds":seeds,"ids":ids});
+        let expected = json!({
+            "scope":"coverage/test/app",
+            "seeds":[
+                ["one",[172,232,180,6,8,50,101,155,93,92,54,125,208,132,94,166,192,171,150,28,138,127,77,234,201,198,34,131,111,35,109,82]],
+                ["two",[143,133,157,107,178,196,226,181,217,127,121,125,97,93,10,98,99,71,29,167,165,139,164,246,95,11,173,140,150,168,144,96]]
+            ],
+            "ids":[
+                {"invocation":"one","uuid":[0,0,0,0,27,88,113,50,135,74,140,2,218,23,234,188]},
+                {"invocation":"two","uuid":[0,0,0,0,27,88,120,218,187,89,177,131,129,0,240,175]}
+            ]
+        });
+        assert_eq!(observation, expected, "{}", path.display());
+        fs::write(&path, serde_json::to_vec(&observation)?)?;
+        traces.push(observation);
         let started = runtime.host().monotonic();
         simulation.set_time(9000)?;
         assert_eq!(runtime.inputs().clock.wall_time()?, Duration::from_secs(9));
