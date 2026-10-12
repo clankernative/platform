@@ -15,6 +15,17 @@ regexes = [
 ]
 
 [[allowlists]]
+description = "Exact public Parent and Child model identities in the lifecycle conformance ledger"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''(^|/)fixtures/lifecycle-conformance/model-identities\.json$''']
+regexTarget = "line"
+regexes = [
+  '''^\s*\{ "identity": \{ "key": "875c2f6158be4091a7b3c8cf42d00a16", "prefix": "par" \}, "table": "parents", "roc_type": "Models\.Parent", "retired": false \},?$''',
+  '''^\s*\{ "identity": \{ "key": "fbc8497d13c6405fab1a99f3a5c142d8", "prefix": "chi" \}, "table": "children", "roc_type": "Models\.Child", "retired": false \},?$''',
+]
+
+[[allowlists]]
 description = "Public Request model identity in the legacy compact fixture ledger"
 targetRules = ["generic-api-key"]
 condition = "AND"
