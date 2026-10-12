@@ -117,7 +117,8 @@ jobs:
           retention-days: 14
 
   verify-prepare-parts:
-    if: ${{ inputs.verification != 'full' && inputs.verification != 'diagnostics' && inputs.verification != 'serial-prepare' }}
+    needs: verify-queue-receipt
+    if: ${{ !cancelled() && !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') && inputs.verification != 'full' && inputs.verification != 'diagnostics' && inputs.verification != 'serial-prepare' }}
     runs-on: macos-15
     timeout-minutes: 360
     strategy:
@@ -224,7 +225,8 @@ jobs:
           retention-days: 3
 
   verify-prepare-serial:
-    if: ${{ inputs.verification == 'serial-prepare' }}
+    needs: verify-queue-receipt
+    if: ${{ !cancelled() && !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') && inputs.verification == 'serial-prepare' }}
     runs-on: macos-15
     timeout-minutes: 360
     env:
