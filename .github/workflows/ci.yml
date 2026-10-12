@@ -488,69 +488,42 @@ jobs:
 
   verification-diagnostics:
     if: ${{ inputs.verification == 'diagnostics' }}
-    runs-on: macos-15
-    timeout-minutes: 360
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     env:
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_BUILD_JOBS: '2'
-      RUSTC_WRAPPER: sccache
-      SCCACHE_GHA_ENABLED: 'true'
-      SCCACHE_GHA_VERSION: day2-platform-ci-v2
-      # Preserve compiler statistics through the long runtime campaigns.
-      SCCACHE_IDLE_TIMEOUT: '0'
-      DAY2_TEMPORAL_CLI: /tmp/day2-tools/temporal
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: opentofu/setup-opentofu@9d84900f3238fab8cd84ce47d658d25dd008be2f # v1
-        with:
-          tofu_version: 1.11.5
-          tofu_wrapper: false
-      - run: gh release download v1.6.1 --repo temporalio/cli --pattern temporal_cli_1.6.1_darwin_arm64.tar.gz --dir /tmp/day2-tools
-        env:
-          GH_TOKEN: ${{ github.token }}
-      - run: shasum -a 256 --check "$GITHUB_WORKSPACE/.github/temporal.sha256"
-        working-directory: /tmp/day2-tools
-      - run: tar -xzf /tmp/day2-tools/temporal_cli_1.6.1_darwin_arm64.tar.gz -C /tmp/day2-tools
       - name: Select the pinned Rust toolchain
         run: rustup show active-toolchain
-      - name: Set up the Rust compiler cache
-        uses: Mozilla-Actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-        with:
-          version: v0.18.0
-      - name: Restore Cargo dependencies and build outputs
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          prefix-key: day2-platform-ci-v2
-          # The virtual root manifest owns the compilation profiles.
-          key: ${{ hashFiles('Cargo.toml') }}
-          cache-bin: 'false'
-          cache-workspace-crates: 'false'
-          shared-key: ${{ hashFiles('Cargo.toml') }}-verify
-          save-if: 'false'
-      - run: cargo run --locked -p xtask -- source-check
+      - name: Update only the affected Quinn protocol package
+        run: cargo update -p quinn-proto --precise 0.11.18
       - run: cargo fetch --locked
       - run: cargo run --locked -p xtask -- notices
-      - run: git diff --exit-code -- THIRD-PARTY-NOTICES.txt dependency-inventory.json
-      - run: cargo run --locked -p xtask -- bootstrap
-      - run: gh release download roc-formatter-2026-09-12 --repo clankernative/platform --pattern roc-fmt-day2-aarch64-apple-darwin --dir /tmp/day2-tools
-        env:
-          GH_TOKEN: ${{ github.token }}
-      - run: cargo run --locked -p xtask -- bootstrap-formatter /tmp/day2-tools/roc-fmt-day2-aarch64-apple-darwin
-      - run: cargo run --locked -p xtask -- configure-tofu
-      - run: cargo run --locked -p xtask -- fmt
-      - run: git diff --binary > /tmp/day2-format.patch
       - run: target/debug/xtask architecture-inventory > /tmp/day2-architecture-inventory.json
       - run: target/debug/xtask architecture-dependencies > /tmp/day2-architecture-dependencies.json
       - run: target/debug/xtask architecture-proof-inventory > /tmp/day2-architecture-proofs.json
+      - run: gh release download cargo-audit/v0.22.2 --repo RustSec/rustsec --pattern cargo-audit-x86_64-unknown-linux-gnu-v0.22.2.tgz --dir /tmp/scanners
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - run: sha256sum --check "$GITHUB_WORKSPACE/.github/cargo-audit.sha256"
+        working-directory: /tmp/scanners
+      - run: tar -xzf /tmp/scanners/cargo-audit-x86_64-unknown-linux-gnu-v0.22.2.tgz -C /tmp/scanners
+      - run: /tmp/scanners/cargo-audit-x86_64-unknown-linux-gnu-v0.22.2/cargo-audit audit --deny warnings
+      - run: git diff --binary -- Cargo.lock THIRD-PARTY-NOTICES.txt dependency-inventory.json > /tmp/day2-quinn-repair.patch
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: ${{ always() }}
         with:
-          name: day2-verification-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          name: day2-quinn-repair-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            /tmp/day2-format.patch
+            Cargo.lock
+            THIRD-PARTY-NOTICES.txt
+            dependency-inventory.json
+            /tmp/day2-quinn-repair.patch
             /tmp/day2-architecture-inventory.json
             /tmp/day2-architecture-dependencies.json
             /tmp/day2-architecture-proofs.json
