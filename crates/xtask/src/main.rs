@@ -740,7 +740,10 @@ fn main() -> Result<()> {
             verification::execute(&root, "verify")?;
         }
         "verify-queue-find" | "verify-queue-admit" => {
-            ensure!(args.next().is_none(), "queue receipt admission accepts no overrides");
+            ensure!(
+                args.next().is_none(),
+                "queue receipt admission accepts no overrides"
+            );
             verification::queue_receipt(&root, &action)?;
         }
         "verify-prepare" | "verify-prepare-join" | "verify-compose" => {

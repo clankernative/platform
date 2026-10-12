@@ -125,7 +125,10 @@ pub fn queue_receipt(root: &Path, recipe: &str) -> Result<()> {
     let runner = workflows::build(root)?;
     day2::automation::run(&runner, &[recipe], |request| {
         let parameters: BTreeMap<String, String> = request.decode()?;
-        ensure!(parameters.is_empty() && request.action == recipe, "closed queue admission capability required");
+        ensure!(
+            parameters.is_empty() && request.action == recipe,
+            "closed queue admission capability required"
+        );
         match request.action.as_str() {
             "verify-queue-find" => shards::reuse::find(root, &snapshot),
             "verify-queue-admit" => shards::reuse::admit(root, &snapshot),

@@ -1,8 +1,9 @@
 # CI compilation caches
 
 Platform CI restores two compilation caches before its first Cargo command.
-Every gate retains the full verification recipe's checks. Cache hits are build
-inputs, never verification receipts or a reason to skip a step.
+Compilation cache hits are build inputs and never a reason to skip verification.
+The separate exact merge-group receipt admission described below can reuse a
+complete full outcome on the identical landed main commit.
 
 `Swatinem/rust-cache` restores Cargo registry downloads, Git dependencies and
 compiled dependency outputs in the workspace target directory. Workspace crate

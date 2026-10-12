@@ -923,15 +923,27 @@ fn validate_receipt(prepared: &Prepared, receipt: &Receipt, shard: &str) -> Resu
 }
 
 fn admit_join(prepared: &Prepared, receipts: &[Receipt]) -> Result<BTreeMap<String, u64>> {
-    ensure!(receipts.len() == SHARDS.len(), "exact complete shard receipt set required");
+    ensure!(
+        receipts.len() == SHARDS.len(),
+        "exact complete shard receipt set required"
+    );
     let mut timings = prepared.timings_ms.clone();
     for shard in SHARDS {
-        let matching: Vec<_> = receipts.iter().filter(|receipt| receipt.shard == *shard).collect();
-        ensure!(matching.len() == 1, "exactly one receipt per shard required");
+        let matching: Vec<_> = receipts
+            .iter()
+            .filter(|receipt| receipt.shard == *shard)
+            .collect();
+        ensure!(
+            matching.len() == 1,
+            "exactly one receipt per shard required"
+        );
         let receipt = matching[0];
         validate_receipt(prepared, receipt, shard)?;
         for (step, elapsed) in &receipt.timings_ms {
-            ensure!(timings.insert(step.clone(), *elapsed).is_none(), "duplicate verification effect");
+            ensure!(
+                timings.insert(step.clone(), *elapsed).is_none(),
+                "duplicate verification effect"
+            );
         }
     }
     let mut workspace = 0u64;
