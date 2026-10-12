@@ -4599,8 +4599,11 @@ fn task_set_scheduling_method(method: &str) -> bool {
             | "spawn_local_on"
             | "spawn_blocking"
             | "spawn_blocking_on"
+            | "join_all"
             | "join_next"
             | "join_next_with_id"
+            | "poll_join_next"
+            | "poll_join_next_with_id"
             | "try_join_next"
             | "try_join_next_with_id"
             | "abort_all"
@@ -8329,6 +8332,9 @@ mod tests {
                 let mut jobs = tokio::task::JoinSet::new();
                 jobs.spawn_blocking(|| ());
                 jobs.join_next_with_id();
+                jobs.poll_join_next(cx);
+                jobs.poll_join_next_with_id(cx);
+                jobs.join_all();
             }
             "#,
             r#"
@@ -8376,6 +8382,30 @@ mod tests {
                         || finding.target.ends_with("::is_empty")
                 }),
                 "pure collection operations are not scheduling: {findings:?}"
+            );
+        }
+        let findings = scan(
+            r#"
+            use tokio::task::JoinSet as Tasks;
+            use std::task::Context;
+            fn poll_all(jobs: &mut Tasks<()>, cx: &mut Context<'_>) {
+                jobs.poll_join_next(cx);
+                jobs.poll_join_next_with_id(cx);
+            }
+            async fn join_all(jobs: Tasks<()>) {
+                jobs.join_all().await;
+            }
+            "#,
+        );
+        for method in ["poll_join_next", "poll_join_next_with_id", "join_all"] {
+            let target = format!("tokio::task::JoinSet::{method}");
+            assert_eq!(
+                findings
+                    .iter()
+                    .filter(|finding| finding.kind == "scheduling" && finding.target == target)
+                    .count(),
+                1,
+                "missing exact {target}: {findings:?}"
             );
         }
     }
