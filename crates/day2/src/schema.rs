@@ -412,6 +412,10 @@ impl Table {
     }
     fn kind(&self, id: usize, models: &BTreeMap<String, String>) -> Result<Kind> {
         let node = self.node(id)?;
+        ensure!(
+            !crate::connection_codegen::invocation_type(&node.name),
+            "connection Use cannot appear in persistent models or public inputs"
+        );
         match node.kind.as_str() {
             "integer" => Ok(Kind::Integer),
             "unsigned" => Ok(Kind::Unsigned(
@@ -569,6 +573,10 @@ impl Table {
         );
         let node = self.node(id)?;
         let builtin = node.name.is_empty() || node.name.starts_with("__");
+        ensure!(
+            !crate::connection_codegen::invocation_type(&node.name),
+            "connection Use cannot appear in public inputs"
+        );
         let shape = match node.kind.as_str() {
             "text" if builtin => Type::String,
             "integer" if builtin => Type::Integer,

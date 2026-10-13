@@ -550,6 +550,7 @@ pub struct Runtime {
     integrations: Arc<crate::integration_host::Host>,
     app_calls: Option<Arc<dyn crate::delegation::AppCallPort>>,
     pub(crate) credentials: Option<Arc<dyn crate::managed_credentials::issuance::Authority>>,
+    pub(crate) connections: Option<Arc<dyn crate::oauth::usage::Authority>>,
     instance_path: PathBuf,
     app: String,
     db: PathBuf,
@@ -601,6 +602,7 @@ impl Runtime {
             integrations: Arc::new(crate::integration_host::Host::local(&instance_path)?),
             app_calls: None,
             credentials: None,
+            connections: None,
             scope: instance.scope(&app)?,
             hosted_domain: instance.identity.map(|identity| identity.hosted_domain),
             instance_path,
@@ -783,6 +785,7 @@ impl Runtime {
             integrations: Arc::new(crate::integration_host::Host::local(&instance_path)?),
             app_calls: None,
             credentials: None,
+            connections: None,
             scope: instance.scope(app)?,
             hosted_domain: instance.hosted_domain().map(str::to_owned),
             instance_path,
@@ -847,6 +850,14 @@ impl Runtime {
             crate::managed_credentials::store::replace_empty_version_1_unit(db)?;
             crate::managed_credentials::store::install_schema(db)?;
             crate::managed_credentials::issuance::install(db)?;
+            if !self
+                .artifact()
+                .contract()
+                .connection_declarations
+                .is_empty()
+            {
+                crate::oauth::usage::install(db)?;
+            }
             // Newly installed peers are admitted under the same cumulative
             // counter before the writer may publish their initialized shape.
             crate::managed_credentials::store::install_schema(db)

@@ -872,6 +872,66 @@ pub fn provisional_modules(sources: &[String]) -> Result<BTreeMap<String, String
         crate::credential_codegen::MODULE.into(),
         crate::credential_codegen::provisional_module(credential_names)?,
     );
+    let mut connection_names = BTreeSet::new();
+    for source in sources {
+        let source_tokens = tokens(source)?;
+        let mut aliases = BTreeSet::from(["Connections"]);
+        fn member_name(name: &str) -> &str {
+            name.strip_prefix("Use_").unwrap_or(name)
+        }
+        for at in 0..source_tokens.len().saturating_sub(1) {
+            if source_tokens[at..at + 2] != [Token::Word("import"), Token::Word("Connections")] {
+                continue;
+            }
+            let mut member_at = at + 2;
+            if source_tokens.get(member_at) == Some(&Token::Word("as")) {
+                member_at += 2;
+            }
+            if source_tokens.get(member_at..member_at + 2)
+                == Some(&[Token::Word("exposing"), Token::Punct(b'[')])
+            {
+                for token in source_tokens[member_at + 2..]
+                    .iter()
+                    .take_while(|token| **token != Token::Punct(b']'))
+                {
+                    if let Token::Word(name) = token {
+                        let name = member_name(name);
+                        if day2_contracts::names::identifier(name).is_ok()
+                            && name.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
+                        {
+                            connection_names.insert(name);
+                        }
+                    }
+                }
+            }
+        }
+        for window in source_tokens.windows(4) {
+            if let [
+                Token::Word("import"),
+                Token::Word("Connections"),
+                Token::Word("as"),
+                Token::Word(alias),
+            ] = window
+            {
+                aliases.insert(*alias);
+            }
+        }
+        for window in source_tokens.windows(3) {
+            if let [Token::Word(module), Token::Punct(b'.'), Token::Word(member)] = window
+                && aliases.contains(module)
+                && member_name(member)
+                    .as_bytes()
+                    .first()
+                    .is_some_and(u8::is_ascii_lowercase)
+            {
+                connection_names.insert(member_name(member));
+            }
+        }
+    }
+    modules.insert(
+        crate::connection_codegen::MODULE.into(),
+        crate::connection_codegen::provisional_module(connection_names)?,
+    );
     Ok(modules)
 }
 

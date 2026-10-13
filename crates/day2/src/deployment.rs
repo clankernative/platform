@@ -549,21 +549,19 @@ async fn serve_configured(
     }
     let runtime = tokio::task::spawn_blocking(move || configure(runtime)).await??;
     let concurrency = usize::from(profile.resources().http_concurrency());
-    let receiver = if oauth {
-        let runtime = runtime.clone();
-        Some(
-            tokio::task::spawn_blocking(move || {
-                let providers = match providers {
-                    Some(providers) => providers,
-                    None => crate::oauth::host::Providers::from_gke_runtime(&runtime)?,
-                };
-                crate::oauth::host::app_receiver(&runtime, &providers)
-            })
-            .await
-            .context("OAuth host startup failed")??,
-        )
+    let (runtime, receiver) = if oauth {
+        tokio::task::spawn_blocking(move || {
+            let providers = match providers {
+                Some(providers) => providers,
+                None => crate::oauth::host::Providers::from_gke_runtime(&runtime)?,
+            };
+            let (runtime, receiver) = crate::oauth::host::app_receiver(runtime, &providers)?;
+            Ok::<_, anyhow::Error>((runtime, Some(receiver)))
+        })
+        .await
+        .context("OAuth host startup failed")??
     } else {
-        None
+        (runtime, None)
     };
     let server = match access {
         Access::Development {

@@ -70,6 +70,10 @@ fn discover(
             let name = crate::app_inference::module_name(&source)
                 .with_context(|| format!("invalid app module {}", path.display()))?;
             ensure!(
+                name != "Connections",
+                "Connections is generated from checked declarations"
+            );
+            ensure!(
                 entry.file_name() == format!("{name}.roc").as_str(),
                 "{} must be named {name}.roc to match its module declaration",
                 path.display()

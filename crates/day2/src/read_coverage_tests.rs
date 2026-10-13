@@ -85,6 +85,7 @@ impl Fixture {
             integrations: Arc::new(crate::integration_host::Host::local(&instance_path)?),
             app_calls: None,
             credentials: None,
+            connections: None,
             instance_path,
             app: "app".into(),
             db: state.join("app.sqlite"),

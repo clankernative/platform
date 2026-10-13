@@ -38,6 +38,7 @@ pub struct VerifiedExternalExchange {
     verified: VerifiedExternalAccount,
     binding: ExchangeBinding,
     tokens: ValidatedTokenResponse,
+    started_at: i64,
 }
 
 impl PrivateExchangeResponse {
@@ -80,6 +81,7 @@ impl PrivateExchangeResponse {
             verified,
             binding: self.binding,
             tokens,
+            started_at: self.started_at,
         })
     }
 }
@@ -103,7 +105,10 @@ impl VerifiedExternalExchange {
             self.verified.observed(),
             &self.binding,
             self.tokens,
-            now,
+            custody::QuarantineTiming {
+                issued_at: self.started_at,
+                observed_at: now,
+            },
         )?;
         Ok(PreparedExternalSettlement {
             verified: self.verified,

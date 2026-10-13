@@ -1176,7 +1176,8 @@ step = |raw| raw
             directory.join("app/Outputs.roc"),
             output_schema::roc_module(&navigation_outputs)?,
         )?;
-        let modules = navigation_catalog.modules(&navigation_schema, &navigation_outputs, false)?;
+        let modules =
+            navigation_catalog.modules(&navigation_schema, &navigation_outputs, &[], false)?;
         for module in ["SecurityActions.roc", "ProductReturns.roc"] {
             fs::write(directory.join("app").join(module), &modules[module])?;
         }

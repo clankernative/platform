@@ -69,6 +69,7 @@ fn compiler_fixture(root: &Path, stage: &Path, artifact: &LoadedArtifact) -> Res
     for (module, source) in artifact.contract().declarations.modules(
         &artifact.contract().schema,
         &artifact.contract().outputs,
+        &artifact.contract().connection_declarations,
         false,
     )? {
         fs::write(app.join(module), source)?;
