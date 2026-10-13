@@ -648,8 +648,9 @@ jobs:
       - name: Run native formatter process-group and admission guards
         timeout-minutes: 5
         run: 'cargo test --locked -p xtask -- formatter_bootstrap::tests:: formatting::tests:: --nocapture --test-threads=1'
-      - name: Observe bounded native Linux formatter build
-        timeout-minutes: 10
+      - name: Build complete reviewed-input Linux formatter candidate
+        # The ten-minute observation is retained separately. Complete this
+        # candidate inside the unchanged forty-minute job and native limits.
         run: cargo run --locked -p xtask -- build-formatter
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: ${{ always() }}
