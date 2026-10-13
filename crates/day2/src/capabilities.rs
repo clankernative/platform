@@ -22,7 +22,7 @@ pub use day2_capabilities::registry::{LOCAL_PROVIDER_DATABASES, READS, WRITES};
 /// but it reaches no provider, holds no resource and spends no budget, so it
 /// has no place in the provider table.
 pub fn observation(name: &str) -> bool {
-    READS.contains(&name) || name == crate::audit::HISTORY
+    READS.contains(&name) || name == crate::audit::HISTORY || crate::oauth::usage::observation(name)
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

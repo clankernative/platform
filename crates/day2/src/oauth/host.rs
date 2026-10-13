@@ -94,10 +94,10 @@ pub(crate) fn require_providers(
 }
 
 pub(crate) fn app_receiver(
-    runtime: &Runtime,
+    mut runtime: Runtime,
     providers: &Providers,
-) -> Result<Arc<shell_transport::AppApprovalReceiver>> {
-    let selected = admission::QualifiedConnections::from_runtime(runtime, &providers.catalog)?;
+) -> Result<(Runtime, Arc<shell_transport::AppApprovalReceiver>)> {
+    let selected = admission::QualifiedConnections::from_runtime(&runtime, &providers.catalog)?;
     let instance = selected.instance().clone();
     let tokens = match &instance.oauth_runtime {
         Some(config) => approval_keys::GkeMetadataAccessTokens::selected(
@@ -124,11 +124,13 @@ pub(crate) fn app_receiver(
         authority.clone(),
     )?);
     let receiver = shell_transport::AppApprovalReceiver::from_instance(&instance, backend)?;
-    match &providers.registrations {
+    let receiver = match &providers.registrations {
         Some(readiness) => receiver.with_registrations(Arc::new(Registrations {
-            authority,
+            authority: authority.clone(),
             readiness: readiness.clone(),
         })),
         None => Ok(receiver),
-    }
+    }?;
+    runtime.connections = Some(authority);
+    Ok((runtime, receiver))
 }

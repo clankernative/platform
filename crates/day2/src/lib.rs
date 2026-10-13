@@ -54,6 +54,7 @@ mod release_binding;
 #[allow(dead_code)]
 mod oauth;
 pub use oauth::declaration as connection_declaration;
+pub mod connection_codegen;
 pub mod openapi;
 pub mod operation_catalog;
 pub mod operation_contract;

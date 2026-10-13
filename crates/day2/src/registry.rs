@@ -966,8 +966,10 @@ impl Catalog {
         &self,
         schema: &Schema,
         outputs: &output_schema::Catalog,
+        connections: &[day2_capabilities::oauth::ConnectionDeclaration],
         admission: bool,
     ) -> Result<BTreeMap<String, String>> {
+        crate::connection_declaration::validate_catalog(connections, self)?;
         let prefix = if admission { "admission_" } else { "" };
         let input_type = |key: &str| -> Result<String> {
             Ok(schema
@@ -985,6 +987,10 @@ impl Catalog {
                 .clone())
         };
         let mut modules = BTreeMap::new();
+        modules.insert(
+            crate::connection_codegen::MODULE.into(),
+            crate::connection_codegen::module(connections, admission)?,
+        );
         modules.insert(
             crate::credential_codegen::MODULE.into(),
             crate::credential_codegen::module(

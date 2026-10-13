@@ -1290,6 +1290,164 @@ impl ApprovalAuthority for ArtifactApprovalAuthority {
     }
 }
 
+impl ArtifactApprovalAuthority {
+    fn use_selection(
+        &self,
+        state: &AuthorityState,
+        app: &str,
+        registration: &str,
+        owner: &str,
+        now: i64,
+    ) -> Result<Option<super::usage::Selection>> {
+        let selected = &state.selected;
+        if let Some(runtime) = &selected.instance.oauth_runtime {
+            ensure!(
+                self.readiness.selected_runtime()? == Some(Digest::of(runtime)?),
+                "OAuth live runtime selection changed"
+            );
+        }
+        let Some(candidate) = selected
+            .entries
+            .get(&(app.to_owned(), registration.to_owned()))
+        else {
+            return Ok(None);
+        };
+        ensure!(
+            candidate.requirement.owner == day2_capabilities::oauth::ConnectionOwner::CurrentHuman,
+            "product use requires a current-human connection"
+        );
+        let slot = ConnectionSlotKey {
+            installation: candidate.binding.namespace.installation.clone(),
+            environment: candidate.binding.namespace.environment.clone(),
+            app: candidate.binding.namespace.app.clone(),
+            requirement: candidate.requirement.logical_id.clone(),
+            owner: SlotOwner::Human {
+                subject: owner.to_owned(),
+            },
+        };
+        let Some(instance) = self.readiness.current(&candidate.binding, &slot, now)? else {
+            return Ok(None);
+        };
+        let (account, policy, observed_owner) = match &instance.account {
+            profiles::AccountBindingEvidence::MappedHuman { mapping, owner, .. } => {
+                (mapping, AccountBindingPolicy::MappedHuman, owner)
+            }
+            profiles::AccountBindingEvidence::ExplicitExternal {
+                approval, owner, ..
+            } => (
+                approval,
+                AccountBindingPolicy::ExplicitExternalAccount,
+                owner,
+            ),
+            profiles::AccountBindingEvidence::Installation { .. } => {
+                anyhow::bail!("human connection returned installation account evidence")
+            }
+        };
+        ensure!(
+            instance.instance == instance_identity(&selected.instance)?
+                && instance.binding_namespace == binding_namespace(&candidate.binding)?
+                && instance.registration.registration == candidate.binding.registration
+                && candidate
+                    .client_credential
+                    .as_ref()
+                    .is_none_or(|credential| *credential == instance.registration.client_credential)
+                && instance.shell.origin == candidate.binding.security_shell
+                && instance.custody == candidate.binding.custody
+                && instance.product_return == candidate.binding.product_return
+                && *account == candidate.binding.account_binding
+                && policy == candidate.requirement.account_policy
+                && observed_owner == owner,
+            "OAuth product readiness differs from selected binding"
+        );
+        Ok(Some(super::usage::Selection {
+            requirement: candidate.requirement.clone(),
+            permission: candidate.permission.clone(),
+            reviewed: candidate.reviewed.clone(),
+            binding: candidate.binding.clone(),
+            instance,
+            slot: slot.id(&candidate.requirement)?,
+        }))
+    }
+}
+
+impl super::usage::Authority for ArtifactApprovalAuthority {
+    fn current(
+        &self,
+        app: &str,
+        registration: &str,
+        owner: &str,
+        now: i64,
+    ) -> Result<Option<super::usage::Selection>> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| anyhow::anyhow!("OAuth selection lock poisoned"))?;
+        self.use_selection(&state, app, registration, owner, now)
+    }
+
+    fn custody(
+        &self,
+        app: &str,
+        registration: &str,
+        owner: &str,
+        expected: &Digest,
+        now: i64,
+    ) -> Result<Option<crate::managed_credentials::crypto::KeyLease>> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| anyhow::anyhow!("OAuth selection lock poisoned"))?;
+        let started = super::effects::Instant::now();
+        let Some(selection) = self.use_selection(&state, app, registration, owner, now)? else {
+            return Ok(None);
+        };
+        ensure!(
+            selection.identity()? == *expected,
+            "OAuth prepared use selection changed"
+        );
+        let candidate = &state.selected.entries[&(app.to_owned(), registration.to_owned())];
+        let keys = state
+            .keys
+            .as_ref()
+            .context("OAuth custody key provider missing")?;
+        let load = |reference: &ApprovalKeyRef, purpose| -> Result<[u8; 32]> {
+            let key = keys.load(reference, purpose)?;
+            ensure!(
+                key.binding == reference.binding
+                    && key.version == reference.version
+                    && key.purpose == purpose,
+                "OAuth custody key identity mismatch"
+            );
+            Ok(key.bytes)
+        };
+        let verifier = load(
+            &candidate.custody_verifier,
+            ApprovalKeyPurpose::CustodyVerifier,
+        )?;
+        let encryption = load(
+            &candidate.custody_encryption,
+            ApprovalKeyPurpose::CustodyEncryption,
+        )?;
+        let key = crate::managed_credentials::crypto::KeyLease::new(
+            &verifier,
+            &encryption,
+            candidate.custody_verifier.version.clone(),
+            candidate.custody_encryption.version.clone(),
+        )?;
+        let at = now
+            .checked_add(i64::try_from(started.elapsed().as_secs())?)
+            .context("OAuth use clock overflow")?;
+        let Some(current) = self.use_selection(&state, app, registration, owner, at)? else {
+            return Ok(None);
+        };
+        ensure!(
+            current.identity()? == *expected,
+            "OAuth product readiness changed during key retrieval"
+        );
+        Ok(Some(key))
+    }
+}
+
 #[cfg(test)]
 pub(super) mod tests {
     use super::super::{approval_registry::ApprovalKeyMaterial, connect::CallbackBindingSpec};
@@ -1543,6 +1701,8 @@ pub(super) mod tests {
                     callback: &'a ProviderCallbackRef,
                     custody: &'a BindingRef,
                     account: Option<&'a str>,
+                    reference: &'a str,
+                    token_version: Option<i64>,
                 }
                 let expected = TokenIdentity {
                     purpose: "ConnectionTokens",
@@ -1555,6 +1715,8 @@ pub(super) mod tests {
                     callback: &self.exchange.callback,
                     custody: &self.exchange.custody,
                     account: Some(self.expected_account.as_str()),
+                    reference: &self.exchange.token_slot_ref,
+                    token_version: Some(1),
                 };
                 ensure!(
                     identity
@@ -1571,7 +1733,8 @@ pub(super) mod tests {
                 plaintext.fill(0);
                 ensure!(
                     token
-                        == json!({"access_token":"private-replay-provider-token","refresh_token":"private-replay-provider-refresh-token","expires_in":3600}),
+                        == json!({"access_token":"private-replay-provider-token","refresh_token":"private-replay-provider-refresh-token",
+                            "issued_at":999,"expires_at":4599}),
                     "replay published wrong original provider token"
                 );
             }

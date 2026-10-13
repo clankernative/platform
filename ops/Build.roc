@@ -19,11 +19,12 @@ Build :: [].{
 		_ = Capability.call!("build-app-shape", "{}", host!)?
 		_ = Capability.call!("build-witnesses", "{}", host!)?
 		_ = Capability.call!("build-app-types", "{}", host!)?
+		_ = Capability.call!("build-glue", "{}", host!)?
+		_ = Capability.call!("build-host", "{}", host!)?
+		_ = Capability.call!("build-connection-contract", "{}", host!)?
 		_ = Capability.call!("build-bind", "{}", host!)?
 		_ = Capability.call!("build-app-check", "{}", host!)?
 		_ = Capability.call!("build-admission", "{}", host!)?
-		_ = Capability.call!("build-glue", "{}", host!)?
-		_ = Capability.call!("build-host", "{}", host!)?
 		_ = Capability.call!("build-check", "{}", host!)?
 		_ = Capability.call!("build-link", "{}", host!)?
 		_ = Capability.call!("build-publish", "{}", host!)?

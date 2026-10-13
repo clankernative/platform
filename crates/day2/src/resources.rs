@@ -885,6 +885,9 @@ pub(crate) fn validate_cached(
             &observation.instruction,
         );
     }
+    if crate::oauth::usage::observation(&observation.instruction.model) {
+        return crate::oauth::usage::validate_cached(connection, runtime, request, observation);
+    }
     if observation.instruction.model == crate::audit::HISTORY {
         // A recorded history page carries no resource. What must still hold is
         // the grant: revoking `audit.history` stops the invocation using what it

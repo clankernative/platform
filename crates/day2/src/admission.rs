@@ -44,6 +44,11 @@ const FACTORIES: &[(&str, &str)] = &[
 
 const SEALED: &[(&str, &str, &str)] = &[
     (
+        "Connection.roc",
+        "resolve",
+        "b79b6f5f2d789837920c6c3102877b3ef61479415a3d85a4f1ea5c60994fb54b",
+    ),
+    (
         "ConnectionAccess.roc",
         "define",
         "3afad645a9729ae965fbb91acc17ee529e5f940464418b9a5eaa010c8a8838bb",
@@ -55,8 +60,8 @@ const SEALED: &[(&str, &str, &str)] = &[
     ),
     (
         "GoogleCalendar.roc",
-        "",
-        "4c3316dd010c2c67cd4331fb2b7cd397dd054cdd7cec2abd776e97cbf66adfe4",
+        "list_events",
+        "0cf174ecd525ca29728b55be4a6386d0feaaf98443e31ded535c62c51932ed67",
     ),
     (
         "GitlabProjects.roc",
@@ -517,7 +522,12 @@ pub fn prepare(
     if stage.join("registry.json").exists() {
         let catalog: crate::registry::Catalog =
             serde_json::from_slice(&fs::read(stage.join("registry.json"))?)?;
-        for (module, source) in catalog.modules(schema, outputs, true)? {
+        let connections = if catalog.connections.is_empty() {
+            Vec::new()
+        } else {
+            serde_json::from_slice(&fs::read(stage.join("connections.json"))?)?
+        };
+        for (module, source) in catalog.modules(schema, outputs, &connections, true)? {
             fs::write(target.join("app").join(module), source)?;
         }
         fs::write(
