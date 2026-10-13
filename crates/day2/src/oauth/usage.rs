@@ -612,6 +612,13 @@ pub(crate) fn execute(
         current.identity()? == claims.selection,
         "connection selection changed during provider read"
     );
+    let completed_at = super::effects::wall_time()?;
+    if completed_at < at || completed_at >= token.expires_at {
+        let tx = crate::write_queue::immediate(&mut db)?;
+        refuse(&tx, &claims)?;
+        tx.commit()?;
+        return Ok(unavailable("ReauthRequired"));
+    }
     let snapshot = db.transaction()?;
     load(
         &snapshot,
@@ -619,7 +626,7 @@ pub(crate) fn execute(
         request,
         &input.registration,
         &input.reference,
-        at,
+        completed_at,
     )?;
     snapshot.commit()?;
     Ok(result)
@@ -995,6 +1002,8 @@ mod tests {
         Expired,
         Rewound,
         RewoundKey,
+        ReadinessExpired,
+        ReadinessRewound,
         Late,
         MissingMarker,
     }
@@ -1079,6 +1088,7 @@ mod tests {
             match self.case {
                 ProviderCase::Expired => self.now.store(303, SeqCst),
                 ProviderCase::Rewound => self.now.store(99, SeqCst),
+                ProviderCase::ReadinessRewound => self.now.store(110, SeqCst),
                 ProviderCase::Late => self.ticks.store(3, SeqCst),
                 _ => (),
             }
@@ -1132,6 +1142,19 @@ mod tests {
                 self.port
                     .now
                     .store(110, std::sync::atomic::Ordering::SeqCst);
+            }
+            if call == 2 {
+                match self.port.case {
+                    ProviderCase::ReadinessExpired => self
+                        .port
+                        .now
+                        .store(303, std::sync::atomic::Ordering::SeqCst),
+                    ProviderCase::ReadinessRewound => self
+                        .port
+                        .now
+                        .store(105, std::sync::atomic::Ordering::SeqCst),
+                    _ => (),
+                }
             }
             Ok(Some(self.selection.clone()))
         }
@@ -1342,6 +1365,8 @@ mod tests {
             ProviderCase::Expired,
             ProviderCase::Rewound,
             ProviderCase::RewoundKey,
+            ProviderCase::ReadinessExpired,
+            ProviderCase::ReadinessRewound,
             ProviderCase::Late,
             ProviderCase::MissingMarker,
         ] {
@@ -1472,10 +1497,16 @@ mod tests {
                         | ProviderCase::Expired
                         | ProviderCase::Rewound
                         | ProviderCase::RewoundKey
+                        | ProviderCase::ReadinessExpired
+                        | ProviderCase::ReadinessRewound
                 ) {
                     let error = outcome.expect_err("invalidated Use must refuse actual completion");
-                    let expected = if matches!(case, ProviderCase::Expired | ProviderCase::Rewound)
-                    {
+                    let expected = if matches!(
+                        case,
+                        ProviderCase::Expired
+                            | ProviderCase::Rewound
+                            | ProviderCase::ReadinessExpired
+                    ) {
                         "connection use authority or invocation changed"
                     } else {
                         "connection use generation or account changed"
@@ -1558,7 +1589,11 @@ mod tests {
                 );
                 if matches!(
                     case,
-                    ProviderCase::Expired | ProviderCase::Rewound | ProviderCase::RewoundKey
+                    ProviderCase::Expired
+                        | ProviderCase::Rewound
+                        | ProviderCase::RewoundKey
+                        | ProviderCase::ReadinessExpired
+                        | ProviderCase::ReadinessRewound
                 ) {
                     assert_eq!(
                         db.query_row("SELECT status FROM oauth_connection_slots", [], |row| {

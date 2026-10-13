@@ -31,3 +31,9 @@ This slice uses original activation token material only. Expired tokens require
 reauthorization; real refresh publication, Calendar writes, live Google consent,
 effective IAM/workload qualification and production-role authority remain separate
 implementation and qualification work.
+
+Expiry and clock rollback observed at custody, dispatch and post-read readiness
+checks persist refusal for the exact token generation/version. Final and replay
+checks reject an invalid Use inside their decision transaction; a failed decision
+does not separately publish a persistent clock refusal. A qualified clock producer
+and complete cross-clock qualification remain follow-up work.
