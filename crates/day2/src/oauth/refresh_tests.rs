@@ -1,13 +1,13 @@
 //! Real admitted Calendar worker -> Runtime -> private refresh -> encrypted
 //! settlement -> bounded read. Only native readiness/clock/HTTP use test ports.
 use super::*;
-use anyhow::Context as _;
-use rusqlite::OptionalExtension as _;
 use crate::{
     artifact::LoadedArtifact,
     authority_state,
     oauth::{account, effects, exchange, outbound, profiles, refresh},
 };
+use anyhow::Context as _;
+use rusqlite::OptionalExtension as _;
 use std::{
     collections::BTreeSet,
     fs,
@@ -246,8 +246,14 @@ impl Authority for NativeAuthority {
     fn current(&self, _: &str, _: &str, _: &str, _: i64) -> Result<Option<Selection>> {
         if self.port.case == Case::AbsentReturnRewind {
             let db = store::open(&self.port.db)?;
-            let missing: bool = db.query_row("SELECT NOT EXISTS(SELECT 1 FROM oauth_connection_slots)", [], |r| r.get(0))?;
-            if missing { self.port.activate_on_fill.store(true, SeqCst); }
+            let missing: bool = db.query_row(
+                "SELECT NOT EXISTS(SELECT 1 FROM oauth_connection_slots)",
+                [],
+                |r| r.get(0),
+            )?;
+            if missing {
+                self.port.activate_on_fill.store(true, SeqCst);
+            }
         }
         if self.port.case == Case::ReadinessRewind && self.port.posts.load(SeqCst) > 0 {
             self.port.now.store(255, SeqCst);
@@ -498,7 +504,9 @@ fn compiled_calendar_refresh_publishes_versions_and_fences_failure_recovery() ->
             activate_on_fill: AtomicBool::new(false),
         });
         let result = effects::scope(port.clone(), || -> Result<()> {
-            if case != Case::AbsentReturnRewind { activate(&runtime, &fixture)?; }
+            if case != Case::AbsentReturnRewind {
+                activate(&runtime, &fixture)?;
+            }
             runtime.connections = Some(Arc::new(NativeAuthority {
                 selection,
                 port: port.clone(),
@@ -511,10 +519,11 @@ fn compiled_calendar_refresh_publishes_versions_and_fences_failure_recovery() ->
                     [],
                 )?;
             }
-            let original: Option<Vec<u8>> =
-                db.query_row("SELECT ciphertext FROM oauth_private_tokens", [], |r| {
+            let original: Option<Vec<u8>> = db
+                .query_row("SELECT ciphertext FROM oauth_private_tokens", [], |r| {
                     r.get(0)
-                }).optional()?;
+                })
+                .optional()?;
             let human = crate::iap::Verified {
                 email: "alice@example.com".into(),
                 subject: "accounts.google.com:google-alice".into(),
@@ -642,7 +651,9 @@ fn compiled_calendar_refresh_publishes_versions_and_fences_failure_recovery() ->
                     "{case:?}: failed refresh completed a Calendar read"
                 );
                 let posts = match case {
-                    Case::CredentialRewind | Case::MaterialSubstitution | Case::AbsentReturnRewind => 0,
+                    Case::CredentialRewind
+                    | Case::MaterialSubstitution
+                    | Case::AbsentReturnRewind => 0,
                     Case::SuccessorReturnRewind => 2,
                     _ => 1,
                 };
@@ -668,8 +679,21 @@ fn compiled_calendar_refresh_publishes_versions_and_fences_failure_recovery() ->
                 );
                 if case == Case::AbsentReturnRewind {
                     assert!(original.is_none());
-                    assert_eq!(db.query_row("SELECT status FROM oauth_connection_slots", [], |r| r.get::<_,String>(0))?, "active", "uncaptured activation must not be retired");
-                    assert_eq!(db.query_row("SELECT count(*) FROM oauth_use_handles WHERE invocation='refresh_v2'", [], |r| r.get::<_,i64>(0))?, 0, "absent-material clock floor failed to stop Use minting");
+                    assert_eq!(
+                        db.query_row("SELECT status FROM oauth_connection_slots", [], |r| r
+                            .get::<_, String>(0))?,
+                        "active",
+                        "uncaptured activation must not be retired"
+                    );
+                    assert_eq!(
+                        db.query_row(
+                            "SELECT count(*) FROM oauth_use_handles WHERE invocation='refresh_v2'",
+                            [],
+                            |r| r.get::<_, i64>(0)
+                        )?,
+                        0,
+                        "absent-material clock floor failed to stop Use minting"
+                    );
                 } else if version == 1 {
                     assert_eq!(
                         db.query_row("SELECT ciphertext FROM oauth_private_tokens", [], |r| r

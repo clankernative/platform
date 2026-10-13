@@ -69,18 +69,20 @@ impl Resolution {
             if let Some(fence) = &self.fence {
                 let expected = &fence.expected;
                 custody::refuse_access(
-                db,
-                &expected.slot,
-                expected.generation,
-                expected.base_version,
-                expected.security_epoch,
-                &expected.profile,
-                &expected.account,
+                    db,
+                    &expected.slot,
+                    expected.generation,
+                    expected.base_version,
+                    expected.security_epoch,
+                    &expected.profile,
+                    &expected.account,
                 )?;
             }
             return Ok(false);
         }
-        let Some(fence) = &self.fence else { return Ok(true); };
+        let Some(fence) = &self.fence else {
+            return Ok(true);
+        };
         let expected = &fence.expected;
         Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM oauth_connection_slots s JOIN oauth_private_tokens t
             ON t.slot=s.slot AND t.generation=s.generation AND t.account=s.account
