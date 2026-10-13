@@ -56,7 +56,8 @@ jobs:
   # Only main pushes may reuse authenticated full proof for the exact queue SHA.
   # Any lookup/setup/download/admission failure selects ordinary full preparation.
   verify-queue-receipt:
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    needs: [secrets, dependencies]
+    if: ${{ !cancelled() && needs.secrets.result == 'success' && needs.dependencies.result == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: macos-15
     timeout-minutes: 20
     permissions:
@@ -117,8 +118,9 @@ jobs:
           retention-days: 14
 
   verify-prepare-parts:
-    needs: verify-queue-receipt
-    if: ${{ !cancelled() && !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') && inputs.verification != 'full' && inputs.verification != 'diagnostics' && inputs.verification != 'serial-prepare' }}
+    # Reject known security failures before allocating compilation runners.
+    needs: [secrets, dependencies, verify-queue-receipt]
+    if: ${{ !cancelled() && needs.secrets.result == 'success' && needs.dependencies.result == 'success' && !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') && inputs.verification != 'full' && inputs.verification != 'diagnostics' && inputs.verification != 'serial-prepare' }}
     runs-on: macos-15
     timeout-minutes: 360
     strategy:
@@ -225,8 +227,8 @@ jobs:
           retention-days: 3
 
   verify-prepare-serial:
-    needs: verify-queue-receipt
-    if: ${{ !cancelled() && !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') && inputs.verification == 'serial-prepare' }}
+    needs: [secrets, dependencies, verify-queue-receipt]
+    if: ${{ !cancelled() && needs.secrets.result == 'success' && needs.dependencies.result == 'success' && !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') && inputs.verification == 'serial-prepare' }}
     runs-on: macos-15
     timeout-minutes: 360
     env:
@@ -312,8 +314,8 @@ jobs:
           retention-days: 3
 
   verify-prepare:
-    needs: [verify-queue-receipt, verify-prepare-parts, verify-prepare-serial]
-    if: ${{ always() && !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') && inputs.verification != 'full' && inputs.verification != 'diagnostics' }}
+    needs: [secrets, dependencies, verify-queue-receipt, verify-prepare-parts, verify-prepare-serial]
+    if: ${{ !cancelled() && needs.secrets.result == 'success' && needs.dependencies.result == 'success' && !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') && inputs.verification != 'full' && inputs.verification != 'diagnostics' }}
     runs-on: macos-15
     timeout-minutes: 20
     env:
@@ -433,9 +435,10 @@ jobs:
           retention-days: 3
 
   verify:
-    needs: [verify-queue-receipt, verify-prepare, verify-shards]
+    needs: [secrets, dependencies, verify-queue-receipt, verify-prepare, verify-shards]
     if: ${{ always() && inputs.verification != 'full' && inputs.verification != 'diagnostics' }}
-    runs-on: macos-15
+    # A rejected source only needs the failure guard, not a macOS queue slot.
+    runs-on: ${{ needs.secrets.result == 'success' && needs.dependencies.result == 'success' && 'macos-15' || 'ubuntu-24.04' }}
     timeout-minutes: 20
     env:
       CARGO_INCREMENTAL: '0'
@@ -449,9 +452,11 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: Require successful preparation and every shard
-        run: test "$REUSED" = true -o "$PREPARATION:$SHARDS" = success:success
+      - name: Require security checks and complete verification
+        run: test "$SECRETS:$DEPENDENCIES:$REUSED" = success:success:true -o "$SECRETS:$DEPENDENCIES:$PREPARATION:$SHARDS" = success:success:success:success
         env:
+          SECRETS: ${{ needs.secrets.result }}
+          DEPENDENCIES: ${{ needs.dependencies.result }}
           REUSED: ${{ needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true' }}
           PREPARATION: ${{ needs.verify-prepare.result }}
           SHARDS: ${{ needs.verify-shards.result }}
@@ -514,7 +519,8 @@ jobs:
           retention-days: 14
 
   verify-full:
-    if: ${{ inputs.verification == 'full' || inputs.verification == 'compare' }}
+    needs: [secrets, dependencies]
+    if: ${{ !cancelled() && needs.secrets.result == 'success' && needs.dependencies.result == 'success' && (inputs.verification == 'full' || inputs.verification == 'compare') }}
     runs-on: macos-15
     timeout-minutes: 360
     env:
