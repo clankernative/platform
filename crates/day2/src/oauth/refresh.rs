@@ -38,26 +38,46 @@ struct MaterialFence {
 
 impl Resolution {
     fn unavailable(problem: &'static str) -> Self {
-        Self { problem: Some(problem), fence: None }
+        Self {
+            problem: Some(problem),
+            fence: None,
+        }
     }
 
     fn ready(context: &usage::RefreshContext, version: i64, clock: i64) -> Result<Self> {
         let mut expected = context.eligibility().clone();
         expected.base_version = version;
-        Ok(Self { problem: None, fence: Some(MaterialFence { expected,
-            reference: custody::token_reference(context.binding(), version)?, clock }) })
+        Ok(Self {
+            problem: None,
+            fence: Some(MaterialFence {
+                expected,
+                reference: custody::token_reference(context.binding(), version)?,
+                clock,
+            }),
+        })
     }
 
-    pub(super) fn problem(&self) -> Option<&'static str> { self.problem }
+    pub(super) fn problem(&self) -> Option<&'static str> {
+        self.problem
+    }
 
     /// The caller commits even a refused result so an observed rewind cannot
     /// disappear when the product decision subsequently fails.
     pub(super) fn validate(&self, db: &Connection, now: i64) -> Result<bool> {
-        let Some(fence) = &self.fence else { return Ok(true); };
+        let Some(fence) = &self.fence else {
+            return Ok(true);
+        };
         let expected = &fence.expected;
         if now < fence.clock {
-            custody::refuse_access(db, &expected.slot, expected.generation, expected.base_version,
-                expected.security_epoch, &expected.profile, &expected.account)?;
+            custody::refuse_access(
+                db,
+                &expected.slot,
+                expected.generation,
+                expected.base_version,
+                expected.security_epoch,
+                &expected.profile,
+                &expected.account,
+            )?;
             return Ok(false);
         }
         Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM oauth_connection_slots s JOIN oauth_private_tokens t
@@ -180,7 +200,12 @@ pub(super) fn ensure_current(
     snapshot.commit()?;
     let context = match context {
         Ok(Some(context)) => context,
-        Ok(None) => return Ok(Resolution { problem: None, fence: None }),
+        Ok(None) => {
+            return Ok(Resolution {
+                problem: None,
+                fence: None,
+            });
+        }
         Err(_) => return Ok(Resolution::unavailable("ReauthRequired")),
     };
     let selected = selection.identity()?;
@@ -524,7 +549,7 @@ pub(super) fn ensure_current(
                         at >= observed_at && at < expires_at && monotonic.elapsed() <= BUDGET,
                         "refresh publication clock or elapsed fence changed"
                     );
-                freshest = at;
+                    freshest = at;
                     local_matches(
                         tx,
                         runtime,

@@ -1476,7 +1476,9 @@ impl super::usage::Authority for ArtifactApprovalAuthority {
         bytes.fill(0);
         let secret = secret?;
         let at = super::effects::wall_time()?;
-        if at < now { return Err(super::refresh::ClockRefusal.into()); }
+        if at < now {
+            return Err(super::refresh::ClockRefusal.into());
+        }
         let Some(current) = self.use_selection(&state, app, registration, owner, at)? else {
             return Ok(None);
         };

@@ -27,7 +27,11 @@ pub(crate) trait Hooks: Send + Sync {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum RefreshBoundary { DispatchCommitted, MaterialWritten, PublicationCommitted }
+pub(crate) enum RefreshBoundary {
+    DispatchCommitted,
+    MaterialWritten,
+    PublicationCommitted,
+}
 
 /// A test process can terminate at the real durable boundaries. Serving builds
 /// have no hook and execute exactly the same transition without an observer.

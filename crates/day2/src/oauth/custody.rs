@@ -579,7 +579,15 @@ pub(super) fn load_refresh(
     let bundle = match load_bundle(db, key, intent, binding, account, version) {
         Ok(bundle) => bundle,
         Err(_) => {
-            refuse_access(db, &intent.slot, intent.proposed_generation, version, intent.expected_epoch, &intent.profile, account)?;
+            refuse_access(
+                db,
+                &intent.slot,
+                intent.proposed_generation,
+                version,
+                intent.expected_epoch,
+                &intent.profile,
+                account,
+            )?;
             return Ok(None);
         }
     };

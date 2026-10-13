@@ -1,8 +1,10 @@
 //! Real admitted Calendar worker -> Runtime -> private refresh -> encrypted
 //! settlement -> bounded read. Only native readiness/clock/HTTP use test ports.
 use super::*;
+use anyhow::Context as _;
 use crate::{
     artifact::LoadedArtifact,
+    authority_state,
     oauth::{account, effects, exchange, outbound, profiles, refresh},
 };
 use std::{
@@ -84,7 +86,8 @@ impl Port {
 impl effects::Hooks for Port {
     fn refresh_boundary(&self, boundary: effects::RefreshBoundary) {
         if self.crash == Some(boundary) {
-            self.record(&format!("boundary:{boundary:?}")).expect("durable child boundary log");
+            self.record(&format!("boundary:{boundary:?}"))
+                .expect("durable child boundary log");
             std::process::exit(86);
         }
     }
@@ -288,22 +291,49 @@ impl Authority for NativeAuthority {
             if self.port.case == Case::PublicationExpired {
                 self.port.now.store(340, SeqCst);
             }
-            if matches!(self.port.case, Case::ReturnRewind | Case::SuccessorReturnRewind) {
+            if matches!(
+                self.port.case,
+                Case::ReturnRewind | Case::SuccessorReturnRewind
+            ) {
                 self.port.now.store(270, SeqCst);
             }
         }
         let result = commit(&self.selection);
-        if call == 1 && result.as_ref().is_ok_and(|value| *value)
-            && matches!(self.port.case, Case::ReturnRewind | Case::SuccessorReturnRewind) {
+        if call == 1
+            && result.as_ref().is_ok_and(|value| *value)
+            && matches!(
+                self.port.case,
+                Case::ReturnRewind | Case::SuccessorReturnRewind
+            )
+        {
             if self.port.case == Case::SuccessorReturnRewind {
                 let mut successor = self.port.local_runtime.clone();
-                successor.connections = Some(Arc::new(NativeAuthority { selection: self.selection.clone(), port:self.port.clone(), commits:AtomicUsize::new(2) }));
+                successor.connections = Some(Arc::new(NativeAuthority {
+                    selection: self.selection.clone(),
+                    port: self.port.clone(),
+                    commits: AtomicUsize::new(2),
+                }));
                 self.port.now.store(280, SeqCst);
-                let human = crate::iap::Verified { email:"alice@example.com".into(), subject:"accounts.google.com:google-alice".into() };
+                let human = crate::iap::Verified {
+                    email: "alice@example.com".into(),
+                    subject: "accounts.google.com:google-alice".into(),
+                };
                 let input = json!({"start":"2026-10-13T00:00:00Z","end":"2026-10-14T00:00:00Z"});
-                let outcome = successor.invoke_verified("oauthcalendar.list_events", store::RequestIdentity { actor:&human.email, origin:Some(&human) },
-                    "concurrent_successor_v3", &input, 280, store::Fault::None)?;
-                assert_eq!(outcome.result["status"], "ok", "concurrent successor must use real sealed publication");
+                let outcome = successor.invoke_verified(
+                    "oauthcalendar.list_events",
+                    store::RequestIdentity {
+                        actor: &human.email,
+                        origin: Some(&human),
+                    },
+                    "concurrent_successor_v3",
+                    &input,
+                    280,
+                    store::Fault::None,
+                )?;
+                assert_eq!(
+                    outcome.result["status"], "ok",
+                    "concurrent successor must use real sealed publication"
+                );
             }
             self.port.now.store(265, SeqCst);
         }
@@ -454,28 +484,84 @@ fn compiled_calendar_refresh_publishes_versions_and_fences_failure_recovery() ->
         });
         let result = effects::scope(port.clone(), || -> Result<()> {
             activate(&runtime, &fixture)?;
-            runtime.connections = Some(Arc::new(NativeAuthority { selection, port:port.clone(), commits:AtomicUsize::new(0) }));
+            runtime.connections = Some(Arc::new(NativeAuthority {
+                selection,
+                port: port.clone(),
+                commits: AtomicUsize::new(0),
+            }));
             let db = store::open(runtime.db())?;
             if case == Case::MaterialSubstitution {
-                db.execute("UPDATE oauth_private_tokens SET reference='substituted_material_reference'", [])?;
+                db.execute(
+                    "UPDATE oauth_private_tokens SET reference='substituted_material_reference'",
+                    [],
+                )?;
             }
-            let original: Vec<u8> = db.query_row("SELECT ciphertext FROM oauth_private_tokens", [], |r| r.get(0))?;
-            let human = crate::iap::Verified { email:"alice@example.com".into(), subject:"accounts.google.com:google-alice".into() };
+            let original: Vec<u8> =
+                db.query_row("SELECT ciphertext FROM oauth_private_tokens", [], |r| {
+                    r.get(0)
+                })?;
+            let human = crate::iap::Verified {
+                email: "alice@example.com".into(),
+                subject: "accounts.google.com:google-alice".into(),
+            };
             crate::iap::bind_subject(&db, &human, 250)?;
             let input = json!({"start":"2026-10-13T00:00:00Z","end":"2026-10-14T00:00:00Z"});
-            let invoke = |id: &str| runtime.invoke_verified("oauthcalendar.list_events", store::RequestIdentity { actor:&human.email, origin:Some(&human) }, id, &input, port.now.load(SeqCst), store::Fault::None);
+            let invoke = |id: &str| {
+                runtime.invoke_verified(
+                    "oauthcalendar.list_events",
+                    store::RequestIdentity {
+                        actor: &human.email,
+                        origin: Some(&human),
+                    },
+                    id,
+                    &input,
+                    port.now.load(SeqCst),
+                    store::Fault::None,
+                )
+            };
             let first = invoke("refresh_v2");
             if case == Case::Complete {
                 let outcome = first.with_context(|| format!("{case:?} v2"))?;
-                assert_eq!(outcome.status, "success"); assert_eq!(outcome.result["status"], "ok");
-                assert_eq!(port.posts.load(SeqCst), 1); assert_eq!(port.accounts.load(SeqCst), 1); assert_eq!(port.reads.load(SeqCst), 1);
-                let binding = exchange::load_binding(&db, &fixture.intent.attempt)?.context("activation binding")?;
-                let account: String = db.query_row("SELECT account FROM oauth_connection_slots", [], |r| r.get(0))?;
+                assert_eq!(outcome.status, "success");
+                assert_eq!(outcome.result["status"], "ok");
+                assert_eq!(port.posts.load(SeqCst), 1);
+                assert_eq!(port.accounts.load(SeqCst), 1);
+                assert_eq!(port.reads.load(SeqCst), 1);
+                let binding = exchange::load_binding(&db, &fixture.intent.attempt)?
+                    .context("activation binding")?;
+                let account: String =
+                    db.query_row("SELECT account FROM oauth_connection_slots", [], |r| {
+                        r.get(0)
+                    })?;
                 let key = profiles::tests::exchange_key();
-                let token = super::super::custody::load_access(&db, &key, &fixture.intent, &binding, &account, 2, 250)?.context("v2 material")?;
+                let token = super::super::custody::load_access(
+                    &db,
+                    &key,
+                    &fixture.intent,
+                    &binding,
+                    &account,
+                    2,
+                    250,
+                )?
+                .context("v2 material")?;
                 assert_eq!(token.expires_at, 340);
-                assert!(super::super::custody::load_access(&db, &key, &fixture.intent, &binding, &account, 1, 250).is_err());
-                let reference: String = db.query_row("SELECT reference FROM oauth_use_handles WHERE invocation='refresh_v2'", [], |r| r.get(0))?;
+                assert!(
+                    super::super::custody::load_access(
+                        &db,
+                        &key,
+                        &fixture.intent,
+                        &binding,
+                        &account,
+                        1,
+                        250
+                    )
+                    .is_err()
+                );
+                let reference: String = db.query_row(
+                    "SELECT reference FROM oauth_use_handles WHERE invocation='refresh_v2'",
+                    [],
+                    |r| r.get(0),
+                )?;
                 // Drop the returned outcome and reopen the store as a caller
                 // recovering a lost acknowledgement. The committed receipt
                 // permits observation, never another refresh of base version 1.
@@ -487,65 +573,216 @@ fn compiled_calendar_refresh_publishes_versions_and_fences_failure_recovery() ->
                 port.now.store(280, SeqCst);
                 assert_eq!(invoke("refresh_v3")?.result["status"], "ok");
                 assert_eq!(port.posts.load(SeqCst), 2);
-                assert_eq!(db.query_row("SELECT token_version FROM oauth_connection_slots", [], |r| r.get::<_,i64>(0))?, 3);
-                assert!(super::super::custody::load_access(&db, &key, &fixture.intent, &binding, &account, 2, 280).is_err());
-                assert!(super::super::custody::load_access(&db, &key, &fixture.intent, &binding, &account, 3, 280)?.is_some());
-                let old = Request { operation:"oauthcalendar.list_events".into(), input:input.to_string(),
-                    context:store::invocation_context(&db, "refresh_v2")?, observations:vec![] };
-                assert_eq!(load(&db, &runtime, &old, "calendar", &reference, 280).err().context("stale Use survived publication")?.to_string(),
-                    "connection use generation or account changed", "Use must fail on its material pin while its 60-second lifetime remains valid");
+                assert_eq!(
+                    db.query_row(
+                        "SELECT token_version FROM oauth_connection_slots",
+                        [],
+                        |r| r.get::<_, i64>(0)
+                    )?,
+                    3
+                );
+                assert!(
+                    super::super::custody::load_access(
+                        &db,
+                        &key,
+                        &fixture.intent,
+                        &binding,
+                        &account,
+                        2,
+                        280
+                    )
+                    .is_err()
+                );
+                assert!(
+                    super::super::custody::load_access(
+                        &db,
+                        &key,
+                        &fixture.intent,
+                        &binding,
+                        &account,
+                        3,
+                        280
+                    )?
+                    .is_some()
+                );
+                let old = Request {
+                    operation: "oauthcalendar.list_events".into(),
+                    input: input.to_string(),
+                    context: store::invocation_context(&db, "refresh_v2")?,
+                    observations: vec![],
+                };
+                assert_eq!(
+                    load(&db, &runtime, &old, "calendar", &reference, 280)
+                        .err()
+                        .context("stale Use survived publication")?
+                        .to_string(),
+                    "connection use generation or account changed",
+                    "Use must fail on its material pin while its 60-second lifetime remains valid"
+                );
             } else {
-                assert!(!first.as_ref().is_ok_and(|o| o.status == "success" && o.result["status"] == "ok"), "{case:?}: failed refresh completed a Calendar read");
-                let posts = match case { Case::CredentialRewind | Case::MaterialSubstitution => 0, Case::SuccessorReturnRewind => 2, _ => 1 };
+                assert!(
+                    !first
+                        .as_ref()
+                        .is_ok_and(|o| o.status == "success" && o.result["status"] == "ok"),
+                    "{case:?}: failed refresh completed a Calendar read"
+                );
+                let posts = match case {
+                    Case::CredentialRewind | Case::MaterialSubstitution => 0,
+                    Case::SuccessorReturnRewind => 2,
+                    _ => 1,
+                };
                 assert_eq!(port.posts.load(SeqCst), posts, "{case:?}");
-                assert_eq!(port.reads.load(SeqCst), usize::from(case == Case::SuccessorReturnRewind), "{case:?}");
-                let version = match case { Case::ReturnRewind => 2, Case::SuccessorReturnRewind => 3, _ => 1 };
-                assert_eq!(db.query_row("SELECT token_version FROM oauth_connection_slots", [], |r| r.get::<_,i64>(0))?, version, "{case:?}");
+                assert_eq!(
+                    port.reads.load(SeqCst),
+                    usize::from(case == Case::SuccessorReturnRewind),
+                    "{case:?}"
+                );
+                let version = match case {
+                    Case::ReturnRewind => 2,
+                    Case::SuccessorReturnRewind => 3,
+                    _ => 1,
+                };
+                assert_eq!(
+                    db.query_row(
+                        "SELECT token_version FROM oauth_connection_slots",
+                        [],
+                        |r| r.get::<_, i64>(0)
+                    )?,
+                    version,
+                    "{case:?}"
+                );
                 if version == 1 {
-                    assert_eq!(db.query_row("SELECT ciphertext FROM oauth_private_tokens", [], |r| r.get::<_,Vec<u8>>(0))?, original, "{case:?}: partial material publication");
+                    assert_eq!(
+                        db.query_row("SELECT ciphertext FROM oauth_private_tokens", [], |r| r
+                            .get::<_, Vec<u8>>(0))?,
+                        original,
+                        "{case:?}: partial material publication"
+                    );
                 } else {
-                    assert_ne!(db.query_row("SELECT ciphertext FROM oauth_private_tokens", [], |r| r.get::<_,Vec<u8>>(0))?, original, "{case:?}: committed successor missing");
+                    assert_ne!(
+                        db.query_row("SELECT ciphertext FROM oauth_private_tokens", [], |r| r
+                            .get::<_, Vec<u8>>(0))?,
+                        original,
+                        "{case:?}: committed successor missing"
+                    );
                 }
                 let before = port.posts.load(SeqCst);
-                port.now.store(if case == Case::SuccessorReturnRewind {280} else {250}, SeqCst);
+                port.now.store(
+                    if case == Case::SuccessorReturnRewind {
+                        280
+                    } else {
+                        250
+                    },
+                    SeqCst,
+                );
                 let recovery = invoke("recovery_no_resend");
                 if case == Case::SuccessorReturnRewind {
                     assert_eq!(recovery?.result["status"], "ok");
-                    assert_eq!(db.query_row("SELECT status FROM oauth_connection_slots", [], |r| r.get::<_,String>(0))?, "active", "late refusal must not disable v3");
+                    assert_eq!(
+                        db.query_row("SELECT status FROM oauth_connection_slots", [], |r| r
+                            .get::<_, String>(0))?,
+                        "active",
+                        "late refusal must not disable v3"
+                    );
                 }
-                assert_eq!(port.posts.load(SeqCst), before, "{case:?}: recovery resent an unresolved base");
-                if matches!(case, Case::ReadinessRewind | Case::PublicationRewind | Case::PublicationExpired | Case::CredentialRewind | Case::ReturnRewind | Case::MaterialSubstitution) {
-                    assert_eq!(db.query_row("SELECT status FROM oauth_connection_slots", [], |r| r.get::<_,String>(0))?, "reauth_required");
+                assert_eq!(
+                    port.posts.load(SeqCst),
+                    before,
+                    "{case:?}: recovery resent an unresolved base"
+                );
+                if matches!(
+                    case,
+                    Case::ReadinessRewind
+                        | Case::PublicationRewind
+                        | Case::PublicationExpired
+                        | Case::CredentialRewind
+                        | Case::ReturnRewind
+                        | Case::MaterialSubstitution
+                ) {
+                    assert_eq!(
+                        db.query_row("SELECT status FROM oauth_connection_slots", [], |r| r
+                            .get::<_, String>(0))?,
+                        "reauth_required"
+                    );
                 }
             }
-            assert_eq!(db.query_row("SELECT count(*) FROM entries", [], |r| r.get::<_,i64>(0))?, 0);
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM entries", [], |r| r.get::<_, i64>(0))?,
+                0
+            );
             Ok(())
         });
         if let Err(error) = result {
             let retained = directory.keep();
-            anyhow::bail!("compiled refresh case {case:?} failed; protected fixture retained at {}: {error:#}", retained.display());
+            anyhow::bail!(
+                "compiled refresh case {case:?} failed; protected fixture retained at {}: {error:#}",
+                retained.display()
+            );
         }
     }
     Ok(())
 }
 
-fn crash_runtime(directory: &std::path::Path, artifact: &std::path::Path, create: bool) -> Result<Runtime> {
+fn crash_runtime(
+    directory: &std::path::Path,
+    artifact: &std::path::Path,
+    create: bool,
+) -> Result<Runtime> {
     let instance_path = directory.join("instance.json");
     if create {
-        fs::write(&instance_path, serde_json::to_vec(&crate::development::verification_instance_data(artifact, None, "alice@example.com")?)?)?;
+        fs::write(
+            &instance_path,
+            serde_json::to_vec(&crate::development::verification_instance_data(
+                artifact,
+                None,
+                "alice@example.com",
+            )?)?,
+        )?;
     }
-    let runtime = Runtime::from_artifact_for_tests(instance_path, "app".into(), directory.join("app.sqlite"), LoadedArtifact::load(artifact)?)?;
+    let runtime = Runtime::from_artifact_for_tests(
+        instance_path,
+        "app".into(),
+        directory.join("app.sqlite"),
+        LoadedArtifact::load(artifact)?,
+    )?;
     runtime.initialize()?;
     Ok(runtime)
 }
 
-fn crash_authority(runtime: &mut Runtime, directory: &std::path::Path, point: Option<effects::RefreshBoundary>) -> Result<(Arc<Port>, profiles::tests::QualificationFixture)> {
+fn crash_authority(
+    runtime: &mut Runtime,
+    directory: &std::path::Path,
+    point: Option<effects::RefreshBoundary>,
+) -> Result<(Arc<Port>, profiles::tests::QualificationFixture)> {
     let (selection, fixture) = super::tests::product_selection(runtime)?;
-    let scopes = fixture.permission.action_scopes.values().flatten().cloned().collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>().join(" ");
-    let port = Arc::new(Port { case:Case::Complete, db:runtime.db().to_owned(), local_runtime:runtime.clone(), scopes,
-        now:AtomicI64::new(250), entropy:AtomicU64::new(500), posts:AtomicUsize::new(0), accounts:AtomicUsize::new(0), reads:AtomicUsize::new(0),
-        crash:point, transport:Some(directory.join("transport.sqlite")) });
-    runtime.connections = Some(Arc::new(NativeAuthority { selection, port:port.clone(), commits:AtomicUsize::new(0) }));
+    let scopes = fixture
+        .permission
+        .action_scopes
+        .values()
+        .flatten()
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let port = Arc::new(Port {
+        case: Case::Complete,
+        db: runtime.db().to_owned(),
+        local_runtime: runtime.clone(),
+        scopes,
+        now: AtomicI64::new(250),
+        entropy: AtomicU64::new(500),
+        posts: AtomicUsize::new(0),
+        accounts: AtomicUsize::new(0),
+        reads: AtomicUsize::new(0),
+        crash: point,
+        transport: Some(directory.join("transport.sqlite")),
+    });
+    runtime.connections = Some(Arc::new(NativeAuthority {
+        selection,
+        port: port.clone(),
+        commits: AtomicUsize::new(0),
+    }));
     Ok((port, fixture))
 }
 
@@ -553,19 +790,41 @@ fn crash_authority(runtime: &mut Runtime, directory: &std::path::Path, point: Op
 fn compiled_refresh_crash_recovery_uses_sealed_dispatch_and_publication() -> Result<()> {
     const CHILD_DIRECTORY: &str = "DAY2_REFRESH_CRASH_DIRECTORY";
     const CHILD_POINT: &str = "DAY2_REFRESH_CRASH_POINT";
-    let artifact = PathBuf::from(std::env::var("DAY2_TEST_OAUTH_CALENDAR_ARTIFACT").context("compiled Calendar artifact required")?);
-    let human = crate::iap::Verified { email:"alice@example.com".into(), subject:"accounts.google.com:google-alice".into() };
+    let artifact = PathBuf::from(
+        std::env::var("DAY2_TEST_OAUTH_CALENDAR_ARTIFACT")
+            .context("compiled Calendar artifact required")?,
+    );
+    let human = crate::iap::Verified {
+        email: "alice@example.com".into(),
+        subject: "accounts.google.com:google-alice".into(),
+    };
     let input = json!({"start":"2026-10-13T00:00:00Z","end":"2026-10-14T00:00:00Z"});
-    let points = [effects::RefreshBoundary::DispatchCommitted, effects::RefreshBoundary::MaterialWritten, effects::RefreshBoundary::PublicationCommitted];
+    let points = [
+        effects::RefreshBoundary::DispatchCommitted,
+        effects::RefreshBoundary::MaterialWritten,
+        effects::RefreshBoundary::PublicationCommitted,
+    ];
     if let Some(directory) = std::env::var_os(CHILD_DIRECTORY) {
         let directory = PathBuf::from(directory);
         let selected = std::env::var(CHILD_POINT)?;
-        let point = points.into_iter().find(|point| format!("{point:?}") == selected).context("unknown child boundary")?;
+        let point = points
+            .into_iter()
+            .find(|point| format!("{point:?}") == selected)
+            .context("unknown child boundary")?;
         let mut runtime = crash_runtime(&directory, &artifact, false)?;
         let (port, _) = crash_authority(&mut runtime, &directory, Some(point))?;
         effects::scope(port, || {
-            runtime.invoke_verified("oauthcalendar.list_events", store::RequestIdentity { actor:&human.email, origin:Some(&human) },
-                "crashed_refresh", &input, 250, store::Fault::None)
+            runtime.invoke_verified(
+                "oauthcalendar.list_events",
+                store::RequestIdentity {
+                    actor: &human.email,
+                    origin: Some(&human),
+                },
+                "crashed_refresh",
+                &input,
+                250,
+                store::Fault::None,
+            )
         })?;
         anyhow::bail!("child missed its real production boundary");
     }
@@ -573,13 +832,18 @@ fn compiled_refresh_crash_recovery_uses_sealed_dispatch_and_publication() -> Res
         let directory = tempfile::tempdir()?;
         let result = (|| -> Result<()> {
             let transport = Connection::open(directory.path().join("transport.sqlite"))?;
-            transport.execute_batch("CREATE TABLE sends(seq INTEGER PRIMARY KEY, phase TEXT NOT NULL)")?;
+            transport.execute_batch(
+                "CREATE TABLE sends(seq INTEGER PRIMARY KEY, phase TEXT NOT NULL)",
+            )?;
             let mut runtime = crash_runtime(directory.path(), &artifact, true)?;
-            fs::write(directory.path().join("campaign.json"), serde_json::to_vec_pretty(&json!({
-                "test":"compiled_refresh_crash_recovery_uses_sealed_dispatch_and_publication",
-                "boundary":format!("{point:?}"), "artifact":runtime.artifact().id(),
-                "test_executable":std::env::current_exe()?, "scope":"native simulated provider, real admitted worker, real private custody/dispatch/publication and process exit; no live qualification"
-            }))?)?;
+            fs::write(
+                directory.path().join("campaign.json"),
+                serde_json::to_vec_pretty(&json!({
+                    "test":"compiled_refresh_crash_recovery_uses_sealed_dispatch_and_publication",
+                    "boundary":format!("{point:?}"), "artifact":runtime.artifact().id(),
+                    "test_executable":std::env::current_exe()?, "scope":"native simulated provider, real admitted worker, real private custody/dispatch/publication and process exit; no live qualification"
+                }))?,
+            )?;
             let (port, fixture) = crash_authority(&mut runtime, directory.path(), None)?;
             effects::scope(port, || -> Result<()> {
                 activate(&runtime, &fixture)?;
@@ -587,30 +851,73 @@ fn compiled_refresh_crash_recovery_uses_sealed_dispatch_and_publication() -> Res
                 Ok(())
             })?;
             let db = store::open(runtime.db())?;
-            let original: Vec<u8> = db.query_row("SELECT ciphertext FROM oauth_private_tokens", [], |r| r.get(0))?;
+            let original: Vec<u8> =
+                db.query_row("SELECT ciphertext FROM oauth_private_tokens", [], |r| {
+                    r.get(0)
+                })?;
             drop(db);
             drop(runtime);
-            let stdout = fs::OpenOptions::new().write(true).create_new(true).open(directory.path().join("child.stdout"))?;
-            let stderr = fs::OpenOptions::new().write(true).create_new(true).open(directory.path().join("child.stderr"))?;
+            let stdout = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(directory.path().join("child.stdout"))?;
+            let stderr = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(directory.path().join("child.stderr"))?;
             let mut child = std::process::Command::new(std::env::current_exe()?)
                 .args(["--exact", "oauth::usage::refresh_tests::compiled_refresh_crash_recovery_uses_sealed_dispatch_and_publication", "--nocapture"])
                 .env(CHILD_DIRECTORY, directory.path()).env(CHILD_POINT, format!("{point:?}"))
                 .stdout(std::process::Stdio::from(stdout)).stderr(std::process::Stdio::from(stderr)).spawn()?;
             let started = std::time::Instant::now();
             let status = loop {
-                if let Some(status) = child.try_wait()? { break status; }
+                if let Some(status) = child.try_wait()? {
+                    break status;
+                }
                 if started.elapsed() >= Duration::from_secs(30) {
-                    child.kill()?; let _ = child.wait()?;
+                    child.kill()?;
+                    let _ = child.wait()?;
                     anyhow::bail!("child exceeded bounded crash campaign deadline");
                 }
                 std::thread::sleep(Duration::from_millis(10));
             };
-            ensure!(status.code() == Some(86), "wrong child exit at {point:?}: {status}");
-            assert_eq!(transport.query_row("SELECT count(*) FROM sends WHERE phase=?1", [format!("boundary:{point:?}")], |r| r.get::<_,i64>(0))?, 1);
+            ensure!(
+                status.code() == Some(86),
+                "wrong child exit at {point:?}: {status}"
+            );
+            assert_eq!(
+                transport.query_row(
+                    "SELECT count(*) FROM sends WHERE phase=?1",
+                    [format!("boundary:{point:?}")],
+                    |r| r.get::<_, i64>(0)
+                )?,
+                1
+            );
             let child_posts = i64::from(point != effects::RefreshBoundary::DispatchCommitted);
-            assert_eq!(transport.query_row("SELECT count(*) FROM sends WHERE phase='token_post'", [], |r| r.get::<_,i64>(0))?, child_posts);
-            assert_eq!(transport.query_row("SELECT count(*) FROM sends WHERE phase='account_get'", [], |r| r.get::<_,i64>(0))?, child_posts);
-            assert_eq!(transport.query_row("SELECT count(*) FROM sends WHERE phase='calendar_get'", [], |r| r.get::<_,i64>(0))?, 0);
+            assert_eq!(
+                transport.query_row(
+                    "SELECT count(*) FROM sends WHERE phase='token_post'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )?,
+                child_posts
+            );
+            assert_eq!(
+                transport.query_row(
+                    "SELECT count(*) FROM sends WHERE phase='account_get'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )?,
+                child_posts
+            );
+            assert_eq!(
+                transport.query_row(
+                    "SELECT count(*) FROM sends WHERE phase='calendar_get'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )?,
+                0
+            );
             let mut recovered = crash_runtime(directory.path(), &artifact, false)?;
             let (port, fixture) = crash_authority(&mut recovered, directory.path(), None)?;
             effects::scope(port.clone(), || -> Result<()> {
@@ -619,44 +926,105 @@ fn compiled_refresh_crash_recovery_uses_sealed_dispatch_and_publication() -> Res
                 let (version, state, next, receipt): (i64,String,Option<i64>,Option<String>) = db.query_row(
                     "SELECT s.token_version,r.state,r.next_version,r.receipt FROM oauth_connection_slots s JOIN oauth_refresh_attempts r ON r.slot=s.slot",
                     [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
-                let ciphertext: Vec<u8> = db.query_row("SELECT ciphertext FROM oauth_private_tokens", [], |r| r.get(0))?;
+                let ciphertext: Vec<u8> =
+                    db.query_row("SELECT ciphertext FROM oauth_private_tokens", [], |r| {
+                        r.get(0)
+                    })?;
                 if committed {
-                    assert_eq!((version,state,next), (2,"replacement_committed".into(),Some(2)));
+                    assert_eq!(
+                        (version, state, next),
+                        (2, "replacement_committed".into(), Some(2))
+                    );
                     assert!(receipt.as_ref().is_some_and(|s| !s.is_empty()));
                     assert_ne!(ciphertext, original);
-                    let binding = exchange::load_binding(&db, &fixture.intent.attempt)?.context("original binding")?;
-                    let account: String = db.query_row("SELECT account FROM oauth_connection_slots", [], |r| r.get(0))?;
-                    assert!(super::super::custody::load_access(&db, &profiles::tests::exchange_key(), &fixture.intent, &binding, &account, 2, 250)?.is_some());
+                    let binding = exchange::load_binding(&db, &fixture.intent.attempt)?
+                        .context("original binding")?;
+                    let account: String =
+                        db.query_row("SELECT account FROM oauth_connection_slots", [], |r| {
+                            r.get(0)
+                        })?;
+                    assert!(
+                        super::super::custody::load_access(
+                            &db,
+                            &profiles::tests::exchange_key(),
+                            &fixture.intent,
+                            &binding,
+                            &account,
+                            2,
+                            250
+                        )?
+                        .is_some()
+                    );
                 } else {
-                    assert_eq!((version,state,next,receipt), (1,"may_have_been_sent".into(),None,None));
-                    assert_eq!(ciphertext, original, "partial publication survived process exit");
+                    assert_eq!(
+                        (version, state, next, receipt),
+                        (1, "may_have_been_sent".into(), None, None)
+                    );
+                    assert_eq!(
+                        ciphertext, original,
+                        "partial publication survived process exit"
+                    );
                 }
                 // Resume the same accepted product invocation. It must observe
                 // committed v2 or refuse unresolved dispatch, never refresh again.
                 let outcome = recovered.execute("crashed_refresh", store::Fault::None);
                 if committed {
                     let outcome = outcome?;
-                    assert_eq!(outcome.status, "success"); assert_eq!(outcome.result["status"], "ok");
+                    assert_eq!(outcome.status, "success");
+                    assert_eq!(outcome.result["status"], "ok");
                     assert_eq!(port.reads.load(SeqCst), 1);
-                    assert_eq!(recovered.execute("crashed_refresh", store::Fault::None)?.result["status"], "ok");
-                    assert_eq!(port.reads.load(SeqCst), 1, "settled replay repeated provider read");
+                    assert_eq!(
+                        recovered
+                            .execute("crashed_refresh", store::Fault::None)?
+                            .result["status"],
+                        "ok"
+                    );
+                    assert_eq!(
+                        port.reads.load(SeqCst),
+                        1,
+                        "settled replay repeated provider read"
+                    );
                 } else {
-                    assert!(!outcome.as_ref().is_ok_and(|o| o.status=="success" && o.result["status"]=="ok"));
+                    assert!(
+                        !outcome
+                            .as_ref()
+                            .is_ok_and(|o| o.status == "success" && o.result["status"] == "ok")
+                    );
                     assert_eq!(port.reads.load(SeqCst), 0);
                 }
                 assert_eq!(port.posts.load(SeqCst), 0);
-                assert_eq!(db.query_row("SELECT count(*) FROM entries", [], |r| r.get::<_,i64>(0))?, 0);
+                assert_eq!(
+                    db.query_row("SELECT count(*) FROM entries", [], |r| r.get::<_, i64>(0))?,
+                    0
+                );
                 Ok(())
             })?;
             // This durable oracle includes both processes, unlike per-process
             // Atomic counters. Recovery cannot erase or hide a second send.
-            assert_eq!(transport.query_row("SELECT count(*) FROM sends WHERE phase='token_post'", [], |r| r.get::<_,i64>(0))?, child_posts);
-            assert_eq!(transport.query_row("SELECT count(*) FROM sends WHERE phase='account_get'", [], |r| r.get::<_,i64>(0))?, child_posts);
+            assert_eq!(
+                transport.query_row(
+                    "SELECT count(*) FROM sends WHERE phase='token_post'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )?,
+                child_posts
+            );
+            assert_eq!(
+                transport.query_row(
+                    "SELECT count(*) FROM sends WHERE phase='account_get'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )?,
+                child_posts
+            );
             Ok(())
         })();
         if let Err(error) = result {
             let retained = directory.keep();
-            anyhow::bail!("{point:?} sealed refresh crash failed; protected fixture and child output retained at {}: {error:#}", retained.display());
+            anyhow::bail!(
+                "{point:?} sealed refresh crash failed; protected fixture and child output retained at {}: {error:#}",
+                retained.display()
+            );
         }
     }
     Ok(())
