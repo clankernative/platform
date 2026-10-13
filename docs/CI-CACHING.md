@@ -131,19 +131,37 @@ not cross-run caches; no runtime outcome is reused by this change.
 
 ## Completed build outputs
 
-Preparation jobs use separate `day2-fixtures-v1` and `day2-test-outputs-v1`
-GitHub caches. Their immutable action pin and content keys include the host,
-architecture, workflow and complete reviewed source directories, manifests,
-lockfile and toolchain inputs. They have no prefix restore keys or commit/run
-IDs. Each selected preparation job saves its own outputs only on job success;
-the dependency and compiler cache namespaces remain unchanged.
+Preparation jobs use separate `day2-fixtures-v2` and `day2-test-outputs-v1`
+GitHub caches. Fixture keys retain shared platform, SDK, compiler configuration,
+workflow, host and architecture inputs as a common prefix. A source-specific
+suffix saves changed app and fixture trees separately. Prefix restoration may
+supply older fixture outputs; native admission decides each selected entry.
+The ordinary test output cache keeps its complete reviewed source key and has
+no prefix restoration. Dependency and compiler cache namespaces stay unchanged.
 
 The fixture cache contains only content-addressed artifact directories and the
-existing source-snapshot fixture index. That index is admitted against its
-format, scope and current full input snapshot. Each selected artifact is loaded
-again, its identity checked, and complete successful artifact verification
-required. Missing, stale or invalid entries rebuild through the original fixture
-recipe. CLI checks, formatting and lint still execute.
+format-2 fixture index. Cargo's ordinary compiler dep-info captures embedded
+non-Rust inputs, and the current xtask executable digest binds the compiler
+adapter. Its source closure and the existing Rust/Cargo/C compiler, profile,
+environment, workspace and CI workflow identity must match before reuse.
+Missing or unsupported compiler evidence disables reuse and selects normal builds.
+
+Each candidate is loaded and its complete successful artifact verification
+required. The same native build adapter re-captures its current app and overlay,
+explicit SDK catalog, pinned Roc compiler, locked UI package/provider inputs,
+platform source hashes and consumed import contract. Its identity ledger is
+re-derived against the admitted checked types. The resulting complete source
+map must equal the artifact's source map, excluding only the host archive output
+already bound by the worker digest and exact compiler identity. A missing, added,
+changed or invalid input rebuilds through the original fixture recipe.
+
+Imported fixtures retain their per-entry whole verification snapshot requirement
+because their build verification consumes a selected peer's disposable oracle.
+An unrelated source edit may reuse independently admitted standalone fixtures;
+it still rebuilds imported fixtures. CLI checks, formatting, lint, documentation,
+all runtime campaigns, current-run preparation joins and whole-source stability
+checks execute normally. This change does not narrow ordinary test target keys
+or cache private/isolated build outputs.
 
 The test cache contains completed ordinary test harnesses, the normal programs
 Cargo builds for integration tests, and their compilation manifest, without run

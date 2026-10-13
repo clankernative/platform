@@ -13,7 +13,7 @@ use std::{
 
 mod shards;
 
-const CACHE_FORMAT: u32 = 1;
+const CACHE_FORMAT: u32 = 2;
 
 // Every test campaign in the full gate selects the same Cargo packages and
 // targets. Only libtest filters change: selecting a narrower Cargo test target
@@ -65,15 +65,24 @@ struct VerificationCache {
     format: u32,
     scope: String,
     snapshot: String,
-    fixtures: BTreeMap<String, String>,
+    compiler: Option<shards::BuildIdentity>,
+    fixtures: BTreeMap<String, FixtureCacheEntry>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct FixtureCacheEntry {
+    artifact: String,
+    snapshot: String,
 }
 
 impl VerificationCache {
-    fn empty(scope: &str, snapshot: &str) -> Self {
+    fn empty(scope: &str, snapshot: &str, compiler: Option<shards::BuildIdentity>) -> Self {
         Self {
             format: CACHE_FORMAT,
             scope: scope.into(),
             snapshot: snapshot.into(),
+            compiler,
             fixtures: BTreeMap::new(),
         }
     }
@@ -360,26 +369,51 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
             "verify-build" => {
                 let fixture = value("fixture")?;
                 ensure!(!fixtures.contains_key(fixture), "duplicate fixture");
-                let cached = cache
+                let build = fixture_build(root, fixture, &fixtures)?;
+                let cached: Result<Option<PathBuf>> = cache
                     .fixtures
                     .get(fixture)
-                    .map_or(Ok(None), |artifact| cached_fixture(root, artifact));
+                    .filter(|entry| {
+                        cache.compiler.is_some()
+                            && reusable_fixture_snapshot(
+                                build.imports.is_some(),
+                                &entry.snapshot,
+                                &snapshot,
+                            )
+                    })
+                    .map_or(Ok(None), |entry| {
+                        let artifact = cached_fixture(root, &entry.artifact)?;
+                        if let Some(artifact) = &artifact {
+                            build_native::admit_cached_fixture(
+                                root,
+                                &build.app,
+                                build.overrides.as_deref(),
+                                build.imports.as_ref(),
+                                artifact,
+                            )?;
+                        }
+                        Ok(artifact)
+                    });
                 let artifact = match cached {
                     Ok(Some(artifact)) => {
                         println!("Reusing verified {fixture} fixture: {}", artifact.display());
                         artifact
                     }
-                    Ok(None) => build_fixture(root, fixture, &fixtures)?,
+                    Ok(None) => build.build(root)?,
                     Err(error) => {
                         eprintln!("Ignoring invalid cached {fixture} fixture: {error:#}");
-                        build_fixture(root, fixture, &fixtures)?
+                        build.build(root)?
                     }
                 };
                 let loaded = day2::artifact::LoadedArtifact::load(&artifact)
                     .context("verification fixture artifact admission")?;
-                cache
-                    .fixtures
-                    .insert(fixture.into(), loaded.id().to_owned());
+                cache.fixtures.insert(
+                    fixture.into(),
+                    FixtureCacheEntry {
+                        artifact: loaded.id().to_owned(),
+                        snapshot: snapshot.clone(),
+                    },
+                );
                 save_cache(root, &cache)?;
                 fixtures.insert(fixture.into(), artifact);
                 format!("build-{fixture}")
@@ -410,13 +444,56 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
     Ok(())
 }
 
+struct FixtureBuild {
+    app: PathBuf,
+    overrides: Option<PathBuf>,
+    imports: Option<BuildImportContext>,
+    _inputs: Option<tempfile::TempDir>,
+}
+
+impl FixtureBuild {
+    fn plain(root: &Path, app: &str) -> Result<Self> {
+        Ok(Self {
+            app: root.join(app),
+            overrides: None,
+            imports: None,
+            _inputs: None,
+        })
+    }
+
+    fn overlay(root: &Path, app: &str, overrides: &str) -> Result<Self> {
+        Ok(Self {
+            overrides: Some(root.join(overrides)),
+            ..Self::plain(root, app)?
+        })
+    }
+
+    fn build(&self, root: &Path) -> Result<PathBuf> {
+        build_recipe(
+            root,
+            &self.app,
+            self.overrides.as_deref(),
+            None,
+            self.imports.as_ref(),
+        )
+    }
+}
+
 fn build_fixture(
     root: &Path,
     fixture: &str,
     fixtures: &BTreeMap<String, PathBuf>,
 ) -> Result<PathBuf> {
+    fixture_build(root, fixture, fixtures)?.build(root)
+}
+
+fn fixture_build(
+    root: &Path,
+    fixture: &str,
+    fixtures: &BTreeMap<String, PathBuf>,
+) -> Result<FixtureBuild> {
     match fixture {
-        "app-ownership" => build(root, &root.join("examples/app-ownership")),
+        "app-ownership" => FixtureBuild::plain(root, "examples/app-ownership"),
         "notifications" => {
             let peer = fixtures
                 .get("app-ownership")
@@ -435,15 +512,14 @@ fn build_fixture(
                 &lock,
                 serde_json::to_vec(&catalog.pin(&["app_ownership.check".into()])?)?,
             )?;
-            build_recipe(
-                root,
-                &root.join("examples/notifications"),
-                None,
-                None,
-                Some(&BuildImportContext { instance, lock }),
-            )
+            Ok(FixtureBuild {
+                app: root.join("examples/notifications"),
+                overrides: None,
+                imports: Some(BuildImportContext { instance, lock }),
+                _inputs: Some(inputs),
+            })
         }
-        "stock-ledger" => build(root, &root.join("fixtures/stock-ledger")),
+        "stock-ledger" => FixtureBuild::plain(root, "fixtures/stock-ledger"),
         "request-desk" => {
             let peer = fixtures
                 .get("stock-ledger")
@@ -465,41 +541,39 @@ fn build_fixture(
                     "stock_ledger.reserve".into(),
                 ])?)?,
             )?;
-            build_recipe(
-                root,
-                &root.join("fixtures/request-desk"),
-                None,
-                None,
-                Some(&BuildImportContext { instance, lock }),
-            )
+            Ok(FixtureBuild {
+                app: root.join("fixtures/request-desk"),
+                overrides: None,
+                imports: Some(BuildImportContext { instance, lock }),
+                _inputs: Some(inputs),
+            })
         }
-        "reports" => build(root, &root.join("examples/reports")),
-        "reports-probe" => build_with_overrides(
+        "reports" => FixtureBuild::plain(root, "examples/reports"),
+        "reports-probe" => FixtureBuild::overlay(
             root,
-            &root.join("examples/reports"),
-            Some(&root.join("fixtures/command-target-adversaries")),
+            "examples/reports",
+            "fixtures/command-target-adversaries",
         ),
-        "http" => build_with_overrides(
+        "http" => FixtureBuild::overlay(
             root,
-            &root.join("fixtures/row-authority-web-conformance"),
-            Some(&root.join("fixtures/http-conformance")),
+            "fixtures/row-authority-web-conformance",
+            "fixtures/http-conformance",
         ),
-        "relational" => build(root, &root.join("fixtures/relational-conformance")),
-        "lifecycle" => build(root, &root.join("fixtures/lifecycle-conformance")),
-        "collection" => build(root, &root.join("fixtures/collection-conformance")),
+        "relational" => FixtureBuild::plain(root, "fixtures/relational-conformance"),
+        "lifecycle" => FixtureBuild::plain(root, "fixtures/lifecycle-conformance"),
+        "collection" => FixtureBuild::plain(root, "fixtures/collection-conformance"),
         "credential-metadata" => {
-            build(root, &root.join("fixtures/credential-metadata-conformance"))
+            FixtureBuild::plain(root, "fixtures/credential-metadata-conformance")
         }
-        "connection-declaration" => build(
+        "connection-declaration" => {
+            FixtureBuild::plain(root, "fixtures/connection-declaration-conformance")
+        }
+        "oauth-calendar" => FixtureBuild::plain(root, "fixtures/oauth-calendar-canary"),
+        "oauth-gitlab" => FixtureBuild::plain(root, "fixtures/oauth-gitlab-canary"),
+        "delegation-peer" => FixtureBuild::overlay(
             root,
-            &root.join("fixtures/connection-declaration-conformance"),
-        ),
-        "oauth-calendar" => build(root, &root.join("fixtures/oauth-calendar-canary")),
-        "oauth-gitlab" => build(root, &root.join("fixtures/oauth-gitlab-canary")),
-        "delegation-peer" => build_with_overrides(
-            root,
-            &root.join("fixtures/delegation-conformance"),
-            Some(&root.join("fixtures/delegation-peer")),
+            "fixtures/delegation-conformance",
+            "fixtures/delegation-peer",
         ),
         "delegation" => {
             let peer = fixtures
@@ -522,19 +596,26 @@ fn build_fixture(
                     &catalog.pin(&["peer_identity.who".into(), "peer_identity.record".into()])?,
                 )?,
             )?;
-            build_recipe(
-                root,
-                &root.join("fixtures/delegation-conformance"),
-                None,
-                None,
-                Some(&BuildImportContext { instance, lock }),
-            )
+            Ok(FixtureBuild {
+                app: root.join("fixtures/delegation-conformance"),
+                overrides: None,
+                imports: Some(BuildImportContext { instance, lock }),
+                _inputs: Some(inputs),
+            })
         }
-        "redirect" => build(root, &root.join("fixtures/redirect-conformance")),
-        "relational-next" => build_migration_fixture(root),
-        "owned" => build(root, &root.join("fixtures/row-authority-web-conformance")),
-        "repeated-field" => build(root, &root.join("fixtures/repeated-field-conformance")),
-        "owned-probe" => build_row_authority_adversaries(root),
+        "redirect" => FixtureBuild::plain(root, "fixtures/redirect-conformance"),
+        "relational-next" => FixtureBuild::overlay(
+            root,
+            "fixtures/relational-conformance",
+            "fixtures/migration-add-optional-text",
+        ),
+        "owned" => FixtureBuild::plain(root, "fixtures/row-authority-web-conformance"),
+        "repeated-field" => FixtureBuild::plain(root, "fixtures/repeated-field-conformance"),
+        "owned-probe" => FixtureBuild::overlay(
+            root,
+            "fixtures/row-authority-web-conformance",
+            "fixtures/row-authority-adversaries",
+        ),
         _ => bail!("unknown fixture"),
     }
 }
@@ -690,24 +771,106 @@ fn cache_path(root: &Path, scope: &str) -> PathBuf {
     root.join(format!("artifacts/{scope}-verification-cache.json"))
 }
 
+fn reusable_fixture_snapshot(imports: bool, retained: &str, current: &str) -> bool {
+    // Imported fixtures carry a selected peer's disposable verification oracle.
+    // Keep their original whole-snapshot requirement; unrelated standalone
+    // outputs are admitted independently through the ordinary source capture.
+    !imports || retained == current
+}
+
+fn fixture_compiler_sources(root: &Path) -> Result<BTreeMap<String, String>> {
+    let root = root.canonicalize()?;
+    let mut sources = build_native::platform_sources(&root)?;
+    let dependency_file = fs::read_to_string(root.join("target/debug/xtask.d"))?;
+    let dependencies = compiler_dependency_paths(&dependency_file)?;
+    ensure!(
+        dependencies.contains(&root.join("crates/xtask/src/main.rs"))
+            && dependencies.contains(&root.join("crates/day2/src/development.rs")),
+        "compiler dep-info does not close the fixture adapter"
+    );
+    let executable = std::env::current_exe()?.canonicalize()?;
+    ensure!(
+        executable == root.join("target/debug/xtask").canonicalize()?,
+        "ordinary fixture compiler adapter executable required"
+    );
+    sources.insert("compiler/xtask".into(), digest(&fs::read(executable)?));
+    for path in dependencies {
+        ensure!(path.is_absolute(), "absolute compiler dependency required");
+        if let Ok(relative) = path.strip_prefix(&root) {
+            let metadata = fs::symlink_metadata(&path)?;
+            ensure!(
+                metadata.is_file() && !metadata.file_type().is_symlink(),
+                "compiler dependency must be regular"
+            );
+            ensure!(
+                path.canonicalize()?.starts_with(&root),
+                "compiler dependency escaped workspace"
+            );
+            sources.insert(
+                format!("compiler-inputs/{}", relative.to_string_lossy()),
+                digest(&fs::read(path)?),
+            );
+        }
+    }
+    Ok(sources)
+}
+
+fn compiler_dependency_paths(contents: &str) -> Result<Vec<PathBuf>> {
+    // Cargo's normal unescaped single-line dep-info is authoritative for embedded
+    // non-Rust inputs too. Unsupported escaping disables reuse, never full builds.
+    let line = contents
+        .lines()
+        .next()
+        .context("compiler dep-info missing")?;
+    let (target, dependencies) = line
+        .split_once(": ")
+        .context("compiler dep-info target missing")?;
+    ensure!(
+        !line.contains(['\\', '\r']) && Path::new(target).is_absolute(),
+        "unsupported compiler dep-info encoding"
+    );
+    let paths: Vec<_> = dependencies.split_whitespace().map(PathBuf::from).collect();
+    ensure!(!paths.is_empty(), "compiler dep-info dependencies missing");
+    Ok(paths)
+}
+
+fn fixture_compiler_identity(root: &Path) -> Result<shards::BuildIdentity> {
+    let sources = fixture_compiler_sources(root)?;
+    shards::build_identity(root, &digest(&serde_json::to_vec(&sources)?))
+}
+
 fn load_cache(root: &Path, scope: &str, snapshot: &str) -> Result<VerificationCache> {
+    let compiler = match fixture_compiler_identity(root) {
+        Ok(identity) => Some(identity),
+        Err(error) => {
+            eprintln!(
+                "Fixture output reuse unavailable; ordinary builds remain selected: {error:#}"
+            );
+            None
+        }
+    };
     let path = cache_path(root, scope);
     let Ok(bytes) = fs::read(&path) else {
-        return Ok(VerificationCache::empty(scope, snapshot));
+        return Ok(VerificationCache::empty(scope, snapshot, compiler));
     };
-    let cache: VerificationCache = match day2::json::decode(&bytes) {
+    let mut cache: VerificationCache = match day2::json::decode(&bytes) {
         Ok(cache) => cache,
         Err(error) => {
             eprintln!(
                 "Ignoring invalid verification cache {}: {error:#}",
                 path.display()
             );
-            return Ok(VerificationCache::empty(scope, snapshot));
+            return Ok(VerificationCache::empty(scope, snapshot, compiler));
         }
     };
-    if cache.format != CACHE_FORMAT || cache.scope != scope || cache.snapshot != snapshot {
-        return Ok(VerificationCache::empty(scope, snapshot));
+    if cache.format != CACHE_FORMAT
+        || cache.scope != scope
+        || compiler.is_none()
+        || cache.compiler != compiler
+    {
+        return Ok(VerificationCache::empty(scope, snapshot, compiler));
     }
+    cache.snapshot = snapshot.into();
     Ok(cache)
 }
 
@@ -722,6 +885,14 @@ fn save_cache(root: &Path, cache: &VerificationCache) -> Result<()> {
 }
 
 fn cached_fixture(root: &Path, artifact: &str) -> Result<Option<PathBuf>> {
+    ensure!(
+        artifact.len() == 71
+            && artifact.starts_with("sha256:")
+            && artifact[7..]
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "cached artifact must be a canonical SHA-256 identity"
+    );
     let directory = root
         .join("artifacts")
         .join(artifact.trim_start_matches("sha256:"));
@@ -1601,6 +1772,56 @@ mod tests {
         assert_eq!(report["input_snapshot"], "snapshot");
         assert_eq!(report["timings_ms"]["total"], 66);
         assert_eq!(report["timings_ms"]["steps"]["lint"], 22);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod fixture_cache_tests {
+    use super::*;
+
+    #[test]
+    fn imported_fixture_oracles_keep_whole_snapshot_admission() {
+        assert!(reusable_fixture_snapshot(false, "old", "current"));
+        assert!(reusable_fixture_snapshot(true, "current", "current"));
+        assert!(!reusable_fixture_snapshot(true, "old", "current"));
+    }
+
+    #[test]
+    fn compiler_dep_info_preserves_embedded_fixture_inputs_and_rejects_unknown_encoding()
+    -> Result<()> {
+        let paths = compiler_dependency_paths(
+            "/work/platform/target/debug/xtask: /work/platform/crates/xtask/src/main.rs /work/platform/fixtures/authority-policies/reports.json\n",
+        )?;
+        assert!(paths.contains(&PathBuf::from(
+            "/work/platform/fixtures/authority-policies/reports.json"
+        )));
+        for contents in [
+            "",
+            "missing target",
+            "/xtask: ",
+            "relative: /input",
+            "/xtask: /escaped\\ input",
+            "/xtask: /first \\\n/second",
+        ] {
+            assert!(compiler_dependency_paths(contents).is_err(), "{contents:?}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn cache_artifact_identity_cannot_select_paths_or_noncanonical_digests() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        for artifact in [
+            "../worker",
+            "sha256:../worker",
+            "sha256:abc",
+            "worker",
+            "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        ] {
+            assert!(cached_fixture(root.path(), artifact).is_err());
+        }
+        assert!(cached_fixture(root.path(), &digest(b"missing artifact"))?.is_none());
         Ok(())
     }
 }

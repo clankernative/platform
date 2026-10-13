@@ -435,6 +435,71 @@ pub(super) fn platform_sources(root: &Path) -> Result<BTreeMap<String, String>> 
     Ok(hashes)
 }
 
+/// Re-capture through the ordinary build adapter before selecting a cached fixture.
+/// The complete platform recipe and its runtime campaigns still run on this checkout.
+pub(super) fn admit_cached_fixture(
+    root: &Path,
+    app: &Path,
+    overrides: Option<&Path>,
+    imports: Option<&BuildImportContext>,
+    directory: &Path,
+) -> Result<()> {
+    let mut prepared = prepare(root, app, overrides, imports)?;
+    ensure!(
+        prepared.target == native_toolchain::Target::MacArm64,
+        "fixture output reuse requires the hosted macOS target"
+    );
+    let loaded = day2::artifact::LoadedArtifact::load(directory)?;
+    loaded.require_current_api()?;
+    let contract = loaded.contract();
+    ensure!(
+        contract.namespace == prepared.namespace && contract.imports == prepared.imports,
+        "cached fixture namespace or consumed import contract changed"
+    );
+    // Build.data allocates identities against these same retained checked types.
+    // Re-derive that ledger instead of trusting the cache's original input index.
+    let schema = Schema::from_checked_types(&fs::read(directory.join("checked-types.json"))?)?;
+    let identities = day2::identity::prepare(&prepared.stage.join("app"), &schema, true)?;
+    ensure!(
+        serde_json::to_value(&identities)? == serde_json::to_value(&contract.identities)?,
+        "cached fixture identity ledger changed"
+    );
+    prepared.hashes.insert(
+        format!("app/{}", day2::identity::REGISTRY_FILE),
+        digest(&fs::read(
+            prepared
+                .stage
+                .join("app")
+                .join(day2::identity::REGISTRY_FILE),
+        )?),
+    );
+    prepared.hashes.extend(prepared.platform_hashes);
+    admit_fixture_sources(&prepared.hashes, &contract.sources)
+}
+
+fn admit_fixture_sources(
+    expected: &BTreeMap<String, String>,
+    sources: &BTreeMap<String, String>,
+) -> Result<()> {
+    let mut actual = sources.clone();
+    // The release host archive is an output, admitted by the artifact's worker
+    // digest and the separate exact compiler/profile/source cache identity.
+    let archive = actual
+        .remove("native/arm64mac/libhost.a")
+        .context("cached fixture native archive identity missing")?;
+    ensure!(
+        archive.len() == 71
+            && archive.starts_with("sha256:")
+            && archive[7..].bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "cached fixture native archive identity invalid"
+    );
+    ensure!(
+        actual == *expected,
+        "cached fixture closed source inputs changed"
+    );
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn publish_contract(
     _root: &Path,
@@ -826,6 +891,53 @@ mod platform_input_tests {
             assert!(platform_sources(root).is_err());
             fs::write(root.join(policy), b"approved input")?;
         }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod fixture_cache_admission_tests {
+    use super::*;
+
+    #[test]
+    fn cached_fixture_requires_exact_closed_source_set_and_native_output() -> Result<()> {
+        let expected: BTreeMap<String, String> = [
+            "app/App.roc",
+            "app/ui/page.html",
+            "app/model-identities.json",
+            "sdk/contracts/Api.roc",
+            "toolchain.json",
+            "ui/package",
+            "ui-provider/executable",
+        ]
+        .into_iter()
+        .map(|name| (name.into(), digest(name.as_bytes())))
+        .collect();
+        let mut artifact = expected.clone();
+        artifact.insert("native/arm64mac/libhost.a".into(), digest(b"host archive"));
+        admit_fixture_sources(&expected, &artifact)?;
+        for name in expected.keys() {
+            let mut changed = artifact.clone();
+            changed.insert(name.clone(), digest(b"changed input"));
+            assert!(
+                admit_fixture_sources(&expected, &changed).is_err(),
+                "{name}"
+            );
+            let mut missing = artifact.clone();
+            missing.remove(name);
+            assert!(
+                admit_fixture_sources(&expected, &missing).is_err(),
+                "{name}"
+            );
+        }
+        let mut extra = artifact.clone();
+        extra.insert("app/deleted.roc".into(), digest(b"old input"));
+        assert!(admit_fixture_sources(&expected, &extra).is_err());
+        let mut missing_host = artifact.clone();
+        missing_host.remove("native/arm64mac/libhost.a");
+        assert!(admit_fixture_sources(&expected, &missing_host).is_err());
+        artifact.insert("native/arm64mac/libhost.a".into(), "not a digest".into());
+        assert!(admit_fixture_sources(&expected, &artifact).is_err());
         Ok(())
     }
 }
