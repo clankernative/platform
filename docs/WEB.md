@@ -626,19 +626,46 @@ they are not browser module entrypoints. Datastar is a fixed platform dependency
 
 ### Optional UI assembly
 
-`ui/ui.lock.json` opts an app into build-time assembly. Without it, no provider
-is invoked. The lock pins package inputs, not executable authority: the operator
-separately approves a SHA-256-pinned tool using `DAY2_UI_PROVIDER_PIN_JSON`.
+Clanker UI is a standard, build-only dependency of the Platform distribution.
+`xtask cli` executes the same `ops/UiDependency.roc` setup recipe locally and in
+the Linux tooling image: obtain the reviewed target archive, verify its pinned
+identity, extract a bounded regular-file closure, verify all package/tool/legal
+bytes, and publish the installation atomically. A verified existing installation
+requires no network. Corrupt installations fail closed rather than being silently
+replaced. `xtask bootstrap-ui` runs that recipe independently of rebuilding the CLI.
 
-The host captures the locked closure, invokes assembly in a private snapshot,
-then independently admits the returned templates/resources. Providers are never
-loaded while serving pages. App models, commands, routes and authorization remain
-app-owned; normal form, resource, CSP and runtime checks still apply.
+The reviewed release catalog is `build-dependencies/clanker-ui.json`. This release
+supports Mac ARM64 and Linux x86-64; unsupported targets fail explicitly. The
+complete release, including notices and licenses, stays beside the builder under
+`cli/build-dependencies/`. Downloading the bundle is Platform setup, never app
+build automation. Ordinary app builds are offline and never install dependencies.
+
+`day2 platform ui-lock SOURCE` initializes a new app's `ui/ui.lock.json` from the
+installed package. It does not silently replace a different existing package pin.
+Schema 2 locks identify the provider and exact package name/version/digest/inputs;
+they contain no filesystem path. The app cannot nominate a download URL or an
+executable. Installing a trusted Platform distribution establishes approval of
+its catalog-pinned build tool. No provider environment override or separate UI
+provider configuration is needed. Apps without a UI lock do not invoke assembly.
+
+The host discovers the installed dependency, captures the locked closure, and
+translates the authored lock into the pinned compiler's private input contract.
+The temporary package path is host-owned. Admission verifies generated lock metadata
+separately as `ui-provider/input-lock`; the original schema-2 lock remains unchanged
+and content-addressed as app source. Assembly runs in that private snapshot, then
+the host independently admits the returned templates/resources.
+Installation builds capture and materialize the same complete
+verified dependency into their offline job, binding its identity to the builder
+and evidence. Providers are never loaded while serving pages. App models,
+commands, routes and authorization remain app-owned; normal form, resource, CSP
+and runtime checks still apply.
 
 Only protocol 2 / binding ABI 2 with Minijinja 2.12.0 is accepted. See the released
 [protocol](https://github.com/clankernative/clanker-ui/blob/v0.1.0/docs/native-assembly-protocol.md)
-for the envelope and generic `ui_*` helpers. The approved local executable is
-trusted operator tooling, not a hostile-code sandbox.
+for the envelope and generic `ui_*` helpers. The distribution-approved executable is
+trusted operator tooling, not a hostile-code sandbox. The upstream v0.1.0 assets
+are unsigned; reviewed hashes identify exact bytes, not a claim of upstream
+signature verification. A Platform upgrade does not silently update app UI locks.
 
 The host loads an admitted `ui-package.js` component entry only when assembly
 recorded the approved provider executable in the artifact's source identity.

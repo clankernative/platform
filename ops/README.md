@@ -12,6 +12,7 @@ Roc recipes; the recipes select steps, their order, examples, and checks.
 | [Check.roc](Check.roc) | Select examples, iterate generated cases, replay, duplicate delivery, invalid inputs, properties and command completion |
 | [LocalDev.roc](LocalDev.roc) | Managed development sessions, seed selection, watch/rebuild, checkpoint/migration, recovery and lifecycle commands |
 | [Backup.roc](Backup.roc) | Take a consistent snapshot → verify the bundle; verify → restore into a new directory |
+| [UiDependency.roc](UiDependency.roc) | Inspect verified installation → fetch pinned Clanker release → bounded extraction → verify full closure → atomic publication |
 | [Authority.roc](Authority.roc) | Inspect active authority; explicitly activate desired grants or an artifact with an expected stamp and retry identity |
 | [Infra.roc](Infra.roc) | Construct the resource graph → prepare → version → init → validate → plan → show → receipt |
 | [Ci.roc](Ci.roc) | Source-event trigger policy and the mandatory isolated build/admission/check/evidence recipe |
@@ -33,8 +34,13 @@ cd ..
 ```
 
 `xtask cli` builds the Roc CLI, Roc workflow runner, Rust host and source builder together,
-records binary/toolchain identities in `cli/distribution.json`, and checks the
-pinned compiler. The distribution binaries stay together. This is a source-checkout
+records binary/toolchain and bundled Clanker identities in `cli/distribution.json`,
+and checks the pinned compiler. It automatically installs the reviewed target's
+Clanker UI executable, package, and legal closure. A validated installed bundle is
+reused offline; app builds never download it. `xtask bootstrap-ui` runs just that
+same dependency recipe. `day2 platform ui-lock APP_DIRECTORY` initializes an
+app-owned, path-free package lock; it refuses an implicit version upgrade.
+The distribution binaries and `cli/build-dependencies/` stay together. This is a source-checkout
 distribution on Apple Silicon macOS, not a relocatable production installer.
 `xtask workflows` bootstraps just the Roc runner. Rust retains compiler bootstrap,
 process supervision, admission, transactions, cryptography and evidence storage.

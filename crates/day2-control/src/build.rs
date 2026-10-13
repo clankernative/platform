@@ -139,6 +139,7 @@ impl PlatformInputs {
             files.insert(format!("platform/{name}"), file);
         }
         for name in [
+            "build-dependencies",
             "crates",
             "sdk",
             "tools",
@@ -413,12 +414,9 @@ impl TrustedRunner {
         })
     }
 
-    /// Attach an explicitly approved UI provider and opaque package snapshot.
-    pub fn with_ui_assembly(
-        mut self,
-        configuration: &day2_capabilities::UiAssemblyProvider,
-    ) -> Result<Self> {
-        self.ui_assembly = Some(UiAssemblyInputs::capture(configuration)?);
+    /// Bind the standard UI dependency to the operator-selected Platform installation.
+    pub fn with_bundled_ui(mut self, platform_root: &Path) -> Result<Self> {
+        self.ui_assembly = Some(UiAssemblyInputs::capture(platform_root)?);
         Ok(self)
     }
 
@@ -683,12 +681,6 @@ impl TrustedRunner {
                         .stdin(Stdio::null())
                         .stdout(log.try_clone()?)
                         .stderr(log);
-                    if validate_ui_activation(&request.source, self.ui_assembly.as_ref())? {
-                        command.env(
-                            "DAY2_UI_PROVIDER_PIN_JSON",
-                            job.join("ui-provider/pin.json"),
-                        );
-                    }
                     let outcome = run_bounded(&mut command, &child_log);
                     let (log, oversized) = read_log(&child_log)?;
                     fs::write(result.join("build.log"), log)?;
@@ -1162,6 +1154,8 @@ fn collect_cli(
         ]
         .iter()
         .any(|excluded| name == *excluded)
+            || (name == "build-dependencies"
+                && directory.strip_prefix(root)?.components().count() == 1)
         {
             continue;
         }

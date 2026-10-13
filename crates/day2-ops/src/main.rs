@@ -333,6 +333,15 @@ impl Operations {
                 )?;
                 Ok(json!({"artifact":target.id(),"receipt":receipt,"mode":"local-operator-only"}))
             }
+            "ui-lock" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Input {
+                    source: PathBuf,
+                }
+                let parameters: Input = input(&request)?;
+                day2::build_dependencies::write_lock(&platform()?, &parameters.source)
+            }
             "build-source" => {
                 #[derive(Deserialize)]
                 #[serde(deny_unknown_fields)]

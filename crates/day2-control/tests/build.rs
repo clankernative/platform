@@ -100,6 +100,7 @@ fn platform(directory: &Path) -> Result<PlatformInputs> {
         write(&root.join(name), b"approved platform input", false)?;
     }
     for name in [
+        "build-dependencies",
         "crates",
         "sdk",
         "tools",
@@ -115,7 +116,17 @@ fn platform(directory: &Path) -> Result<PlatformInputs> {
     ] {
         fs::create_dir_all(root.join(name))?;
     }
+    write(
+        &root.join("build-dependencies/clanker-ui.json"),
+        b"reviewed catalog",
+        false,
+    )?;
     write(&root.join("cli/main.roc"), b"approved CLI", false)?;
+    write(
+        &root.join("cli/build-dependencies/clanker-ui-0.1.0/manifest.json"),
+        b"installed managed bundle",
+        false,
+    )?;
     write(
         &root.join("ops/Workflow.roc"),
         b"approved operations",
@@ -321,6 +332,17 @@ fn platform_snapshot_excludes_mutable_shared_outputs_but_pins_policy_and_toolcha
     for name in ["cli/main.roc", "ops/Workflow.roc", "infra/Stack.roc"] {
         assert!(approved.files().contains_key(&format!("platform/{name}")));
     }
+    assert!(
+        approved
+            .files()
+            .contains_key("platform/build-dependencies/clanker-ui.json")
+    );
+    assert!(
+        !approved
+            .files()
+            .keys()
+            .any(|name| name.starts_with("platform/cli/build-dependencies/"))
+    );
     assert_eq!(
         approved
             .files()
@@ -351,7 +373,16 @@ fn platform_snapshot_excludes_mutable_shared_outputs_but_pins_policy_and_toolcha
     fs::create_dir(&private)?;
     approved.materialize(&private)?;
     assert!(!private.join("platform/artifacts").exists());
+    assert!(
+        !private
+            .join("platform/cli/build-dependencies/clanker-ui-0.1.0/manifest.json")
+            .exists()
+    );
     assert!(!private.join("platform/crates/worker/generated").exists());
+    assert_eq!(
+        fs::read(private.join("platform/build-dependencies/clanker-ui.json"))?,
+        b"reviewed catalog"
+    );
     assert_eq!(
         fs::read(private.join("platform/fixtures/authority-policies/owned.json"))?,
         b"approved policy"
@@ -567,7 +598,7 @@ fn cargo_stage_sandbox_starts_the_real_cargo_binary() -> Result<()> {
 }
 
 #[test]
-#[ignore = "explicit operator-pinned macOS runner smoke; requires DAY2_TEST_BUILD_* paths"]
+#[ignore = "explicit operator-pinned macOS runner smoke; requires DAY2_TEST_BUILD_* paths and installed managed UI dependency"]
 fn real_isolated_owned_links_build_produces_bound_evidence_and_recovers_receipt() -> Result<()> {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -583,22 +614,7 @@ fn real_isolated_owned_links_build_produces_bound_evidence_and_recovers_receipt(
         &path("DAY2_TEST_BUILD_RUST")?,
         &path("DAY2_TEST_BUILD_REGISTRY")?,
     )?;
-    // Optional inputs keep this the same real recipe smoke, not a separate UI workflow.
-    let runner = if let Some(provider_pin) = std::env::var_os("DAY2_TEST_BUILD_UI_PROVIDER_PIN") {
-        runner.with_ui_assembly(&day2_capabilities::UiAssemblyProvider {
-            provider_pin: PathBuf::from(provider_pin).display().to_string(),
-            package_root: path("DAY2_TEST_BUILD_UI_PACKAGE_ROOT")?
-                .display()
-                .to_string(),
-            package_key: name("clanker-vanilla"),
-        })?
-    } else {
-        anyhow::ensure!(
-            std::env::var_os("DAY2_TEST_BUILD_UI_PACKAGE_ROOT").is_none(),
-            "a UI package requires an explicitly approved provider pin"
-        );
-        runner
-    };
+    let runner = runner.with_bundled_ui(&root)?;
     let platform = PlatformInputs::capture(&root, &root.join("../.toolchains"))?;
     let external_source = std::env::var_os("DAY2_TEST_BUILD_APP");
     let source_root = external_source
