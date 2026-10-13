@@ -16,7 +16,16 @@ const MAX_BINARY_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_LOG_BYTES: u64 = 16 * 1024 * 1024;
 const BUILD_BUDGET: Duration = Duration::from_secs(3600);
 const ZIG_SHA256: &str = "b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489";
-const REVIEWED_BINARY_URL: &str = "https://github.com/clankernative/platform/releases/download/roc-formatter-2026-09-12/roc-fmt-day2-aarch64-apple-darwin";
+const ZIG_LINUX_SHA256: &str =
+    "70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00";
+
+pub(super) fn pin_path() -> Result<&'static str> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => Ok("tools/roc-formatter/toolchain.json"),
+        ("linux", "x86_64") => Ok("tools/roc-formatter/linux-x86_64.json"),
+        _ => anyhow::bail!("unsupported native formatter host"),
+    }
+}
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -72,12 +81,25 @@ impl Pin {
                 && !self.roc_source_archive.chars().any(char::is_control),
             "formatter source must be an approved nightly archive"
         );
+        let (archive, digest, cpu, jobs) = match self.target.as_str() {
+            "aarch64-macos" => (
+                "https://ziglang.org/download/0.16.0/zig-aarch64-macos-0.16.0.tar.xz",
+                ZIG_SHA256,
+                "-Dcpu=apple_m1",
+                "-j4",
+            ),
+            "x86_64-linux" => (
+                "https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz",
+                ZIG_LINUX_SHA256,
+                "-Dcpu=baseline",
+                "-j2",
+            ),
+            _ => anyhow::bail!("unsupported formatter build toolchain"),
+        };
         ensure!(
-            self.target == "aarch64-macos"
-                && self.zig_version == "0.16.0"
-                && self.zig_archive
-                    == "https://ziglang.org/download/0.16.0/zig-aarch64-macos-0.16.0.tar.xz"
-                && self.zig_archive_sha256 == ZIG_SHA256,
+            self.zig_version == "0.16.0"
+                && self.zig_archive == archive
+                && self.zig_archive_sha256 == digest,
             "unsupported formatter build toolchain"
         );
         let expected = [
@@ -85,15 +107,24 @@ impl Pin {
             "roc".to_string(),
             "-Doptimize=ReleaseFast".to_string(),
             "-Dstrip=true".to_string(),
-            "-Dcpu=apple_m1".to_string(),
+            cpu.to_string(),
             format!("-Dcompiler-version={}", self.roc_version),
-            "-j4".to_string(),
+            jobs.to_string(),
         ];
         ensure!(
             self.build_args == expected,
             "unapproved formatter build recipe"
         );
         Ok(())
+    }
+
+    fn binary_url(&self) -> Result<&'static str> {
+        self.validate()?;
+        match self.target.as_str() {
+            "aarch64-macos" => Ok("https://github.com/clankernative/platform/releases/download/roc-formatter-2026-09-12/roc-fmt-day2-aarch64-apple-darwin"),
+            "x86_64-linux" => Ok("https://github.com/clankernative/platform/releases/download/roc-formatter-linux-2026-09-12/roc-fmt-day2-x86_64-unknown-linux-gnu"),
+            _ => anyhow::bail!("unsupported native formatter release"),
+        }
     }
 
     fn recipe(&self) -> serde_json::Value {
@@ -319,12 +350,8 @@ fn publish(binary: &Path, destination: &Path, expected: &str) -> Result<()> {
 }
 
 fn checked_pin(root: &Path) -> Result<Pin> {
-    ensure!(
-        cfg!(all(target_os = "macos", target_arch = "aarch64")),
-        "formatter bootstrap requires Apple Silicon macOS"
-    );
     let tools = root.join("tools/roc-formatter");
-    let pin_path = tools.join("toolchain.json");
+    let pin_path = root.join(pin_path()?);
     let metadata = fs::symlink_metadata(&pin_path)?;
     ensure!(
         metadata.is_file() && metadata.len() <= 16_384,
@@ -332,6 +359,11 @@ fn checked_pin(root: &Path) -> Result<Pin> {
     );
     let pin: Pin = serde_json::from_slice(&fs::read(pin_path)?)?;
     pin.validate()?;
+    ensure!(
+        (pin.target == "aarch64-macos" && cfg!(all(target_os = "macos", target_arch = "aarch64")))
+            || (pin.target == "x86_64-linux" && cfg!(all(target_os = "linux", target_arch = "x86_64"))),
+        "formatter pin does not match the native host"
+    );
     let original = super::native_toolchain::load(root)?;
     ensure!(
         original.semantic_version(root)? == pin.roc_version,
@@ -375,7 +407,7 @@ pub fn install(root: &Path, candidate: Option<&Path>) -> Result<()> {
         let binary = scratch.path().join("roc-fmt-day2");
         download(
             scratch.path(),
-            REVIEWED_BINARY_URL,
+            pin.binary_url()?,
             &pin.roc_binary_sha256,
             &binary,
         )?;
@@ -610,6 +642,30 @@ mod tests {
                 _ => unreachable!(),
             }
             assert!(pin.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn linux_recipe_rejects_mixed_host_inputs_and_build_flags() {
+        let mut linux = pin();
+        linux.target = "x86_64-linux".into();
+        linux.zig_archive =
+            "https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz".into();
+        linux.zig_archive_sha256 = ZIG_LINUX_SHA256.into();
+        linux.build_args[4] = "-Dcpu=baseline".into();
+        linux.build_args[6] = "-j2".into();
+        linux.validate().unwrap();
+        assert!(linux.binary_url().unwrap().ends_with("x86_64-unknown-linux-gnu"));
+        for change in 0..4 {
+            let mut wrong = linux.clone();
+            match change {
+                0 => wrong.target = "aarch64-linux".into(),
+                1 => wrong.zig_archive_sha256 = ZIG_SHA256.into(),
+                2 => wrong.build_args[4] = "-Dcpu=apple_m1".into(),
+                3 => wrong.build_args[6] = "-j4".into(),
+                _ => unreachable!(),
+            }
+            assert!(wrong.validate().is_err());
         }
     }
 
