@@ -17,6 +17,8 @@
     "-Dstrip=true",
     "-Dcpu=baseline",
     "-Dcompiler-version=nightly-2026-09-12-220fd47",
-    "-j2"
+    "-j1",
+    "--summary",
+    "all"
   ]
 }

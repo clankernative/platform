@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     fs,
-    io::{Read, Seek, SeekFrom},
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     time::{Duration, Instant},
@@ -15,6 +15,7 @@ const MAX_ARCHIVE_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_BINARY_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_LOG_BYTES: u64 = 16 * 1024 * 1024;
 const BUILD_BUDGET: Duration = Duration::from_secs(3600);
+const LINUX_ADDRESS_SPACE_BYTES: u64 = 12 * 1024 * 1024 * 1024;
 const ZIG_SHA256: &str = "b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489";
 const ZIG_LINUX_SHA256: &str =
     "70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00";
@@ -92,7 +93,7 @@ impl Pin {
                 "https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz",
                 ZIG_LINUX_SHA256,
                 "-Dcpu=baseline",
-                "-j2",
+                "-j1",
             ),
             _ => anyhow::bail!("unsupported formatter build toolchain"),
         };
@@ -102,7 +103,7 @@ impl Pin {
                 && self.zig_archive_sha256 == digest,
             "unsupported formatter build toolchain"
         );
-        let expected = [
+        let mut expected = vec![
             "build".to_string(),
             "roc".to_string(),
             "-Doptimize=ReleaseFast".to_string(),
@@ -111,6 +112,9 @@ impl Pin {
             format!("-Dcompiler-version={}", self.roc_version),
             jobs.to_string(),
         ];
+        if self.target == "x86_64-linux" {
+            expected.extend(["--summary".into(), "all".into()]);
+        }
         ensure!(
             self.build_args == expected,
             "unapproved formatter build recipe"
@@ -128,7 +132,7 @@ impl Pin {
     }
 
     fn recipe(&self) -> serde_json::Value {
-        serde_json::json!({
+        let mut recipe = serde_json::json!({
             "roc_version": self.roc_version,
             "roc_source_archive": self.roc_source_archive,
             "roc_source_archive_sha256": self.roc_source_archive_sha256,
@@ -143,7 +147,15 @@ impl Pin {
             "target": self.target,
             "build_args": self.build_args,
             "test_args": self.test_args(),
-        })
+        });
+        if self.target == "x86_64-linux" {
+            recipe["process_limits"] = serde_json::json!({
+                "program": "/usr/bin/prlimit",
+                "address_space_bytes_per_process": LINUX_ADDRESS_SPACE_BYTES,
+                "core_bytes": 0,
+            });
+        }
+        recipe
     }
 
     fn test_args(&self) -> Vec<String> {
@@ -245,39 +257,84 @@ fn command(program: impl AsRef<Path>, scratch: &Path) -> Command {
     command
 }
 
+fn compiler_command(program: &Path, scratch: &Path, pin: &Pin) -> Command {
+    if pin.target == "x86_64-linux" {
+        // One scheduled Zig job and a per-process address-space ceiling leave
+        // room for the hosted runner. This is not a process-tree memory limit.
+        let mut bounded = command("/usr/bin/prlimit", scratch);
+        bounded
+            .arg(format!("--as={LINUX_ADDRESS_SPACE_BYTES}"))
+            .args(["--core=0", "--"])
+            .arg(program);
+        bounded
+    } else {
+        command(program, scratch)
+    }
+}
+
 fn run(scratch: &Path, phase: &str, command: &mut Command, budget: Duration) -> Result<()> {
-    println!("Formatter: {phase}");
-    let log = tempfile::NamedTempFile::new_in(scratch)?;
-    let output = log.reopen()?;
+    let logs = scratch.join("logs");
+    fs::create_dir_all(&logs)?;
+    ensure!(fs::symlink_metadata(&logs)?.is_dir(), "formatter log directory");
+    let (log, path) = tempfile::Builder::new()
+        .prefix("phase-")
+        .suffix(".log")
+        .tempfile_in(&logs)?
+        .keep()?;
+    println!("Formatter: {phase}; retained log {}", path.display());
+    let output = log.try_clone()?;
     command.stdout(output.try_clone()?).stderr(output);
     let mut child = Supervised(command.spawn().with_context(|| phase.to_string())?);
     let started = Instant::now();
+    let mut progress = Instant::now();
     loop {
         ensure!(
             started.elapsed() <= budget,
             "formatter {phase} time budget exceeded"
         );
         ensure!(
-            log.as_file().metadata()?.len() <= MAX_LOG_BYTES,
+            log.metadata()?.len() <= MAX_LOG_BYTES,
             "formatter {phase} log budget exceeded"
         );
         if let Some(status) = child.0.try_wait()? {
-            let length = log.as_file().metadata()?.len();
+            let length = log.metadata()?.len();
             ensure!(
                 length <= MAX_LOG_BYTES,
                 "formatter {phase} log budget exceeded"
             );
+            let mut reader = fs::File::open(&path)?;
+            reader.seek(SeekFrom::Start(length.saturating_sub(16_384)))?;
+            let mut tail = Vec::new();
+            reader.take(16_384).read_to_end(&mut tail)?;
+            println!(
+                "Formatter: {phase} completed in {:.1}s: {status}\n{}",
+                started.elapsed().as_secs_f64(),
+                String::from_utf8_lossy(&tail)
+            );
             if !status.success() {
-                let mut reader = log.reopen()?;
-                reader.seek(SeekFrom::Start(length.saturating_sub(8_192)))?;
-                let mut tail = Vec::new();
-                reader.take(8_192).read_to_end(&mut tail)?;
                 anyhow::bail!(
                     "formatter {phase} failed: {status}\n{}",
                     String::from_utf8_lossy(&tail)
                 );
             }
             return Ok(());
+        }
+        if progress.elapsed() >= Duration::from_secs(60) {
+            println!(
+                "Formatter: {phase} still running after {:.1}s; {} log bytes",
+                started.elapsed().as_secs_f64(),
+                log.metadata()?.len()
+            );
+            #[cfg(target_os = "linux")]
+            if let Ok(memory) = fs::read_to_string("/proc/meminfo") {
+                for line in memory.lines().filter(|line| {
+                    line.starts_with("MemAvailable:") || line.starts_with("SwapFree:")
+                }) {
+                    println!("Formatter runner memory: {line}");
+                }
+            }
+            std::io::stdout().flush()?;
+            progress = Instant::now();
         }
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -507,7 +564,7 @@ pub fn build_candidate(root: &Path) -> Result<PathBuf> {
     // is cleared. The caches are kept: Zig names cache entries by content hash and
     // embeds those paths in the binary, so repopulating a cleared cache lands the
     // same inputs in differently named buckets and changes the output bytes.
-    for child in ["home", "tmp", "source", "zig"] {
+    for child in ["home", "tmp", "source", "zig", "logs"] {
         let path = scratch.join(child);
         if fs::symlink_metadata(&path).is_ok() {
             fs::remove_dir_all(&path).context("clear the formatter build root")?;
@@ -571,7 +628,7 @@ pub fn build_candidate(root: &Path) -> Result<PathBuf> {
     run(
         scratch,
         "test native formatter module",
-        command(&executable, scratch)
+        compiler_command(&executable, scratch, &pin)
             .current_dir(&source)
             .args(pin.test_args()),
         BUILD_BUDGET,
@@ -579,7 +636,7 @@ pub fn build_candidate(root: &Path) -> Result<PathBuf> {
     run(
         scratch,
         "build native formatter",
-        command(&executable, scratch)
+        compiler_command(&executable, scratch, &pin)
             .current_dir(&source)
             .args(&pin.build_args),
         BUILD_BUDGET,
@@ -653,7 +710,8 @@ mod tests {
             "https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz".into();
         linux.zig_archive_sha256 = ZIG_LINUX_SHA256.into();
         linux.build_args[4] = "-Dcpu=baseline".into();
-        linux.build_args[6] = "-j2".into();
+        linux.build_args[6] = "-j1".into();
+        linux.build_args.extend(["--summary".into(), "all".into()]);
         linux.validate().unwrap();
         assert!(linux.binary_url().unwrap().ends_with("x86_64-unknown-linux-gnu"));
         for change in 0..4 {
@@ -795,5 +853,28 @@ mod tests {
             environment[std::ffi::OsStr::new("GIT_CEILING_DIRECTORIES")],
             Some(scratch.as_os_str())
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn native_linux_compiler_process_has_the_recorded_kernel_limits() -> Result<()> {
+        let scratch = tempfile::tempdir()?;
+        let mut linux = pin();
+        linux.target = "x86_64-linux".into();
+        let output = compiler_command(Path::new("/usr/bin/cat"), scratch.path(), &linux)
+            .arg("/proc/self/limits")
+            .output()?;
+        ensure!(output.status.success(), "query actual child kernel limits");
+        let limits = String::from_utf8(output.stdout)?;
+        let address = limits.lines().find(|line| line.starts_with("Max address space"))
+            .context("address-space limit missing")?;
+        let core = limits.lines().find(|line| line.starts_with("Max core file size"))
+            .context("core limit missing")?;
+        assert_eq!(address.split_whitespace().collect::<Vec<_>>(),
+            ["Max", "address", "space", "12884901888", "12884901888", "bytes"]);
+        assert_eq!(core.split_whitespace().collect::<Vec<_>>(),
+            ["Max", "core", "file", "size", "0", "0", "bytes"]);
+        assert_eq!(linux.recipe()["process_limits"]["address_space_bytes_per_process"], LINUX_ADDRESS_SPACE_BYTES);
+        Ok(())
     }
 }
