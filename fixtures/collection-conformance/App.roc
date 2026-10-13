@@ -1,4 +1,3 @@
-# Temporary CI fixture-cache invalidation measurement.
 import InsertEntry
 import CollectEntries
 import UpdateCollectEntries
