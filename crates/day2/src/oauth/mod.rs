@@ -20,6 +20,7 @@ pub mod inbound;
 pub mod outbound;
 pub mod profiles;
 pub mod protocol;
+mod refresh;
 pub(crate) mod registration;
 pub(crate) mod schema;
 pub(crate) mod security_shell;
