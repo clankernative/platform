@@ -316,14 +316,16 @@ fn status_group_rss(status: &str, group: u32) -> Result<GroupMemory> {
         return Ok(GroupMemory::Foreign);
     }
     let Some(rss) = status.lines().find_map(|line| line.strip_prefix("VmRSS:")) else {
-        return Ok(if status
-            .lines()
-            .any(|line| line.starts_with("State:") && line.contains("Z (zombie)"))
-        {
-            GroupMemory::Resident(0)
-        } else {
-            GroupMemory::Unavailable
-        });
+        return Ok(
+            if status
+                .lines()
+                .any(|line| line.starts_with("State:") && line.contains("Z (zombie)"))
+            {
+                GroupMemory::Resident(0)
+            } else {
+                GroupMemory::Unavailable
+            },
+        );
     };
     let mut fields = rss.split_whitespace();
     let kibibytes: u64 = fields.next().context("process RSS missing")?.parse()?;
@@ -342,28 +344,46 @@ fn status_group_rss(status: &str, group: u32) -> Result<GroupMemory> {
 fn read_process_status(path: &Path) -> Result<Option<String>> {
     match fs::read_to_string(path) {
         Ok(status) => Ok(Some(status)),
-        Err(error) if error.raw_os_error() == Some(3)
-            || [std::io::ErrorKind::NotFound, std::io::ErrorKind::PermissionDenied]
-                .contains(&error.kind()) => Ok(None),
+        Err(error)
+            if error.raw_os_error() == Some(3)
+                || [
+                    std::io::ErrorKind::NotFound,
+                    std::io::ErrorKind::PermissionDenied,
+                ]
+                .contains(&error.kind()) =>
+        {
+            Ok(None)
+        }
         Err(error) => Err(error.into()),
     }
 }
 
 #[cfg(target_os = "linux")]
-fn sample_member_rss(group: u32, mut read: impl FnMut() -> Result<Option<String>>) -> Result<Option<u64>> {
+fn sample_member_rss(
+    group: u32,
+    mut read: impl FnMut() -> Result<Option<String>>,
+) -> Result<Option<u64>> {
     // Linux can release a task's address space before it becomes a zombie.
     // Re-observe that transition, never count a persistently unobserved live
     // member as zero. Three reads allow at most two ten-millisecond delays.
     let mut remaining = 3;
     loop {
-        let Some(status) = read()? else { return Ok(None); };
+        let Some(status) = read()? else {
+            return Ok(None);
+        };
         match status_group_rss(&status, group)? {
             GroupMemory::Foreign => return Ok(None),
             GroupMemory::Resident(bytes) => return Ok(Some(bytes)),
             GroupMemory::Unavailable => {
                 remaining -= 1;
-                ensure!(remaining > 0, "live formatter process RSS unavailable after bounded recheck: {}",
-                    status.lines().find(|line| line.starts_with("State:")).unwrap_or("State: missing"));
+                ensure!(
+                    remaining > 0,
+                    "live formatter process RSS unavailable after bounded recheck: {}",
+                    status
+                        .lines()
+                        .find(|line| line.starts_with("State:"))
+                        .unwrap_or("State: missing")
+                );
                 std::thread::sleep(Duration::from_millis(10));
             }
         }
@@ -1109,11 +1129,17 @@ mod tests {
     #[test]
     fn process_group_observation_rejects_missing_units_overflow_and_foreign_groups() -> Result<()> {
         let status = "Name:\tzig with spaces)\nNSpgid:\t42\t7\nVmRSS:\t123 kB\n";
-        assert_eq!(status_group_rss(status, 42)?, GroupMemory::Resident(123 * 1024));
+        assert_eq!(
+            status_group_rss(status, 42)?,
+            GroupMemory::Resident(123 * 1024)
+        );
         assert_eq!(status_group_rss(status, 7)?, GroupMemory::Foreign);
         assert!(status_group_rss("NSpgid:\t42\nVmRSS:\t123 bytes\n", 42).is_err());
         assert!(status_group_rss("NSpgid:\t42\nVmRSS:\t18446744073709551615 kB\n", 42).is_err());
-        assert_eq!(status_group_rss("NSpgid:\t42\nState:\tR (running)\n", 42)?, GroupMemory::Unavailable);
+        assert_eq!(
+            status_group_rss("NSpgid:\t42\nState:\tR (running)\n", 42)?,
+            GroupMemory::Unavailable
+        );
         assert_eq!(
             status_group_rss("NSpgid:\t42\nState:\tZ (zombie)\n", 42)?,
             GroupMemory::Resident(0)
@@ -1123,7 +1149,8 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn member_rss_rechecks_teardown_but_rejects_persistent_or_malformed_observations() -> Result<()> {
+    fn member_rss_rechecks_teardown_but_rejects_persistent_or_malformed_observations() -> Result<()>
+    {
         let missing = "NSpgid:\t42\nState:\tR (running)\n";
         for (last, expected) in [
             (Some("NSpgid:\t42\nVmRSS:\t123 kB\n"), Some(123 * 1024)),
@@ -1131,12 +1158,23 @@ mod tests {
             (None, None),
         ] {
             let mut observations = [Some(missing), last].into_iter();
-            assert_eq!(sample_member_rss(42, || Ok(observations.next().unwrap().map(str::to_owned)))?, expected);
+            assert_eq!(
+                sample_member_rss(42, || Ok(observations.next().unwrap().map(str::to_owned)))?,
+                expected
+            );
         }
         let mut attempts = 0;
-        assert!(sample_member_rss(42, || { attempts += 1; Ok(Some(missing.into())) }).is_err());
+        assert!(
+            sample_member_rss(42, || {
+                attempts += 1;
+                Ok(Some(missing.into()))
+            })
+            .is_err()
+        );
         assert_eq!(attempts, 3);
-        assert!(sample_member_rss(42, || Ok(Some("NSpgid:\t42\nVmRSS:\t123 bytes\n".into()))).is_err());
+        assert!(
+            sample_member_rss(42, || Ok(Some("NSpgid:\t42\nVmRSS:\t123 bytes\n".into()))).is_err()
+        );
         assert!(sample_member_rss(42, || anyhow::bail!("read failed")).is_err());
         assert_eq!(sample_member_rss(7, || Ok(Some(missing.into())))?, None);
         Ok(())
