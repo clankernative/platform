@@ -1,7 +1,7 @@
 {
   "version": 1,
   "trait_checks": [
-    {"source":"crates/day2/src/structural_proofs.rs","scope":"module","fingerprint":"sha256:f8e05bc0076a01ab03331d2334f48b9c85701617324fb862cf05c78318b12629","registration":{"source":"crates/day2/src/lib.rs","module":"structural_proofs"}},
+    {"source":"crates/day2/src/structural_proofs.rs","scope":"module","fingerprint":"sha256:5d241c23787b9880558381f209a69e005c116b237bb44eec92d0d793409b645c","registration":{"source":"crates/day2/src/lib.rs","module":"structural_proofs"}},
     {"source":"crates/day2-control/src/release.rs","scope":"const","fingerprint":"sha256:9c616765ed20205205236e2e4d7cc7a77a49512dcd9d0c33c34e1c40da5209e3","registration":null}
   ],
   "proofs": [
@@ -104,8 +104,56 @@
       ],
       "methods": ["pub fn attempt(&self) -> &str", "pub fn send<T>(self, transport: impl FnOnce(&RefreshEligibility) -> T) -> T"],
       "factories": [
-        {"owner": null, "signature": "pub fn authorize_and_commit_dispatch(db: &mut Connection, attempt: &str) -> Result<Option<RefreshDispatchPermit>>"}
+        {"owner": null, "signature": "pub(super) fn authorize_checked_dispatch(db: &mut Connection, attempt: &str, authorize: impl FnOnce(&Connection) -> Result<bool>) -> Result<Option<RefreshDispatchPermit>>"}
       ]
+    },
+    {
+      "source": "crates/day2/src/oauth/refresh.rs",
+      "type_name": "ClientCredential",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "methods": ["pub(super) fn new(client: String, secret: String, reference: BindingRef) -> Result<Self>"],
+      "factories": [
+        {"owner":"ClientCredential","signature":"pub(super) fn new(client: String, secret: String, reference: BindingRef) -> Result<Self>"}
+      ],
+      "material_uses": [],
+      "owning_children": []
+    },
+    {
+      "source": "crates/day2/src/oauth/refresh.rs",
+      "type_name": "PreparedReplacement",
+      "kind": "private_material",
+      "consuming_methods": ["into_parts"],
+      "methods": ["pub(super) fn into_parts(self) -> (String, i64, String, String, custody::PreparedTokenMaterial)"],
+      "factories": [
+        {"owner":null,"signature":"pub(super) fn ensure_current(runtime: &crate::store::Runtime, request: &crate::protocol::Request, registration: &str, subject: &str, selection: &usage::Selection, started_at: i64) -> Result<Resolution>"}
+      ],
+      "material_uses": [
+        {"owner":"PreparedReplacement","signature":"pub(super) fn into_parts(self) -> (String, i64, String, String, custody::PreparedTokenMaterial)"}
+      ],
+      "owning_children": []
+    },
+    {
+      "source": "crates/day2/src/oauth/refresh.rs",
+      "type_name": "Resolution",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "methods": [
+        "pub(super) fn problem(&self) -> Option<&'static str>",
+        "fn ready(context: &usage::RefreshContext, version: i64, clock: i64) -> Result<Self>",
+        "fn unavailable(problem: &'static str) -> Self",
+        "pub(super) fn validate(&self, db: &Connection, now: i64) -> Result<bool>"
+      ],
+      "factories": [
+        {"owner":null,"signature":"pub(super) fn ensure_current(runtime: &crate::store::Runtime, request: &crate::protocol::Request, registration: &str, subject: &str, selection: &usage::Selection, started_at: i64) -> Result<Resolution>"},
+        {"owner":"Resolution","signature":"fn ready(context: &usage::RefreshContext, version: i64, clock: i64) -> Result<Self>"},
+        {"owner":"Resolution","signature":"fn unavailable(problem: &'static str) -> Self"}
+      ],
+      "material_uses": [
+        {"owner":"Resolution","signature":"pub(super) fn problem(&self) -> Option<&'static str>"},
+        {"owner":"Resolution","signature":"pub(super) fn validate(&self, db: &Connection, now: i64) -> Result<bool>"}
+      ],
+      "owning_children": []
     }
   ]
 }

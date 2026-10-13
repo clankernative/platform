@@ -193,7 +193,11 @@ impl ArtifactShellSigner {
     ) -> Result<Self> {
         let keys = Self::keys(&selected, tokens.clone())?;
         Ok(Self {
-            state: RwLock::new(AuthorityState { selected, keys, tokens: Some(tokens) }),
+            state: RwLock::new(AuthorityState {
+                selected,
+                keys,
+                tokens: Some(tokens),
+            }),
         })
     }
 
@@ -223,7 +227,11 @@ impl ArtifactShellSigner {
             .state
             .write()
             .map_err(|_| anyhow::anyhow!("OAuth shell selection lock poisoned"))? =
-            AuthorityState { selected, keys, tokens: Some(tokens) };
+            AuthorityState {
+                selected,
+                keys,
+                tokens: Some(tokens),
+            };
         Ok(())
     }
 
@@ -1049,7 +1057,11 @@ impl ArtifactApprovalAuthority {
     ) -> Result<Self> {
         let keys = Self::gcp_keys(&selected, tokens.clone())?;
         Ok(Self {
-            state: RwLock::new(AuthorityState { selected, keys, tokens: Some(tokens) }),
+            state: RwLock::new(AuthorityState {
+                selected,
+                keys,
+                tokens: Some(tokens),
+            }),
             readiness,
         })
     }
@@ -1092,8 +1104,11 @@ impl ArtifactApprovalAuthority {
         *self
             .state
             .write()
-            .map_err(|_| anyhow::anyhow!("OAuth selection lock poisoned"))? =
-            AuthorityState { selected, keys, tokens: Some(tokens) };
+            .map_err(|_| anyhow::anyhow!("OAuth selection lock poisoned"))? = AuthorityState {
+            selected,
+            keys,
+            tokens: Some(tokens),
+        };
         Ok(())
     }
 
@@ -1374,40 +1389,106 @@ impl ArtifactApprovalAuthority {
 
 impl super::usage::Authority for ArtifactApprovalAuthority {
     fn with_current(
-        &self, app: &str, registration: &str, owner: &str, now: i64,
+        &self,
+        app: &str,
+        registration: &str,
+        owner: &str,
+        now: i64,
         commit: &mut dyn FnMut(&super::usage::Selection) -> Result<bool>,
     ) -> Result<bool> {
-        let state = self.state.read().map_err(|_| anyhow::anyhow!("OAuth selection lock poisoned"))?;
-        let Some(selection) = self.use_selection(&state, app, registration, owner, now)? else { return Ok(false); };
+        let state = self
+            .state
+            .read()
+            .map_err(|_| anyhow::anyhow!("OAuth selection lock poisoned"))?;
+        let Some(selection) = self.use_selection(&state, app, registration, owner, now)? else {
+            return Ok(false);
+        };
         // Selection replacement cannot race the local dispatch/publication CAS.
         commit(&selection)
     }
 
     fn refresh_client(
-        &self, app: &str, registration: &str, owner: &str, expected: &Digest, now: i64,
+        &self,
+        app: &str,
+        registration: &str,
+        owner: &str,
+        expected: &Digest,
+        now: i64,
     ) -> Result<Option<super::refresh::ClientCredential>> {
-        let state = self.state.read().map_err(|_| anyhow::anyhow!("OAuth selection lock poisoned"))?;
-        let Some(selection) = self.use_selection(&state, app, registration, owner, now)? else { return Ok(None); };
-        ensure!(selection.identity()? == *expected, "OAuth refresh client selection changed");
+        let state = self
+            .state
+            .read()
+            .map_err(|_| anyhow::anyhow!("OAuth selection lock poisoned"))?;
+        let Some(selection) = self.use_selection(&state, app, registration, owner, now)? else {
+            return Ok(None);
+        };
+        ensure!(
+            selection.identity()? == *expected,
+            "OAuth refresh client selection changed"
+        );
         let instance = &state.selected.instance;
         let selected = &state.selected.entries[&(app.to_owned(), registration.to_owned())];
-        let client = instance.oauth_clients.as_ref().context("OAuth clients missing")?
-            .registrations.get(&selected.binding.registration.id).context("OAuth refresh client missing")?.client();
-        ensure!(matches!(client, day2_capabilities::oauth::ProviderClient::Google { .. }), "OAuth product refresh adapter unavailable");
-        let control = instance.control.as_ref().context("OAuth secret catalog missing")?;
-        let version = gcp_version(control.secrets.get(client.credential()).context("OAuth refresh secret missing")?);
-        let reference = super::clients::provider_credential_reference(&instance_identity(instance)?, &client, &version)?;
-        ensure!(reference == selection.instance.registration.client_credential, "OAuth refresh credential differs from current registration");
-        let reader = super::approval_keys::GcpSecretReader::new(state.tokens.as_ref().context("OAuth refresh secret transport missing")?.clone())?;
+        let client = instance
+            .oauth_clients
+            .as_ref()
+            .context("OAuth clients missing")?
+            .registrations
+            .get(&selected.binding.registration.id)
+            .context("OAuth refresh client missing")?
+            .client();
+        ensure!(
+            matches!(
+                client,
+                day2_capabilities::oauth::ProviderClient::Google { .. }
+            ),
+            "OAuth product refresh adapter unavailable"
+        );
+        let control = instance
+            .control
+            .as_ref()
+            .context("OAuth secret catalog missing")?;
+        let version = gcp_version(
+            control
+                .secrets
+                .get(client.credential())
+                .context("OAuth refresh secret missing")?,
+        );
+        let reference = super::clients::provider_credential_reference(
+            &instance_identity(instance)?,
+            &client,
+            &version,
+        )?;
+        ensure!(
+            reference == selection.instance.registration.client_credential,
+            "OAuth refresh credential differs from current registration"
+        );
+        let reader = super::approval_keys::GcpSecretReader::new(
+            state
+                .tokens
+                .as_ref()
+                .context("OAuth refresh secret transport missing")?
+                .clone(),
+        )?;
         let mut bytes = reader.load(&version)?;
-        let secret = std::str::from_utf8(&bytes).map(str::to_owned).map_err(|_| anyhow::anyhow!("invalid OAuth client credential"));
+        let secret = std::str::from_utf8(&bytes)
+            .map(str::to_owned)
+            .map_err(|_| anyhow::anyhow!("invalid OAuth client credential"));
         bytes.fill(0);
         let secret = secret?;
         let at = super::effects::wall_time()?;
-        ensure!(at >= now, "OAuth refresh credential clock rewound");
-        let Some(current) = self.use_selection(&state, app, registration, owner, at)? else { return Ok(None); };
-        ensure!(current.identity()? == *expected, "OAuth refresh readiness changed during secret retrieval");
-        Ok(Some(super::refresh::ClientCredential::new(client.client_id().to_owned(), secret, reference)?))
+        if at < now { return Err(super::refresh::ClockRefusal.into()); }
+        let Some(current) = self.use_selection(&state, app, registration, owner, at)? else {
+            return Ok(None);
+        };
+        ensure!(
+            current.identity()? == *expected,
+            "OAuth refresh readiness changed during secret retrieval"
+        );
+        Ok(Some(super::refresh::ClientCredential::new(
+            client.client_id().to_owned(),
+            secret,
+            reference,
+        )?))
     }
 
     fn current(
@@ -1715,7 +1796,11 @@ pub(super) mod tests {
                     AND token_version=1 AND security_epoch=1 AND profile=?2 AND account=?3 AND affinity=?4 AND status='active'",
                     rusqlite::params![self.slot,intent.profile,self.expected_account.as_str(),affinity.as_str()],|row| row.get(0))?;
                 ensure!(exact == 1, "replay wrong OAuth slot/affinity/owner link");
-                let material_reference = Digest::of(&("oauth-private-token-material-v2", &self.exchange.token_slot_ref, 1i64))?;
+                let material_reference = Digest::of(&(
+                    "oauth-private-token-material-v2",
+                    &self.exchange.token_slot_ref,
+                    1i64,
+                ))?;
                 let (identity, key, nonce, ciphertext): (String, String, Vec<u8>, Vec<u8>) = db
                     .query_row(
                     "SELECT identity_digest,key_version,nonce,ciphertext FROM oauth_private_tokens

@@ -352,10 +352,18 @@ pub(super) struct RefreshContext {
 }
 
 impl RefreshContext {
-    pub(super) fn intent(&self) -> &super::connect::ConnectIntent { &self.intent }
-    pub(super) fn binding(&self) -> &super::exchange::ExchangeBinding { &self.binding }
-    pub(super) fn eligibility(&self) -> &super::store::RefreshEligibility { &self.eligibility }
-    pub(super) fn pin(&self) -> &Digest { &self.pin }
+    pub(super) fn intent(&self) -> &super::connect::ConnectIntent {
+        &self.intent
+    }
+    pub(super) fn binding(&self) -> &super::exchange::ExchangeBinding {
+        &self.binding
+    }
+    pub(super) fn eligibility(&self) -> &super::store::RefreshEligibility {
+        &self.eligibility
+    }
+    pub(super) fn pin(&self) -> &Digest {
+        &self.pin
+    }
 }
 
 pub(super) fn refresh_context(
@@ -369,17 +377,52 @@ pub(super) fn refresh_context(
 ) -> Result<Option<RefreshContext>> {
     runtime.check_binding(db)?;
     require_action(db, runtime, request, crate::connection_codegen::RESOLVE)?;
-    ensure!(human(db, runtime, request)?.as_deref() == Some(subject), "refresh human changed");
-    let Some(claims) = capture(db, selection, request, runtime, registration, subject.to_owned(), now)? else { return Ok(None); };
+    ensure!(
+        human(db, runtime, request)?.as_deref() == Some(subject),
+        "refresh human changed"
+    );
+    let Some(claims) = capture(
+        db,
+        selection,
+        request,
+        runtime,
+        registration,
+        subject.to_owned(),
+        now,
+    )?
+    else {
+        return Ok(None);
+    };
     let (intent, binding) = activation(db, &claims, selection)?;
     let eligibility = super::store::RefreshEligibility {
-        slot: claims.slot, generation: claims.generation, base_version: claims.token_version,
-        security_epoch: claims.security_epoch, profile: claims.profile, account: claims.account, affinity: claims.affinity,
+        slot: claims.slot,
+        generation: claims.generation,
+        base_version: claims.token_version,
+        security_epoch: claims.security_epoch,
+        profile: claims.profile,
+        account: claims.account,
+        affinity: claims.affinity,
     };
-    let pin = Digest::of(&("oauth-current-refresh-authority-v1", &claims.invocation, &claims.operation,
-        &claims.actor, &claims.subject, &claims.scope, &claims.artifact, &claims.authority,
-        &claims.registration, &claims.requirement, &claims.selection, &eligibility))?;
-    Ok(Some(RefreshContext { intent, binding, eligibility, pin }))
+    let pin = Digest::of(&(
+        "oauth-current-refresh-authority-v1",
+        &claims.invocation,
+        &claims.operation,
+        &claims.actor,
+        &claims.subject,
+        &claims.scope,
+        &claims.artifact,
+        &claims.authority,
+        &claims.registration,
+        &claims.requirement,
+        &claims.selection,
+        &eligibility,
+    ))?;
+    Ok(Some(RefreshContext {
+        intent,
+        binding,
+        eligibility,
+        pin,
+    }))
 }
 
 fn load(
@@ -477,12 +520,17 @@ fn resolve(runtime: &Runtime, request: &Request, instruction: &Instruction) -> R
         now >= started && now - started <= 10,
         "connection readiness deadline exceeded"
     );
-    if let Some(problem) = super::refresh::ensure_current(
-        runtime, request, &input.registration, &subject, &selection, now,
-    )? {
+    let refresh = super::refresh::ensure_current(
+        runtime,
+        request,
+        &input.registration,
+        &subject,
+        &selection,
+        now,
+    )?;
+    if let Some(problem) = refresh.problem() {
         return Ok(unavailable(problem));
     }
-    let now = super::effects::wall_time()?;
     let mut nonce = [0u8; 32];
     super::effects::fill(&mut nonce)?;
     use base64::Engine as _;
@@ -491,6 +539,11 @@ fn resolve(runtime: &Runtime, request: &Request, instruction: &Instruction) -> R
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(nonce)
     );
     let tx = crate::write_queue::immediate(&mut db)?;
+    let now = super::effects::wall_time()?;
+    if !refresh.validate(&tx, now)? {
+        tx.commit()?;
+        return Ok(unavailable("ReauthRequired"));
+    }
     runtime.check_binding(&tx)?;
     ensure!(
         human(&tx, runtime, request)?.as_deref() == Some(subject.as_str()),
@@ -1192,13 +1245,28 @@ mod tests {
     }
 
     impl Authority for ProductAuthority {
-        fn refresh_client(&self, _: &str, _: &str, _: &str, _: &Digest, _: i64) -> Result<Option<super::super::refresh::ClientCredential>> {
+        fn refresh_client(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &Digest,
+            _: i64,
+        ) -> Result<Option<super::super::refresh::ClientCredential>> {
             anyhow::bail!("unexpected refresh of an unexpired original test token")
         }
 
-        fn with_current(&self, app: &str, registration: &str, owner: &str, now: i64,
-            commit: &mut dyn FnMut(&Selection) -> Result<bool>) -> Result<bool> {
-            let Some(current) = self.current(app, registration, owner, now)? else { return Ok(false); };
+        fn with_current(
+            &self,
+            app: &str,
+            registration: &str,
+            owner: &str,
+            now: i64,
+            commit: &mut dyn FnMut(&Selection) -> Result<bool>,
+        ) -> Result<bool> {
+            let Some(current) = self.current(app, registration, owner, now)? else {
+                return Ok(false);
+            };
             commit(&current)
         }
 

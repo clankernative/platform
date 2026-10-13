@@ -82,7 +82,9 @@ pub(super) fn token_reference(binding: &ExchangeBinding, version: i64) -> Result
         "oauth-private-token-material-v2",
         &binding.token_slot_ref,
         version,
-    ))?.as_str().to_owned())
+    ))?
+    .as_str()
+    .to_owned())
 }
 
 fn token_identity<'a>(
@@ -92,7 +94,12 @@ fn token_identity<'a>(
     reference: &'a str,
     version: i64,
 ) -> MaterialIdentity<'a> {
-    let mut material = identity(MaterialPurpose::ConnectionTokens, intent, binding, Some(account));
+    let mut material = identity(
+        MaterialPurpose::ConnectionTokens,
+        intent,
+        binding,
+        Some(account),
+    );
     material.reference = reference;
     material.token_version = Some(version);
     material
@@ -467,12 +474,7 @@ fn load_bundle(
     let (digest, version, nonce, ciphertext): (String, String, Vec<u8>, Vec<u8>) = db.query_row(
         "SELECT identity_digest,key_version,nonce,ciphertext FROM oauth_private_tokens
          WHERE reference=?1 AND slot=?2 AND generation=?3 AND account=?4",
-        params![
-            reference,
-            intent.slot,
-            intent.proposed_generation,
-            account
-        ],
+        params![reference, intent.slot, intent.proposed_generation, account],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
     )?;
     let expected = token_identity(intent, binding, account, &reference, token_version);
@@ -574,17 +576,39 @@ pub(super) fn load_refresh(
     if !active {
         return Ok(None);
     }
-    let bundle = load_bundle(db, key, intent, binding, account, version)?;
+    let bundle = match load_bundle(db, key, intent, binding, account, version) {
+        Ok(bundle) => bundle,
+        Err(_) => {
+            refuse_access(db, &intent.slot, intent.proposed_generation, version, intent.expected_epoch, &intent.profile, account)?;
+            return Ok(None);
+        }
+    };
     if now < bundle.issued_at {
-        refuse_access(db, &intent.slot, intent.proposed_generation, version, intent.expected_epoch, &intent.profile, account)?;
+        refuse_access(
+            db,
+            &intent.slot,
+            intent.proposed_generation,
+            version,
+            intent.expected_epoch,
+            &intent.profile,
+            account,
+        )?;
         return Ok(None);
     }
-    let Some(token) = bundle.refresh_token else { return Ok(None); };
+    let Some(token) = bundle.refresh_token else {
+        return Ok(None);
+    };
     ensure!(
-        !token.is_empty() && token.len() <= 8192 && token.bytes().all(|byte| byte.is_ascii_graphic()),
+        !token.is_empty()
+            && token.len() <= 8192
+            && token.bytes().all(|byte| byte.is_ascii_graphic()),
         "invalid private OAuth refresh token"
     );
-    Ok(Some(RefreshSource { token, issued_at: bundle.issued_at, expires_at: bundle.expires_at }))
+    Ok(Some(RefreshSource {
+        token,
+        issued_at: bundle.issued_at,
+        expires_at: bundle.expires_at,
+    }))
 }
 
 /// Called only with a verified private refresh response, before the publication
@@ -598,17 +622,34 @@ pub(super) fn prepare_replacement_tokens(
     tokens: ValidatedTokenResponse,
     issued_at: i64,
 ) -> Result<PreparedTokenMaterial> {
-    ensure!(version > 1 && issued_at >= 0, "invalid OAuth replacement version or time");
+    ensure!(
+        version > 1 && issued_at >= 0,
+        "invalid OAuth replacement version or time"
+    );
     let (access_token, refresh_token, expires_in) = tokens.into_private_tokens();
     let bundle = TokenBundle {
-        access_token, refresh_token, issued_at,
-        expires_at: issued_at.checked_add(i64::try_from(expires_in)?).ok_or_else(|| anyhow::anyhow!("OAuth replacement expiry overflow"))?,
+        access_token,
+        refresh_token,
+        issued_at,
+        expires_at: issued_at
+            .checked_add(i64::try_from(expires_in)?)
+            .ok_or_else(|| anyhow::anyhow!("OAuth replacement expiry overflow"))?,
     };
     let reference = token_reference(binding, version)?;
     let mut plaintext = serde_json::to_vec(&bundle)?;
-    let material = encrypt(key, &token_identity(intent, binding, account, &reference, version), &plaintext);
+    let material = encrypt(
+        key,
+        &token_identity(intent, binding, account, &reference, version),
+        &plaintext,
+    );
     plaintext.fill(0);
-    Ok(PreparedTokenMaterial { slot: intent.slot.clone(), generation: intent.proposed_generation, account: account.to_owned(), reference, material: material? })
+    Ok(PreparedTokenMaterial {
+        slot: intent.slot.clone(),
+        generation: intent.proposed_generation,
+        account: account.to_owned(),
+        reference,
+        material: material?,
+    })
 }
 
 /// Replace only the authenticated base material; the caller commits this with
@@ -625,6 +666,7 @@ pub(super) fn replace_tokens(
             prepared.material.nonce.as_slice(), prepared.material.ciphertext, prepared.slot, prepared.generation, prepared.account, base_reference],
     )?;
     ensure!(changed == 1, "OAuth replacement base material changed");
+    super::effects::refresh_boundary(super::effects::RefreshBoundary::MaterialWritten);
     Ok(())
 }
 

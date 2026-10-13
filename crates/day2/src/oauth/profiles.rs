@@ -518,8 +518,12 @@ pub struct ValidatedTokenResponse {
 }
 
 impl ValidatedTokenResponse {
-    pub(super) fn refresh_access(&self) -> &str { &self.access_token }
-    pub(super) fn lifetime(&self) -> u64 { self.expires_in }
+    pub(super) fn refresh_access(&self) -> &str {
+        &self.access_token
+    }
+    pub(super) fn lifetime(&self) -> u64 {
+        self.expires_in
+    }
 
     pub fn scopes(&self) -> &BTreeSet<String> {
         &self.scopes

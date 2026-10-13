@@ -1218,6 +1218,10 @@ fn configure_tests(
             "--skip",
             "oauth::usage::refresh_tests::compiled_calendar_refresh_publishes_versions_and_fences_failure_recovery",
         ]);
+        command.args([
+            "--skip",
+            "oauth::usage::refresh_tests::compiled_refresh_crash_recovery_uses_sealed_dispatch_and_publication",
+        ]);
     }
     if !fixtures.contains_key("oauth-calendar") && fixtures.contains_key("credential-metadata") {
         command.args([

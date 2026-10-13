@@ -223,7 +223,10 @@ pub(super) fn tokens(
 
 pub(super) fn account(raw: &[u8], subject: &str, tenant: &str) -> Result<()> {
     let account = observe_account(raw)?;
-    ensure!(account.subject == subject && account.tenant == tenant, "Google account mismatch");
+    ensure!(
+        account.subject == subject && account.tenant == tenant,
+        "Google account mismatch"
+    );
     Ok(())
 }
 
@@ -244,7 +247,12 @@ pub(super) fn observe_account(raw: &[u8]) -> Result<super::account::ProviderAcco
             && account.email.contains('@'),
         "Google account mismatch"
     );
-    Ok(super::account::ProviderAccount { issuer: ISSUER.into(), subject: account.sub, tenant: account.hd, display_email: account.email })
+    Ok(super::account::ProviderAccount {
+        issuer: ISSUER.into(),
+        subject: account.sub,
+        tenant: account.hd,
+        display_email: account.email,
+    })
 }
 
 /// Product refresh keeps Google's reviewed reusable token. A response cannot
@@ -255,18 +263,51 @@ pub(super) fn refresh_tokens(
     permission: &day2_capabilities::oauth::ProviderPermissionContract,
     reusable: &str,
 ) -> Result<profiles::ValidatedTokenResponse> {
-    ensure!(matches!(reviewed.protocol, profiles::ConfidentialPkceProfile::Reusable {
-        retry: profiles::ReusableRetry::NoAutomaticRetry, ..
-    }), "unsupported product refresh semantics");
-    let parsed: GoogleTokens = crate::json::decode(raw).map_err(|_| anyhow::anyhow!("invalid Google refresh response"))?;
-    ensure!(parsed.refresh_token.as_deref().is_none_or(|token| token == reusable), "Google reusable refresh token changed");
-    ensure!(parsed.access_token.bytes().all(|byte| byte.is_ascii_graphic())
-        && parsed.id_token.as_ref().is_none_or(|token| !token.is_empty() && token.len() <= 16_384 && token.bytes().all(|b| b.is_ascii_graphic()))
-        && parsed.refresh_token_expires_in.is_none_or(|seconds| seconds > 0), "invalid Google refresh material");
-    let normalized = serde_json::to_vec(&NormalizedTokens { access_token: &parsed.access_token,
-        refresh_token: Some(reusable), token_type: &parsed.token_type, expires_in: parsed.expires_in,
-        scope: normalize_scope(&parsed.scope)?, })?;
-    reviewed.protocol.validate_token_response(&normalized, permission)
+    ensure!(
+        matches!(
+            reviewed.protocol,
+            profiles::ConfidentialPkceProfile::Reusable {
+                retry: profiles::ReusableRetry::NoAutomaticRetry,
+                ..
+            }
+        ),
+        "unsupported product refresh semantics"
+    );
+    let parsed: GoogleTokens =
+        crate::json::decode(raw).map_err(|_| anyhow::anyhow!("invalid Google refresh response"))?;
+    ensure!(
+        parsed
+            .refresh_token
+            .as_deref()
+            .is_none_or(|token| token == reusable),
+        "Google reusable refresh token changed"
+    );
+    ensure!(
+        parsed
+            .access_token
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic())
+            && parsed
+                .id_token
+                .as_ref()
+                .is_none_or(|token| !token.is_empty()
+                    && token.len() <= 16_384
+                    && token.bytes().all(|b| b.is_ascii_graphic()))
+            && parsed
+                .refresh_token_expires_in
+                .is_none_or(|seconds| seconds > 0),
+        "invalid Google refresh material"
+    );
+    let normalized = serde_json::to_vec(&NormalizedTokens {
+        access_token: &parsed.access_token,
+        refresh_token: Some(reusable),
+        token_type: &parsed.token_type,
+        expires_in: parsed.expires_in,
+        scope: normalize_scope(&parsed.scope)?,
+    })?;
+    reviewed
+        .protocol
+        .validate_token_response(&normalized, permission)
 }
 
 #[cfg(test)]

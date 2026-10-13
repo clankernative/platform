@@ -23,6 +23,20 @@ pub(crate) trait Hooks: Send + Sync {
     fn monotonic(&self) -> Duration;
     fn fill(&self, bytes: &mut [u8]) -> Result<()>;
     fn send(&self, request: blocking::Request) -> Result<Response>;
+    fn refresh_boundary(&self, _boundary: RefreshBoundary) {}
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RefreshBoundary { DispatchCommitted, MaterialWritten, PublicationCommitted }
+
+/// A test process can terminate at the real durable boundaries. Serving builds
+/// have no hook and execute exactly the same transition without an observer.
+pub(super) fn refresh_boundary(boundary: RefreshBoundary) {
+    #[cfg(test)]
+    if let Some(hooks) = HOOKS.with(|slot| slot.borrow().clone()) {
+        hooks.refresh_boundary(boundary);
+    }
+    let _ = boundary;
 }
 
 #[cfg(test)]

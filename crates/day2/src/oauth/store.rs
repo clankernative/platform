@@ -182,7 +182,9 @@ pub(super) fn authorize_checked_dispatch(
 ) -> Result<Option<RefreshDispatchPermit>> {
     validate_id(attempt)?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    if !authorize(&tx)? { return Ok(None); }
+    if !authorize(&tx)? {
+        return Ok(None);
+    }
     let row = tx.query_row(
         "SELECT a.slot, a.generation, a.base_version, a.security_epoch, a.profile, a.account, a.affinity
          FROM oauth_refresh_attempts a JOIN oauth_connection_slots s ON s.slot = a.slot
@@ -207,6 +209,7 @@ pub(super) fn authorize_checked_dispatch(
     )?;
     ensure!(changed == 1, "refresh dispatch fence lost");
     tx.commit()?;
+    super::effects::refresh_boundary(super::effects::RefreshBoundary::DispatchCommitted);
     Ok(Some(RefreshDispatchPermit {
         attempt: attempt.to_owned(),
         eligibility,
@@ -411,6 +414,7 @@ fn commit_replacement_with(
         params![attempt, next_version, receipt],
     )?;
     tx.commit()?;
+    super::effects::refresh_boundary(super::effects::RefreshBoundary::PublicationCommitted);
     Ok(Some(ReplacementReceipt {
         attempt: attempt.to_owned(),
         next_version,
