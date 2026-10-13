@@ -19,43 +19,77 @@ const CACHE_FORMAT: u32 = 2;
 /// supplies the private cgroup; neither an app nor a cache may select quotas,
 /// mount paths or a weaker compiler policy.
 pub(super) fn linux_context(root: &Path) -> Result<()> {
-    ensure!(std::env::consts::OS == "linux" && std::env::consts::ARCH == "x86_64",
-        "native Linux x86_64 CI context required");
-    ensure!(std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true"), "hosted CI setup only");
+    ensure!(
+        std::env::consts::OS == "linux" && std::env::consts::ARCH == "x86_64",
+        "native Linux x86_64 CI context required"
+    );
+    ensure!(
+        std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true"),
+        "hosted CI setup only"
+    );
     let cgroup = fs::read_to_string("/proc/self/cgroup")?;
     let memory = fs::read_to_string("/sys/fs/cgroup/memory.max")?;
     validate_linux_context(&cgroup, &memory)?;
     let root = root.canonicalize()?;
-    for (relative, bytes) in [("artifacts", 1024_u64*1024*1024), ("crates/worker/generated", 64_u64*1024*1024)] {
+    for (relative, bytes) in [
+        ("artifacts", 1024_u64 * 1024 * 1024),
+        ("crates/worker/generated", 64_u64 * 1024 * 1024),
+    ] {
         let path = root.join(relative);
         fs::create_dir_all(&path)?;
-        ensure!(path.canonicalize()? == path && fs::symlink_metadata(&path)?.is_dir(),
-            "CI compiler output must be a regular owned directory");
+        ensure!(
+            path.canonicalize()? == path && fs::symlink_metadata(&path)?.is_dir(),
+            "CI compiler output must be a regular owned directory"
+        );
         let mounts = fs::read_to_string("/proc/self/mountinfo")?;
-        ensure!(!mounts.lines().any(|line| line.split_whitespace().nth(4) == path.to_str()),
-            "CI output mount already exists; setup must precede cache/transport restoration");
-        run_with_budget(&root, Command::new("/usr/bin/mount")
-            .args(["-t", "tmpfs", "-o"])
-            .arg(format!("rw,exec,nosuid,nodev,size={bytes}"))
-            .arg("day2-ci-output").arg(&path), Duration::from_secs(30))?;
+        ensure!(
+            !mounts
+                .lines()
+                .any(|line| line.split_whitespace().nth(4) == path.to_str()),
+            "CI output mount already exists; setup must precede cache/transport restoration"
+        );
+        run_with_budget(
+            &root,
+            Command::new("/usr/bin/mount")
+                .args(["-t", "tmpfs", "-o"])
+                .arg(format!("rw,exec,nosuid,nodev,size={bytes}"))
+                .arg("day2-ci-output")
+                .arg(&path),
+            Duration::from_secs(30),
+        )?;
     }
     let run = std::env::var("GITHUB_RUN_ID")?;
     let attempt = std::env::var("GITHUB_RUN_ATTEMPT")?;
-    ensure!(run.parse::<u64>().is_ok_and(|value| value>0) && attempt.parse::<u64>().is_ok_and(|value| value>0),
-        "actual hosted context identity required");
-    let evidence=json!({"run":run,"attempt":attempt,"host":"linux","architecture":"x86_64",
+    ensure!(
+        run.parse::<u64>().is_ok_and(|value| value > 0)
+            && attempt.parse::<u64>().is_ok_and(|value| value > 0),
+        "actual hosted context identity required"
+    );
+    let evidence = json!({"run":run,"attempt":attempt,"host":"linux","architecture":"x86_64",
         "workspace":root,"cgroup":cgroup,"memory_max":memory.trim(),
         "mountinfo":fs::read_to_string("/proc/self/mountinfo")?,
         "compiler_policy":"unchanged mandatory native cgroup/tmpfs/Landlock/seccomp admission"});
-    fs::write("/tmp/day2-ci-linux-context.json",serde_json::to_vec_pretty(&evidence)?)?;
+    fs::write(
+        "/tmp/day2-ci-linux-context.json",
+        serde_json::to_vec_pretty(&evidence)?,
+    )?;
     println!("Established private Linux compiler context; native confinement remains mandatory");
     Ok(())
 }
 
 fn validate_linux_context(cgroup: &str, memory: &str) -> Result<()> {
-    ensure!(cgroup.trim()=="0::/", "private cgroup v2 namespace required");
-    let memory: u64=memory.trim().parse().context("finite Linux CI memory quota required")?;
-    ensure!((1..=6*1024_u64*1024*1024).contains(&memory), "Linux compiler cgroup exceeds6GiB");
+    ensure!(
+        cgroup.trim() == "0::/",
+        "private cgroup v2 namespace required"
+    );
+    let memory: u64 = memory
+        .trim()
+        .parse()
+        .context("finite Linux CI memory quota required")?;
+    ensure!(
+        (1..=6 * 1024_u64 * 1024 * 1024).contains(&memory),
+        "Linux compiler cgroup exceeds6GiB"
+    );
     Ok(())
 }
 
@@ -726,10 +760,17 @@ fn verification_snapshot(root: &Path, recipe: &str) -> Result<String> {
 }
 
 fn verification_source_identity(root: &Path, recipe: &str) -> Result<String> {
-    Ok(digest(&serde_json::to_vec(&verification_sources(root, recipe)?)?))
+    Ok(digest(&serde_json::to_vec(&verification_sources(
+        root, recipe,
+    )?)?))
 }
 
-fn verification_snapshot_for(root: &Path, recipe: &str, host: &str, architecture: &str) -> Result<String> {
+fn verification_snapshot_for(
+    root: &Path,
+    recipe: &str,
+    host: &str,
+    architecture: &str,
+) -> Result<String> {
     Ok(digest(&serde_json::to_vec(&json!({
         "recipe":recipe,
         "host":host,
@@ -1509,12 +1550,17 @@ mod tests {
     #[test]
     fn linux_context_requires_private_finite_native_compiler_limits() -> Result<()> {
         validate_linux_context("0::/\n", "6442450944\n")?;
-        for (group,memory) in [("0::/host/job","6442450944"),("0::/","max"),("0::/","0"),("0::/","6442450945"),("0::/","-1")] {
-            assert!(validate_linux_context(group,memory).is_err());
+        for (group, memory) in [
+            ("0::/host/job", "6442450944"),
+            ("0::/", "max"),
+            ("0::/", "0"),
+            ("0::/", "6442450945"),
+            ("0::/", "-1"),
+        ] {
+            assert!(validate_linux_context(group, memory).is_err());
         }
         Ok(())
     }
-
 
     #[test]
     fn full_gate_filters_keep_the_same_cargo_package_and_target_graph() -> Result<()> {

@@ -236,7 +236,8 @@ fn admit_executable(path: &Path, expected: &str, permissions: u32) -> Result<()>
     {
         use std::os::unix::fs::PermissionsExt;
         ensure!(
-            permissions & 0o111 != 0 && permissions & !0o777 == 0
+            permissions & 0o111 != 0
+                && permissions & !0o777 == 0
                 && executable_permissions(path)? == permissions,
             "compiler output lacks execute permission"
         );
@@ -335,10 +336,16 @@ fn identity(root: &Path, snapshot: &str) -> Result<Identity> {
         checkout.len() == 40 && checkout.bytes().all(|byte| byte.is_ascii_hexdigit()),
         "exact checkout SHA required"
     );
-    let tree = Command::new("git").args(["rev-parse", "HEAD^{tree}"]).current_dir(root).output()?;
+    let tree = Command::new("git")
+        .args(["rev-parse", "HEAD^{tree}"])
+        .current_dir(root)
+        .output()?;
     ensure!(tree.status.success(), "resolve exact verification tree");
     let tree = String::from_utf8(tree.stdout)?.trim().to_owned();
-    ensure!(tree.len() == 40 && tree.bytes().all(|byte| byte.is_ascii_hexdigit()), "exact checkout tree required");
+    ensure!(
+        tree.len() == 40 && tree.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "exact checkout tree required"
+    );
     Ok(Identity {
         checkout,
         tree,
@@ -374,25 +381,40 @@ fn auxiliary_targets(host: &str) -> BTreeSet<(String, String, Vec<String>)> {
     if host != "linux" {
         return BTreeSet::new();
     }
-    ["day2-sandbox", "day2-compiler-sandbox", "day2-sandbox-probe"]
-        .map(|target| ("day2-sandbox".into(), target.into(), vec!["bin".into()]))
-        .into()
+    [
+        "day2-sandbox",
+        "day2-compiler-sandbox",
+        "day2-sandbox-probe",
+    ]
+    .map(|target| ("day2-sandbox".into(), target.into(), vec!["bin".into()]))
+    .into()
 }
 
 fn validate_auxiliary_inventory(auxiliaries: &[Binary], host: &str) -> Result<()> {
     let mut observed = BTreeSet::new();
     for binary in auxiliaries {
         ensure!(
-            binary.permissions & 0o111 != 0 && binary.permissions & !0o777 == 0
+            binary.permissions & 0o111 != 0
+                && binary.permissions & !0o777 == 0
                 && binary.directory == Path::new("crates/day2-sandbox")
                 && binary.executable == program_output(&binary.target)
-                && binary.digest.strip_prefix("sha256:").is_some_and(|value|
-                    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
-                && observed.insert((binary.package.clone(), binary.target.clone(), binary.kind.clone())),
+                && binary
+                    .digest
+                    .strip_prefix("sha256:")
+                    .is_some_and(|value| value.len() == 64
+                        && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+                && observed.insert((
+                    binary.package.clone(),
+                    binary.target.clone(),
+                    binary.kind.clone()
+                )),
             "Linux launcher source, path, digest or target changed"
         );
     }
-    ensure!(observed == auxiliary_targets(host), "all three exact Linux launchers required");
+    ensure!(
+        observed == auxiliary_targets(host),
+        "all three exact Linux launchers required"
+    );
     Ok(())
 }
 
@@ -404,42 +426,86 @@ fn build_auxiliaries(
     if expected.is_empty() {
         return Ok(Vec::new());
     }
-    ensure!(std::env::consts::OS == "linux", "native Linux launcher preparation required");
+    ensure!(
+        std::env::consts::OS == "linux",
+        "native Linux launcher preparation required"
+    );
     let capture = tempfile::NamedTempFile::new_in(root.join("artifacts"))?;
     run_with_budget(
         root,
         Command::new("cargo")
-            .args(["build", "--locked", "-p", "day2-sandbox", "--bins", "--message-format=json-render-diagnostics"])
+            .args([
+                "build",
+                "--locked",
+                "-p",
+                "day2-sandbox",
+                "--bins",
+                "--message-format=json-render-diagnostics",
+            ])
             .stdout(capture.as_file().try_clone()?),
         Duration::from_secs(12600),
     )?;
     let mut binaries = Vec::new();
     let mut finished = false;
-    for line in fs::read(capture.path())?.split(|byte| *byte == b'\n').filter(|line| !line.is_empty()) {
+    for line in fs::read(capture.path())?
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+    {
         let value: serde_json::Value = day2::json::decode(line)?;
         if value["reason"] == "compiler-message" {
-            if let Some(rendered) = value["message"]["rendered"].as_str() { print!("{rendered}"); }
+            if let Some(rendered) = value["message"]["rendered"].as_str() {
+                print!("{rendered}");
+            }
         }
-        if value["reason"] == "build-finished" { finished = value["success"] == true; }
-        if value["reason"] != "compiler-artifact" || value["executable"].is_null() { continue; }
-        ensure!(value["profile"]["test"] == false, "ordinary launcher program required");
-        let (package, directory) = members.get(value["package_id"].as_str().context("launcher package ID")?)
+        if value["reason"] == "build-finished" {
+            finished = value["success"] == true;
+        }
+        if value["reason"] != "compiler-artifact" || value["executable"].is_null() {
+            continue;
+        }
+        ensure!(
+            value["profile"]["test"] == false,
+            "ordinary launcher program required"
+        );
+        let (package, directory) = members
+            .get(
+                value["package_id"]
+                    .as_str()
+                    .context("launcher package ID")?,
+            )
             .context("launcher outside declared Cargo graph")?;
-        let target = value["target"]["name"].as_str().context("launcher target")?.to_owned();
-        let executable = Path::new(value["executable"].as_str().context("launcher executable")?)
-            .strip_prefix(root)?.to_owned();
+        let target = value["target"]["name"]
+            .as_str()
+            .context("launcher target")?
+            .to_owned();
+        let executable = Path::new(
+            value["executable"]
+                .as_str()
+                .context("launcher executable")?,
+        )
+        .strip_prefix(root)?
+        .to_owned();
         binaries.push(Binary {
-            package: package.clone(), target,
+            package: package.clone(),
+            target,
             kind: serde_json::from_value(value["target"]["kind"].clone())?,
-            directory: directory.clone(), digest: digest(&fs::read(root.join(&executable))?),
-            permissions: executable_permissions(&root.join(&executable))?, executable,
+            directory: directory.clone(),
+            digest: digest(&fs::read(root.join(&executable))?),
+            permissions: executable_permissions(&root.join(&executable))?,
+            executable,
         });
     }
     ensure!(finished, "Linux launcher build incomplete");
-    binaries.sort_by(|a,b| a.target.cmp(&b.target));
+    binaries.sort_by(|a, b| a.target.cmp(&b.target));
     validate_auxiliary_inventory(&binaries, "linux")?;
-    ensure!(binaries.iter().map(|b| (b.package.clone(),b.target.clone(),b.kind.clone())).collect::<BTreeSet<_>>() == *expected,
-        "Linux launcher Cargo inventory changed");
+    ensure!(
+        binaries
+            .iter()
+            .map(|b| (b.package.clone(), b.target.clone(), b.kind.clone()))
+            .collect::<BTreeSet<_>>()
+            == *expected,
+        "Linux launcher Cargo inventory changed"
+    );
     Ok(binaries)
 }
 
@@ -449,7 +515,10 @@ fn install_auxiliaries(root: &Path, auxiliaries: &[Binary]) -> Result<()> {
         let source = root.join(&binary.executable);
         let target = root.join("target/debug/deps").join(&binary.target);
         admit_executable(&source, &binary.digest, binary.permissions)?;
-        crate::native_toolchain::verify_executable_target(crate::native_toolchain::load(root)?.target, &source)?;
+        crate::native_toolchain::verify_executable_target(
+            crate::native_toolchain::load(root)?.target,
+            &source,
+        )?;
         crate::install_cli_file(&source, &target)?;
         admit_executable(&target, &binary.digest, binary.permissions)?;
     }
@@ -458,9 +527,9 @@ fn install_auxiliaries(root: &Path, auxiliaries: &[Binary]) -> Result<()> {
 
 #[cfg(target_os = "linux")]
 pub(super) fn prepare_linux_installation(root: &Path) -> Result<()> {
-    let targets=compiler_targets(root)?;
-    let auxiliaries=build_auxiliaries(root,&targets.auxiliaries,&targets.members)?;
-    install_auxiliaries(root,&auxiliaries)
+    let targets = compiler_targets(root)?;
+    let auxiliaries = build_auxiliaries(root, &targets.auxiliaries, &targets.members)?;
+    install_auxiliaries(root, &auxiliaries)
 }
 
 fn compiler_targets(root: &Path) -> Result<Targets> {
@@ -494,8 +563,18 @@ fn compiler_targets(root: &Path) -> Result<Targets> {
             for target in targets {
                 let kind: Vec<String> = serde_json::from_value(target["kind"].clone())?;
                 if kind == ["bin"] {
-                    ensure!(target.get("required-features").is_none(), "unreviewed launcher features");
-                    auxiliaries.insert((name.to_owned(), target["name"].as_str().context("launcher target")?.to_owned(), kind));
+                    ensure!(
+                        target.get("required-features").is_none(),
+                        "unreviewed launcher features"
+                    );
+                    auxiliaries.insert((
+                        name.to_owned(),
+                        target["name"]
+                            .as_str()
+                            .context("launcher target")?
+                            .to_owned(),
+                        kind,
+                    ));
                 }
             }
             continue;
@@ -582,8 +661,8 @@ pub(super) fn build(root: &Path, snapshot: &str) -> Result<()> {
                 println!(
                     "Reusing {} admitted compiled test binaries and {} supporting programs plus {} native Linux launchers; runtime campaigns and doc tests execute fresh",
                     cache.binaries.len(),
-                    cache.programs.len()
-                    ,cache.auxiliaries.len()
+                    cache.programs.len(),
+                    cache.auxiliaries.len()
                 );
                 return Ok(());
             }
@@ -853,7 +932,8 @@ fn validate_preparation(prepared: &Prepared, part: &str) -> Result<()> {
     );
     for binary in &prepared.binaries {
         ensure!(
-            binary.permissions & 0o111 != 0 && binary.permissions & !0o777 == 0
+            binary.permissions & 0o111 != 0
+                && binary.permissions & !0o777 == 0
                 && binary.executable.starts_with("target/debug/deps")
                 && !binary
                     .executable
@@ -886,7 +966,8 @@ fn validate_preparation(prepared: &Prepared, part: &str) -> Result<()> {
     );
     for program in &prepared.programs {
         ensure!(
-            program.permissions & 0o111 != 0 && program.permissions & !0o777 == 0
+            program.permissions & 0o111 != 0
+                && program.permissions & !0o777 == 0
                 && program.kind == ["bin"]
                 && program.executable == program_output(&program.target)
                 && program.executable.parent() == Some(Path::new("target/debug"))
@@ -897,7 +978,14 @@ fn validate_preparation(prepared: &Prepared, part: &str) -> Result<()> {
             "prepared ordinary program path required"
         );
     }
-    validate_auxiliary_inventory(&prepared.auxiliaries, if part == "inputs" { "none" } else { &prepared.identity.host })?;
+    validate_auxiliary_inventory(
+        &prepared.auxiliaries,
+        if part == "inputs" {
+            "none"
+        } else {
+            &prepared.identity.host
+        },
+    )?;
     Ok(())
 }
 
@@ -945,11 +1033,23 @@ pub(super) fn load(root: &Path, snapshot: &str) -> Result<Prepared> {
     );
     validate_preparation(&prepared, "all")?;
     for binary in prepared.binaries.iter().chain(&prepared.programs) {
-        admit_executable(&root.join(&binary.executable), &binary.digest, binary.permissions)?;
+        admit_executable(
+            &root.join(&binary.executable),
+            &binary.digest,
+            binary.permissions,
+        )?;
     }
     for auxiliary in &prepared.auxiliaries {
-        admit_executable(&root.join(&auxiliary.executable), &auxiliary.digest, auxiliary.permissions)?;
-        admit_executable(&root.join("target/debug/deps").join(&auxiliary.target), &auxiliary.digest, auxiliary.permissions)?;
+        admit_executable(
+            &root.join(&auxiliary.executable),
+            &auxiliary.digest,
+            auxiliary.permissions,
+        )?;
+        admit_executable(
+            &root.join("target/debug/deps").join(&auxiliary.target),
+            &auxiliary.digest,
+            auxiliary.permissions,
+        )?;
         crate::native_toolchain::verify_executable_target(
             crate::native_toolchain::load(root)?.target,
             &root.join(&auxiliary.executable),
@@ -1335,7 +1435,7 @@ mod tests {
             directory: "crates/example".into(),
             executable: executable.clone(),
             digest: digest(b"compiled output"),
-                        permissions: 0o755,
+            permissions: 0o755,
         };
         let expected =
             BTreeSet::from([("example".into(), "example-test".into(), vec!["test".into()])]);
@@ -1352,7 +1452,7 @@ mod tests {
             directory: "crates/example".into(),
             executable: program_output("example"),
             digest: digest(b"supporting program"),
-                        permissions: 0o755,
+            permissions: 0o755,
         };
         let expected_programs =
             BTreeSet::from([("example".into(), "example".into(), vec!["bin".into()])]);
@@ -1360,7 +1460,10 @@ mod tests {
         {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(root.join(&executable), fs::Permissions::from_mode(0o755))?;
-            fs::set_permissions(root.join(PROGRAM_CACHE).join("example"), fs::Permissions::from_mode(0o755))?;
+            fs::set_permissions(
+                root.join(PROGRAM_CACHE).join("example"),
+                fs::Permissions::from_mode(0o755),
+            )?;
         }
         let cache = BuildCache {
             identity,
@@ -1638,7 +1741,7 @@ mod tests {
                     directory: "crates/day2".into(),
                     executable: executable.into(),
                     digest: "binary".into(),
-                        permissions: 0o755,
+                    permissions: 0o755,
                 });
             }
             tests.programs.push(Binary {
@@ -1648,7 +1751,7 @@ mod tests {
                 directory: "crates/day2".into(),
                 executable: program_output("day2"),
                 digest: "program".into(),
-                        permissions: 0o755,
+                permissions: 0o755,
             });
             Ok(tests)
         };
@@ -1727,7 +1830,7 @@ mod tests {
                 directory: "crates/day2".into(),
                 executable: "target/debug/deps/day2_integration-test".into(),
                 digest: "binary".into(),
-                        permissions: 0o755,
+                permissions: 0o755,
             }],
             programs: Vec::new(),
             auxiliaries: Vec::new(),
@@ -1768,23 +1871,44 @@ mod tests {
     }
     #[test]
     fn linux_launchers_cannot_be_missing_duplicated_foreign_or_added_to_mac() -> Result<()> {
-        let complete: Vec<_> = auxiliary_targets("linux").into_iter().map(|(package,target,kind)| Binary {
-            directory: "crates/day2-sandbox".into(), executable: program_output(&target),
-            digest: format!("sha256:{}", "a".repeat(64)), permissions: 0o755, package,target,kind,
-        }).collect();
+        let complete: Vec<_> = auxiliary_targets("linux")
+            .into_iter()
+            .map(|(package, target, kind)| Binary {
+                directory: "crates/day2-sandbox".into(),
+                executable: program_output(&target),
+                digest: format!("sha256:{}", "a".repeat(64)),
+                permissions: 0o755,
+                package,
+                target,
+                kind,
+            })
+            .collect();
         validate_auxiliary_inventory(&complete, "linux")?;
         assert!(validate_auxiliary_inventory(&complete[..2], "linux").is_err());
         assert!(validate_auxiliary_inventory(&complete, "macos").is_err());
-        for field in ["package", "target", "kind", "directory", "executable", "digest"] {
+        for field in [
+            "package",
+            "target",
+            "kind",
+            "directory",
+            "executable",
+            "digest",
+        ] {
             let mut value = serde_json::to_value(&complete)?;
-            value[0][field] = if field=="kind" {json!(["lib"])} else {json!("foreign")};
+            value[0][field] = if field == "kind" {
+                json!(["lib"])
+            } else {
+                json!("foreign")
+            };
             let invalid: Vec<Binary> = serde_json::from_value(value)?;
-            assert!(validate_auxiliary_inventory(&invalid,"linux").is_err(),"{field}");
+            assert!(
+                validate_auxiliary_inventory(&invalid, "linux").is_err(),
+                "{field}"
+            );
         }
         let mut duplicate: Vec<Binary> = serde_json::from_value(serde_json::to_value(&complete)?)?;
         duplicate.push(complete[0].clone());
         assert!(validate_auxiliary_inventory(&duplicate, "linux").is_err());
         Ok(())
     }
-
 }

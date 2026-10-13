@@ -474,10 +474,12 @@ pub(super) fn admit_cached_fixture(
         )?),
     );
     prepared.hashes.extend(prepared.platform_hashes);
-    prepared.hashes.extend(native_toolchain::stage_system_link_inputs(
-        prepared.target,
-        &prepared.stage,
-    )?);
+    prepared
+        .hashes
+        .extend(native_toolchain::stage_system_link_inputs(
+            prepared.target,
+            &prepared.stage,
+        )?);
     admit_fixture_sources(prepared.target, &prepared.hashes, &contract.sources)
 }
 
@@ -925,34 +927,53 @@ mod fixture_cache_admission_tests {
             let mut changed = artifact.clone();
             changed.insert(name.clone(), digest(b"changed input"));
             assert!(
-                admit_fixture_sources(native_toolchain::Target::MacArm64, &expected, &changed).is_err(),
+                admit_fixture_sources(native_toolchain::Target::MacArm64, &expected, &changed)
+                    .is_err(),
                 "{name}"
             );
             let mut missing = artifact.clone();
             missing.remove(name);
             assert!(
-                admit_fixture_sources(native_toolchain::Target::MacArm64, &expected, &missing).is_err(),
+                admit_fixture_sources(native_toolchain::Target::MacArm64, &expected, &missing)
+                    .is_err(),
                 "{name}"
             );
         }
         let mut extra = artifact.clone();
         extra.insert("app/deleted.roc".into(), digest(b"old input"));
-        assert!(admit_fixture_sources(native_toolchain::Target::MacArm64, &expected, &extra).is_err());
+        assert!(
+            admit_fixture_sources(native_toolchain::Target::MacArm64, &expected, &extra).is_err()
+        );
         let mut missing_host = artifact.clone();
         missing_host.remove("native/arm64mac/libhost.a");
-        assert!(admit_fixture_sources(native_toolchain::Target::MacArm64, &expected, &missing_host).is_err());
+        assert!(
+            admit_fixture_sources(native_toolchain::Target::MacArm64, &expected, &missing_host)
+                .is_err()
+        );
         artifact.insert("native/arm64mac/libhost.a".into(), "not a digest".into());
-        assert!(admit_fixture_sources(native_toolchain::Target::MacArm64, &expected, &artifact).is_err());
+        assert!(
+            admit_fixture_sources(native_toolchain::Target::MacArm64, &expected, &artifact)
+                .is_err()
+        );
         Ok(())
     }
     #[test]
     fn cached_fixture_linker_inputs_and_native_archive_are_target_bound() -> Result<()> {
-        for target in [native_toolchain::Target::LinuxX64, native_toolchain::Target::LinuxArm64] {
+        for target in [
+            native_toolchain::Target::LinuxX64,
+            native_toolchain::Target::LinuxArm64,
+        ] {
             let prefix = format!("native/{}", target.roc_target());
             let expected = BTreeMap::from([
                 ("app/App.roc".into(), digest(b"app")),
-                (format!("{prefix}/libc.so.6"), digest(b"current reviewed image libc")),
-                (format!("{prefix}/loader"), digest(b"current reviewed image loader")),
+                (
+                    format!("{prefix}/libc.so.6"),
+                    digest(b"current reviewed image libc"),
+                ),
+                (
+                    format!("{prefix}/loader"),
+                    digest(b"current reviewed image loader"),
+                ),
             ]);
             let host = format!("{prefix}/libhost.a");
             let mut sources = expected.clone();
@@ -962,14 +983,17 @@ mod fixture_cache_admission_tests {
                 let mut changed = sources.clone();
                 changed.insert(name.clone(), digest(b"foreign source or image"));
                 assert!(admit_fixture_sources(target, &expected, &changed).is_err());
-                let mut missing = sources.clone(); missing.remove(name);
+                let mut missing = sources.clone();
+                missing.remove(name);
                 assert!(admit_fixture_sources(target, &expected, &missing).is_err());
             }
             sources.remove(&host);
-            sources.insert("native/arm64mac/libhost.a".into(), digest(b"foreign host output"));
+            sources.insert(
+                "native/arm64mac/libhost.a".into(),
+                digest(b"foreign host output"),
+            );
             assert!(admit_fixture_sources(target, &expected, &sources).is_err());
         }
         Ok(())
     }
-
 }

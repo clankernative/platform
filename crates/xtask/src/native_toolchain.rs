@@ -540,10 +540,7 @@ pub fn stage_link_inputs(
 /// Re-capture the current image's fixed Linux linker inputs for both ordinary
 /// builds and cached fixture admission. The native host archive is an output;
 /// these DSOs and loader are independently checked source inputs.
-pub fn stage_system_link_inputs(
-    target: Target,
-    stage: &Path,
-) -> Result<BTreeMap<String, String>> {
+pub fn stage_system_link_inputs(target: Target, stage: &Path) -> Result<BTreeMap<String, String>> {
     let directory = stage.join("sdk/targets").join(target.roc_target());
     fs::create_dir_all(&directory)?;
     let mut hashes = BTreeMap::new();

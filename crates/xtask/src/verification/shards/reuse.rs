@@ -366,7 +366,8 @@ fn admit_full(
         for binary in binaries {
             ensure!(
                 directories.get(&binary.package) == Some(&binary.directory)
-                    && binary.permissions & 0o111 != 0 && binary.permissions & !0o777 == 0
+                    && binary.permissions & 0o111 != 0
+                    && binary.permissions & !0o777 == 0
                     && observed.insert((
                         binary.package.clone(),
                         binary.target.clone(),
@@ -592,7 +593,7 @@ mod tests {
             directory: "crates/day2".into(),
             executable: program_output("day2"),
             digest: String::new(),
-                permissions: 0o755,
+            permissions: 0o755,
         });
         for binary in tests.binaries.iter_mut().chain(&mut tests.programs) {
             binary.digest = format!("sha256:{}", "b".repeat(64));

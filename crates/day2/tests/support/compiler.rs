@@ -102,7 +102,10 @@ fn captures_completed_output() -> Result<()> {
         use std::os::unix::process::CommandExt;
         let mut command = Command::new("/bin/sleep");
         command.arg("60").process_group(0);
-        Supervised { child: command.spawn()?, stopped: false }
+        Supervised {
+            child: command.spawn()?,
+            stopped: false,
+        }
     };
     let result = output(
         Command::new("/bin/echo").arg("checked"),
@@ -112,7 +115,10 @@ fn captures_completed_output() -> Result<()> {
     assert_eq!(result.stdout, b"checked\n");
     assert!(result.stderr.is_empty());
     #[cfg(unix)]
-    assert!(sibling.child.try_wait()?.is_none(), "cleanup killed a sibling outside its owned group");
+    assert!(
+        sibling.child.try_wait()?.is_none(),
+        "cleanup killed a sibling outside its owned group"
+    );
     Ok(())
 }
 
