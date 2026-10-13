@@ -370,7 +370,7 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
                 let fixture = value("fixture")?;
                 ensure!(!fixtures.contains_key(fixture), "duplicate fixture");
                 let build = fixture_build(root, fixture, &fixtures)?;
-                let cached = cache
+                let cached: Result<Option<PathBuf>> = cache
                     .fixtures
                     .get(fixture)
                     .filter(|entry| {
