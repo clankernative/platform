@@ -344,7 +344,7 @@ impl LocalServer {
         } else {
             ""
         };
-        let inputs = runtime.inputs();
+        let inputs = runtime.inputs().clone();
         let entropy = inputs.entropy.clone();
         let host = Arc::new(Host {
             entropy: entropy.clone(),

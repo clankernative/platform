@@ -41,6 +41,10 @@ mod integration_host_tests;
 mod read_coverage_tests;
 
 #[cfg(test)]
+#[path = "runtime_input_replay_tests.rs"]
+mod input_replay_tests;
+
+#[cfg(test)]
 #[path = "supply_tests.rs"]
 mod supply_tests;
 
@@ -3414,6 +3418,237 @@ mod selection_tests {
         }
     }
 
+    #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+    #[serde(deny_unknown_fields)]
+    pub(super) struct CursorInputs {
+        seed: u8,
+        now: i64,
+        pages: usize,
+        page_size: i64,
+        actor: String,
+        operation: String,
+    }
+
+    #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+    pub(super) enum CursorAction {
+        Page,
+    }
+
+    #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+    #[serde(deny_unknown_fields)]
+    struct CursorItem {
+        id: i64,
+        version: i64,
+        created_at: i64,
+        data: String,
+    }
+
+    #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+    #[serde(deny_unknown_fields)]
+    struct CursorPage {
+        items: Vec<CursorItem>,
+        has_more: bool,
+        next_after: String,
+    }
+
+    #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+    #[serde(deny_unknown_fields)]
+    struct CursorRow {
+        token: String,
+        boundary_key: String,
+        boundary: String,
+        expires_at: i64,
+    }
+
+    #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+    #[serde(deny_unknown_fields)]
+    pub(super) struct CursorObservation {
+        page: CursorPage,
+        cursors: Vec<CursorRow>,
+        entropy_draws: usize,
+    }
+
+    pub(super) type CursorHistory =
+        input_replay_tests::History<CursorInputs, CursorAction, CursorObservation>;
+
+    pub(super) fn cursor_history(seed: u8) -> CursorHistory {
+        CursorHistory::new(
+            CursorInputs {
+                seed,
+                now: 100,
+                pages: 3,
+                page_size: 3,
+                actor: "alice".into(),
+                operation: "lookup".into(),
+            },
+            vec![CursorAction::Page; 3],
+        )
+    }
+
+    pub(super) fn validate_cursor_history(history: &CursorHistory) -> Result<()> {
+        history.validate()?;
+        ensure!(
+            history.inputs.seed < 8
+                && history.inputs == cursor_history(history.inputs.seed).inputs
+                && history.actions == vec![CursorAction::Page; 3],
+            "unsupported cursor input history fixture"
+        );
+        for observed in &history.observations {
+            if let input_replay_tests::Recorded::Ok(observed) = observed {
+                ensure!(
+                    observed.page.items.len() <= 100 && observed.cursors.len() <= 16,
+                    "cursor history observation budget"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn expected_cursor_observation(inputs: &CursorInputs, pages: usize) -> CursorObservation {
+        // Domain fixtures and literal binding hashes, not the SQL selection or
+        // cursor codec, determine the expected rows and complete cursor state.
+        let boundary_keys = [
+            "8c037529e5f852716a0ad4e4e914ac918a85e5992cfa6324187027c76655b6cf",
+            "ee554659560fde426fcac10ed9dfac8fbfe40ec87c492299459846701f18fea5",
+            "2dc6ed0a1b27b1b2a84644371e1cacc30eaf7d5e9a6b7f5063fcbe58db166ef1",
+        ];
+        let token = |page: usize| {
+            format!(
+                "sel1_{}",
+                format!("{:02x}", inputs.seed + page as u8).repeat(32)
+            )
+        };
+        let items = ((pages - 1) * 3 + 1..=pages * 3).map(|number| {
+            let number = number as i64;
+            CursorItem {
+                id: number,
+                version: number % 7 + 1,
+                created_at: 0,
+                data: json!({
+                    "active":number % 3 != 0,
+                    "description":if number % 2 == 0 { json!({"Some":"even"}) } else { json!("None") },
+                    "name":format!("item{number:03}"),
+                    "owner":if number % 2 == 0 { "alice" } else { "bob" },
+                    "unindexed":"hidden",
+                    "visits":u64::MAX - number as u64 % 13
+                }).to_string(),
+            }
+        }).collect();
+        let cursors = (0..pages).map(|page| CursorRow {
+            token: token(page),
+            boundary_key: boundary_keys[page].into(),
+            boundary: format!("{{\"binding\":\"f241e92b389ae0e9109541177af3f41cdc69448faccfa2b2b7dba9de0b072d99\",\"values\":[{}]}}", (page + 1) * 3),
+            expires_at: 86_500,
+        }).collect();
+        CursorObservation {
+            page: CursorPage {
+                items,
+                has_more: true,
+                next_after: token(pages - 1),
+            },
+            cursors,
+            entropy_draws: pages,
+        }
+    }
+
+    struct CursorWorld {
+        connection: Connection,
+        schema: Schema,
+        entropy: CursorEntropy,
+        after: String,
+    }
+
+    fn cursor_observation(
+        world: &mut CursorWorld,
+        inputs: &CursorInputs,
+        _action: &CursorAction,
+    ) -> Result<CursorObservation> {
+        let data = plan(
+            &group("all", vec![]),
+            &[("id", false)],
+            &world.after,
+            inputs.page_size,
+        );
+        let page: CursorPage = serde_json::from_str(&select_rows(
+            &world.connection,
+            &world.schema,
+            "links",
+            &data,
+            false,
+            RowFilter::All,
+            SelectionContext {
+                entropy: &world.entropy,
+                invocation: "",
+                actor: &inputs.actor,
+                operation: &inputs.operation,
+                now: inputs.now,
+            },
+        )?)?;
+        world.after = page.next_after.clone();
+        let cursors = world.connection.prepare("SELECT token,boundary_key,boundary,expires_at FROM day2_selection_cursors ORDER BY token")?
+            .query_map([], |row| Ok(CursorRow { token: row.get(0)?, boundary_key: row.get(1)?, boundary: row.get(2)?, expires_at: row.get(3)? }))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(CursorObservation {
+            page,
+            cursors,
+            entropy_draws: world.entropy.draws.load(Ordering::Relaxed),
+        })
+    }
+
+    pub(super) fn check_cursor_history(
+        saved: &CursorHistory,
+        path: Option<&Path>,
+    ) -> Result<CursorHistory> {
+        use input_replay_tests::{Case, checkpoint};
+        validate_cursor_history(saved)?;
+        let mut observed = CursorHistory::new(saved.inputs.clone(), saved.actions.clone());
+        if let Some(path) = path {
+            checkpoint(path, Case::Cursors(observed.clone()))?;
+        }
+        let (connection, schema) = match input_replay_tests::capture(fixture) {
+            Ok(world) => world,
+            Err(error) => {
+                observed.fixture_failed(&error);
+                if let Some(path) = path {
+                    checkpoint(path, Case::Cursors(observed.clone()))?;
+                }
+                return Err(error);
+            }
+        };
+        ensure!(
+            saved.fixture_error.is_none(),
+            "saved cursor fixture failure did not recur"
+        );
+        let mut world = CursorWorld {
+            connection,
+            schema,
+            entropy: CursorEntropy {
+                seed: saved.inputs.seed,
+                draws: AtomicUsize::new(0),
+                fail: false,
+            },
+            after: String::new(),
+        };
+        for (step, action) in saved.actions.iter().enumerate() {
+            let check = observed.observe(
+                input_replay_tests::capture(|| {
+                    cursor_observation(&mut world, &saved.inputs, action)
+                }),
+                &expected_cursor_observation(&saved.inputs, step + 1),
+            );
+            if let Some(path) = path {
+                checkpoint(path, Case::Cursors(observed.clone()))?;
+            }
+            observed.compare_saved(saved, step)?;
+            check?;
+        }
+        ensure!(
+            saved.failure.is_none(),
+            "saved cursor failure did not recur"
+        );
+        Ok(observed)
+    }
+
     #[test]
     fn fresh_cursor_traces_replay_bounded_seeded_inputs_against_literal_rows() -> Result<()> {
         let root = Path::new("/tmp/dst-platform-input-composition");
@@ -3424,92 +3659,18 @@ mod selection_tests {
             .keep();
         for seed in 0..8_u8 {
             let mut traces = Vec::new();
-            for replay in 0..2 {
-                let path = evidence.join(format!("seed-{seed}-replay-{replay}.json"));
-                let (connection, schema) = fixture()?;
-                let entropy = CursorEntropy {
-                    seed,
-                    draws: AtomicUsize::new(0),
-                    fail: false,
-                };
-                let mut after = String::new();
-                let mut trace = Vec::new();
-                fs::write(
-                    &path,
-                    serde_json::to_vec(&json!({"seed":seed,"pages":3,"trace":trace}))?,
-                )?;
-                for page in 0..3 {
-                    let data = plan(&group("all", vec![]), &[("id", false)], &after, 3);
-                    let result: Value = serde_json::from_str(&select_rows(
-                        &connection,
-                        &schema,
-                        "links",
-                        &data,
-                        false,
-                        RowFilter::All,
-                        SelectionContext {
-                            entropy: &entropy,
-                            invocation: "",
-                            actor: "alice",
-                            operation: "lookup",
-                            now: 100,
-                        },
-                    )?)?;
-                    trace.push(result.clone());
-                    fs::write(
-                        &path,
-                        serde_json::to_vec(&json!({"seed":seed,"pages":3,"trace":trace}))?,
-                    )?;
-                    let ids: Vec<i64> = result["items"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .map(|row| row["id"].as_i64().unwrap())
-                        .collect();
-                    assert_eq!(
-                        ids,
-                        vec![page * 3 + 1, page * 3 + 2, page * 3 + 3],
-                        "{}",
-                        path.display()
-                    );
-                    assert_eq!(result["has_more"], true);
-                    after = result["next_after"].as_str().unwrap().into();
-                    assert_eq!(
-                        after,
-                        format!("sel1_{}", format!("{:02x}", seed + page as u8).repeat(32))
-                    );
-                }
-                let cursors = connection.prepare("SELECT token,boundary_key,boundary,expires_at FROM day2_selection_cursors ORDER BY token")?
-                    .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, i64>(3)?)))?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                let expected_boundary_key = [
-                    "8c037529e5f852716a0ad4e4e914ac918a85e5992cfa6324187027c76655b6cf",
-                    "ee554659560fde426fcac10ed9dfac8fbfe40ec87c492299459846701f18fea5",
-                    "2dc6ed0a1b27b1b2a84644371e1cacc30eaf7d5e9a6b7f5063fcbe58db166ef1",
-                ];
-                let expected_values = [3, 6, 9];
-                let expected_cursors: Vec<_> = (0..3)
-                    .map(|page| {
-                        (
-                            format!(
-                                "sel1_{}",
-                                format!("{:02x}", seed + page as u8).repeat(32)
-                            ),
-                            expected_boundary_key[page].to_owned(),
-                            format!(
-                                "{{\"binding\":\"f241e92b389ae0e9109541177af3f41cdc69448faccfa2b2b7dba9de0b072d99\",\"values\":[{}]}}",
-                                expected_values[page]
-                            ),
-                            86_500,
-                        )
-                    })
-                    .collect();
-                assert_eq!(cursors, expected_cursors, "{}", path.display());
-                let trace = json!({"pages":trace,"cursors":cursors});
-                fs::write(&path, serde_json::to_vec(&trace)?)?;
-                traces.push(trace);
+            for run in 0..2 {
+                let path = evidence.join(format!("seed-{seed}-replay-{run}.json"));
+                eprintln!(
+                    "Runtime input replay: {}",
+                    input_replay_tests::command(&path)
+                );
+                let observed = check_cursor_history(&cursor_history(seed), Some(&path))
+                    .with_context(|| input_replay_tests::command(&path))?;
+                input_replay_tests::replay(&path)?;
+                traces.push(observed.observations);
             }
-            assert_eq!(traces[0], traces[1], "{}", evidence.display());
+            assert_eq!(traces[0], traces[1]);
         }
         Ok(())
     }

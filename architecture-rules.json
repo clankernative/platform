@@ -278,6 +278,7 @@
     "crates/day2/src/retention.rs",
     "crates/day2/src/rollup.rs",
     "crates/day2/src/routing.rs",
+    "crates/day2/src/runtime_input_replay_tests.rs",
     "crates/day2/src/sandbox.rs",
     "crates/day2/src/schedules.rs",
     "crates/day2/src/schema.rs",

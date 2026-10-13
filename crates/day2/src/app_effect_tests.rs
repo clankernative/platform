@@ -566,8 +566,12 @@ fn legacy_pages_exclude_tombstones_before_counting_visible_rows() -> Result<()> 
             "installation-a",
             &current,
             &instruction,
-            &policy()?,
-            "change",
+            EffectContext {
+                scope: "installation-a",
+                policy: &policy()?,
+                operation: "change",
+                entropy: &crate::host_inputs::SecureEntropy,
+            },
         )?)?)
     };
     let first = page(Id::default())?;
@@ -885,8 +889,12 @@ fn authoritative_write_values_enforce_domains_after_row_authority() -> Result<()
             "installation-a",
             request,
             &instruction,
-            &policy()?,
-            "change",
+            EffectContext {
+                scope: "installation-a",
+                policy: &policy()?,
+                operation: "change",
+                entropy: &crate::host_inputs::SecureEntropy,
+            },
         );
         request.observations.push(Observation {
             instruction,

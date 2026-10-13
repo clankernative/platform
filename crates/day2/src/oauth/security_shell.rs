@@ -2979,7 +2979,11 @@ mod tests {
 
         impl crate::host::Host for CredentialClock {
             fn entropy(&self, scope: &str, invocation: &str) -> Result<[u8; 32]> {
-                crate::host::Host::entropy(&crate::host::System, scope, invocation)
+                crate::host::Host::entropy(
+                    &crate::host::System(crate::host_inputs::Inputs::default()),
+                    scope,
+                    invocation,
+                )
             }
 
             fn now_ms(&self) -> Result<i64> {
@@ -2993,7 +2997,11 @@ mod tests {
                 phase: crate::protocol::Phase,
                 request: &crate::protocol::Request,
             ) -> Result<crate::host::WorkerAction> {
-                crate::host::Host::worker_action(&crate::host::System, phase, request)
+                crate::host::Host::worker_action(
+                    &crate::host::System(crate::host_inputs::Inputs::default()),
+                    phase,
+                    request,
+                )
             }
 
             fn record_exchange(
@@ -3002,15 +3010,16 @@ mod tests {
                 request: &crate::protocol::Request,
                 result: &Result<crate::protocol::Response>,
             ) -> Result<()> {
-                crate::host::Host::record_exchange(&crate::host::System, phase, request, result)
+                crate::host::Host::record_exchange(
+                    &crate::host::System(crate::host_inputs::Inputs::default()),
+                    phase,
+                    request,
+                    result,
+                )
             }
 
-            fn deadline(
-                &self,
-                phase: crate::protocol::Phase,
-                started: std::time::Instant,
-            ) -> Result<()> {
-                crate::host::Host::deadline(&crate::host::System, phase, started)
+            fn monotonic(&self) -> Duration {
+                effects::Hooks::monotonic(self.0.as_ref())
             }
         }
 
@@ -3024,7 +3033,7 @@ mod tests {
         )?);
         world.runtime = world
             .runtime
-            .with_host(Arc::new(CredentialClock(clock.clone())));
+            .with_host(Arc::new(CredentialClock(clock.clone())), clock.clone());
         effects::scope(clock.clone(), || {
             let identity = iap::Verified {
                 email: "alice@example.com".into(),
@@ -3591,6 +3600,16 @@ mod tests {
             }
         }
 
+        impl crate::host_inputs::Clock for Clock {
+            fn wall_time(&self) -> Result<Duration> {
+                Ok(Duration::from_secs(u64::try_from(self.wall())?))
+            }
+
+            fn monotonic(&self) -> Duration {
+                self.time.lock().unwrap().1
+            }
+        }
+
         struct Host {
             original: crate::store::Runtime,
             clock: Arc<Clock>,
@@ -3621,14 +3640,8 @@ mod tests {
             ) -> Result<()> {
                 self.original.host().record_exchange(phase, request, result)
             }
-            fn deadline(
-                &self,
-                phase: crate::protocol::Phase,
-                started: std::time::Instant,
-            ) -> Result<()> {
-                // Existing Simulation modeled Host boundary. The physical
-                // Worker watchdog is unchanged; real elapsed is not replayed.
-                self.original.host().deadline(phase, started)
+            fn monotonic(&self) -> Duration {
+                crate::host_inputs::Clock::monotonic(self.clock.as_ref())
             }
         }
 
@@ -3742,10 +3755,13 @@ mod tests {
             );
             let simulation = crate::simulation::Simulation::new(runtime, [17; 32], 1_000_000)?;
             let original = simulation.runtime().clone();
-            let runtime = original.clone().with_host(Arc::new(Host {
-                original,
-                clock: clock.clone(),
-            }));
+            let runtime = original.clone().with_host(
+                Arc::new(Host {
+                    original,
+                    clock: clock.clone(),
+                }),
+                clock.clone(),
+            );
             runtime.initialize()?;
             let active = crate::authority_state::current(&open(runtime.db())?)?;
             ensure!(
@@ -5356,10 +5372,13 @@ mod tests {
                                 credential.runtime.db(),
                                 credential.runtime.scope(),
                             ))
-                            .with_host(Arc::new(Host {
-                                original: credential.runtime.clone(),
-                                clock: clock.clone(),
-                            }))
+                            .with_host(
+                                Arc::new(Host {
+                                    original: credential.runtime.clone(),
+                                    clock: clock.clone(),
+                                }),
+                                clock.clone(),
+                            )
                             .with_credential_authority(
                                 credential.runtime.credentials.as_ref().unwrap().clone(),
                             );

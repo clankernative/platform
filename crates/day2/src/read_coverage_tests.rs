@@ -305,6 +305,282 @@ async fn local_server_refuses_host_only_contract_before_drawing_runtime_secret_e
     Ok(())
 }
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(super) struct IdInputs {
+    seed: [u8; 32],
+    initial_wall_ms: i64,
+    scope: String,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub(super) enum IdAction {
+    Accept { invocation: String },
+    SetWall { milliseconds: i64 },
+    Elapse { nanoseconds: u64 },
+    Deadline {},
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct GeneratedId {
+    invocation: String,
+    uuid: [u8; 16],
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct IdValues {
+    scope: String,
+    seeds: Vec<(String, [u8; 32])>,
+    ids: Vec<GeneratedId>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(super) struct IdObservation {
+    values: IdValues,
+    alternate_scope_seeds: [[u8; 32]; 2],
+    wall_ms: i64,
+    input_wall_ms: i64,
+    monotonic_ns: u64,
+    input_monotonic_ns: u64,
+    deadline: Option<String>,
+}
+
+pub(super) type IdHistory = input_replay_tests::History<IdInputs, IdAction, IdObservation>;
+
+pub(super) fn id_history(reverse: bool) -> IdHistory {
+    let order = if reverse {
+        ["two", "one"]
+    } else {
+        ["one", "two"]
+    };
+    let mut actions: Vec<_> = order
+        .into_iter()
+        .map(|id| IdAction::Accept {
+            invocation: id.into(),
+        })
+        .collect();
+    actions.extend([
+        IdAction::SetWall { milliseconds: 9000 },
+        IdAction::Deadline {},
+        IdAction::Elapse {
+            nanoseconds: 15_000_000_000,
+        },
+        IdAction::Deadline {},
+    ]);
+    IdHistory::new(
+        IdInputs {
+            seed: [42; 32],
+            initial_wall_ms: 7000,
+            scope: "coverage/test/app".into(),
+        },
+        actions,
+    )
+}
+
+pub(super) fn validate_id_history(history: &IdHistory) -> Result<()> {
+    history.validate()?;
+    let forward = id_history(false);
+    let reverse = id_history(true);
+    ensure!(
+        history.inputs == forward.inputs
+            && (history.actions == forward.actions || history.actions == reverse.actions),
+        "unsupported ID input history fixture"
+    );
+    for observed in &history.observations {
+        if let input_replay_tests::Recorded::Ok(observed) = observed {
+            ensure!(
+                observed.values.seeds.len() <= 16
+                    && observed.values.ids.len() <= 16
+                    && observed.values.scope.len() <= 128,
+                "ID history observation budget"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn literal_id_values() -> Result<IdValues> {
+    // Literal expectations are independent of Host::entropy and ID generation.
+    Ok(serde_json::from_value(json!({
+        "scope":"coverage/test/app",
+        "seeds":[
+            ["one",[172,232,180,6,8,50,101,155,93,92,54,125,208,132,94,166,192,171,150,28,138,127,77,234,201,198,34,131,111,35,109,82]],
+            ["two",[143,133,157,107,178,196,226,181,217,127,121,125,97,93,10,98,99,71,29,167,165,139,164,246,95,11,173,140,150,168,144,96]]
+        ],
+        "ids":[
+            {"invocation":"one","uuid":[0,0,0,0,27,88,113,50,135,74,140,2,218,23,234,188]},
+            {"invocation":"two","uuid":[0,0,0,0,27,88,120,218,187,89,177,131,129,0,240,175]}
+        ]
+    }))?)
+}
+
+fn literal_alternate_seeds() -> [[u8; 32]; 2] {
+    [
+        [
+            151, 61, 222, 67, 140, 211, 132, 139, 205, 19, 53, 98, 75, 7, 194, 66, 41, 14, 254, 81,
+            53, 248, 68, 57, 133, 126, 107, 208, 205, 174, 88, 28,
+        ],
+        [
+            139, 154, 45, 152, 141, 34, 195, 75, 171, 233, 191, 208, 147, 91, 221, 183, 189, 96,
+            74, 124, 127, 246, 231, 186, 120, 35, 8, 216, 87, 109, 61, 23,
+        ],
+    ]
+}
+
+fn expected_id_observation(inputs: &IdInputs, prefix: &[IdAction]) -> Result<IdObservation> {
+    let mut values = literal_id_values()?;
+    let accepted: Vec<_> = prefix
+        .iter()
+        .filter_map(|action| match action {
+            IdAction::Accept { invocation } => Some(invocation),
+            _ => None,
+        })
+        .collect();
+    values.seeds.retain(|(id, _)| accepted.contains(&id));
+    values.ids.retain(|row| accepted.contains(&&row.invocation));
+    let mut wall_ms = inputs.initial_wall_ms;
+    let mut monotonic_ns = 0;
+    for action in prefix {
+        match action {
+            IdAction::SetWall { milliseconds } => wall_ms = *milliseconds,
+            IdAction::Elapse { nanoseconds } => monotonic_ns += *nanoseconds,
+            _ => {}
+        }
+    }
+    let deadline = matches!(prefix.last(), Some(IdAction::Deadline { .. })).then(|| {
+        if monotonic_ns >= 15_000_000_000 {
+            "TransactionDeadline"
+        } else {
+            "Passed"
+        }
+        .into()
+    });
+    Ok(IdObservation {
+        values,
+        alternate_scope_seeds: literal_alternate_seeds(),
+        wall_ms,
+        input_wall_ms: wall_ms,
+        monotonic_ns,
+        input_monotonic_ns: monotonic_ns,
+        deadline,
+    })
+}
+
+fn id_observation(
+    simulation: &crate::simulation::Simulation,
+    action: &IdAction,
+) -> Result<IdObservation> {
+    let runtime = simulation.runtime();
+    let mut deadline = None;
+    match action {
+        IdAction::Accept { invocation } => {
+            runtime.accept("guarded_read", "alice", invocation, &json!({}), 7)?;
+        }
+        IdAction::SetWall { milliseconds } => simulation.set_time(*milliseconds)?,
+        IdAction::Elapse { nanoseconds } => {
+            simulation.advance_monotonic(Duration::from_nanos(*nanoseconds))?
+        }
+        IdAction::Deadline { .. } => {
+            deadline = Some(
+                match runtime.host().deadline(Phase::Decide, Duration::ZERO) {
+                    Ok(()) => "Passed".into(),
+                    Err(error) => format!("{:?}", classify(&error)),
+                },
+            );
+        }
+    }
+    let db = open(runtime.db())?;
+    let rows = db.prepare("SELECT s.invocation,s.seed,i.now FROM day2_id_seeds AS s JOIN day2_invocations AS i ON i.id=s.invocation ORDER BY s.invocation")?
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?, row.get::<_, i64>(2)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut seeds = Vec::new();
+    let mut ids = Vec::new();
+    for (invocation, seed, now) in rows {
+        let seed: [u8; 32] = seed.as_slice().try_into()?;
+        ids.push(GeneratedId {
+            invocation: invocation.clone(),
+            uuid: crate::identity::generate(
+                &seed,
+                now.checked_mul(1000)
+                    .context("ID history clock")?
+                    .try_into()?,
+                "items",
+                0,
+            )?,
+        });
+        seeds.push((invocation, seed));
+    }
+    Ok(IdObservation {
+        values: IdValues {
+            scope: runtime.scope().into(),
+            seeds,
+            ids,
+        },
+        alternate_scope_seeds: [
+            runtime.host().entropy("different/scope/app", "one")?,
+            runtime.host().entropy("different/scope/app", "two")?,
+        ],
+        wall_ms: runtime.host().now_ms()?,
+        input_wall_ms: runtime.inputs().clock.wall_time()?.as_millis().try_into()?,
+        monotonic_ns: runtime.host().monotonic().as_nanos().try_into()?,
+        input_monotonic_ns: runtime.inputs().clock.monotonic().as_nanos().try_into()?,
+        deadline,
+    })
+}
+
+pub(super) fn check_id_history(saved: &IdHistory, path: Option<&Path>) -> Result<IdHistory> {
+    use input_replay_tests::{Case, checkpoint};
+    validate_id_history(saved)?;
+    let mut observed = IdHistory::new(saved.inputs.clone(), saved.actions.clone());
+    if let Some(path) = path {
+        checkpoint(path, Case::Ids(observed.clone()))?;
+    }
+    let setup = input_replay_tests::capture(|| {
+        let fixture = Fixture::new()?;
+        ensure!(
+            fixture.runtime.scope() == saved.inputs.scope,
+            "ID fixture scope mismatch"
+        );
+        let simulation = crate::simulation::Simulation::with_scripted_providers(
+            fixture.runtime.clone(),
+            saved.inputs.seed,
+            saved.inputs.initial_wall_ms,
+        )?;
+        Ok((fixture, simulation))
+    });
+    let (_fixture, simulation) = match setup {
+        Ok(world) => world,
+        Err(error) => {
+            observed.fixture_failed(&error);
+            if let Some(path) = path {
+                checkpoint(path, Case::Ids(observed.clone()))?;
+            }
+            return Err(error);
+        }
+    };
+    ensure!(
+        saved.fixture_error.is_none(),
+        "saved ID fixture failure did not recur"
+    );
+    for (step, action) in saved.actions.iter().enumerate() {
+        let check = observed.observe(
+            input_replay_tests::capture(|| id_observation(&simulation, action)),
+            &expected_id_observation(&saved.inputs, &saved.actions[..=step])?,
+        );
+        if let Some(path) = path {
+            checkpoint(path, Case::Ids(observed.clone()))?;
+        }
+        observed.compare_saved(saved, step)?;
+        check?;
+    }
+    ensure!(saved.failure.is_none(), "saved ID failure did not recur");
+    Ok(observed)
+}
+
 #[test]
 fn fresh_runtime_id_seeds_are_scope_stable_and_simulation_clock_is_composed() -> Result<()> {
     let root = Path::new("/tmp/dst-platform-input-composition");
@@ -313,93 +589,19 @@ fn fresh_runtime_id_seeds_are_scope_stable_and_simulation_clock_is_composed() ->
         .prefix("id-traces-")
         .tempdir_in(root)?
         .keep();
-    let mut traces = Vec::new();
-    for replay in 0..2 {
-        let fixture = Fixture::new()?;
-        let simulation = crate::simulation::Simulation::with_scripted_providers(
-            fixture.runtime.clone(),
-            [42; 32],
-            7000,
-        )?;
-        let runtime = simulation.runtime();
-        let path = evidence.join(format!("replay-{replay}.json"));
-        fs::write(
-            &path,
-            serde_json::to_vec(
-                &json!({"seed":vec![42; 32],"wall_ms":7000,"invocations":["one","two"]}),
-            )?,
-        )?;
-        for id in if replay == 0 {
-            ["one", "two"]
-        } else {
-            ["two", "one"]
-        } {
-            runtime.accept("guarded_read", "alice", id, &json!({}), 7)?;
-        }
-        let db = open(runtime.db())?;
-        let seeds = db
-            .prepare("SELECT invocation,seed FROM day2_id_seeds ORDER BY invocation")?
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        assert_eq!(runtime.scope(), "coverage/test/app");
-        assert_eq!(seeds.len(), 2);
-        assert_ne!(seeds[0].1, seeds[1].1);
-        let alternate_scope_seeds = [
-            runtime.host().entropy("different/scope/app", "one")?,
-            runtime.host().entropy("different/scope/app", "two")?,
-        ];
-        assert_eq!(
-            alternate_scope_seeds,
-            [
-                [
-                    151, 61, 222, 67, 140, 211, 132, 139, 205, 19, 53, 98, 75, 7, 194, 66, 41, 14,
-                    254, 81, 53, 248, 68, 57, 133, 126, 107, 208, 205, 174, 88, 28
-                ],
-                [
-                    139, 154, 45, 152, 141, 34, 195, 75, 171, 233, 191, 208, 147, 91, 221, 183,
-                    189, 96, 74, 124, 127, 246, 231, 186, 120, 35, 8, 216, 87, 109, 61, 23
-                ],
-            ]
+    let mut final_observations = Vec::new();
+    for reverse in [false, true] {
+        let path = evidence.join(format!("replay-{}.json", usize::from(reverse)));
+        eprintln!(
+            "Runtime input replay: {}",
+            input_replay_tests::command(&path)
         );
-        assert_ne!(seeds[0].1.as_slice(), alternate_scope_seeds[0]);
-        assert_ne!(seeds[1].1.as_slice(), alternate_scope_seeds[1]);
-        let ids = seeds
-            .iter()
-            .map(|(id, seed)| -> Result<Value> {
-                let seed: [u8; 32] = seed.as_slice().try_into()?;
-                Ok(json!({"invocation":id,"uuid":crate::identity::generate(&seed, 7000, "items", 0)?}))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let observation = json!({"scope":runtime.scope(),"seeds":seeds,"ids":ids});
-        let expected = json!({
-            "scope":"coverage/test/app",
-            "seeds":[
-                ["one",[172,232,180,6,8,50,101,155,93,92,54,125,208,132,94,166,192,171,150,28,138,127,77,234,201,198,34,131,111,35,109,82]],
-                ["two",[143,133,157,107,178,196,226,181,217,127,121,125,97,93,10,98,99,71,29,167,165,139,164,246,95,11,173,140,150,168,144,96]]
-            ],
-            "ids":[
-                {"invocation":"one","uuid":[0,0,0,0,27,88,113,50,135,74,140,2,218,23,234,188]},
-                {"invocation":"two","uuid":[0,0,0,0,27,88,120,218,187,89,177,131,129,0,240,175]}
-            ]
-        });
-        assert_eq!(observation, expected, "{}", path.display());
-        fs::write(&path, serde_json::to_vec(&observation)?)?;
-        traces.push(observation);
-        let started = runtime.host().monotonic();
-        simulation.set_time(9000)?;
-        assert_eq!(runtime.inputs().clock.wall_time()?, Duration::from_secs(9));
-        runtime.host().deadline(Phase::Decide, started)?;
-        simulation.advance_monotonic(Duration::from_secs(15))?;
-        assert_eq!(runtime.inputs().clock.monotonic(), Duration::from_secs(15));
-        assert_eq!(
-            classify(&runtime.host().deadline(Phase::Decide, started).unwrap_err()),
-            Failure::TransactionDeadline
-        );
-        assert_eq!(runtime.host().now_ms()?, 9000);
+        let observed = check_id_history(&id_history(reverse), Some(&path))
+            .with_context(|| input_replay_tests::command(&path))?;
+        input_replay_tests::replay(&path)?;
+        final_observations.push(observed.observations.last().cloned());
     }
-    assert_eq!(traces[0], traces[1], "{}", evidence.display());
+    assert_eq!(final_observations[0], final_observations[1]);
     Ok(())
 }
 
