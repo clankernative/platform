@@ -79,8 +79,8 @@ SubmitReport :: [].{
 
 	verify_result : Str, ReportView.Saved, Str -> Try(Bool, Str)
 	verify_result = |before, saved, after| {
-		old = Data.snapshot(before)?
-		next = Data.snapshot(after)?
+		old = Data.verification_snapshot(before)?.live
+		next = Data.verification_snapshot(after)?.live
 		row = next.reports.find_first(|candidate| candidate.id == saved.id).map_err(|_| "created report missing")?
 		Ok(
 			next.reports.len()

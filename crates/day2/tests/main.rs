@@ -27,6 +27,7 @@ mod guards;
 mod indexes;
 mod ingress_hold_gate;
 mod instance_capabilities;
+mod lifecycle;
 mod linux_worker;
 mod live_updates;
 mod migration_commands;

@@ -6,6 +6,44 @@ use super::{shell_oidc, shell_transport::ApprovalView};
 use crate::{iap, managed_credentials::browser::Pending, store::Runtime};
 use anyhow::{Result, ensure};
 use day2_capabilities::Digest;
+use serde::{Deserialize, Serialize};
+
+/// Durable original context is DATA. It cannot reconstruct a fresh-human owner.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CredentialContextData {
+    pub(crate) purpose: CredentialContextPurpose,
+    pub(crate) scope: String,
+    pub(crate) app: String,
+    pub(crate) artifact: String,
+    pub(crate) app_origin: String,
+    pub(crate) shell_origin: String,
+    pub(crate) attempt: String,
+    pub(crate) pending_challenge: Digest,
+    pub(crate) human: String,
+    pub(crate) subject: String,
+    pub(crate) pending_created_at: i64,
+    pub(crate) pending_expires_at: i64,
+    pub(crate) authenticated_at: i64,
+    pub(crate) proof_deadline: i64,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CredentialContextPurpose {
+    CredentialIntent,
+}
+
+impl CredentialContextData {
+    pub(crate) fn validate_origins(&self) -> Result<()> {
+        ensure!(
+            admitted_origin(&self.app_origin)? == self.app_origin
+                && admitted_origin(&self.shell_origin)? == self.shell_origin,
+            "invalid original credential origins"
+        );
+        Ok(())
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(in crate::oauth) enum FreshPurpose {
@@ -183,6 +221,46 @@ pub(crate) struct VerifiedAuthTime {
 }
 
 impl VerifiedAuthTime {
+    /// Project the actual original, purpose-bound proof into historical DATA.
+    /// Deserializing this result never creates VerifiedAuthTime.
+    pub(crate) fn credential_confirmation_context(
+        &self,
+        current: &FreshIntent,
+        identity: &iap::Verified,
+        entry_now: i64,
+    ) -> Result<CredentialContextData> {
+        self.require_intent(current, identity)?;
+        self.require_current(entry_now)?;
+        let intent = self.google.intent();
+        let Context::Credential {
+            scope,
+            app,
+            artifact,
+            app_origin,
+            shell_origin,
+            expires_at,
+        } = &intent.context
+        else {
+            anyhow::bail!("credential original purpose required");
+        };
+        Ok(CredentialContextData {
+            purpose: CredentialContextPurpose::CredentialIntent,
+            scope: scope.clone(),
+            app: app.clone(),
+            artifact: artifact.clone(),
+            app_origin: app_origin.clone(),
+            shell_origin: shell_origin.clone(),
+            attempt: intent.attempt.clone(),
+            pending_challenge: intent.challenge.clone(),
+            human: intent.human.clone(),
+            subject: intent.subject.clone(),
+            pending_created_at: intent.created_at,
+            pending_expires_at: *expires_at,
+            authenticated_at: self.authenticated_at(),
+            proof_deadline: self.deadline()?,
+        })
+    }
+
     pub(in crate::oauth) fn from_google(google: shell_oidc::Reauthenticated) -> Self {
         Self { google }
     }

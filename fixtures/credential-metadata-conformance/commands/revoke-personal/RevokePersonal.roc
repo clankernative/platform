@@ -40,15 +40,15 @@ RevokePersonal :: [].{
 		verification: {
 			input: |snapshot, _seed| {
 				row =
-					Data.snapshot(snapshot)?
+					Data.verification_snapshot(snapshot)?.live
 						.key_receipts
 						.find_first(|candidate| candidate.value.family == "personal")
 						.map_err(|_| "create a personal first")?
 				Ok({ lineage: row.value.lineage })
 			},
 			check: |before, output, after| {
-				old = Data.snapshot(before)?
-				next = Data.snapshot(after)?
+				old = Data.verification_snapshot(before)?.live
+				next = Data.verification_snapshot(after)?.live
 				Ok(
 					(output.status == "revoked" or output.status == "already_revoked")
 						and output.revision > 1 and next.entries.len() == old.entries.len() + 1

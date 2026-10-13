@@ -72,6 +72,7 @@ failures! {
     BudgetUnavailable => ("budget_unavailable", Conflict),
     Conflict => ("conflict", Conflict),
     UniqueConstraintConflict => ("unique_constraint_conflict", Conflict),
+    LiveReferenceConflict => ("live_reference_conflict", Conflict),
     AmbiguousSelection => ("ambiguous_selection", Conflict),
     CollectionLimitExceeded => ("collection_limit_exceeded", Conflict),
     StaleVersion => ("stale_version", Conflict),

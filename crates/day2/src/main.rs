@@ -97,8 +97,7 @@ fn main() -> Result<()> {
         ["check-properties", instance, app, evidence_dir] => {
             let runtime = Runtime::load(Path::new(instance), app)?;
             serde_json::to_value(day2::properties::require(
-                runtime.artifact(),
-                &runtime.inspect()?,
+                &runtime,
                 Path::new(evidence_dir),
             )?)?
         }

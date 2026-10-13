@@ -83,15 +83,15 @@ Seed :: [].{
 	}
 
 	verify_input : Str, U64 -> Try(SeedTypes.Input, Str)
-	verify_input = |snapshot, seed| match Data.snapshot(snapshot)?.deals.first() {
+	verify_input = |snapshot, seed| match Data.verification_snapshot(snapshot)?.live.deals.first() {
 		Ok(deal) => Ok({ title: deal.value.title })
 		Err(_) => Ok({ title: Domains.title("Generated deal ${seed.to_str()}")? })
 	}
 
 	verify_result : Str, DealView.Seeded, Str -> Try(Bool, Str)
 	verify_result = |before, saved, after| {
-		old = Data.snapshot(before)?
-		next = Data.snapshot(after)?
+		old = Data.verification_snapshot(before)?.live
+		next = Data.verification_snapshot(after)?.live
 		Ok(
 			(old.stages.is_empty() or before == after)
 				and next.stages.len() == 2
@@ -107,7 +107,7 @@ Seed :: [].{
 
 	rejected_input : Str, U64 -> Try(SeedTypes.Input, Str)
 	rejected_input = |snapshot, _seed| {
-		deal = Data.snapshot(snapshot)?.deals.first().map_err(|_| "initialize a deal first")?
+		deal = Data.verification_snapshot(snapshot)?.live.deals.first().map_err(|_| "initialize a deal first")?
 		title = Domains.title(
 			if deal.value.title.to_str() == "Different title" {
 				"Another title"

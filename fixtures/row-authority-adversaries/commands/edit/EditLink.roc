@@ -111,8 +111,18 @@ EditLink :: [].{
 
 	verify_result : Str, LinkView.Saved, Str -> Try(Bool, Str)
 	verify_result = |before, saved, after| {
-		old = Data.snapshot(before)?.links.find_first(|row| row.id == saved.id).map_err(|_| "missing old row")?
-		row = Data.snapshot(after)?.links.find_first(|item| item.id == saved.id).map_err(|_| "missing new row")?
+		old =
+			Data.verification_snapshot(before)?
+				.live
+				.links
+				.find_first(|row| row.id == saved.id)
+				.map_err(|_| "missing old row")?
+		row =
+			Data.verification_snapshot(after)?
+				.live
+				.links
+				.find_first(|item| item.id == saved.id)
+				.map_err(|_| "missing new row")?
 		Ok(
 			row.version
 				== saved.version

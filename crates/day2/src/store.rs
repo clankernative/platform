@@ -50,6 +50,174 @@ mod supply_tests;
 #[path = "delegation_capability_tests.rs"]
 mod delegation_capability_tests;
 
+// A closed test-only corruption of one reply from the ACTUAL compiled worker.
+// No hook or selector exists in a production build. This does not qualify a
+// malicious worker binary or replace artifact admission.
+#[cfg(test)]
+pub(crate) mod credential_reply_test_fault {
+    use super::*;
+    use std::{cell::RefCell, marker::PhantomData, rc::Rc, thread::ThreadId};
+
+    enum ReplyFault {
+        EffectsAfterCredentialMutation,
+    }
+
+    #[derive(Clone, PartialEq, Eq)]
+    struct Selector {
+        executor: ThreadId,
+        database: PathBuf,
+        scope: String,
+        app: String,
+        artifact: String,
+        operation: String,
+        invocation: String,
+    }
+
+    #[derive(Clone, Debug, serde::Serialize)]
+    pub(crate) struct StagingEvidence {
+        pub(crate) counts: [i64; 7],
+        pub(crate) observations: Vec<(String, String)>,
+        pub(crate) original_kind: String,
+        pub(crate) original_instruction: String,
+        pub(crate) original_model: String,
+        pub(crate) consumed: usize,
+    }
+
+    struct State {
+        selector: Selector,
+        fault: ReplyFault,
+        fired: bool,
+        evidence: Option<StagingEvidence>,
+    }
+
+    thread_local! { static ACTIVE: RefCell<Option<State>> = const { RefCell::new(None) }; }
+
+    pub(crate) struct Scope {
+        selector: Selector,
+        _executor: PhantomData<Rc<()>>,
+    }
+
+    impl Scope {
+        pub(crate) fn observed(&self) -> Option<StagingEvidence> {
+            ACTIVE.with(|state| {
+                state
+                    .borrow()
+                    .as_ref()
+                    .filter(|state| state.selector == self.selector)
+                    .and_then(|state| state.evidence.clone())
+            })
+        }
+    }
+
+    impl Drop for Scope {
+        fn drop(&mut self) {
+            ACTIVE.with(|state| {
+                let mut state = state.borrow_mut();
+                if state
+                    .as_ref()
+                    .is_some_and(|state| state.selector == self.selector)
+                {
+                    *state = None;
+                }
+            });
+        }
+    }
+
+    pub(crate) fn effects_after_credential_mutation(
+        runtime: &Runtime,
+        invocation: &str,
+    ) -> Result<Scope> {
+        let db = open(runtime.db())?;
+        let operation: String = db.query_row(
+            "SELECT operation FROM day2_invocations WHERE id=?1",
+            [invocation],
+            |row| row.get(0),
+        )?;
+        ensure!(
+            crate::managed_credentials::issuance::access(runtime, &operation)?.interactive,
+            "interactive response-corruption fixture required"
+        );
+        let selector = Selector {
+            executor: std::thread::current().id(),
+            database: runtime.db().to_owned(),
+            scope: runtime.scope().into(),
+            app: runtime.app().into(),
+            artifact: runtime.artifact().id().into(),
+            operation,
+            invocation: invocation.into(),
+        };
+        ACTIVE.with(|state| -> Result<()> {
+            let mut state = state.borrow_mut();
+            ensure!(
+                state.is_none(),
+                "response-corruption scope already installed"
+            );
+            *state = Some(State {
+                selector: selector.clone(),
+                fault: ReplyFault::EffectsAfterCredentialMutation,
+                fired: false,
+                evidence: None,
+            });
+            Ok(())
+        })?;
+        Ok(Scope {
+            selector,
+            _executor: PhantomData,
+        })
+    }
+
+    pub(super) fn replace(
+        runtime: &Runtime,
+        db: &Connection,
+        request: &Request,
+        original: Response,
+    ) -> Result<Response> {
+        ACTIVE.with(|state| -> Result<Response> {
+            let mut state = state.borrow_mut();
+            let Some(state) = state.as_mut() else { return Ok(original); };
+            let selector = &state.selector;
+            if state.fired || selector.executor != std::thread::current().id()
+                || selector.database != runtime.db() || selector.scope != runtime.scope()
+                || selector.app != runtime.app() || selector.artifact != runtime.artifact().id()
+                || selector.operation != request.operation || selector.invocation != request.context.invocation_id {
+                return Ok(original);
+            }
+            let Some((mutation_at, mutation)) = request.observations.iter().enumerate().find(|(_, entry)|
+                entry.instruction.kind == "credential_issue" && entry.error.is_empty()) else { return Ok(original); };
+            if !request.observations[mutation_at + 1..].iter().any(|entry|
+                entry.instruction.kind == "create" && entry.instruction.model == "entries" && entry.error.is_empty()) {
+                return Ok(original);
+            }
+            ensure!(original.consumed == request.observations.len(), "replay_consumption_mismatch");
+            // Preserve genuine Failed/Done/unrelated replies. A decoded failure
+            // must never masquerade as the expected injected whitelist refusal.
+            if !matches!(original.decode()?, Reply::Pending(Step::Database(Database::Write {
+                model: "key_receipts", change: Write::Create, ..
+            }))) || original.instruction.kind != "create" { return Ok(original); }
+            let issued: Value = crate::json::decode(mutation.result.as_bytes())?;
+            let actual: Value = crate::json::decode(original.instruction.data.as_bytes())?;
+            if actual != json!({"family":"clients", "lineage":issued["lineage"], "head":issued["version"], "revision":1}) {
+                return Ok(original);
+            }
+            let mut counts = [0; 7];
+            for (slot, table) in ["entries", "key_receipts", "day2_credential_lineages", "day2_credential_versions",
+                "day2_credential_material", "day2_credential_deliveries", "day2_credential_receipts"].into_iter().enumerate() {
+                counts[slot] = db.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row.get(0))?;
+            }
+            state.evidence = Some(StagingEvidence { counts,
+                observations: request.observations.iter().map(|entry| (entry.instruction.kind.clone(), entry.instruction.model.clone())).collect(),
+                original_kind: original.kind.clone(), original_instruction: original.instruction.kind.clone(),
+                original_model: original.instruction.model.clone(), consumed: original.consumed });
+            state.fired = true;
+            match state.fault {
+                ReplyFault::EffectsAfterCredentialMutation => Ok(Response { kind: "pending".into(),
+                    instruction: Instruction { kind: "effects".into(), ..Default::default() },
+                    result: String::new(), error: String::new(), consumed: request.observations.len() }),
+            }
+        })
+    }
+}
+
 /// Once state is initialized only the artifact the database activated may run,
 /// so a tree (a release image, say) that does not carry it cannot serve. Replace
 /// the loader's bare missing-file error with one naming both identities and the
@@ -1316,11 +1484,12 @@ impl Runtime {
         let execution = app_execution(self.artifact.contract(), &registered_operation);
         let precondition_row =
             match precondition_target(&policy, &registered_operation, &input_value, execution) {
-                Ok(Some(target)) => get_optional(
+                Ok(Some(target)) => guard_target(
                     &tx,
                     &target.model,
                     &self.artifact.contract().schema.models[&target.model],
                     target.id,
+                    execution,
                 )?,
                 _ => None,
             };
@@ -1467,8 +1636,16 @@ impl Runtime {
         operation: &str,
         kind: &str,
         fault: Fault,
-        credential_keys: Option<&crate::managed_credentials::issuance::ReadyKeys>,
+        credential_keys: Option<&crate::managed_credentials::issuance::PreparedCredential>,
     ) -> Result<Outcome> {
+        let empty_domains = crate::domain::Catalog::new();
+        let domains = self
+            .artifact
+            .contract()
+            .app_contract
+            .as_ref()
+            .map(|contract| &contract.domains)
+            .unwrap_or(&empty_domains);
         let mut writes = 0;
         let mut effect_failed = request
             .observations
@@ -1480,6 +1657,9 @@ impl Runtime {
         // Exact consumption and failure latching forbid divergence or swallowed denials.
         loop {
             let response = worker.exchange(request)?;
+            #[cfg(test)]
+            let response =
+                credential_reply_test_fault::replace(self, connection, request, response)?;
             let reply = response.decode()?;
             ensure!(
                 response.consumed == request.observations.len(),
@@ -1579,20 +1759,6 @@ impl Runtime {
                     let mutation = step.mutation();
                     let result = (|| -> Result<String> {
                         ensure!(!mutation || kind != "query", "query_write_forbidden");
-                        if matches!(step, Step::Database(Database::Write { .. }))
-                            && let Some(contract) = &self.artifact.contract().app_contract
-                        {
-                            crate::domain::record(
-                                &contract.domains,
-                                self.artifact
-                                    .contract()
-                                    .schema
-                                    .models
-                                    .get(&instruction.model)
-                                    .context("unknown_model")?,
-                                &serde_json::from_str(&instruction.data)?,
-                            )?;
-                        }
                         if matches!(
                             step,
                             Step::Database(Database::Write { .. }) | Step::Request { .. }
@@ -1633,7 +1799,10 @@ impl Runtime {
                         } else {
                             effect(
                                 connection,
-                                &self.artifact.contract().schema,
+                                StorageContract {
+                                    schema: &self.artifact.contract().schema,
+                                    domains,
+                                },
                                 &self.scope,
                                 request,
                                 &instruction,
@@ -1734,25 +1903,42 @@ impl Runtime {
         validate_storage_snapshot(&mut connection, &self.artifact, &self.scope)
     }
 
+    /// Retained rows, including tombstones, for storage comparison and inspection.
     pub fn inspect(&self) -> Result<Value> {
+        self.snapshot(SnapshotScope::Retained)
+    }
+
+    /// Complete live application state, matching ordinary query visibility.
+    /// App-owned checks receive Entities, which deliberately expose no deletion flag.
+    pub fn application_snapshot(&self) -> Result<Value> {
+        self.snapshot(SnapshotScope::Live)
+    }
+
+    /// Operation generators and checks can explicitly inspect either lifecycle scope.
+    /// Both complete bounded views belong to one consistent database snapshot.
+    pub fn verification_snapshot(&self) -> Result<Value> {
         let mut connection = open(&self.db)?;
         let snapshot = connection.transaction()?;
         self.check_binding(&snapshot)?;
-        let limit = crate::properties::MAX_ROWS_PER_MODEL;
-        let mut models = serde_json::Map::new();
-        for (name, record) in &self.artifact.contract().schema.models {
-            let sql = format!(
-                "SELECT {} FROM \"{name}\" ORDER BY id LIMIT {}",
-                projection(record),
-                limit + 1
+        let schema = &self.artifact.contract().schema;
+        let live = read_model_snapshot(&snapshot, schema, SnapshotScope::Live)?;
+        let deleted = read_model_snapshot(&snapshot, schema, SnapshotScope::Deleted)?;
+        for rollup in &schema.rollups {
+            ensure!(
+                rollup.mismatches(&snapshot)? == 0,
+                "rollup_recount_mismatch: {}",
+                rollup.table()
             );
-            let mut statement = snapshot.prepare(&sql)?;
-            let rows = statement
-                .query_map([], |row| read_row(row, record))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            ensure!(rows.len() <= limit, "inspection_limit");
-            models.insert(name.clone(), serde_json::to_value(rows)?);
         }
+        snapshot.commit()?;
+        Ok(json!({"live":live.to_string(),"deleted":deleted.to_string()}))
+    }
+
+    fn snapshot(&self, scope: SnapshotScope) -> Result<Value> {
+        let mut connection = open(&self.db)?;
+        let snapshot = connection.transaction()?;
+        self.check_binding(&snapshot)?;
+        let models = read_model_snapshot(&snapshot, &self.artifact.contract().schema, scope)?;
         for rollup in &self.artifact.contract().schema.rollups {
             ensure!(
                 rollup.mismatches(&snapshot)? == 0,
@@ -1761,7 +1947,7 @@ impl Runtime {
             );
         }
         snapshot.commit()?;
-        Ok(Value::Object(models))
+        Ok(models)
     }
 }
 
@@ -1825,6 +2011,7 @@ pub fn validate_storage_snapshot(
             "invalid stored foreign key"
         );
     }
+    validate_live_relationships(&snapshot, &artifact.contract().schema)?;
     for rollup in &artifact.contract().schema.rollups {
         ensure!(
             rollup.mismatches(&snapshot)? == 0,
@@ -2037,6 +2224,41 @@ pub(crate) fn get(connection: &Connection, model: &str, record: &Record, id: Id)
     get_optional(connection, model, record, id)?.context(crate::error::Failure::NotFound)
 }
 
+#[derive(Clone, Copy)]
+enum SnapshotScope {
+    Retained,
+    Live,
+    Deleted,
+}
+
+fn read_model_snapshot(
+    connection: &Connection,
+    schema: &Schema,
+    scope: SnapshotScope,
+) -> Result<Value> {
+    let limit = crate::properties::MAX_ROWS_PER_MODEL;
+    let predicate = match scope {
+        SnapshotScope::Retained => "",
+        SnapshotScope::Live => " WHERE deleted_at=0",
+        SnapshotScope::Deleted => " WHERE deleted_at!=0",
+    };
+    let mut models = serde_json::Map::new();
+    for (name, record) in &schema.models {
+        let sql = format!(
+            "SELECT {} FROM \"{name}\"{predicate} ORDER BY id LIMIT {}",
+            projection(record),
+            limit + 1,
+        );
+        let mut statement = connection.prepare(&sql)?;
+        let rows = statement
+            .query_map([], |row| read_row(row, record))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        ensure!(rows.len() <= limit, "inspection_limit");
+        models.insert(name.clone(), serde_json::to_value(rows)?);
+    }
+    Ok(Value::Object(models))
+}
+
 fn get_optional(
     connection: &Connection,
     model: &str,
@@ -2048,16 +2270,55 @@ fn get_optional(
         .map(|(row, _)| row))
 }
 
-/// Read a row whether or not it is deleted.
+fn guard_target(
+    connection: &Connection,
+    model: &str,
+    record: &Record,
+    id: Id,
+    execution: Option<&crate::app_contract::Execution>,
+) -> Result<Option<Row>> {
+    if execution.is_some_and(|execution| {
+        execution
+            .effects
+            .iter()
+            .any(|effect| effect.kind == "soft_delete" && effect.model == model)
+    }) {
+        Ok(get_scoped(connection, model, record, id)?.map(|(row, _)| row))
+    } else {
+        get_optional(connection, model, record, id)
+    }
+}
+
+/// Child requests use the callee's admitted lifecycle scope, while ordinary
+/// app reads continue to hide deleted targets.
+pub(crate) fn get_operation_target(
+    runtime: &Runtime,
+    connection: &Connection,
+    operation: &str,
+    model: &str,
+    id: Id,
+) -> Result<Row> {
+    let record = runtime
+        .artifact
+        .contract()
+        .schema
+        .models
+        .get(model)
+        .context("unknown_command_target")?;
+    guard_target(
+        connection,
+        model,
+        record,
+        id,
+        app_execution(runtime.artifact.contract(), operation),
+    )?
+    .context(crate::error::Failure::NotFound)
+}
+
+/// Read a host row and its lifecycle state, including retained targets.
 ///
-/// Only the deletion machinery itself is allowed to see past the default: the
-/// before-image of a delete, the row a restore is bringing back, and the
-/// after-image the audit log records. Every other path goes through `get`.
-/// Read a row whether or not it is deleted, saying which it was.
-///
-/// Only the deletion machinery itself is allowed to see past the default: the
-/// before-image of a delete, the row a restore is bringing back, and the
-/// after-image the audit log records. Every other path goes through `get`.
+/// Lifecycle writes, admitted lifecycle guards and audit after-images may use
+/// retained rows. Ordinary app key reads go through `get` instead.
 /// The flag is returned beside the row rather than on it, so there is no field
 /// an application could ever read — `Row` is what an app receives as `Entity`.
 fn get_scoped(
@@ -2162,16 +2423,19 @@ fn check_app_effect(
     input: &Value,
     invocation: &str,
 ) -> Result<()> {
-    if instruction.kind == "update"
-        && let Some(target) = execution.target(input)?
+    if matches!(
+        instruction.kind.as_str(),
+        "update" | "soft_delete" | "restore"
+    ) && let Some(target) = execution.target(input)?
     {
         ensure!(
             if target.model == instruction.model {
                 target.id == instruction.id
             } else {
-                execution.effects.iter().any(|effect| {
-                    effect.kind == "update_created" && effect.model == instruction.model
-                })
+                instruction.kind == "update"
+                    && execution.effects.iter().any(|effect| {
+                        effect.kind == "update_created" && effect.model == instruction.model
+                    })
             },
             "application_edit_target_forbidden"
         );
@@ -2700,6 +2964,64 @@ fn mutation_error(error: rusqlite::Error) -> anyhow::Error {
     }
 }
 
+fn check_live_relationships(
+    connection: &Connection,
+    schema: &Schema,
+    model: &str,
+    record: &Record,
+    change: Write,
+    value: &Value,
+) -> Result<()> {
+    if let Write::SoftDelete { id, .. } = change {
+        for key in schema.foreign_keys.iter().filter(|key| key.target == model) {
+            // A self-reference leaves live state with the row itself.
+            let self_filter = if key.model == model {
+                " AND id!=?1"
+            } else {
+                ""
+            };
+            let referenced: bool = connection.query_row(
+                &format!("SELECT EXISTS(SELECT 1 FROM \"{}\" WHERE \"{}\"=?1 AND deleted_at=0{self_filter})", key.model, key.field),
+                [id.sql(record.identity.as_ref())?],
+                |row| row.get(0),
+            )?;
+            ensure!(!referenced, crate::error::Failure::LiveReferenceConflict);
+        }
+    } else {
+        for key in schema.foreign_keys.iter().filter(|key| key.model == model) {
+            let target = sql_value(&record.fields[&key.field], &value[&key.field])?;
+            if key.target == model
+                && let Write::Update { id, .. } | Write::Restore { id, .. } = change
+                && target == id.sql(record.identity.as_ref())?
+            {
+                continue;
+            }
+            let live: bool = connection.query_row(
+                &format!(
+                    "SELECT EXISTS(SELECT 1 FROM \"{}\" WHERE id=?1 AND deleted_at=0)",
+                    key.target
+                ),
+                [target],
+                |row| row.get(0),
+            )?;
+            ensure!(live, crate::error::Failure::LiveReferenceConflict);
+        }
+    }
+    Ok(())
+}
+
+fn validate_live_relationships(connection: &Connection, schema: &Schema) -> Result<()> {
+    for key in &schema.foreign_keys {
+        let invalid: bool = connection.query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM \"{}\" child LEFT JOIN \"{}\" parent ON child.\"{}\"=parent.id WHERE child.deleted_at=0 AND (parent.id IS NULL OR parent.deleted_at!=0))", key.model, key.target, key.field),
+            [],
+            |row| row.get(0),
+        )?;
+        ensure!(!invalid, crate::error::Failure::LiveReferenceConflict);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod selection_tests {
     use super::*;
@@ -2801,6 +3123,101 @@ mod selection_tests {
                 now: 100,
             },
         )?)?)
+    }
+
+    #[test]
+    fn application_snapshots_hide_tombstones_without_losing_retained_state() -> Result<()> {
+        let (connection, schema) = fixture()?;
+        let retained = read_model_snapshot(&connection, &schema, SnapshotScope::Retained)?;
+        assert_eq!(
+            retained,
+            read_model_snapshot(&connection, &schema, SnapshotScope::Live)?
+        );
+        connection.execute(
+            "UPDATE links SET deleted_at=500,version=version+1 WHERE id=2",
+            [],
+        )?;
+        let deleted = read_model_snapshot(&connection, &schema, SnapshotScope::Retained)?;
+        let live = read_model_snapshot(&connection, &schema, SnapshotScope::Live)?;
+        assert_eq!(
+            deleted["links"].as_array().context("retained rows")?.len(),
+            250
+        );
+        assert_eq!(live["links"].as_array().context("live rows")?.len(), 249);
+        assert!(
+            deleted["links"]
+                .as_array()
+                .context("retained rows")?
+                .iter()
+                .any(|row| row["id"] == 2)
+        );
+        assert!(
+            live["links"]
+                .as_array()
+                .context("live rows")?
+                .iter()
+                .all(|row| row["id"] != 2)
+        );
+        assert_ne!(
+            retained, deleted,
+            "retained comparisons still detect lifecycle changes"
+        );
+        connection.execute(
+            "UPDATE links SET deleted_at=0,version=version+1 WHERE id=2",
+            [],
+        )?;
+        assert_eq!(
+            read_model_snapshot(&connection, &schema, SnapshotScope::Retained)?,
+            read_model_snapshot(&connection, &schema, SnapshotScope::Live)?,
+            "restored records return to application state",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn snapshot_scopes_fail_closed_without_silent_truncation() -> Result<()> {
+        let (connection, schema) = fixture()?;
+        connection.execute(
+            "INSERT INTO links(id,version,created_at,name,owner,active,visits,unindexed) \
+             SELECT id+250,version,created_at,name,owner,active,visits,unindexed FROM links WHERE id<=7",
+            [],
+        )?;
+        for scope in [SnapshotScope::Retained, SnapshotScope::Live] {
+            assert_eq!(
+                read_model_snapshot(&connection, &schema, scope)
+                    .unwrap_err()
+                    .to_string(),
+                "inspection_limit"
+            );
+        }
+        connection.execute("UPDATE links SET deleted_at=500 WHERE id>250", [])?;
+        assert_eq!(
+            read_model_snapshot(&connection, &schema, SnapshotScope::Retained)
+                .unwrap_err()
+                .to_string(),
+            "inspection_limit"
+        );
+        assert_eq!(
+            read_model_snapshot(&connection, &schema, SnapshotScope::Live)?["links"]
+                .as_array()
+                .context("live rows")?
+                .len(),
+            250
+        );
+        connection.execute("UPDATE links SET deleted_at=500", [])?;
+        assert_eq!(
+            read_model_snapshot(&connection, &schema, SnapshotScope::Deleted)
+                .unwrap_err()
+                .to_string(),
+            "inspection_limit"
+        );
+        assert!(
+            read_model_snapshot(&connection, &schema, SnapshotScope::Live)?["links"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        Ok(())
     }
 
     /// A soft-deleted row leaves every ordinary read, and only an explicit ask
@@ -3423,9 +3840,15 @@ mod selection_tests {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct StorageContract<'a> {
+    pub schema: &'a Schema,
+    pub domains: &'a crate::domain::Catalog,
+}
+
 pub(crate) fn effect(
     connection: &Connection,
-    schema: &Schema,
+    StorageContract { schema, domains }: StorageContract<'_>,
     scope: &str,
     request: &Request,
     instruction: &Instruction,
@@ -3491,7 +3914,7 @@ pub(crate) fn effect(
             limit,
             ..
         } => {
-            let mut predicates = vec!["id > ?1".to_string()];
+            let mut predicates = vec!["id > ?1".to_string(), "deleted_at=0".to_string()];
             let cursor = if after.empty() {
                 if record.identity.is_some() {
                     SqlValue::Blob(vec![0; 16])
@@ -3582,6 +4005,10 @@ pub(crate) fn effect(
             } else {
                 policy.check_create(operation, model, &request.context.actor, &value)?;
             }
+            // Use the same authoritative before-image and effective value as
+            // row policy. Lifecycle writes never parse a payload or bypass domains.
+            crate::domain::record(domains, record, &value)?;
+            check_live_relationships(connection, schema, model, record, change, &value)?;
             let values: Vec<SqlValue> = record
                 .fields
                 .iter()
@@ -3667,6 +4094,7 @@ pub(crate) fn effect(
                         }
                     );
                     let stamp = if deleting { request.context.now } else { 0 };
+                    ensure!(!deleting || stamp > 0, crate::error::Failure::InvalidInput);
                     let changed = connection
                         .execute(
                             &format!(
@@ -3855,7 +4283,10 @@ mod rollup_read_tests {
         let mut instruction = Instruction { kind:"select_page".into(), model:"events_daily".into(), data:json!({"predicate":json!({"kind":"all","model":"","field":"","value":"","children":[]}).to_string(),"orders":[{"model":"events_daily","field":"time","descending":false}],"after":"","limit":1}).to_string(), ..Instruction::default() };
         let first: Value = serde_json::from_str(&effect(
             &db,
-            &schema,
+            StorageContract {
+                schema: &schema,
+                domains: &crate::domain::Catalog::new(),
+            },
             "test",
             &request,
             &instruction,
@@ -3872,7 +4303,10 @@ mod rollup_read_tests {
         instruction.data = plan.to_string();
         let second: Value = serde_json::from_str(&effect(
             &db,
-            &schema,
+            StorageContract {
+                schema: &schema,
+                domains: &crate::domain::Catalog::new(),
+            },
             "test",
             &request,
             &instruction,
@@ -3889,17 +4323,31 @@ mod rollup_read_tests {
             ..Instruction::default()
         };
         assert!(
-            effect(&db, &schema, "test", &request, &write, &policy, "lookup")
-                .unwrap_err()
-                .to_string()
-                .contains("rollup_is_read_only")
+            effect(
+                &db,
+                StorageContract {
+                    schema: &schema,
+                    domains: &crate::domain::Catalog::new()
+                },
+                "test",
+                &request,
+                &write,
+                &policy,
+                "lookup"
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("rollup_is_read_only")
         );
         let mut denied = policy.clone();
         denied.operations.get_mut("lookup").unwrap().models.clear();
         assert!(
             effect(
                 &db,
-                &schema,
+                StorageContract {
+                    schema: &schema,
+                    domains: &crate::domain::Catalog::new()
+                },
                 "test",
                 &request,
                 &instruction,
@@ -3912,7 +4360,10 @@ mod rollup_read_tests {
         assert!(
             effect(
                 &db,
-                &schema,
+                StorageContract {
+                    schema: &schema,
+                    domains: &crate::domain::Catalog::new()
+                },
                 "test",
                 &request,
                 &instruction,

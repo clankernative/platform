@@ -81,7 +81,7 @@ GetReport :: [].{
 	verify_result : Str, ReportView.Detail, Str -> Try(Bool, Str)
 	verify_result = |before, view, after| {
 		row =
-			Data.snapshot(before)?
+			Data.verification_snapshot(before)?.live
 				.reports
 				.find_first(|candidate| candidate.id == view.id)
 				.map_err(|_| "report missing")?

@@ -1,8 +1,9 @@
 # CI compilation caches
 
 Platform CI restores two compilation caches before its first Cargo command.
-Every gate retains the full verification recipe's checks. Cache hits are build
-inputs, never verification receipts or a reason to skip a step.
+Compilation cache hits are build inputs and never a reason to skip verification.
+The separate exact merge-group receipt admission described below can reuse a
+complete full outcome on the identical landed main commit.
 
 `Swatinem/rust-cache` restores Cargo registry downloads, Git dependencies and
 compiled dependency outputs in the workspace target directory. Workspace crate
@@ -27,8 +28,9 @@ The repository's `rust-toolchain.toml` remains the Rust version authority.
 
 The dependency cache is saved only after a successful job. Compiler outputs can
 be cached as compilation finishes, regardless of later test outcomes. Neither
-cache stores runtime state, exported installations, fixture artifacts or completed
-verification receipts. Isolated builds retain their cleared environment, private
+cache stores runtime state, exported installations or completed verification
+receipts. Separate source-bound caches below store completed fixture and test
+compiler outputs. Isolated builds retain their cleared environment, private
 target directories and offline Cargo inputs; they receive no cache service token
 or compiler wrapper from the outer job.
 
@@ -59,7 +61,7 @@ Use complete hosted verification runs on fresh runners:
    compiler, manifests, lockfile, features and profile fixed.
 
 For each run, record its exact head, runner/toolchain, all verification outcomes,
-total verify job duration, initial Cargo preparation, the 28 recipe step timings,
+total verify job duration, initial Cargo preparation, the 29 recipe step timings,
 cache restore/save durations and archive size. The compiler cache action publishes
 hits, misses, non-cacheable requests, cache errors and read/write timings in its
 post-job log and summary. An idle server restart can reset these counters; an
@@ -73,8 +75,19 @@ gate establishes correctness; a cache hit rate alone does not establish faster C
 
 ## Hosted verification campaigns
 
+The secret scan and dependency audit finish before CI starts ordinary compilation
+or looks up a main-push queue receipt. If either fails, preparation and runtime
+campaigns do not allocate runners. The required `verify` job runs its failure
+guard on Ubuntu; skipped preparation cannot produce a successful full check.
+This avoids spending macOS compilation time on already-rejected changes. Passing
+runs retain the full gate and incur the initial security-check wait.
+
+Hosted `diagnostics` remains independent of those checks so maintainers can
+generate and review a dependency repair when the original lockfile fails audit.
+Diagnostics never qualify a source or replace any required check.
+
 CI preparation runs two jobs concurrently. The inputs job retains the full
-recipe's formatting, CLI, twenty fixture builds and lint checks, including all
+recipe's formatting, CLI, twenty-one fixture builds and lint checks, including all
 fixture dependency ordering. The tests job compiles the ordinary complete Cargo
 test package and target graph once, then runs documentation tests. The preparation
 join requires both exact current-run manifests, disjoint and exhaustive effects,
@@ -95,7 +108,7 @@ The required `verify` job fails if preparation or any campaign fails or skips.
 Its native admission also requires all seven receipts from the same checkout,
 source snapshot, workflow, run attempt, host and workspace path, plus unchanged
 test executable hashes and admitted fixtures. Missing test targets, effects or
-timings prevent a full receipt. It joins the original 28 steps and twenty fixtures;
+timings prevent a full receipt. It joins all 29 steps and twenty-one fixtures;
 the combined workspace campaign retains its original 12,600-second budget.
 Rerun the entire workflow when retrying: partial job reruns cannot mix prepared
 artifacts and successful receipts from different attempts.
@@ -116,8 +129,91 @@ preparation job, including the two-part join, queues and every artifact transfer
 Include both preparation jobs in runner minutes. The parts are run-scoped outputs,
 not cross-run caches; no runtime outcome is reused by this change.
 
-References: [Cargo cache action](https://github.com/Swatinem/rust-cache),
+## Completed build outputs
+
+Preparation jobs use separate `day2-fixtures-v1` and `day2-test-outputs-v1`
+GitHub caches. Their immutable action pin and content keys include the host,
+architecture, workflow and complete reviewed source directories, manifests,
+lockfile and toolchain inputs. They have no prefix restore keys or commit/run
+IDs. Each selected preparation job saves its own outputs only on job success;
+the dependency and compiler cache namespaces remain unchanged.
+
+The fixture cache contains only content-addressed artifact directories and the
+existing source-snapshot fixture index. That index is admitted against its
+format, scope and current full input snapshot. Each selected artifact is loaded
+again, its identity checked, and complete successful artifact verification
+required. Missing, stale or invalid entries rebuild through the original fixture
+recipe. CLI checks, formatting and lint still execute.
+
+The test cache contains completed ordinary test harnesses, the normal programs
+Cargo builds for integration tests, and their compilation manifest, without run
+receipts or runtime state. Cargo’s authoritative compiler messages and fresh
+metadata must close both inventories. Supporting programs are cached separately
+from Cargo’s ordinary output directory; only admitted programs are restored to
+the exact `CARGO_BIN_EXE_*` paths with executable permissions preserved. The
+current-run preparation join and every campaign re-admit their byte digests. Native admission checks the
+current full source snapshot, embedded workflow, canonical workspace, host and
+architecture, actual Rust/Cargo/C compiler versions, compiler/profile environment
+digest and repository Cargo configuration. Fresh Cargo metadata must match every
+default target and package directory. Every executable must be unique, regular,
+within the ordinary Cargo output directory and match its recorded byte digest.
+An unavailable or invalid cache compiles the original complete target graph.
+Valid outputs produce a new current-run inventory and preparation receipt;
+documentation tests and all seven runtime campaigns execute fresh. Source changes
+invalidate the completed-output proof. No source timestamps are rewritten to
+claim Cargo freshness, and isolated/private-target builds remain uncached.
+
+These caches can reduce repeated compilation on unchanged sources, including
+queue/push checkouts with the same inputs. A small source edit may still rebuild
+the completed outputs; the existing library/compiler cache handles matching
+compilation requests. Measure complete cold/warm runs, a nonfunctional Rust edit
+and restored-tree final qualification in one cache scope before reporting a
+speedup. Retain archive sizes, save/restore costs, current-source admission,
+coverage, compiler counters and complete pipeline latency and runner work.
+
+References: [Completed output cache action](https://github.com/actions/cache/blob/0057852bfaa89a56745cba8c7296529d2fc39830/README.md),
+[Cargo cache action](https://github.com/Swatinem/rust-cache),
 [sccache action](https://github.com/mozilla-actions/sccache-action),
 [Rust cache coverage](https://github.com/mozilla/sccache/blob/main/docs/Rust.md),
 [Pinned server idle behavior](https://github.com/mozilla/sccache/blob/v0.18.0/src/server.rs),
 [GitHub cache scope](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching).
+
+## Exact merge-group receipt reuse
+
+PR and merge-group workflows always execute the complete gate. A main push first
+looks for the latest merge-group run of this repository's active `ci.yml` workflow
+at the exact checked-out SHA and tree. A different SHA with an identical tree is
+insufficient. Authenticated GitHub metadata must show a completed successful
+latest attempt, all ten successful required jobs and their actual GitHub Actions
+app15368 checks, and its unexpired immutable full-receipt artifact. This job has
+only contents, Actions and checks read permissions; it accepts no caller-selected
+repository, URL, workflow, run, artifact or source override.
+
+The small receipt artifact carries both preparation parts, prepared inventory,
+compiler-input manifest, seven-campaign join and original full verification
+receipt. Native admission requires the exact current snapshot and Roc/CI workflow,
+host/architecture, canonical workspace, compiler/config/profile identity, fresh
+Cargo metadata for all default targets and supporting programs, exhaustive fixture
+and campaign evidence, original step timings and campaign budgets. Downloaded
+proof is read as confined bounded JSON; its executables are never downloaded or
+run. The authenticated latest run is checked again after artifact admission.
+
+Missing, expired, foreign, incomplete, changed or unavailable proof selects
+ordinary complete preparation and all seven fresh campaigns. A setup, lookup,
+download, admission or reuse-artifact upload failure also selects that fallback.
+The required `verify` job succeeds only after either the full preparation and all
+campaigns succeed, or the exact receipt-admission job succeeds and its proof is
+transported. The other nine required checks always run on the current source.
+
+Reused evidence is named `reused-trusted-merge-group-full` and retains the original
+run/attempt and all original receipts alongside the current run identity. It
+explicitly records that this main push did not execute fresh runtime campaigns;
+it is not a new full execution or a cross-source performance result. Actual
+end-to-end reuse must be observed after an explicitly user-queued eligible PR
+lands. A passing PR full gate or synthetic admission test alone does not establish
+that runtime receipt. No unrelated merge is needed to qualify the implementation.
+
+The [workflow-run API](https://docs.github.com/en/rest/actions/workflow-runs),
+[artifact API](https://docs.github.com/en/rest/actions/artifacts) and pinned
+[artifact download action](https://github.com/actions/download-artifact/tree/d3f86a106a0bac45b974a628896c90dbdf5c8093)
+provide the authenticated metadata and cross-run artifact transport.

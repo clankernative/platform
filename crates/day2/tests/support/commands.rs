@@ -69,11 +69,7 @@ impl World {
         anyhow::bail!("invocation did not complete")
     }
     pub fn properties(&self) -> Result<()> {
-        day2::properties::require(
-            self.runtime.artifact(),
-            &self.runtime.inspect()?,
-            &self.directory.path().join("properties"),
-        )?;
+        day2::properties::require(&self.runtime, &self.directory.path().join("properties"))?;
         Ok(())
     }
     pub fn change_policy(&self, change: impl FnOnce(&mut day2::authority::Policy)) -> Result<()> {
