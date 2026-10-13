@@ -215,9 +215,17 @@ fn admit_candidate(candidate: &Candidate, current: &Identity, tree: &str) -> Res
             "all ten app-pinned checks must bind to the actual successful jobs"
         );
     }
-    let mac_job = jobs.iter().find(|job|job["name"] == "verify-mac-compatibility").context("native Mac job required")?;
-    let labels = mac_job["labels"].as_array().context("actual Mac runner labels required")?;
-    ensure!(labels.iter().any(|label|label == "macos-15"),"native Mac runner job required");
+    let mac_job = jobs
+        .iter()
+        .find(|job| job["name"] == "verify-mac-compatibility")
+        .context("native Mac job required")?;
+    let labels = mac_job["labels"]
+        .as_array()
+        .context("actual Mac runner labels required")?;
+    ensure!(
+        labels.iter().any(|label| label == "macos-15"),
+        "native Mac runner job required"
+    );
     let artifact = &candidate.artifact;
     number(artifact, "id")?;
     ensure!(
@@ -391,9 +399,12 @@ fn admit_full(
             "queue inventory must cover all current default targets and supporting programs"
         );
     }
-    ensure!(expected.host == "linux" && expected.architecture == "x86_64","Linux portable full origin required");
-    super::mac::admit(&joined.mac,&expected,mac_snapshot,compiler,targets)?;
-    let timings = admit_join(&prepared, &joined.shards,Some(&joined.mac))?;
+    ensure!(
+        expected.host == "linux" && expected.architecture == "x86_64",
+        "Linux portable full origin required"
+    );
+    super::mac::admit(&joined.mac, &expected, mac_snapshot, compiler, targets)?;
+    let timings = admit_join(&prepared, &joined.shards, Some(&joined.mac))?;
     let effects: BTreeSet<_> = timings.keys().cloned().collect();
     ensure!(
         joined.prepared_digest == digest(&serde_json::to_vec(&prepared)?)
@@ -442,7 +453,7 @@ pub(in super::super) fn admit(root: &Path, snapshot: &str) -> Result<Value> {
         &build_identity(root, snapshot)?,
         &compiler_targets(root)?,
         &files,
-        &super::super::verification_snapshot_for(root,"verify","macos","aarch64")?,
+        &super::super::verification_snapshot_for(root, "verify", "macos", "aarch64")?,
     )?;
     // A newer failed/in-progress attempt invalidates an earlier success. Recheck
     // authenticated metadata after artifact admission, never an older attempt URL.
@@ -454,9 +465,11 @@ pub(in super::super) fn admit(root: &Path, snapshot: &str) -> Result<Value> {
         latest == candidate.run,
         "merge-group run changed during admission"
     );
-    let latest_candidate = self::candidate(root,&current)?;
-    ensure!(serde_json::to_value(&latest_candidate)? == serde_json::to_value(&candidate)?,
-        "latest origin jobs/checks/artifact changed during admission");
+    let latest_candidate = self::candidate(root, &current)?;
+    ensure!(
+        serde_json::to_value(&latest_candidate)? == serde_json::to_value(&candidate)?,
+        "latest origin jobs/checks/artifact changed during admission"
+    );
     ensure!(
         hosted_main(root, &super::super::verification_snapshot(root, "verify")?)? == current,
         "current source changed during receipt admission"
@@ -575,7 +588,8 @@ mod tests {
 
     fn full() -> Result<Full> {
         let mut current = sample_identity();
-        current.host = "linux".into(); current.architecture = "x86_64".into();
+        current.host = "linux".into();
+        current.architecture = "x86_64".into();
         let candidate = metadata(&current);
         let mut inputs = sample_part("inputs")?;
         for id in inputs.fixtures.values_mut() {
@@ -584,10 +598,16 @@ mod tests {
         inputs.identity = serde_json::from_value(serde_json::to_value(&current)?)?;
         let mut tests = sample_part("tests")?;
         tests.identity = serde_json::from_value(serde_json::to_value(&current)?)?;
-        for (_,target,kind) in super::super::auxiliary_targets("linux") {
-            tests.auxiliaries.push(Binary { package:"day2-sandbox".into(), target:target.clone(), kind,
-                directory:"crates/day2-sandbox".into(), executable:program_output(&target),
-                digest:format!("sha256:{}","c".repeat(64)), permissions:0o755 });
+        for (_, target, kind) in super::super::auxiliary_targets("linux") {
+            tests.auxiliaries.push(Binary {
+                package: "day2-sandbox".into(),
+                target: target.clone(),
+                kind,
+                directory: "crates/day2-sandbox".into(),
+                executable: program_output(&target),
+                digest: format!("sha256:{}", "c".repeat(64)),
+                permissions: 0o755,
+            });
         }
         // A supporting program is separate from its test harness and required by
         // the integration-test package; it must never enlarge campaign selections.
@@ -605,10 +625,19 @@ mod tests {
                 permissions: 0o755,
             });
         }
-        for (package,target,kind) in [("day2-control","control_integration","test"),("xtask","xtask","bin")] {
-            tests.binaries.push(Binary { package:package.into(),target:target.into(),kind:vec![kind.into()],
-                directory:format!("crates/{package}").into(),executable:format!("target/debug/deps/{target}").into(),
-                digest:String::new(),permissions:0o755 });
+        for (package, target, kind) in [
+            ("day2-control", "control_integration", "test"),
+            ("xtask", "xtask", "bin"),
+        ] {
+            tests.binaries.push(Binary {
+                package: package.into(),
+                target: target.into(),
+                kind: vec![kind.into()],
+                directory: format!("crates/{package}").into(),
+                executable: format!("target/debug/deps/{target}").into(),
+                digest: String::new(),
+                permissions: 0o755,
+            });
         }
         tests.programs.push(Binary {
             package: "day2".into(),
@@ -636,7 +665,7 @@ mod tests {
             rustc: "rust\nhost: x86_64-unknown-linux-gnu".into(),
             cargo: "cargo".into(),
             cc: "cc".into(),
-            environment:format!("sha256:{}","d".repeat(64)),
+            environment: format!("sha256:{}", "d".repeat(64)),
             cargo_configuration: BTreeMap::new(),
             ci_workflow: "ci".into(),
         };
@@ -646,9 +675,10 @@ mod tests {
             programs: prepared.programs.clone(),
             auxiliaries: prepared.auxiliaries.clone(),
         };
-        let mac = super::super::mac::tests::sample(&prepared,&compiler)?;
+        let mac = super::super::mac::tests::sample(&prepared, &compiler)?;
         let shards: Vec<_> = SHARDS
-            .iter().filter(|shard|!["isolated-build","installation-build"].contains(shard))
+            .iter()
+            .filter(|shard| !["isolated-build", "installation-build"].contains(shard))
             .map(|shard| Receipt {
                 prepared_digest: digest(&serde_json::to_vec(&prepared).unwrap()),
                 shard: (*shard).into(),
@@ -657,7 +687,7 @@ mod tests {
                 binaries: expected_binaries(&prepared, shard),
             })
             .collect();
-        let timings = admit_join(&prepared, &shards,Some(&mac))?;
+        let timings = admit_join(&prepared, &shards, Some(&mac))?;
         let joined = json!({"identity":current,"prepared_digest":digest(&serde_json::to_vec(&prepared)?),
             "shards":shards,"mac":mac,"effects":timings.keys().collect::<Vec<_>>(),"timings_ms":timings,"timing_scope":"admitted work"});
         let files = [
@@ -681,7 +711,8 @@ mod tests {
                 .collect(),
             members: prepared
                 .binaries
-                .iter().chain(&prepared.auxiliaries)
+                .iter()
+                .chain(&prepared.auxiliaries)
                 .map(|b| (b.package.clone(), (b.package.clone(), b.directory.clone())))
                 .collect(),
         };
@@ -707,15 +738,46 @@ mod tests {
             files,
         } = full()?;
         admit_candidate(&candidate, &current, "tree")?;
-        admit_full(&candidate, &current, &compiler, &targets, &files,"mac-snapshot")?;
+        admit_full(
+            &candidate,
+            &current,
+            &compiler,
+            &targets,
+            &files,
+            "mac-snapshot",
+        )?;
         for (name, pointer, replacement) in [
             ("ci-prepared.json", "/identity/checkout", json!("foreign")),
-            ("ci-verification.json","/mac/prepared/identity/source_identity",json!("foreign")),
-            ("ci-verification.json","/mac/prepared/identity/attempt",json!("2")),
-            ("ci-verification.json","/mac/prepared/identity/host",json!("linux")),
-            ("ci-verification.json","/mac/compiler/snapshot",json!("foreign")),
-            ("ci-verification.json","/mac/cases/0/status",json!("skipped")),
-            ("ci-verification.json","/mac/campaigns/0/prepared_digest",json!("foreign")),
+            (
+                "ci-verification.json",
+                "/mac/prepared/identity/source_identity",
+                json!("foreign"),
+            ),
+            (
+                "ci-verification.json",
+                "/mac/prepared/identity/attempt",
+                json!("2"),
+            ),
+            (
+                "ci-verification.json",
+                "/mac/prepared/identity/host",
+                json!("linux"),
+            ),
+            (
+                "ci-verification.json",
+                "/mac/compiler/snapshot",
+                json!("foreign"),
+            ),
+            (
+                "ci-verification.json",
+                "/mac/cases/0/status",
+                json!("skipped"),
+            ),
+            (
+                "ci-verification.json",
+                "/mac/campaigns/0/prepared_digest",
+                json!("foreign"),
+            ),
             (
                 "ci-preparation-inputs.json",
                 "/identity/attempt",
@@ -751,20 +813,48 @@ mod tests {
             let mut invalid = files.clone();
             *invalid.get_mut(name).unwrap().pointer_mut(pointer).unwrap() = replacement;
             assert!(
-                admit_full(&candidate, &current, &compiler, &targets, &invalid,"mac-snapshot").is_err(),
+                admit_full(
+                    &candidate,
+                    &current,
+                    &compiler,
+                    &targets,
+                    &invalid,
+                    "mac-snapshot"
+                )
+                .is_err(),
                 "{name}{pointer}"
             );
         }
         let mut incomplete = files.clone();
         incomplete.remove("verification.json");
-        assert!(admit_full(&candidate, &current, &compiler, &targets, &incomplete,"mac-snapshot").is_err());
+        assert!(
+            admit_full(
+                &candidate,
+                &current,
+                &compiler,
+                &targets,
+                &incomplete,
+                "mac-snapshot"
+            )
+            .is_err()
+        );
         let mut changed = targets;
         changed.tests.insert((
             "day2".into(),
             "new-default-target".into(),
             vec!["test".into()],
         ));
-        assert!(admit_full(&candidate, &current, &compiler, &changed, &files,"mac-snapshot").is_err());
+        assert!(
+            admit_full(
+                &candidate,
+                &current,
+                &compiler,
+                &changed,
+                &files,
+                "mac-snapshot"
+            )
+            .is_err()
+        );
         Ok(())
     }
 }

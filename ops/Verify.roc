@@ -150,7 +150,12 @@ Verify :: [].{
 		_ = Capability.call!("verify-mac-prepared", "{}", host!)?
 		_ = Capability.call!("verify-mac-native", "{}", host!)?
 		for suite in ["isolated-build", "installation-build"] {
-			_ = Capability.call!("verify-prebuilt-tests", Json.to_str({ suite: suite, budget_seconds: 1800.U64 }), host!)?
+			_ =
+				Capability.call!(
+					"verify-prebuilt-tests",
+					Json.to_str({ suite: suite, budget_seconds: 1800.U64 }),
+					host!,
+				)?
 		}
 		Capability.call!("verify-mac-receipt", "{}", host!)
 	}

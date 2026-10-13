@@ -32,8 +32,8 @@ const SHARDS: &[&str] = &[
     "installation-build",
 ];
 
-pub(super) mod reuse;
 pub(super) mod mac;
+pub(super) mod reuse;
 
 #[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -235,7 +235,6 @@ fn admit_executable(path: &Path, expected: &str, permissions: u32) -> Result<()>
     );
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
         ensure!(
             permissions & 0o111 != 0
                 && permissions & !0o777 == 0
@@ -1194,9 +1193,20 @@ fn validate_receipt(prepared: &Prepared, receipt: &Receipt, shard: &str) -> Resu
     Ok(())
 }
 
-fn admit_join(prepared: &Prepared, receipts: &[Receipt], mac: Option<&mac::Proof>) -> Result<BTreeMap<String, u64>> {
-    ensure!(prepared.identity.host != "linux" || mac.is_some(), "Linux full verification requires real Mac domain");
-    let selected: Vec<_> = SHARDS.iter().copied().filter(|shard|mac.is_none() || !["isolated-build","installation-build"].contains(shard)).collect();
+fn admit_join(
+    prepared: &Prepared,
+    receipts: &[Receipt],
+    mac: Option<&mac::Proof>,
+) -> Result<BTreeMap<String, u64>> {
+    ensure!(
+        prepared.identity.host != "linux" || mac.is_some(),
+        "Linux full verification requires real Mac domain"
+    );
+    let selected: Vec<_> = SHARDS
+        .iter()
+        .copied()
+        .filter(|shard| mac.is_none() || !["isolated-build", "installation-build"].contains(shard))
+        .collect();
     ensure!(
         receipts.len() == selected.len(),
         "exact complete native shard receipt set required"
@@ -1222,8 +1232,11 @@ fn admit_join(prepared: &Prepared, receipts: &[Receipt], mac: Option<&mac::Proof
     }
     if let Some(proof) = mac {
         for receipt in mac::campaigns(proof) {
-            for (step,elapsed) in &receipt.timings_ms {
-                ensure!(timings.insert(step.clone(),*elapsed).is_none(),"duplicate native campaign effect");
+            for (step, elapsed) in &receipt.timings_ms {
+                ensure!(
+                    timings.insert(step.clone(), *elapsed).is_none(),
+                    "duplicate native campaign effect"
+                );
             }
         }
     }
@@ -1264,21 +1277,39 @@ pub(super) fn join(
     root: &Path,
     prepared: &Prepared,
 ) -> Result<(BTreeSet<String>, BTreeMap<String, u64>)> {
-    ensure!(prepared.identity.host == "linux" && prepared.identity.architecture == "x86_64",
-        "hosted full composition requires Linux portable domain");
+    ensure!(
+        prepared.identity.host == "linux" && prepared.identity.architecture == "x86_64",
+        "hosted full composition requires Linux portable domain"
+    );
     let mac_path = root.join(mac::PATH);
-    ensure!(mac_path.canonicalize()? == mac_path && fs::symlink_metadata(&mac_path)?.is_file()
-        && fs::metadata(&mac_path)?.len() <= 1024*1024,"bounded regular native Mac proof required");
+    ensure!(
+        mac_path.canonicalize()? == mac_path
+            && fs::symlink_metadata(&mac_path)?.is_file()
+            && fs::metadata(&mac_path)?.len() <= 1024 * 1024,
+        "bounded regular native Mac proof required"
+    );
     let mac: mac::Proof = day2::json::decode(&fs::read(&mac_path)?)?;
-    mac::admit(&mac,&prepared.identity,
-        &super::verification_snapshot_for(root,"verify","macos","aarch64")?,
-        &build_identity(root,&prepared.identity.snapshot)?,&compiler_targets(root)?)?;
-    let portable: Vec<_> = SHARDS.iter().filter(|shard|!["isolated-build","installation-build"].contains(shard)).collect();
+    mac::admit(
+        &mac,
+        &prepared.identity,
+        &super::verification_snapshot_for(root, "verify", "macos", "aarch64")?,
+        &build_identity(root, &prepared.identity.snapshot)?,
+        &compiler_targets(root)?,
+    )?;
+    let portable: Vec<_> = SHARDS
+        .iter()
+        .filter(|shard| !["isolated-build", "installation-build"].contains(shard))
+        .collect();
     let files = fs::read_dir(root.join(RESULTS))?.collect::<std::io::Result<Vec<_>>>()?;
-    ensure!(files.len() == portable.len(), "exact five portable receipts required");
+    ensure!(
+        files.len() == portable.len(),
+        "exact five portable receipts required"
+    );
     let mut receipts = Vec::new();
     for shard in portable {
-        receipts.push(day2::json::decode(&fs::read(root.join(RESULTS).join(format!("{shard}.json")))?)?);
+        receipts.push(day2::json::decode(&fs::read(
+            root.join(RESULTS).join(format!("{shard}.json")),
+        )?)?);
     }
     let timings = admit_join(prepared, &receipts, Some(&mac))?;
     let passed: BTreeSet<_> = timings.keys().cloned().collect();

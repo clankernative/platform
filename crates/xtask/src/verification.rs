@@ -327,7 +327,7 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
                 tests(root, &campaign.suite, &fixtures, budget)?;
             }
             if recipe == "verify-mac" {
-                mac_campaigns.insert(campaign.suite.clone(),executed_binaries.clone());
+                mac_campaigns.insert(campaign.suite.clone(), executed_binaries.clone());
             }
             ensure_stable(root, recipe, &snapshot)?;
             let step = format!("test-{}", campaign.suite);
@@ -351,20 +351,44 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
                 "test-binaries".into()
             }
             "verify-mac-prepared" => {
-                ensure!(recipe == "verify-mac" && parameters.is_empty(), "closed native Mac preparation required");
-                prepared = Some(shards::mac::prepare(root,&snapshot,&fixtures,&passed,&timings.steps_ms)?);
+                ensure!(
+                    recipe == "verify-mac" && parameters.is_empty(),
+                    "closed native Mac preparation required"
+                );
+                prepared = Some(shards::mac::prepare(
+                    root,
+                    &snapshot,
+                    &fixtures,
+                    &passed,
+                    &timings.steps_ms,
+                )?);
                 return Ok(json!({}));
             }
             "verify-mac-native" => {
-                ensure!(recipe == "verify-mac" && parameters.is_empty(), "closed native Mac cases required");
-                shards::mac::focused(root,prepared.as_ref().context("Mac preparation required")?,&fixtures)?;
+                ensure!(
+                    recipe == "verify-mac" && parameters.is_empty(),
+                    "closed native Mac cases required"
+                );
+                shards::mac::focused(
+                    root,
+                    prepared.as_ref().context("Mac preparation required")?,
+                    &fixtures,
+                )?;
                 "test-mac-native".into()
             }
             "verify-mac-receipt" => {
-                ensure!(recipe == "verify-mac" && parameters.is_empty(), "closed native Mac receipt required");
-                ensure_stable(root,recipe,&snapshot)?;
-                shards::mac::finish(root,prepared.take().context("Mac preparation required")?,
-                    &passed,&timings.steps_ms,&mac_campaigns)?;
+                ensure!(
+                    recipe == "verify-mac" && parameters.is_empty(),
+                    "closed native Mac receipt required"
+                );
+                ensure_stable(root, recipe, &snapshot)?;
+                shards::mac::finish(
+                    root,
+                    prepared.take().context("Mac preparation required")?,
+                    &passed,
+                    &timings.steps_ms,
+                    &mac_campaigns,
+                )?;
                 return Ok(json!({}));
             }
             "verify-test-docs" => {
@@ -806,8 +830,12 @@ fn verification_snapshot_for(
 
 fn verification_sources(root: &Path, recipe: &str) -> Result<BTreeMap<String, String>> {
     let mut hashes = build_native::platform_sources(root)?;
-    for pin in [".github/workflows/ci.yml", ".github/temporal.sha256", ".github/temporal-linux.sha256"] {
-        hashes.insert(pin.into(),digest(&fs::read(root.join(pin))?));
+    for pin in [
+        ".github/workflows/ci.yml",
+        ".github/temporal.sha256",
+        ".github/temporal-linux.sha256",
+    ] {
+        hashes.insert(pin.into(), digest(&fs::read(root.join(pin))?));
     }
     let mut sources = vec![
         ("sdk", root.join("sdk")),
