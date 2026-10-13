@@ -627,12 +627,14 @@ jobs:
       - run: cargo run --locked -p xtask -- source-check
       - run: cargo run --locked -p xtask -- bootstrap
       - run: 'cargo test --locked -p xtask -- formatter_bootstrap::tests:: formatting::tests:: --test-threads=1'
-      - run: cargo run --locked -p xtask -- build-formatter
       - run: cargo fmt --all
       - run: git diff --binary > /tmp/day2-linux-formatter-format.patch
       - run: target/debug/xtask architecture-inventory > /tmp/day2-linux-formatter-native-inventory.json
       - run: target/debug/xtask architecture-dependencies > /tmp/day2-linux-formatter-dependencies.json
       - run: target/debug/xtask architecture-proof-inventory > /tmp/day2-linux-formatter-proofs.json
+      - name: Observe bounded native Linux formatter build
+        timeout-minutes: 10
+        run: cargo run --locked -p xtask -- build-formatter
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: ${{ always() }}
         with:
