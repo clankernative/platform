@@ -16,6 +16,8 @@ const MAX_BINARY_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_LOG_BYTES: u64 = 16 * 1024 * 1024;
 const BUILD_BUDGET: Duration = Duration::from_secs(3600);
 const LINUX_ADDRESS_SPACE_BYTES: u64 = 12 * 1024 * 1024 * 1024;
+const LINUX_GROUP_RSS_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+const LINUX_DISK_HEADROOM_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const ZIG_SHA256: &str = "b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489";
 const ZIG_LINUX_SHA256: &str =
     "70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00";
@@ -153,6 +155,10 @@ impl Pin {
                 "program": "/usr/bin/prlimit",
                 "address_space_bytes_per_process": LINUX_ADDRESS_SPACE_BYTES,
                 "core_bytes": 0,
+                "sampled_process_group_rss_bytes": LINUX_GROUP_RSS_BYTES,
+                "minimum_available_disk_bytes": LINUX_DISK_HEADROOM_BYTES,
+                "resource_sampling_ms": 500,
+                "sampling_is_not_kernel_process_tree_confinement": true,
             });
         }
         recipe
@@ -272,6 +278,66 @@ fn compiler_command(program: &Path, scratch: &Path, pin: &Pin) -> Command {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn status_group_rss(status: &str, group: u32) -> Result<Option<u64>> {
+    let Some(groups) = status.lines().find_map(|line| line.strip_prefix("NSpgid:")) else {
+        return Ok(None);
+    };
+    let actual: u32 = groups.split_whitespace().next()
+        .context("process group missing")?.parse()?;
+    if actual != group {
+        return Ok(None);
+    }
+    let Some(rss) = status.lines().find_map(|line| line.strip_prefix("VmRSS:")) else {
+        ensure!(status.lines().any(|line| line.starts_with("State:") && line.contains("Z (zombie)")),
+            "live formatter process RSS unavailable");
+        return Ok(Some(0));
+    };
+    let mut fields = rss.split_whitespace();
+    let kibibytes: u64 = fields.next().context("process RSS missing")?.parse()?;
+    ensure!(fields.next() == Some("kB") && fields.next().is_none(), "unsupported process RSS units");
+    Ok(Some(kibibytes.checked_mul(1024).context("process RSS overflow")?))
+}
+
+#[cfg(target_os = "linux")]
+fn group_rss(group: u32) -> Result<(u64, bool)> {
+    let mut total = 0u64;
+    let mut parent_observed = false;
+    for entry in fs::read_dir("/proc")? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(pid) = name.to_str().and_then(|value| value.parse::<u32>().ok()) else {
+            continue;
+        };
+        let status = match fs::read_to_string(entry.path().join("status")) {
+            Ok(status) => status,
+            Err(error) if [std::io::ErrorKind::NotFound, std::io::ErrorKind::PermissionDenied]
+                .contains(&error.kind()) => continue,
+            Err(error) => return Err(error.into()),
+        };
+        if let Some(rss) = status_group_rss(&status, group)? {
+            total = total.checked_add(rss).context("formatter process-group RSS overflow")?;
+            parent_observed |= pid == group;
+        }
+    }
+    Ok((total, parent_observed))
+}
+
+#[cfg(target_os = "linux")]
+fn available_disk(scratch: &Path) -> Result<u64> {
+    let output = command("/usr/bin/df", scratch)
+        .args(["--output=avail", "-B1"])
+        .arg(scratch)
+        .output()?;
+    ensure!(output.status.success() && output.stdout.len() <= 4096, "formatter disk observation");
+    let output = String::from_utf8(output.stdout)?;
+    let mut fields = output.split_whitespace();
+    ensure!(fields.next() == Some("Avail"), "unsupported disk observation header");
+    let bytes = fields.next().context("available disk missing")?.parse()?;
+    ensure!(fields.next().is_none(), "ambiguous disk observation");
+    Ok(bytes)
+}
+
 fn run(scratch: &Path, phase: &str, command: &mut Command, budget: Duration) -> Result<()> {
     let logs = scratch.join("logs");
     fs::create_dir_all(&logs)?;
@@ -282,11 +348,23 @@ fn run(scratch: &Path, phase: &str, command: &mut Command, budget: Duration) -> 
         .tempfile_in(&logs)?
         .keep()?;
     println!("Formatter: {phase}; retained log {}", path.display());
+    #[cfg(target_os = "linux")]
+    let (mut telemetry, telemetry_path) = tempfile::Builder::new()
+        .prefix("resources-").suffix(".jsonl").tempfile_in(&logs)?.keep()?;
+    #[cfg(target_os = "linux")]
+    {
+        let disk = available_disk(scratch)?;
+        writeln!(telemetry, "{}", serde_json::json!({"phase":phase,"available_disk_bytes":disk,"elapsed_ms":0}))?;
+        ensure!(disk >= LINUX_DISK_HEADROOM_BYTES, "formatter disk headroom below budget: {disk} bytes");
+        println!("Formatter resource telemetry: {}", telemetry_path.display());
+    }
     let output = log.try_clone()?;
     command.stdout(output.try_clone()?).stderr(output);
     let mut child = Supervised(command.spawn().with_context(|| phase.to_string())?);
     let started = Instant::now();
     let mut progress = Instant::now();
+    #[cfg(target_os = "linux")]
+    let mut resources = Instant::now();
     loop {
         ensure!(
             started.elapsed() <= budget,
@@ -318,6 +396,23 @@ fn run(scratch: &Path, phase: &str, command: &mut Command, budget: Duration) -> 
                 );
             }
             return Ok(());
+        }
+        #[cfg(target_os = "linux")]
+        if resources.elapsed() >= Duration::from_millis(500) {
+            let (rss, observed) = group_rss(child.0.id())?;
+            if !observed {
+                ensure!(child.0.try_wait()?.is_some(), "live formatter process group could not be observed");
+                continue;
+            }
+            let disk = available_disk(scratch)?;
+            writeln!(telemetry, "{}", serde_json::json!({
+                "phase":phase,"elapsed_ms":started.elapsed().as_millis(),
+                "sampled_group_rss_bytes":rss,"available_disk_bytes":disk,
+            }))?;
+            ensure!(telemetry.metadata()?.len() <= MAX_LOG_BYTES, "formatter telemetry byte budget");
+            ensure!(rss <= LINUX_GROUP_RSS_BYTES, "formatter sampled process-group RSS exceeded budget: {rss} bytes");
+            ensure!(disk >= LINUX_DISK_HEADROOM_BYTES, "formatter disk headroom below budget: {disk} bytes");
+            resources = Instant::now();
         }
         if progress.elapsed() >= Duration::from_secs(60) {
             println!(
@@ -875,6 +970,36 @@ mod tests {
         assert_eq!(core.split_whitespace().collect::<Vec<_>>(),
             ["Max", "core", "file", "size", "0", "0", "bytes"]);
         assert_eq!(linux.recipe()["process_limits"]["address_space_bytes_per_process"], LINUX_ADDRESS_SPACE_BYTES);
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn process_group_observation_rejects_missing_units_overflow_and_foreign_groups() -> Result<()> {
+        let status = "Name:\tzig with spaces)\nNSpgid:\t42\t7\nVmRSS:\t123 kB\n";
+        assert_eq!(status_group_rss(status, 42)?, Some(123 * 1024));
+        assert_eq!(status_group_rss(status, 7)?, None);
+        assert!(status_group_rss("NSpgid:\t42\nVmRSS:\t123 bytes\n", 42).is_err());
+        assert!(status_group_rss("NSpgid:\t42\nVmRSS:\t18446744073709551615 kB\n", 42).is_err());
+        assert!(status_group_rss("NSpgid:\t42\nState:\tR (running)\n", 42).is_err());
+        assert_eq!(status_group_rss("NSpgid:\t42\nState:\tZ (zombie)\n", 42)?, Some(0));
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn resource_observation_measures_the_actual_owned_child_group_and_disk() -> Result<()> {
+        let scratch = tempfile::tempdir()?;
+        let child = Supervised(command("/usr/bin/sleep", scratch.path()).arg("2").spawn()?);
+        let started = Instant::now();
+        loop {
+            let (rss, observed) = group_rss(child.0.id())?;
+            if observed && rss > 0 { break; }
+            ensure!(started.elapsed() < Duration::from_secs(1), "owned child process observation");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(group_rss(u32::MAX)?, (0, false));
+        assert!(available_disk(scratch.path())? > 0);
         Ok(())
     }
 }
