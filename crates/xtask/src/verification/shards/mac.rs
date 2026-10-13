@@ -2,8 +2,8 @@
 //! unsupported-on-Linux build campaigns. Outcomes are fresh, never cache entries.
 use super::{
     BUILD_CACHE, Binary, BuildCache, BuildIdentity, Identity, Prepared, Receipt, Targets,
-    admit_build_cache, build_identity, compiler_targets, configure_tests, effects,
-    identity, program_output, validate_receipt,
+    admit_build_cache, build_identity, compiler_targets, configure_tests, effects, identity,
+    program_output, validate_receipt,
 };
 use crate::run_with_budget;
 use anyhow::{Context, Result, ensure};
@@ -727,8 +727,8 @@ pub(super) fn campaigns(proof: &Proof) -> &[Receipt] {
 
 #[cfg(test)]
 pub(super) mod tests {
-    use super::*;
     use super::super::expected_binaries;
+    use super::*;
     pub(in crate::verification::shards) fn sample(
         original: &Prepared,
         compiler: &BuildIdentity,
