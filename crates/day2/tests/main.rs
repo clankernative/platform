@@ -20,6 +20,7 @@ mod command_atomicity;
 mod command_recovery;
 mod command_simulation;
 mod connection_declarations;
+mod connection_use;
 mod credential_metadata;
 mod delegation;
 mod edge;

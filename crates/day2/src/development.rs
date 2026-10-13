@@ -309,7 +309,11 @@ pub fn local_policy_for(artifact: &LoadedArtifact, actor: &str) -> Result<Policy
                 observations: crate::capabilities::READS
                     .iter()
                     .copied()
-                    .chain([crate::audit::HISTORY])
+                    .chain([
+                        crate::audit::HISTORY,
+                        crate::connection_codegen::RESOLVE,
+                        crate::connection_codegen::LIST_EVENTS,
+                    ])
                     .map(Into::into)
                     .collect(),
                 effects: if operation.kind == "command" {

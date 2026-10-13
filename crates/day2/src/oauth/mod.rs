@@ -3,6 +3,7 @@ pub mod account;
 pub(crate) mod admission;
 pub(crate) mod approval_keys;
 pub(crate) mod approval_registry;
+mod calendar;
 pub(crate) mod catalog;
 pub(crate) mod clients;
 pub mod connect;
@@ -25,6 +26,7 @@ pub(crate) mod security_shell;
 pub(crate) mod shell_oidc;
 pub(crate) mod shell_transport;
 pub mod store;
+pub(crate) mod usage;
 pub(crate) mod workload;
 
 #[cfg(test)]

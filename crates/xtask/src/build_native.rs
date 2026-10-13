@@ -34,6 +34,7 @@ struct Bound {
     identities: day2::identity::Registry,
     outputs: day2::output_schema::Catalog,
     declarations: day2::registry::Catalog,
+    connections: Vec<day2::connection_declaration::ConnectionDeclaration>,
 }
 
 fn prepare(
@@ -216,6 +217,7 @@ fn data(_app: &Path, _isolated_job: Option<&Path>, prepared: &mut Prepared) -> R
         identities,
         outputs,
         declarations: day2::registry::Catalog::default(),
+        connections: Vec::new(),
     })
 }
 
@@ -270,9 +272,10 @@ fn bind(root: &Path, prepared: &mut Prepared, bound: &mut Bound) -> Result<()> {
         stage.join("registry.json"),
         serde_json::to_vec(&bound.declarations)?,
     )?;
-    for (name, source) in bound
-        .declarations
-        .modules(&bound.schema, &bound.outputs, false)?
+    for (name, source) in
+        bound
+            .declarations
+            .modules(&bound.schema, &bound.outputs, &bound.connections, false)?
     {
         fs::write(stage.join("app").join(name), source)?;
     }
@@ -313,6 +316,7 @@ fn publish(root: &Path, prepared: &mut Prepared, bound: &Bound) -> Result<PathBu
         identities,
         outputs,
         declarations,
+        connections,
     } = bound;
     let mut worker = Worker::start(&stage.join("worker"))?;
     let raw_manifest = worker.exchange(b"manifest")?;
@@ -380,12 +384,14 @@ fn publish(root: &Path, prepared: &mut Prepared, bound: &Bound) -> Result<PathBu
         artifact["credential_manifest"] =
             serde_json::to_value(day2::credential_authority::manifest(&with_declarations)?)?;
     }
-    if !declarations.connections.is_empty() {
-        artifact["connection_declarations"] =
-            serde_json::to_value(day2::connection_declaration::decode(
-                &worker.exchange(b"connection-contract")?,
-                &checked,
-            )?)?;
+    let final_connections =
+        day2::connection_declaration::decode(&worker.exchange(b"connection-contract")?, &checked)?;
+    ensure!(
+        final_connections == *connections,
+        "connection requirements changed after SDK binding"
+    );
+    if !connections.is_empty() {
+        artifact["connection_declarations"] = serde_json::to_value(connections)?;
     }
     artifact["export_manifest"] = serde_json::to_value(
         day2::operation_contract::Manifest::from_checked_artifact(&checked)?,
@@ -676,13 +682,46 @@ pub fn execute(
                 }
                 "build-bind" => {
                     ensure!(
-                        done.contains("build-app-types"),
-                        "checked callback types required"
+                        done.contains("build-connection-contract"),
+                        "checked connection metadata required"
                     );
                     bind(
                         root,
                         prepared,
                         bound.as_mut().context("bound data required")?,
+                    )?;
+                }
+                "build-connection-contract" => {
+                    ensure!(
+                        done.contains("build-app-types") && done.contains("build-host"),
+                        "checked registration inventory and pure host required"
+                    );
+                    let bound = bound.as_mut().context("bound data required")?;
+                    let (_, catalog) = checked_app(prepared, bound)?;
+                    if !catalog.connections.is_empty() {
+                        let source = stage.join("app/connection-probe.roc");
+                        let executable = stage.join("connection-probe");
+                        fs::write(&source, day2::connection_codegen::probe(&catalog))?;
+                        run(
+                            root,
+                            day2::sandbox::compiler(root, stage, roc)?
+                                .arg("build")
+                                .arg(&source)
+                                .arg(format!("--output={}", executable.display())),
+                        )?;
+                        // This worker can only evaluate the pure projection.
+                        // No runtime, authority provider or effect dispatcher
+                        // participates in declaration discovery.
+                        let raw = Worker::start(&executable)?.exchange(b"connection-contract")?;
+                        bound.connections =
+                            day2::connection_declaration::decode_catalog(&raw, &catalog)?;
+                        fs::remove_file(source)?;
+                        fs::remove_file(executable)?;
+                    }
+                    day2::connection_declaration::validate_catalog(&bound.connections, &catalog)?;
+                    fs::write(
+                        stage.join("connections.json"),
+                        serde_json::to_vec(&bound.connections)?,
                     )?;
                 }
                 "build-admission" => {
@@ -700,9 +739,13 @@ pub fn execute(
                 }
                 "build-glue" => {
                     ensure!(
-                        done.contains("build-admission"),
-                        "admission required before ABI generation"
+                        done.contains("build-app-types"),
+                        "checked app types required before pure ABI generation"
                     );
+                    // The pure ABI is always Str -> Str and does not import
+                    // authored App code. Product linking still requires both
+                    // final native admission profiles below.
+                    fs::write(stage.join("sdk/main.roc"), day2::sdk::app_platform())?;
                     fs::create_dir_all(root.join("crates/worker/generated"))?;
                     run(
                         root,
@@ -733,6 +776,7 @@ pub fn execute(
                     )?);
                 }
                 "build-check" => {
+                    ensure!(done.contains("build-admission"), "final admission required");
                     ensure!(bound.is_some(), "bound schema required");
                     run(
                         root,
@@ -743,7 +787,9 @@ pub fn execute(
                 }
                 "build-link" => {
                     ensure!(
-                        done.contains("build-host") && done.contains("build-check"),
+                        done.contains("build-host")
+                            && done.contains("build-check")
+                            && done.contains("build-admission"),
                         "checked app and native host required"
                     );
                     run(

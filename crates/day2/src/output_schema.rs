@@ -102,6 +102,10 @@ impl Table {
         *nodes += 1;
         ensure!(*nodes <= MAX_SCHEMA_NODES, "output schema node budget");
         let node = self.node(id)?;
+        ensure!(
+            !crate::connection_codegen::invocation_type(&node.name),
+            "connection Use cannot appear in public outputs"
+        );
         let (shape, roc_type) = match node.kind.as_str() {
             "text" => (Type::String, "Str".into()),
             "integer" => (Type::Integer, "I64".into()),

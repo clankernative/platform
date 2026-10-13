@@ -1,9 +1,11 @@
-# Calendar registration canary
+# Calendar connection and read canary
 
 This complete app declares one current-human, mapped company-account requirement
 for reading Calendar events. The admitted artifact is a small deployment target
 for the installation's native security-shell registration campaign. The ordinary
-`inspect` query reports app-owned intent and preserves an empty product database.
+`inspect` query reports app-owned intent. The `list_events` product query resolves
+the current verified human's requirement and reads their primary Calendar through
+private host custody. Both preserve an empty product database.
 
 Build it with the ordinary platform recipe:
 
@@ -18,6 +20,13 @@ to derive the desired binding pins and exact provider callback. Review the
 emitted `instance` document before saving it. Desired metadata proves no live
 readiness; the authenticated shell campaign must publish a fresh native receipt.
 
-This fixture currently qualifies registration only. Provider event execution,
-connect-attempt creation, refresh/revoke recovery, effective IAM/workload
-qualification, and the Workspace product migration still need their own gates.
+Reads accept an increasing RFC3339 window of at most 31 days. The host admits at
+most four provider pages, 100 events, 128 KiB per response and 30 KiB in the complete
+result. Provider cursors and credentials stay private. Exceeding the limits returns
+a problem; it never returns a truncated success. Local sign-in or workload actor
+text does not establish a human connection.
+
+This slice uses original activation token material only. Expired tokens require
+reauthorization; real refresh publication, Calendar writes, live Google consent,
+effective IAM/workload qualification and production-role authority remain separate
+implementation and qualification work.

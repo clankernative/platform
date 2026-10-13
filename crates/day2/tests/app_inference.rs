@@ -42,11 +42,12 @@ impl Fixture {
             .collect();
         day2::sdk::stage(&root.join("sdk"), &stage.join("sdk"))?;
         let contract = &artifact.contract();
-        for (name, source) in
-            contract
-                .declarations
-                .modules(&contract.schema, &contract.outputs, false)?
-        {
+        for (name, source) in contract.declarations.modules(
+            &contract.schema,
+            &contract.outputs,
+            &contract.connection_declarations,
+            false,
+        )? {
             fs::write(stage.join("app").join(name), source)?;
         }
         for (name, source) in [
@@ -211,7 +212,12 @@ impl Fixture {
             output.shape.bind_identities(&schema)?;
         }
         let catalog = registry::from_checked_types(&checked)?;
-        for (name, source) in catalog.modules(&schema, &outputs, false)? {
+        for (name, source) in catalog.modules(
+            &schema,
+            &outputs,
+            &self.contract.connection_declarations,
+            false,
+        )? {
             fs::write(self.stage.join("app").join(name), source)?;
         }
         fs::write(self.stage.join("app/Inputs.roc"), schema.inputs_module()?)?;

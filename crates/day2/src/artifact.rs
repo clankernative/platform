@@ -821,7 +821,7 @@ impl LoadedArtifact {
                     "credential declarations differ from compiled App.definition"
                 );
             }
-            if !loaded.contract.connection_declarations.is_empty() {
+            {
                 let compiled = crate::oauth::declaration::decode(
                     &worker
                         .exchange(b"connection-contract")

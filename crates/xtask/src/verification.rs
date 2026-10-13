@@ -55,6 +55,9 @@ const PARALLEL_RUNTIME_TESTS: &[&str] = &[
     "guards::checked_compiler_rejects_wrong_models_forged_values_and_unavailable_io",
     "credential_metadata::native_compiler_preserves_family_types_and_seals_host_read_constructors",
     "connection_declarations::native_connection_declarations_require_nominal_access_and_account_policy",
+    "connection_use::native_connection_use_is_nominal_and_private_in_both_profiles",
+    "connection_use::native_reflected_use_cannot_enter_nested_public_codecs",
+    "connection_use::native_calendar_preparation_frames_bound_escaped_and_accumulated_results",
     "numeric::native_generated_numeric_codecs_roundtrip_boundaries_and_reject_negative_values",
     "schema::native_structured_inputs_reflect_and_roundtrip_without_flattening_records",
 ];
