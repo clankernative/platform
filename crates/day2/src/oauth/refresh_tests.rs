@@ -2,6 +2,7 @@
 //! settlement -> bounded read. Only native readiness/clock/HTTP use test ports.
 use super::*;
 use anyhow::Context as _;
+use rusqlite::OptionalExtension as _;
 use crate::{
     artifact::LoadedArtifact,
     authority_state,
@@ -13,7 +14,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc,
-        atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering::SeqCst},
+        atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering::SeqCst},
     },
     time::Duration,
 };
@@ -37,6 +38,7 @@ enum Case {
     ReturnRewind,
     MaterialSubstitution,
     SuccessorReturnRewind,
+    AbsentReturnRewind,
 }
 
 struct Port {
@@ -51,6 +53,7 @@ struct Port {
     reads: AtomicUsize,
     crash: Option<effects::RefreshBoundary>,
     transport: Option<PathBuf>,
+    activate_on_fill: AtomicBool,
 }
 
 fn response(body: Value) -> Result<effects::Response> {
@@ -101,6 +104,11 @@ impl effects::Hooks for Port {
         Duration::ZERO
     }
     fn fill(&self, bytes: &mut [u8]) -> Result<()> {
+        if self.activate_on_fill.swap(false, SeqCst) {
+            let (_, fixture) = super::tests::product_selection(&self.local_runtime)?;
+            activate(&self.local_runtime, &fixture)?;
+            self.now.store(245, SeqCst);
+        }
         let value = self.entropy.fetch_add(1, SeqCst).to_le_bytes();
         for (i, byte) in bytes.iter_mut().enumerate() {
             *byte = value[i % value.len()].wrapping_add(i as u8);
@@ -236,6 +244,11 @@ struct NativeAuthority {
 
 impl Authority for NativeAuthority {
     fn current(&self, _: &str, _: &str, _: &str, _: i64) -> Result<Option<Selection>> {
+        if self.port.case == Case::AbsentReturnRewind {
+            let db = store::open(&self.port.db)?;
+            let missing: bool = db.query_row("SELECT NOT EXISTS(SELECT 1 FROM oauth_connection_slots)", [], |r| r.get(0))?;
+            if missing { self.port.activate_on_fill.store(true, SeqCst); }
+        }
         if self.port.case == Case::ReadinessRewind && self.port.posts.load(SeqCst) > 0 {
             self.port.now.store(255, SeqCst);
         }
@@ -440,6 +453,7 @@ fn compiled_calendar_refresh_publishes_versions_and_fences_failure_recovery() ->
         Case::ReturnRewind,
         Case::MaterialSubstitution,
         Case::SuccessorReturnRewind,
+        Case::AbsentReturnRewind,
     ] {
         let directory = tempfile::tempdir()?;
         let instance_path = directory.path().join("instance.json");
@@ -481,9 +495,10 @@ fn compiled_calendar_refresh_publishes_versions_and_fences_failure_recovery() ->
             reads: AtomicUsize::new(0),
             crash: None,
             transport: None,
+            activate_on_fill: AtomicBool::new(false),
         });
         let result = effects::scope(port.clone(), || -> Result<()> {
-            activate(&runtime, &fixture)?;
+            if case != Case::AbsentReturnRewind { activate(&runtime, &fixture)?; }
             runtime.connections = Some(Arc::new(NativeAuthority {
                 selection,
                 port: port.clone(),
@@ -496,10 +511,10 @@ fn compiled_calendar_refresh_publishes_versions_and_fences_failure_recovery() ->
                     [],
                 )?;
             }
-            let original: Vec<u8> =
+            let original: Option<Vec<u8>> =
                 db.query_row("SELECT ciphertext FROM oauth_private_tokens", [], |r| {
                     r.get(0)
-                })?;
+                }).optional()?;
             let human = crate::iap::Verified {
                 email: "alice@example.com".into(),
                 subject: "accounts.google.com:google-alice".into(),
@@ -627,7 +642,7 @@ fn compiled_calendar_refresh_publishes_versions_and_fences_failure_recovery() ->
                     "{case:?}: failed refresh completed a Calendar read"
                 );
                 let posts = match case {
-                    Case::CredentialRewind | Case::MaterialSubstitution => 0,
+                    Case::CredentialRewind | Case::MaterialSubstitution | Case::AbsentReturnRewind => 0,
                     Case::SuccessorReturnRewind => 2,
                     _ => 1,
                 };
@@ -651,18 +666,22 @@ fn compiled_calendar_refresh_publishes_versions_and_fences_failure_recovery() ->
                     version,
                     "{case:?}"
                 );
-                if version == 1 {
+                if case == Case::AbsentReturnRewind {
+                    assert!(original.is_none());
+                    assert_eq!(db.query_row("SELECT status FROM oauth_connection_slots", [], |r| r.get::<_,String>(0))?, "active", "uncaptured activation must not be retired");
+                    assert_eq!(db.query_row("SELECT count(*) FROM oauth_use_handles WHERE invocation='refresh_v2'", [], |r| r.get::<_,i64>(0))?, 0, "absent-material clock floor failed to stop Use minting");
+                } else if version == 1 {
                     assert_eq!(
                         db.query_row("SELECT ciphertext FROM oauth_private_tokens", [], |r| r
                             .get::<_, Vec<u8>>(0))?,
-                        original,
+                        original.as_ref().context("original material")?.clone(),
                         "{case:?}: partial material publication"
                     );
                 } else {
                     assert_ne!(
                         db.query_row("SELECT ciphertext FROM oauth_private_tokens", [], |r| r
                             .get::<_, Vec<u8>>(0))?,
-                        original,
+                        original.as_ref().context("original material")?.clone(),
                         "{case:?}: committed successor missing"
                     );
                 }
@@ -676,7 +695,7 @@ fn compiled_calendar_refresh_publishes_versions_and_fences_failure_recovery() ->
                     SeqCst,
                 );
                 let recovery = invoke("recovery_no_resend");
-                if case == Case::SuccessorReturnRewind {
+                if matches!(case, Case::SuccessorReturnRewind | Case::AbsentReturnRewind) {
                     assert_eq!(recovery?.result["status"], "ok");
                     assert_eq!(
                         db.query_row("SELECT status FROM oauth_connection_slots", [], |r| r
@@ -687,7 +706,7 @@ fn compiled_calendar_refresh_publishes_versions_and_fences_failure_recovery() ->
                 }
                 assert_eq!(
                     port.posts.load(SeqCst),
-                    before,
+                    before + usize::from(case == Case::AbsentReturnRewind),
                     "{case:?}: recovery resent an unresolved base"
                 );
                 if matches!(
@@ -777,6 +796,7 @@ fn crash_authority(
         reads: AtomicUsize::new(0),
         crash: point,
         transport: Some(directory.join("transport.sqlite")),
+        activate_on_fill: AtomicBool::new(false),
     });
     runtime.connections = Some(Arc::new(NativeAuthority {
         selection,

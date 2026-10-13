@@ -28,12 +28,12 @@ impl std::error::Error for ClockRefusal {}
 pub(crate) struct Resolution {
     problem: Option<&'static str>,
     fence: Option<MaterialFence>,
+    clock: i64,
 }
 
 struct MaterialFence {
     expected: store::RefreshEligibility,
     reference: String,
-    clock: i64,
 }
 
 impl Resolution {
@@ -41,6 +41,7 @@ impl Resolution {
         Self {
             problem: Some(problem),
             fence: None,
+            clock: 0,
         }
     }
 
@@ -49,10 +50,10 @@ impl Resolution {
         expected.base_version = version;
         Ok(Self {
             problem: None,
+            clock,
             fence: Some(MaterialFence {
                 expected,
                 reference: custody::token_reference(context.binding(), version)?,
-                clock,
             }),
         })
     }
@@ -64,12 +65,10 @@ impl Resolution {
     /// The caller commits even a refused result so an observed rewind cannot
     /// disappear when the product decision subsequently fails.
     pub(super) fn validate(&self, db: &Connection, now: i64) -> Result<bool> {
-        let Some(fence) = &self.fence else {
-            return Ok(true);
-        };
-        let expected = &fence.expected;
-        if now < fence.clock {
-            custody::refuse_access(
+        if now < self.clock {
+            if let Some(fence) = &self.fence {
+                let expected = &fence.expected;
+                custody::refuse_access(
                 db,
                 &expected.slot,
                 expected.generation,
@@ -77,9 +76,12 @@ impl Resolution {
                 expected.security_epoch,
                 &expected.profile,
                 &expected.account,
-            )?;
+                )?;
+            }
             return Ok(false);
         }
+        let Some(fence) = &self.fence else { return Ok(true); };
+        let expected = &fence.expected;
         Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM oauth_connection_slots s JOIN oauth_private_tokens t
             ON t.slot=s.slot AND t.generation=s.generation AND t.account=s.account
             WHERE s.slot=?1 AND s.generation=?2 AND s.token_version=?3 AND s.security_epoch=?4
@@ -204,6 +206,7 @@ pub(super) fn ensure_current(
             return Ok(Resolution {
                 problem: None,
                 fence: None,
+                clock: started_at,
             });
         }
         Err(_) => return Ok(Resolution::unavailable("ReauthRequired")),
