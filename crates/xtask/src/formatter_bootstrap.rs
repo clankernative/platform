@@ -227,17 +227,30 @@ struct Supervised(Child);
 
 impl Drop for Supervised {
     fn drop(&mut self) {
+        // End option parsing before the negative group ID: procps 4.0.4 can
+        // otherwise interpret just its first digit (including -1, all PIDs).
         #[cfg(unix)]
-        let _ = Command::new("/bin/kill")
-            .env_clear()
-            .args(["-KILL", &format!("-{}", self.0.id())])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        if let Some(mut signal) = group_signal(self.0.id(), "KILL") {
+            let _ = signal.status();
+        }
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
+}
+
+#[cfg(unix)]
+fn group_signal(group: u32, signal: &str) -> Option<Command> {
+    if group <= 1 || group > i32::MAX as u32 {
+        return None;
+    }
+    let mut command = Command::new("/bin/kill");
+    command
+        .env_clear()
+        .args([format!("-{signal}"), "--".into(), format!("-{group}")])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    Some(command)
 }
 
 fn command(program: impl AsRef<Path>, scratch: &Path) -> Command {
@@ -983,6 +996,36 @@ mod tests {
         assert!(status_group_rss("NSpgid:\t42\nVmRSS:\t18446744073709551615 kB\n", 42).is_err());
         assert!(status_group_rss("NSpgid:\t42\nState:\tR (running)\n", 42).is_err());
         assert_eq!(status_group_rss("NSpgid:\t42\nState:\tZ (zombie)\n", 42)?, Some(0));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn group_cleanup_terminates_only_the_owned_child_and_keeps_a_sibling_alive() -> Result<()> {
+        let scratch = tempfile::tempdir()?;
+        let mut sibling = Supervised(command("/bin/sleep", scratch.path()).arg("30").spawn()?);
+        let child = Supervised(command("/bin/sleep", scratch.path()).arg("30").spawn()?);
+        let group = child.0.id();
+        let mut probe = group_signal(group, "0").context("owned group signal")?;
+        assert_eq!(probe.get_args().collect::<Vec<_>>(),
+            [std::ffi::OsStr::new("-0"), std::ffi::OsStr::new("--"),
+                std::ffi::OsStr::new(&format!("-{group}"))]);
+        ensure!(probe.status()?.success(), "owned group must exist before cleanup");
+        // The old syntax is observed only with signal zero, never a destructive
+        // signal. Record the actual hosted tool's behavior without assuming its
+        // version; production cleanup always uses the explicit terminator.
+        let old_probe = Command::new("/bin/kill").env_clear()
+            .args(["-0", &format!("-{group}")]).output()?;
+        println!("Signal-zero old syntax: {}; stderr={}", old_probe.status,
+            String::from_utf8_lossy(&old_probe.stderr));
+        println!("Owned formatter group={group}; sibling={}", sibling.0.id());
+        drop(child);
+        ensure!(!group_signal(group, "0").context("owned group probe")?.status()?.success(),
+            "owned child group still exists after cleanup");
+        ensure!(sibling.0.try_wait()?.is_none(), "cleanup terminated an unrelated sibling");
+        assert!(group_signal(0, "KILL").is_none());
+        assert!(group_signal(1, "KILL").is_none());
+        assert!(group_signal(u32::MAX, "KILL").is_none());
         Ok(())
     }
 
