@@ -361,7 +361,10 @@ impl Schema {
             .map(|name| format!("{name}: {name}_rows"))
             .collect::<Vec<_>>()
             .join(", ");
-        result.push_str(&format!("        Ok({{ {values} }})\n    }}\n}}\n"));
+        result.push_str(&format!("        Ok({{ {values} }})\n    }}\n"));
+        result.push_str(
+            "    VerificationSnapshot : { live : Snapshot, deleted : Snapshot }\n    verification_snapshot : Str -> Try(VerificationSnapshot, Str)\n    verification_snapshot = |raw| {\n        dto : Try({ live : Str, deleted : Str }, _)\n        dto = Json.parse(raw)\n        rows = dto.map_err(|_| \"invalid_verification_snapshot\")?\n        live = snapshot(rows.live)?\n        deleted = snapshot(rows.deleted)?\n        Ok({ live, deleted })\n    }\n}\n"
+        );
         Ok(result)
     }
 

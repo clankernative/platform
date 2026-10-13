@@ -65,7 +65,7 @@ GetPublication :: [].{
 
 	verify_input : Str, U64 -> Try(GetPublicationTypes.Input, Str)
 	verify_input = |snapshot, _seed| {
-		row = Data.snapshot(snapshot)?.publications.first().map_err(|_| "publish an event first")?
+		row = Data.verification_snapshot(snapshot)?.live.publications.first().map_err(|_| "publish an event first")?
 		Ok({ app_id: row.value.app_id, publication_id: row.value.publication_id })
 	}
 

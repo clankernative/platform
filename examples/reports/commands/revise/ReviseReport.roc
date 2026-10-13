@@ -125,9 +125,13 @@ ReviseReport :: [].{
 	verify_result : Str, ReportView.Saved, Str -> Try(Bool, Str)
 	verify_result = |before, saved, after| {
 		old =
-			Data.snapshot(before)?.reports.find_first(|row| row.id == saved.id).map_err(|_| "original report missing")?
+			Data.verification_snapshot(before)?
+				.live
+				.reports
+				.find_first(|row| row.id == saved.id)
+				.map_err(|_| "original report missing")?
 		row =
-			Data.snapshot(after)?
+			Data.verification_snapshot(after)?.live
 				.reports
 				.find_first(|candidate| candidate.id == saved.id)
 				.map_err(|_| "revised report missing")?

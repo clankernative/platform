@@ -4294,7 +4294,12 @@ mod tests {
                     );
                     return Ok(None);
                 };
-                let confirmation: serde_json::Value = crate::json::decode(confirmation.as_bytes())?;
+                let record: serde_json::Value = crate::json::decode(confirmation.as_bytes())?;
+                let confirmation = &record["confirmation"];
+                ensure!(
+                    record["original"]["kind"] == "credential",
+                    "replay genuine credential record required"
+                );
                 let original = serde_json::to_value(&world.pending)?;
                 for key in [
                     "invocation",
@@ -4917,6 +4922,11 @@ mod tests {
                     ("crates/day2/src/oauth/admission.rs".into(),Digest::new(include_bytes!("admission.rs"))),
                     ("crates/day2/src/oauth/shell_oidc.rs".into(),Digest::new(include_bytes!("shell_oidc.rs"))),
                     ("crates/day2/src/oauth/security_shell.rs".into(),Digest::new(include_bytes!("security_shell.rs"))),
+                    ("crates/day2/src/oauth/fresh_auth.rs".into(),Digest::new(include_bytes!("fresh_auth.rs"))),
+                    ("crates/day2/src/managed_credentials/browser.rs".into(),Digest::new(include_bytes!("../managed_credentials/browser.rs"))),
+                    ("crates/day2/src/managed_credentials/issuance.rs".into(),Digest::new(include_bytes!("../managed_credentials/issuance.rs"))),
+                    ("crates/day2/src/managed_credentials/store.rs".into(),Digest::new(include_bytes!("../managed_credentials/store.rs"))),
+                    ("crates/day2/src/store.rs".into(),Digest::new(include_bytes!("../store.rs"))),
                 ]),toolchain:Digest::new(include_bytes!("../../../../toolchain.json")),artifact:None,
                 fixture:Digest::new(b"signed-google-replay-v2;seed=17;wall=1000;complete=1001;exp=1301;fixed-reviewed-keys;modeled-host-deadline"),
                 observations:Vec::new(),first_failure:None,refusals:Vec::new()};
@@ -5268,6 +5278,265 @@ mod tests {
                 for consumer in [Consumer::OAuth, Consumer::Credential] {
                     compare(consumer, case)?;
                 }
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn signed_credential_initial_commit_loss_retains_original_record_and_deadline() -> Result<()>
+        {
+            for expired in [false, true] {
+                let clock = Clock::new();
+                effects::scope(clock.clone(), || {
+                    credential_effects::scope(clock.clone(), || -> Result<()> {
+                        let mut world = World::new(Consumer::Credential, clock.clone())?;
+                        let result = (|| -> Result<()> {
+                            ensure!(
+                                world.step(Step::Begin, Case::Positive)? == Disposition::Redirect,
+                                "original signed begin refused"
+                            );
+                            ensure!(
+                                world.step(Step::Callback, Case::Positive)?
+                                    == Disposition::Redirect,
+                                "actual signed callback refused"
+                            );
+                            let credential = world.credential.as_ref().unwrap();
+                            let session = world
+                                .session
+                                .as_ref()
+                                .context("actual signed session missing")?;
+                            let binding = world.original_session_binding()?;
+                            let fault = credentials::confirm_with_fault(
+                                &credential.runtime,
+                                &credential.pending,
+                                &identity(),
+                                &binding,
+                                session.proof.as_ref(),
+                                clock.wall(),
+                                credentials::ConfirmationFault::AfterConfirmationCommit,
+                            )
+                            .unwrap_err();
+                            ensure!(
+                                fault.to_string() == "simulated_process_loss",
+                                "unrelated initial commit refusal"
+                            );
+                            let db = open(credential.runtime.db())?;
+                            let original: String = db.query_row(
+                            "SELECT confirmation FROM day2_credential_confirmations WHERE invocation=?1",
+                            [&credential.pending.invocation], |row| row.get(0),
+                        )?;
+                            let record: serde_json::Value =
+                                crate::json::decode(original.as_bytes())?;
+                            ensure!(
+                                record["original"]["kind"] == "credential"
+                                    && record["confirmation"]["approved_at"] == 1_001
+                                    && record["confirmation"]["authenticated_at"] == 1_001
+                                    && record["confirmation"]["expires_at"] == 1_300,
+                                "first approval times/context differ"
+                            );
+                            ensure!(
+                                db.query_row("SELECT count(*) FROM day2_invocations", [], |row| {
+                                    row.get::<_, i64>(0)
+                                })? == 0,
+                                "invocation existed before actual interrupted invoke"
+                            );
+                            ensure!(
+                                db.query_row(
+                                    "SELECT count(*) FROM day2_credential_lineages",
+                                    [],
+                                    |row| row.get::<_, i64>(0)
+                                )? == 0,
+                                "initial approval was mistaken for business commit"
+                            );
+                            let reopened = crate::store::Runtime::load(
+                                credential.runtime.instance_path(),
+                                credential.runtime.app(),
+                            )?
+                            .with_integrations(crate::integration_host::Host::simulated(
+                                credential.runtime.db(),
+                                credential.runtime.scope(),
+                            ))
+                            .with_host(Arc::new(Host {
+                                original: credential.runtime.clone(),
+                                clock: clock.clone(),
+                            }))
+                            .with_credential_authority(
+                                credential.runtime.credentials.as_ref().unwrap().clone(),
+                            );
+                            reopened.initialize()?;
+                            let before_keys = *credential.keys.counts.lock().unwrap();
+                            // This replacement is well-formed historical DATA and
+                            // preserves the genuine original context. Its approval
+                            // is still in the future, so it must refuse BEFORE keys.
+                            let mut future: serde_json::Value =
+                                crate::json::decode(original.as_bytes())?;
+                            future["confirmation"]["approved_at"] = 1_200.into();
+                            crate::managed_credentials::issuance::rehash_fixture_value(
+                                &mut future,
+                            )?;
+                            let future = future.to_string();
+                            db.execute("UPDATE day2_credential_confirmations SET confirmation=?1 WHERE invocation=?2",
+                            rusqlite::params![future, credential.pending.invocation])?;
+                            reopened.initialize()?;
+                            let refusal = credentials::confirm(
+                                &reopened,
+                                &credential.pending,
+                                &identity(),
+                                &binding,
+                                session.proof.as_ref(),
+                                clock.wall(),
+                            )
+                            .unwrap_err();
+                            ensure!(
+                                refusal.to_string() == "credential approval not current",
+                                "unrelated future-approval refusal"
+                            );
+                            ensure!(
+                                *credential.keys.counts.lock().unwrap() == before_keys,
+                                "future approval reached key provider"
+                            );
+                            ensure!(
+                                db.query_row("SELECT count(*) FROM day2_invocations", [], |row| {
+                                    row.get::<_, i64>(0)
+                                })? == 0,
+                                "future approval accepted invocation"
+                            );
+                            ensure!(db.query_row("SELECT confirmation FROM day2_credential_confirmations WHERE invocation=?1",
+                            [&credential.pending.invocation], |row| row.get::<_, String>(0))? == future,
+                            "future approval was repaired or rewritten");
+                            db.execute("UPDATE day2_credential_confirmations SET confirmation=?1 WHERE invocation=?2",
+                            rusqlite::params![original, credential.pending.invocation])?;
+                            ensure!(
+                                credentials::confirm(
+                                    &reopened,
+                                    &credential.pending,
+                                    &identity(),
+                                    "changed-session",
+                                    session.proof.as_ref(),
+                                    clock.wall()
+                                )
+                                .is_err(),
+                                "changed session resumed approval"
+                            );
+                            ensure!(
+                                *credential.keys.counts.lock().unwrap() == before_keys,
+                                "retargeting reached key provider"
+                            );
+                            if expired {
+                                clock.expire_ticks()?;
+                                ensure!(
+                                    credentials::confirm(
+                                        &reopened,
+                                        &credential.pending,
+                                        &identity(),
+                                        &binding,
+                                        session.proof.as_ref(),
+                                        clock.wall()
+                                    )
+                                    .is_err(),
+                                    "expired original approval resumed"
+                                );
+                                ensure!(
+                                    *credential.keys.counts.lock().unwrap() == before_keys,
+                                    "expired approval reached key provider"
+                                );
+                                ensure!(
+                                    db.query_row(
+                                        "SELECT count(*) FROM day2_invocations",
+                                        [],
+                                        |row| row.get::<_, i64>(0)
+                                    )? == 0,
+                                    "expired recovery accepted invocation"
+                                );
+                            } else {
+                                // Duplicate request time changes; first approved_at cannot.
+                                clock.time.lock().unwrap().0 = 1_002;
+                                let outcome = credentials::confirm(
+                                    &reopened,
+                                    &credential.pending,
+                                    &identity(),
+                                    &binding,
+                                    session.proof.as_ref(),
+                                    clock.wall(),
+                                )?;
+                                ensure!(
+                                    outcome.status == "success",
+                                    "original eligible recovery did not commit"
+                                );
+                                ensure!(
+                                    credentials::confirm(
+                                        &reopened,
+                                        &credential.pending,
+                                        &identity(),
+                                        &binding,
+                                        session.proof.as_ref(),
+                                        clock.wall()
+                                    )? == outcome,
+                                    "duplicate terminal result changed"
+                                );
+                                ensure!(
+                                    db.query_row(
+                                        "SELECT count(*) FROM day2_credential_lineages",
+                                        [],
+                                        |row| row.get::<_, i64>(0)
+                                    )? == 1,
+                                    "recovery issued more than one lineage"
+                                );
+                                ensure!(
+                                    db.query_row(
+                                        "SELECT count(*) FROM day2_credential_receipts",
+                                        [],
+                                        |row| row.get::<_, i64>(0)
+                                    )? == 1,
+                                    "recovery issued more than one receipt"
+                                );
+                                crate::store::replay(
+                                    reopened.artifact(),
+                                    &reopened.trace(&credential.pending.invocation)?,
+                                )?;
+                            }
+                            ensure!(db.query_row("SELECT confirmation FROM day2_credential_confirmations WHERE invocation=?1",
+                            [&credential.pending.invocation], |row| row.get::<_, String>(0))? == original,
+                            "recovery replaced body/context/hash or renewed times");
+                            Ok(())
+                        })();
+                        if result.is_err() {
+                            use std::io::Write;
+                            // Keep actual signed callback/approval state before a fallible evidence write.
+                            let credential = world.credential.take().unwrap();
+                            let artifact = credential.runtime.artifact().id().to_owned();
+                            let trace = credential
+                                .runtime
+                                .trace(&credential.pending.invocation)
+                                .ok();
+                            let path = credential._directory.keep();
+                            let evidence = serde_json::to_vec(&serde_json::json!({
+                                "seed":17,"expired":expired,
+                                "schedule":["actual_signed_begin","actual_signed_callback","actual_confirmation_commit_fault","reopen","original_resume"],
+                                "artifact":artifact,"trace":trace,
+                                "source":Digest::new(include_bytes!("security_shell.rs")),
+                                "toolchain":Digest::new(include_bytes!("../../../../toolchain.json")),
+                                "original_state":"retained in original SQLite; no fresh or provider qualification claim",
+                            }))?;
+                            ensure!(
+                                evidence.len() <= TRACE_BYTES,
+                                "confirmation loss evidence budget"
+                            );
+                            let mut file = std::fs::OpenOptions::new()
+                                .create_new(true)
+                                .write(true)
+                                .mode(0o600)
+                                .open(path.join("initial-confirmation-counterexample.json"))?;
+                            file.write_all(&evidence)?;
+                            file.sync_all()?;
+                            eprintln!(
+                                "private initial confirmation counterexample: {}",
+                                path.display()
+                            );
+                        }
+                        result
+                    })
+                })?;
             }
             Ok(())
         }

@@ -248,8 +248,8 @@ PublishNotification :: [].{
 
 	verify_result : Str, Publications.Output, Str -> Try(Bool, Str)
 	verify_result = |before, output, after| {
-		old = Data.snapshot(before)?
-		next = Data.snapshot(after)?
+		old = Data.verification_snapshot(before)?.live
+		next = Data.verification_snapshot(after)?.live
 		row =
 			next
 				.publications
@@ -287,7 +287,12 @@ PublishNotification :: [].{
 		verification: |_| Api.failed_command(
 			Commands.publish,
 			|snapshot, _seed| {
-				row = Data.snapshot(snapshot)?.publications.first().map_err(|_| "publish an event first")?
+				row =
+					Data.verification_snapshot(snapshot)?
+						.live
+						.publications
+						.first()
+						.map_err(|_| "publish an event first")?
 				payload : List(NotificationRules.Value)
 				payload = Json.parse(row.value.payload_json).map_err(|_| "invalid retained payload")?
 				Ok({

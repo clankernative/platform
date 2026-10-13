@@ -89,7 +89,10 @@ fn create(db: &Connection, schema: &Schema, request: &mut Request, model: &str) 
     };
     let result = effect(
         db,
-        schema,
+        StorageContract {
+            schema,
+            domains: &crate::domain::Catalog::new(),
+        },
         "installation-a",
         request,
         &instruction,
@@ -219,7 +222,10 @@ fn created_update_requires_native_exact_origin_and_preserves_primary_edit_target
     let preexisting = get(&db, "children", &schema.models["children"], 17.into())?;
     effect(
         &db,
-        &schema,
+        StorageContract {
+            schema: &schema,
+            domains: &crate::domain::Catalog::new(),
+        },
         "installation-a",
         &current,
         &update("children", &preexisting),
@@ -268,7 +274,10 @@ fn created_update_survives_reopen_but_not_rollback_or_another_installation() -> 
     check(&db, &schema, &declared, &current, &instruction)?;
     effect(
         &db,
-        &schema,
+        StorageContract {
+            schema: &schema,
+            domains: &crate::domain::Catalog::new(),
+        },
         "installation-a",
         &current,
         &instruction,
@@ -283,7 +292,10 @@ fn created_update_survives_reopen_but_not_rollback_or_another_installation() -> 
     check(&db, &schema, &declared, &current, &instruction)?;
     let result = effect(
         &db,
-        &schema,
+        StorageContract {
+            schema: &schema,
+            domains: &crate::domain::Catalog::new(),
+        },
         "installation-a",
         &current,
         &instruction,
@@ -337,7 +349,10 @@ fn created_origin_does_not_refresh_cas_or_override_current_operator_authority() 
     let foreign = request("foreign");
     effect(
         &db,
-        &schema,
+        StorageContract {
+            schema: &schema,
+            domains: &crate::domain::Catalog::new(),
+        },
         "installation-a",
         &foreign,
         &instruction,
@@ -347,7 +362,10 @@ fn created_origin_does_not_refresh_cas_or_override_current_operator_authority() 
     check(&db, &schema, &declared, &current, &instruction)?;
     let conflict = effect(
         &db,
-        &schema,
+        StorageContract {
+            schema: &schema,
+            domains: &crate::domain::Catalog::new(),
+        },
         "installation-a",
         &current,
         &instruction,
@@ -371,7 +389,10 @@ fn created_origin_does_not_refresh_cas_or_override_current_operator_authority() 
         assert!(
             effect(
                 &db,
-                &schema,
+                StorageContract {
+                    schema: &schema,
+                    domains: &crate::domain::Catalog::new()
+                },
                 "installation-a",
                 &current,
                 &instruction,
@@ -396,7 +417,10 @@ fn created_origin_does_not_refresh_cas_or_override_current_operator_authority() 
     assert!(
         effect(
             &db,
-            &schema,
+            StorageContract {
+                schema: &schema,
+                domains: &crate::domain::Catalog::new()
+            },
             "installation-a",
             &current,
             &instruction,
@@ -418,7 +442,10 @@ fn created_origin_does_not_refresh_cas_or_override_current_operator_authority() 
     assert!(
         effect(
             &db,
-            &schema,
+            StorageContract {
+                schema: &schema,
+                domains: &crate::domain::Catalog::new()
+            },
             "installation-a",
             &current,
             &instruction,
@@ -439,7 +466,10 @@ fn created_origin_does_not_refresh_cas_or_override_current_operator_authority() 
     assert!(
         effect(
             &db,
-            &schema,
+            StorageContract {
+                schema: &schema,
+                domains: &crate::domain::Catalog::new()
+            },
             "installation-a",
             &wrong_owner,
             &instruction,
@@ -452,13 +482,63 @@ fn created_origin_does_not_refresh_cas_or_override_current_operator_authority() 
     check(&db, &schema, &declared, &current, &instruction)?;
     effect(
         &db,
-        &schema,
+        StorageContract {
+            schema: &schema,
+            domains: &crate::domain::Catalog::new(),
+        },
         "installation-a",
         &current,
         &instruction,
         &policy()?,
         "change",
     )?;
+    Ok(())
+}
+
+#[test]
+fn legacy_pages_exclude_tombstones_before_counting_visible_rows() -> Result<()> {
+    let db = Connection::open_in_memory()?;
+    let schema = fixture(&db)?;
+    db.execute_batch(
+        "INSERT INTO children(id,version,created_at,owner,status,deleted_at) VALUES \
+        (1,2,0,'alice','pending',100),(2,1,0,'alice','pending',0), \
+        (3,1,0,'alice','pending',0),(4,1,0,'bob','pending',0)",
+    )?;
+    let current = request("current");
+    let page = |after| -> Result<Value> {
+        let instruction = Instruction {
+            kind: "page".into(),
+            model: "children".into(),
+            after,
+            limit: 1,
+            ..Instruction::default()
+        };
+        Ok(serde_json::from_str(&effect(
+            &db,
+            StorageContract {
+                schema: &schema,
+                domains: &crate::domain::Catalog::new(),
+            },
+            "installation-a",
+            &current,
+            &instruction,
+            &policy()?,
+            "change",
+        )?)?)
+    };
+    let first = page(Id::default())?;
+    assert_eq!(first["items"].as_array().context("first page")?.len(), 1);
+    assert_eq!(first["items"][0]["id"], 2);
+    assert_eq!(first["has_more"], true);
+    assert_eq!(first["next_after"], 2);
+    let second = page(Id::Legacy(2))?;
+    assert_eq!(second["items"].as_array().context("second page")?.len(), 1);
+    assert_eq!(second["items"][0]["id"], 3);
+    assert_eq!(second["has_more"], false);
+    assert_eq!(second["next_after"], 3);
+    let last = page(Id::Legacy(3))?;
+    assert!(last["items"].as_array().context("last page")?.is_empty());
+    assert_eq!(last["has_more"], false);
     Ok(())
 }
 
@@ -493,7 +573,10 @@ fn a_soft_deleted_row_leaves_every_read_until_a_restore_brings_it_back() -> Resu
     let run = |request: &mut Request, instruction: &Instruction| -> Result<String> {
         let result = effect(
             &db,
-            &schema,
+            StorageContract {
+                schema: &schema,
+                domains: &crate::domain::Catalog::new(),
+            },
             "installation-a",
             request,
             instruction,
@@ -511,6 +594,18 @@ fn a_soft_deleted_row_leaves_every_read_until_a_restore_brings_it_back() -> Resu
         });
         result
     };
+
+    let page = Instruction {
+        kind: "page".into(),
+        model: "children".into(),
+        limit: 1,
+        ..Instruction::default()
+    };
+    let live_page: Value = serde_json::from_str(&run(&mut current, &page)?)?;
+    assert_eq!(
+        live_page["items"].as_array().context("page items")?.len(),
+        1
+    );
 
     // Declaring the delete is enough to declare the undo, and an operation
     // that declared neither cannot reach either.
@@ -551,6 +646,14 @@ fn a_soft_deleted_row_leaves_every_read_until_a_restore_brings_it_back() -> Resu
         |r| r.get(0),
     )?;
     assert_eq!(live, 0, "the row is still live in the table");
+    let deleted_page: Value = serde_json::from_str(&run(&mut current, &page)?)?;
+    assert!(
+        deleted_page["items"]
+            .as_array()
+            .context("page items")?
+            .is_empty()
+    );
+    assert_eq!(deleted_page["has_more"], false);
     // And an update cannot resurrect it as a side effect of editing it.
     assert_eq!(
         crate::error::observation_code(
@@ -574,6 +677,14 @@ fn a_soft_deleted_row_leaves_every_read_until_a_restore_brings_it_back() -> Resu
         "the restored row is not the row that was deleted"
     );
     assert_eq!(get(&db, "children", record, row.id)?, restored);
+    let restored_page: Value = serde_json::from_str(&run(&mut current, &page)?)?;
+    assert_eq!(
+        restored_page["items"]
+            .as_array()
+            .context("page items")?
+            .len(),
+        1
+    );
     assert_eq!(
         run(&mut current, &change("restore", 3))
             .unwrap_err()
@@ -584,6 +695,374 @@ fn a_soft_deleted_row_leaves_every_read_until_a_restore_brings_it_back() -> Resu
     assert_eq!(
         crate::error::observation_code(&run(&mut current, &change("soft_delete", 1)).unwrap_err()),
         "version_conflict"
+    );
+    Ok(())
+}
+
+#[test]
+fn lifecycle_writes_preserve_app_edit_targets_and_authorized_retained_guards() -> Result<()> {
+    let db = Connection::open_in_memory()?;
+    let schema = fixture(&db)?;
+    db.execute_batch("INSERT INTO parents(id,version,created_at,owner,status) VALUES(1,1,0,'alice','pending'),(2,1,0,'alice','pending'); BEGIN IMMEDIATE")?;
+    let execution = Execution {
+        model: "parents".into(),
+        id_field: "id".into(),
+        version_field: "version".into(),
+        effects: vec![Effect {
+            kind: "soft_delete".into(),
+            model: "parents".into(),
+            fields: vec![],
+            command: String::new(),
+        }],
+        ..Execution::default()
+    };
+    let current = request("current");
+    let input: Value = serde_json::from_str(&current.input)?;
+    for kind in ["soft_delete", "restore"] {
+        let wrong = Instruction {
+            kind: kind.into(),
+            model: "parents".into(),
+            id: Id::Legacy(2),
+            expected_version: 1,
+            ..Instruction::default()
+        };
+        assert_eq!(
+            check(&db, &schema, &execution, &current, &wrong)
+                .unwrap_err()
+                .to_string(),
+            "application_edit_target_forbidden"
+        );
+        let intended = Instruction {
+            id: Id::Legacy(1),
+            ..wrong
+        };
+        check(&db, &schema, &execution, &current, &intended)?;
+    }
+    db.execute("UPDATE parents SET deleted_at=100 WHERE id=1", [])?;
+    assert!(get_optional(&db, "parents", &schema.models["parents"], Id::Legacy(1))?.is_none());
+    let retained = guard_target(
+        &db,
+        "parents",
+        &schema.models["parents"],
+        Id::Legacy(1),
+        Some(&execution),
+    )?;
+    check_precondition(
+        &policy()?,
+        "change",
+        "alice",
+        &input,
+        retained.as_ref(),
+        Some(&execution),
+    )?;
+    let stale = json!({"id":"1","version":2});
+    assert_eq!(
+        crate::error::observation_code(
+            &check_precondition(
+                &policy()?,
+                "change",
+                "alice",
+                &stale,
+                retained.as_ref(),
+                Some(&execution)
+            )
+            .unwrap_err()
+        ),
+        "conflict"
+    );
+    db.execute("UPDATE parents SET owner='bob' WHERE id=1", [])?;
+    let retained = guard_target(
+        &db,
+        "parents",
+        &schema.models["parents"],
+        Id::Legacy(1),
+        Some(&execution),
+    )?;
+    assert_eq!(
+        crate::error::observation_code(
+            &check_precondition(
+                &policy()?,
+                "change",
+                "alice",
+                &input,
+                retained.as_ref(),
+                Some(&execution)
+            )
+            .unwrap_err()
+        ),
+        "forbidden"
+    );
+    assert!(
+        guard_target(
+            &db,
+            "parents",
+            &schema.models["parents"],
+            Id::Legacy(1),
+            Some(&declaration("update", "parents", true))
+        )?
+        .is_none()
+    );
+    Ok(())
+}
+
+#[test]
+fn authoritative_write_values_enforce_domains_after_row_authority() -> Result<()> {
+    let db = Connection::open_in_memory()?;
+    let mut schema = fixture(&db)?;
+    for record in schema.models.values_mut() {
+        record.fields.insert(
+            "status".into(),
+            Kind::StandardText {
+                domain: "LifecycleStatus".into(),
+            },
+        );
+    }
+    let domains = BTreeMap::from([(
+        "LifecycleStatus".into(),
+        day2_contracts::text::TextRule {
+            maximum_bytes: 20,
+            nonblank: true,
+            description: "Nonblank lifecycle status".into(),
+        },
+    )]);
+    db.execute_batch("INSERT INTO children(id,version,created_at,owner,status) VALUES(1,1,0,'alice','pending'); BEGIN IMMEDIATE")?;
+    let mut current = request("current");
+    let run = |request: &mut Request, instruction: Instruction| -> Result<Row> {
+        let result = effect(
+            &db,
+            StorageContract {
+                schema: &schema,
+                domains: &domains,
+            },
+            "installation-a",
+            request,
+            &instruction,
+            &policy()?,
+            "change",
+        );
+        request.observations.push(Observation {
+            instruction,
+            result: result.as_deref().unwrap_or_default().into(),
+            error: result
+                .as_ref()
+                .err()
+                .map(crate::error::observation_code)
+                .unwrap_or_default(),
+        });
+        Ok(serde_json::from_str(&result?)?)
+    };
+    for kind in ["create", "update"] {
+        let invalid = Instruction {
+            kind: kind.into(),
+            model: "children".into(),
+            id: if kind == "update" {
+                Id::Legacy(1)
+            } else {
+                Id::default()
+            },
+            expected_version: if kind == "update" { 1 } else { 0 },
+            data: json!({"owner":"alice","status":""}).to_string(),
+            ..Instruction::default()
+        };
+        assert_eq!(
+            crate::error::observation_code(&run(&mut current, invalid).unwrap_err()),
+            "invalid_domain_value"
+        );
+    }
+    let deleted = run(
+        &mut current,
+        Instruction {
+            kind: "soft_delete".into(),
+            model: "children".into(),
+            id: Id::Legacy(1),
+            expected_version: 1,
+            ..Instruction::default()
+        },
+    )?;
+    assert_eq!(deleted.version, 2);
+    db.execute("UPDATE children SET status='' WHERE id=1", [])?;
+    let restore = Instruction {
+        kind: "restore".into(),
+        model: "children".into(),
+        id: Id::Legacy(1),
+        expected_version: 2,
+        ..Instruction::default()
+    };
+    assert_eq!(
+        crate::error::observation_code(&run(&mut current, restore.clone()).unwrap_err()),
+        "invalid_domain_value"
+    );
+    db.execute("UPDATE children SET owner='bob' WHERE id=1", [])?;
+    assert_eq!(
+        crate::error::observation_code(&run(&mut current, restore.clone()).unwrap_err()),
+        "forbidden"
+    );
+    db.execute(
+        "UPDATE children SET owner='alice',status='pending' WHERE id=1",
+        [],
+    )?;
+    let restored = run(&mut current, restore)?;
+    assert_eq!(restored.version, 3);
+    assert_eq!(restored.data, deleted.data);
+    Ok(())
+}
+
+#[test]
+fn live_references_restrict_all_activation_writes_and_storage_validation() -> Result<()> {
+    let db = Connection::open_in_memory()?;
+    db.pragma_update(None, "foreign_keys", true)?;
+    let schema: Schema = serde_json::from_value(json!({
+        "models":{
+            "parents":{"roc_type":"Models.Parent","fields":{"owner":"text","status":"text"}},
+            "children":{"roc_type":"Models.Child","fields":{"owner":"text","status":"text","parent_id":{"reference":{"target":"parents"}}}}
+        },
+        "inputs":{},"foreign_keys":[{"model":"children","field":"parent_id","target":"parents"}]
+    }))?;
+    for ddl in schema.ddl()? {
+        db.execute_batch(&ddl)?;
+    }
+    db.execute_batch("INSERT INTO parents(id,version,created_at,owner,status,deleted_at) VALUES(1,1,0,'alice','pending',0),(2,1,0,'alice','pending',100); INSERT INTO children(id,version,created_at,owner,status,parent_id,deleted_at) VALUES(3,1,0,'alice','pending',1,0),(4,1,0,'alice','pending',2,100); BEGIN IMMEDIATE")?;
+    let value = json!({"owner":"alice","status":"pending","parent_id":2});
+    for change in [
+        Write::Create,
+        Write::Update {
+            id: Id::Legacy(3),
+            version: 1,
+        },
+        Write::Restore {
+            id: Id::Legacy(4),
+            version: 1,
+        },
+    ] {
+        let error = check_live_relationships(
+            &db,
+            &schema,
+            "children",
+            &schema.models["children"],
+            change,
+            &value,
+        )
+        .unwrap_err();
+        assert_eq!(
+            crate::error::classify(&error),
+            crate::error::Failure::LiveReferenceConflict
+        );
+    }
+    assert!(
+        check_live_relationships(
+            &db,
+            &schema,
+            "parents",
+            &schema.models["parents"],
+            Write::SoftDelete {
+                id: Id::Legacy(1),
+                version: 1
+            },
+            &json!({})
+        )
+        .is_err()
+    );
+    check_live_relationships(
+        &db,
+        &schema,
+        "parents",
+        &schema.models["parents"],
+        Write::SoftDelete {
+            id: Id::Legacy(2),
+            version: 1,
+        },
+        &json!({}),
+    )?;
+    validate_live_relationships(&db, &schema)?;
+    db.execute("UPDATE parents SET deleted_at=0 WHERE id=2", [])?;
+    for change in [
+        Write::Create,
+        Write::Update {
+            id: Id::Legacy(3),
+            version: 1,
+        },
+        Write::Restore {
+            id: Id::Legacy(4),
+            version: 1,
+        },
+    ] {
+        check_live_relationships(
+            &db,
+            &schema,
+            "children",
+            &schema.models["children"],
+            change,
+            &value,
+        )?;
+    }
+    db.execute("UPDATE parents SET deleted_at=100 WHERE id=1", [])?;
+    assert!(
+        db.prepare("PRAGMA foreign_key_check")?
+            .query([])?
+            .next()?
+            .is_none()
+    );
+    assert_eq!(
+        crate::error::classify(&validate_live_relationships(&db, &schema).unwrap_err()),
+        crate::error::Failure::LiveReferenceConflict
+    );
+    Ok(())
+}
+
+#[test]
+fn self_references_leave_and_return_with_their_row_without_hiding_other_dependents() -> Result<()> {
+    let db = Connection::open_in_memory()?;
+    db.pragma_update(None, "foreign_keys", true)?;
+    let schema: Schema = serde_json::from_value(json!({
+        "models":{"nodes":{"roc_type":"Models.Node","fields":{"parent_id":{"reference":{"target":"nodes"}}}}},
+        "inputs":{},"foreign_keys":[{"model":"nodes","field":"parent_id","target":"nodes"}]
+    }))?;
+    for ddl in schema.ddl()? {
+        db.execute_batch(&ddl)?;
+    }
+    db.execute_batch(
+        "INSERT INTO nodes(id,version,created_at,parent_id) VALUES(1,1,0,1); BEGIN IMMEDIATE",
+    )?;
+    let value = json!({"parent_id":1});
+    check_live_relationships(
+        &db,
+        &schema,
+        "nodes",
+        &schema.models["nodes"],
+        Write::SoftDelete {
+            id: Id::Legacy(1),
+            version: 1,
+        },
+        &value,
+    )?;
+    db.execute("UPDATE nodes SET deleted_at=100 WHERE id=1", [])?;
+    check_live_relationships(
+        &db,
+        &schema,
+        "nodes",
+        &schema.models["nodes"],
+        Write::Restore {
+            id: Id::Legacy(1),
+            version: 1,
+        },
+        &value,
+    )?;
+    db.execute_batch("UPDATE nodes SET deleted_at=0 WHERE id=1; INSERT INTO nodes(id,version,created_at,parent_id) VALUES(2,1,0,1)")?;
+    let error = check_live_relationships(
+        &db,
+        &schema,
+        "nodes",
+        &schema.models["nodes"],
+        Write::SoftDelete {
+            id: Id::Legacy(1),
+            version: 1,
+        },
+        &value,
+    )
+    .unwrap_err();
+    assert_eq!(
+        crate::error::classify(&error),
+        crate::error::Failure::LiveReferenceConflict
     );
     Ok(())
 }

@@ -53,8 +53,74 @@ jobs:
       - run: tar -xzf /tmp/scanners/cargo-audit-x86_64-unknown-linux-gnu-v0.22.2.tgz -C /tmp/scanners
       - run: /tmp/scanners/cargo-audit-x86_64-unknown-linux-gnu-v0.22.2/cargo-audit audit --deny warnings
 
+  # Only main pushes may reuse authenticated full proof for the exact queue SHA.
+  # Any lookup/setup/download/admission failure selects ordinary full preparation.
+  verify-queue-receipt:
+    needs: [secrets, dependencies]
+    if: ${{ !cancelled() && needs.secrets.result == 'success' && needs.dependencies.result == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: macos-15
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+      checks: read
+    outputs:
+      reused: ${{ steps.admit.outputs.reused }}
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_BUILD_JOBS: '2'
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: 'true'
+      SCCACHE_GHA_VERSION: day2-platform-ci-v2
+      SCCACHE_IDLE_TIMEOUT: '0'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - run: rustup show active-toolchain
+      - uses: Mozilla-Actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.18.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          prefix-key: day2-platform-ci-v2
+          shared-key: ${{ hashFiles('Cargo.toml') }}-verify
+          key: ${{ hashFiles('Cargo.toml') }}
+          cache-bin: 'false'
+          cache-workspace-crates: 'false'
+          save-if: 'false'
+      - run: cargo run --locked -p xtask -- bootstrap
+      - id: find
+        run: cargo run --locked -p xtask -- verify-queue-find
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: ${{ steps.find.outputs.artifact != '' }}
+        with:
+          artifact-ids: ${{ steps.find.outputs.artifact }}
+          run-id: ${{ steps.find.outputs.run }}
+          github-token: ${{ github.token }}
+          repository: clankernative/platform
+          path: /tmp/day2-merge-receipt
+          merge-multiple: true
+      - id: admit
+        if: ${{ steps.find.outputs.artifact != '' }}
+        run: cargo run --locked -p xtask -- verify-queue-admit
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ steps.admit.outputs.reused == 'true' }}
+        with:
+          name: day2-merge-reuse-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/ci-merge-reuse.json
+          if-no-files-found: error
+          retention-days: 14
+
   verify-prepare-parts:
-    if: ${{ inputs.verification != 'full' && inputs.verification != 'diagnostics' && inputs.verification != 'serial-prepare' }}
+    # Reject known security failures before allocating compilation runners.
+    needs: [secrets, dependencies, verify-queue-receipt]
+    if: ${{ !cancelled() && needs.secrets.result == 'success' && needs.dependencies.result == 'success' && !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') && inputs.verification != 'full' && inputs.verification != 'diagnostics' && inputs.verification != 'serial-prepare' }}
     runs-on: macos-15
     timeout-minutes: 360
     strategy:
@@ -101,6 +167,28 @@ jobs:
           cache-workspace-crates: 'false'
           shared-key: ${{ hashFiles('Cargo.toml') }}-verify
           save-if: ${{ matrix.part == 'inputs' }}
+      # Cross-run build outputs have their own source-bound namespace. Native
+      # guards re-admit them; no step or runtime receipt is selected by cache-hit.
+      - name: Restore completed fixture builds
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        if: ${{ matrix.part == 'inputs' }}
+        with:
+          key: day2-fixtures-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', '.dockerignore', 'rust-toolchain.toml', '.cargo/**', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**', 'cli/**', 'fixtures/**', 'examples/**') }}
+          path: |
+            artifacts/all-verification-cache.json
+            artifacts/????????????????????????????????????????????????????????????????
+      - name: Restore completed test executables
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        if: ${{ matrix.part == 'tests' }}
+        with:
+          key: day2-test-outputs-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', '.dockerignore', 'rust-toolchain.toml', '.cargo/**', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**', 'cli/**', 'fixtures/**', 'examples/**') }}
+          path: |
+            artifacts/ci-test-build-cache.json
+            artifacts/ci-test-programs
+            target/debug/deps/*
+            !target/debug/deps/*.rlib
+            !target/debug/deps/*.rmeta
+            !target/debug/deps/*.d
       - run: cargo run --locked -p xtask -- source-check
       - run: cargo fetch --locked
       - run: cargo run --locked -p xtask -- notices
@@ -112,6 +200,16 @@ jobs:
       - run: cargo run --locked -p xtask -- bootstrap-formatter /tmp/day2-tools/roc-fmt-day2-aarch64-apple-darwin
       - run: cargo run --locked -p xtask -- configure-tofu
       - run: cargo run --locked -p xtask -- verify-prepare-part ${{ matrix.part }}
+      - name: Retain compiled test input identity and inventory
+        if: ${{ matrix.part == 'tests' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: day2-compiled-test-inputs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            artifacts/ci-test-build-cache.json
+            artifacts/ci-test-binaries.json
+          if-no-files-found: error
+          retention-days: 14
       # Each lane transports only its reviewed outputs. The test lane cannot
       # overwrite fixture caches, CLI distribution or generated worker sources.
       - name: Archive fixture and check preparation
@@ -119,7 +217,7 @@ jobs:
         run: tar -czf /tmp/day2-preparation.tgz --exclude=platform/target/debug/incremental --exclude=platform/target/debug/build --exclude=platform/target/debug/.fingerprint --exclude='platform/target/debug/deps/*.rlib' --exclude='platform/target/debug/deps/*.rmeta' --exclude='platform/target/debug/deps/*.d' -C "$GITHUB_WORKSPACE/.." platform/target platform/artifacts platform/cli platform/crates/worker/generated .toolchains
       - name: Archive test compilation and documentation preparation
         if: ${{ matrix.part == 'tests' }}
-        run: tar -czf /tmp/day2-preparation.tgz --exclude=platform/target/debug/incremental --exclude=platform/target/debug/build --exclude=platform/target/debug/.fingerprint --exclude='platform/target/debug/deps/*.rlib' --exclude='platform/target/debug/deps/*.rmeta' --exclude='platform/target/debug/deps/*.d' -C "$GITHUB_WORKSPACE/.." platform/target/debug platform/artifacts/ci-test-binaries.json platform/artifacts/ci-preparation-tests.json
+        run: tar -czf /tmp/day2-preparation.tgz --exclude=platform/target/debug/incremental --exclude=platform/target/debug/build --exclude=platform/target/debug/.fingerprint --exclude='platform/target/debug/deps/*.rlib' --exclude='platform/target/debug/deps/*.rmeta' --exclude='platform/target/debug/deps/*.d' -C "$GITHUB_WORKSPACE/.." platform/target/debug platform/artifacts/ci-test-binaries.json platform/artifacts/ci-test-build-cache.json platform/artifacts/ci-preparation-tests.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: day2-preparation-${{ matrix.part }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -129,7 +227,8 @@ jobs:
           retention-days: 3
 
   verify-prepare-serial:
-    if: ${{ inputs.verification == 'serial-prepare' }}
+    needs: [secrets, dependencies, verify-queue-receipt]
+    if: ${{ !cancelled() && needs.secrets.result == 'success' && needs.dependencies.result == 'success' && !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') && inputs.verification == 'serial-prepare' }}
     runs-on: macos-15
     timeout-minutes: 360
     env:
@@ -171,6 +270,26 @@ jobs:
           cache-bin: 'false'
           cache-workspace-crates: 'false'
           shared-key: ${{ hashFiles('Cargo.toml') }}-verify
+      # Cross-run build outputs have their own source-bound namespace. Native
+      # guards re-admit them; no step or runtime receipt is selected by cache-hit.
+      - name: Restore completed fixture builds
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          key: day2-fixtures-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', '.dockerignore', 'rust-toolchain.toml', '.cargo/**', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**', 'cli/**', 'fixtures/**', 'examples/**') }}
+          path: |
+            artifacts/all-verification-cache.json
+            artifacts/????????????????????????????????????????????????????????????????
+      - name: Restore completed test executables
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          key: day2-test-outputs-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', '.dockerignore', 'rust-toolchain.toml', '.cargo/**', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**', 'cli/**', 'fixtures/**', 'examples/**') }}
+          path: |
+            artifacts/ci-test-build-cache.json
+            artifacts/ci-test-programs
+            target/debug/deps/*
+            !target/debug/deps/*.rlib
+            !target/debug/deps/*.rmeta
+            !target/debug/deps/*.d
       - run: cargo run --locked -p xtask -- source-check
       - run: cargo fetch --locked
       - run: cargo run --locked -p xtask -- notices
@@ -183,7 +302,7 @@ jobs:
       - run: cargo run --locked -p xtask -- configure-tofu
       - run: cargo run --locked -p xtask -- verify-prepare
       # tar retains executable permissions. Artifacts belong only to this exact
-      # run attempt; workspace crates never enter the cross-run dependency cache.
+      # run attempt; compiled outputs use separate source-bound caches.
       - name: Archive prepared verification workspace
         run: tar -czf /tmp/day2-verification.tgz --exclude=platform/target/debug/incremental --exclude=platform/target/debug/build --exclude=platform/target/debug/.fingerprint --exclude='platform/target/debug/deps/*.rlib' --exclude='platform/target/debug/deps/*.rmeta' --exclude='platform/target/debug/deps/*.d' -C "$GITHUB_WORKSPACE/.." platform/target platform/artifacts platform/cli platform/crates/worker/generated .toolchains
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -195,8 +314,8 @@ jobs:
           retention-days: 3
 
   verify-prepare:
-    needs: [verify-prepare-parts, verify-prepare-serial]
-    if: ${{ always() && inputs.verification != 'full' && inputs.verification != 'diagnostics' }}
+    needs: [secrets, dependencies, verify-queue-receipt, verify-prepare-parts, verify-prepare-serial]
+    if: ${{ !cancelled() && needs.secrets.result == 'success' && needs.dependencies.result == 'success' && !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') && inputs.verification != 'full' && inputs.verification != 'diagnostics' }}
     runs-on: macos-15
     timeout-minutes: 20
     env:
@@ -316,9 +435,10 @@ jobs:
           retention-days: 3
 
   verify:
-    needs: [verify-prepare, verify-shards]
+    needs: [secrets, dependencies, verify-queue-receipt, verify-prepare, verify-shards]
     if: ${{ always() && inputs.verification != 'full' && inputs.verification != 'diagnostics' }}
-    runs-on: macos-15
+    # A rejected source only needs the failure guard, not a macOS queue slot.
+    runs-on: ${{ needs.secrets.result == 'success' && needs.dependencies.result == 'success' && 'macos-15' || 'ubuntu-24.04' }}
     timeout-minutes: 20
     env:
       CARGO_INCREMENTAL: '0'
@@ -332,16 +452,22 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: Require successful preparation and every shard
-        run: test "$PREPARATION" = success -a "$SHARDS" = success
+      - name: Require security checks and complete verification
+        run: test "$SECRETS:$DEPENDENCIES:$REUSED" = success:success:true -o "$SECRETS:$DEPENDENCIES:$PREPARATION:$SHARDS" = success:success:success:success
         env:
+          SECRETS: ${{ needs.secrets.result }}
+          DEPENDENCIES: ${{ needs.dependencies.result }}
+          REUSED: ${{ needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true' }}
           PREPARATION: ${{ needs.verify-prepare.result }}
           SHARDS: ${{ needs.verify-shards.result }}
       - run: rustup show active-toolchain
+        if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
       - uses: Mozilla-Actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
         with:
           version: v0.18.0
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
         with:
           prefix-key: day2-platform-ci-v2
           shared-key: ${{ hashFiles('Cargo.toml') }}-verify
@@ -350,30 +476,51 @@ jobs:
           cache-workspace-crates: 'false'
           save-if: 'false'
       - run: cargo fetch --locked
+        if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
         with:
           name: day2-verify-${{ github.run_id }}-${{ github.run_attempt }}
           path: /tmp/day2-verification
       - run: tar -xzf /tmp/day2-verification/day2-verification.tgz -C "$GITHUB_WORKSPACE/.."
+        if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
         with:
           pattern: day2-result-*-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/ci-results
           merge-multiple: true
       - run: target/debug/xtask verify-compose
+        if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
         with:
           name: day2-verification-receipt-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             artifacts/verification.json
             artifacts/ci-verification.json
             artifacts/ci-prepared.json
+            artifacts/ci-test-build-cache.json
             artifacts/ci-preparation-*.json
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: ${{ needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true' }}
+        with:
+          name: day2-merge-reuse-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts
+      - name: Retain reused evidence with its original execution identity
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true' }}
+        with:
+          name: day2-reused-verification-receipt-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/ci-merge-reuse.json
           if-no-files-found: error
           retention-days: 14
 
   verify-full:
-    if: ${{ inputs.verification == 'full' || inputs.verification == 'compare' }}
+    needs: [secrets, dependencies]
+    if: ${{ !cancelled() && needs.secrets.result == 'success' && needs.dependencies.result == 'success' && (inputs.verification == 'full' || inputs.verification == 'compare') }}
     runs-on: macos-15
     timeout-minutes: 360
     env:

@@ -128,12 +128,16 @@ AnalyzeReport :: [].{
 	verify_result : Str, ReportView.Saved, Str -> Try(Bool, Str)
 	verify_result = |before, saved, after| {
 		old =
-			Data.snapshot(before)?
+			Data.verification_snapshot(before)?.live
 				.reports
 				.find_first(|report| report.id == saved.id)
 				.map_err(|_| "original report missing")?
 		report =
-			Data.snapshot(after)?.reports.find_first(|row| row.id == saved.id).map_err(|_| "analyzed report missing")?
+			Data.verification_snapshot(after)?
+				.live
+				.reports
+				.find_first(|row| row.id == saved.id)
+				.map_err(|_| "analyzed report missing")?
 		Ok(
 			report.value.ready
 				and report.version

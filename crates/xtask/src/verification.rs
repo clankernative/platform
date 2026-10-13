@@ -120,6 +120,24 @@ fn default_test_budget_seconds() -> u64 {
     DEFAULT_CAMPAIGN_BUDGET_SECONDS
 }
 
+pub fn queue_receipt(root: &Path, recipe: &str) -> Result<()> {
+    let snapshot = verification_snapshot(root, "verify")?;
+    let runner = workflows::build(root)?;
+    day2::automation::run(&runner, &[recipe], |request| {
+        let parameters: BTreeMap<String, String> = request.decode()?;
+        ensure!(
+            parameters.is_empty() && request.action == recipe,
+            "closed queue admission capability required"
+        );
+        match request.action.as_str() {
+            "verify-queue-find" => shards::reuse::find(root, &snapshot),
+            "verify-queue-admit" => shards::reuse::admit(root, &snapshot),
+            _ => bail!("unknown queue receipt capability"),
+        }
+    })?;
+    ensure_stable(root, "verify", &snapshot)
+}
+
 impl TestCampaign {
     fn budget(&self) -> Result<std::time::Duration> {
         let maximum = match self.suite.as_str() {
@@ -235,7 +253,7 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
         let key = match request.action.as_str() {
             "verify-test-build" => {
                 ensure!(parameters.is_empty(), "test build accepts no overrides");
-                shards::build(root)?;
+                shards::build(root, &snapshot)?;
                 "test-binaries".into()
             }
             "verify-test-docs" => {
@@ -467,6 +485,7 @@ fn build_fixture(
             Some(&root.join("fixtures/http-conformance")),
         ),
         "relational" => build(root, &root.join("fixtures/relational-conformance")),
+        "lifecycle" => build(root, &root.join("fixtures/lifecycle-conformance")),
         "collection" => build(root, &root.join("fixtures/collection-conformance")),
         "credential-metadata" => {
             build(root, &root.join("fixtures/credential-metadata-conformance"))
@@ -998,6 +1017,11 @@ fn configure_tests(
             "managed_credentials::issuance::tests::expired_confirmation_prevents_issuance_but_completed_receipt_is_recoverable",
             "managed_credentials::issuance::tests::native_lifecycle_is_atomic_terminal_and_recovers_after_reopen",
             "managed_credentials::issuance::tests::native_lifecycle_rejects_changed_target_and_personal_subject",
+            "managed_credentials::issuance::tests::final_selected_role_refuses_disposable_history_including_terminal_reuse",
+            "managed_credentials::issuance::tests::provider_pause_rehash_and_expiry_refuse_actual_business_commit",
+            "managed_credentials::issuance::tests::captured_fence_is_required_even_without_a_lifecycle_observation",
+            "managed_credentials::issuance::tests::two_real_executors_reuse_one_record_and_one_business_transition",
+            "managed_credentials::issuance::tests::compiled_worker_reply_corruption_rolls_back_exact_staging_and_recovers",
             "oauth::security_shell::tests::credential_browser_issues_native_product_commands_and_protects_delivery",
             "oauth::security_shell::tests::credential_browser_rotates_revokes_and_fences_accepted_work",
             "oauth::security_shell::tests::credential_api_admits_only_current_tokens_and_rechecks_durable_execution",
@@ -1005,6 +1029,7 @@ fn configure_tests(
             "oauth::security_shell::tests::credential_signed_google_session_keeps_original_intent_across_three_roles",
             "oauth::security_shell::tests::signed_replay::signed_google_replay_two_positive_owner_histories",
             "oauth::security_shell::tests::signed_replay::signed_google_replay_six_paired_negative_owner_histories",
+            "oauth::security_shell::tests::signed_replay::signed_credential_initial_commit_loss_retains_original_record_and_deadline",
             "oauth::security_shell::tests::credential_app_navigation_only_freezes_canonical_intent",
         ] {
             command.args(["--skip", test]);
@@ -1021,6 +1046,7 @@ fn configure_tests(
         ("reports", "DAY2_TEST_REPORTS_API_ARTIFACT"),
         ("reports-probe", "DAY2_TEST_REPORTS_PROBE_ARTIFACT"),
         ("relational", "DAY2_TEST_RELATIONAL_ARTIFACT"),
+        ("lifecycle", "DAY2_TEST_LIFECYCLE_ARTIFACT"),
         ("collection", "DAY2_TEST_COLLECTION_ARTIFACT"),
         ("delegation", "DAY2_TEST_DELEGATION_ARTIFACT"),
         (
@@ -1142,6 +1168,7 @@ fn receipt(
         let app_ownership = artifact("app-ownership")?;
         let notifications = artifact("notifications")?;
         let baseline = artifact("relational")?;
+        let lifecycle = artifact("lifecycle")?;
         let collection = artifact("collection")?;
         let next = artifact("relational-next")?;
         let owned = artifact("owned")?;
@@ -1154,6 +1181,7 @@ fn receipt(
         let mut report = serde_json::json!({
             "status":"passed", "scope":"all", "workflow":day2::automation::source_digest(),
             "relational":artifact_id(&baseline), "relational_next":artifact_id(&next), "http":artifact_id(&web),
+            "lifecycle":artifact_id(&lifecycle),
             "redirect":artifact_id(&redirect),
             "credential_metadata":artifact_id(&credential_metadata),
             "connection_declaration":artifact_id(&connection_declaration),
@@ -1287,6 +1315,7 @@ fn required_steps(scope: &str) -> Result<&'static [&'static str]> {
             "build-notifications",
             "build-redirect",
             "build-relational",
+            "build-lifecycle",
             "build-collection",
             "build-relational-next",
             "test-isolated-build",
@@ -1415,6 +1444,7 @@ mod tests {
             "build-oauth-gitlab",
             "build-redirect",
             "build-relational",
+            "build-lifecycle",
             "build-collection",
             "build-relational-next",
             "build-http",
@@ -1487,7 +1517,7 @@ mod tests {
     }
 
     #[test]
-    fn full_receipt_requires_and_pins_the_redirect_artifact() -> Result<()> {
+    fn full_receipt_requires_and_pins_lifecycle_and_redirect_artifacts() -> Result<()> {
         let directory = tempfile::tempdir()?;
         fs::create_dir_all(directory.path().join("artifacts"))?;
         let required = required_steps("all")?;
@@ -1501,22 +1531,29 @@ mod tests {
             })
             .collect();
         let redirect = "d".repeat(64);
+        let lifecycle = "e".repeat(64);
         fixtures.insert("redirect".into(), PathBuf::from(&redirect));
-        let mut missing = fixtures.clone();
-        missing.remove("redirect");
-        let error = receipt(
-            directory.path(),
-            "all",
-            &missing,
-            &passed,
-            "snapshot",
-            &BTreeMap::new(),
-            0,
-        )
-        .unwrap_err();
-        assert_eq!(error.to_string(), "missing verified fixture: redirect");
+        fixtures.insert("lifecycle".into(), PathBuf::from(&lifecycle));
         let path = directory.path().join("artifacts/verification.json");
-        assert!(!path.exists());
+        for name in ["redirect", "lifecycle"] {
+            let mut missing = fixtures.clone();
+            missing.remove(name);
+            let error = receipt(
+                directory.path(),
+                "all",
+                &missing,
+                &passed,
+                "snapshot",
+                &BTreeMap::new(),
+                0,
+            )
+            .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!("missing verified fixture: {name}")
+            );
+            assert!(!path.exists());
+        }
         receipt(
             directory.path(),
             "all",
@@ -1528,6 +1565,7 @@ mod tests {
         )?;
         let report: serde_json::Value = serde_json::from_slice(&fs::read(path)?)?;
         assert_eq!(report["redirect"], format!("sha256:{redirect}"));
+        assert_eq!(report["lifecycle"], format!("sha256:{lifecycle}"));
         Ok(())
     }
 

@@ -58,14 +58,14 @@ UpdateCollectEntries :: [].{
 
 	verify_input : Str, U64 -> Try(UpdateCollectEntriesTypes.Input, Str)
 	verify_input = |snapshot, _seed| {
-		row = Data.snapshot(snapshot)?.entries.first().map_err(|_| "insert an entry first")?
+		row = Data.verification_snapshot(snapshot)?.live.entries.first().map_err(|_| "insert an entry first")?
 		Ok({ row_id: row.id, bucket: "keep", maximum_rows: 256, after: Cursor.start, note: "after" })
 	}
 
 	verify_result : Str, EntryView.Result, Str -> Try(Bool, Str)
 	verify_result = |before, output, after| {
-		old = Data.snapshot(before)?
-		next = Data.snapshot(after)?
+		old = Data.verification_snapshot(before)?.live
+		next = Data.verification_snapshot(after)?.live
 		Ok(
 			old.entries.len() == next.entries.len()
 				and output.count == next.entries.keep_if(|row| row.value.bucket == "keep").len(),

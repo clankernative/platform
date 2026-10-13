@@ -100,7 +100,7 @@ SetEnabled :: [].{
 
 	verify_input : Str, U64 -> Try(SetEnabledTypes.Input, Str)
 	verify_input = |snapshot, _seed| {
-		row = Data.snapshot(snapshot)?.definitions.first().map_err(|_| "configure an event first")?
+		row = Data.verification_snapshot(snapshot)?.live.definitions.first().map_err(|_| "configure an event first")?
 		Ok({
 			app_id: row.value.app_id,
 			event_key: row.value.event_key,
@@ -111,8 +111,8 @@ SetEnabled :: [].{
 
 	verify_result : Str, SetEnabledTypes.Output, Str -> Try(Bool, Str)
 	verify_result = |before, output, after| {
-		old = Data.snapshot(before)?
-		next = Data.snapshot(after)?
+		old = Data.verification_snapshot(before)?.live
+		next = Data.verification_snapshot(after)?.live
 		Ok(
 			next.definitions.len()
 				== old.definitions.len()

@@ -75,7 +75,7 @@ SetOwner :: [].{
 
 	verify_result : Str, SetOwnerTypes.Output, Str -> Try(Bool, Str)
 	verify_result = |_before, output, after| {
-		state = Data.snapshot(after)?
+		state = Data.verification_snapshot(after)?.live
 		Ok(
 			state
 				.ownerships

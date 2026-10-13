@@ -57,6 +57,7 @@ Verify :: [].{
 			"notifications",
 			"redirect",
 			"relational",
+			"lifecycle",
 			"relational-next",
 			"collection",
 			"owned",
@@ -143,6 +144,15 @@ Verify :: [].{
 		_ = Capability.call!("verify-join", "{}", host!)?
 		Capability.call!("verify-receipt", Json.to_str({ scope: "all" }), host!)
 	}
+
+	# Mandatory native guards bind authenticated GitHub proof to the exact main
+	# checkout. Absence selects the ordinary full workflow; downloaded proof is
+	# never executed and every PR/merge-group still runs the full recipe.
+	queue_find! : (Str => Try(Str, Str)) => Try(Str, Str)
+	queue_find! = |host!| Capability.call!("verify-queue-find", "{}", host!)
+
+	queue_admit! : (Str => Try(Str, Str)) => Try(Str, Str)
+	queue_admit! = |host!| Capability.call!("verify-queue-admit", "{}", host!)
 
 	control! : (Str => Try(Str, Str)) => Try(Str, Str)
 	control! = |host!| {

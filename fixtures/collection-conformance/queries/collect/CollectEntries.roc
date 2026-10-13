@@ -52,7 +52,7 @@ CollectEntries :: [].{
 
 	verify_result : Str, EntryView.Result, Str -> Try(Bool, Str)
 	verify_result = |before, output, after| {
-		state = Data.snapshot(before)?
+		state = Data.verification_snapshot(before)?.live
 		Ok(before == after and output.count == state.entries.keep_if(|row| row.value.bucket == "keep").len())
 	}
 }

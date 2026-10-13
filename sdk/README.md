@@ -69,6 +69,11 @@ and compound uniqueness enforced on inserts and updates.
 
 Every operation requires typed verification callbacks. Every model
 requires a named invariant; every declared operation/failure pair requires a scenario.
+Operation callbacks decode `Data.verification_snapshot(raw)` and select its
+explicit `live` or `deleted` model lists. This allows restore generators to use
+retained rows while ordinary invariants continue to decode live state through
+`Data.snapshot`. Both verification scopes are complete and bounded, captured in
+one database read transaction. See [lifecycle conformance](../fixtures/lifecycle-conformance/README.md).
 `Api.error` supplies one typed failing example. `Api.error_cases` lets several
 commands or queries share one error identity while supplying a typed failing
 example for each operation that declares it.

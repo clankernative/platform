@@ -938,17 +938,19 @@
           "local_path": null
         },
         {
-          "name": "serde_json",
+          "name": "serde-saphyr",
           "kind": "normal",
           "target": null,
           "rename": null,
-          "features": [],
-          "default_features": true,
+          "features": [
+            "deserialize"
+          ],
+          "default_features": false,
           "optional": false,
           "local_path": null
         },
         {
-          "name": "serde_yaml",
+          "name": "serde_json",
           "kind": "normal",
           "target": null,
           "rename": null,
