@@ -153,6 +153,7 @@ fn snapshot(
                         "AppContract.roc",
                         "ImportedContracts.roc",
                         "Credentials.roc",
+                        "Connections.roc",
                         "SecurityActions.roc",
                         "ProductReturns.roc",
                         "Registry.roc",

@@ -175,7 +175,9 @@ fn admitted_calendar_canary_prepares_reproducible_selection_without_live_authori
     draft["apps"]["oauthcalendar"]["oauth_connections"]["calendar"]["namespace"]["app"] =
         json!("oauthcalendar");
     draft["apps"]["oauthcalendar"]["authority"]["operations"] = json!({
-        "oauthcalendar.inspect": {"actors":["qa@example.com"], "mode":{"kind":"read"}, "models":{}}
+        "oauthcalendar.inspect": {"actors":["qa@example.com"], "mode":{"kind":"read"}, "models":{}},
+        "oauthcalendar.list_events": {"actors":["qa@example.com"], "mode":{"kind":"read"}, "models":{},
+            "observations":["connection.resolve.v1","google_calendar.list_events.v1"]}
     });
     select_fixture_epoch(&mut draft, "oauthcalendar")?;
     let directory = tempfile::tempdir()?;

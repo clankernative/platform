@@ -574,6 +574,7 @@ pub(super) mod tests {
     use crate::oauth::connect::{
         self, CallbackBinding, CallbackBindingSpec, ConnectIntent, ConnectState,
     };
+    use crate::oauth::custody;
     use crate::oauth::exchange::{self, ExchangeObservation, TokenHttpResponse};
     use crate::oauth::external::{self, FreshExternalApproval, ShellApprovalKeyLease};
     use crate::oauth::outbound::{CallbackIngress, CallbackOutcome};
@@ -2054,6 +2055,381 @@ pub(super) mod tests {
             })
             .unwrap();
         assert_eq!((code_count, verifier_count), (0, 0));
+    }
+
+    fn active_token_fixture(
+        expires_in: u64,
+        settlement_at: i64,
+    ) -> (QualificationFixture, rusqlite::Connection, KeyLease) {
+        let fixture = qualification_fixture();
+        let key = exchange_key();
+        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        connect::install_schema(&db).unwrap();
+        let prepared = exchange::prepare_authorization(
+            fixture.input(),
+            &key,
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~",
+        )
+        .unwrap();
+        let code_ref = prepared.code_ref().to_owned();
+        assert!(prepared.begin(&mut db, 1).unwrap());
+        private_callback(&mut db, &fixture, &code_ref, &key);
+        let permit = exchange::authorize_and_commit_qualified_exchange(&mut db, fixture.input(), 3)
+            .unwrap()
+            .unwrap();
+        let body = serde_json::json!({"access_token":"private_calendar_access","token_type":"Bearer","expires_in":expires_in,"scope":"calendar.read"}).to_string().into_bytes();
+        let ExchangeObservation::Response(response) = permit.send(|_| {
+            Ok(TokenHttpResponse {
+                status: 200,
+                content_type: "application/json".into(),
+                body,
+            })
+        }) else {
+            panic!("lost token response");
+        };
+        let (mapping, observed) = mapped_account(&fixture);
+        let settlement = response
+            .validate_mapped(fixture.input(), &mapping, &observed)
+            .unwrap()
+            .prepare_tokens(&key)
+            .unwrap();
+        assert!(
+            exchange::settle_mapped(
+                &mut db,
+                settlement,
+                fixture.input(),
+                &mapping.mapping_revision,
+                settlement_at
+            )
+            .unwrap()
+        );
+        (fixture, db, key)
+    }
+
+    #[test]
+    fn product_custody_pins_original_expiry_and_exact_activation_material() {
+        let (fixture, db, key) = active_token_fixture(10, 8);
+        let binding = exchange::load_binding(&db, &fixture.intent.attempt)
+            .unwrap()
+            .unwrap();
+        let account: String = db
+            .query_row(
+                "SELECT account FROM oauth_connection_slots WHERE slot=?1",
+                [&fixture.intent.slot],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let load = |intent: &ConnectIntent, binding: &exchange::ExchangeBinding, version, now| {
+            custody::load_access(&db, &key, intent, binding, &account, version, now)
+        };
+        let token = load(&fixture.intent, &binding, 1, 8).unwrap().unwrap();
+        assert_eq!(
+            token.expires_at, 13,
+            "settlement must not restart token life"
+        );
+        assert!(token.authorization().unwrap().is_sensitive());
+        assert!(load(&fixture.intent, &binding, 1, 12).unwrap().is_some());
+        assert!(load(&fixture.intent, &binding, 1, 13).unwrap().is_none());
+        assert!(
+            load(&fixture.intent, &binding, 1, 12).unwrap().is_none(),
+            "observed expiry must stay refused after a clock rewind"
+        );
+        assert!(
+            load(&fixture.intent, &binding, 1, 2).unwrap().is_none(),
+            "clock rollback must refuse use"
+        );
+        assert!(
+            load(&fixture.intent, &binding, 2, 8).is_err(),
+            "refresh versions need authenticated publication"
+        );
+        for changed in ["generation", "epoch", "owner"] {
+            let mut intent = fixture.intent.clone();
+            match changed {
+                "generation" => intent.proposed_generation += 1,
+                "epoch" => intent.expected_epoch += 1,
+                _ => intent.attempt = "other_attempt".into(),
+            }
+            assert!(
+                load(&intent, &binding, 1, 8).is_err(),
+                "{changed} substitution was admitted"
+            );
+        }
+        let mut alias = binding.clone();
+        alias.token_slot_ref = "substituted_token_reference".into();
+        db.execute(
+            "UPDATE oauth_private_tokens SET reference=?1",
+            [&alias.token_slot_ref],
+        )
+        .unwrap();
+        assert!(
+            load(&fixture.intent, &alias, 1, 8).is_err(),
+            "storage alias must not replace authenticated material reference"
+        );
+        let (late_fixture, late_db, late_key) = active_token_fixture(1, 5);
+        let late_binding = exchange::load_binding(&late_db, &late_fixture.intent.attempt)
+            .unwrap()
+            .unwrap();
+        let late_account: String = late_db
+            .query_row("SELECT account FROM oauth_connection_slots", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert!(
+            custody::load_access(
+                &late_db,
+                &late_key,
+                &late_fixture.intent,
+                &late_binding,
+                &late_account,
+                1,
+                5
+            )
+            .unwrap()
+            .is_none(),
+            "delayed activation beyond original token lifetime must remain expired"
+        );
+    }
+
+    #[test]
+    fn product_calendar_reads_one_complete_bounded_response_and_redacts_failures() {
+        use crate::oauth::{calendar, effects};
+        use std::{
+            collections::VecDeque,
+            sync::{
+                Arc, Mutex,
+                atomic::{AtomicBool, AtomicU64, Ordering},
+            },
+            time::Duration,
+        };
+        struct Port {
+            responses: Mutex<VecDeque<(u16, String)>>,
+            calls: Mutex<Vec<String>>,
+            now: AtomicU64,
+            entropy: AtomicU64,
+            late: AtomicBool,
+        }
+        impl effects::Hooks for Port {
+            fn domain(&self) -> u64 {
+                6301
+            }
+            fn wall_time(&self) -> Result<i64> {
+                Ok(8 + self.now.load(Ordering::SeqCst) as i64)
+            }
+            fn monotonic(&self) -> Duration {
+                Duration::from_secs(self.now.load(Ordering::SeqCst))
+            }
+            fn fill(&self, bytes: &mut [u8]) -> Result<()> {
+                let nonce = self.entropy.fetch_add(1, Ordering::SeqCst).to_le_bytes();
+                for (index, byte) in bytes.iter_mut().enumerate() {
+                    *byte = nonce[index % nonce.len()];
+                }
+                Ok(())
+            }
+            fn send(&self, request: reqwest::blocking::Request) -> Result<effects::Response> {
+                assert_eq!(request.method(), reqwest::Method::GET);
+                assert_eq!(request.url().scheme(), "https");
+                assert_eq!(request.url().host_str(), Some("www.googleapis.com"));
+                assert_eq!(
+                    request.url().path(),
+                    "/calendar/v3/calendars/primary/events"
+                );
+                assert!(request.body().is_none());
+                assert!(
+                    !request
+                        .url()
+                        .query_pairs()
+                        .any(|(name, _)| name == "pageToken")
+                );
+                assert!(
+                    request
+                        .url()
+                        .query_pairs()
+                        .any(|(name, value)| name == "fields" && value.starts_with("kind,"))
+                );
+                let header = &request.headers()[reqwest::header::AUTHORIZATION];
+                assert_eq!(header.to_str().unwrap(), "Bearer private_calendar_access");
+                assert!(header.is_sensitive());
+                self.calls.lock().unwrap().push(request.url().to_string());
+                let (status, body) = self
+                    .responses
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .context("unexpected provider request")?;
+                if self.late.load(Ordering::SeqCst) {
+                    self.now.store(3, Ordering::SeqCst);
+                }
+                Ok(effects::Response::Simulated {
+                    status: reqwest::StatusCode::from_u16(status)?,
+                    headers: reqwest::header::HeaderMap::from_iter([(
+                        reqwest::header::CONTENT_TYPE,
+                        reqwest::header::HeaderValue::from_static("application/json"),
+                    )]),
+                    body: std::io::Cursor::new(body.into_bytes()),
+                    peer: None,
+                })
+            }
+        }
+        let port = Arc::new(Port {
+            responses: Mutex::new(VecDeque::new()),
+            calls: Mutex::new(Vec::new()),
+            now: AtomicU64::new(0),
+            entropy: AtomicU64::new(1),
+            late: AtomicBool::new(false),
+        });
+        effects::scope(port.clone(), || {
+            let (fixture, db, key) = active_token_fixture(3600, 8);
+            let binding = exchange::load_binding(&db, &fixture.intent.attempt)
+                .unwrap()
+                .unwrap();
+            let account: String = db
+                .query_row("SELECT account FROM oauth_connection_slots", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            let token = custody::load_access(&db, &key, &fixture.intent, &binding, &account, 1, 8)
+                .unwrap()
+                .unwrap();
+            let window = calendar::Window {
+                start: "2026-10-13T00:00:00Z".into(),
+                end: "2026-10-14T00:00:00Z".into(),
+            };
+            let event = serde_json::json!({"id":"event_1","summary":"Work meeting","start":{"dateTime":"2026-10-13T10:00:00Z"},"end":{"dateTime":"2026-10-13T11:00:00Z"}});
+            let run = |responses: Vec<(u16, String)>| {
+                port.now.store(0, Ordering::SeqCst);
+                *port.responses.lock().unwrap() = responses.into();
+                port.calls.lock().unwrap().clear();
+                calendar::list(&token, &window).unwrap()
+            };
+            let result = run(vec![(
+                200,
+                serde_json::json!({"kind":"calendar#events","items":[event.clone()]}).to_string(),
+            )]);
+            let value: serde_json::Value = serde_json::from_str(&result).unwrap();
+            assert_eq!(value["Listed"][0]["id"], "event_1");
+            assert_eq!(
+                port.calls.lock().unwrap().len(),
+                1,
+                "a complete response requires exactly one GET"
+            );
+            assert!(
+                !result.contains("private_cursor") && !result.contains("private_calendar_access")
+            );
+            let escaped_events = (0..40)
+                .map(|index| {
+                    let mut value = event.clone();
+                    value["id"] = format!("escaped_{index}").into();
+                    value["summary"] = "\\\"\n\t\u{0}é".repeat(32).into();
+                    value
+                })
+                .collect::<Vec<_>>();
+            let escaped = run(vec![(
+                200,
+                serde_json::json!({"kind":"calendar#events","items":escaped_events}).to_string(),
+            )]);
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&escaped).unwrap()["Listed"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                40
+            );
+            let observation = crate::protocol::Observation {
+                instruction: crate::protocol::Instruction {
+                    kind: "observe".into(), model: crate::connection_codegen::LIST_EVENTS.into(),
+                    data: serde_json::json!({"registration":"calendar","reference":"cu1_native_reference",
+                        "window":{"start":window.start,"end":window.end}}).to_string(),
+                    ..Default::default()
+                },
+                result: escaped, error: String::new(),
+            };
+            let bounded = crate::resources::bounded_observation(observation).unwrap();
+            assert!(
+                bounded.error.is_empty(),
+                "complete escaped result must fit the actual preparation envelope"
+            );
+            assert!(serde_json::to_vec(&bounded).unwrap().len() <= 65_536);
+            for (status, problem) in [
+                (401, "ReauthRequired"),
+                (403, "PermissionDenied"),
+                (429, "CapacityDeferred"),
+                (302, "ProviderUnavailable"),
+                (500, "ProviderUnavailable"),
+            ] {
+                let result = run(vec![(
+                    status,
+                    "private provider error with credential bytes".into(),
+                )]);
+                assert_eq!(
+                    result,
+                    serde_json::json!({"Unavailable":problem}).to_string()
+                );
+            }
+            let capacity = run(vec![(200, serde_json::json!({"kind":"calendar#events","items":[],"nextPageToken":"private_cursor"}).to_string()), (200, serde_json::json!({"kind":"calendar#events","items":[event.clone()]}).to_string())]);
+            assert_eq!(
+                capacity,
+                serde_json::json!({"Unavailable":"CapacityDeferred"}).to_string()
+            );
+            assert_eq!(
+                port.calls.lock().unwrap().len(),
+                1,
+                "continuation must never dispatch a second bearer request"
+            );
+            assert_eq!(port.responses.lock().unwrap().len(), 1);
+            assert_eq!(
+                run(vec![(200, r#"{"kind":"calendar#events"}"#.into())]),
+                r#"{"Listed":[]}"#
+            );
+            port.late.store(true, Ordering::SeqCst);
+            assert_eq!(
+                run(vec![(
+                    200,
+                    serde_json::json!({"kind":"calendar#events","items":[event.clone()]})
+                        .to_string()
+                )]),
+                serde_json::json!({"Unavailable":"CapacityDeferred"}).to_string(),
+                "a terminal valid response arriving at the elapsed deadline must not publish Listed"
+            );
+            assert_eq!(port.calls.lock().unwrap().len(), 1);
+            port.late.store(false, Ordering::SeqCst);
+            for body in [
+                serde_json::json!({"kind":"calendar#events","items":[event.clone(),event.clone()]}).to_string(),
+                r#"{"kind":"calendar#events","items":[],"items":[]}"#.into(),
+                serde_json::json!({"kind":"calendar#events","items":[],"unreviewed":"provider bytes"}).to_string(),
+                r#"{}"#.into(),
+                r#"{"items":[]}"#.into(),
+                r#"{"kind":null,"items":[]}"#.into(),
+                r#"{"kind":"calendar#event","items":[]}"#.into(),
+                r#"{"error":{"code":200}}"#.into(),
+                "x".repeat(128 * 1024 + 1),
+            ] {
+                assert_eq!(
+                    run(vec![(200, body)]),
+                    serde_json::json!({"Unavailable":"ProviderUnavailable"}).to_string()
+                );
+            }
+            assert!(
+                !calendar::Window {
+                    start: window.end.clone(),
+                    end: window.start.clone()
+                }
+                .valid()
+            );
+            assert!(
+                !calendar::Window {
+                    start: window.start.clone(),
+                    end: "2026-12-14T00:00:00Z".into()
+                }
+                .valid()
+            );
+            assert!(
+                !calendar::Window {
+                    start: "2026-10-13T00:00:00".into(),
+                    end: window.end.clone()
+                }
+                .valid()
+            );
+        });
     }
 
     #[test]

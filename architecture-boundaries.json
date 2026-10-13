@@ -409,7 +409,8 @@
           "target": null,
           "rename": null,
           "features": [
-            "formatting"
+            "formatting",
+            "parsing"
           ],
           "default_features": true,
           "optional": false,

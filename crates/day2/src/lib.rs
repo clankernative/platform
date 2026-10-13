@@ -31,6 +31,7 @@ mod error;
 mod execution;
 mod host;
 pub mod host_inputs;
+mod host_loop;
 pub mod iap;
 pub mod iap_workload;
 pub mod identity;
@@ -54,6 +55,7 @@ mod release_binding;
 #[allow(dead_code)]
 mod oauth;
 pub use oauth::declaration as connection_declaration;
+pub mod connection_codegen;
 pub mod openapi;
 pub mod operation_catalog;
 pub mod operation_contract;

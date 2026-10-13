@@ -220,6 +220,7 @@ pub struct ExchangeDispatchPermit {
     intent: ConnectIntent,
     binding: ExchangeBinding,
     code_ref: String,
+    started_at: i64,
 }
 
 pub struct ExchangeRequest<'a> {
@@ -301,6 +302,7 @@ pub struct PrivateExchangeResponse {
     pub(super) intent: ConnectIntent,
     pub(super) binding: ExchangeBinding,
     pub(super) http: TokenHttpResponse,
+    pub(super) started_at: i64,
 }
 
 impl ExchangeDispatchPermit {
@@ -314,6 +316,7 @@ impl ExchangeDispatchPermit {
                 intent: self.intent,
                 binding: self.binding,
                 http,
+                started_at: self.started_at,
             })),
             Err(_) => ExchangeObservation::Uncertain(ExchangeUncertain {
                 attempt: self.intent.attempt,
@@ -396,6 +399,7 @@ pub fn authorize_and_commit_qualified_exchange(
         intent: stored_intent,
         binding: stored_exchange,
         code_ref,
+        started_at: now,
     }))
 }
 
@@ -440,6 +444,7 @@ pub struct VerifiedMappedExchange {
     verified: VerifiedMappedAccount,
     binding: ExchangeBinding,
     tokens: ValidatedTokenResponse,
+    started_at: i64,
 }
 
 impl PrivateExchangeResponse {
@@ -483,6 +488,7 @@ impl PrivateExchangeResponse {
             verified,
             binding: self.binding,
             tokens,
+            started_at: self.started_at,
         })
     }
 }
@@ -504,6 +510,7 @@ impl VerifiedMappedExchange {
             self.verified.account(),
             &self.binding,
             self.tokens,
+            self.started_at,
         )?;
         Ok(PreparedMappedSettlement {
             verified: self.verified,

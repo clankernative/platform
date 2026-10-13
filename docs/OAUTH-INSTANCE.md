@@ -390,9 +390,19 @@ are needed to derive it; no placeholder ID establishes a real registration.
 
 [`fixtures/oauth-calendar-canary`](../fixtures/oauth-calendar-canary/README.md)
 provides a complete, minimal registration target. It declares company-account
-Calendar event reads and exposes only an intent-inspection query. Its native
-build and SQLite/setup checks are part of the full verification campaign; they
-do not perform the Google sandbox campaign or Calendar business dispatch.
+Calendar event reads and exposes an intent query and a bounded event query.
+Generated `Connections.calendar.resolve` returns a requirement-specific opaque
+Use for `Connections.calendar.list_events`. Uses cannot enter persistent models
+or public API codecs; provider tokens remain in private host custody.
+
+Reads require a durable verified human origin and current native authority. They
+use original activation tokens and admit one GET, at most 100 events and a window
+of at most 31 days. Any provider continuation returns `CapacityDeferred` without
+another request. The canary's native build, setup and compiled runtime/custody
+tests are part of full verification, with host-only simulated readiness and HTTP.
+Live Google registration, refresh publication, Calendar writes and qualified
+clock/workload authority remain separate. See the canary README for byte/time
+limits and the precise scope of persistent clock refusal.
 
 The fact source starts empty. A current verified human must first match the
 pending attempt's owner and the app database's immutable IAP subject binding.
@@ -739,4 +749,6 @@ This layer provides the guarded shell entrypoint; it does not deploy a live work
 create a Google web client, establish
 complete installation readiness or enable OAuth on an installation. Live registration
 qualification requires the real client and deployed canary callback. Calendar
-business dispatch and the connect/use/refresh canary remain follow-up work.
+read dispatch is available through the sealed client when current native
+authority and original activation tokens are available. The live connect/use
+canary, refresh publication and Calendar writes remain follow-up work.
