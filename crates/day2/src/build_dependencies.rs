@@ -8,10 +8,11 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-const RELEASE: &str = "0.1.0";
+const RELEASE: &str = "0.1.1";
 const MAX_MANIFEST: u64 = 1_000_000;
 const MAX_FILE: u64 = 16 * 1024 * 1024;
 const MAX_PACKAGE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_EXECUTABLE_BYTES: u64 = 64 * 1024 * 1024;
 const CATALOG: &[u8] = include_bytes!("../../../build-dependencies/clanker-ui.json");
 
 #[derive(Clone)]
@@ -23,6 +24,9 @@ struct TargetPin {
     manifest_sha256: String,
     executable_sha256: String,
     executable_bytes: u64,
+    chart_worker_sha256: String,
+    chart_worker_bytes: u64,
+    contracts_sha256: String,
     provider_pin_sha256: String,
 }
 
@@ -61,6 +65,12 @@ fn pin_for(target: &str) -> Result<TargetPin> {
         manifest_sha256: string("manifestSha256")?,
         executable_sha256: string("executableSha256")?,
         executable_bytes: number("executableBytes")?,
+        chart_worker_sha256: string("chartWorkerSha256")?,
+        chart_worker_bytes: number("chartWorkerBytes")?,
+        contracts_sha256: catalog["presentationWorker"]["contractsSha256"]
+            .as_str()
+            .context("catalog presentation contract digest")?
+            .to_owned(),
         provider_pin_sha256: string("providerPinSha256")?,
     })
 }
@@ -237,6 +247,21 @@ fn verify_bundle(bundle_root: &Path, pin: TargetPin) -> Result<InstalledBundle> 
         "managed package identity mismatch"
     );
     ensure!(
+        manifest["presentationWorker"]["abi"] == catalog["presentationWorker"]["abi"]
+            && manifest["presentationWorker"]["executable"]["path"] == "bin/clanker-chart-worker"
+            && manifest["presentationWorker"]["executable"]["bytes"] == pin.chart_worker_bytes
+            && manifest["presentationWorker"]["executable"]["digest"]
+                == format!("sha256:{}", pin.chart_worker_sha256),
+        "managed chart worker manifest mismatch"
+    );
+    let contracts_digest = sha(&serde_json::to_vec(
+        &manifest["presentationWorker"]["contracts"],
+    )?);
+    ensure!(
+        contracts_digest == pin.contracts_sha256,
+        "managed presentation contract digest mismatch"
+    );
+    ensure!(
         manifest["executable"]["path"] == "bin/clanker-ui"
             && manifest["executable"]["bytes"] == pin.executable_bytes
             && manifest["executable"]["digest"] == format!("sha256:{}", pin.executable_sha256),
@@ -259,11 +284,18 @@ fn verify_bundle(bundle_root: &Path, pin: TargetPin) -> Result<InstalledBundle> 
     let entries = manifest["entries"]
         .as_array()
         .context("manifest entries missing")?;
-    ensure!(entries.len() == 448, "managed package input count mismatch");
+    ensure!(
+        entries.len() as u64
+            == catalog["inputCount"]
+                .as_u64()
+                .context("catalog inputCount")?,
+        "managed package input count mismatch"
+    );
     let mut expected = BTreeSet::from([
         "manifest.json".to_owned(),
         "provider-pin.json".to_owned(),
         "bin/clanker-ui".to_owned(),
+        "bin/clanker-chart-worker".to_owned(),
         "legal/LICENSE".to_owned(),
         "legal/NOTICES.txt".to_owned(),
     ]);
@@ -345,6 +377,14 @@ fn verify_bundle(bundle_root: &Path, pin: TargetPin) -> Result<InstalledBundle> 
         legal_paths == BTreeSet::from(["legal/LICENSE".to_owned(), "legal/NOTICES.txt".to_owned()]),
         "managed legal closure incomplete"
     );
+    let executable_total = pin
+        .executable_bytes
+        .checked_add(pin.chart_worker_bytes)
+        .context("executable closure byte budget overflow")?;
+    ensure!(
+        executable_total <= MAX_EXECUTABLE_BYTES,
+        "executable closure exceeds byte budget"
+    );
     let executable = bundle_root.join("bin/clanker-ui");
     let executable_bytes = read_regular(&executable, pin.executable_bytes)?;
     ensure!(
@@ -353,6 +393,14 @@ fn verify_bundle(bundle_root: &Path, pin: TargetPin) -> Result<InstalledBundle> 
         "managed executable digest mismatch"
     );
     check_executable(&executable, &executable_bytes, &pin.target)?;
+    let chart_worker = bundle_root.join("bin/clanker-chart-worker");
+    let chart_worker_bytes = read_regular(&chart_worker, pin.chart_worker_bytes)?;
+    ensure!(
+        chart_worker_bytes.len() as u64 == pin.chart_worker_bytes
+            && sha(&chart_worker_bytes) == pin.chart_worker_sha256,
+        "managed chart worker digest mismatch"
+    );
+    check_executable(&chart_worker, &chart_worker_bytes, &pin.target)?;
     let mut actual = BTreeSet::new();
     let mut visited = 0usize;
     collect_files(bundle_root, bundle_root, &mut actual, 0, &mut visited)?;
@@ -367,6 +415,8 @@ fn verify_bundle(bundle_root: &Path, pin: TargetPin) -> Result<InstalledBundle> 
         "manifestDigest": format!("sha256:{}", pin.manifest_sha256),
         "providerPinDigest": format!("sha256:{}", pin.provider_pin_sha256),
         "archiveDigest": format!("sha256:{}", pin.archive_sha256),
+        "presentationWorker": {"abi": catalog["presentationWorker"]["abi"], "contractsSha256": catalog["presentationWorker"]["contractsSha256"], "executable": {"path": "bin/clanker-chart-worker", "bytes": pin.chart_worker_bytes, "digest": format!("sha256:{}", pin.chart_worker_sha256)} },
+        "inputCount": catalog["inputCount"],
         "package": {"name":catalog["name"], "version":catalog["version"], "digest":catalog["packageDigest"]}
     });
     Ok(InstalledBundle {
@@ -583,7 +633,7 @@ mod tests {
         assert_eq!(lock["schemaVersion"], 2);
         assert_eq!(
             lock["package"]["digest"],
-            "sha256:9185573e72c1a2faffec1b038859b052b15954fa984305d5446d905537d31358"
+            "sha256:8f90ff7a2da0a1e476d57ae26c5a6dad9acf67bd86b7625e98c0a097c42e7325"
         );
         assert_eq!(lock["package"]["inputs"][0]["bytes"], 27);
         assert_eq!(
@@ -602,7 +652,7 @@ mod tests {
         fs::create_dir_all(bundle.join("legal")).unwrap();
 
         let mut entries = Vec::new();
-        for index in 0..448 {
+        for index in 0..455 {
             let path = format!("files/input-{index:03}.txt");
             fs::write(package.join(&path), b"x").unwrap();
             entries.push(json!({"path":path,"bytes":1,"digest":format!("sha256:{}",sha(b"x"))}));
@@ -636,12 +686,34 @@ mod tests {
             .unwrap();
         }
         let executable_sha = sha(&executable);
+        let mut chart_worker = vec![0u8; 64];
+        if target == "macos-aarch64" {
+            chart_worker[..4].copy_from_slice(&[0xcf, 0xfa, 0xed, 0xfe]);
+        } else {
+            chart_worker[..4].copy_from_slice(b"\x7fELF");
+            chart_worker[18..20].copy_from_slice(&[0x3e, 0x00]);
+        }
+        fs::write(bundle.join("bin/clanker-chart-worker"), &chart_worker).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(
+                bundle.join("bin/clanker-chart-worker"),
+                fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+        }
+        let chart_worker_sha = sha(&chart_worker);
+        let contracts =
+            json!({"fixture_contract":{"input":{"string":"string"},"output":{"string":"string"}}});
+        let contracts_sha = sha(&serde_json::to_vec(&contracts).unwrap());
         let manifest = json!({
             "schemaVersion":catalog["schemaVersion"],"target":target,"toolVersion":catalog["release"],
             "sourceRevision":catalog["sourceRevision"],"provider":catalog["provider"],
             "assemblyProtocol":catalog["assemblyProtocol"],"bindingAbi":catalog["bindingAbi"],
             "templateEngine":catalog["templateEngine"],
             "executable":{"path":"bin/clanker-ui","bytes":executable.len(),"digest":format!("sha256:{executable_sha}")},
+            "presentationWorker":{"abi":catalog["presentationWorker"]["abi"],"executable":{"path":"bin/clanker-chart-worker","bytes":chart_worker.len(),"digest":format!("sha256:{chart_worker_sha}")},"contracts":contracts},
             "package":{"name":catalog["name"],"version":catalog["version"],"digest":catalog["packageDigest"]},
             "legal":legal_entries,"entries":entries
         });
@@ -662,6 +734,9 @@ mod tests {
             manifest_sha256: sha(&manifest_bytes),
             executable_sha256: executable_sha,
             executable_bytes: executable.len() as u64,
+            chart_worker_sha256: chart_worker_sha,
+            chart_worker_bytes: chart_worker.len() as u64,
+            contracts_sha256: contracts_sha,
             provider_pin_sha256: sha(&provider_bytes),
         };
         (pin, format!("sha256:{}", sha(&manifest_bytes)))
@@ -676,7 +751,7 @@ mod tests {
         assert_eq!(installed.identity()["manifestDigest"], manifest_digest);
         assert_eq!(
             installed.identity()["package"]["digest"],
-            "sha256:9185573e72c1a2faffec1b038859b052b15954fa984305d5446d905537d31358"
+            "sha256:8f90ff7a2da0a1e476d57ae26c5a6dad9acf67bd86b7625e98c0a097c42e7325"
         );
 
         let changed = tempfile::tempdir().unwrap();
@@ -684,7 +759,7 @@ mod tests {
         let changed_root = changed.path().canonicalize().unwrap();
         fs::write(
             changed_root
-                .join("cli/build-dependencies/clanker-ui-0.1.0/package/files/input-000.txt"),
+                .join("cli/build-dependencies/clanker-ui-0.1.1/package/files/input-000.txt"),
             b"tampered",
         )
         .unwrap();
@@ -695,10 +770,88 @@ mod tests {
         let missing_root = missing.path().canonicalize().unwrap();
         fs::remove_file(
             missing_root
-                .join("cli/build-dependencies/clanker-ui-0.1.0/package/files/input-000.txt"),
+                .join("cli/build-dependencies/clanker-ui-0.1.1/package/files/input-000.txt"),
         )
         .unwrap();
         assert!(installed_with_pin(&missing_root, missing_pin).is_err());
+    }
+
+    #[test]
+    fn installed_rejects_chart_worker_tampering_missing_files_and_unreviewed_contracts() {
+        let tampered = tempfile::tempdir().unwrap();
+        let (pin, _) = reviewed_fixture(tampered.path());
+        let root = tampered.path().canonicalize().unwrap();
+        let worker_path = root.join(format!(
+            "cli/build-dependencies/clanker-ui-{RELEASE}/bin/clanker-chart-worker"
+        ));
+        fs::write(&worker_path, b"tampered").unwrap();
+        assert!(installed_with_pin(&root, pin).is_err());
+
+        let missing = tempfile::tempdir().unwrap();
+        let (pin, _) = reviewed_fixture(missing.path());
+        let root = missing.path().canonicalize().unwrap();
+        let worker_path = root.join(format!(
+            "cli/build-dependencies/clanker-ui-{RELEASE}/bin/clanker-chart-worker"
+        ));
+        fs::remove_file(worker_path).unwrap();
+        assert!(installed_with_pin(&root, pin).is_err());
+
+        #[cfg(unix)]
+        {
+            let mode = tempfile::tempdir().unwrap();
+            let (pin, _) = reviewed_fixture(mode.path());
+            let root = mode.path().canonicalize().unwrap();
+            let worker_path = root.join(format!(
+                "cli/build-dependencies/clanker-ui-{RELEASE}/bin/clanker-chart-worker"
+            ));
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&worker_path, fs::Permissions::from_mode(0o644)).unwrap();
+            assert!(installed_with_pin(&root, pin).is_err());
+        }
+
+        let oversized = tempfile::tempdir().unwrap();
+        let (mut pin, _) = reviewed_fixture(oversized.path());
+        let root = oversized.path().canonicalize().unwrap();
+        let manifest_path = root.join(format!(
+            "cli/build-dependencies/clanker-ui-{RELEASE}/manifest.json"
+        ));
+        let mut manifest: Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        pin.chart_worker_bytes = MAX_EXECUTABLE_BYTES - pin.executable_bytes + 1;
+        manifest["presentationWorker"]["executable"]["bytes"] = json!(pin.chart_worker_bytes);
+        let bytes = serde_json::to_vec(&manifest).unwrap();
+        fs::write(manifest_path, &bytes).unwrap();
+        pin.manifest_sha256 = sha(&bytes);
+        let error = installed_with_pin(&root, pin).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("executable closure exceeds byte budget")
+        );
+
+        for field in ["abi", "contracts"] {
+            let changed = tempfile::tempdir().unwrap();
+            let (mut pin, _) = reviewed_fixture(changed.path());
+            let root = changed.path().canonicalize().unwrap();
+            let manifest_path = root.join(format!(
+                "cli/build-dependencies/clanker-ui-{RELEASE}/manifest.json"
+            ));
+            let mut manifest: Value =
+                serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+            if field == "abi" {
+                manifest["presentationWorker"]["abi"] = json!(2);
+            } else {
+                manifest["presentationWorker"]["contracts"]["fixture_contract"]["input"] =
+                    json!("changed");
+            }
+            let bytes = serde_json::to_vec(&manifest).unwrap();
+            fs::write(manifest_path, &bytes).unwrap();
+            pin.manifest_sha256 = sha(&bytes);
+            assert!(
+                installed_with_pin(&root, pin).is_err(),
+                "accepted changed {field}"
+            );
+        }
     }
 
     #[test]

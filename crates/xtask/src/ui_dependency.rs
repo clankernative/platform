@@ -11,7 +11,7 @@ use std::{
 };
 use tar::{Archive, EntryType};
 
-const RELEASE: &str = "0.1.0";
+const RELEASE: &str = "0.1.1";
 const MAX_ARCHIVE: u64 = 8_000_000;
 const MAX_EXTRACTED: u64 = 80_000_000;
 const MAX_FILES: usize = 512;
@@ -382,7 +382,7 @@ mod tests {
         assert!(
             !temp
                 .path()
-                .join("cli/build-dependencies/clanker-ui-0.1.0")
+                .join("cli/build-dependencies/clanker-ui-0.1.1")
                 .exists()
         );
     }

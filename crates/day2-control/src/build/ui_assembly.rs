@@ -14,7 +14,7 @@ const PACKAGE_FILE_LIMIT: usize = 4096;
 const BUNDLE_TOTAL_LIMIT: u64 = 64 * 1024 * 1024;
 const BUNDLE_ITEM_LIMIT: u64 = 16 * 1024 * 1024;
 const LOCK_PATH: &str = "ui/ui.lock.json";
-const BUNDLE_RELATIVE: &str = "cli/build-dependencies/clanker-ui-0.1.0";
+const BUNDLE_RELATIVE: &str = "cli/build-dependencies/clanker-ui-0.1.1";
 
 #[derive(Clone, Debug)]
 pub(super) struct UiAssemblyInputs {
@@ -266,7 +266,7 @@ mod tests {
             provider: "clanker-ui.native".into(),
             package: day2::ui_lock::LockedPackage {
                 name: "@clanker/vanilla".into(),
-                version: "0.7.0".into(),
+                version: "0.7.1".into(),
                 digest: day2::ui_lock::manifest_digest(&inputs)?,
                 inputs,
             },
@@ -293,7 +293,7 @@ mod tests {
         )?;
         let identity = json!({
             "provider":"clanker-ui.native", "target":"test-target",
-            "package":{"name":"@clanker/vanilla","version":"0.7.0","digest":package_digest}
+            "package":{"name":"@clanker/vanilla","version":"0.7.1","digest":package_digest}
         });
         Ok(UiAssemblyInputs {
             platform_root: root.to_path_buf(),
@@ -301,7 +301,7 @@ mod tests {
             identity,
             provider: "clanker-ui.native".into(),
             package_name: "@clanker/vanilla".into(),
-            package_version: "0.7.0".into(),
+            package_version: "0.7.1".into(),
             package_digest,
             target: "test-target".into(),
             test_bundle: true,

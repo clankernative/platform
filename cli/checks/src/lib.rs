@@ -248,7 +248,8 @@ mod tests {
         );
         assert_eq!(lock["schemaVersion"], 2);
         assert!(lock["package"].get("path").is_none());
-        assert_eq!(lock["package"]["inputs"].as_array().unwrap().len(), 448);
+        assert_eq!(lock["package"]["version"], "0.7.1");
+        assert_eq!(lock["package"]["inputs"].as_array().unwrap().len(), 455);
         assert!(generate().status.success());
         assert_eq!(fs::read(&path).unwrap(), authored);
         let mut changed = lock;

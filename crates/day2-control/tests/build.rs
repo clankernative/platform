@@ -123,7 +123,7 @@ fn platform(directory: &Path) -> Result<PlatformInputs> {
     )?;
     write(&root.join("cli/main.roc"), b"approved CLI", false)?;
     write(
-        &root.join("cli/build-dependencies/clanker-ui-0.1.0/manifest.json"),
+        &root.join("cli/build-dependencies/clanker-ui-0.1.1/manifest.json"),
         b"installed managed bundle",
         false,
     )?;
@@ -375,7 +375,7 @@ fn platform_snapshot_excludes_mutable_shared_outputs_but_pins_policy_and_toolcha
     assert!(!private.join("platform/artifacts").exists());
     assert!(
         !private
-            .join("platform/cli/build-dependencies/clanker-ui-0.1.0/manifest.json")
+            .join("platform/cli/build-dependencies/clanker-ui-0.1.1/manifest.json")
             .exists()
     );
     assert!(!private.join("platform/crates/worker/generated").exists());
