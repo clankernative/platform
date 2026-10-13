@@ -233,7 +233,8 @@ impl Drop for Supervised {
         // End option parsing before the negative group ID: procps 4.0.4 can
         // otherwise interpret just its first digit (including -1, all PIDs).
         #[cfg(unix)]
-        if let Some(mut signal) = group_signal(self.0.id(), "KILL") {
+        if let Some(signal) = group_signal(self.0.id(), "KILL") {
+            let mut signal: Command = signal;
             let _ = signal.status();
         }
         let _ = self.0.kill();
@@ -446,13 +447,17 @@ fn run(scratch: &Path, phase: &str, command: &mut Command, budget: Duration) -> 
         .suffix(".log")
         .tempfile_in(&logs)?
         .keep()?;
+    let log: fs::File = log;
     println!("Formatter: {phase}; retained log {}", path.display());
-    #[cfg(target_os = "linux")]
-    let (mut telemetry, telemetry_path) = tempfile::Builder::new()
+    let (telemetry, telemetry_path) = tempfile::Builder::new()
         .prefix("resources-")
         .suffix(".jsonl")
         .tempfile_in(&logs)?
         .keep()?;
+    let mut telemetry: fs::File = telemetry;
+    #[cfg(not(target_os = "linux"))]
+    writeln!(telemetry, "{}", serde_json::json!({"phase":phase,"elapsed_ms":0}))?;
+    println!("Formatter resource telemetry: {}", telemetry_path.display());
     #[cfg(target_os = "linux")]
     {
         let disk = available_disk(scratch)?;
@@ -465,7 +470,6 @@ fn run(scratch: &Path, phase: &str, command: &mut Command, budget: Duration) -> 
             disk >= LINUX_DISK_HEADROOM_BYTES,
             "formatter disk headroom below budget: {disk} bytes"
         );
-        println!("Formatter resource telemetry: {}", telemetry_path.display());
     }
     let output = log.try_clone()?;
     command.stdout(output.try_clone()?).stderr(output);

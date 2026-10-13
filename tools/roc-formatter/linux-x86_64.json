@@ -1,6 +1,6 @@
 {
   "roc_version": "nightly-2026-09-12-220fd47",
-  "roc_binary_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "roc_binary_sha256": "4b4eed88a6540d041fc33fe5eecdbc43ee8fcfa4a549931bf4369e21fad49825",
   "roc_source_archive": "https://github.com/roc-lang/nightlies/releases/download/nightly-2026-09-12-220fd47/roc_nightly-source-2026-09-12-220fd47.tar.gz",
   "roc_source_archive_sha256": "d25cbd3f9cf012a08d734daf1c6d917b9d997e3943376103943109be01570b4d",
   "roc_source_commit": "220fd4709ea8c96e88ad83cdf4447048418f9045",

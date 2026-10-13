@@ -1,0 +1,70 @@
+{
+  "format": 1,
+  "review_status": "reviewed-Linux-x86_64-formatter-output",
+  "binary_sha256": "4b4eed88a6540d041fc33fe5eecdbc43ee8fcfa4a549931bf4369e21fad49825",
+  "binary_bytes": 226687584,
+  "source_recipe_sha256": "sha256:f34ebda101fed9916f8b91ecfce0236859da14efcdf77e5d8c5b218f678a50b7",
+  "build_recipe": {
+    "build_args": [
+      "build",
+      "roc",
+      "-Doptimize=ReleaseFast",
+      "-Dstrip=true",
+      "-Dcpu=baseline",
+      "-Dcompiler-version=nightly-2026-09-12-220fd47",
+      "-j1",
+      "--summary",
+      "all"
+    ],
+    "digit_grouping_patch_sha256": "78be77ab3f9d908946cf14498907d51422b893d60ca925195247c58fd89c7a09",
+    "patch_sha256": "bdc1a7a89284bd5fc2ec3bc88cd33b03dc76c0c92d6800ab71a6f2c3e39e2c4c",
+    "process_limits": {
+      "address_space_bytes_per_process": 12884901888,
+      "core_bytes": 0,
+      "minimum_available_disk_bytes": 4294967296,
+      "program": "/usr/bin/prlimit",
+      "resource_sampling_ms": 500,
+      "sampled_process_group_rss_bytes": 8589934592,
+      "sampling_is_not_kernel_process_tree_confinement": true
+    },
+    "roc_source_archive": "https://github.com/roc-lang/nightlies/releases/download/nightly-2026-09-12-220fd47/roc_nightly-source-2026-09-12-220fd47.tar.gz",
+    "roc_source_archive_sha256": "d25cbd3f9cf012a08d734daf1c6d917b9d997e3943376103943109be01570b4d",
+    "roc_source_commit": "220fd4709ea8c96e88ad83cdf4447048418f9045",
+    "roc_version": "nightly-2026-09-12-220fd47",
+    "target": "x86_64-linux",
+    "test_args": [
+      "build",
+      "run-test-zig-module-fmt",
+      "-Doptimize=ReleaseFast",
+      "-Dstrip=true",
+      "-Dcpu=baseline",
+      "-Dcompiler-version=nightly-2026-09-12-220fd47",
+      "-j1",
+      "--summary",
+      "all"
+    ],
+    "zig_archive": "https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz",
+    "zig_archive_sha256": "70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00",
+    "zig_version": "0.16.0"
+  },
+  "hosted_build": {
+    "repository": "clankernative/platform",
+    "run_id": 38468385595,
+    "run_attempt": 1,
+    "head_sha": "313a32b12c66ec0ee2bdd716b0f09e97c00b44d7",
+    "job_id": 115540858804,
+    "runner": "ubuntu-24.04",
+    "url": "https://github.com/clankernative/platform/actions/runs/38468385595"
+  },
+  "native_formatter_tests": {
+    "passed": 114,
+    "total": 114
+  },
+  "Rust_formatter_guards": {
+    "passed": 22,
+    "failed": 0,
+    "ignored": 1
+  },
+  "binary_reproducibility": "not-guaranteed: compiler embeds absolute build paths",
+  "scope": "Formatter-only executable; application compiler and ABI generator remain independently pinned; hosted platform/Linux qualification is separate"
+}
