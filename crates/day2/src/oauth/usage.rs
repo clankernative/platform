@@ -534,17 +534,30 @@ pub(crate) fn execute(
             && selection.requirement.actions.contains("list_events"),
         "connection provider action or selection changed"
     );
+    let selected_at = super::effects::wall_time()?;
+    if selected_at < started {
+        let tx = crate::write_queue::immediate(&mut db)?;
+        refuse(&tx, &claims)?;
+        tx.commit()?;
+        return Ok(unavailable("ReauthRequired"));
+    }
     let Some(key) = authority.custody(
         runtime.app(),
         &input.registration,
         &claims.actor,
         &claims.selection,
-        started,
+        selected_at,
     )?
     else {
         return Ok(unavailable("BindingUnavailable"));
     };
     let now = super::effects::wall_time()?;
+    if now < selected_at {
+        let tx = crate::write_queue::immediate(&mut db)?;
+        refuse(&tx, &claims)?;
+        tx.commit()?;
+        return Ok(unavailable("ReauthRequired"));
+    }
     let snapshot = crate::write_queue::immediate(&mut db)?;
     let current = load(
         &snapshot,
@@ -586,6 +599,9 @@ pub(crate) fn execute(
     let result = super::calendar::list(&token, &input.window)?;
     let at = super::effects::wall_time()?;
     if at < now || at >= token.expires_at {
+        let tx = crate::write_queue::immediate(&mut db)?;
+        refuse(&tx, &claims)?;
+        tx.commit()?;
         return Ok(unavailable("ReauthRequired"));
     }
     let Some(current) = authority.current(runtime.app(), &input.registration, &claims.actor, at)?
@@ -607,6 +623,18 @@ pub(crate) fn execute(
     )?;
     snapshot.commit()?;
     Ok(result)
+}
+
+fn refuse(db: &Connection, claims: &Claims) -> Result<()> {
+    super::custody::refuse_access(
+        db,
+        &claims.slot,
+        claims.generation,
+        claims.token_version,
+        claims.security_epoch,
+        &claims.profile,
+        &claims.account,
+    )
 }
 
 /// Runs inside the final/replay transaction. Only local pins and the clock are
@@ -956,6 +984,612 @@ mod tests {
             observations: Vec::new(),
         };
         assert!(human(&tx, &fixture.runtime, &request)?.is_none());
+        Ok(())
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum ProviderCase {
+        Complete,
+        Continuation,
+        RevokedContinuation,
+        Expired,
+        Rewound,
+        RewoundKey,
+        Late,
+        MissingMarker,
+    }
+
+    struct ProductPort {
+        case: ProviderCase,
+        db: std::path::PathBuf,
+        now: std::sync::atomic::AtomicI64,
+        ticks: std::sync::atomic::AtomicU64,
+        entropy: std::sync::atomic::AtomicU64,
+        sends: std::sync::atomic::AtomicUsize,
+    }
+
+    impl super::super::effects::Hooks for ProductPort {
+        fn domain(&self) -> u64 {
+            6303
+        }
+
+        fn wall_time(&self) -> Result<i64> {
+            Ok(self.now.load(std::sync::atomic::Ordering::SeqCst))
+        }
+
+        fn monotonic(&self) -> Duration {
+            Duration::from_secs(self.ticks.load(std::sync::atomic::Ordering::SeqCst))
+        }
+
+        fn fill(&self, bytes: &mut [u8]) -> Result<()> {
+            let counter = self
+                .entropy
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                .to_le_bytes();
+            for (index, byte) in bytes.iter_mut().enumerate() {
+                *byte = counter[index % counter.len()];
+            }
+            Ok(())
+        }
+
+        fn send(
+            &self,
+            request: reqwest::blocking::Request,
+        ) -> Result<super::super::effects::Response> {
+            use std::sync::atomic::Ordering::SeqCst;
+            assert_eq!(
+                self.sends.fetch_add(1, SeqCst),
+                0,
+                "no second bearer dispatch or retry"
+            );
+            assert_eq!(request.method(), reqwest::Method::GET);
+            assert_eq!(request.url().host_str(), Some("www.googleapis.com"));
+            assert_eq!(
+                request.url().path(),
+                "/calendar/v3/calendars/primary/events"
+            );
+            assert!(
+                !request
+                    .url()
+                    .query_pairs()
+                    .any(|(name, _)| name == "pageToken")
+            );
+            let authorization = &request.headers()[reqwest::header::AUTHORIZATION];
+            assert_eq!(
+                authorization.to_str()?,
+                "Bearer private_runtime_calendar_access"
+            );
+            assert!(authorization.is_sensitive());
+            // Acquiring an immediate writer proves the host has closed its
+            // business transaction before entering the simulated provider.
+            let mut db = store::open(&self.db)?;
+            let tx = crate::write_queue::immediate(&mut db)?;
+            assert_eq!(
+                tx.query_row(
+                    "SELECT count(*) FROM day2_observation_attempts WHERE observation IS NULL",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )?,
+                1
+            );
+            if self.case == ProviderCase::RevokedContinuation {
+                tx.execute("UPDATE oauth_connection_slots SET status='disabled',security_epoch=security_epoch+1", [])?;
+            }
+            tx.commit()?;
+            match self.case {
+                ProviderCase::Expired => self.now.store(303, SeqCst),
+                ProviderCase::Rewound => self.now.store(99, SeqCst),
+                ProviderCase::Late => self.ticks.store(3, SeqCst),
+                _ => (),
+            }
+            let mut body = json!({"kind":"calendar#events","items":[{
+                "id":"event_1","summary":"Work meeting","start":{"dateTime":"2026-10-13T10:00:00Z"},
+                "end":{"dateTime":"2026-10-13T11:00:00Z"}
+            }]});
+            if matches!(
+                self.case,
+                ProviderCase::Continuation | ProviderCase::RevokedContinuation
+            ) {
+                body["nextPageToken"] = "private_cursor".into();
+            }
+            if self.case == ProviderCase::MissingMarker {
+                body.as_object_mut().unwrap().remove("kind");
+            }
+            Ok(super::super::effects::Response::Simulated {
+                status: reqwest::StatusCode::OK,
+                headers: reqwest::header::HeaderMap::from_iter([(
+                    reqwest::header::CONTENT_TYPE,
+                    reqwest::header::HeaderValue::from_static("application/json"),
+                )]),
+                body: std::io::Cursor::new(serde_json::to_vec(&body)?),
+                peer: None,
+            })
+        }
+    }
+
+    struct ProductAuthority {
+        selection: Selection,
+        port: Arc<ProductPort>,
+        reads: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Authority for ProductAuthority {
+        fn current(
+            &self,
+            app: &str,
+            registration: &str,
+            owner: &str,
+            _: i64,
+        ) -> Result<Option<Selection>> {
+            ensure!(
+                app == "app" && registration == "calendar" && owner == "alice@example.com",
+                "unexpected native selection"
+            );
+            let mut db = store::open(&self.port.db)?;
+            crate::write_queue::immediate(&mut db)?.commit()?;
+            let call = self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.port.case == ProviderCase::RewoundKey && call == 1 {
+                self.port
+                    .now
+                    .store(110, std::sync::atomic::Ordering::SeqCst);
+            }
+            Ok(Some(self.selection.clone()))
+        }
+
+        fn custody(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            expected: &Digest,
+            now: i64,
+        ) -> Result<Option<KeyLease>> {
+            assert_eq!(&self.selection.identity()?, expected);
+            let mut db = store::open(&self.port.db)?;
+            crate::write_queue::immediate(&mut db)?.commit()?;
+            if self.port.case == ProviderCase::RewoundKey {
+                assert_eq!(now, 110);
+                self.port
+                    .now
+                    .store(105, std::sync::atomic::Ordering::SeqCst);
+            }
+            Ok(Some(super::super::profiles::tests::exchange_key()))
+        }
+    }
+
+    // Host-only simulated readiness and HTTP; the artifact, generated typed
+    // clients, human acceptance, original exchange/custody, observation journal
+    // and final decision all use their ordinary implementations.
+    fn product_selection(
+        runtime: &Runtime,
+    ) -> Result<(
+        Selection,
+        super::super::profiles::tests::QualificationFixture,
+    )> {
+        use super::super::{
+            admission,
+            connect::{CallbackBinding, CallbackBindingSpec, ConnectIntent},
+            profiles::*,
+        };
+        use day2_capabilities::{
+            BindingRef,
+            credentials::Namespace,
+            oauth::{
+                ConnectionSlotKey, ProductReturnRef, ProviderCallbackRef, SecurityOriginRef,
+                SlotOwner,
+            },
+        };
+        let name = |value: &str| Name::try_from(value.to_owned());
+        let pin = |value: &str| BindingRef::pin(name(value)?, &value);
+        let requirement = declaration(runtime, "calendar")?.clone();
+        let access = super::super::google::reviewed(&requirement.account_policy)?;
+        let reviewed = access.profile.clone();
+        let (_, permission) = admission::ReviewedCatalog::new(vec![access])?
+            .resolve(&requirement, &reviewed.protocol.identity().binding)?;
+        let instance_ref = pin("simulated_instance")?;
+        let shell_url = "https://security.example.com/".to_owned();
+        let qualification = Digest::of(&"simulated-shell-readiness")?;
+        let origin = SecurityOriginRef(BindingRef {
+            id: name("security_origin")?,
+            revision: Digest::of(&(
+                "oauth-security-shell-evidence-v1",
+                &instance_ref,
+                &shell_url,
+                &qualification,
+            ))?,
+        });
+        let mut binding = OutboundConnectionBinding {
+            namespace: Namespace {
+                installation: name("localdev")?,
+                environment: name("disposable")?,
+                app: name("app")?,
+                binding_generation: 1,
+            },
+            requirement: requirement.nominal_identity()?,
+            profile: permission.profile.clone(),
+            registration: pin("calendar_registration")?,
+            custody: pin("oauth_custody")?,
+            security_shell: origin.clone(),
+            account_binding: pin("human_subject_map")?,
+            shell_attestation: pin("shell_attestation")?,
+            product_return: ProductReturnRef(pin("calendar_return")?),
+            custody_verifier_secret: name("verifier")?,
+            custody_encryption_secret: name("encryption")?,
+            shell_attestation_secret: name("attestation")?,
+        };
+        let slot = ConnectionSlotKey {
+            installation: binding.namespace.installation.clone(),
+            environment: binding.namespace.environment.clone(),
+            app: binding.namespace.app.clone(),
+            requirement: requirement.logical_id.clone(),
+            owner: SlotOwner::Human {
+                subject: "alice@example.com".into(),
+            },
+        }
+        .id(&requirement)?;
+        let namespace = admission::binding_namespace(&binding)?;
+        let callback = ProviderCallbackRef::derive(&origin, &permission.profile, &namespace)?;
+        let callback_url = derived_callback_url(&shell_url, &callback)?;
+        let confirmation = Digest::of(&"simulated-provider-confirmation")?;
+        let client_credential = pin("calendar_client_credential")?;
+        let class = ClientRegistrationClass::ConfidentialPkceS256;
+        binding.registration.revision = Digest::of(&(
+            "oauth-provider-registration-evidence-v1",
+            &instance_ref,
+            &permission.profile,
+            &reviewed.issuer,
+            &origin,
+            &callback,
+            &callback_url,
+            &confirmation,
+            &client_credential,
+            class,
+        ))?;
+        let intent = ConnectIntent {
+            attempt: "original_attempt".into(),
+            slot: slot.as_str().into(),
+            expected_generation: None,
+            expected_epoch: 1,
+            proposed_generation: 1,
+            owner: "alice@example.com".into(),
+            profile: permission.profile.id.as_str().into(),
+            registration: Digest::of(&binding.registration)?.as_str().into(),
+            callback: Digest::of(&callback)?.as_str().into(),
+            consent: permission.consent_digest(&requirement)?.as_str().into(),
+            expires_at: 900,
+        };
+        let callback_binding = CallbackBinding::from_secret_state(
+            b"0123456789abcdefghijklmnopqrstuvwxyzABCDEF",
+            CallbackBindingSpec {
+                issuer: reviewed.issuer.clone(),
+                issuer_url: reviewed.issuer_url.clone(),
+                security_origin: origin.clone(),
+                profile: permission.profile.clone(),
+                callback: callback.clone(),
+                binding_namespace: namespace.clone(),
+                session: Digest::of(&"private-session")?,
+                product_return: binding.product_return.clone(),
+            },
+        )?;
+        let instance = OutboundInstanceEvidence {
+            instance: instance_ref.clone(),
+            binding_namespace: namespace,
+            app_origin_url: "https://app.example.com/".into(),
+            shell: SecurityShellEvidence {
+                instance: instance_ref.clone(),
+                origin: origin.clone(),
+                origin_url: shell_url,
+                qualification,
+            },
+            registration: ProviderRegistrationEvidence {
+                instance: instance_ref.clone(),
+                registration: binding.registration.clone(),
+                profile: permission.profile.clone(),
+                issuer: reviewed.issuer.clone(),
+                security_origin: origin,
+                callback,
+                callback_url,
+                provider_confirmation: confirmation,
+                client_credential,
+                class,
+            },
+            custody: binding.custody.clone(),
+            account: AccountBindingEvidence::MappedHuman {
+                instance: instance_ref,
+                mapping: binding.account_binding.clone(),
+                owner: intent.owner.clone(),
+            },
+            product_return: binding.product_return.clone(),
+        };
+        let fixture = super::super::profiles::tests::QualificationFixture {
+            intent,
+            binding: callback_binding,
+            requirement: requirement.clone(),
+            permission: permission.clone(),
+            reviewed: reviewed.clone(),
+            instance: instance.clone(),
+        };
+        Ok((
+            Selection {
+                requirement,
+                permission,
+                reviewed,
+                binding,
+                instance,
+                slot,
+            },
+            fixture,
+        ))
+    }
+
+    #[test]
+    fn compiled_calendar_runtime_uses_real_custody_and_fences_dispatch_and_completion() -> Result<()>
+    {
+        use super::super::{
+            account::{MappedHumanEvidence, ProviderAccount},
+            effects,
+            exchange::{self, ExchangeObservation, TokenHttpResponse},
+            outbound::{CallbackIngress, CallbackOutcome},
+            profiles::AccountBindingEvidence,
+        };
+        use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering::SeqCst};
+        let artifact_path = std::env::var("DAY2_TEST_OAUTH_CALENDAR_ARTIFACT")
+            .context("compiled Calendar artifact required")?;
+        for case in [
+            ProviderCase::Complete,
+            ProviderCase::Continuation,
+            ProviderCase::RevokedContinuation,
+            ProviderCase::Expired,
+            ProviderCase::Rewound,
+            ProviderCase::RewoundKey,
+            ProviderCase::Late,
+            ProviderCase::MissingMarker,
+        ] {
+            let directory = tempfile::tempdir()?;
+            let instance_path = directory.path().join("instance.json");
+            let instance = crate::development::verification_instance_data(
+                std::path::Path::new(&artifact_path),
+                None,
+                "alice@example.com",
+            )?;
+            fs::write(&instance_path, serde_json::to_vec(&instance)?)?;
+            let mut runtime = Runtime::from_artifact_for_tests(
+                instance_path,
+                "app".into(),
+                directory.path().join("app.sqlite"),
+                LoadedArtifact::load(std::path::Path::new(&artifact_path))?,
+            )?;
+            runtime.initialize()?;
+            let port = Arc::new(ProductPort {
+                case,
+                db: runtime.db().to_owned(),
+                now: AtomicI64::new(100),
+                ticks: AtomicU64::new(0),
+                entropy: AtomicU64::new(1),
+                sends: AtomicUsize::new(0),
+            });
+            effects::scope(port.clone(), || -> Result<()> {
+                let (selection, fixture) = product_selection(&runtime)?;
+                let authority = Arc::new(ProductAuthority {
+                    selection,
+                    port: port.clone(),
+                    reads: AtomicUsize::new(0),
+                });
+                runtime.connections = Some(authority.clone());
+                let mut db = store::open(runtime.db())?;
+                let key = super::super::profiles::tests::exchange_key();
+                let prepared = exchange::prepare_authorization(
+                    fixture.input(),
+                    &key,
+                    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~",
+                )?;
+                let code_ref = prepared.code_ref().to_owned();
+                assert!(prepared.begin(&mut db, 1)?);
+                let raw = url::form_urlencoded::Serializer::new(String::new())
+                    .append_pair("state", "0123456789abcdefghijklmnopqrstuvwxyzABCDEF")
+                    .append_pair("code", "secret_original_code")
+                    .append_pair("iss", &fixture.reviewed.issuer_url)
+                    .finish();
+                assert!(matches!(
+                    exchange::handle_qualified_callback(
+                        &mut db,
+                        fixture.input(),
+                        CallbackIngress {
+                            attempt: &fixture.intent.attempt,
+                            raw_query: raw.as_bytes(),
+                            route: &fixture.instance.registration.callback,
+                            session: fixture.binding.session(),
+                            issuer_binding: &fixture.reviewed.issuer,
+                            code_ref: &code_ref,
+                            now: 2
+                        },
+                        &key
+                    )?,
+                    CallbackOutcome::CodeAccepted { .. }
+                ));
+                let permit =
+                    exchange::authorize_and_commit_qualified_exchange(&mut db, fixture.input(), 3)?
+                        .context("qualified original permit")?;
+                let scopes = fixture
+                    .permission
+                    .action_scopes
+                    .values()
+                    .flatten()
+                    .cloned()
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let ExchangeObservation::Response(response) = permit.send(|_| Ok(TokenHttpResponse { status: 200, content_type: "application/json".into(),
+                    body: serde_json::to_vec(&json!({"access_token":"private_runtime_calendar_access","refresh_token":"private_runtime_refresh","token_type":"Bearer","expires_in":300,"scope":scopes}))? })) else { anyhow::bail!("original exchange response lost"); };
+                let AccountBindingEvidence::MappedHuman { mapping, .. } = &fixture.instance.account
+                else {
+                    anyhow::bail!("expected mapped human");
+                };
+                let mapped = MappedHumanEvidence {
+                    human: fixture.intent.owner.clone(),
+                    issuer: fixture.reviewed.issuer_url.clone(),
+                    provider_subject: "google-alice".into(),
+                    tenant: "example.com".into(),
+                    mapping_revision: mapping.revision.clone(),
+                };
+                let account = ProviderAccount {
+                    issuer: mapped.issuer.clone(),
+                    subject: mapped.provider_subject.clone(),
+                    tenant: mapped.tenant.clone(),
+                    display_email: "alice@example.com".into(),
+                };
+                let settlement = response
+                    .validate_mapped(fixture.input(), &mapped, &account)?
+                    .prepare_tokens(&key)?;
+                assert!(exchange::settle_mapped(
+                    &mut db,
+                    settlement,
+                    fixture.input(),
+                    &mapped.mapping_revision,
+                    4
+                )?);
+                let human = crate::iap::Verified {
+                    email: "alice@example.com".into(),
+                    subject: "accounts.google.com:google-alice".into(),
+                };
+                crate::iap::bind_subject(&db, &human, 100)?;
+                let input = json!({"start":"2026-10-13T00:00:00Z","end":"2026-10-14T00:00:00Z"});
+                let outcome = runtime.invoke_verified(
+                    "oauthcalendar.list_events",
+                    store::RequestIdentity {
+                        actor: &human.email,
+                        origin: Some(&human),
+                    },
+                    "product_read",
+                    &input,
+                    100,
+                    store::Fault::None,
+                );
+                if matches!(
+                    case,
+                    ProviderCase::RevokedContinuation
+                        | ProviderCase::Expired
+                        | ProviderCase::Rewound
+                        | ProviderCase::RewoundKey
+                ) {
+                    let error = outcome.expect_err("invalidated Use must refuse actual completion");
+                    let expected = if matches!(case, ProviderCase::Expired | ProviderCase::Rewound)
+                    {
+                        "connection use authority or invocation changed"
+                    } else {
+                        "connection use generation or account changed"
+                    };
+                    assert_eq!(error.to_string(), expected, "{case:?}: {error:#}");
+                    assert_ne!(
+                        db.query_row(
+                            "SELECT status FROM day2_invocations WHERE id='product_read'",
+                            [],
+                            |row| row.get::<_, String>(0)
+                        )?,
+                        "success"
+                    );
+                } else {
+                    let outcome =
+                        outcome.with_context(|| format!("{case:?} native Calendar execution"))?;
+                    if case == ProviderCase::Complete {
+                        assert_eq!(outcome.status, "success", "{outcome:?}");
+                        assert_eq!(outcome.result["status"], "ok", "{outcome:?}");
+                        assert_eq!(outcome.result["events"]["items"][0]["id"], "event_1");
+                        assert_eq!(outcome.result["events"]["has_more"], false);
+                        assert_eq!(
+                        db.query_row(
+                            "SELECT count(*) FROM day2_observation_attempts WHERE invocation='product_read' AND observation IS NOT NULL",
+                            [],
+                            |row| row.get::<_, i64>(0)
+                        )?,
+                        2
+                    );
+                    } else {
+                        assert!(
+                            outcome.status != "success" || outcome.result["status"] != "ok",
+                            "invalid provider result completed: {outcome:?}"
+                        );
+                        if matches!(
+                            case,
+                            ProviderCase::Continuation
+                                | ProviderCase::Late
+                                | ProviderCase::MissingMarker
+                        ) {
+                            assert_eq!(outcome.status, "success", "{outcome:?}");
+                            assert_eq!(
+                                outcome.result["status"],
+                                if case == ProviderCase::MissingMarker {
+                                    "provider_unavailable"
+                                } else {
+                                    "capacity_deferred"
+                                }
+                            );
+                            assert_eq!(outcome.result["events"]["items"], json!([]));
+                        }
+                    }
+                }
+                assert_eq!(
+                    port.sends.load(SeqCst),
+                    usize::from(case != ProviderCase::RewoundKey)
+                );
+                assert_eq!(
+                    db.query_row("SELECT count(*) FROM entries", [], |row| row
+                        .get::<_, i64>(0))?,
+                    0
+                );
+                let encoded: String = db.query_row(
+                    "SELECT claims FROM oauth_use_handles WHERE invocation='product_read'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                let claims: Claims = crate::json::decode(encoded.as_bytes())?;
+                assert_eq!(claims.subject, human.subject);
+                assert_eq!(claims.selection, authority.selection.identity()?);
+                let journal = db
+                    .prepare(
+                        "SELECT observation FROM day2_observation_attempts WHERE invocation='product_read' AND observation IS NOT NULL ORDER BY ordinal,attempt",
+                    )?
+                    .query_map([], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+                    .join(" ");
+                assert!(
+                    !journal.contains("private_runtime") && !journal.contains("private_cursor")
+                );
+                if matches!(
+                    case,
+                    ProviderCase::Expired | ProviderCase::Rewound | ProviderCase::RewoundKey
+                ) {
+                    assert_eq!(
+                        db.query_row("SELECT status FROM oauth_connection_slots", [], |row| {
+                            row.get::<_, String>(0)
+                        })?,
+                        "reauth_required"
+                    );
+                    // This fresh invocation runs resolve again after the wall
+                    // clock recovers/rewinds, and must never recover a Use.
+                    port.now.store(100, SeqCst);
+                    let retry = runtime.invoke_verified(
+                        "oauthcalendar.list_events",
+                        store::RequestIdentity {
+                            actor: &human.email,
+                            origin: Some(&human),
+                        },
+                        "after_clock_recovery",
+                        &input,
+                        100,
+                        store::Fault::None,
+                    )?;
+                    assert_eq!(retry.status, "success", "{retry:?}");
+                    assert_eq!(retry.result["status"], "reauth_required", "{retry:?}");
+                    assert_eq!(
+                        port.sends.load(SeqCst),
+                        usize::from(case != ProviderCase::RewoundKey)
+                    );
+                }
+                Ok(())
+            })?;
+        }
         Ok(())
     }
 }

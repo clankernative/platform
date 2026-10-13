@@ -2131,6 +2131,10 @@ pub(super) mod tests {
         assert!(load(&fixture.intent, &binding, 1, 12).unwrap().is_some());
         assert!(load(&fixture.intent, &binding, 1, 13).unwrap().is_none());
         assert!(
+            load(&fixture.intent, &binding, 1, 12).unwrap().is_none(),
+            "observed expiry must stay refused after a clock rewind"
+        );
+        assert!(
             load(&fixture.intent, &binding, 1, 2).unwrap().is_none(),
             "clock rollback must refuse use"
         );
@@ -2187,13 +2191,13 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn product_calendar_reads_complete_bounded_pages_and_redacts_failures() {
+    fn product_calendar_reads_one_complete_bounded_response_and_redacts_failures() {
         use crate::oauth::{calendar, effects};
         use std::{
             collections::VecDeque,
             sync::{
                 Arc, Mutex,
-                atomic::{AtomicU64, Ordering},
+                atomic::{AtomicBool, AtomicU64, Ordering},
             },
             time::Duration,
         };
@@ -2202,6 +2206,7 @@ pub(super) mod tests {
             calls: Mutex<Vec<String>>,
             now: AtomicU64,
             entropy: AtomicU64,
+            late: AtomicBool,
         }
         impl effects::Hooks for Port {
             fn domain(&self) -> u64 {
@@ -2229,6 +2234,18 @@ pub(super) mod tests {
                     "/calendar/v3/calendars/primary/events"
                 );
                 assert!(request.body().is_none());
+                assert!(
+                    !request
+                        .url()
+                        .query_pairs()
+                        .any(|(name, _)| name == "pageToken")
+                );
+                assert!(
+                    request
+                        .url()
+                        .query_pairs()
+                        .any(|(name, value)| name == "fields" && value.starts_with("kind,"))
+                );
                 let header = &request.headers()[reqwest::header::AUTHORIZATION];
                 assert_eq!(header.to_str().unwrap(), "Bearer private_calendar_access");
                 assert!(header.is_sensitive());
@@ -2239,6 +2256,9 @@ pub(super) mod tests {
                     .unwrap()
                     .pop_front()
                     .context("unexpected provider request")?;
+                if self.late.load(Ordering::SeqCst) {
+                    self.now.store(3, Ordering::SeqCst);
+                }
                 Ok(effects::Response::Simulated {
                     status: reqwest::StatusCode::from_u16(status)?,
                     headers: reqwest::header::HeaderMap::from_iter([(
@@ -2255,6 +2275,7 @@ pub(super) mod tests {
             calls: Mutex::new(Vec::new()),
             now: AtomicU64::new(0),
             entropy: AtomicU64::new(1),
+            late: AtomicBool::new(false),
         });
         effects::scope(port.clone(), || {
             let (fixture, db, key) = active_token_fixture(3600, 8);
@@ -2275,28 +2296,22 @@ pub(super) mod tests {
             };
             let event = serde_json::json!({"id":"event_1","summary":"Work meeting","start":{"dateTime":"2026-10-13T10:00:00Z"},"end":{"dateTime":"2026-10-13T11:00:00Z"}});
             let run = |responses: Vec<(u16, String)>| {
+                port.now.store(0, Ordering::SeqCst);
                 *port.responses.lock().unwrap() = responses.into();
                 port.calls.lock().unwrap().clear();
                 calendar::list(&token, &window).unwrap()
             };
-            let result = run(vec![
-                (
-                    200,
-                    serde_json::json!({"items":[],"nextPageToken":"private_cursor"}).to_string(),
-                ),
-                (
-                    200,
-                    serde_json::json!({"items":[event.clone()]}).to_string(),
-                ),
-            ]);
+            let result = run(vec![(
+                200,
+                serde_json::json!({"kind":"calendar#events","items":[event.clone()]}).to_string(),
+            )]);
             let value: serde_json::Value = serde_json::from_str(&result).unwrap();
             assert_eq!(value["Listed"][0]["id"], "event_1");
             assert_eq!(
                 port.calls.lock().unwrap().len(),
-                2,
-                "empty continuation page must still be followed"
+                1,
+                "a complete response requires exactly one GET"
             );
-            assert!(port.calls.lock().unwrap()[1].contains("pageToken=private_cursor"));
             assert!(
                 !result.contains("private_cursor") && !result.contains("private_calendar_access")
             );
@@ -2310,7 +2325,7 @@ pub(super) mod tests {
                 .collect::<Vec<_>>();
             let escaped = run(vec![(
                 200,
-                serde_json::json!({"items":escaped_events}).to_string(),
+                serde_json::json!({"kind":"calendar#events","items":escaped_events}).to_string(),
             )]);
             assert_eq!(
                 serde_json::from_str::<serde_json::Value>(&escaped).unwrap()["Listed"]
@@ -2350,23 +2365,42 @@ pub(super) mod tests {
                     serde_json::json!({"Unavailable":problem}).to_string()
                 );
             }
-            let capacity = run((0..4)
-                .map(|index| {
-                    (
-                        200,
-                        serde_json::json!({"items":[],"nextPageToken":format!("cursor_{index}")})
-                            .to_string(),
-                    )
-                })
-                .collect());
+            let capacity = run(vec![(200, serde_json::json!({"kind":"calendar#events","items":[],"nextPageToken":"private_cursor"}).to_string()), (200, serde_json::json!({"kind":"calendar#events","items":[event.clone()]}).to_string())]);
             assert_eq!(
                 capacity,
                 serde_json::json!({"Unavailable":"CapacityDeferred"}).to_string()
             );
+            assert_eq!(
+                port.calls.lock().unwrap().len(),
+                1,
+                "continuation must never dispatch a second bearer request"
+            );
+            assert_eq!(port.responses.lock().unwrap().len(), 1);
+            assert_eq!(
+                run(vec![(200, r#"{"kind":"calendar#events"}"#.into())]),
+                r#"{"Listed":[]}"#
+            );
+            port.late.store(true, Ordering::SeqCst);
+            assert_eq!(
+                run(vec![(
+                    200,
+                    serde_json::json!({"kind":"calendar#events","items":[event.clone()]})
+                        .to_string()
+                )]),
+                serde_json::json!({"Unavailable":"CapacityDeferred"}).to_string(),
+                "a terminal valid response arriving at the elapsed deadline must not publish Listed"
+            );
+            assert_eq!(port.calls.lock().unwrap().len(), 1);
+            port.late.store(false, Ordering::SeqCst);
             for body in [
-                serde_json::json!({"items":[event.clone(),event.clone()]}).to_string(),
-                r#"{"items":[],"items":[]}"#.into(),
-                serde_json::json!({"items":[],"unreviewed":"provider bytes"}).to_string(),
+                serde_json::json!({"kind":"calendar#events","items":[event.clone(),event.clone()]}).to_string(),
+                r#"{"kind":"calendar#events","items":[],"items":[]}"#.into(),
+                serde_json::json!({"kind":"calendar#events","items":[],"unreviewed":"provider bytes"}).to_string(),
+                r#"{}"#.into(),
+                r#"{"items":[]}"#.into(),
+                r#"{"kind":null,"items":[]}"#.into(),
+                r#"{"kind":"calendar#event","items":[]}"#.into(),
+                r#"{"error":{"code":200}}"#.into(),
                 "x".repeat(128 * 1024 + 1),
             ] {
                 assert_eq!(

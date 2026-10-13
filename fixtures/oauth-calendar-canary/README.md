@@ -20,10 +20,11 @@ to derive the desired binding pins and exact provider callback. Review the
 emitted `instance` document before saving it. Desired metadata proves no live
 readiness; the authenticated shell campaign must publish a fresh native receipt.
 
-Reads accept an increasing RFC3339 window of at most 31 days. The host admits at
-most four provider pages, 100 events, 128 KiB per response and 30 KiB in the complete
+Reads accept an increasing RFC3339 window of at most 31 days. The host admits
+one GET, 100 events, 128 KiB per response and 30 KiB in the complete
 result. Provider cursors and credentials stay private. Exceeding the limits returns
-a problem; it never returns a truncated success. Local sign-in or workload actor
+a problem; a provider continuation always returns capacity_deferred. It never
+returns a truncated success. Local sign-in or workload actor
 text does not establish a human connection.
 
 This slice uses original activation token material only. Expired tokens require

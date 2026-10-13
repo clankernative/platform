@@ -1209,6 +1209,12 @@ fn configure_tests(
             command.args(["--skip", test]);
         }
     }
+    if !fixtures.contains_key("oauth-calendar") {
+        command.args([
+            "--skip",
+            "oauth::usage::tests::compiled_calendar_runtime_uses_real_custody_and_fences_dispatch_and_completion",
+        ]);
+    }
     if !fixtures.contains_key("oauth-calendar") && fixtures.contains_key("credential-metadata") {
         command.args([
             "--skip",

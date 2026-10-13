@@ -489,7 +489,25 @@ pub(super) fn load_access(
                 .is_some_and(|duration| duration <= 86_400 * 366),
         "invalid original OAuth token expiry"
     );
+    let active: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM oauth_connection_slots WHERE slot=?1 AND generation=?2 AND token_version=?3
+         AND security_epoch=?4 AND profile=?5 AND account=?6 AND status='active')",
+        params![intent.slot, intent.proposed_generation, token_version, intent.expected_epoch, intent.profile, account],
+        |row| row.get(0),
+    )?;
+    if !active {
+        return Ok(None);
+    }
     if now < bundle.issued_at || now >= bundle.expires_at {
+        refuse_access(
+            db,
+            &intent.slot,
+            intent.proposed_generation,
+            token_version,
+            intent.expected_epoch,
+            &intent.profile,
+            account,
+        )?;
         return Ok(None);
     }
     ensure!(
@@ -500,6 +518,23 @@ pub(super) fn load_access(
         value: bundle.access_token,
         expires_at: bundle.expires_at,
     }))
+}
+
+/// Refuse only the captured exact material generation/version/epoch. A later
+/// wall-clock rewind cannot revive an expiry or rollback already observed.
+pub(super) fn refuse_access(
+    db: &Connection,
+    slot: &str,
+    generation: i64,
+    token_version: i64,
+    security_epoch: i64,
+    profile: &str,
+    account: &str,
+) -> Result<()> {
+    db.execute("UPDATE oauth_connection_slots SET status='reauth_required' WHERE slot=?1 AND generation=?2
+        AND token_version=?3 AND security_epoch=?4 AND profile=?5 AND account=?6 AND status='active'",
+        params![slot,generation,token_version,security_epoch,profile,account])?;
+    Ok(())
 }
 
 #[derive(Serialize, Deserialize)]

@@ -9,13 +9,12 @@ use std::{collections::BTreeSet, io::Read, time::Duration};
 use time::{Date, OffsetDateTime, format_description::well_known::Rfc3339};
 
 const ENDPOINT: &str = "https://www.googleapis.com/calendar/v3/calendars/primary/events";
-const MAX_PAGES: usize = 4;
 const MAX_EVENTS: usize = 100;
 const MAX_BODY: usize = 128 * 1024;
 // The preparation journal JSON-escapes this complete JSON result once more.
 // Leave enough space for its instruction/envelope under the 64 KiB frame cap.
 const MAX_RESULT: usize = 30 * 1024;
-const MAX_SECONDS: u64 = 8;
+const MAX_SECONDS: u64 = 3;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -56,6 +55,7 @@ struct Event {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Page {
+    kind: String,
     #[serde(default)]
     items: Vec<WireEvent>,
     next_page_token: Option<String>,
@@ -128,7 +128,8 @@ fn unavailable(problem: &str) -> String {
 
 // https://developers.google.com/workspace/calendar/api/v3/reference/events/list
 // singleEvents expands recurring events; startTime ordering requires it. An
-// empty page with nextPageToken is incomplete and must still be followed.
+// empty page with nextPageToken is incomplete. This initial adapter admits one
+// GET and returns CapacityDeferred for every continuation.
 pub(super) fn list(token: &AccessToken, window: &Window) -> Result<String> {
     anyhow::ensure!(window.valid(), "invalid Calendar window");
     let client = effects::Client::builder()
@@ -138,11 +139,9 @@ pub(super) fn list(token: &AccessToken, window: &Window) -> Result<String> {
         .timeout(Duration::from_secs(3))
         .build()?;
     let started = effects::Instant::now();
-    let mut page_token = None::<String>;
-    let mut tokens = BTreeSet::new();
     let mut ids = BTreeSet::new();
     let mut events = Vec::new();
-    for _ in 0..MAX_PAGES {
+    {
         let elapsed = started.elapsed();
         if elapsed >= Duration::from_secs(MAX_SECONDS) {
             return Ok(unavailable("CapacityDeferred"));
@@ -157,12 +156,9 @@ pub(super) fn list(token: &AccessToken, window: &Window) -> Result<String> {
             ("maxResults", "100"),
             (
                 "fields",
-                "items(id,summary,start(date,dateTime),end(date,dateTime)),nextPageToken",
+                "kind,items(id,summary,start(date,dateTime),end(date,dateTime)),nextPageToken",
             ),
         ]);
-        if let Some(cursor) = &page_token {
-            url.query_pairs_mut().append_pair("pageToken", cursor);
-        }
         let response = match client
             .get(url)
             .header(reqwest::header::AUTHORIZATION, token.authorization()?)
@@ -203,7 +199,7 @@ pub(super) fn list(token: &AccessToken, window: &Window) -> Result<String> {
             return Ok(unavailable("ProviderUnavailable"));
         }
         let page = match crate::json::decode::<Page>(&bytes) {
-            Ok(page) if page.items.len() <= MAX_EVENTS => page,
+            Ok(page) if page.kind == "calendar#events" && page.items.len() <= MAX_EVENTS => page,
             _ => return Ok(unavailable("ProviderUnavailable")),
         };
         for event in page.items {
@@ -223,18 +219,19 @@ pub(super) fn list(token: &AccessToken, window: &Window) -> Result<String> {
         if encoded.len() > MAX_RESULT {
             return Ok(unavailable("CapacityDeferred"));
         }
+        if started.elapsed() >= Duration::from_secs(MAX_SECONDS) {
+            return Ok(unavailable("CapacityDeferred"));
+        }
         match page.next_page_token {
-            None => return Ok(encoded),
+            None => Ok(encoded),
             Some(cursor)
                 if !cursor.is_empty()
                     && cursor.len() <= 2048
-                    && !cursor.chars().any(char::is_control)
-                    && tokens.insert(cursor.clone()) =>
+                    && !cursor.chars().any(char::is_control) =>
             {
-                page_token = Some(cursor)
+                Ok(unavailable("CapacityDeferred"))
             }
-            _ => return Ok(unavailable("ProviderUnavailable")),
+            _ => Ok(unavailable("ProviderUnavailable")),
         }
     }
-    Ok(unavailable("CapacityDeferred"))
 }
