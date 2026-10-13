@@ -1710,6 +1710,8 @@ mod tests {
         let prepared = Prepared {
             identity: Identity {
                 checkout: "a".repeat(40),
+                tree: "tree".into(),
+                source_identity: "source-identity".into(),
                 workspace: "/workspace/platform".into(),
                 run: "123".into(),
                 attempt: "1".into(),
