@@ -257,11 +257,12 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
     let mut fixtures: BTreeMap<String, PathBuf> = BTreeMap::new();
     let mut passed = BTreeSet::new();
     let mut executed_binaries = BTreeSet::new();
+    let mut mac_campaigns = BTreeMap::new();
     let mut simulation = None;
     let mut simulation_started = None;
     let mut timings = Timings::new();
     let mut cache = load_cache(root, scope, &snapshot)?;
-    let prepared = if recipe.starts_with("verify-shard-") || recipe == "verify-compose" {
+    let mut prepared = if recipe.starts_with("verify-shard-") || recipe == "verify-compose" {
         let prepared = shards::load(root, &snapshot)?;
         fixtures = shards::fixtures(root, &prepared)?;
         Some(prepared)
@@ -325,6 +326,9 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
             } else {
                 tests(root, &campaign.suite, &fixtures, budget)?;
             }
+            if recipe == "verify-mac" {
+                mac_campaigns.insert(campaign.suite.clone(),executed_binaries.clone());
+            }
             ensure_stable(root, recipe, &snapshot)?;
             let step = format!("test-{}", campaign.suite);
             ensure!(passed.insert(step.clone()), "duplicate verification effect");
@@ -345,6 +349,23 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
                 ensure!(parameters.is_empty(), "test build accepts no overrides");
                 shards::build(root, &snapshot)?;
                 "test-binaries".into()
+            }
+            "verify-mac-prepared" => {
+                ensure!(recipe == "verify-mac" && parameters.is_empty(), "closed native Mac preparation required");
+                prepared = Some(shards::mac::prepare(root,&snapshot,&fixtures,&passed,&timings.steps_ms)?);
+                return Ok(json!({}));
+            }
+            "verify-mac-native" => {
+                ensure!(recipe == "verify-mac" && parameters.is_empty(), "closed native Mac cases required");
+                shards::mac::focused(root,prepared.as_ref().context("Mac preparation required")?,&fixtures)?;
+                "test-mac-native".into()
+            }
+            "verify-mac-receipt" => {
+                ensure!(recipe == "verify-mac" && parameters.is_empty(), "closed native Mac receipt required");
+                ensure_stable(root,recipe,&snapshot)?;
+                shards::mac::finish(root,prepared.take().context("Mac preparation required")?,
+                    &passed,&timings.steps_ms,&mac_campaigns)?;
+                return Ok(json!({}));
             }
             "verify-test-docs" => {
                 ensure!(parameters.is_empty(), "doc tests accept no overrides");
@@ -744,6 +765,7 @@ fn recipe_scope(recipe: &str) -> Result<&'static str> {
         | "verify-prepare"
         | "verify-prepare-join"
         | "verify-compose"
+        | "verify-mac"
         | "verify-prepare-part-inputs"
         | "verify-prepare-part-tests" => Ok("all"),
         shard
@@ -784,6 +806,9 @@ fn verification_snapshot_for(
 
 fn verification_sources(root: &Path, recipe: &str) -> Result<BTreeMap<String, String>> {
     let mut hashes = build_native::platform_sources(root)?;
+    for pin in [".github/workflows/ci.yml", ".github/temporal.sha256", ".github/temporal-linux.sha256"] {
+        hashes.insert(pin.into(),digest(&fs::read(root.join(pin))?));
+    }
     let mut sources = vec![
         ("sdk", root.join("sdk")),
         ("cli", root.join("cli")),

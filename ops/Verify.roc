@@ -139,6 +139,22 @@ Verify :: [].{
 		Capability.call!("verify-shard-receipt", Json.to_str({ shard: shard }), host!)
 	}
 
+	# Only native Mac obligations stay here. Portable workspace campaigns run on Linux.
+	mac! : (Str => Try(Str, Str)) => Try(Str, Str)
+	mac! = |host!| {
+		_ = Capability.call!("verify-cli", "{}", host!)?
+		for fixture in ["reports", "reports-probe"] {
+			_ = Capability.call!("verify-build", Json.to_str({ fixture: fixture }), host!)?
+		}
+		_ = Capability.call!("verify-test-build", "{}", host!)?
+		_ = Capability.call!("verify-mac-prepared", "{}", host!)?
+		_ = Capability.call!("verify-mac-native", "{}", host!)?
+		for suite in ["isolated-build", "installation-build"] {
+			_ = Capability.call!("verify-prebuilt-tests", Json.to_str({ suite: suite, budget_seconds: 1800.U64 }), host!)?
+		}
+		Capability.call!("verify-mac-receipt", "{}", host!)
+	}
+
 	compose! : (Str => Try(Str, Str)) => Try(Str, Str)
 	compose! = |host!| {
 		_ = Capability.call!("verify-join", "{}", host!)?

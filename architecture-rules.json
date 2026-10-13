@@ -394,6 +394,7 @@
     "crates/xtask/src/ui_assembly/tests.rs",
     "crates/xtask/src/verification.rs",
     "crates/xtask/src/verification/shards.rs",
+    "crates/xtask/src/verification/shards/mac.rs",
     "crates/xtask/src/verification/shards/reuse.rs",
     "crates/xtask/src/workflows.rs"
   ],

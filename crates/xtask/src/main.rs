@@ -752,7 +752,7 @@ fn main() -> Result<()> {
             );
             verification::queue_receipt(&root, &action)?;
         }
-        "verify-prepare" | "verify-prepare-join" | "verify-compose" => {
+        "verify-prepare" | "verify-prepare-join" | "verify-compose" | "verify-mac" => {
             ensure!(
                 args.next().is_none(),
                 "verification stage accepts no arguments"
