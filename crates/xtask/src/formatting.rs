@@ -425,7 +425,7 @@ mod tests {
         let workspace = workspace()?;
         let root = workspace.path().join("platform");
         formatter(&root)?;
-        for path in [PIN_PATH, PATCH_PATH, BINARY_PATH] {
+        for path in [crate::formatter_bootstrap::pin_path()?, PATCH_PATH, BINARY_PATH] {
             let path = root.join(path);
             let backup = path.with_extension("original");
             fs::rename(&path, &backup)?;
