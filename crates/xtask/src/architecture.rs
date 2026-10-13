@@ -2261,6 +2261,143 @@ impl<'a> Scanner<'a> {
         }
     }
 
+    fn task_set_arguments(&self, arguments: &syn::AngleBracketedGenericArguments) -> bool {
+        arguments.args.iter().any(|argument| {
+            matches!(argument, syn::GenericArgument::Type(ty)
+                if self.type_origin(ty).as_deref() == Some("tokio::task::JoinSet"))
+        })
+    }
+
+    fn task_set_collect(&self, call: &syn::ExprMethodCall, inferred: bool) -> bool {
+        identifier_name(&call.method) == "collect"
+            && (inferred
+                || call
+                    .turbofish
+                    .as_ref()
+                    .is_some_and(|args| self.task_set_arguments(args)))
+    }
+
+    fn task_set_trait_path(&self, path: &syn::ExprPath) -> Option<String> {
+        let target = self.resolve(&path.path);
+        let (owner, method) = target.rsplit_once("::")?;
+        let qualified = path.qself.as_ref().is_some_and(|receiver| {
+            self.type_origin(&receiver.ty).as_deref() == Some("tokio::task::JoinSet")
+        });
+        let creates_tasks = match (owner, method) {
+            ("std::iter::Iterator" | "core::iter::Iterator" | "Iterator", "collect") => {
+                path.path.segments.last().is_some_and(|segment| {
+                    matches!(&segment.arguments, syn::PathArguments::AngleBracketed(args)
+                        if self.task_set_arguments(args))
+                })
+            }
+            (
+                "std::iter::FromIterator" | "core::iter::FromIterator" | "FromIterator",
+                "from_iter",
+            )
+            | ("std::iter::Extend" | "core::iter::Extend" | "Extend", "extend") => qualified,
+            _ => false,
+        };
+        creates_tasks.then(|| format!("tokio::task::JoinSet::{method}"))
+    }
+
+    fn task_set_trait_call(&self, call: &syn::ExprCall, inferred: bool) -> Option<String> {
+        let Expr::Path(path) = &*call.func else {
+            return None;
+        };
+        let target = self.origin(&call.func)?;
+        let (owner, method) = target.rsplit_once("::")?;
+        let receiver = || {
+            path.qself.as_ref().is_some_and(|qualified| {
+                self.type_origin(&qualified.ty).as_deref() == Some("tokio::task::JoinSet")
+            }) || call.args.first().is_some_and(|argument| {
+                self.origin(argument).as_deref() == Some("tokio::task::JoinSet")
+            })
+        };
+        let creates_tasks = match (owner, method) {
+            ("tokio::task::JoinSet", "collect" | "from_iter" | "extend") => true,
+            ("std::iter::Iterator" | "core::iter::Iterator" | "Iterator", "collect") => {
+                inferred
+                    || path.path.segments.last().is_some_and(|segment| {
+                        matches!(&segment.arguments, syn::PathArguments::AngleBracketed(args)
+                        if self.task_set_arguments(args))
+                    })
+            }
+            (
+                "std::iter::FromIterator" | "core::iter::FromIterator" | "FromIterator",
+                "from_iter",
+            ) => inferred || receiver(),
+            ("std::iter::Extend" | "core::iter::Extend" | "Extend", "extend") => receiver(),
+            _ => false,
+        };
+        creates_tasks.then(|| format!("tokio::task::JoinSet::{method}"))
+    }
+
+    // Follow only value-producing tails. An outer JoinSet annotation must not
+    // turn an unrelated Vec::collect in a nested statement into scheduling.
+    // Explicit generic collection targets are handled by the ordinary visitor.
+    fn inferred_task_set_collection(&mut self, expression: &Expr) {
+        if definitely_test_only(expression_attributes(expression)) {
+            return;
+        }
+        match expression {
+            Expr::MethodCall(call) if self.task_set_collect(call, true) => {
+                if !self.task_set_collect(call, false) {
+                    self.record("scheduling", "tokio::task::JoinSet::collect", call);
+                }
+            }
+            Expr::Call(call) => {
+                if self.task_set_trait_call(call, false).is_none()
+                    && let Some(target) = self.task_set_trait_call(call, true)
+                {
+                    self.record("scheduling", &target, call);
+                }
+            }
+            Expr::Block(block) => self.inferred_task_set_block(&block.block),
+            Expr::If(branch) => {
+                self.inferred_task_set_block(&branch.then_branch);
+                if let Some((_, otherwise)) = &branch.else_branch {
+                    self.inferred_task_set_collection(otherwise);
+                }
+            }
+            Expr::Match(branch) => {
+                for arm in &branch.arms {
+                    if !definitely_test_only(&arm.attrs) {
+                        self.inferred_task_set_collection(&arm.body);
+                    }
+                }
+            }
+            Expr::Paren(inner) => self.inferred_task_set_collection(&inner.expr),
+            Expr::Group(inner) => self.inferred_task_set_collection(&inner.expr),
+            Expr::Return(inner) => {
+                if let Some(value) = &inner.expr {
+                    self.inferred_task_set_collection(value);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn inferred_task_set_block(&mut self, block: &syn::Block) {
+        for statement in &block.stmts {
+            if let syn::Stmt::Expr(expression @ Expr::Return(_), _) = statement {
+                self.inferred_task_set_collection(expression);
+            }
+        }
+        if let Some(syn::Stmt::Expr(expression, None)) = block.stmts.last()
+            && !matches!(expression, Expr::Return(_))
+        {
+            self.inferred_task_set_collection(expression);
+        }
+    }
+
+    fn task_set_return(&mut self, signature: &syn::Signature, block: &syn::Block) {
+        if let syn::ReturnType::Type(_, ty) = &signature.output
+            && self.type_origin(ty).as_deref() == Some("tokio::task::JoinSet")
+        {
+            self.inferred_task_set_block(block);
+        }
+    }
+
     fn origin(&self, expr: &Expr) -> Option<String> {
         #[cfg(test)]
         {
@@ -2275,6 +2412,9 @@ impl<'a> Scanner<'a> {
         }
         match expr {
             Expr::Path(path) => {
+                if let Some(target) = self.task_set_trait_path(path) {
+                    return Some(target);
+                }
                 if path_is_ident(&path.path, "self") {
                     return self.self_type.clone();
                 }
@@ -2301,6 +2441,9 @@ impl<'a> Scanner<'a> {
                     .or(Some(name))
             }
             Expr::Call(call) => {
+                if self.task_set_trait_call(call, false).is_some() {
+                    return Some("tokio::task::JoinSet".to_owned());
+                }
                 if let Some(method) = self.read_dir_call_method(call) {
                     return if read_dir_lazy_method(&method) {
                         Some("std::fs::ReadDir".to_owned())
@@ -2346,6 +2489,7 @@ impl<'a> Scanner<'a> {
                         || origin.ends_with("::create")
                         || origin.ends_with("::now")
                         || origin == "std::path::PathBuf::from"
+                        || origin == "tokio::task::JoinSet::from_iter"
                     {
                         Some(origin.rsplit_once("::").unwrap().0.to_owned())
                     } else {
@@ -2354,6 +2498,9 @@ impl<'a> Scanner<'a> {
                 })
             }
             Expr::MethodCall(call) => {
+                if self.task_set_collect(call, false) {
+                    return Some("tokio::task::JoinSet".to_owned());
+                }
                 let method = identifier_name(&call.method);
                 // Resolve the receiver once. Repeating this recursive query in
                 // each classification branch multiplies ordinary chain work.
@@ -3422,6 +3569,7 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
         self.context.push(function.sig.ident.to_string());
         self.push_values();
         self.parameters(&function.sig);
+        self.task_set_return(&function.sig, &function.block);
         visit::visit_item_fn(self, function);
         self.pop_values();
         self.context.pop();
@@ -3490,6 +3638,11 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
         for input in &closure.inputs {
             self.bind_value(input, None, ValueKind::Data);
         }
+        if let syn::ReturnType::Type(_, ty) = &closure.output
+            && self.type_origin(ty).as_deref() == Some("tokio::task::JoinSet")
+        {
+            self.inferred_task_set_collection(&closure.body);
+        }
         visit::visit_expr_closure(self, closure);
         self.pop_values();
     }
@@ -3511,6 +3664,7 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
         self.context.push(function.sig.ident.to_string());
         self.push_values();
         self.parameters(&function.sig);
+        self.task_set_return(&function.sig, &function.block);
         visit::visit_impl_item_fn(self, function);
         self.pop_values();
         self.context.pop();
@@ -3523,6 +3677,9 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
         self.context.push(function.sig.ident.to_string());
         self.push_values();
         self.parameters(&function.sig);
+        if let Some(block) = &function.default {
+            self.task_set_return(&function.sig, block);
+        }
         visit::visit_trait_item_fn(self, function);
         self.pop_values();
         self.context.pop();
@@ -3540,6 +3697,12 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
         if definitely_test_only(&local.attrs) {
             return;
         }
+        if let Pat::Type(pattern) = &local.pat
+            && self.type_origin(&pattern.ty).as_deref() == Some("tokio::task::JoinSet")
+            && let Some(initializer) = &local.init
+        {
+            self.inferred_task_set_collection(&initializer.expr);
+        }
         // The new binding cannot shadow its own initializer or let-else branch.
         visit::visit_local(self, local);
         // Alternate-platform bindings cannot erase another branch's origin.
@@ -3555,6 +3718,29 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
         } else {
             self.reject_conditional_effect_binding(local);
         }
+    }
+
+    fn visit_expr_assign(&mut self, assignment: &'ast syn::ExprAssign) {
+        if self.origin(&assignment.left).as_deref() == Some("tokio::task::JoinSet") {
+            self.inferred_task_set_collection(&assignment.right);
+        }
+        visit::visit_expr_assign(self, assignment);
+    }
+
+    fn visit_expr_struct(&mut self, expression: &'ast syn::ExprStruct) {
+        let owner = self.resolve(&expression.path);
+        for field in &expression.fields {
+            if self
+                .fields
+                .get(&owner)
+                .and_then(|fields| fields.get(&member_name(&field.member)))
+                .map(String::as_str)
+                == Some("tokio::task::JoinSet")
+            {
+                self.inferred_task_set_collection(&field.expr);
+            }
+        }
+        visit::visit_expr_struct(self, expression);
     }
 
     fn visit_expr_if(&mut self, expression: &'ast syn::ExprIf) {
@@ -3643,7 +3829,9 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
                 PathNamespace::Type
             },
         );
-        let target = self.reference_target(&name);
+        let target = self
+            .task_set_trait_path(expression)
+            .or_else(|| self.reference_target(&name));
         if let Some(target) = target
             && let Some(kind) = hazard(&target)
         {
@@ -3670,6 +3858,9 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
             && read_dir_consuming_method(&method)
         {
             self.record("filesystem", &format!("std::fs::ReadDir::{method}"), call);
+            suppress_direct_reference = true;
+        } else if let Some(target) = self.task_set_trait_call(call, false) {
+            self.record("scheduling", &target, call);
             suppress_direct_reference = true;
         } else if let Some(target) = self.origin(&call.func)
             && let Some(kind) = hazard(&target)
@@ -3701,7 +3892,9 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
         }) {
             self.refuse_read_dir_handoff(&format!("{method} (unmodeled native argument role)"));
         }
-        if receiver
+        if self.task_set_collect(call, false) {
+            self.record("scheduling", "tokio::task::JoinSet::collect", call);
+        } else if receiver
             .as_deref()
             .and_then(|owner| read_dir_projection_result(owner, &method))
             .is_some()
@@ -4599,6 +4792,9 @@ fn task_set_scheduling_method(method: &str) -> bool {
             | "spawn_local_on"
             | "spawn_blocking"
             | "spawn_blocking_on"
+            | "extend"
+            | "from_iter"
+            | "collect"
             | "join_all"
             | "join_next"
             | "join_next_with_id"
@@ -8406,6 +8602,230 @@ mod tests {
                     .count(),
                 1,
                 "missing exact {target}: {findings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn task_set_trait_submission_and_typed_collection_require_exact_review() {
+        for (source, method, count) in [
+            (
+                r#"fn sample() {
+                let mut jobs = tokio::task::JoinSet::<()>::new();
+                jobs.extend((0..4).map(|_| async {}));
+            }"#,
+                "extend",
+                1,
+            ),
+            (
+                r#"use tokio::task::JoinSet as Tasks;
+                fn sample() { Tasks::from_iter((0..4).map(|_| async {})); }"#,
+                "from_iter",
+                1,
+            ),
+            (
+                r#"use tokio::task::JoinSet as Tasks;
+                fn sample() { <Tasks<()> as std::iter::FromIterator<_>>::from_iter([async {}]); }"#,
+                "from_iter",
+                1,
+            ),
+            (
+                r#"use tokio::task::JoinSet as Tasks;
+                use std::iter::Extend as Add;
+                fn sample(jobs: &mut Tasks<()>) { Add::extend(jobs, [async {}]); }"#,
+                "extend",
+                1,
+            ),
+            (
+                r#"fn sample() {
+                let jobs: tokio::task::JoinSet<()> = (0..4).map(|_| async {}).collect();
+            }"#,
+                "collect",
+                1,
+            ),
+            (
+                r#"use tokio::task::JoinSet as Tasks;
+                fn sample() { (0..4).map(|_| async {}).collect::<Tasks<()>>(); }"#,
+                "collect",
+                1,
+            ),
+            (
+                r#"use tokio::task::JoinSet as Tasks;
+                use std::iter::Iterator as Iter;
+                fn sample() { Iter::collect::<Tasks<()>>((0..4).map(|_| async {})); }"#,
+                "collect",
+                1,
+            ),
+            (
+                r#"fn sample() {
+                let jobs: tokio::task::JoinSet<()> = std::iter::Iterator::collect([async {}].into_iter());
+            }"#,
+                "collect",
+                1,
+            ),
+            (
+                r#"fn sample() {
+                let jobs: tokio::task::JoinSet<()> = std::iter::FromIterator::from_iter([async {}]);
+            }"#,
+                "from_iter",
+                1,
+            ),
+            (
+                r#"fn sample() {
+                let jobs: tokio::task::JoinSet<()> = [async {}].into_iter().collect::<tokio::task::JoinSet<()>>();
+            }"#,
+                "collect",
+                1,
+            ),
+            (
+                r#"use tokio::task::JoinSet as Tasks;
+                fn sample(flag: bool) {
+                    let jobs: Tasks<()> = if flag { [async {}].into_iter().collect() }
+                        else { [async {}].into_iter().collect() };
+                }"#,
+                "collect",
+                2,
+            ),
+            (
+                r#"fn sample(flag: bool) -> tokio::task::JoinSet<()> {
+                match flag { true => [async {}].into_iter().collect(),
+                    false => [async {}].into_iter().collect() }
+            }"#,
+                "collect",
+                2,
+            ),
+            (
+                r#"fn sample() -> tokio::task::JoinSet<()> {
+                return [async {}].into_iter().collect();
+            }"#,
+                "collect",
+                1,
+            ),
+            (
+                r#"fn sample(jobs: &mut tokio::task::JoinSet<()>) {
+                *jobs = [async {}].into_iter().collect();
+            }"#,
+                "collect",
+                1,
+            ),
+            (
+                r#"struct Adapter { jobs: tokio::task::JoinSet<()> }
+                fn sample() { Adapter { jobs: [async {}].into_iter().collect() }; }"#,
+                "collect",
+                1,
+            ),
+            (
+                r#"fn sample() {
+                let factory = || -> tokio::task::JoinSet<()> { [async {}].into_iter().collect() };
+            }"#,
+                "collect",
+                1,
+            ),
+        ] {
+            let findings = scan(source);
+            let target = format!("tokio::task::JoinSet::{method}");
+            assert_eq!(
+                findings
+                    .iter()
+                    .filter(|finding| finding.kind == "scheduling" && finding.target == target)
+                    .map(|finding| finding.count)
+                    .sum::<usize>(),
+                count,
+                "{source}: missing exact {target}: {findings:?}"
+            );
+            assert_eq!(
+                findings.iter().map(|finding| finding.count).sum::<usize>(),
+                count,
+                "unexpected findings: {findings:?}"
+            );
+        }
+        for source in [
+            r#"fn sample() {
+                let mut jobs = tokio::task::JoinSet::from_iter([async {}]); jobs.join_next();
+            }"#,
+            r#"fn sample() {
+                let mut jobs = [async {}].into_iter().collect::<tokio::task::JoinSet<()>>(); jobs.join_next();
+            }"#,
+            r#"fn sample() {
+                let mut jobs = <tokio::task::JoinSet<()> as std::iter::FromIterator<_>>::from_iter([async {}]);
+                jobs.join_next();
+            }"#,
+        ] {
+            assert!(
+                scan(source)
+                    .iter()
+                    .any(|finding| finding.target == "tokio::task::JoinSet::join_next"),
+                "lost constructed receiver: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_collections_and_test_only_task_sets_do_not_require_scheduling_review() {
+        for source in [
+            r#"fn sample() { let mut values = Vec::<()>::new(); values.extend([()]);
+                Vec::<()>::from_iter([()]); let values: Vec<()> = [()].into_iter().collect();
+                [()].into_iter().collect::<Vec<()>>(); std::iter::Iterator::collect::<Vec<()>>([()].into_iter()); }"#,
+            r#"fn sample() -> Vec<()> { [()].into_iter().collect() }"#,
+            r#"struct JoinSet; impl JoinSet { fn from_iter() {} fn extend(&self) {} }
+                fn sample(jobs: JoinSet) { jobs.extend(); JoinSet::from_iter(); }"#,
+            r#"fn sample() {
+                let jobs: tokio::task::JoinSet<()> = {
+                    let values: Vec<()> = [()].into_iter().collect();
+                    tokio::task::JoinSet::new()
+                };
+            }"#,
+            r#"#[cfg(test)] fn sample() {
+                let jobs: tokio::task::JoinSet<()> = [async {}].into_iter().collect();
+            }"#,
+            r#"fn sample() {
+                #[cfg(test)] let jobs: tokio::task::JoinSet<()> = [async {}].into_iter().collect();
+            }"#,
+        ] {
+            assert!(
+                scan(source).is_empty(),
+                "pure/test control acquired effects: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn first_class_task_set_trait_methods_keep_submission_review() {
+        for (source, method) in [
+            (
+                r#"fn sample() {
+                let create = <tokio::task::JoinSet<()> as std::iter::FromIterator<_>>::from_iter;
+                create([async {}]);
+            }"#,
+                "from_iter",
+            ),
+            (
+                r#"use tokio::task::JoinSet as Tasks;
+                fn sample(jobs: &mut Tasks<()>) {
+                    let add = <Tasks<()> as std::iter::Extend<_>>::extend;
+                    add(jobs, [async {}]);
+                }"#,
+                "extend",
+            ),
+            (
+                r#"use tokio::task::JoinSet as Tasks;
+                fn sample() {
+                    let create = std::iter::Iterator::collect::<Tasks<()>>;
+                    create([async {}].into_iter());
+                }"#,
+                "collect",
+            ),
+        ] {
+            let target = format!("tokio::task::JoinSet::{method}");
+            let findings = scan(source);
+            assert_eq!(
+                findings
+                    .iter()
+                    .filter(|finding| finding.kind == "scheduling" && finding.target == target)
+                    .map(|finding| finding.count)
+                    .sum::<usize>(),
+                2,
+                "escaped method lost submission review: {source}: {findings:?}"
             );
         }
     }
