@@ -154,11 +154,20 @@ pub(crate) fn confirm(
         security_epoch: ready.security_epoch,
         authenticated_at: now,
         approved_at: now,
-        expires_at: now + 300,
+        expires_at: now
+            .checked_add(300)
+            .context("credential verification time overflow")?,
     };
+    let original =
+        issuance::ConfirmationOrigin::DisposableVerification(issuance::VerificationContextData {
+            purpose: issuance::VerificationPurpose::DisposableCredentialVerification,
+            scope: runtime.scope().into(),
+            app: runtime.app().into(),
+            artifact: runtime.artifact().id().into(),
+        });
     tx.execute(
-        "INSERT INTO day2_credential_confirmations VALUES (?1, ?2)",
-        params![invocation, serde_json::to_string(&confirmation)?],
+        "INSERT INTO day2_credential_confirmations (invocation,confirmation) VALUES (?1, ?2)",
+        params![invocation, issuance::encode_record(confirmation, original)?],
     )?;
     tx.commit()?;
     Ok(())

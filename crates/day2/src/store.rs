@@ -50,6 +50,174 @@ mod supply_tests;
 #[path = "delegation_capability_tests.rs"]
 mod delegation_capability_tests;
 
+// A closed test-only corruption of one reply from the ACTUAL compiled worker.
+// No hook or selector exists in a production build. This does not qualify a
+// malicious worker binary or replace artifact admission.
+#[cfg(test)]
+pub(crate) mod credential_reply_test_fault {
+    use super::*;
+    use std::{cell::RefCell, marker::PhantomData, rc::Rc, thread::ThreadId};
+
+    enum ReplyFault {
+        EffectsAfterCredentialMutation,
+    }
+
+    #[derive(Clone, PartialEq, Eq)]
+    struct Selector {
+        executor: ThreadId,
+        database: PathBuf,
+        scope: String,
+        app: String,
+        artifact: String,
+        operation: String,
+        invocation: String,
+    }
+
+    #[derive(Clone, Debug, serde::Serialize)]
+    pub(crate) struct StagingEvidence {
+        pub(crate) counts: [i64; 7],
+        pub(crate) observations: Vec<(String, String)>,
+        pub(crate) original_kind: String,
+        pub(crate) original_instruction: String,
+        pub(crate) original_model: String,
+        pub(crate) consumed: usize,
+    }
+
+    struct State {
+        selector: Selector,
+        fault: ReplyFault,
+        fired: bool,
+        evidence: Option<StagingEvidence>,
+    }
+
+    thread_local! { static ACTIVE: RefCell<Option<State>> = const { RefCell::new(None) }; }
+
+    pub(crate) struct Scope {
+        selector: Selector,
+        _executor: PhantomData<Rc<()>>,
+    }
+
+    impl Scope {
+        pub(crate) fn observed(&self) -> Option<StagingEvidence> {
+            ACTIVE.with(|state| {
+                state
+                    .borrow()
+                    .as_ref()
+                    .filter(|state| state.selector == self.selector)
+                    .and_then(|state| state.evidence.clone())
+            })
+        }
+    }
+
+    impl Drop for Scope {
+        fn drop(&mut self) {
+            ACTIVE.with(|state| {
+                let mut state = state.borrow_mut();
+                if state
+                    .as_ref()
+                    .is_some_and(|state| state.selector == self.selector)
+                {
+                    *state = None;
+                }
+            });
+        }
+    }
+
+    pub(crate) fn effects_after_credential_mutation(
+        runtime: &Runtime,
+        invocation: &str,
+    ) -> Result<Scope> {
+        let db = open(runtime.db())?;
+        let operation: String = db.query_row(
+            "SELECT operation FROM day2_invocations WHERE id=?1",
+            [invocation],
+            |row| row.get(0),
+        )?;
+        ensure!(
+            crate::managed_credentials::issuance::access(runtime, &operation)?.interactive,
+            "interactive response-corruption fixture required"
+        );
+        let selector = Selector {
+            executor: std::thread::current().id(),
+            database: runtime.db().to_owned(),
+            scope: runtime.scope().into(),
+            app: runtime.app().into(),
+            artifact: runtime.artifact().id().into(),
+            operation,
+            invocation: invocation.into(),
+        };
+        ACTIVE.with(|state| -> Result<()> {
+            let mut state = state.borrow_mut();
+            ensure!(
+                state.is_none(),
+                "response-corruption scope already installed"
+            );
+            *state = Some(State {
+                selector: selector.clone(),
+                fault: ReplyFault::EffectsAfterCredentialMutation,
+                fired: false,
+                evidence: None,
+            });
+            Ok(())
+        })?;
+        Ok(Scope {
+            selector,
+            _executor: PhantomData,
+        })
+    }
+
+    pub(super) fn replace(
+        runtime: &Runtime,
+        db: &Connection,
+        request: &Request,
+        original: Response,
+    ) -> Result<Response> {
+        ACTIVE.with(|state| -> Result<Response> {
+            let mut state = state.borrow_mut();
+            let Some(state) = state.as_mut() else { return Ok(original); };
+            let selector = &state.selector;
+            if state.fired || selector.executor != std::thread::current().id()
+                || selector.database != runtime.db() || selector.scope != runtime.scope()
+                || selector.app != runtime.app() || selector.artifact != runtime.artifact().id()
+                || selector.operation != request.operation || selector.invocation != request.context.invocation_id {
+                return Ok(original);
+            }
+            let Some((mutation_at, mutation)) = request.observations.iter().enumerate().find(|(_, entry)|
+                entry.instruction.kind == "credential_issue" && entry.error.is_empty()) else { return Ok(original); };
+            if !request.observations[mutation_at + 1..].iter().any(|entry|
+                entry.instruction.kind == "create" && entry.instruction.model == "entries" && entry.error.is_empty()) {
+                return Ok(original);
+            }
+            ensure!(original.consumed == request.observations.len(), "replay_consumption_mismatch");
+            // Preserve genuine Failed/Done/unrelated replies. A decoded failure
+            // must never masquerade as the expected injected whitelist refusal.
+            if !matches!(original.decode()?, Reply::Pending(Step::Database(Database::Write {
+                model: "key_receipts", change: Write::Create, ..
+            }))) || original.instruction.kind != "create" { return Ok(original); }
+            let issued: Value = crate::json::decode(mutation.result.as_bytes())?;
+            let actual: Value = crate::json::decode(original.instruction.data.as_bytes())?;
+            if actual != json!({"family":"clients", "lineage":issued["lineage"], "head":issued["version"], "revision":1}) {
+                return Ok(original);
+            }
+            let mut counts = [0; 7];
+            for (slot, table) in ["entries", "key_receipts", "day2_credential_lineages", "day2_credential_versions",
+                "day2_credential_material", "day2_credential_deliveries", "day2_credential_receipts"].into_iter().enumerate() {
+                counts[slot] = db.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row.get(0))?;
+            }
+            state.evidence = Some(StagingEvidence { counts,
+                observations: request.observations.iter().map(|entry| (entry.instruction.kind.clone(), entry.instruction.model.clone())).collect(),
+                original_kind: original.kind.clone(), original_instruction: original.instruction.kind.clone(),
+                original_model: original.instruction.model.clone(), consumed: original.consumed });
+            state.fired = true;
+            match state.fault {
+                ReplyFault::EffectsAfterCredentialMutation => Ok(Response { kind: "pending".into(),
+                    instruction: Instruction { kind: "effects".into(), ..Default::default() },
+                    result: String::new(), error: String::new(), consumed: request.observations.len() }),
+            }
+        })
+    }
+}
+
 /// Once state is initialized only the artifact the database activated may run,
 /// so a tree (a release image, say) that does not carry it cannot serve. Replace
 /// the loader's bare missing-file error with one naming both identities and the
@@ -1468,7 +1636,7 @@ impl Runtime {
         operation: &str,
         kind: &str,
         fault: Fault,
-        credential_keys: Option<&crate::managed_credentials::issuance::ReadyKeys>,
+        credential_keys: Option<&crate::managed_credentials::issuance::PreparedCredential>,
     ) -> Result<Outcome> {
         let empty_domains = crate::domain::Catalog::new();
         let domains = self
@@ -1489,6 +1657,9 @@ impl Runtime {
         // Exact consumption and failure latching forbid divergence or swallowed denials.
         loop {
             let response = worker.exchange(request)?;
+            #[cfg(test)]
+            let response =
+                credential_reply_test_fault::replace(self, connection, request, response)?;
             let reply = response.decode()?;
             ensure!(
                 response.consumed == request.observations.len(),
