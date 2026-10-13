@@ -73,7 +73,7 @@ impl effects::Hooks for Port {
                         &authority_state::ApplyAuthority { request_id: "narrow_during_refresh".into(), expected: Some(current.stamp), document })?;
                 }
                 if self.case == Case::ReadinessRewind { self.now.store(260, SeqCst); }
-                let mut body = json!({"access_token":format!("private_refresh_access_{ordinal}"),"token_type":"Bearer","expires_in":120,"scope":self.scopes});
+                let mut body = json!({"access_token":format!("private_refresh_access_{ordinal}"),"token_type":"Bearer","expires_in":90,"scope":self.scopes});
                 if self.case == Case::WrongScope { body["scope"] = "openid".into(); }
                 if self.case == Case::ChangedRefresh { body["refresh_token"] = "unreviewed_rotated_token".into(); }
                 response(body)
@@ -125,7 +125,7 @@ impl Authority for NativeAuthority {
         let call = self.commits.fetch_add(1, SeqCst);
         if call == 1 {
             if self.port.case == Case::PublicationRewind { self.port.now.store(265, SeqCst); }
-            if self.port.case == Case::PublicationExpired { self.port.now.store(370, SeqCst); }
+            if self.port.case == Case::PublicationExpired { self.port.now.store(340, SeqCst); }
         }
         commit(&self.selection)
     }
@@ -193,7 +193,7 @@ fn compiled_calendar_refresh_publishes_versions_and_fences_failure_recovery() ->
                 let account: String = db.query_row("SELECT account FROM oauth_connection_slots", [], |r| r.get(0))?;
                 let key = profiles::tests::exchange_key();
                 let token = super::super::custody::load_access(&db, &key, &fixture.intent, &binding, &account, 2, 250)?.context("v2 material")?;
-                assert_eq!(token.expires_at, 370);
+                assert_eq!(token.expires_at, 340);
                 assert!(super::super::custody::load_access(&db, &key, &fixture.intent, &binding, &account, 1, 250).is_err());
                 let reference: String = db.query_row("SELECT reference FROM oauth_use_handles WHERE invocation='refresh_v2'", [], |r| r.get(0))?;
                 // Drop the returned outcome and reopen the store as a caller
@@ -204,15 +204,16 @@ fn compiled_calendar_refresh_publishes_versions_and_fences_failure_recovery() ->
                 assert_eq!(reopened.query_row("SELECT count(*) FROM oauth_refresh_attempts WHERE state='replacement_committed' AND base_version=1 AND next_version=2 AND length(receipt)>0", [], |r| r.get::<_,i64>(0))?, 1);
                 assert_eq!(invoke("after_lost_ack")?.result["status"], "ok");
                 assert_eq!(port.posts.load(SeqCst), 1);
-                port.now.store(320, SeqCst);
+                port.now.store(280, SeqCst);
                 assert_eq!(invoke("refresh_v3")?.result["status"], "ok");
                 assert_eq!(port.posts.load(SeqCst), 2);
                 assert_eq!(db.query_row("SELECT token_version FROM oauth_connection_slots", [], |r| r.get::<_,i64>(0))?, 3);
-                assert!(super::super::custody::load_access(&db, &key, &fixture.intent, &binding, &account, 2, 320).is_err());
-                assert!(super::super::custody::load_access(&db, &key, &fixture.intent, &binding, &account, 3, 320)?.is_some());
+                assert!(super::super::custody::load_access(&db, &key, &fixture.intent, &binding, &account, 2, 280).is_err());
+                assert!(super::super::custody::load_access(&db, &key, &fixture.intent, &binding, &account, 3, 280)?.is_some());
                 let old = Request { operation:"oauthcalendar.list_events".into(), input:input.to_string(),
                     context:store::invocation_context(&db, "refresh_v2")?, observations:vec![] };
-                assert!(load(&db, &runtime, &old, "calendar", &reference, 320).is_err(), "stale Use survived publication");
+                assert_eq!(load(&db, &runtime, &old, "calendar", &reference, 280).err().context("stale Use survived publication")?.to_string(),
+                    "connection use generation or account changed", "Use must fail on its material pin while its 60-second lifetime remains valid");
             } else {
                 assert!(!first.as_ref().is_ok_and(|o| o.status == "success" && o.result["status"] == "ok"), "{case:?}: failed refresh completed a Calendar read");
                 assert_eq!(port.posts.load(SeqCst), 1, "{case:?}"); assert_eq!(port.reads.load(SeqCst), 0, "{case:?}");
