@@ -61,7 +61,7 @@ struct Binary {
 /// Completed compiler outputs, without any runtime outcome or run receipt.
 #[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct BuildIdentity {
+pub(super) struct BuildIdentity {
     snapshot: String,
     workflow: String,
     workspace: PathBuf,
@@ -83,7 +83,7 @@ struct BuildCache {
     programs: Vec<Binary>,
 }
 
-fn build_identity(root: &Path, snapshot: &str) -> Result<BuildIdentity> {
+pub(super) fn build_identity(root: &Path, snapshot: &str) -> Result<BuildIdentity> {
     let version = |tool: &str, verbose: bool| -> Result<String> {
         let mut command = Command::new(tool);
         command.arg("--version").current_dir(root);
