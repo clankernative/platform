@@ -456,7 +456,11 @@ fn run(scratch: &Path, phase: &str, command: &mut Command, budget: Duration) -> 
         .keep()?;
     let mut telemetry: fs::File = telemetry;
     #[cfg(not(target_os = "linux"))]
-    writeln!(telemetry, "{}", serde_json::json!({"phase":phase,"elapsed_ms":0}))?;
+    writeln!(
+        telemetry,
+        "{}",
+        serde_json::json!({"phase":phase,"elapsed_ms":0})
+    )?;
     println!("Formatter resource telemetry: {}", telemetry_path.display());
     #[cfg(target_os = "linux")]
     {

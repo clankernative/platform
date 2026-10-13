@@ -352,18 +352,21 @@ fn admit_full(
     ensure!(
         cache.identity == *compiler
             && cache.binaries == prepared.binaries
-            && cache.programs == prepared.programs,
+            && cache.programs == prepared.programs
+            && cache.auxiliaries == prepared.auxiliaries,
         "queue compiler/config/profile and output inventory changed"
     );
     let directories: BTreeMap<_, _> = targets.members.values().cloned().collect();
     for (binaries, expected) in [
         (&cache.binaries, &targets.tests),
         (&cache.programs, &targets.programs),
+        (&cache.auxiliaries, &targets.auxiliaries),
     ] {
         let mut observed = BTreeSet::new();
         for binary in binaries {
             ensure!(
                 directories.get(&binary.package) == Some(&binary.directory)
+                    && binary.permissions & 0o111 != 0 && binary.permissions & !0o777 == 0
                     && observed.insert((
                         binary.package.clone(),
                         binary.target.clone(),
@@ -579,6 +582,7 @@ mod tests {
                 directory: "crates/day2".into(),
                 executable: path.into(),
                 digest: String::new(),
+                permissions: 0o755,
             });
         }
         tests.programs.push(Binary {
@@ -588,6 +592,7 @@ mod tests {
             directory: "crates/day2".into(),
             executable: program_output("day2"),
             digest: String::new(),
+                permissions: 0o755,
         });
         for binary in tests.binaries.iter_mut().chain(&mut tests.programs) {
             binary.digest = format!("sha256:{}", "b".repeat(64));
@@ -614,6 +619,7 @@ mod tests {
             identity: serde_json::from_value(serde_json::to_value(&compiler)?)?,
             binaries: prepared.binaries.clone(),
             programs: prepared.programs.clone(),
+            auxiliaries: prepared.auxiliaries.clone(),
         };
         let shards: Vec<_> = SHARDS
             .iter()
@@ -636,6 +642,7 @@ mod tests {
             ("ci-test-build-cache.json",serde_json::to_value(cache)?),
         ].into_iter().map(|(name,value)|(name.into(),value)).collect();
         let targets = Targets {
+            auxiliaries: BTreeSet::new(),
             tests: prepared
                 .binaries
                 .iter()

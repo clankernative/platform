@@ -523,7 +523,7 @@ pub fn stage_link_inputs(
 ) -> Result<BTreeMap<String, String>> {
     let directory = stage.join("sdk/targets").join(target.roc_target());
     fs::create_dir_all(&directory)?;
-    let mut hashes = BTreeMap::new();
+    let mut hashes = stage_system_link_inputs(target, stage)?;
     let host = fs::read(archive)?;
     ensure!(
         host.starts_with(b"!<arch>\n"),
@@ -534,6 +534,19 @@ pub fn stage_link_inputs(
         format!("native/{}/libhost.a", target.roc_target()),
         digest(&host),
     );
+    Ok(hashes)
+}
+
+/// Re-capture the current image's fixed Linux linker inputs for both ordinary
+/// builds and cached fixture admission. The native host archive is an output;
+/// these DSOs and loader are independently checked source inputs.
+pub fn stage_system_link_inputs(
+    target: Target,
+    stage: &Path,
+) -> Result<BTreeMap<String, String>> {
+    let directory = stage.join("sdk/targets").join(target.roc_target());
+    fs::create_dir_all(&directory)?;
+    let mut hashes = BTreeMap::new();
     if let Some((library, loader, _)) = target.linux_abi() {
         for name in LINUX_INPUTS.iter().copied().chain([loader]) {
             let path = format!("{library}/{name}");
