@@ -622,6 +622,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      - name: Admit only this checkout in the container Git ownership configuration
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Select the pinned Rust toolchain
         run: rustup show active-toolchain
       - name: Set up the Rust compiler cache
