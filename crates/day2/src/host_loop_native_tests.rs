@@ -120,6 +120,7 @@ fn fixture(
         observations: Vec::new(),
     };
     std::fs::write(&path, serde_json::to_vec_pretty(&trace).unwrap()).unwrap();
+    eprintln!("Host-loop decision replay: {}", replay_command(&path));
     let (entered, observed) = mpsc::unbounded_channel();
     let pairs = std::array::from_fn::<_, 3, _>(|_| std::sync::mpsc::channel());
     let (release, gates): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
@@ -219,7 +220,7 @@ async fn native_timers_skip_busy_deliveries_and_stop_awaits_real_sqlite_commits(
     );
     assert!(ticks.try_recv().is_err());
     assert!(entered.try_recv().is_err());
-    replay(&work.path);
+    replay(&work.path).unwrap();
     assert!(
         work.trace
             .lock()
@@ -272,7 +273,7 @@ fn native_shutdown_refuses_blocking_tasks_queued_behind_uninterruptible_work() {
         assert!(!control.admitting.load(Ordering::Acquire));
         assert_eq!(commits(&work), [0; 3]);
         assert!(entered.try_recv().is_err());
-        replay(&work.path);
+        replay(&work.path).unwrap();
         let trace = work.trace.lock().unwrap();
         assert_eq!(
             trace
@@ -300,7 +301,7 @@ async fn native_stop_before_dispatch_and_undeclared_schedules_never_run() {
     .unwrap();
     assert_eq!(commits(&work), [0; 3]);
     assert!(entered.try_recv().is_err());
-    replay(&work.path);
+    replay(&work.path).unwrap();
     assert_eq!(work.trace.lock().unwrap().events, vec![Event::Stop]);
 }
 

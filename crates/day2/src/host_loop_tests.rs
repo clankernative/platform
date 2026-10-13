@@ -1,12 +1,15 @@
 use super::*;
 use serde::{Deserialize, Serialize};
+use std::io::Read;
 
 #[path = "host_loop_native_tests.rs"]
 mod native;
 
 const STEPS: usize = 128;
+const MAX_REPLAY_BYTES: u64 = 1_048_576;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct Snapshot {
     phases: [String; 3],
     stopping: bool,
@@ -106,7 +109,16 @@ fn decision_source() -> String {
     crate::digest(include_bytes!("host_loop.rs"))
 }
 
+fn replay_command(path: &std::path::Path) -> String {
+    let quoted = path.to_string_lossy().replace('\'', "'\"'\"'");
+    format!(
+        "DAY2_HOST_LOOP_REPLAY='{quoted}' cargo test --locked -p day2 --lib \
+         host_loop::tests::replay_saved_host_loop_history -- --exact"
+    )
+}
+
 fn check(trace: &mut Trace, path: &std::path::Path) {
+    eprintln!("Host-loop decision replay: {}", replay_command(path));
     assert_eq!(trace.format, 1);
     assert_eq!(
         trace.source,
@@ -126,32 +138,170 @@ fn check(trace: &mut Trace, path: &std::path::Path) {
         assert_eq!(
             actual,
             reference(trace.declared, &trace.events[..=i]),
-            "seed={} step={i}; complete replay: {}",
+            "seed={} step={i}; complete replay: {}; command: {}",
             trace.seed,
-            path.display()
+            path.display(),
+            replay_command(path)
         );
     }
 }
 
-fn replay(path: &std::path::Path) {
-    let saved: Trace = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-    assert_eq!(saved.format, 1);
-    assert_eq!(
-        saved.source,
-        decision_source(),
+fn replay(path: &std::path::Path) -> Result<()> {
+    use anyhow::{Context as _, ensure};
+    let file = std::fs::File::open(path)?;
+    let metadata = file.metadata()?;
+    ensure!(
+        metadata.is_file(),
+        "host-loop replay requires a regular file"
+    );
+    ensure!(
+        metadata.len() <= MAX_REPLAY_BYTES,
+        "host-loop replay byte budget"
+    );
+    let mut bytes = Vec::new();
+    file.take(MAX_REPLAY_BYTES + 1).read_to_end(&mut bytes)?;
+    ensure!(
+        bytes.len() as u64 <= MAX_REPLAY_BYTES,
+        "host-loop replay byte budget"
+    );
+    let saved: Trace = crate::json::decode(&bytes).context("decode host-loop replay")?;
+    ensure!(saved.format == 1, "unsupported host-loop replay format");
+    ensure!(
+        saved.source == decision_source(),
         "replay source identity changed"
     );
-    assert!(saved.events.len() <= STEPS + 4);
-    assert!(saved.observations.len() <= saved.events.len());
+    ensure!(
+        saved.events.len() <= STEPS + 4,
+        "host-loop replay schedule bound exceeded"
+    );
+    ensure!(
+        saved.observations.len() <= saved.events.len(),
+        "host-loop replay observation bound exceeded"
+    );
     let mut state = State::new(saved.declared);
     for (i, event) in saved.events.iter().enumerate() {
         let error = state.apply(*event).err();
         let actual = snapshot(&state, error);
         if let Some(recorded) = saved.observations.get(i) {
-            assert_eq!(&actual, recorded);
+            ensure!(
+                &actual == recorded,
+                "host-loop replay observation mismatch at step {i}"
+            );
         }
-        assert_eq!(actual, reference(saved.declared, &saved.events[..=i]));
+        ensure!(
+            actual == reference(saved.declared, &saved.events[..=i]),
+            "host-loop replay oracle mismatch at step {i}"
+        );
     }
+    Ok(())
+}
+
+#[test]
+fn replay_saved_host_loop_history() -> Result<()> {
+    use anyhow::Context as _;
+    let Some(path) = std::env::var_os("DAY2_HOST_LOOP_REPLAY") else {
+        return Ok(());
+    };
+    let path = std::path::Path::new(&path);
+    replay(path).with_context(|| {
+        format!(
+            "host-loop saved replay failed; repeat: {}",
+            replay_command(path)
+        )
+    })
+}
+
+#[test]
+fn saved_replay_bounds_identity_and_recorded_observations_fail_closed() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("trace.json");
+    let mut trace = Trace {
+        format: 1,
+        source: decision_source(),
+        seed: 17,
+        declared: true,
+        events: vec![
+            Event::Wake(Pump::Commands),
+            Event::Dispatch(Pump::Commands, true),
+            Event::Stop,
+        ],
+        observations: Vec::new(),
+    };
+    check(&mut trace, &path);
+    replay(&path)?;
+    // A retained failure may end at a prefix; replay still evaluates the full
+    // schedule against the independent oracle, without rewriting its evidence.
+    trace.observations.pop();
+    let mut bytes = serde_json::to_vec(&trace)?;
+    bytes.resize(MAX_REPLAY_BYTES as usize, b' ');
+    std::fs::write(&path, &bytes)?;
+    replay(&path)?;
+    assert_eq!(
+        std::fs::read(&path)?,
+        bytes,
+        "replay must preserve the saved counterexample"
+    );
+    bytes.push(b' ');
+    std::fs::write(&path, &bytes)?;
+    assert!(
+        replay(&path)
+            .unwrap_err()
+            .to_string()
+            .contains("byte budget")
+    );
+    assert!(
+        replay(directory.path())
+            .unwrap_err()
+            .to_string()
+            .contains("regular file")
+    );
+    let valid = serde_json::to_value(&trace)?;
+    let mut wrong = trace.observations.clone();
+    wrong[0].stopping = true;
+    for (field, value, reason) in [
+        ("format", serde_json::json!(2), "unsupported"),
+        (
+            "source",
+            serde_json::json!("different implementation"),
+            "source identity",
+        ),
+        (
+            "events",
+            serde_json::to_value(vec![Event::Stop; STEPS + 5])?,
+            "schedule bound",
+        ),
+        (
+            "observations",
+            serde_json::to_value(vec![wrong[0].clone(); 4])?,
+            "observation bound",
+        ),
+        (
+            "observations",
+            serde_json::to_value(&wrong)?,
+            "observation mismatch",
+        ),
+    ] {
+        let mut invalid = valid.clone();
+        invalid[field] = value;
+        std::fs::write(&path, serde_json::to_vec(&invalid)?)?;
+        assert!(
+            replay(&path).unwrap_err().to_string().contains(reason),
+            "missing rejection: {reason}"
+        );
+    }
+    let mut unknown = valid.clone();
+    unknown["observations"][0]["unexpected"] = serde_json::json!(true);
+    std::fs::write(&path, serde_json::to_vec(&unknown)?)?;
+    assert!(replay(&path).is_err());
+    let duplicated =
+        serde_json::to_string(&valid)?.replace("\"format\":1", "\"format\":1,\"format\":1");
+    std::fs::write(&path, duplicated)?;
+    assert!(replay(&path).is_err());
+    std::fs::write(&path, b"{")?;
+    assert!(replay(&path).is_err());
+    let quoted = replay_command(std::path::Path::new("/tmp/saved 'trace.json"));
+    assert!(quoted.contains("DAY2_HOST_LOOP_REPLAY='/tmp/saved '\"'\"'trace.json'"));
+    Ok(())
 }
 
 #[test]
@@ -194,7 +344,7 @@ fn bounded_seeded_schedules_match_independent_history_and_replay() {
             observations: Vec::new(),
         };
         check(&mut trace, &path);
-        replay(&path);
+        replay(&path).unwrap();
         assert!(trace.observations.last().unwrap().drained);
         let mut before = reference(trace.declared, &[]);
         for (event, after) in trace.events.iter().zip(&trace.observations) {
@@ -289,7 +439,7 @@ fn proptest_bounded_event_schedules_persist_every_original_and_shrink() {
                     observations: Vec::new(),
                 };
                 check(&mut trace, &path);
-                replay(&path);
+                replay(&path).unwrap();
                 prop_assert!(trace.observations.last().unwrap().drained);
                 Ok(())
             },

@@ -26,3 +26,19 @@ OAuth's required seeded host/protocol campaigns, effect-boundary guard, catalog
 coverage gate, implementation-bound replay, and durable schema upgrades are
 documented in [OAuth simulation and durable invariants](OAUTH-SIMULATION.md).
 They run in both library gates and complement real adapter/crash qualification.
+
+Private native host-loop campaigns share the production supervisor reducer and
+retain source-bound event histories with independent-oracle snapshots. Replay a
+saved history from the repository root with:
+
+```console
+DAY2_HOST_LOOP_REPLAY=/absolute/path/to/trace.json cargo test --locked -p day2 --lib host_loop::tests::replay_saved_host_loop_history -- --exact
+```
+
+Campaign evidence prints this command with its exact saved path. The reader admits
+only regular files of at most 1 MiB, at most 132 events, a supported format and the
+current reducer source identity; malformed or divergent evidence fails. Replay
+preserves the saved file and checks the supervisor decisions against recorded
+snapshots and the independent oracle. Native SQLite, Tokio timer and blocking-task
+conformance remain separate tests; decision replay does not repeat native work or
+reproduce database/provider effects.
