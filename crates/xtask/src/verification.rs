@@ -375,13 +375,21 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
                     .get(fixture)
                     .filter(|entry| {
                         cache.compiler.is_some()
-                            && reusable_fixture_snapshot(build.imports.is_some(), &entry.snapshot, &snapshot)
+                            && reusable_fixture_snapshot(
+                                build.imports.is_some(),
+                                &entry.snapshot,
+                                &snapshot,
+                            )
                     })
                     .map_or(Ok(None), |entry| {
                         let artifact = cached_fixture(root, &entry.artifact)?;
                         if let Some(artifact) = &artifact {
                             build_native::admit_cached_fixture(
-                                root, &build.app, build.overrides.as_deref(), build.imports.as_ref(), artifact,
+                                root,
+                                &build.app,
+                                build.overrides.as_deref(),
+                                build.imports.as_ref(),
+                                artifact,
                             )?;
                         }
                         Ok(artifact)
@@ -399,11 +407,13 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
                 };
                 let loaded = day2::artifact::LoadedArtifact::load(&artifact)
                     .context("verification fixture artifact admission")?;
-                cache
-                    .fixtures
-                    .insert(fixture.into(), FixtureCacheEntry {
-                        artifact: loaded.id().to_owned(), snapshot: snapshot.clone(),
-                    });
+                cache.fixtures.insert(
+                    fixture.into(),
+                    FixtureCacheEntry {
+                        artifact: loaded.id().to_owned(),
+                        snapshot: snapshot.clone(),
+                    },
+                );
                 save_cache(root, &cache)?;
                 fixtures.insert(fixture.into(), artifact);
                 format!("build-{fixture}")
@@ -459,7 +469,13 @@ impl FixtureBuild {
     }
 
     fn build(&self, root: &Path) -> Result<PathBuf> {
-        build_recipe(root, &self.app, self.overrides.as_deref(), None, self.imports.as_ref())
+        build_recipe(
+            root,
+            &self.app,
+            self.overrides.as_deref(),
+            None,
+            self.imports.as_ref(),
+        )
     }
 }
 
@@ -549,7 +565,9 @@ fn fixture_build(
         "credential-metadata" => {
             FixtureBuild::plain(root, "fixtures/credential-metadata-conformance")
         }
-        "connection-declaration" => FixtureBuild::plain(root, "fixtures/connection-declaration-conformance"),
+        "connection-declaration" => {
+            FixtureBuild::plain(root, "fixtures/connection-declaration-conformance")
+        }
         "oauth-calendar" => FixtureBuild::plain(root, "fixtures/oauth-calendar-canary"),
         "oauth-gitlab" => FixtureBuild::plain(root, "fixtures/oauth-gitlab-canary"),
         "delegation-peer" => FixtureBuild::overlay(
@@ -586,10 +604,18 @@ fn fixture_build(
             })
         }
         "redirect" => FixtureBuild::plain(root, "fixtures/redirect-conformance"),
-        "relational-next" => FixtureBuild::overlay(root, "fixtures/relational-conformance", "fixtures/migration-add-optional-text"),
+        "relational-next" => FixtureBuild::overlay(
+            root,
+            "fixtures/relational-conformance",
+            "fixtures/migration-add-optional-text",
+        ),
         "owned" => FixtureBuild::plain(root, "fixtures/row-authority-web-conformance"),
         "repeated-field" => FixtureBuild::plain(root, "fixtures/repeated-field-conformance"),
-        "owned-probe" => FixtureBuild::overlay(root, "fixtures/row-authority-web-conformance", "fixtures/row-authority-adversaries"),
+        "owned-probe" => FixtureBuild::overlay(
+            root,
+            "fixtures/row-authority-web-conformance",
+            "fixtures/row-authority-adversaries",
+        ),
         _ => bail!("unknown fixture"),
     }
 }
@@ -772,8 +798,14 @@ fn fixture_compiler_sources(root: &Path) -> Result<BTreeMap<String, String>> {
         ensure!(path.is_absolute(), "absolute compiler dependency required");
         if let Ok(relative) = path.strip_prefix(&root) {
             let metadata = fs::symlink_metadata(&path)?;
-            ensure!(metadata.is_file() && !metadata.file_type().is_symlink(), "compiler dependency must be regular");
-            ensure!(path.canonicalize()?.starts_with(&root), "compiler dependency escaped workspace");
+            ensure!(
+                metadata.is_file() && !metadata.file_type().is_symlink(),
+                "compiler dependency must be regular"
+            );
+            ensure!(
+                path.canonicalize()?.starts_with(&root),
+                "compiler dependency escaped workspace"
+            );
             sources.insert(
                 format!("compiler-inputs/{}", relative.to_string_lossy()),
                 digest(&fs::read(path)?),
@@ -786,8 +818,13 @@ fn fixture_compiler_sources(root: &Path) -> Result<BTreeMap<String, String>> {
 fn compiler_dependency_paths(contents: &str) -> Result<Vec<PathBuf>> {
     // Cargo's normal unescaped single-line dep-info is authoritative for embedded
     // non-Rust inputs too. Unsupported escaping disables reuse, never full builds.
-    let line = contents.lines().next().context("compiler dep-info missing")?;
-    let (target, dependencies) = line.split_once(": ").context("compiler dep-info target missing")?;
+    let line = contents
+        .lines()
+        .next()
+        .context("compiler dep-info missing")?;
+    let (target, dependencies) = line
+        .split_once(": ")
+        .context("compiler dep-info target missing")?;
     ensure!(
         !line.contains(['\\', '\r']) && Path::new(target).is_absolute(),
         "unsupported compiler dep-info encoding"
@@ -806,7 +843,9 @@ fn load_cache(root: &Path, scope: &str, snapshot: &str) -> Result<VerificationCa
     let compiler = match fixture_compiler_identity(root) {
         Ok(identity) => Some(identity),
         Err(error) => {
-            eprintln!("Fixture output reuse unavailable; ordinary builds remain selected: {error:#}");
+            eprintln!(
+                "Fixture output reuse unavailable; ordinary builds remain selected: {error:#}"
+            );
             None
         }
     };
@@ -817,11 +856,18 @@ fn load_cache(root: &Path, scope: &str, snapshot: &str) -> Result<VerificationCa
     let mut cache: VerificationCache = match day2::json::decode(&bytes) {
         Ok(cache) => cache,
         Err(error) => {
-            eprintln!("Ignoring invalid verification cache {}: {error:#}", path.display());
+            eprintln!(
+                "Ignoring invalid verification cache {}: {error:#}",
+                path.display()
+            );
             return Ok(VerificationCache::empty(scope, snapshot, compiler));
         }
     };
-    if cache.format != CACHE_FORMAT || cache.scope != scope || compiler.is_none() || cache.compiler != compiler {
+    if cache.format != CACHE_FORMAT
+        || cache.scope != scope
+        || compiler.is_none()
+        || cache.compiler != compiler
+    {
         return Ok(VerificationCache::empty(scope, snapshot, compiler));
     }
     cache.snapshot = snapshot.into();
@@ -842,7 +888,9 @@ fn cached_fixture(root: &Path, artifact: &str) -> Result<Option<PathBuf>> {
     ensure!(
         artifact.len() == 71
             && artifact.starts_with("sha256:")
-            && artifact[7..].bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+            && artifact[7..]
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
         "cached artifact must be a canonical SHA-256 identity"
     );
     let directory = root
@@ -1740,12 +1788,22 @@ mod fixture_cache_tests {
     }
 
     #[test]
-    fn compiler_dep_info_preserves_embedded_fixture_inputs_and_rejects_unknown_encoding() -> Result<()> {
+    fn compiler_dep_info_preserves_embedded_fixture_inputs_and_rejects_unknown_encoding()
+    -> Result<()> {
         let paths = compiler_dependency_paths(
             "/work/platform/target/debug/xtask: /work/platform/crates/xtask/src/main.rs /work/platform/fixtures/authority-policies/reports.json\n",
         )?;
-        assert!(paths.contains(&PathBuf::from("/work/platform/fixtures/authority-policies/reports.json")));
-        for contents in ["", "missing target", "/xtask: ", "relative: /input", "/xtask: /escaped\\ input", "/xtask: /first \\\n/second"] {
+        assert!(paths.contains(&PathBuf::from(
+            "/work/platform/fixtures/authority-policies/reports.json"
+        )));
+        for contents in [
+            "",
+            "missing target",
+            "/xtask: ",
+            "relative: /input",
+            "/xtask: /escaped\\ input",
+            "/xtask: /first \\\n/second",
+        ] {
             assert!(compiler_dependency_paths(contents).is_err(), "{contents:?}");
         }
         Ok(())
@@ -1754,7 +1812,13 @@ mod fixture_cache_tests {
     #[test]
     fn cache_artifact_identity_cannot_select_paths_or_noncanonical_digests() -> Result<()> {
         let root = tempfile::tempdir()?;
-        for artifact in ["../worker", "sha256:../worker", "sha256:abc", "worker", "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"] {
+        for artifact in [
+            "../worker",
+            "sha256:../worker",
+            "sha256:abc",
+            "worker",
+            "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        ] {
             assert!(cached_fixture(root.path(), artifact).is_err());
         }
         assert!(cached_fixture(root.path(), &digest(b"missing artifact"))?.is_none());

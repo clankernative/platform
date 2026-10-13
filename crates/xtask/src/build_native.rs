@@ -467,7 +467,10 @@ pub(super) fn admit_cached_fixture(
     prepared.hashes.insert(
         format!("app/{}", day2::identity::REGISTRY_FILE),
         digest(&fs::read(
-            prepared.stage.join("app").join(day2::identity::REGISTRY_FILE),
+            prepared
+                .stage
+                .join("app")
+                .join(day2::identity::REGISTRY_FILE),
         )?),
     );
     prepared.hashes.extend(prepared.platform_hashes);
@@ -490,7 +493,10 @@ fn admit_fixture_sources(
             && archive[7..].bytes().all(|byte| byte.is_ascii_hexdigit()),
         "cached fixture native archive identity invalid"
     );
-    ensure!(actual == *expected, "cached fixture closed source inputs changed");
+    ensure!(
+        actual == *expected,
+        "cached fixture closed source inputs changed"
+    );
     Ok(())
 }
 
@@ -896,19 +902,33 @@ mod fixture_cache_admission_tests {
     #[test]
     fn cached_fixture_requires_exact_closed_source_set_and_native_output() -> Result<()> {
         let expected: BTreeMap<String, String> = [
-            "app/App.roc", "app/ui/page.html", "app/model-identities.json",
-            "sdk/contracts/Api.roc", "toolchain.json", "ui/package", "ui-provider/executable",
-        ].into_iter().map(|name| (name.into(), digest(name.as_bytes()))).collect();
+            "app/App.roc",
+            "app/ui/page.html",
+            "app/model-identities.json",
+            "sdk/contracts/Api.roc",
+            "toolchain.json",
+            "ui/package",
+            "ui-provider/executable",
+        ]
+        .into_iter()
+        .map(|name| (name.into(), digest(name.as_bytes())))
+        .collect();
         let mut artifact = expected.clone();
         artifact.insert("native/arm64mac/libhost.a".into(), digest(b"host archive"));
         admit_fixture_sources(&expected, &artifact)?;
         for name in expected.keys() {
             let mut changed = artifact.clone();
             changed.insert(name.clone(), digest(b"changed input"));
-            assert!(admit_fixture_sources(&expected, &changed).is_err(), "{name}");
+            assert!(
+                admit_fixture_sources(&expected, &changed).is_err(),
+                "{name}"
+            );
             let mut missing = artifact.clone();
             missing.remove(name);
-            assert!(admit_fixture_sources(&expected, &missing).is_err(), "{name}");
+            assert!(
+                admit_fixture_sources(&expected, &missing).is_err(),
+                "{name}"
+            );
         }
         let mut extra = artifact.clone();
         extra.insert("app/deleted.roc".into(), digest(b"old input"));
