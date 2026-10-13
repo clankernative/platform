@@ -19,8 +19,7 @@ const LINUX_ADDRESS_SPACE_BYTES: u64 = 12 * 1024 * 1024 * 1024;
 const LINUX_GROUP_RSS_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const LINUX_DISK_HEADROOM_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const ZIG_SHA256: &str = "b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489";
-const ZIG_LINUX_SHA256: &str =
-    "70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00";
+const ZIG_LINUX_SHA256: &str = "70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00";
 
 pub(super) fn pin_path() -> Result<&'static str> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
@@ -127,8 +126,12 @@ impl Pin {
     fn binary_url(&self) -> Result<&'static str> {
         self.validate()?;
         match self.target.as_str() {
-            "aarch64-macos" => Ok("https://github.com/clankernative/platform/releases/download/roc-formatter-2026-09-12/roc-fmt-day2-aarch64-apple-darwin"),
-            "x86_64-linux" => Ok("https://github.com/clankernative/platform/releases/download/roc-formatter-linux-2026-09-12/roc-fmt-day2-x86_64-unknown-linux-gnu"),
+            "aarch64-macos" => Ok(
+                "https://github.com/clankernative/platform/releases/download/roc-formatter-2026-09-12/roc-fmt-day2-aarch64-apple-darwin",
+            ),
+            "x86_64-linux" => Ok(
+                "https://github.com/clankernative/platform/releases/download/roc-formatter-linux-2026-09-12/roc-fmt-day2-x86_64-unknown-linux-gnu",
+            ),
             _ => anyhow::bail!("unsupported native formatter release"),
         }
     }
@@ -296,20 +299,34 @@ fn status_group_rss(status: &str, group: u32) -> Result<Option<u64>> {
     let Some(groups) = status.lines().find_map(|line| line.strip_prefix("NSpgid:")) else {
         return Ok(None);
     };
-    let actual: u32 = groups.split_whitespace().next()
-        .context("process group missing")?.parse()?;
+    let actual: u32 = groups
+        .split_whitespace()
+        .next()
+        .context("process group missing")?
+        .parse()?;
     if actual != group {
         return Ok(None);
     }
     let Some(rss) = status.lines().find_map(|line| line.strip_prefix("VmRSS:")) else {
-        ensure!(status.lines().any(|line| line.starts_with("State:") && line.contains("Z (zombie)")),
-            "live formatter process RSS unavailable");
+        ensure!(
+            status
+                .lines()
+                .any(|line| line.starts_with("State:") && line.contains("Z (zombie)")),
+            "live formatter process RSS unavailable"
+        );
         return Ok(Some(0));
     };
     let mut fields = rss.split_whitespace();
     let kibibytes: u64 = fields.next().context("process RSS missing")?.parse()?;
-    ensure!(fields.next() == Some("kB") && fields.next().is_none(), "unsupported process RSS units");
-    Ok(Some(kibibytes.checked_mul(1024).context("process RSS overflow")?))
+    ensure!(
+        fields.next() == Some("kB") && fields.next().is_none(),
+        "unsupported process RSS units"
+    );
+    Ok(Some(
+        kibibytes
+            .checked_mul(1024)
+            .context("process RSS overflow")?,
+    ))
 }
 
 #[cfg(target_os = "linux")]
@@ -324,12 +341,21 @@ fn group_rss(group: u32) -> Result<(u64, bool)> {
         };
         let status = match fs::read_to_string(entry.path().join("status")) {
             Ok(status) => status,
-            Err(error) if [std::io::ErrorKind::NotFound, std::io::ErrorKind::PermissionDenied]
-                .contains(&error.kind()) => continue,
+            Err(error)
+                if [
+                    std::io::ErrorKind::NotFound,
+                    std::io::ErrorKind::PermissionDenied,
+                ]
+                .contains(&error.kind()) =>
+            {
+                continue;
+            }
             Err(error) => return Err(error.into()),
         };
         if let Some(rss) = status_group_rss(&status, group)? {
-            total = total.checked_add(rss).context("formatter process-group RSS overflow")?;
+            total = total
+                .checked_add(rss)
+                .context("formatter process-group RSS overflow")?;
             parent_observed |= pid == group;
         }
     }
@@ -342,10 +368,16 @@ fn available_disk(scratch: &Path) -> Result<u64> {
         .args(["--output=avail", "-B1"])
         .arg(scratch)
         .output()?;
-    ensure!(output.status.success() && output.stdout.len() <= 4096, "formatter disk observation");
+    ensure!(
+        output.status.success() && output.stdout.len() <= 4096,
+        "formatter disk observation"
+    );
     let output = String::from_utf8(output.stdout)?;
     let mut fields = output.split_whitespace();
-    ensure!(fields.next() == Some("Avail"), "unsupported disk observation header");
+    ensure!(
+        fields.next() == Some("Avail"),
+        "unsupported disk observation header"
+    );
     let bytes = fields.next().context("available disk missing")?.parse()?;
     ensure!(fields.next().is_none(), "ambiguous disk observation");
     Ok(bytes)
@@ -354,7 +386,10 @@ fn available_disk(scratch: &Path) -> Result<u64> {
 fn run(scratch: &Path, phase: &str, command: &mut Command, budget: Duration) -> Result<()> {
     let logs = scratch.join("logs");
     fs::create_dir_all(&logs)?;
-    ensure!(fs::symlink_metadata(&logs)?.is_dir(), "formatter log directory");
+    ensure!(
+        fs::symlink_metadata(&logs)?.is_dir(),
+        "formatter log directory"
+    );
     let (log, path) = tempfile::Builder::new()
         .prefix("phase-")
         .suffix(".log")
@@ -363,12 +398,22 @@ fn run(scratch: &Path, phase: &str, command: &mut Command, budget: Duration) -> 
     println!("Formatter: {phase}; retained log {}", path.display());
     #[cfg(target_os = "linux")]
     let (mut telemetry, telemetry_path) = tempfile::Builder::new()
-        .prefix("resources-").suffix(".jsonl").tempfile_in(&logs)?.keep()?;
+        .prefix("resources-")
+        .suffix(".jsonl")
+        .tempfile_in(&logs)?
+        .keep()?;
     #[cfg(target_os = "linux")]
     {
         let disk = available_disk(scratch)?;
-        writeln!(telemetry, "{}", serde_json::json!({"phase":phase,"available_disk_bytes":disk,"elapsed_ms":0}))?;
-        ensure!(disk >= LINUX_DISK_HEADROOM_BYTES, "formatter disk headroom below budget: {disk} bytes");
+        writeln!(
+            telemetry,
+            "{}",
+            serde_json::json!({"phase":phase,"available_disk_bytes":disk,"elapsed_ms":0})
+        )?;
+        ensure!(
+            disk >= LINUX_DISK_HEADROOM_BYTES,
+            "formatter disk headroom below budget: {disk} bytes"
+        );
         println!("Formatter resource telemetry: {}", telemetry_path.display());
     }
     let output = log.try_clone()?;
@@ -376,8 +421,9 @@ fn run(scratch: &Path, phase: &str, command: &mut Command, budget: Duration) -> 
     let mut child = Supervised(command.spawn().with_context(|| phase.to_string())?);
     let started = Instant::now();
     let mut progress = Instant::now();
-    #[cfg(target_os = "linux")]
-    let mut resources = Instant::now();
+    // One unconditional clock owner keeps native-effect admission explicit on
+    // every host. Only Linux samples process resources when this clock expires.
+    let mut resources: Instant = Instant::now();
     loop {
         ensure!(
             started.elapsed() <= budget,
@@ -410,21 +456,39 @@ fn run(scratch: &Path, phase: &str, command: &mut Command, budget: Duration) -> 
             }
             return Ok(());
         }
-        #[cfg(target_os = "linux")]
         if resources.elapsed() >= Duration::from_millis(500) {
-            let (rss, observed) = group_rss(child.0.id())?;
-            if !observed {
-                ensure!(child.0.try_wait()?.is_some(), "live formatter process group could not be observed");
-                continue;
+            #[cfg(target_os = "linux")]
+            {
+                let (rss, observed) = group_rss(child.0.id())?;
+                if !observed {
+                    ensure!(
+                        child.0.try_wait()?.is_some(),
+                        "live formatter process group could not be observed"
+                    );
+                    continue;
+                }
+                let disk = available_disk(scratch)?;
+                writeln!(
+                    telemetry,
+                    "{}",
+                    serde_json::json!({
+                        "phase":phase,"elapsed_ms":started.elapsed().as_millis(),
+                        "sampled_group_rss_bytes":rss,"available_disk_bytes":disk,
+                    })
+                )?;
+                ensure!(
+                    telemetry.metadata()?.len() <= MAX_LOG_BYTES,
+                    "formatter telemetry byte budget"
+                );
+                ensure!(
+                    rss <= LINUX_GROUP_RSS_BYTES,
+                    "formatter sampled process-group RSS exceeded budget: {rss} bytes"
+                );
+                ensure!(
+                    disk >= LINUX_DISK_HEADROOM_BYTES,
+                    "formatter disk headroom below budget: {disk} bytes"
+                );
             }
-            let disk = available_disk(scratch)?;
-            writeln!(telemetry, "{}", serde_json::json!({
-                "phase":phase,"elapsed_ms":started.elapsed().as_millis(),
-                "sampled_group_rss_bytes":rss,"available_disk_bytes":disk,
-            }))?;
-            ensure!(telemetry.metadata()?.len() <= MAX_LOG_BYTES, "formatter telemetry byte budget");
-            ensure!(rss <= LINUX_GROUP_RSS_BYTES, "formatter sampled process-group RSS exceeded budget: {rss} bytes");
-            ensure!(disk >= LINUX_DISK_HEADROOM_BYTES, "formatter disk headroom below budget: {disk} bytes");
             resources = Instant::now();
         }
         if progress.elapsed() >= Duration::from_secs(60) {
@@ -526,7 +590,8 @@ fn checked_pin(root: &Path) -> Result<Pin> {
     pin.validate()?;
     ensure!(
         (pin.target == "aarch64-macos" && cfg!(all(target_os = "macos", target_arch = "aarch64")))
-            || (pin.target == "x86_64-linux" && cfg!(all(target_os = "linux", target_arch = "x86_64"))),
+            || (pin.target == "x86_64-linux"
+                && cfg!(all(target_os = "linux", target_arch = "x86_64"))),
         "formatter pin does not match the native host"
     );
     let original = super::native_toolchain::load(root)?;
@@ -821,7 +886,12 @@ mod tests {
         linux.build_args[6] = "-j1".into();
         linux.build_args.extend(["--summary".into(), "all".into()]);
         linux.validate().unwrap();
-        assert!(linux.binary_url().unwrap().ends_with("x86_64-unknown-linux-gnu"));
+        assert!(
+            linux
+                .binary_url()
+                .unwrap()
+                .ends_with("x86_64-unknown-linux-gnu")
+        );
         for change in 0..4 {
             let mut wrong = linux.clone();
             match change {
@@ -974,15 +1044,33 @@ mod tests {
             .output()?;
         ensure!(output.status.success(), "query actual child kernel limits");
         let limits = String::from_utf8(output.stdout)?;
-        let address = limits.lines().find(|line| line.starts_with("Max address space"))
+        let address = limits
+            .lines()
+            .find(|line| line.starts_with("Max address space"))
             .context("address-space limit missing")?;
-        let core = limits.lines().find(|line| line.starts_with("Max core file size"))
+        let core = limits
+            .lines()
+            .find(|line| line.starts_with("Max core file size"))
             .context("core limit missing")?;
-        assert_eq!(address.split_whitespace().collect::<Vec<_>>(),
-            ["Max", "address", "space", "12884901888", "12884901888", "bytes"]);
-        assert_eq!(core.split_whitespace().collect::<Vec<_>>(),
-            ["Max", "core", "file", "size", "0", "0", "bytes"]);
-        assert_eq!(linux.recipe()["process_limits"]["address_space_bytes_per_process"], LINUX_ADDRESS_SPACE_BYTES);
+        assert_eq!(
+            address.split_whitespace().collect::<Vec<_>>(),
+            [
+                "Max",
+                "address",
+                "space",
+                "12884901888",
+                "12884901888",
+                "bytes"
+            ]
+        );
+        assert_eq!(
+            core.split_whitespace().collect::<Vec<_>>(),
+            ["Max", "core", "file", "size", "0", "0", "bytes"]
+        );
+        assert_eq!(
+            linux.recipe()["process_limits"]["address_space_bytes_per_process"],
+            LINUX_ADDRESS_SPACE_BYTES
+        );
         Ok(())
     }
 
@@ -995,7 +1083,10 @@ mod tests {
         assert!(status_group_rss("NSpgid:\t42\nVmRSS:\t123 bytes\n", 42).is_err());
         assert!(status_group_rss("NSpgid:\t42\nVmRSS:\t18446744073709551615 kB\n", 42).is_err());
         assert!(status_group_rss("NSpgid:\t42\nState:\tR (running)\n", 42).is_err());
-        assert_eq!(status_group_rss("NSpgid:\t42\nState:\tZ (zombie)\n", 42)?, Some(0));
+        assert_eq!(
+            status_group_rss("NSpgid:\t42\nState:\tZ (zombie)\n", 42)?,
+            Some(0)
+        );
         Ok(())
     }
 
@@ -1007,22 +1098,43 @@ mod tests {
         let child = Supervised(command("/bin/sleep", scratch.path()).arg("30").spawn()?);
         let group = child.0.id();
         let mut probe = group_signal(group, "0").context("owned group signal")?;
-        assert_eq!(probe.get_args().collect::<Vec<_>>(),
-            [std::ffi::OsStr::new("-0"), std::ffi::OsStr::new("--"),
-                std::ffi::OsStr::new(&format!("-{group}"))]);
-        ensure!(probe.status()?.success(), "owned group must exist before cleanup");
+        assert_eq!(
+            probe.get_args().collect::<Vec<_>>(),
+            [
+                std::ffi::OsStr::new("-0"),
+                std::ffi::OsStr::new("--"),
+                std::ffi::OsStr::new(&format!("-{group}"))
+            ]
+        );
+        ensure!(
+            probe.status()?.success(),
+            "owned group must exist before cleanup"
+        );
         // The old syntax is observed only with signal zero, never a destructive
         // signal. Record the actual hosted tool's behavior without assuming its
         // version; production cleanup always uses the explicit terminator.
-        let old_probe = Command::new("/bin/kill").env_clear()
-            .args(["-0", &format!("-{group}")]).output()?;
-        println!("Signal-zero old syntax: {}; stderr={}", old_probe.status,
-            String::from_utf8_lossy(&old_probe.stderr));
+        let old_probe = Command::new("/bin/kill")
+            .env_clear()
+            .args(["-0", &format!("-{group}")])
+            .output()?;
+        println!(
+            "Signal-zero old syntax: {}; stderr={}",
+            old_probe.status,
+            String::from_utf8_lossy(&old_probe.stderr)
+        );
         println!("Owned formatter group={group}; sibling={}", sibling.0.id());
         drop(child);
-        ensure!(!group_signal(group, "0").context("owned group probe")?.status()?.success(),
-            "owned child group still exists after cleanup");
-        ensure!(sibling.0.try_wait()?.is_none(), "cleanup terminated an unrelated sibling");
+        ensure!(
+            !group_signal(group, "0")
+                .context("owned group probe")?
+                .status()?
+                .success(),
+            "owned child group still exists after cleanup"
+        );
+        ensure!(
+            sibling.0.try_wait()?.is_none(),
+            "cleanup terminated an unrelated sibling"
+        );
         assert!(group_signal(0, "KILL").is_none());
         assert!(group_signal(1, "KILL").is_none());
         assert!(group_signal(u32::MAX, "KILL").is_none());
@@ -1037,8 +1149,13 @@ mod tests {
         let started = Instant::now();
         loop {
             let (rss, observed) = group_rss(child.0.id())?;
-            if observed && rss > 0 { break; }
-            ensure!(started.elapsed() < Duration::from_secs(1), "owned child process observation");
+            if observed && rss > 0 {
+                break;
+            }
+            ensure!(
+                started.elapsed() < Duration::from_secs(1),
+                "owned child process observation"
+            );
             std::thread::sleep(Duration::from_millis(10));
         }
         assert_eq!(group_rss(u32::MAX)?, (0, false));
