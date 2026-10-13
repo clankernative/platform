@@ -668,6 +668,8 @@ jobs:
       - run: target/debug/xtask architecture-inventory > /tmp/day2-architecture-inventory.json
       - run: target/debug/xtask architecture-dependencies > /tmp/day2-architecture-dependencies.json
       - run: target/debug/xtask architecture-proof-inventory > /tmp/day2-architecture-proofs.json
+      - name: Exercise current mixed-host native proof and cache admission guards
+        run: cargo test --locked -p xtask verification::shards -- --nocapture
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: ${{ always() }}
         with:
