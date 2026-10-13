@@ -626,7 +626,7 @@ jobs:
       - run: cargo fetch --locked
       - run: cargo run --locked -p xtask -- source-check
       - run: cargo run --locked -p xtask -- bootstrap
-      - run: 'cargo test --locked -p xtask formatter_bootstrap::tests:: -- --test-threads=1'
+      - run: 'cargo test --locked -p xtask -- formatter_bootstrap::tests:: formatting::tests:: --test-threads=1'
       - run: cargo run --locked -p xtask -- build-formatter
       - run: cargo fmt --all
       - run: git diff --binary > /tmp/day2-linux-formatter-format.patch
