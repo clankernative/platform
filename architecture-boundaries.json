@@ -271,8 +271,11 @@
           "kind": "dev",
           "target": null,
           "rename": null,
-          "features": [],
-          "default_features": true,
+          "features": [
+            "bit-set",
+            "std"
+          ],
+          "default_features": false,
           "optional": false,
           "local_path": null
         },
@@ -343,8 +346,10 @@
           "kind": "normal",
           "target": null,
           "rename": null,
-          "features": [],
-          "default_features": true,
+          "features": [
+            "errors"
+          ],
+          "default_features": false,
           "optional": false,
           "local_path": null
         },
@@ -885,8 +890,11 @@
           "kind": "dev",
           "target": null,
           "rename": null,
-          "features": [],
-          "default_features": true,
+          "features": [
+            "bit-set",
+            "std"
+          ],
+          "default_features": false,
           "optional": false,
           "local_path": null
         },
