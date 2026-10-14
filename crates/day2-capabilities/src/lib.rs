@@ -257,6 +257,9 @@ pub struct InstallationControl {
     /// Operator-selected external authority, outside any app database backup.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub security_epochs: BTreeMap<Name, security_epoch::EpochStore>,
+    /// Explicit operator-owned initial bootstrap intents; never startup authority.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub security_bootstraps: BTreeMap<Name, security_epoch::bootstrap::InitialBootstrapPolicy>,
 }
 
 impl InstallationControl {
@@ -278,7 +281,8 @@ impl InstallationControl {
                 && self.sources.len() <= 1024
                 && self.builders.len() <= 64
                 && self.runtimes.len() <= 64
-                && self.security_epochs.len() <= 128,
+                && self.security_epochs.len() <= 128
+                && self.security_bootstraps.len() <= 128,
             "control binding budget"
         );
         // A separate operator tooling instance may administer resources without
@@ -290,7 +294,8 @@ impl InstallationControl {
                     && self.builders.is_empty()
                     && self.runtimes.is_empty()
                     && self.secrets.is_empty()
-                    && self.security_epochs.is_empty()),
+                    && self.security_epochs.is_empty()
+                    && self.security_bootstraps.is_empty()),
             "operator_only_control_cannot_have_provider_bindings"
         );
         for provider in self.builders.values() {
@@ -332,6 +337,14 @@ impl InstallationControl {
                 epoch_scopes.insert(store.scope.clone())
                     && epoch_authorities.insert(store.authority_key()?),
                 "duplicate_security_epoch_authority"
+            );
+        }
+        let mut bootstrap_scopes = BTreeSet::new();
+        for policy in self.security_bootstraps.values() {
+            policy.validate(&self.security_epochs)?;
+            ensure!(
+                bootstrap_scopes.insert(policy.scope.clone()),
+                "duplicate_security_bootstrap_scope"
             );
         }
         ensure!(self.secrets.len() <= 1024, "secret binding budget");
@@ -497,7 +510,7 @@ mod security_epoch_catalog_tests {
                 "scope":{"installation":"company","environment":"staging","app":"reports"},
                 "provider":{"kind":"firestore_native_v1","project":"company-tools","project_number":7,
                     "database":"security","database_uid":"01234567-89ab-4cde-8fab-0123456789ab",
-                    "iam_source":{"kind":"gke_workload_identity_v1","service_account":"epochs@company-tools.iam.gserviceaccount.com"}},
+                    "iam_source":{"kind":"gke_workload_identity_v1","service_account":"epochs@company-tools.iam.gserviceaccount.com","service_account_uid":"100000000000000000007"}},
                 "key_set":Digest::new(b"selected keys"),"max_lease_seconds":30
             }}})).unwrap()
     }
@@ -553,6 +566,32 @@ mod security_epoch_catalog_tests {
         assert!(selected.validate(["reports"]).is_err());
         selected.security_epochs.clear();
         selected.validate(["reports"])?;
+        Ok(())
+    }
+
+    #[test]
+    fn bootstrap_catalog_requires_one_exact_operator_intent() -> Result<()> {
+        let mut selected = control();
+        let store = selected.security_epochs.values().next().unwrap();
+        let policy = security_epoch::bootstrap::tests::selection(store, "epoch");
+        selected
+            .security_bootstraps
+            .insert("initial".to_owned().try_into()?, policy.clone());
+        selected.validate(["reports"])?;
+        let mut duplicate = selected.clone();
+        duplicate
+            .security_bootstraps
+            .insert("replacement".to_owned().try_into()?, policy);
+        assert!(duplicate.validate(["reports"]).is_err());
+        selected.security_epochs.clear();
+        assert!(selected.validate(["reports"]).is_err());
+        selected.security_bootstraps.clear();
+        selected.validate(["reports"])?;
+        assert!(
+            serde_json::to_value(selected)?
+                .get("security_bootstraps")
+                .is_none()
+        );
         Ok(())
     }
 }

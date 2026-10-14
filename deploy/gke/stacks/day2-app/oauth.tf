@@ -61,6 +61,9 @@ resource "terraform_data" "oauth_admission" {
         tostring(epoch.provider.project_number) == split("/", local.iap_audience)[2] &&
         epoch.provider.iam_source.kind == "gke_workload_identity_v1" &&
         epoch.provider.iam_source.service_account == local.contract["OAUTH_APP_SERVICE_ACCOUNT"] &&
+        epoch.provider.iam_source.service_account_uid == local.contract["OAUTH_APP_SERVICE_ACCOUNT_UID"] &&
+        epoch.provider.iam_source.service_account_uid == tostring(epoch.provider.iam_source.service_account_uid) &&
+        length(regexall("^[1-9][0-9]{0,127}$", epoch.provider.iam_source.service_account_uid)) == 1 &&
         length(regexall("^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$", epoch.provider.database)) == 1 &&
         length(regexall("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", epoch.provider.database_uid)) == 1 &&
         length(regexall("^sha256:[0-9a-f]{64}$", epoch.key_set)) == 1 &&

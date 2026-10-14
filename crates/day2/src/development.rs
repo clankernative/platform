@@ -1814,7 +1814,7 @@ fn credential_verification_selection(
         "scope":{"installation":instance.installation,"environment":instance.environment,"app":"app"},
         "provider":{"kind":"firestore_native_v1","project":"day2-verification","project_number":1,
             "database":"security","database_uid":"01234567-89ab-4cde-8fab-0123456789ab",
-            "iam_source":{"kind":"gke_workload_identity_v1","service_account":"app@day2-verification.iam.gserviceaccount.com"}},
+            "iam_source":{"kind":"gke_workload_identity_v1","service_account":"app@day2-verification.iam.gserviceaccount.com","service_account_uid":"100000000000000000007"}},
         "key_set":Digest::new(b"pending complete desired selection"),"max_lease_seconds":30
     }))?;
     instance

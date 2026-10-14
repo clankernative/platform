@@ -13,6 +13,7 @@
     "crates/day2-capabilities/src/resources_tests.rs",
     "crates/day2-capabilities/src/runtime.rs",
     "crates/day2-capabilities/src/security_epoch.rs",
+    "crates/day2-capabilities/src/security_epoch/bootstrap.rs",
     "crates/day2-capabilities/src/tests.rs",
     "crates/day2-contracts/src/identity.rs",
     "crates/day2-contracts/src/lib.rs",

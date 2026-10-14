@@ -8,5 +8,7 @@ mod firestore;
 pub(crate) mod journal;
 mod kernel;
 
+pub(crate) use firestore::EpochObservation;
+
 #[cfg(test)]
 mod tests;
