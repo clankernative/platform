@@ -275,7 +275,7 @@ pub(super) enum SlotState {
     },
     Observed {
         control_lineage: Attempt,
-        receipt: Receipt,
+        receipt: Box<Receipt>,
         settlement: Settlement,
     },
     Fenced {
@@ -301,7 +301,7 @@ impl<'de> Deserialize<'de> for SlotState {
             },
             Observed {
                 control_lineage: Attempt,
-                receipt: Receipt,
+                receipt: Box<Receipt>,
                 settlement: Settlement,
             },
             Fenced {
@@ -407,7 +407,7 @@ impl Slot {
             } => {
                 control_lineage.validate(&self.logical)?;
                 ensure!(
-                    *receipt == self.logical.counter.receipt()?
+                    **receipt == self.logical.counter.receipt()?
                         && settlement.id == settlement.core.digest()?
                         && settlement.core.logical == self.logical.digest()?
                         && settlement.core.control_attempt == control_lineage.id
@@ -507,7 +507,7 @@ impl Slot {
         Ok(Self {
             state: SlotState::Observed {
                 control_lineage: lineage.clone(),
-                receipt,
+                receipt: Box::new(receipt),
                 settlement,
             },
             ..self.clone()
