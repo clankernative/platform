@@ -1948,10 +1948,9 @@ impl Runtime {
         self.snapshot(SnapshotScope::Retained)
     }
 
-    /// Complete live application state, matching ordinary query visibility.
-    /// App-owned checks receive Entities, which deliberately expose no deletion flag.
-    pub fn application_snapshot(&self) -> Result<Value> {
-        self.snapshot(SnapshotScope::Live)
+    /// Complete live model state for ordinary app properties, from one bounded read transaction.
+    pub fn application_snapshot(&self) -> Result<LivePropertySnapshot> {
+        Ok(LivePropertySnapshot(self.snapshot(SnapshotScope::Live)?))
     }
 
     /// Operation generators and checks can explicitly inspect either lifecycle scope.
@@ -1961,8 +1960,41 @@ impl Runtime {
         let snapshot = connection.transaction()?;
         self.check_binding(&snapshot)?;
         let schema = &self.artifact.contract().schema;
-        let live = read_model_snapshot(&snapshot, schema, SnapshotScope::Live)?;
-        let deleted = read_model_snapshot(&snapshot, schema, SnapshotScope::Deleted)?;
+        let limits = self.artifact.contract().verification_limits.as_ref();
+        let row_limit = limits.map_or(256, |limits| limits.rows_per_model);
+        let fact_limit = limits.map_or(usize::MAX, |limits| limits.total_facts);
+        let byte_limit = limits.map_or(usize::MAX, |limits| limits.snapshot_bytes);
+        let live = read_model_snapshot_bounded(
+            &snapshot,
+            schema,
+            SnapshotScope::Live,
+            row_limit,
+            fact_limit,
+            byte_limit,
+        )?;
+        let deleted = read_model_snapshot_bounded(
+            &snapshot,
+            schema,
+            SnapshotScope::Deleted,
+            row_limit,
+            fact_limit,
+            byte_limit,
+        )?;
+        if let Some(limits) = limits {
+            let facts = snapshot_fact_count(&live)?.saturating_add(snapshot_fact_count(&deleted)?);
+            ensure!(
+                facts <= limits.total_facts,
+                "verification_total_fact_budget"
+            );
+            let combined = serde_json::to_vec(&json!({
+                "live": live.to_string(),
+                "deleted": deleted.to_string()
+            }))?;
+            ensure!(
+                combined.len() <= limits.snapshot_bytes,
+                "verification_snapshot_byte_budget"
+            );
+        }
         for rollup in &schema.rollups {
             ensure!(
                 rollup.mismatches(&snapshot)? == 0,
@@ -1978,7 +2010,22 @@ impl Runtime {
         let mut connection = open(&self.db)?;
         let snapshot = connection.transaction()?;
         self.check_binding(&snapshot)?;
-        let models = read_model_snapshot(&snapshot, &self.artifact.contract().schema, scope)?;
+        let limits = self.artifact.contract().verification_limits.as_ref();
+        let models = read_model_snapshot_bounded(
+            &snapshot,
+            &self.artifact.contract().schema,
+            scope,
+            limits.map_or(256, |limits| limits.rows_per_model),
+            limits.map_or(usize::MAX, |limits| limits.total_facts),
+            limits.map_or(usize::MAX, |limits| limits.snapshot_bytes),
+        )?;
+        let encoded = serde_json::to_vec(&models)?;
+        if let Some(limits) = limits {
+            ensure!(
+                encoded.len() <= limits.snapshot_bytes,
+                "verification_snapshot_byte_budget"
+            );
+        }
         for rollup in &self.artifact.contract().schema.rollups {
             ensure!(
                 rollup.mismatches(&snapshot)? == 0,
@@ -2179,6 +2226,25 @@ fn read_row(row: &rusqlite::Row<'_>, record: &Record) -> rusqlite::Result<Row> {
                     .map_err(|_| rusqlite::Error::InvalidQuery)?;
                 json!(u64::from_be_bytes(bytes))
             }
+            Kind::OptionalUnsigned(day2_contracts::numeric::Unsigned::U64) => {
+                match row.get::<_, Option<Vec<u8>>>(index + 3)? {
+                    Some(bytes) => {
+                        let bytes: [u8; 8] = bytes
+                            .try_into()
+                            .map_err(|_| rusqlite::Error::InvalidQuery)?;
+                        json!({"Some": u64::from_be_bytes(bytes)})
+                    }
+                    None => json!("None"),
+                }
+            }
+            Kind::OptionalInteger => match row.get::<_, Option<i64>>(index + 3)? {
+                Some(value) => json!({"Some": value}),
+                None => json!("None"),
+            },
+            Kind::OptionalUnsigned(_) => match row.get::<_, Option<i64>>(index + 3)? {
+                Some(value) => json!({"Some": value}),
+                None => json!("None"),
+            },
             Kind::Integer | Kind::Unsigned(_) | Kind::RowVersion | Kind::Reference { .. } => {
                 json!(row.get::<_, i64>(index + 3)?)
             }
@@ -2264,6 +2330,17 @@ pub(crate) fn get(connection: &Connection, model: &str, record: &Record, id: Id)
     get_optional(connection, model, record, id)?.context(crate::error::Failure::NotFound)
 }
 
+/// A complete live snapshot captured by Runtime for ordinary property checks.
+/// Its private representation prevents callers from labeling retained JSON as live.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LivePropertySnapshot(Value);
+
+impl LivePropertySnapshot {
+    pub fn as_value(&self) -> &Value {
+        &self.0
+    }
+}
+
 #[derive(Clone, Copy)]
 enum SnapshotScope {
     Retained,
@@ -2271,29 +2348,69 @@ enum SnapshotScope {
     Deleted,
 }
 
+fn snapshot_fact_count(snapshot: &Value) -> Result<usize> {
+    snapshot
+        .as_object()
+        .context("snapshot must be an object")?
+        .values()
+        .try_fold(0usize, |total, rows| {
+            Ok(total.saturating_add(
+                rows.as_array()
+                    .context("snapshot table must be an array")?
+                    .len(),
+            ))
+        })
+}
+
+#[cfg(test)]
 fn read_model_snapshot(
     connection: &Connection,
     schema: &Schema,
     scope: SnapshotScope,
 ) -> Result<Value> {
-    let limit = crate::properties::MAX_ROWS_PER_MODEL;
+    read_model_snapshot_bounded(connection, schema, scope, 256, usize::MAX, usize::MAX)
+}
+
+fn read_model_snapshot_bounded(
+    connection: &Connection,
+    schema: &Schema,
+    scope: SnapshotScope,
+    row_limit: usize,
+    fact_limit: usize,
+    byte_limit: usize,
+) -> Result<Value> {
     let predicate = match scope {
         SnapshotScope::Retained => "",
         SnapshotScope::Live => " WHERE deleted_at=0",
         SnapshotScope::Deleted => " WHERE deleted_at!=0",
     };
     let mut models = serde_json::Map::new();
+    let mut total_facts = 0usize;
+    let mut serialized_rows = 2usize;
     for (name, record) in &schema.models {
         let sql = format!(
             "SELECT {} FROM \"{name}\"{predicate} ORDER BY id LIMIT {}",
             projection(record),
-            limit + 1,
+            row_limit.saturating_add(1),
         );
         let mut statement = connection.prepare(&sql)?;
-        let rows = statement
-            .query_map([], |row| read_row(row, record))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        ensure!(rows.len() <= limit, "inspection_limit");
+        let mut rows = Vec::new();
+        let mut cursor = statement.query([])?;
+        while let Some(row) = cursor.next()? {
+            let row = read_row(row, record)?;
+            serialized_rows = serialized_rows.saturating_add(serde_json::to_vec(&row)?.len() + 1);
+            ensure!(
+                serialized_rows <= byte_limit,
+                "verification_snapshot_byte_budget"
+            );
+            rows.push(row);
+        }
+        ensure!(
+            rows.len() <= row_limit,
+            "verification_rows_per_model_budget"
+        );
+        total_facts = total_facts.saturating_add(rows.len());
+        ensure!(total_facts <= fact_limit, "verification_total_fact_budget");
         models.insert(name.clone(), serde_json::to_value(rows)?);
     }
     Ok(Value::Object(models))
@@ -2555,6 +2672,26 @@ fn sql_value(kind: &Kind, value: &Value) -> Result<SqlValue> {
                 .to_be_bytes()
                 .to_vec(),
         ),
+        Kind::OptionalUnsigned(day2_contracts::numeric::Unsigned::U64) => {
+            if value == "None" {
+                SqlValue::Null
+            } else {
+                SqlValue::Blob(
+                    value["Some"]
+                        .as_u64()
+                        .context("invalid_optional_unsigned")?
+                        .to_be_bytes()
+                        .to_vec(),
+                )
+            }
+        }
+        Kind::OptionalInteger | Kind::OptionalUnsigned(_) => {
+            if value == "None" {
+                SqlValue::Null
+            } else {
+                SqlValue::Integer(value["Some"].as_i64().context("invalid_optional_integer")?)
+            }
+        }
         Kind::Integer | Kind::Unsigned(_) | Kind::RowVersion | Kind::Reference { .. } => {
             SqlValue::Integer(
                 value
@@ -2685,8 +2822,22 @@ fn selection_predicate(
         values.push(SqlValue::Text(pattern.to_string()));
         "LIKE"
     } else {
+        let operator = match node.kind.as_str() {
+            "equal" => "IS",
+            "at_least" | "at_most" => {
+                ensure!(
+                    matches!(
+                        kind,
+                        Some(Kind::Integer | Kind::Unsigned(_) | Kind::RowVersion)
+                    ) || kind.is_none() && matches!(node.field.as_str(), "version" | "created_at"),
+                    "invalid_selection_operator_type"
+                );
+                if node.kind == "at_least" { ">=" } else { "<=" }
+            }
+            _ => bail!("unsupported_selection_operator"),
+        };
         values.push(selection_value(schema, model, &node.field, &value)?);
-        "IS"
+        operator
     };
     Ok(format!("\"{}\" {operator} ?{}", node.field, values.len()))
 }
@@ -2865,6 +3016,48 @@ struct SelectionContext<'a> {
     actor: &'a str,
     operation: &'a str,
     now: i64,
+}
+
+fn count_rows(
+    connection: &Connection,
+    schema: &Schema,
+    model: &str,
+    data: &str,
+    row_filter: RowFilter,
+) -> Result<String> {
+    let plan = SelectionPlan::parse(data, false)?;
+    ensure!(plan.after.is_empty(), "invalid_count_bounds");
+    let mut ordered = std::collections::BTreeSet::new();
+    for order in &plan.orders {
+        ensure!(order.model == model, "selection_model_mismatch");
+        selection_field(schema, model, &order.field)?;
+        ensure!(ordered.insert(&order.field), "duplicate_selection_order");
+    }
+    let mut values = Vec::new();
+    let mut predicates = vec![selection_predicate(
+        schema,
+        model,
+        &plan.predicate,
+        &mut values,
+    )?];
+    match plan.deleted.as_str() {
+        "include" => {}
+        "only" => predicates.push("\"deleted_at\" != 0".into()),
+        _ => predicates.push("\"deleted_at\" = 0".into()),
+    }
+    if let RowFilter::Owner { field, actor } = row_filter {
+        values.push(SqlValue::Text(actor));
+        predicates.push(format!("\"{field}\" IS ?{}", values.len()));
+    }
+    let count: i64 = connection.query_row(
+        &format!(
+            "SELECT count(*) FROM \"{model}\" WHERE {}",
+            predicates.join(" AND ")
+        ),
+        params_from_iter(values),
+        |row| row.get(0),
+    )?;
+    Ok(serde_json::to_string(&u64::try_from(count)?)?)
 }
 
 fn select_rows(
@@ -3093,6 +3286,11 @@ mod selection_tests {
                 Kind::Unsigned(day2_contracts::numeric::Unsigned::U64),
             ),
             ("description".into(), Kind::OptionalText),
+            ("from_timestamp".into(), Kind::OptionalInteger),
+            (
+                "cleared_count".into(),
+                Kind::OptionalUnsigned(day2_contracts::numeric::Unsigned::U64),
+            ),
             ("unindexed".into(), Kind::Text),
         ]);
         let schema = Schema {
@@ -3137,6 +3335,197 @@ mod selection_tests {
         Ok((connection, schema))
     }
 
+    #[test]
+    fn optional_numeric_sql_roundtrips_null_zero_and_full_u64_precision() -> Result<()> {
+        let (connection, schema) = fixture()?;
+        let record = &schema.models["links"];
+        let none =
+            serde_json::from_str::<Value>(&get(&connection, "links", record, 1.into())?.data)?;
+        assert_eq!(none["from_timestamp"], "None");
+        assert_eq!(none["cleared_count"], "None");
+        connection.execute(
+            "UPDATE links SET from_timestamp=?1, cleared_count=?2 WHERE id=1",
+            params![
+                sql_value(&Kind::OptionalInteger, &json!({"Some": 0}))?,
+                sql_value(
+                    &Kind::OptionalUnsigned(day2_contracts::numeric::Unsigned::U64),
+                    &json!({"Some": u64::MAX})
+                )?,
+            ],
+        )?;
+        let some =
+            serde_json::from_str::<Value>(&get(&connection, "links", record, 1.into())?.data)?;
+        assert_eq!(some["from_timestamp"], json!({"Some": 0}));
+        assert_eq!(some["cleared_count"], json!({"Some": u64::MAX}));
+        connection.execute(
+            "UPDATE links SET from_timestamp=?1, cleared_count=?2 WHERE id=1",
+            params![
+                sql_value(&Kind::OptionalInteger, &json!("None"))?,
+                sql_value(
+                    &Kind::OptionalUnsigned(day2_contracts::numeric::Unsigned::U64),
+                    &json!("None")
+                )?,
+            ],
+        )?;
+        let cleared =
+            serde_json::from_str::<Value>(&get(&connection, "links", record, 1.into())?.data)?;
+        assert_eq!(cleared["from_timestamp"], "None");
+        assert_eq!(cleared["cleared_count"], "None");
+        Ok(())
+    }
+
+    #[test]
+    fn counts_cover_the_complete_visible_set_and_deletion_scope() -> Result<()> {
+        let (connection, schema) = fixture()?;
+        let predicate = group("all", vec![]);
+        let data = plan(&predicate, &[("name", true)], "", 1);
+        assert_eq!(
+            count_rows(&connection, &schema, "links", &data, RowFilter::All)?,
+            "250"
+        );
+        let own = RowFilter::Owner {
+            field: "owner".into(),
+            actor: "alice".into(),
+        };
+        assert_eq!(
+            count_rows(&connection, &schema, "links", &data, own.clone())?,
+            "125"
+        );
+        connection.execute("UPDATE links SET deleted_at=500 WHERE id=2", [])?;
+        assert_eq!(
+            count_rows(&connection, &schema, "links", &data, own.clone())?,
+            "124"
+        );
+        let mut plan: Value = serde_json::from_str(&data)?;
+        plan["deleted"] = json!("only");
+        assert_eq!(
+            count_rows(
+                &connection,
+                &schema,
+                "links",
+                &plan.to_string(),
+                own.clone()
+            )?,
+            "1"
+        );
+        plan["deleted"] = json!("include");
+        assert_eq!(
+            count_rows(&connection, &schema, "links", &plan.to_string(), own)?,
+            "125"
+        );
+        assert_eq!(
+            count_rows(
+                &connection,
+                &schema,
+                "links",
+                &plan.to_string(),
+                RowFilter::All
+            )?,
+            "250"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn numeric_ranges_are_inclusive_and_preserve_unsigned_order() -> Result<()> {
+        let (connection, schema) = fixture()?;
+        connection.execute("UPDATE links SET created_at=id", [])?;
+        let range = group(
+            "all",
+            vec![
+                leaf("created_at", "at_least", json!(9)),
+                leaf("created_at", "at_most", json!(12)),
+            ],
+        );
+        let data = plan(&range, &[], "", 100);
+        assert_eq!(
+            count_rows(&connection, &schema, "links", &data, RowFilter::All)?,
+            "4"
+        );
+        let page = select(&connection, &schema, &data, false, false)?;
+        assert_eq!(page["items"].as_array().context("range page")?.len(), 4);
+        let range = group(
+            "all",
+            vec![
+                leaf("visits", "at_least", json!(u64::MAX)),
+                leaf("visits", "at_most", json!(u64::MAX)),
+            ],
+        );
+        assert_eq!(
+            count_rows(
+                &connection,
+                &schema,
+                "links",
+                &plan(&range, &[], "", 1),
+                RowFilter::All
+            )?,
+            "19"
+        );
+        let inverted = group(
+            "all",
+            vec![
+                leaf("created_at", "at_least", json!(12)),
+                leaf("created_at", "at_most", json!(9)),
+            ],
+        );
+        assert_eq!(
+            count_rows(
+                &connection,
+                &schema,
+                "links",
+                &plan(&inverted, &[], "", 1),
+                RowFilter::All
+            )?,
+            "0"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn counts_and_ranges_reject_untyped_unindexed_and_cursor_inputs() -> Result<()> {
+        let (connection, schema) = fixture()?;
+        for predicate in [
+            leaf("name", "at_least", json!("item")),
+            leaf("active", "at_most", json!(true)),
+            leaf("unindexed", "equal", json!("hidden")),
+            leaf("visits", "at_least", json!(-1)),
+            leaf("id", "at_least", json!(1)),
+            leaf("created_at", "at_least", json!("9")),
+        ] {
+            assert!(
+                count_rows(
+                    &connection,
+                    &schema,
+                    "links",
+                    &plan(&predicate, &[], "", 1),
+                    RowFilter::All
+                )
+                .is_err()
+            );
+        }
+        let data = plan(
+            &group("all", vec![]),
+            &[],
+            &format!("sel1_{}", "0".repeat(64)),
+            1,
+        );
+        assert!(count_rows(&connection, &schema, "links", &data, RowFilter::All).is_err());
+        let mut data: Value =
+            serde_json::from_str(&plan(&group("all", vec![]), &[("name", false)], "", 1))?;
+        data["orders"][0]["model"] = json!("foreign_model");
+        assert!(
+            count_rows(
+                &connection,
+                &schema,
+                "links",
+                &data.to_string(),
+                RowFilter::All
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
     fn leaf(field: &str, kind: &str, value: Value) -> String {
         json!({"kind":kind,"model":"links","field":field,"value":value.to_string(),"children":[]})
             .to_string()
@@ -3179,6 +3568,115 @@ mod selection_tests {
                 now: 100,
             },
         )?)?)
+    }
+
+    #[test]
+    fn bounded_snapshot_capture_accepts_exact_row_and_fact_limits() -> Result<()> {
+        let (connection, schema) = fixture()?;
+        assert!(
+            read_model_snapshot_bounded(
+                &connection,
+                &schema,
+                SnapshotScope::Retained,
+                250,
+                250,
+                usize::MAX
+            )
+            .is_ok()
+        );
+        assert!(
+            read_model_snapshot_bounded(
+                &connection,
+                &schema,
+                SnapshotScope::Retained,
+                249,
+                250,
+                usize::MAX
+            )
+            .is_err()
+        );
+        assert!(
+            read_model_snapshot_bounded(
+                &connection,
+                &schema,
+                SnapshotScope::Retained,
+                250,
+                249,
+                usize::MAX
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn qualified_snapshot_capture_retains_ten_thousand_rows_and_refuses_overflow() -> Result<()> {
+        let (mut connection, schema) = fixture()?;
+        let limits = crate::artifact::VerificationLimits::QUALIFIED;
+        let transaction = connection.transaction()?;
+        {
+            let mut insert = transaction.prepare(
+                "INSERT INTO links(id,version,created_at,name,owner,active,visits,description,unindexed) \
+                 SELECT ?1,version,created_at,name,owner,active,visits,description,unindexed FROM links WHERE id=1",
+            )?;
+            for id in 251..=limits.rows_per_model {
+                insert.execute([id as i64])?;
+            }
+        }
+        transaction.execute("UPDATE links SET deleted_at=500 WHERE id>9000", [])?;
+        transaction.commit()?;
+
+        let snapshot = connection.transaction()?;
+        let capture = |scope| {
+            read_model_snapshot_bounded(
+                &snapshot,
+                &schema,
+                scope,
+                limits.rows_per_model,
+                limits.total_facts,
+                limits.snapshot_bytes,
+            )
+        };
+        let retained = capture(SnapshotScope::Retained)?;
+        assert_eq!(
+            retained["links"].as_array().context("retained rows")?.len(),
+            10_000
+        );
+        assert_eq!(
+            capture(SnapshotScope::Live)?["links"]
+                .as_array()
+                .context("live rows")?
+                .len(),
+            9_000
+        );
+        assert_eq!(
+            capture(SnapshotScope::Deleted)?["links"]
+                .as_array()
+                .context("deleted rows")?
+                .len(),
+            1_000
+        );
+        snapshot.commit()?;
+
+        connection.execute(
+            "INSERT INTO links(id,version,created_at,name,owner,active,visits,description,unindexed) \
+             SELECT 10001,version,created_at,name,owner,active,visits,description,unindexed FROM links WHERE id=1",
+            [],
+        )?;
+        assert_eq!(
+            read_model_snapshot_bounded(
+                &connection,
+                &schema,
+                SnapshotScope::Retained,
+                limits.rows_per_model,
+                limits.total_facts,
+                limits.snapshot_bytes,
+            )
+            .unwrap_err()
+            .to_string(),
+            "verification_rows_per_model_budget",
+        );
+        Ok(())
     }
 
     #[test]
@@ -3243,7 +3741,7 @@ mod selection_tests {
                 read_model_snapshot(&connection, &schema, scope)
                     .unwrap_err()
                     .to_string(),
-                "inspection_limit"
+                "verification_rows_per_model_budget"
             );
         }
         connection.execute("UPDATE links SET deleted_at=500 WHERE id>250", [])?;
@@ -3251,7 +3749,7 @@ mod selection_tests {
             read_model_snapshot(&connection, &schema, SnapshotScope::Retained)
                 .unwrap_err()
                 .to_string(),
-            "inspection_limit"
+            "verification_rows_per_model_budget"
         );
         assert_eq!(
             read_model_snapshot(&connection, &schema, SnapshotScope::Live)?["links"]
@@ -3265,7 +3763,7 @@ mod selection_tests {
             read_model_snapshot(&connection, &schema, SnapshotScope::Deleted)
                 .unwrap_err()
                 .to_string(),
-            "inspection_limit"
+            "verification_rows_per_model_budget"
         );
         assert!(
             read_model_snapshot(&connection, &schema, SnapshotScope::Live)?["links"]
@@ -3519,9 +4017,9 @@ mod selection_tests {
         // Domain fixtures and literal binding hashes, not the SQL selection or
         // cursor codec, determine the expected rows and complete cursor state.
         let boundary_keys = [
-            "8c037529e5f852716a0ad4e4e914ac918a85e5992cfa6324187027c76655b6cf",
-            "ee554659560fde426fcac10ed9dfac8fbfe40ec87c492299459846701f18fea5",
-            "2dc6ed0a1b27b1b2a84644371e1cacc30eaf7d5e9a6b7f5063fcbe58db166ef1",
+            "c9fc221dad193757618d2f6448f304744f33dbfffe4aabd31c2872f7f88dc89b",
+            "370829b3508826056a6ed02f9786fb3e8781f5a20396eb16dd95876e58a08dce",
+            "478f9242e8accc18f4bf529cc7ac3434c2755aaeaee447052c146f0e358e8f21",
         ];
         let token = |page: usize| {
             format!(
@@ -3537,7 +4035,9 @@ mod selection_tests {
                 created_at: 0,
                 data: json!({
                     "active":number % 3 != 0,
+                    "cleared_count":"None",
                     "description":if number % 2 == 0 { json!({"Some":"even"}) } else { json!("None") },
+                    "from_timestamp":"None",
                     "name":format!("item{number:03}"),
                     "owner":if number % 2 == 0 { "alice" } else { "bob" },
                     "unindexed":"hidden",
@@ -3548,7 +4048,7 @@ mod selection_tests {
         let cursors = (0..pages).map(|page| CursorRow {
             token: token(page),
             boundary_key: boundary_keys[page].into(),
-            boundary: format!("{{\"binding\":\"f241e92b389ae0e9109541177af3f41cdc69448faccfa2b2b7dba9de0b072d99\",\"values\":[{}]}}", (page + 1) * 3),
+            boundary: format!("{{\"binding\":\"0dade3d99475737bf91344de8a924552f95cf35ee8c85e72a10049f06228cac8\",\"values\":[{}]}}", (page + 1) * 3),
             expires_at: 86_500,
         }).collect();
         CursorObservation {
@@ -4285,7 +4785,10 @@ pub(crate) fn effect(
         ensure!(
             matches!(
                 instruction,
-                Database::Get { .. } | Database::Select { .. } | Database::Page { .. }
+                Database::Get { .. }
+                    | Database::Select { .. }
+                    | Database::Page { .. }
+                    | Database::Count { .. }
             ),
             "rollup_is_read_only"
         );
@@ -4310,6 +4813,7 @@ pub(crate) fn effect(
             )?;
             Ok(serde_json::to_string(&row)?)
         }
+        Database::Count { data, .. } => count_rows(connection, schema, model, data, row_filter),
         Database::Select { data, find, .. } => select_rows(
             connection,
             schema,

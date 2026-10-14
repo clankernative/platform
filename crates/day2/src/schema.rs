@@ -13,6 +13,8 @@ pub enum Kind {
     Text,
     Boolean,
     OptionalText,
+    OptionalInteger,
+    OptionalUnsigned(day2_contracts::numeric::Unsigned),
     Reference {
         target: String,
     },
@@ -524,6 +526,13 @@ impl Table {
                 })
             }
             "union" if node.tags.len() == 2 => {
+                ensure!(
+                    node.fields.is_empty()
+                        && node.args.is_empty()
+                        && node.item == 0
+                        && node.ret == 0,
+                    "invalid optional codec shape"
+                );
                 let none = node
                     .tags
                     .iter()
@@ -534,11 +543,16 @@ impl Table {
                     .find(|tag| tag.name == "Some" && tag.payload.len() == 1);
                 ensure!(none.is_some(), "unsupported nullable representation");
                 let some = some.context("unsupported nullable representation")?;
-                ensure!(
-                    self.node(some.payload[0])?.kind == "text",
-                    "only optional text supported in this spike"
-                );
-                Ok(Kind::OptionalText)
+                let payload = self.node(some.payload[0])?;
+                match payload.kind.as_str() {
+                    "text" => Ok(Kind::OptionalText),
+                    "integer" => Ok(Kind::OptionalInteger),
+                    "unsigned" => Ok(Kind::OptionalUnsigned(
+                        day2_contracts::numeric::Unsigned::from_roc(&payload.name)
+                            .context("unsupported optional unsigned integer width")?,
+                    )),
+                    _ => bail!("optional codecs support only text and numeric scalars"),
+                }
             }
             _ => bail!("unsupported persistent/input type: {}", node.kind),
         }
@@ -674,11 +688,17 @@ impl Table {
                     .iter()
                     .find(|tag| tag.name == "Some" && tag.payload.len() == 1)
                     .context("optional input requires one Some payload")?;
+                let payload = self.input_shape(some.payload[0], active, count)?;
                 ensure!(
-                    self.input_shape(some.payload[0], active, count)? == Type::String,
-                    "only optional text is supported inside structured inputs"
+                    matches!(payload, Type::String | Type::Integer | Type::Unsigned(_)),
+                    "optional structured inputs support only scalar payloads"
                 );
-                Type::OptionalText
+                match payload {
+                    Type::String => Type::OptionalText,
+                    Type::Integer => Type::OptionalInteger,
+                    Type::Unsigned(width) => Type::OptionalUnsigned(width),
+                    _ => unreachable!(),
+                }
             }
             _ => bail!(
                 "structured inputs require builtin scalars, structural records or lists; unsupported {} {}",
@@ -1344,6 +1364,18 @@ impl Schema {
                         ));
                     }
                 }
+                if let Kind::OptionalUnsigned(unsigned) = kind {
+                    if *unsigned == day2_contracts::numeric::Unsigned::U64 {
+                        definition.push_str(&format!(
+                            " CHECK(\"{field}\" IS NULL OR length(\"{field}\") = 8)"
+                        ));
+                    } else {
+                        definition.push_str(&format!(
+                            " CHECK(\"{field}\" IS NULL OR (\"{field}\" >= 0 AND \"{field}\" <= {}))",
+                            unsigned.maximum()
+                        ));
+                    }
+                }
                 if *kind == Kind::RowVersion {
                     definition.push_str(&format!(" CHECK(\"{field}\" >= 1)"));
                 }
@@ -1404,17 +1436,26 @@ impl Index {
     }
 }
 
+fn optional_payload(value: &Value, valid: impl FnOnce(&Value) -> bool) -> bool {
+    value == "None"
+        || value
+            .as_object()
+            .is_some_and(|object| object.len() == 1 && object.get("Some").is_some_and(valid))
+}
+
 impl Kind {
     pub fn ddl(&self) -> Result<&'static str> {
         Ok(match self {
             Self::Unsigned(day2_contracts::numeric::Unsigned::U64)
             | Self::ModelReference { .. } => "BLOB NOT NULL",
+            Self::OptionalUnsigned(day2_contracts::numeric::Unsigned::U64) => "BLOB",
             Self::Integer
             | Self::Unsigned(_)
             | Self::RowVersion
             | Self::Boolean
             | Self::Reference { .. }
             | Self::PageSize => "INTEGER NOT NULL",
+            Self::OptionalInteger | Self::OptionalUnsigned(_) => "INTEGER",
             Self::Text
             | Self::TextDomain { .. }
             | Self::StandardText { .. }
@@ -1433,6 +1474,13 @@ impl Kind {
             Self::Boolean => "Bool",
             Self::Text => "Str",
             Self::OptionalText => "[None, Some(Str)]",
+            Self::OptionalInteger => "[None, Some(I64)]",
+            Self::OptionalUnsigned(unsigned) => match unsigned {
+                day2_contracts::numeric::Unsigned::U8 => "[None, Some(U8)]",
+                day2_contracts::numeric::Unsigned::U16 => "[None, Some(U16)]",
+                day2_contracts::numeric::Unsigned::U32 => "[None, Some(U32)]",
+                day2_contracts::numeric::Unsigned::U64 => "[None, Some(U64)]",
+            },
             Self::Reference { .. } => {
                 if input {
                     "Str"
@@ -1476,13 +1524,12 @@ impl Kind {
             Self::Boolean => value.is_boolean(),
             Self::WebUrl => value.as_str().is_some_and(|s| web_url(s).is_ok()),
             Self::Reference { .. } => value.as_i64().is_some_and(|id| id > 0),
-            Self::OptionalText => {
-                value == "None"
-                    || value.as_object().is_some_and(|o| {
-                        o.len() == 1
-                            && o.get("Some")
-                                .is_some_and(|v| v.as_str().is_some_and(|s| s.len() <= 16_384))
-                    })
+            Self::OptionalText => optional_payload(value, |payload| {
+                payload.as_str().is_some_and(|s| s.len() <= 16_384)
+            }),
+            Self::OptionalInteger => optional_payload(value, |payload| payload.as_i64().is_some()),
+            Self::OptionalUnsigned(unsigned) => {
+                optional_payload(value, |payload| unsigned.valid(payload))
             }
             Self::InputShape { shape, roc_type } => {
                 crate::input_shape::validate_kind(shape, roc_type).is_ok()
@@ -1787,6 +1834,83 @@ mod structured_input_tests {
                 accepted,
                 "optional union {name}"
             );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn optional_numeric_reflection_is_bounded_and_rejects_recursive_or_nominal_payloads()
+    -> Result<()> {
+        let mut reflected = table()?;
+        reflected.types[0].fields.push(Field {
+            name: "signed".into(),
+            type_id: 7,
+        });
+        reflected.types[0].fields.push(Field {
+            name: "unsigned".into(),
+            type_id: 8,
+        });
+        reflected
+            .types
+            .push(serde_json::from_value(node("integer", ""))?);
+        reflected
+            .types
+            .push(serde_json::from_value(node("unsigned", "U64"))?);
+        for payload in [5, 6] {
+            let mut optional = node("union", "NoneOrSome");
+            optional["tags"] =
+                json!([{"name":"None","payload":[]},{"name":"Some","payload":[payload]}]);
+            reflected.types.push(serde_json::from_value(optional)?);
+        }
+        let record = reflected.record(0, false, &BTreeMap::new())?;
+        assert_eq!(record.fields["signed"], Kind::OptionalInteger);
+        assert_eq!(
+            record.fields["unsigned"],
+            Kind::OptionalUnsigned(day2_contracts::numeric::Unsigned::U64)
+        );
+        assert!(record.validate_input(&json!({"attributes":[],"groups":[],"signed":"None","unsigned":{"Some":u64::MAX}})).is_ok());
+        assert!(record.validate_input(&json!({"attributes":[],"groups":[],"signed":{"Some":i64::MIN},"unsigned":{"Some":u64::MAX}})).is_ok());
+        for malformed in [
+            json!({"attributes":[],"groups":[],"signed":null,"unsigned":"None"}),
+            json!({"attributes":[],"groups":[],"signed":{"Some":1,"extra":2},"unsigned":"None"}),
+            json!({"attributes":[],"groups":[],"signed":{"Some":u64::MAX},"unsigned":{"Some":-1}}),
+        ] {
+            assert!(record.validate_input(&malformed).is_err());
+        }
+        reflected.types[8].tags[1].payload[0] = 8;
+        assert!(reflected.record(0, false, &BTreeMap::new()).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn optional_columns_reserve_only_generated_like_helpers() -> Result<()> {
+        for kind in [
+            Kind::OptionalInteger,
+            Kind::OptionalUnsigned(day2_contracts::numeric::Unsigned::U8),
+            Kind::OptionalUnsigned(day2_contracts::numeric::Unsigned::U16),
+            Kind::OptionalUnsigned(day2_contracts::numeric::Unsigned::U32),
+            Kind::OptionalUnsigned(day2_contracts::numeric::Unsigned::U64),
+            Kind::OptionalText,
+        ] {
+            let has_like = kind == Kind::OptionalText;
+            let record = table()?.record(0, false, &BTreeMap::new())?;
+            let mut schema = schema(record);
+            schema.models.get_mut("rows").unwrap().fields =
+                BTreeMap::from([("number".into(), kind)]);
+            let generated = schema.data_module()?;
+            assert_eq!(
+                generated.contains("rows_number_like : Str -> Predicate("),
+                has_like
+            );
+            schema.models.insert(
+                "rows_number_like".into(),
+                Record {
+                    fields: BTreeMap::from([("name".into(), Kind::Text)]),
+                    roc_type: Some("Models.Other".into()),
+                    identity: None,
+                },
+            );
+            assert_eq!(schema.validate_typed().is_err(), has_like);
         }
         Ok(())
     }

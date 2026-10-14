@@ -97,9 +97,9 @@ impl Catalog {
                     let mut parameter = json!({"name":name,"in":"query","required":true});
                     let field_schema = input_shape["properties"][name].clone();
                     if let Some(description) = field_schema.get("description") { parameter["description"] = description.clone(); }
-                    if matches!(kind, Kind::OptionalText | Kind::InputShape { .. }) {
+                    if matches!(kind, Kind::OptionalText | Kind::OptionalInteger | Kind::OptionalUnsigned(_) | Kind::InputShape { .. }) {
                         parameter["content"] = json!({"application/json":{"schema":field_schema,"example":request_example[name]}});
-                        parameter["description"] = json!(format!("{} JSON-encode this query parameter. Optional text uses quotes for the None string; structured inputs use JSON objects or arrays.", parameter["description"].as_str().unwrap_or_default()));
+                        parameter["description"] = json!(format!("{} JSON-encode this query parameter. Optional values use the string None or an object with one Some field; structured inputs use JSON objects or arrays.", parameter["description"].as_str().unwrap_or_default()));
                     } else {
                         parameter["schema"] = field_schema;
                         parameter["example"] = request_example[name].clone();
@@ -400,12 +400,18 @@ fn responses(output: Option<&str>) -> Value {
     responses.into()
 }
 
-/// Optional text and structured inputs carry JSON within one URL parameter.
+/// Optional and structured inputs carry JSON within one URL parameter.
 pub(crate) fn query_input(record: &Record, raw: &str) -> Result<Value> {
     let mut object = serde_json::Map::new();
     for (name, raw) in crate::routing::query_fields(raw)? {
         let kind = record.fields.get(&name).context("unknown query field")?;
-        let value = if matches!(kind, Kind::OptionalText | Kind::InputShape { .. }) {
+        let value = if matches!(
+            kind,
+            Kind::OptionalText
+                | Kind::OptionalInteger
+                | Kind::OptionalUnsigned(_)
+                | Kind::InputShape { .. }
+        ) {
             crate::json::decode(raw.as_bytes())?
         } else {
             crate::web_security::field_value(kind, &raw)?

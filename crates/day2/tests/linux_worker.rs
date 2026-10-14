@@ -1,7 +1,8 @@
 #![cfg(target_os = "linux")]
 
 use anyhow::{Context, Result, ensure};
-use day2::worker::Worker;
+use day2::{identity::Id, properties, protocol::Row, store::Fault, worker::Worker};
+use serde_json::json;
 use std::{
     path::PathBuf,
     time::{Duration, Instant},
@@ -69,6 +70,137 @@ fn timeout_eof_oversize_and_bad_input_poison_and_reap_worker() -> Result<()> {
             "poisoned worker was reused"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn property_worker_uses_qualified_limits_and_keeps_invocation_profile_unchanged() -> Result<()> {
+    let executable = std::env::current_exe()?;
+    let directory = executable
+        .parent()
+        .and_then(|path| path.parent())
+        .context("test binary directory")?;
+    let probe = directory.join("day2-sandbox-probe");
+    let launcher = directory.join("day2-sandbox");
+
+    let mut ordinary = Worker::start_with_trusted_launcher(&probe, &launcher)?;
+    ensure!(
+        ordinary
+            .exchange_bounded(
+                b"limits",
+                properties::MAX_PROPERTY_FRAME,
+                Duration::from_secs(3)
+            )
+            .is_err(),
+        "ordinary worker admitted the property frame profile"
+    );
+    ensure!(
+        ordinary
+            .exchange_bounded(b"limits", 1_048_576, Duration::from_secs(4))
+            .is_err(),
+        "ordinary worker admitted a longer timeout"
+    );
+    ensure!(ordinary.exchange(b"limits")? == b"268435456,5");
+    ensure!(ordinary.exchange(b"reserve 314572800")? == b"denied");
+    ensure!(
+        ordinary.exchange(b"oversize").is_err(),
+        "ordinary response limit changed"
+    );
+
+    let mut qualified = Worker::start_verification(
+        &probe,
+        512 * 1024 * 1024,
+        Duration::from_secs(30),
+        properties::MAX_PROPERTY_FRAME,
+    )?;
+    ensure!(
+        qualified
+            .exchange_bounded(
+                b"limits",
+                properties::MAX_PROPERTY_FRAME,
+                Duration::from_secs(31)
+            )
+            .is_err(),
+        "property worker admitted a longer timeout"
+    );
+    ensure!(qualified.exchange(b"limits")? == b"536870912,30");
+    ensure!(qualified.exchange(b"reserve 629145600")? == b"denied");
+    let response = qualified.exchange_bounded(
+        b"oversize",
+        properties::MAX_PROPERTY_FRAME,
+        Duration::from_secs(3),
+    )?;
+    ensure!(
+        response.len() == 1_048_577,
+        "qualified response frame was truncated"
+    );
+
+    let started = Instant::now();
+    ensure!(
+        qualified
+            .exchange_bounded(
+                b"spin",
+                properties::MAX_PROPERTY_FRAME,
+                Duration::from_millis(100),
+            )
+            .is_err(),
+        "qualified evaluation timeout was not enforced"
+    );
+    ensure!(
+        started.elapsed() < Duration::from_secs(3),
+        "timeout cleanup exceeded bound"
+    );
+    Ok(())
+}
+
+#[test]
+fn qualified_property_worker_evaluates_and_replays_ten_thousand_typed_rows() -> Result<()> {
+    let world = crate::support::commands::World::new()?;
+    let submitted = world.submit("capacity-seed", Fault::None)?;
+    ensure!(
+        submitted.status == "success",
+        "seed command failed: {}",
+        submitted.error
+    );
+    let seed_snapshot = world.runtime.application_snapshot()?;
+    let seed = seed_snapshot.as_value()["reports"]
+        .as_array()
+        .and_then(|rows| rows.first())
+        .context("typed seed report missing")?;
+    let seed: Row = serde_json::from_value(seed.clone())?;
+
+    let rows = (1_u128..=10_000)
+        .map(|number| {
+            Ok(serde_json::to_value(Row {
+                id: Id::from_uuid("rep", number.to_be_bytes())?,
+                ..seed.clone()
+            })?)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let snapshot = json!({"reports":rows});
+    ensure!(
+        serde_json::to_vec(&snapshot)?.len() > 1_048_576,
+        "capacity regression must cross the ordinary worker frame limit"
+    );
+    let evidence = properties::evaluate(world.runtime.artifact(), &snapshot)?;
+    ensure!(
+        evidence.checks.iter().all(|check| check.passed),
+        "qualified properties rejected 10,000 valid typed rows"
+    );
+    ensure!(properties::replay(world.runtime.artifact(), &evidence)? == evidence);
+
+    let mut over_limit = snapshot["reports"]
+        .as_array()
+        .context("report rows")?
+        .clone();
+    over_limit.push(serde_json::to_value(Row {
+        id: Id::from_uuid("rep", 10_001_u128.to_be_bytes())?,
+        ..seed
+    })?);
+    ensure!(
+        properties::evaluate(world.runtime.artifact(), &json!({"reports":over_limit})).is_err(),
+        "10,001 rows must fail closed before worker evaluation"
+    );
     Ok(())
 }
 

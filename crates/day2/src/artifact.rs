@@ -1,4 +1,4 @@
-pub const CURRENT_FORMAT: u32 = 14;
+pub const CURRENT_FORMAT: u32 = 15;
 
 use crate::{digest, schema::Schema};
 use anyhow::{Context, Result, bail, ensure};
@@ -209,6 +209,42 @@ impl Page {
         Ok(())
     }
 }
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct VerificationLimits {
+    pub total_facts: usize,
+    pub rows_per_model: usize,
+    pub snapshot_bytes: usize,
+    pub worker_memory_bytes: u64,
+    pub evaluation_timeout_ms: u64,
+}
+
+impl VerificationLimits {
+    pub const QUALIFIED: Self = Self {
+        total_facts: 10_000,
+        rows_per_model: 10_000,
+        snapshot_bytes: 32 * 1024 * 1024,
+        worker_memory_bytes: 512 * 1024 * 1024,
+        evaluation_timeout_ms: 30_000,
+    };
+
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.total_facts > 0 && self.rows_per_model > 0,
+            "invalid verification fact limits"
+        );
+        ensure!(
+            self.snapshot_bytes > 0,
+            "invalid verification snapshot byte limit"
+        );
+        ensure!(
+            self.worker_memory_bytes > 0 && self.evaluation_timeout_ms > 0,
+            "invalid verification worker limits"
+        );
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Artifact {
@@ -240,6 +276,8 @@ pub struct Artifact {
     pub operations: Vec<Operation>,
     #[serde(default)]
     pub properties: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification_limits: Option<VerificationLimits>,
     #[serde(default)]
     pub pages: Vec<Page>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -504,6 +542,7 @@ impl LoadedArtifact {
                 "identities",
                 "operations",
                 "properties",
+                "verification_limits",
                 "pages",
                 "assets",
                 "web_resources",
@@ -529,6 +568,17 @@ impl LoadedArtifact {
             "schema digest mismatch"
         );
         contract.schema.validate()?;
+        if contract.format >= 15 {
+            let limits = contract
+                .verification_limits
+                .as_ref()
+                .context("current artifact requires verification_limits")?;
+            limits.validate()?;
+            ensure!(
+                limits == &VerificationLimits::QUALIFIED,
+                "unsupported verification limits"
+            );
+        }
         if contract.format >= 2 {
             contract.schema.validate_typed()?;
             crate::properties::validate_catalog(&contract.properties)?;
@@ -2947,7 +2997,8 @@ mod schedule_admission_tests {
     /// which is the shape a schedule or an endpoint can legitimately bind.
     pub(super) fn fixture() -> Result<Artifact> {
         Ok(serde_json::from_value(json!({
-        "format": 14,
+        "format": CURRENT_FORMAT,
+        "verification_limits": VerificationLimits::QUALIFIED,
         "roc_version": "fixture",
         "worker_digest": "fixture",
         "schema_digest": "fixture",

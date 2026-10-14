@@ -362,6 +362,7 @@ fn publish(root: &Path, prepared: &mut Prepared, bound: &Bound) -> Result<PathBu
         "roc_version": pin["roc_version"], "worker_digest": worker_digest,
         "schema_digest": schema_digest, "schema": schema, "operations": manifest.operations,
         "properties": manifest.properties,
+        "verification_limits": day2::artifact::VerificationLimits::QUALIFIED,
         "pages": manifest.pages,
         "schedules": manifest.schedules,
         "ingress": manifest.ingress,

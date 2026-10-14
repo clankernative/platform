@@ -22,6 +22,20 @@ repositories. Passing this public gate makes no claim about those applications.
 Linux kernel/runtime qualification is a separate native campaign documented in
 [the runtime guide](../deploy/linux-sqlite/README.md).
 
+Current artifacts declare one property-verification profile: 10,000 facts in
+total, at most 10,000 rows per model, 32 MiB of encoded snapshot data, 512 MiB of
+worker address space and a 30-second evaluation deadline. Ordinary properties
+capture only live rows through a privately constructed snapshot contract.
+Operation verification captures separate live/deleted views in one SQLite read
+transaction; their combined facts and bytes share the declared budget. Overflow
+fails rather than truncating state. Generated decoders enforce the same bounds.
+
+Property evaluation requires the current artifact contract and enforced Linux
+worker limits. Other hosts refuse evaluation rather than silently substituting
+ordinary invocation limits. The Linux worker suite exercises larger frames,
+10,000 typed rows, artifact-bound replay and resource-limit rejection; passing
+host-side budget tests alone does not qualify that native profile.
+
 OAuth's required seeded host/protocol campaigns, effect-boundary guard, catalog
 coverage gate, implementation-bound replay, and durable schema upgrades are
 documented in [OAuth simulation and durable invariants](OAUTH-SIMULATION.md).

@@ -38,7 +38,10 @@ keyword. A predicate checks one typed field, `Predicate.all` joins predicates
 with AND, and `Predicate.any` joins them with OR. Empty AND is true; empty OR is
 false. Text fields also have generated `_like` functions. LIKE follows SQLite's
 pattern semantics: `%` and `_` are wildcards, and case folding is SQLite's
-default ASCII behavior. Values are bound parameters, never interpolated SQL.
+default ASCII behavior. Indexed numeric fields also have `_at_least` and
+`_at_most` predicates for inclusive ranges; `version` and `created_at` have
+these handles too. Range predicates reject text, booleans and references.
+Values are bound parameters, never interpolated SQL.
 
 A compound key is expressed with ordinary predicates:
 
@@ -57,6 +60,26 @@ can still fail with `ambiguous_selection`.
 Selecting only user and table can match many rows and normally belongs in
 `Query.page`. `find` rejects a nonempty pagination cursor and always checks up
 to two matching rows, regardless of the selection's page size.
+
+## Complete counts
+
+`Query.count(selection)` and `Tx.count(selection)` return the complete visible
+match count as `U64`. They preserve the predicate, current owner policy and
+explicit deletion scope, but reset pagination to the beginning. The page size
+and ordering do not restrict the count. Rows are not materialized or truncated,
+and counting does not mutate application state.
+
+```roc
+selection = Selection.filter(Data.events, Predicate.all([
+    Data.events_occurred_at_at_least(input.from_time),
+    Data.events_occurred_at_at_most(input.to_time),
+]))
+Query.count(selection)
+```
+
+Like any prepared local read, a count is revalidated before a command's decision.
+An aggregate count does not authorize an edit or establish a captured row target.
+The native protocol rejects count instructions carrying a nonempty page boundary.
 
 ## Paging
 

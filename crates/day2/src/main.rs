@@ -103,8 +103,7 @@ fn main() -> Result<()> {
         }
         ["replay-properties", artifact, path] => {
             let artifact = LoadedArtifact::load(Path::new(artifact))?;
-            let evidence = serde_json::from_slice(&fs::read(path)?)?;
-            serde_json::to_value(day2::properties::replay(&artifact, &evidence)?)?
+            serde_json::to_value(day2::properties::replay_file(&artifact, Path::new(path))?)?
         }
         ["describe", instance, app] => serde_json::to_value(
             Runtime::load(Path::new(instance), app)?

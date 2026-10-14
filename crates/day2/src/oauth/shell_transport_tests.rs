@@ -1216,7 +1216,7 @@ fn app_host_mounts_reserved_receiver_before_human_dispatch_and_drains_admission(
     let instance_path = fixture._directory.path().join("instance.json");
     std::fs::write(&instance_path, serde_json::to_vec(&instance)?)?;
     let mut contract: crate::artifact::Artifact = serde_json::from_value(json!({
-        "format":crate::artifact::CURRENT_FORMAT,"namespace":"app","roc_version":"fixture",
+        "format":crate::artifact::CURRENT_FORMAT,"verification_limits":crate::artifact::VerificationLimits::QUALIFIED,"namespace":"app","roc_version":"fixture",
         "worker_digest":"fixture","schema_digest":"fixture","sources":{},"admission":"local-spike-only",
         "schema":{"models":{"items":{"fields":{"value":"text"},"roc_type":"Item"}},"inputs":{"input":{"fields":{}}},"foreign_keys":[]},
         "properties":["items"],

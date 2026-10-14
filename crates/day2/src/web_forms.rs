@@ -370,7 +370,10 @@ fn validate_query_form_impl(
                     || value.name() == "textarea"
                     || value.name() == "select"
             }
-            Kind::OptionalText | Kind::InputShape { .. } => false,
+            Kind::OptionalText
+            | Kind::OptionalInteger
+            | Kind::OptionalUnsigned(_)
+            | Kind::InputShape { .. } => false,
         };
         ensure!(
             compatible,

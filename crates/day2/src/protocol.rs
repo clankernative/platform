@@ -55,6 +55,10 @@ pub(crate) enum Database<'a> {
         data: &'a str,
         find: bool,
     },
+    Count {
+        model: &'a str,
+        data: &'a str,
+    },
     Write {
         model: &'a str,
         data: &'a str,
@@ -68,6 +72,7 @@ impl<'a> Database<'a> {
             Self::Get { model, .. }
             | Self::Page { model, .. }
             | Self::Select { model, .. }
+            | Self::Count { model, .. }
             | Self::Write { model, .. } => model,
         }
     }
@@ -136,7 +141,10 @@ impl Phase {
             (
                 Self::Prepare,
                 Step::Database(
-                    Database::Get { .. } | Database::Page { .. } | Database::Select { .. },
+                    Database::Get { .. }
+                    | Database::Page { .. }
+                    | Database::Select { .. }
+                    | Database::Count { .. },
                 )
                 | Step::Observe { .. },
             ) => self,
@@ -261,7 +269,7 @@ impl SelectionPredicate {
                     Self::validate(&child, depth + 1, remaining)?;
                 }
             }
-            "equal" | "like" => {
+            "equal" | "like" | "at_least" | "at_most" => {
                 ensure!(
                     !node.model.is_empty() && !node.field.is_empty() && node.children.is_empty(),
                     "invalid_selection_predicate"
@@ -408,6 +416,18 @@ impl Instruction {
                     find,
                 })
             }
+            "count" => {
+                ensure!(
+                    named && empty_row && empty_page && payload,
+                    "invalid_count_instruction"
+                );
+                let plan = SelectionPlan::parse(&self.data, false)?;
+                ensure!(plan.after.is_empty(), "invalid_count_bounds");
+                Step::Database(Database::Count {
+                    model: &self.model,
+                    data: &self.data,
+                })
+            }
             "create" => {
                 ensure!(
                     named && empty_row && empty_page && payload,
@@ -519,7 +539,7 @@ mod instruction_tests {
                 .to_string();
         let data = serde_json::json!({"predicate":predicate,"orders":[],"after":"","limit":20})
             .to_string();
-        for kind in ["find", "select_page"] {
+        for kind in ["find", "select_page", "count"] {
             let instruction = Instruction {
                 kind: kind.into(),
                 model: "links".into(),
@@ -557,6 +577,31 @@ mod instruction_tests {
         for invalid in ["sel1_", "sel1_f", "sel1_GG", "sel1_0A", "other_00"] {
             assert!(!valid_selection_cursor(invalid));
         }
+    }
+
+    #[test]
+    fn counts_are_read_only_and_never_accept_a_page_boundary() {
+        let predicate =
+            serde_json::json!({"kind":"all","model":"","field":"","value":"","children":[]})
+                .to_string();
+        let instruction = Instruction {
+            kind: "count".into(),
+            model: "links".into(),
+            data: serde_json::json!({"predicate":predicate,"orders":[],"after":"","limit":1})
+                .to_string(),
+            ..Instruction::default()
+        };
+        assert!(!instruction.decode().unwrap().mutation());
+        let mut data: serde_json::Value = serde_json::from_str(&instruction.data).unwrap();
+        data["after"] = serde_json::json!(format!("sel1_{}", "0".repeat(64)));
+        assert!(
+            Instruction {
+                data: data.to_string(),
+                ..instruction
+            }
+            .decode()
+            .is_err()
+        );
     }
 
     #[test]

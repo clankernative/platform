@@ -240,7 +240,7 @@ impl Owner {
                     read_progress.reader_entered.store(1, Ordering::Release);
                     let mut reader = std::io::BufReader::new(&mut *stdout);
                     loop {
-                        let result = read_frame(&mut reader, &read_progress);
+                        let result = read_frame(&mut reader, &read_progress, super::MAX_FRAME);
                         let failed = result.is_err();
                         if sender.send(result).is_err() || failed {
                             break;
@@ -517,7 +517,11 @@ mod tests {
             .launch(std::process::Command::new("/bin/cat"))
             .unwrap();
         let child = owner.child.as_ref().unwrap().id();
-        let mut worker = crate::worker::Worker { owner, progress };
+        let mut worker = crate::worker::Worker {
+            owner,
+            progress,
+            frame_limit: super::super::MAX_FRAME,
+        };
         for frame in [
             b"first original frame".as_slice(),
             b"second original frame".as_slice(),

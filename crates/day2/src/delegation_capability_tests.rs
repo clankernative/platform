@@ -123,7 +123,7 @@ impl Granted {
             },
         )?;
         let contract = serde_json::from_value(json!({
-            "format":crate::artifact::CURRENT_FORMAT,"roc_version":"delegation-test",
+            "format":crate::artifact::CURRENT_FORMAT,"verification_limits":crate::artifact::VerificationLimits::QUALIFIED,"roc_version":"delegation-test",
             "worker_digest":"delegation-test","schema_digest":"delegation-test",
             "schema":{"models":{"items":{"fields":{"value":"text"}}},"inputs":{"input":{"fields":{}}},"foreign_keys":[]},
             "operations":[{"name":"ask","kind":"command","input_type":"input","output_type":""}],
@@ -456,7 +456,7 @@ impl Impersonating {
                 "authority":policy}}});
         fs::write(&path, serde_json::to_vec(&instance)?)?;
         let contract = serde_json::from_value(json!({
-            "format":crate::artifact::CURRENT_FORMAT,"roc_version":"support-test",
+            "format":crate::artifact::CURRENT_FORMAT,"verification_limits":crate::artifact::VerificationLimits::QUALIFIED,"roc_version":"support-test",
             "worker_digest":"support-test","schema_digest":"support-test",
             "schema":{"models":{"items":{"fields":{"value":"text"}}},
                 "inputs":{"input":{"fields":{}}},"foreign_keys":[]},

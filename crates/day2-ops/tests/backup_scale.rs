@@ -38,7 +38,14 @@ fn complete_backup_and_restore_do_not_inherit_the_property_snapshot_row_budget()
         .identity
         .as_ref()
         .context("Reports identity")?;
-    let count = day2::properties::MAX_ROWS_PER_MODEL as u64 + 64;
+    let count = runtime
+        .artifact()
+        .contract()
+        .verification_limits
+        .as_ref()
+        .context("Reports verification limits")?
+        .rows_per_model as u64
+        + 64;
     let mut connection = Connection::open(runtime.db())?;
     let transaction = connection.transaction()?;
     for ordinal in 1..=count {

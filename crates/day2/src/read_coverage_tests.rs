@@ -68,7 +68,7 @@ impl Fixture {
         )?;
         let model = json!({"fields":{"owner":"text","status":"text"}});
         let contract = serde_json::from_value(json!({
-            "format":crate::artifact::CURRENT_FORMAT,"roc_version":"host-test","worker_digest":"host-test",
+            "format":crate::artifact::CURRENT_FORMAT,"verification_limits":crate::artifact::VerificationLimits::QUALIFIED,"roc_version":"host-test","worker_digest":"host-test",
             "schema_digest":"host-test","schema":{"models":{"items":model,"fences":model},
                 "inputs":{"input":{"fields":{}}},"foreign_keys":[]},
             "operations":operations,"sources":{
