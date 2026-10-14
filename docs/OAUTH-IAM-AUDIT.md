@@ -42,6 +42,15 @@ for the shell, also compare its self-only `signJwt` and selected app-backend IAP
 access. Any other permission needs resolution. Follow every outgoing service
 account impersonation path and audit the reachable account's authority too.
 
+For an app runtime, compare the key containers separately from provider-client
+containers derived from that app's bound registrations in the canonical instance.
+The app must not read the reauthentication client, an unrelated registration's
+client, or shell signing material. The shell may read its reviewed provider
+clients for protocol qualification; this does not grant the app access to every
+shell container. Keep custody, attestation and client roles distinct across all
+versions of each container. Provider clients are read only by the trusted native
+host, never by Roc app code or the CSI provider-credential route.
+
 Collect incoming access to each shell/app GSA separately:
 
 ```console

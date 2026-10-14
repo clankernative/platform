@@ -37,7 +37,10 @@ locals {
     try([local.oauth_selection.oauth_clients.reauthentication.credential], []),
     try([for registration in values(local.oauth_selection.oauth_clients.registrations) : registration.client.credential], []),
   ))
-  oauth_client_containers = toset([for name in local.oauth_client_names : "${local.oauth_selection.control.secrets[name].project_number}/${local.oauth_selection.control.secrets[name].secret}"])
+  oauth_client_containers     = toset([for name in local.oauth_client_names : "${local.oauth_selection.control.secrets[name].project_number}/${local.oauth_selection.control.secrets[name].secret}"])
+  oauth_provider_client_names = toset(try([for connection in values(local.oauth_connections) : local.oauth_selection.oauth_clients.registrations[connection.registration.id].client.credential], []))
+  oauth_provider_clients      = try([for name in local.oauth_provider_client_names : local.oauth_selection.control.secrets[name]], [])
+  oauth_reauth_secret         = try(local.oauth_selection.control.secrets[local.oauth_selection.oauth_clients.reauthentication.credential], null)
   oauth_metadata = jsondecode(var.oauth_instance_json == null ? "{}" : jsonencode({
     control       = local.oauth_selection.control
     oauth_clients = local.oauth_selection.oauth_clients
@@ -94,9 +97,12 @@ resource "terraform_data" "oauth_admission" {
         alltrue([for connection in values(local.oauth_connections) : connection.namespace.installation == var.installation && connection.namespace.environment == var.environment && connection.namespace.app == var.app_id]) &&
         alltrue([for key in local.oauth_keys : key.kind == "gcp_version" && key.version >= 1 && key.version == floor(key.version) && tostring(key.project_number) == split("/", local.iap_audience)[2]]) &&
         toset(jsondecode(local.contract["OAUTH_APP_SECRET_IDS"])) == toset([for key in local.oauth_keys : key.secret]) &&
-        length(setintersection(toset([for key in local.oauth_keys : "${key.project_number}/${key.secret}"]), local.oauth_client_containers)) == 0,
+        length(setintersection(toset([for key in local.oauth_keys : "${key.project_number}/${key.secret}"]), local.oauth_client_containers)) == 0 &&
+        alltrue([for secret in local.oauth_provider_clients : secret.kind == "gcp_version" && secret.version >= 1 && secret.version == floor(secret.version) && tostring(secret.project_number) == split("/", local.iap_audience)[2]]) &&
+        toset(jsondecode(local.contract["OAUTH_APP_PROVIDER_CLIENT_SECRET_IDS"])) == toset([for secret in local.oauth_provider_clients : secret.secret]) &&
+        alltrue([for secret in local.oauth_provider_clients : "${secret.project_number}/${secret.secret}" != "${local.oauth_reauth_secret.project_number}/${local.oauth_reauth_secret.secret}"]),
       false)
-      error_message = "OAuth accounts/clients must exactly cover this app's bindings; app IAM must grant exactly its numeric-version custody/attestation containers in this project, with no client container even at another version."
+      error_message = "OAuth accounts/clients and separate key/provider-client grants must exactly cover this app. Same-project numeric versions are required; reauthentication and cross-role container aliases are forbidden even across versions."
     }
   }
 }

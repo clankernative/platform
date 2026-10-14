@@ -195,15 +195,21 @@ live workload identity, secret custody, provider readiness or OAuth registration
 
 In the private instance's app-edge inputs, opt into `oauth_runtime` with a
 `service_account_id`, `custody_secret_ids` and `attestation_secret_ids`. The
-edge creates one runtime Google service account, links only the app's `runtime`
-Kubernetes service account and grants the named key containers plus exactly the
-five Compute read methods used by native readiness. It grants no OAuth JWT
+same root also requires `oauth_instance_json`, the canonical single-app snapshot
+used by `day2-app`. The edge derives provider-client containers from only that
+app's bound registrations; no separate client-secret list is authored. It checks
+the selected roles before granting access. The reauthentication client remains
+exclusive to the shell, and keys cannot alias any client container across versions.
+The edge creates one runtime Google service account, links only the app's `runtime`
+Kubernetes service account and grants the exact keys/provider clients plus the
+Resource Manager project read and four Compute reads used by native readiness. It grants no OAuth JWT
 signing authority. If `app_calls` already selects an identity, use that same
 `service_account_id`: its existing resource address and permissions are retained,
 and no second Google service account or workload binding is created.
 
 Pass the same resolved `security_shell_contract` to both roots. The published
-app contract binds its project, runtime identity, key containers and shell
+app contract binds its project, runtime identity, separate key/provider-client
+container sets and shell
 contract reference. `day2-app.oauth_instance_json` takes the complete canonical
 **single-app** native instance JSON from the private company repo, including
 `control.secrets`, `oauth_clients`, `oauth_runtime` and `oauth_connections`.
@@ -216,14 +222,15 @@ versions in that private selection.
 The workload root copies OAuth/control metadata intact and renders the ordinary
 app settings from its existing inputs. It checks installation/environment,
 artifact, binding namespace, account/client coverage, both edges, project,
-selected shell contract, exact key-container grants and the actual KSA's GSA
+selected shell contract, exact key/provider-client grants and the actual KSA's GSA
 annotation. Add `iam.gke.io/gke-metadata-server-enabled = "true"` to the selected
 node labels. Wrong identities, stale selections, extra grants, floating key
-versions and any app-key/client container overlap are refused before rollout.
+versions, reauthentication grants and any app-key/client container overlap are refused before rollout.
 The native launcher still performs closed-schema and admitted-artifact/pin
 checks; planned policy cannot create readiness.
 
-OAuth keys are read natively by exact numeric version; there is no new secret
+OAuth keys and provider-client credentials are read by the trusted native host
+using exact numeric versions. Roc app code receives neither. There is no new secret
 volume, credential registration init container or secret value in OpenTofu.
 The existing provider-credential provisioning instance is composed before
 OAuth metadata is added, preserving its operator-only control contract. Backup
