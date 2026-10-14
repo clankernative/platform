@@ -288,7 +288,7 @@ impl Worker {
                 .env("LC_ALL", "C")
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
-                .stderr(Stdio::inherit())
+                .stderr(Stdio::null())
                 .spawn()
                 .context("spawn isolated Roc worker")?;
             let mut stdin = child.stdin.take().context("worker stdin")?;
