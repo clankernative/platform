@@ -700,6 +700,16 @@ jobs:
       - run: target/debug/xtask architecture-inventory > /tmp/day2-architecture-inventory.json
       - run: target/debug/xtask architecture-dependencies > /tmp/day2-architecture-dependencies.json
       - run: target/debug/xtask architecture-proof-inventory > /tmp/day2-architecture-proofs.json
+      - name: Check current mixed proof and fixture prerequisite guards
+        run: cargo test --locked -p xtask verification::shards:: -- --nocapture
+      - name: Check mandatory finite private Linux context guard
+        run: cargo test --locked -p xtask linux_context_requires_private_finite_native_compiler_limits -- --nocapture
+      - name: Exercise native bounded mounts with the exact checkout ABI seed
+        run: target/debug/xtask verify-linux-context
+      - name: Check all public sources after native output mounts
+        run: target/debug/xtask source-check
+      - name: Require unchanged checked-in ABI seed after native mounts
+        run: git diff --exit-code -- crates/worker/generated/roc_platform_abi.rs
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: ${{ always() }}
         with:
@@ -709,6 +719,7 @@ jobs:
             /tmp/day2-architecture-inventory.json
             /tmp/day2-architecture-dependencies.json
             /tmp/day2-architecture-proofs.json
+            /tmp/day2-ci-linux-context.json
             target/debug/xtask.d
           if-no-files-found: error
           retention-days: 3
