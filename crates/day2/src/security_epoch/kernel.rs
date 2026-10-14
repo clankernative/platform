@@ -197,13 +197,13 @@ impl Request {
                 holder,
                 ..
             } => Phase::ActiveFirstHolder {
-                completion: Completion {
+                completion: Box::new(Completion {
                     operation: operation.clone(),
                     request: self.digest()?,
                     parent_receipt: parent_receipt.clone(),
                     before: before.clone(),
                     holder: holder.clone(),
-                },
+                }),
             },
         };
         let bootstrap = self.bootstrap().clone();
@@ -250,7 +250,7 @@ pub(super) struct Completion {
 #[serde(tag = "phase", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum Phase {
     PendingFirstHolder,
-    ActiveFirstHolder { completion: Completion },
+    ActiveFirstHolder { completion: Box<Completion> },
 }
 
 impl<'de> Deserialize<'de> for Phase {
@@ -404,7 +404,7 @@ pub(super) struct Snapshot {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Outcome {
     NotApplied,
-    Applied(Receipt),
+    Applied(Box<Receipt>),
 }
 
 /// Reconciliation does not authorize another send. A caller must re-acquire the
@@ -479,7 +479,7 @@ pub(super) fn reconcile(
     );
     match request {
         Request::CreateInitialAuthority { .. } => {
-            Ok(Outcome::Applied(create_receipt.value.clone()))
+            Ok(Outcome::Applied(Box::new(create_receipt.value.clone())))
         }
         Request::CompleteInitialFirstActivation { before, .. } => match root.value.phase {
             Phase::PendingFirstHolder => {
@@ -494,7 +494,7 @@ pub(super) fn reconcile(
                     state_request == *request,
                     "security_epoch_conflicting_holder"
                 );
-                Ok(Outcome::Applied(request.receipt()?))
+                Ok(Outcome::Applied(Box::new(request.receipt()?)))
             }
         },
     }
