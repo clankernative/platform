@@ -774,7 +774,7 @@ jobs:
       - name: Complete strict Linux workspace and all-targets lint before preparation
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Check existing worker frame and classification observations
-        run: cargo test --locked -p day2 --lib -- worker::tests:: --nocapture
+        run: 'cargo test --locked -p day2 --lib -- worker::tests:: --nocapture'
       - name: Check existing admission diagnostic redaction
         run: cargo test --locked -p day2 --lib -- admission_context_keeps_private_selection_out_of_public_diagnostics --nocapture
 

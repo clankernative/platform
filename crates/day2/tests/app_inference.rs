@@ -20,6 +20,7 @@ struct Fixture {
 #[cfg(target_os = "linux")]
 fn linux_resource_observation() -> String {
     use std::io::Read;
+    use std::os::unix::fs::FileTypeExt;
 
     let mut observed = std::collections::BTreeMap::new();
     for name in [
@@ -47,6 +48,14 @@ fn linux_resource_observation() -> String {
         };
         observed.insert(name, value);
     }
+    let stderr_kind = match fs::metadata("/proc/self/fd/2") {
+        Ok(metadata) if metadata.file_type().is_fifo() => "pipe".into(),
+        Ok(metadata) if metadata.file_type().is_char_device() => "character".into(),
+        Ok(metadata) if metadata.is_file() => "regular".into(),
+        Ok(_) => "other".into(),
+        Err(error) => format!("unavailable errno={:?}", error.raw_os_error()),
+    };
+    observed.insert("diagnostic_stderr_kind", stderr_kind);
     format!("{observed:?}")
 }
 
