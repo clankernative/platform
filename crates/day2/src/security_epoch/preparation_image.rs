@@ -81,7 +81,7 @@ impl InitialPreparationImage {
             acquisition.remaining()?;
             let core = OriginalSeedCore::new(policy, store, incarnations)?;
             ensure!(
-                runtime.scope() == format!("{}/{}/{}", core.scope.installation, core.scope.environment, core.scope.app)
+                runtime.scope() == format!("{}/{}/{}", core.scope.installation.as_str(), core.scope.environment.as_str(), core.scope.app.as_str())
                     && runtime.app() == core.scope.app.as_str()
                     && runtime.artifact().id() == core.artifact.as_str(),
                 "epoch_preparation_runtime_selection_mismatch"
