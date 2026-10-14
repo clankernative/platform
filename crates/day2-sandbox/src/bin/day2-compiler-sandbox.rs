@@ -140,6 +140,10 @@ mod linux {
             .to_str()
             .context("parent encoding")?
             .parse()?;
+        let cache = args.next().context("missing compiler cache scope")?;
+        let cache =
+            day2_sandbox::CompilerCache::parse(cache.to_str().context("cache scope encoding")?)
+                .context("invalid compiler cache scope")?;
         ensure!(
             args.next().is_some_and(|arg| arg == "--"),
             "missing compiler argument delimiter"
@@ -337,8 +341,8 @@ mod linux {
             .env("LC_ALL", "C")
             .env("HOME", stage.join("home"))
             .env("TMPDIR", stage.join("tmp"))
-            .env("ROC_CACHE_DIR", stage.join("cache"))
-            .env("XDG_CACHE_HOME", stage.join("cache"))
+            .env("ROC_CACHE_DIR", stage.join(cache.directory()))
+            .env("XDG_CACHE_HOME", stage.join(cache.directory()))
             .exec();
         Err(error).context("execute confined compiler")
     }

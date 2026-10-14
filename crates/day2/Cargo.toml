@@ -9,6 +9,7 @@ autotests = false
 [dependencies]
 day2-assets = { path = "../day2-assets" }
 day2-contracts = { path = "../day2-contracts" }
+day2-sandbox = { path = "../day2-sandbox" }
 unicode-segmentation = "=1.13.3"
 day2-capabilities = { path = "../day2-capabilities" }
 anyhow = "1.0"
@@ -45,9 +46,6 @@ scraper = "0.24"
 html5ever = "=0.35.0"
 ego-tree = "=0.10.0"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-day2-sandbox = { path = "../day2-sandbox" }
 
 [dev-dependencies]
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp"] }

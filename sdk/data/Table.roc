@@ -14,6 +14,14 @@
 # from this type, so the selector is typed by the model itself: a key naming a
 # column the model lacks does not compile. The annotation pins the row, which
 # keeps that error on the model rather than in generated code.
+# Nominal markers close the variant universe before storage reflection crosses
+# the host boundary; the constructors still require records of selected columns.
+UniqueKey(fields) := [Unique(List(fields))]
+
+NonUniqueKey(fields) := [NonUnique(List(fields))]
+
+RollupKey(group, measures) := [Rollup(List(group), List(measures))]
+
 Table(row, keys) :: { row_witness : List(row), key_witness : List(keys) }.{
 	# A table with no business keys. The platform supplies this for any model that
 	# declares no `table`, so applications never need to write it.
@@ -31,12 +39,12 @@ Table(row, keys) :: { row_witness : List(row), key_witness : List(keys) }.{
 
 	# SQLite enforces the tuple on every insert and update. Platform deletion does
 	# not release it, and nullable text components follow SQLite semantics.
-	unique : { ..fields } -> [Unique(List({ ..fields }))]
+	unique : { ..fields } -> UniqueKey({ ..fields })
 	unique = |_selected| Unique([])
 
 	# An equality tuple the host admits for selection and ordering. It enforces
 	# nothing about the data.
-	non_unique : { ..fields } -> [NonUnique(List({ ..fields }))]
+	non_unique : { ..fields } -> NonUniqueKey({ ..fields })
 	non_unique = |_selected| NonUnique([])
 
 	# Totals the platform keeps from this table's rows, grouped by some of its
@@ -52,7 +60,7 @@ Table(row, keys) :: { row_witness : List(row), key_witness : List(keys) }.{
 	# `column: row.column`, or an integer time bucketed with `Table.hour`,
 	# `Table.day` or `Table.week` (UTC; weeks start on Monday). A measure counts
 	# rows or sums an integer column, which it is named after.
-	rollup : { ..group }, { ..measures } -> [Rollup(List({ ..group }), List({ ..measures }))]
+	rollup : { ..group }, { ..measures } -> RollupKey({ ..group }, { ..measures })
 	rollup = |_group, _measures| Rollup([], [])
 
 	hour : I64 -> [Hour(I64)]
