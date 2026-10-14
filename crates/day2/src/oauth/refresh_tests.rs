@@ -669,11 +669,6 @@ fn compiled_calendar_refresh_publishes_versions_and_fences_failure_recovery() ->
                     )
                     .is_err()
                 );
-                let reference: String = db.query_row(
-                    "SELECT reference FROM oauth_use_handles WHERE invocation='refresh_v2'",
-                    [],
-                    |r| r.get(0),
-                )?;
                 // Drop the returned outcome and reopen the store as a caller
                 // recovering a lost acknowledgement. The committed receipt
                 // permits observation, never another refresh of base version 1.
@@ -682,6 +677,16 @@ fn compiled_calendar_refresh_publishes_versions_and_fences_failure_recovery() ->
                 assert_eq!(reopened.query_row("SELECT count(*) FROM oauth_refresh_attempts WHERE state='replacement_committed' AND base_version=1 AND next_version=2 AND length(receipt)>0", [], |r| r.get::<_,i64>(0))?, 1);
                 assert_eq!(invoke("after_lost_ack")?.result["status"], "ok");
                 assert_eq!(port.posts.load(SeqCst), 1);
+                // Stop a real compiled invocation after its observations have
+                // committed. Its genuine Use remains pending while another
+                // invocation publishes v3; ordinary cleanup must retain it.
+                let interrupted = runtime.invoke_verified("oauthcalendar.list_events",
+                    store::RequestIdentity { actor:&human.email, origin:Some(&human) },
+                    "pending_v2", &input, 250, store::Fault::AfterPrepare)
+                    .expect_err("expected the actual preparation boundary interruption");
+                assert!(store::Fault::AfterPrepare.caused(&interrupted));
+                assert_eq!(db.query_row("SELECT status FROM day2_invocations WHERE id='pending_v2'", [], |r| r.get::<_,String>(0))?, "pending");
+                let reference: String = db.query_row("SELECT reference FROM oauth_use_handles WHERE invocation='pending_v2'", [], |r| r.get(0))?;
                 port.now.store(280, SeqCst);
                 assert_eq!(invoke("refresh_v3")?.result["status"], "ok");
                 assert_eq!(port.posts.load(SeqCst), 2);
@@ -720,10 +725,11 @@ fn compiled_calendar_refresh_publishes_versions_and_fences_failure_recovery() ->
                 let old = Request {
                     operation: "oauthcalendar.list_events".into(),
                     input: input.to_string(),
-                    context: store::invocation_context(&db, "refresh_v2")?,
+                    context: store::invocation_context(&db, "pending_v2")?,
                     observations: vec![],
                 };
                 let snapshot = db.unchecked_transaction()?;
+                assert_eq!(snapshot.query_row("SELECT count(*) FROM oauth_use_handles WHERE reference=?1 AND invocation='pending_v2'", [&reference], |r| r.get::<_,i64>(0))?, 1, "the genuine pending Use must survive ordinary cleanup");
                 let stale = load(&snapshot, &runtime, &old, "calendar", &reference, 280);
                 snapshot.commit()?;
                 assert_eq!(
@@ -734,6 +740,9 @@ fn compiled_calendar_refresh_publishes_versions_and_fences_failure_recovery() ->
                     "connection use generation or account changed",
                     "Use must fail on its material pin while its 60-second lifetime remains valid"
                 );
+                let reads = port.reads.load(SeqCst);
+                assert!(runtime.execute("pending_v2", store::Fault::None).is_err(), "pending v2 preparation completed under v3 material");
+                assert_eq!(port.reads.load(SeqCst), reads, "resuming stale preparation dispatched another provider read");
             } else {
                 assert!(
                     !first
