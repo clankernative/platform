@@ -104,10 +104,8 @@ impl TryFrom<String> for UpdateTime {
     type Error = anyhow::Error;
 
     fn try_from(value: String) -> Result<Self> {
-        let parsed = time::OffsetDateTime::parse(
-            &value,
-            &time::format_description::well_known::Rfc3339,
-        )?;
+        let parsed =
+            time::OffsetDateTime::parse(&value, &time::format_description::well_known::Rfc3339)?;
         ensure!(
             value.ends_with('Z') && parsed.nanosecond().is_multiple_of(1_000),
             "security_epoch_provider_version"
@@ -248,11 +246,53 @@ pub(super) struct Completion {
     pub holder: Holder,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "phase", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum Phase {
     PendingFirstHolder,
     ActiveFirstHolder { completion: Completion },
+}
+
+impl<'de> Deserialize<'de> for Phase {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // Serde's internally tagged UNIT visitor ignores extras. Also require a
+        // map here: a sequence must not become another spelling of a state.
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = Phase;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a closed external epoch phase map")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Phase, A::Error> {
+                use serde::de::Error;
+                let mut phase = None;
+                let mut completion = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "phase" => {
+                            if phase.is_some() { return Err(A::Error::duplicate_field("phase")); }
+                            phase = Some(map.next_value::<String>()?);
+                        }
+                        "completion" => {
+                            if completion.is_some() { return Err(A::Error::duplicate_field("completion")); }
+                            completion = Some(map.next_value::<serde_json::Value>()?);
+                        }
+                        _ => return Err(A::Error::unknown_field(&key, &["phase", "completion"])),
+                    }
+                }
+                match (phase.as_deref(), completion) {
+                    (Some("pending_first_holder"), None) => Ok(Phase::PendingFirstHolder),
+                    (Some("active_first_holder"), Some(value)) if value.is_object() => {
+                        Ok(Phase::ActiveFirstHolder { completion: serde_json::from_value(value).map_err(A::Error::custom)? })
+                    }
+                    _ => Err(A::Error::custom("invalid closed external epoch phase")),
+                }
+            }
+        }
+        deserializer.deserialize_map(Visitor)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -297,11 +337,16 @@ mod epoch_decimal {
     use super::*;
     use serde::{Deserializer, Serializer, de::Error};
 
-    pub fn serialize<S: Serializer>(value: &SecurityEpoch, serializer: S) -> Result<S::Ok, S::Error> {
+    pub fn serialize<S: Serializer>(
+        value: &SecurityEpoch,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(&value.value().to_string())
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<SecurityEpoch, D::Error> {
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<SecurityEpoch, D::Error> {
         let value = String::deserialize(deserializer)?;
         let epoch = value
             .parse::<u64>()
@@ -376,7 +421,10 @@ pub(super) fn reconcile(
         );
         return Ok(Outcome::NotApplied);
     }
-    let root = snapshot.root.as_ref().context("security_epoch_partial_state")?;
+    let root = snapshot
+        .root
+        .as_ref()
+        .context("security_epoch_partial_state")?;
     let sentinel = snapshot
         .sentinel
         .as_ref()
@@ -401,8 +449,10 @@ pub(super) fn reconcile(
                 .context("security_epoch_activation_receipt_missing")?
                 .value;
             ensure!(
-                matches!(receipt.request, Request::CompleteInitialFirstActivation { .. })
-                    && receipt.request.bootstrap() == create.bootstrap(),
+                matches!(
+                    receipt.request,
+                    Request::CompleteInitialFirstActivation { .. }
+                ) && receipt.request.bootstrap() == create.bootstrap(),
                 "security_epoch_activation_receipt_mismatch"
             );
             receipt.request.validate(selection)?;
@@ -419,7 +469,9 @@ pub(super) fn reconcile(
         "security_epoch_root_sentinel_mismatch"
     );
     match request {
-        Request::CreateInitialAuthority { .. } => Ok(Outcome::Applied(create_receipt.value.clone())),
+        Request::CreateInitialAuthority { .. } => {
+            Ok(Outcome::Applied(create_receipt.value.clone()))
+        }
         Request::CompleteInitialFirstActivation { before, .. } => match root.value.phase {
             Phase::PendingFirstHolder => {
                 ensure!(
@@ -429,7 +481,10 @@ pub(super) fn reconcile(
                 Ok(Outcome::NotApplied)
             }
             Phase::ActiveFirstHolder { .. } => {
-                ensure!(state_request == *request, "security_epoch_conflicting_holder");
+                ensure!(
+                    state_request == *request,
+                    "security_epoch_conflicting_holder"
+                );
                 Ok(Outcome::Applied(request.receipt()?))
             }
         },

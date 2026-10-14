@@ -3,11 +3,14 @@
 //! role, execution and continuous-clock producers have been qualified together.
 //! Parsing authenticated bytes alone would still not mint readiness.
 use super::kernel::{
-    AuthorityRecord, Bootstrap, Receipt, Request, SentinelRecord, Snapshot, UpdateTime, Versioned,
+    self, AuthorityRecord, Bootstrap, Phase, Receipt, Request, SentinelRecord, Snapshot, UpdateTime, Versioned,
 };
 use anyhow::{Context, Result, bail, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use day2_capabilities::{Digest, security_epoch::{EpochProvider, EpochStore}};
+use day2_capabilities::{
+    Digest,
+    security_epoch::{EpochProvider, EpochStore},
+};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value, json};
 use std::{collections::BTreeMap, time::Duration};
@@ -29,7 +32,15 @@ pub(super) struct Response {
 
 pub(super) trait Port {
     fn sample(&mut self) -> Result<Sample>;
-    fn post(&mut self, url: &str, body: &[u8], timeout: Duration, max_bytes: usize) -> Result<Response>;
+    // Exactly one bounded HTTPS request; no proxy, redirect or automatic retry.
+    // A future live implementation must enforce the response limit while reading.
+    fn post(
+        &mut self,
+        url: &str,
+        body: &[u8],
+        timeout: Duration,
+        max_bytes: usize,
+    ) -> Result<Response>;
 }
 
 pub(super) struct Budget {
@@ -51,9 +62,19 @@ impl Budget {
     }
 
     pub(super) fn for_context(sample: Sample, deadline: Duration) -> Result<Self> {
-        let limit = deadline.checked_sub(sample.elapsed).context("security_epoch_context_expired")?;
-        ensure!(!limit.is_zero() && limit <= ACQUISITION_BUDGET, "security_epoch_context_budget");
-        Ok(Self { domain: sample.domain, start: sample.elapsed, latest: sample.elapsed, limit })
+        let limit = deadline
+            .checked_sub(sample.elapsed)
+            .context("security_epoch_context_expired")?;
+        ensure!(
+            !limit.is_zero() && limit <= ACQUISITION_BUDGET,
+            "security_epoch_context_budget"
+        );
+        Ok(Self {
+            domain: sample.domain,
+            start: sample.elapsed,
+            latest: sample.elapsed,
+            limit,
+        })
     }
 
     pub(super) fn remaining(&mut self, port: &mut impl Port) -> Result<Duration> {
@@ -63,8 +84,14 @@ impl Budget {
             "security_epoch_clock_domain_or_rewind"
         );
         self.latest = sample.elapsed;
-        let elapsed = sample.elapsed.checked_sub(self.start).context("security_epoch_clock_rewind")?;
-        let remaining = self.limit.checked_sub(elapsed).context("security_epoch_acquisition_expired")?;
+        let elapsed = sample
+            .elapsed
+            .checked_sub(self.start)
+            .context("security_epoch_clock_rewind")?;
+        let remaining = self
+            .limit
+            .checked_sub(elapsed)
+            .context("security_epoch_acquisition_expired")?;
         ensure!(!remaining.is_zero(), "security_epoch_acquisition_expired");
         Ok(remaining)
     }
@@ -74,14 +101,22 @@ impl Budget {
         let timeout = self.remaining(port)?;
         let response = port.post(url, body, timeout, MAX_BYTES)?;
         self.remaining(port)?;
-        ensure!(response.status == 200, "security_epoch_provider_unavailable");
-        ensure!(response.body.len() <= MAX_BYTES, "security_epoch_response_budget");
+        ensure!(
+            response.status == 200,
+            "security_epoch_provider_unavailable"
+        );
+        ensure!(
+            response.body.len() <= MAX_BYTES,
+            "security_epoch_response_budget"
+        );
         Ok(response.body)
     }
 }
 
 #[derive(Clone, Debug)]
 pub(super) struct Names {
+    selection: EpochStore,
+    bootstrap: Bootstrap,
     database: String,
     pub root: String,
     pub sentinel: String,
@@ -90,30 +125,65 @@ pub(super) struct Names {
 }
 
 impl Names {
-    pub(super) fn new(selection: &EpochStore, bootstrap: &Bootstrap, activate: Option<&Digest>) -> Result<Self> {
+    pub(super) fn new(
+        selection: &EpochStore,
+        bootstrap: &Bootstrap,
+        activate: Option<&Digest>,
+    ) -> Result<Self> {
         bootstrap.validate_selection(selection)?;
-        let EpochProvider::FirestoreNativeV1 {project, database, ..} = &selection.provider;
-        let database = format!("projects/{}/databases/{}", project.as_str(), database.as_str());
-        let key = bootstrap.authority.as_str().strip_prefix("sha256:").context("security_epoch_authority_key")?;
+        let EpochProvider::FirestoreNativeV1 {
+            project, database, ..
+        } = &selection.provider;
+        let database = format!(
+            "projects/{}/databases/{}",
+            project.as_str(),
+            database.as_str()
+        );
+        let key = bootstrap
+            .authority
+            .as_str()
+            .strip_prefix("sha256:")
+            .context("security_epoch_authority_key")?;
         let root = format!("{database}/documents/day2_credential_authority_v1/{key}");
         let sentinel = format!("{database}/documents/day2_credential_bootstrap_v1/{key}");
-        let receipt = |operation: &Digest| format!("{root}/operations/{}", &operation.as_str()[7..]);
-        ensure!(activate != Some(&bootstrap.create_operation), "security_epoch_operation_reused");
-        Ok(Self { database, root: root.clone(), sentinel, create: receipt(&bootstrap.create_operation), activate: activate.map(receipt) })
+        let receipt =
+            |operation: &Digest| format!("{root}/operations/{}", &operation.as_str()[7..]);
+        ensure!(
+            activate != Some(&bootstrap.create_operation),
+            "security_epoch_operation_reused"
+        );
+        Ok(Self {
+            selection: selection.clone(),
+            bootstrap: bootstrap.clone(),
+            database,
+            root: root.clone(),
+            sentinel,
+            create: receipt(&bootstrap.create_operation),
+            activate: activate.map(receipt),
+        })
     }
 
     fn documents(&self) -> Vec<&str> {
-        let mut names = vec![self.root.as_str(), self.sentinel.as_str(), self.create.as_str()];
+        let mut names = vec![
+            self.root.as_str(),
+            self.sentinel.as_str(),
+            self.create.as_str(),
+        ];
         names.extend(self.activate.as_deref());
         names
     }
 
     fn endpoint(&self, operation: &str) -> String {
-        format!("https://firestore.googleapis.com/v1/{}/documents:{operation}", self.database)
+        format!(
+            "https://firestore.googleapis.com/v1/{}/documents:{operation}",
+            self.database
+        )
     }
 
     pub(super) fn read_body(&self) -> Result<Vec<u8>> {
-        Ok(serde_json::to_vec(&json!({"documents":self.documents(),"newTransaction":{"readOnly":{}}}))?)
+        Ok(serde_json::to_vec(
+            &json!({"documents":self.documents(),"newTransaction":{"readOnly":{}}}),
+        )?)
     }
 }
 
@@ -133,24 +203,39 @@ struct Fields {
 }
 
 fn encode_fields(value: Value) -> Result<BTreeMap<String, Field>> {
-    let Value::Object(values) = value else { bail!("security_epoch_record_not_object"); };
-    values.into_iter().map(|(key, value)| {
-        let field = match value {
-            Value::String(value) => Field::String(value),
-            Value::Object(_) => Field::Map(Fields { fields: encode_fields(value)? }),
-            _ => bail!("security_epoch_record_field_type"),
-        };
-        Ok((key, field))
-    }).collect()
+    let Value::Object(values) = value else {
+        bail!("security_epoch_record_not_object");
+    };
+    values
+        .into_iter()
+        .map(|(key, value)| {
+            let field = match value {
+                Value::String(value) => Field::String(value),
+                Value::Object(_) => Field::Map(Fields {
+                    fields: encode_fields(value)?,
+                }),
+                _ => bail!("security_epoch_record_field_type"),
+            };
+            Ok((key, field))
+        })
+        .collect()
 }
 
 fn decode_fields(fields: BTreeMap<String, Field>) -> Value {
-    Value::Object(fields.into_iter().map(|(key, value)| {
-        (key, match value {
-            Field::String(value) => Value::String(value),
-            Field::Map(value) => decode_fields(value.fields),
-        })
-    }).collect::<Map<_, _>>())
+    Value::Object(
+        fields
+            .into_iter()
+            .map(|(key, value)| {
+                (
+                    key,
+                    match value {
+                        Field::String(value) => Value::String(value),
+                        Field::Map(value) => decode_fields(value.fields),
+                    },
+                )
+            })
+            .collect::<Map<_, _>>(),
+    )
 }
 
 #[derive(Deserialize)]
@@ -195,57 +280,127 @@ fn decode_snapshot(names: &Names, entries: Vec<Entry>) -> Result<Snapshot> {
     let expected = names.documents();
     let mut previous_time = None;
     for entry in entries {
-        ensure!(entry.transaction.is_none(), "security_epoch_duplicate_transaction");
+        ensure!(
+            entry.transaction.is_none(),
+            "security_epoch_duplicate_transaction"
+        );
         let document = match (entry.found, entry.missing) {
             (Some(found), None) => (found.name.clone(), Some(found)),
             (None, Some(missing)) => (missing, None),
             _ => bail!("security_epoch_invalid_batch_result"),
         };
-        let read_time = entry.read_time.context("security_epoch_read_time_missing")?;
-        let read_time = time::OffsetDateTime::parse(&read_time, &time::format_description::well_known::Rfc3339)?;
-        ensure!(previous_time.is_none_or(|previous| previous <= read_time), "security_epoch_provider_read_time_rewind");
+        let read_time = entry
+            .read_time
+            .context("security_epoch_read_time_missing")?;
+        let read_time = time::OffsetDateTime::parse(
+            &read_time,
+            &time::format_description::well_known::Rfc3339,
+        )?;
+        ensure!(
+            previous_time.is_none_or(|previous| previous <= read_time),
+            "security_epoch_provider_read_time_rewind"
+        );
         previous_time = Some(read_time);
-        ensure!(expected.contains(&document.0.as_str()), "security_epoch_unrequested_document");
-        ensure!(documents.insert(document.0, document.1).is_none(), "security_epoch_duplicate_document");
+        ensure!(
+            expected.contains(&document.0.as_str()),
+            "security_epoch_unrequested_document"
+        );
+        ensure!(
+            documents.insert(document.0, document.1).is_none(),
+            "security_epoch_duplicate_document"
+        );
     }
-    ensure!(documents.len() == expected.len(), "security_epoch_incomplete_snapshot");
-    fn take<T: DeserializeOwned>(documents: &mut BTreeMap<String, Option<Document>>, name: &str) -> Result<Option<Versioned<T>>> {
-        documents.remove(name).context("security_epoch_document_missing")?.map(|document| {
-            let created = time::OffsetDateTime::parse(&String::from(document.create_time), &time::format_description::well_known::Rfc3339)?;
-            let updated = time::OffsetDateTime::parse(&String::from(document.update_time.clone()), &time::format_description::well_known::Rfc3339)?;
-            ensure!(created <= updated, "security_epoch_document_time_order");
-            Ok(Versioned { value: serde_json::from_value(decode_fields(document.fields))?, version: document.update_time })
-        }).transpose()
+    ensure!(
+        documents.len() == expected.len(),
+        "security_epoch_incomplete_snapshot"
+    );
+    fn take<T: DeserializeOwned>(
+        documents: &mut BTreeMap<String, Option<Document>>,
+        name: &str,
+    ) -> Result<Option<Versioned<T>>> {
+        documents
+            .remove(name)
+            .context("security_epoch_document_missing")?
+            .map(|document| {
+                let created = time::OffsetDateTime::parse(
+                    &String::from(document.create_time),
+                    &time::format_description::well_known::Rfc3339,
+                )?;
+                let updated = time::OffsetDateTime::parse(
+                    &String::from(document.update_time.clone()),
+                    &time::format_description::well_known::Rfc3339,
+                )?;
+                ensure!(created <= updated, "security_epoch_document_time_order");
+                Ok(Versioned {
+                    value: serde_json::from_value(decode_fields(document.fields))?,
+                    version: document.update_time,
+                })
+            })
+            .transpose()
     }
     Ok(Snapshot {
         root: take::<AuthorityRecord>(&mut documents, &names.root)?,
         sentinel: take::<SentinelRecord>(&mut documents, &names.sentinel)?,
         create: take::<Receipt>(&mut documents, &names.create)?,
-        activate: names.activate.as_ref().map(|name| take::<Receipt>(&mut documents, name)).transpose()?.flatten(),
+        activate: names
+            .activate
+            .as_ref()
+            .map(|name| take::<Receipt>(&mut documents, name))
+            .transpose()?
+            .flatten(),
     })
 }
 
 pub(super) fn read(port: &mut impl Port, names: &Names) -> Result<Snapshot> {
     let mut budget = Budget::begin(port)?;
+    let mut snapshot = read_once(port, &mut budget, names)?;
+    if names.activate.is_none()
+        && let Some(Versioned { value: AuthorityRecord { phase: Phase::ActiveFirstHolder { completion }, .. }, .. }) = &snapshot.root
+    {
+        // Discovery supplies only a bounded document selector. Discard the first
+        // snapshot and reread ALL four documents in a fresh coherent transaction
+        // under the original deadline; never splice an old root and a new receipt.
+        let operation = completion.operation.clone();
+        let complete = Names::new(&names.selection, &names.bootstrap, Some(&operation))?;
+        snapshot = read_once(port, &mut budget, &complete)?;
+        ensure!(matches!(&snapshot.root, Some(root) if matches!(&root.value.phase, Phase::ActiveFirstHolder { completion } if completion.operation == operation)), "security_epoch_discovery_state_changed");
+    }
+    kernel::reconcile(&names.selection, &Request::CreateInitialAuthority { bootstrap: names.bootstrap.clone() }, &snapshot)?;
+    budget.remaining(port)?;
+    Ok(snapshot)
+}
+
+fn read_once(port: &mut impl Port, budget: &mut Budget, names: &Names) -> Result<Snapshot> {
     let bytes = budget.call(port, &names.endpoint("batchGet"), &names.read_body()?)?;
     // Duplicate keys (including escaped keys) are rejected before serde maps.
     let mut entries: Vec<Entry> = crate::json::decode(&bytes)?;
-    ensure!(!entries.is_empty() && entries.len() <= names.documents().len() + 1, "security_epoch_batch_size");
-    let token = entries[0].transaction.take().context("security_epoch_transaction_missing")?;
+    ensure!(
+        !entries.is_empty() && entries.len() <= names.documents().len() + 1,
+        "security_epoch_batch_size"
+    );
+    let token = entries[0]
+        .transaction
+        .take()
+        .context("security_epoch_transaction_missing")?;
     let decoded = STANDARD.decode(&token)?;
-    ensure!(!decoded.is_empty() && decoded.len() <= 1024 && STANDARD.encode(decoded) == token, "security_epoch_invalid_transaction");
+    ensure!(
+        !decoded.is_empty() && decoded.len() <= 1024 && STANDARD.encode(decoded) == token,
+        "security_epoch_invalid_transaction"
+    );
     let transaction = ReadTransaction { token };
     // The first streamed entry may contain only the transaction, or also a doc.
     let header_only = entries[0].found.is_none() && entries[0].missing.is_none();
     let result = if header_only && entries[0].read_time.is_some() {
         Err(anyhow::anyhow!("security_epoch_transaction_header_fields"))
     } else {
-        if header_only { entries.remove(0); }
+        if header_only {
+            entries.remove(0);
+        }
         decode_snapshot(names, entries)
     };
     // Semantic decode failures also close the observed read transaction. If the
     // bounded cleanup fails, no snapshot escapes as a successful observation.
-    transaction.rollback(port, &mut budget, names)?;
+    transaction.rollback(port, budget, names)?;
     budget.remaining(port)?;
     result
 }
@@ -259,14 +414,23 @@ pub(super) fn commit_body(selection: &EpochStore, request: &Request) -> Result<V
     let names = Names::new(selection, request.bootstrap(), activate)?;
     let (root, sentinel) = request.records()?;
     fn write<T: Serialize>(name: &str, value: &T, condition: Value) -> Result<Value> {
-        Ok(json!({"update":{"name":name,"fields":encode_fields(serde_json::to_value(value)?)?},"currentDocument":condition}))
+        Ok(
+            json!({"update":{"name":name,"fields":encode_fields(serde_json::to_value(value)?)?},"currentDocument":condition}),
+        )
     }
     let (root_condition, sentinel_condition, receipt_name) = match request {
-        Request::CreateInitialAuthority { .. } => (json!({"exists":false}), json!({"exists":false}), names.create.as_str()),
+        Request::CreateInitialAuthority { .. } => (
+            json!({"exists":false}),
+            json!({"exists":false}),
+            names.create.as_str(),
+        ),
         Request::CompleteInitialFirstActivation { before, .. } => (
             json!({"updateTime":String::from(before.root.clone())}),
             json!({"updateTime":String::from(before.sentinel.clone())}),
-            names.activate.as_deref().context("security_epoch_activation_name")?,
+            names
+                .activate
+                .as_deref()
+                .context("security_epoch_activation_name")?,
         ),
     };
     let bytes = serde_json::to_vec(&json!({"writes":[
@@ -280,10 +444,18 @@ pub(super) fn commit_body(selection: &EpochStore, request: &Request) -> Result<V
 
 /// A successful HTTP response is only a historical acknowledgement. Callers
 /// always reconcile the exact receipt and coherent current records separately.
-pub(super) fn commit(port: &mut impl Port, selection: &EpochStore, dispatch: super::journal::AuthorizedDispatch) -> Result<()> {
+pub(super) fn commit(
+    port: &mut impl Port,
+    selection: &EpochStore,
+    dispatch: super::journal::AuthorizedDispatch,
+) -> Result<()> {
     let (request, mut budget) = dispatch.prepare(selection, port)?;
     let names = Names::new(selection, request.bootstrap(), None)?;
-    let bytes = budget.call(port, &names.endpoint("commit"), &commit_body(selection, &request)?)?;
+    let bytes = budget.call(
+        port,
+        &names.endpoint("commit"),
+        &commit_body(selection, &request)?,
+    )?;
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase", deny_unknown_fields)]
     struct CommitResponse {
@@ -292,12 +464,23 @@ pub(super) fn commit(port: &mut impl Port, selection: &EpochStore, dispatch: sup
     }
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase", deny_unknown_fields)]
-    struct WriteResult { update_time: UpdateTime }
+    struct WriteResult {
+        update_time: UpdateTime,
+    }
     let response: CommitResponse = crate::json::decode(&bytes)?;
-    ensure!(response.write_results.len() == 3, "security_epoch_commit_result_count");
-    let commit = time::OffsetDateTime::parse(&String::from(response.commit_time), &time::format_description::well_known::Rfc3339)?;
+    ensure!(
+        response.write_results.len() == 3,
+        "security_epoch_commit_result_count"
+    );
+    let commit = time::OffsetDateTime::parse(
+        &String::from(response.commit_time),
+        &time::format_description::well_known::Rfc3339,
+    )?;
     for write in response.write_results {
-        let update = time::OffsetDateTime::parse(&String::from(write.update_time), &time::format_description::well_known::Rfc3339)?;
+        let update = time::OffsetDateTime::parse(
+            &String::from(write.update_time),
+            &time::format_description::well_known::Rfc3339,
+        )?;
         ensure!(update <= commit, "security_epoch_commit_time_order");
     }
     budget.remaining(port)?;
