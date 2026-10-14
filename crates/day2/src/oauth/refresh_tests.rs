@@ -80,9 +80,24 @@ impl Port {
         let db = store::open(&self.db)?;
         let current = authority_state::current(&db)?;
         let mut document = current.document;
-        document.policy.as_mut().context("policy")?.operations.get_mut("list_events").context("list policy")?.observations.clear();
-        authority_state::apply(&self.local_runtime, &authority_state::LocalOperator::assert_local("admin")?,
-            &authority_state::ApplyAuthority { request_id:"narrow_during_refresh".into(), expected:Some(current.stamp), document })?;
+        document
+            .policy
+            .as_mut()
+            .context("policy")?
+            .operations
+            .get_mut("list_events")
+            .context("list policy")?
+            .observations
+            .clear();
+        authority_state::apply(
+            &self.local_runtime,
+            &authority_state::LocalOperator::assert_local("admin")?,
+            &authority_state::ApplyAuthority {
+                request_id: "narrow_during_refresh".into(),
+                expected: Some(current.stamp),
+                document,
+            },
+        )?;
         Ok(())
     }
 
@@ -115,7 +130,10 @@ impl effects::Hooks for Port {
         0x6381
     }
     fn wall_time(&self) -> Result<i64> {
-        ensure!(!self.fail_clock.load(SeqCst), "injected unavailable native clock");
+        ensure!(
+            !self.fail_clock.load(SeqCst),
+            "injected unavailable native clock"
+        );
         Ok(self.now.load(SeqCst))
     }
     fn monotonic(&self) -> Duration {
@@ -220,7 +238,9 @@ impl effects::Hooks for Port {
                 }
                 if matches!(
                     self.case,
-                    Case::PublicationRewind | Case::PublicationErrorRecovery | Case::PublicationClockUnavailable
+                    Case::PublicationRewind
+                        | Case::PublicationErrorRecovery
+                        | Case::PublicationClockUnavailable
                 ) {
                     self.now.store(270, SeqCst);
                 }
@@ -342,7 +362,9 @@ impl Authority for NativeAuthority {
         if call == 1 {
             if matches!(
                 self.port.case,
-                Case::PublicationRewind | Case::PublicationErrorRecovery | Case::PublicationClockUnavailable
+                Case::PublicationRewind
+                    | Case::PublicationErrorRecovery
+                    | Case::PublicationClockUnavailable
             ) {
                 self.port.now.store(265, SeqCst);
             }
@@ -367,8 +389,12 @@ impl Authority for NativeAuthority {
         if call == 1 && self.port.case == Case::PublicationErrorRecovery {
             self.port.now.store(270, SeqCst);
         }
-        if call == 1 && self.port.case == Case::PublicationClockUnavailable { self.port.fail_clock.store(true, SeqCst); }
-        if call == 1 && self.port.case == Case::PublicationFallbackRewind { self.port.now.store(265, SeqCst); }
+        if call == 1 && self.port.case == Case::PublicationClockUnavailable {
+            self.port.fail_clock.store(true, SeqCst);
+        }
+        if call == 1 && self.port.case == Case::PublicationFallbackRewind {
+            self.port.now.store(265, SeqCst);
+        }
         if call == 0
             && result.as_ref().is_ok_and(|value| *value)
             && self.port.case == Case::DispatchReturnRewind
@@ -823,7 +849,12 @@ fn compiled_calendar_refresh_publishes_versions_and_fences_failure_recovery() ->
                     );
                 }
                 if matches!(case, Case::PolicyChanged | Case::CustodyFailure) {
-                    assert_eq!(db.query_row("SELECT status FROM oauth_connection_slots", [], |r| r.get::<_,String>(0))?, "active", "generic authority/DB errors must not fabricate clock refusal");
+                    assert_eq!(
+                        db.query_row("SELECT status FROM oauth_connection_slots", [], |r| r
+                            .get::<_, String>(0))?,
+                        "active",
+                        "generic authority/DB errors must not fabricate clock refusal"
+                    );
                 }
             }
             assert_eq!(

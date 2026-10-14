@@ -599,7 +599,9 @@ pub(super) fn ensure_current(
             } else {
                 store::mark_uncertain(&db, &attempt)?;
                 let at = effects::wall_time()?;
-                if at < freshest || at >= expires_at { clock_refusal(&db, &context)?; }
+                if at < freshest || at >= expires_at {
+                    clock_refusal(&db, &context)?;
+                }
             }
             Ok(Resolution::unavailable("ReauthRequired"))
         }
