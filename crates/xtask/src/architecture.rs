@@ -5456,41 +5456,86 @@ mod tests {
 
     #[test]
     fn safe_connection_peer_socket_and_poll_effects_keep_exact_import_provenance() {
-        for (module,operation,kind) in [("nix::sys::socket","getsockopt","network"),("nix::poll","poll","scheduling")] {
+        for (module, operation, kind) in [
+            ("nix::sys::socket", "getsockopt", "network"),
+            ("nix::poll", "poll", "scheduling"),
+        ] {
             let target = format!("{module}::{operation}");
             for source in [
                 format!("fn f() {{ {module}::{operation}(input, option); }}"),
-                format!("use {module}::{operation} as observe; fn f() {{ observe(input, option); }}"),
-                format!("use {module} as adapter; fn f() {{ adapter::{operation}(input, option); }}"),
+                format!(
+                    "use {module}::{operation} as observe; fn f() {{ observe(input, option); }}"
+                ),
+                format!(
+                    "use {module} as adapter; fn f() {{ adapter::{operation}(input, option); }}"
+                ),
                 format!("use {module}::*; fn f() {{ {operation}(input, option); }}"),
             ] {
                 let findings = scan(&source);
-                let effects = findings.iter().filter(|f| f.kind == kind).collect::<Vec<_>>();
-                assert_eq!(effects.len(),1,"{source}: {findings:?}");
-                assert_eq!(effects[0].target,target);assert_eq!(effects[0].count,1);
-                let globs = findings.iter().filter(|f| f.kind == "effect-glob").collect::<Vec<_>>();
-                assert_eq!(globs.len(),usize::from(source.contains("::*")),"{source}: {findings:?}");
-                assert_eq!(findings.len(),effects.len()+globs.len(),"{source}: {findings:?}");
+                let effects = findings
+                    .iter()
+                    .filter(|f| f.kind == kind)
+                    .collect::<Vec<_>>();
+                assert_eq!(effects.len(), 1, "{source}: {findings:?}");
+                assert_eq!(effects[0].target, target);
+                assert_eq!(effects[0].count, 1);
+                let globs = findings
+                    .iter()
+                    .filter(|f| f.kind == "effect-glob")
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    globs.len(),
+                    usize::from(source.contains("::*")),
+                    "{source}: {findings:?}"
+                );
+                assert_eq!(
+                    findings.len(),
+                    effects.len() + globs.len(),
+                    "{source}: {findings:?}"
+                );
             }
         }
         for source in [
             "fn f() { nix::poll::PollFlags::POLLIN; nix::poll::PollTimeout::ZERO; nix::sys::socket::SockType::Stream; }",
             "mod local { pub fn poll() {} pub fn getsockopt() {} } fn f() { local::poll(); local::getsockopt(); }",
-        ] { assert!(scan(source).is_empty(),"{source}"); }
+        ] {
+            assert!(scan(source).is_empty(), "{source}");
+        }
     }
 
     #[test]
     fn connection_peer_imports_preserve_separate_type_and_value_namespaces() {
         for (module, suffix, target, kind) in [
-            ("nix", "sys::socket::getsockopt", "nix::sys::socket::getsockopt", "network"),
-            ("nix::sys", "socket::getsockopt", "nix::sys::socket::getsockopt", "network"),
-            ("nix::sys::socket", "getsockopt", "nix::sys::socket::getsockopt", "network"),
+            (
+                "nix",
+                "sys::socket::getsockopt",
+                "nix::sys::socket::getsockopt",
+                "network",
+            ),
+            (
+                "nix::sys",
+                "socket::getsockopt",
+                "nix::sys::socket::getsockopt",
+                "network",
+            ),
+            (
+                "nix::sys::socket",
+                "getsockopt",
+                "nix::sys::socket::getsockopt",
+                "network",
+            ),
             ("nix::poll", "poll", "nix::poll::poll", "scheduling"),
         ] {
             for source in [
-                format!("use {module} as observe; fn observe() {{}} fn f() {{ observe(); observe::{suffix}(input, option); }}"),
-                format!("fn observe() {{}} use {module} as observe; fn f() {{ observe(); observe::{suffix}(input, option); }}"),
-                format!("use {module} as r#observe; fn f() {{ fn observe() {{}} observe(); r#observe::{suffix}(input, option); }}"),
+                format!(
+                    "use {module} as observe; fn observe() {{}} fn f() {{ observe(); observe::{suffix}(input, option); }}"
+                ),
+                format!(
+                    "fn observe() {{}} use {module} as observe; fn f() {{ observe(); observe::{suffix}(input, option); }}"
+                ),
+                format!(
+                    "use {module} as r#observe; fn f() {{ fn observe() {{}} observe(); r#observe::{suffix}(input, option); }}"
+                ),
             ] {
                 let findings = scan(&source);
                 assert_eq!(findings.len(), 1, "{source}: {findings:?}");
@@ -5499,11 +5544,20 @@ mod tests {
                 assert_eq!(findings[0].count, 1, "{source}: {findings:?}");
             }
         }
-        for (target, kind) in [("nix::sys::socket::getsockopt", "network"), ("nix::poll::poll", "scheduling")] {
+        for (target, kind) in [
+            ("nix::sys::socket::getsockopt", "network"),
+            ("nix::poll::poll", "scheduling"),
+        ] {
             for source in [
-                format!("use {target} as observe; type observe = (); fn f() {{ observe(input, option); }}"),
-                format!("type observe = (); use {target} as observe; fn f() {{ observe(input, option); }}"),
-                format!("use {target} as r#observe; fn f() {{ type observe = (); r#observe(input, option); }}"),
+                format!(
+                    "use {target} as observe; type observe = (); fn f() {{ observe(input, option); }}"
+                ),
+                format!(
+                    "type observe = (); use {target} as observe; fn f() {{ observe(input, option); }}"
+                ),
+                format!(
+                    "use {target} as r#observe; fn f() {{ type observe = (); r#observe(input, option); }}"
+                ),
             ] {
                 let findings = scan(&source);
                 assert_eq!(findings.len(), 1, "{source}: {findings:?}");
@@ -5519,7 +5573,10 @@ mod tests {
             "use nix::poll::poll as observe; fn f() { use opaque::Poll as observe; observe(input, option); }",
         ] {
             let error = inventory(fixture(source).path()).unwrap_err().to_string();
-            assert!(error.contains("unresolved parent ambient imports"), "{source}: {error}");
+            assert!(
+                error.contains("unresolved parent ambient imports"),
+                "{source}: {error}"
+            );
         }
     }
 

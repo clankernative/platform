@@ -33,7 +33,10 @@ macro_rules! assert_secret_references {
 
 const _: () = {
     assert_consuming!(crate::security_epoch::NativeConnectionPeerObservation);
-    assert_not_impl!(crate::security_epoch::NativeConnectionPeerObservation, std::fmt::Debug);
+    assert_not_impl!(
+        crate::security_epoch::NativeConnectionPeerObservation,
+        std::fmt::Debug
+    );
     assert_not_impl!(crate::security_epoch::NativeConnectionPeerObservation, Send);
     assert_not_impl!(crate::security_epoch::NativeConnectionPeerObservation, Sync);
     assert_consuming!(crate::security_epoch::NativeNamespaceObservation);
