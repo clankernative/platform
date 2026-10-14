@@ -3,6 +3,9 @@
 # rejects introducing them before review, and the rule applies if they are present.
 
 disallowed-methods = [
+  { path = "ring::rand::generate", reason = "Entropy belongs to admitted adapters", allow-invalid = true },
+  { path = "ring::rand::SystemRandom::new", reason = "Only deterministic hashing is admitted in contract/kernel crates", allow-invalid = true },
+  { path = "ring::rand::SecureRandom::fill", reason = "Entropy belongs to admitted adapters", allow-invalid = true },
   { path = "std::time::SystemTime::now", reason = "Decision kernels take explicit facts and effects belong to admitted adapters" },
   { path = "std::time::Instant::now", reason = "Decision kernels take explicit facts and effects belong to admitted adapters" },
   { path = "std::env::var", reason = "Decision kernels take explicit facts and effects belong to admitted adapters" },
@@ -53,6 +56,8 @@ disallowed-methods = [
 ]
 
 disallowed-types = [
+  { path = "ring::rand::SecureRandom", reason = "Entropy belongs to admitted adapters", allow-invalid = true },
+  { path = "ring::rand::SystemRandom", reason = "Only deterministic hashing is admitted in contract/kernel crates", allow-invalid = true },
   { path = "std::time::SystemTime", reason = "Decision kernels take explicit facts and effects belong to admitted adapters" },
   { path = "std::time::Instant", reason = "Decision kernels take explicit facts and effects belong to admitted adapters" },
   { path = "std::fs::File", reason = "Decision kernels take explicit facts and effects belong to admitted adapters" },

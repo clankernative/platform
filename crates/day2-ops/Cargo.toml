@@ -36,7 +36,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "signal"] }
 # Maintenance: read the artifact layer of a digest-pinned app image (no xattr).
 flate2 = "1.1"
 tar = { version = "0.4", default-features = false }
-sha2 = "0.10"
+ring = "=0.17.14"
 
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "cookies"] }

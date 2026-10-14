@@ -11,9 +11,9 @@ use anyhow::{Result, ensure};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use day2_capabilities::oauth::ProviderCallbackRef;
 use day2_capabilities::{BindingRef, Digest};
+use ring::digest::{SHA256, digest};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
 
 #[derive(Clone, Copy, Serialize)]
 enum MaterialPurpose {
@@ -139,7 +139,7 @@ pub(super) fn pkce_challenge(verifier: &str) -> Result<String> {
                 .all(|byte| { byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) }),
         "invalid private PKCE verifier"
     );
-    Ok(URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes())))
+    Ok(URL_SAFE_NO_PAD.encode(digest(&SHA256, verifier.as_bytes()).as_ref()))
 }
 
 pub(super) struct PreparedCode {
@@ -1063,6 +1063,15 @@ fn install_schema_in(db: &Connection) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pkce_challenge_matches_rfc7636_appendix_b() -> Result<()> {
+        assert_eq!(
+            pkce_challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk")?,
+            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+        );
+        Ok(())
+    }
 
     #[test]
     fn custody_schema_reopens_current_and_refuses_other_versions() {

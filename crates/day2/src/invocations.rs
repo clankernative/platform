@@ -276,13 +276,12 @@ pub(crate) fn request(
         [&origin.context.invocation_id],
         |row| row.get(0),
     )?;
-    use sha2::{Digest, Sha256};
-    let mut hash = Sha256::new();
-    hash.update(parent_seed);
+    let mut hash = ring::digest::Context::new(&ring::digest::SHA256);
+    hash.update(&parent_seed);
     hash.update(id.as_bytes());
     connection.execute(
         "INSERT INTO day2_id_seeds VALUES(?1,?2)",
-        params![id, hash.finalize().to_vec()],
+        params![id, hash.finish().as_ref().to_vec()],
     )?;
     connection.execute(
         "INSERT INTO day2_command_requests VALUES(?1,?2,?3,?4,?5,?6,?7)",

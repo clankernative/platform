@@ -5,7 +5,6 @@ use super::{AdapterError, PreparedCall, ResponseProfile, WireRequest, WireRespon
 use day2_capabilities::integrations::LiveConnection;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -27,7 +26,7 @@ pub(super) fn validate_url(url: &str, expected: &str) -> Result<(), AdapterError
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
         })
-        || format!("{:x}", Sha256::digest(url.as_bytes())) != expected
+        || crate::digest_hex(url.as_bytes()) != expected
     {
         return Err(AdapterError::CredentialUnavailable);
     }
@@ -149,7 +148,7 @@ mod tests {
                 },
             },
             &ResourceTarget::SlackWebhookDestination {
-                endpoint_sha256: format!("{:x}", Sha256::digest(URL.as_bytes())),
+                endpoint_sha256: crate::digest_hex(URL.as_bytes()),
             },
             &json!({"handle":"opaque","text":"CI <!channel> & test"}).to_string(),
             65536,
@@ -160,7 +159,7 @@ mod tests {
 
     #[test]
     fn exact_secret_destination_is_required_before_dispatch() {
-        let digest = format!("{:x}", Sha256::digest(URL.as_bytes()));
+        let digest = crate::digest_hex(URL.as_bytes());
         assert!(validate_url(URL, &digest).is_ok());
         for url in [
             "https://evil.example/services/T/B/secret",
@@ -170,7 +169,7 @@ mod tests {
             "https://hooks.slack.com/services/T/B/../secret",
             "https://hooks.slack.com/services/T/B/%61",
         ] {
-            assert!(validate_url(url, &format!("{:x}", Sha256::digest(url.as_bytes()))).is_err());
+            assert!(validate_url(url, &crate::digest_hex(url.as_bytes())).is_err());
         }
         let socket = Socket {
             calls: Mutex::new(0),

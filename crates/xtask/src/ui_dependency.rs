@@ -2,7 +2,6 @@ use anyhow::{Context, Result, ensure};
 use day2::{automation::Request, build_dependencies};
 use flate2::read::GzDecoder;
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use std::{
     fs,
     io::Read,
@@ -255,7 +254,7 @@ fn set_mode(_path: &Path, _mode: u32) -> Result<()> {
 }
 
 fn sha(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    day2::digest(bytes).trim_start_matches("sha256:").to_owned()
 }
 
 fn extract_archive(bytes: &[u8], destination: &Path) -> Result<()> {

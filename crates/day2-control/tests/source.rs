@@ -1,7 +1,7 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use day2_control::{Digest, GitOid, source::*};
+use ring::digest::{Context as DigestContext, SHA1_FOR_LEGACY_USE_ONLY};
 use serde_json::{Value, json};
-use sha1::{Digest as _, Sha1};
 use std::{
     collections::{BTreeMap, VecDeque},
     io::{Read, Write},
@@ -205,10 +205,14 @@ fn commit_reply() -> Reply {
     Reply::json(json!({"sha":COMMIT,"tree":{"sha":TREE}}))
 }
 fn blob_oid(bytes: &[u8]) -> String {
-    let mut hash = Sha1::new();
-    hash.update(format!("blob {}\0", bytes.len()));
+    let mut hash = DigestContext::new(&SHA1_FOR_LEGACY_USE_ONLY);
+    hash.update(format!("blob {}\0", bytes.len()).as_bytes());
     hash.update(bytes);
-    format!("{:x}", hash.finalize())
+    hash.finish()
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 fn entry(path: &str, bytes: &[u8]) -> Value {
     json!({"path":path,"mode":"100644","type":"blob","sha":blob_oid(bytes),"size":bytes.len()})

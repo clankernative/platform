@@ -12,9 +12,8 @@
 //! when it is semantically identical, so only the host — which holds the original
 //! bytes — can check it.
 
-use hmac::{Hmac, Mac};
+use ring::hmac;
 use serde_json::Value;
-use sha2::Sha256;
 use std::collections::BTreeMap;
 
 /// Why a delivery was refused. Every refusal is typed: a webhook endpoint that
@@ -185,17 +184,15 @@ impl Scheme {
         };
         let offered = signature.strip_prefix(prefix).ok_or(Refused::Signature)?;
         let offered = decode_hex(offered).ok_or(Refused::Signature)?;
-        let mut mac =
-            Hmac::<Sha256>::new_from_slice(secret.as_bytes()).map_err(|_| Refused::Untrusted)?;
-        if let Some(timestamp) = signed_timestamp {
-            mac.update(b"v0:");
-            mac.update(timestamp.as_bytes());
-            mac.update(b":");
-        }
-        mac.update(body);
-        // Constant time: verify_slice compares without an early exit, so a wrong
-        // signature costs the same as a right one.
-        mac.verify_slice(&offered).map_err(|_| Refused::Untrusted)
+        let key = hmac::Key::new(hmac::HMAC_SHA256, secret.as_bytes());
+        let signed_body = signed_timestamp.map(|timestamp| {
+            let mut message = format!("v0:{timestamp}:").into_bytes();
+            message.extend_from_slice(body);
+            message
+        });
+        // Ring verifies the tag in constant time, without an early byte mismatch exit.
+        hmac::verify(&key, signed_body.as_deref().unwrap_or(body), &offered)
+            .map_err(|_| Refused::Untrusted)
     }
 }
 
@@ -661,9 +658,9 @@ mod tests {
     #[test]
     fn a_signature_from_another_secret_is_refused() {
         // A correctly formed signature, correctly computed — under the wrong key.
-        let mut mac = Hmac::<Sha256>::new_from_slice(b"another-workspaces-secret").unwrap();
-        mac.update(format!("v0:{TIMESTAMP}:{BODY}").as_bytes());
-        let forged = format!("v0={:x}", mac.finalize().into_bytes());
+        let key = hmac::Key::new(hmac::HMAC_SHA256, b"another-workspaces-secret");
+        let tag = hmac::sign(&key, format!("v0:{TIMESTAMP}:{BODY}").as_bytes());
+        let forged = format!("v0={}", crate::hex(tag.as_ref()));
         assert_eq!(
             verify(&forged, BODY.as_bytes(), NOW),
             Err(Refused::Untrusted)

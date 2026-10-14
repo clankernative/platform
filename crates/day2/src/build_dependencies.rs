@@ -1,7 +1,6 @@
 //! Reviewed, bounded build-time dependency bundle for Platform-owned tools.
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -164,7 +163,7 @@ fn installed_with_pin(platform_root: &Path, pin: TargetPin) -> Result<InstalledB
 }
 
 fn sha(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    crate::digest_hex(bytes)
 }
 
 fn read_regular(path: &Path, limit: u64) -> Result<Vec<u8>> {
