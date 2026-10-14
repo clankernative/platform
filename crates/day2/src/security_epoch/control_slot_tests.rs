@@ -1263,3 +1263,63 @@ fn lost_original_creator_fixture_refuses_even_absent_reservation_and_known_claim
     // These are controlled context invalidation/expiry tests. Actual original
     // FD loss/P3 durability remain the separate native producer's qualification.
 }
+
+#[test]
+fn boxed_observed_receipts_keep_exact_unboxed_wire_bytes_for_both_stages() {
+    #[derive(serde::Serialize)]
+    struct ObservedWire<'a> {
+        state: &'static str,
+        control_lineage: &'a Attempt,
+        receipt: &'a super::kernel::Receipt,
+        settlement: &'a Settlement,
+    }
+    let (selection, create) = fixture();
+    let complete = completion(&create);
+    for core in [&create, &complete] {
+        let prepared = Slot::prepared(core.clone());
+        let may = prepared
+            .claim_data(
+                &selection,
+                &version(1),
+                attempt(core, version(1), AttemptOrdinal::first(), b"wire-fixture"),
+            )
+            .unwrap();
+        let SlotState::MayHaveBeenSent { attempt: lineage } = &may.state else {
+            unreachable!()
+        };
+        let receipt = core.counter.receipt().unwrap();
+        let settled = may
+            .settle_data(
+                &selection,
+                &version(2),
+                SettlementCore {
+                    logical: core.digest().unwrap(),
+                    expected: version(2),
+                    control_attempt: lineage.id.clone(),
+                    receipt: receipt.digest().unwrap(),
+                },
+                receipt,
+            )
+            .unwrap();
+        let SlotState::Observed {
+            control_lineage,
+            receipt,
+            settlement,
+        } = &settled.state
+        else {
+            unreachable!()
+        };
+        let expected = serde_json::to_vec(&ObservedWire {
+            state: "observed",
+            control_lineage,
+            receipt: receipt.as_ref(),
+            settlement,
+        })
+        .unwrap();
+        assert_eq!(serde_json::to_vec(&settled.state).unwrap(), expected);
+        assert_eq!(
+            crate::json::decode::<SlotState>(&expected).unwrap(),
+            settled.state
+        );
+    }
+}

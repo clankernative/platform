@@ -91,7 +91,7 @@ pub(super) fn cas_data(
             selection,
             &before.version,
             settlement.core.clone(),
-                receipt.as_ref().clone(),
+            receipt.as_ref().clone(),
         )?,
         _ => anyhow::bail!("control_slot_cas_transition_refused"),
     };
