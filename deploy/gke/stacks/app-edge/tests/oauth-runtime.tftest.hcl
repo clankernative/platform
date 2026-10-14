@@ -2,11 +2,6 @@ mock_provider "google" {}
 mock_provider "kubernetes" {}
 mock_provider "cloudflare" {}
 
-override_resource {
-  target = google_service_account.app_calls[0]
-  values = { unique_id = "100000000000000000007" }
-}
-
 variables {
   project_id              = "example-tools"
   project_number          = "123456789012"
@@ -48,7 +43,7 @@ override_data {
 
 override_resource {
   target = google_service_account.app_calls
-  values = { email = "app-native@example-tools.iam.gserviceaccount.com", name = "projects/example-tools/serviceAccounts/app-native@example-tools.iam.gserviceaccount.com" }
+  values = { email = "app-native@example-tools.iam.gserviceaccount.com", name = "projects/example-tools/serviceAccounts/app-native@example-tools.iam.gserviceaccount.com", unique_id = "100000000000000000007" }
 }
 
 run "one_native_identity_with_exact_read_and_key_grants" {
