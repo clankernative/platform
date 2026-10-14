@@ -612,7 +612,13 @@ pub(super) fn admit(
             && p.passed == preparation_effects()
             && p.timings_ms.keys().cloned().collect::<BTreeSet<_>>() == p.passed
             && p.fixtures.keys().cloned().collect::<BTreeSet<_>>()
-                == ["reports".into(), "reports-probe".into(), "relational".into(), "oauth-calendar".into()].into(),
+                == [
+                    "reports".into(),
+                    "reports-probe".into(),
+                    "relational".into(),
+                    "oauth-calendar".into()
+                ]
+                .into(),
         "missing/foreign/incomplete same-source native Mac preparation"
     );
     ensure!(
@@ -741,9 +747,9 @@ pub(super) mod tests {
         prepared.identity.workspace = "/Users/runner/work/platform/platform".into();
         prepared.identity.snapshot = "mac-snapshot".into();
         prepared.auxiliaries.clear();
-        prepared
-            .fixtures
-            .retain(|name, _| ["reports", "reports-probe", "relational", "oauth-calendar"].contains(&name.as_str()));
+        prepared.fixtures.retain(|name, _| {
+            ["reports", "reports-probe", "relational", "oauth-calendar"].contains(&name.as_str())
+        });
         prepared.passed = preparation_effects();
         prepared.timings_ms = prepared.passed.iter().map(|s| (s.clone(), 100)).collect();
         let mut native_compiler: BuildIdentity =
