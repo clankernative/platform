@@ -514,6 +514,18 @@ jobs:
           path: /tmp/day2-verification
       - run: tar -xzf /tmp/day2-verification/day2-verification.tgz -C "$GITHUB_WORKSPACE/.."
       - run: target/debug/xtask configure-tofu
+      - name: Retain admitted current preparation before EOF observations
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: day2-eof-prepared-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            artifacts/ci-prepared.json
+            artifacts/ci-test-build-cache.json
+            artifacts/ci-test-binaries.json
+            artifacts/all-verification-cache.json
+            target/debug/xtask.d
+          if-no-files-found: error
+          retention-days: 14
       - name: Observe complete parallel runtime boundary 1
         id: eof_1
         run: target/debug/xtask verify-shard ${{ matrix.shard }}
