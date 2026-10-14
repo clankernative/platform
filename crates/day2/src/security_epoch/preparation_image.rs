@@ -340,7 +340,7 @@ pub(super) fn schema_contract(connection: &Connection) -> Result<Digest> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use std::time::Duration;
 
@@ -432,7 +432,7 @@ mod tests {
 
     // Synthetic host-boundary contract DATA; no compiler/artifact admission,
     // actual native role, file ownership or Linux volume qualification.
-    fn runtime() -> (tempfile::TempDir, crate::store::Runtime) {
+    pub(in crate::security_epoch) fn runtime() -> (tempfile::TempDir, crate::store::Runtime) {
         let directory = tempfile::tempdir().unwrap();
         let instance_path = directory.path().join("instance.json");
         std::fs::write(
@@ -467,7 +467,7 @@ mod tests {
         (directory, runtime)
     }
 
-    fn incarnations() -> Incarnations {
+    pub(in crate::security_epoch) fn incarnations() -> Incarnations {
         Incarnations {
             record: Digest::new(b"record"),
             database: Digest::new(b"database"),
@@ -475,7 +475,7 @@ mod tests {
         }
     }
 
-    fn policy(runtime: &crate::store::Runtime, store: &EpochStore) -> InitialBootstrapPolicy {
+    pub(in crate::security_epoch) fn policy(runtime: &crate::store::Runtime, store: &EpochStore) -> InitialBootstrapPolicy {
         let mut memory = FreshMemoryDatabase::empty(&mut acquisition()).unwrap();
         let tx = memory.connection.transaction().unwrap();
         runtime.initialize_in_transaction(&tx).unwrap();

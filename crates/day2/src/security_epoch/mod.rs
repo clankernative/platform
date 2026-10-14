@@ -31,6 +31,8 @@ pub(crate) use native_clock::NativeAcquisition;
 pub(crate) use native_connection_peer::NativeConnectionPeerObservation;
 pub(crate) use native_identity::NativeProcessObservation;
 pub(crate) use native_namespace::NativeNamespaceObservation;
+pub(crate) use storage_authority::{NativeOriginalPreparationOutcome, OriginalCreatorFd,
+    RefusedBeforeAttempt, RefusedOriginalPreparation};
 pub(crate) use storage_authority::NativeStorageCreationAuthority;
 
 #[cfg(test)]

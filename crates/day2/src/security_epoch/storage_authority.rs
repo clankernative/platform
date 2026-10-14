@@ -8,6 +8,10 @@ use day2_capabilities::{Digest, security_epoch::{EpochStore, bootstrap::InitialB
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fs::File, marker::PhantomData, rc::Rc, thread::ThreadId};
 
+mod preparation;
+pub(crate) use preparation::{NativeOriginalPreparationOutcome, OriginalCreatorFd,
+    RefusedBeforeAttempt, RefusedOriginalPreparation};
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SelectionData {
