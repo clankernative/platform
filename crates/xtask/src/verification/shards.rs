@@ -452,10 +452,10 @@ fn build_auxiliaries(
         .filter(|line| !line.is_empty())
     {
         let value: serde_json::Value = day2::json::decode(line)?;
-        if value["reason"] == "compiler-message" {
-            if let Some(rendered) = value["message"]["rendered"].as_str() {
-                print!("{rendered}");
-            }
+        if value["reason"] == "compiler-message"
+            && let Some(rendered) = value["message"]["rendered"].as_str()
+        {
+            print!("{rendered}");
         }
         if value["reason"] == "build-finished" {
             finished = value["success"] == true;
