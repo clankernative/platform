@@ -40,7 +40,10 @@ impl ReviewedFileLayout {
                 selection.seed().incarnations.clone(),
                 acquisition,
             )?;
-            ensure!(image.core() == selection.seed(), "original_file_seed_selection");
+            ensure!(
+                image.core() == selection.seed(),
+                "original_file_seed_selection"
+            );
             let proposal = OriginalFileProposal {
                 selection: selection.digest().clone(),
                 store: image.store().clone(),
@@ -92,12 +95,12 @@ enum PreparationPhase {
 /// These are owning native states, not wire responses. There is no promotion,
 /// retry, descriptor getter, renewal or permission conversion on a refusal.
 pub(crate) enum NativeOriginalPreparationOutcome {
-    RefusedBeforeAttempt(RefusedBeforeAttempt),
+    RefusedBeforeAttempt(BeforeAttemptRefusal),
     Prepared(OriginalCreatorFd),
     RefusedAfterAttempt(RefusedOriginalPreparation),
 }
 
-pub(crate) struct RefusedBeforeAttempt {
+pub(crate) struct BeforeAttemptRefusal {
     authority: NativeStorageCreationAuthority,
     proposal: OriginalFileProposal,
     phase: PreparationPhase,
@@ -132,7 +135,7 @@ struct FileIdentity {
 
 /// Sole owners live outside every fallible stage. Once a descriptor returns,
 /// assigning it here is infallible and precedes all post-create checks.
-struct PreparationCoordinator {
+pub(crate) struct PreparationCoordinator {
     authority: NativeStorageCreationAuthority,
     proposal: OriginalFileProposal,
     file: Option<File>,
@@ -155,14 +158,14 @@ pub(super) fn prepare_original_file(
     let result = owner.prepare(plan, acquisition);
     match result {
         Ok(()) => match (owner.file, owner.identity) {
-            (Some(file), Some(identity)) => NativeOriginalPreparationOutcome::Prepared(
-                OriginalCreatorFd {
+            (Some(file), Some(identity)) => {
+                NativeOriginalPreparationOutcome::Prepared(OriginalCreatorFd {
                     authority: owner.authority,
                     proposal: owner.proposal,
                     file,
                     identity,
-                },
-            ),
+                })
+            }
             (file, _) => {
                 owner.authority.refuse_preparation(acquisition);
                 NativeOriginalPreparationOutcome::RefusedAfterAttempt(RefusedOriginalPreparation {
@@ -178,7 +181,7 @@ pub(super) fn prepare_original_file(
             // evidence is sufficient and contains no path, token or SQL data.
             owner.authority.refuse_preparation(acquisition);
             if owner.phase == PreparationPhase::BeforeAttempt {
-                NativeOriginalPreparationOutcome::RefusedBeforeAttempt(RefusedBeforeAttempt {
+                NativeOriginalPreparationOutcome::RefusedBeforeAttempt(BeforeAttemptRefusal {
                     authority: owner.authority,
                     proposal: owner.proposal,
                     phase: owner.phase,
@@ -196,7 +199,11 @@ pub(super) fn prepare_original_file(
 }
 
 impl PreparationCoordinator {
-    fn validate_plan(&mut self, plan: &ReviewedFileLayout, acquisition: &mut NativeAcquisition) -> Result<()> {
+    fn validate_plan(
+        &mut self,
+        plan: &ReviewedFileLayout,
+        acquisition: &mut NativeAcquisition,
+    ) -> Result<()> {
         self.authority.check_current(acquisition)?;
         ensure!(
             self.proposal.selection == *self.authority.selection.digest()
@@ -211,138 +218,200 @@ impl PreparationCoordinator {
         self.authority.check_current(acquisition)
     }
 
-    #[cfg(not(target_os = "linux"))]
-    fn prepare(&mut self, plan: &ReviewedFileLayout, acquisition: &mut NativeAcquisition) -> Result<()> {
+    fn prepare(
+        &mut self,
+        plan: &ReviewedFileLayout,
+        acquisition: &mut NativeAcquisition,
+    ) -> Result<()> {
         self.validate_plan(plan, acquisition)?;
-        anyhow::bail!("original_file_platform_unsupported")
-    }
-
-    #[cfg(target_os = "linux")]
-    fn prepare(&mut self, plan: &ReviewedFileLayout, acquisition: &mut NativeAcquisition) -> Result<()> {
-        use rustix::fs::{Mode, OFlags, ResolveFlags};
-        self.validate_plan(plan, acquisition)?;
-        // Set the attempted phase BEFORE dispatch. A syscall error does not
-        // authorize a retry or assert that no filesystem object was created.
-        self.phase = PreparationPhase::ExclusiveCreate;
-        let descriptor = rustix::fs::openat2(
-            &self.authority.directory,
-            INITIAL_FILE,
-            OFlags::RDWR | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC
-                | OFlags::NOFOLLOW | OFlags::NONBLOCK,
-            Mode::from_raw_mode(0o600),
-            ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS
-                | ResolveFlags::NO_MAGICLINKS | ResolveFlags::NO_XDEV,
-        )?;
-        self.file = Some(File::from(descriptor));
-        #[cfg(test)]
-        plan.fixture_cut(self.phase)?;
-        self.phase = PreparationPhase::Identity;
-        self.authority.check_current(acquisition)?;
-        let file = self.file.as_ref().ok_or_else(|| anyhow::anyhow!("original_file_owner_missing"))?;
-        self.identity = Some(self.observe_file(file, 0)?);
-        self.check_file(0, acquisition)?;
-
-        self.phase = PreparationPhase::Write;
-        let bytes = plan.image.bytes();
-        let mut offset = 0;
-        while offset < bytes.len() {
-            self.check_file(offset, acquisition)?;
-            let end = (offset + IO_CHUNK_BYTES).min(bytes.len());
-            let written = rustix::io::pwrite(self.file_ref()?, &bytes[offset..end], offset as u64)?;
-            ensure!(written > 0 && written <= end - offset, "original_file_write_progress");
-            offset += written;
-            self.check_file(offset, acquisition)?;
+        #[cfg(not(target_os = "linux"))]
+        {
+            anyhow::bail!("original_file_platform_unsupported")
+        }
+        #[cfg(target_os = "linux")]
+        {
+            use rustix::fs::{Mode, OFlags, ResolveFlags};
+            // Set the attempted phase BEFORE dispatch. A syscall error does not
+            // authorize a retry or assert that no filesystem object was created.
+            self.phase = PreparationPhase::ExclusiveCreate;
+            let descriptor = rustix::fs::openat2(
+                &self.authority.directory,
+                INITIAL_FILE,
+                OFlags::RDWR
+                    | OFlags::CREATE
+                    | OFlags::EXCL
+                    | OFlags::CLOEXEC
+                    | OFlags::NOFOLLOW
+                    | OFlags::NONBLOCK,
+                Mode::from_raw_mode(0o600),
+                ResolveFlags::BENEATH
+                    | ResolveFlags::NO_SYMLINKS
+                    | ResolveFlags::NO_MAGICLINKS
+                    | ResolveFlags::NO_XDEV,
+            )?;
+            self.file = Some(File::from(descriptor));
             #[cfg(test)]
             plan.fixture_cut(self.phase)?;
-        }
-        self.phase = PreparationPhase::FileSync;
-        self.check_file(bytes.len(), acquisition)?;
-        rustix::fs::fsync(self.file_ref()?)?;
-        self.check_file(bytes.len(), acquisition)?;
-        #[cfg(test)]
-        plan.fixture_cut(self.phase)?;
-        self.phase = PreparationPhase::DirectorySync;
-        rustix::fs::fsync(&self.authority.directory)?;
-        self.check_file(bytes.len(), acquisition)?;
-        #[cfg(test)]
-        plan.fixture_cut(self.phase)?;
+            self.phase = PreparationPhase::Identity;
+            self.authority.check_current(acquisition)?;
+            let file = self
+                .file
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("original_file_owner_missing"))?;
+            self.identity = Some(self.observe_file(file, 0)?);
+            self.check_file(0, acquisition)?;
 
-        self.phase = PreparationPhase::Readback;
-        let mut readback = vec![0_u8; bytes.len()];
-        let mut offset = 0;
-        while offset < readback.len() {
+            self.phase = PreparationPhase::Write;
+            let bytes = plan.image.bytes();
+            let mut offset = 0;
+            while offset < bytes.len() {
+                self.check_file(offset, acquisition)?;
+                let end = (offset + IO_CHUNK_BYTES).min(bytes.len());
+                let written =
+                    rustix::io::pwrite(self.file_ref()?, &bytes[offset..end], offset as u64)?;
+                ensure!(
+                    written > 0 && written <= end - offset,
+                    "original_file_write_progress"
+                );
+                offset += written;
+                self.check_file(offset, acquisition)?;
+                #[cfg(test)]
+                plan.fixture_cut(self.phase)?;
+            }
+            self.phase = PreparationPhase::FileSync;
             self.check_file(bytes.len(), acquisition)?;
-            let end = (offset + IO_CHUNK_BYTES).min(readback.len());
-            let read = rustix::io::pread(self.file_ref()?, &mut readback[offset..end], offset as u64)?;
-            ensure!(read > 0 && read <= end - offset, "original_file_read_progress");
-            offset += read;
+            rustix::fs::fsync(self.file_ref()?)?;
             self.check_file(bytes.len(), acquisition)?;
+            #[cfg(test)]
+            plan.fixture_cut(self.phase)?;
+            self.phase = PreparationPhase::DirectorySync;
+            rustix::fs::fsync(&self.authority.directory)?;
+            self.check_file(bytes.len(), acquisition)?;
+            #[cfg(test)]
+            plan.fixture_cut(self.phase)?;
+
+            self.phase = PreparationPhase::Readback;
+            let mut readback = vec![0_u8; bytes.len()];
+            let mut offset = 0;
+            while offset < readback.len() {
+                self.check_file(bytes.len(), acquisition)?;
+                let end = (offset + IO_CHUNK_BYTES).min(readback.len());
+                let read =
+                    rustix::io::pread(self.file_ref()?, &mut readback[offset..end], offset as u64)?;
+                ensure!(
+                    read > 0 && read <= end - offset,
+                    "original_file_read_progress"
+                );
+                offset += read;
+                self.check_file(bytes.len(), acquisition)?;
+            }
+            ensure!(readback == bytes, "original_file_exact_readback");
+            #[cfg(test)]
+            plan.fixture_cut(self.phase)?;
+            self.phase = PreparationPhase::Decode;
+            // Equality of all bytes precedes the trusted memory-only decoder.
+            let decoded = plan.image.decode_exact_readback(&readback, acquisition)?;
+            drop(decoded);
+            #[cfg(test)]
+            plan.fixture_cut(self.phase)?;
+            self.phase = PreparationPhase::FinalCheck;
+            self.validate_plan(plan, acquisition)?;
+            self.check_file(bytes.len(), acquisition)
         }
-        ensure!(readback == bytes, "original_file_exact_readback");
-        #[cfg(test)]
-        plan.fixture_cut(self.phase)?;
-        self.phase = PreparationPhase::Decode;
-        // Equality of all bytes precedes the trusted memory-only decoder.
-        let decoded = plan.image.decode_exact_readback(&readback, acquisition)?;
-        drop(decoded);
-        #[cfg(test)]
-        plan.fixture_cut(self.phase)?;
-        self.phase = PreparationPhase::FinalCheck;
-        self.validate_plan(plan, acquisition)?;
-        self.check_file(bytes.len(), acquisition)
     }
 
-    #[cfg(target_os = "linux")]
     fn file_ref(&self) -> Result<&File> {
-        self.file.as_ref().ok_or_else(|| anyhow::anyhow!("original_file_owner_missing"))
+        self.file
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("original_file_owner_missing"))
     }
 
-    #[cfg(target_os = "linux")]
     fn observe_file(&self, file: &File, expected_length: usize) -> Result<FileIdentity> {
-        use rustix::fs::{AtFlags, FileType, StatxFlags};
-        let mask = StatxFlags::TYPE | StatxFlags::MODE | StatxFlags::NLINK
-            | StatxFlags::UID | StatxFlags::INO | StatxFlags::SIZE | StatxFlags::MNT_ID;
-        let observed = rustix::fs::statx(file, "", AtFlags::EMPTY_PATH, mask)?;
-        let directory = rustix::fs::statx(&self.authority.directory, "", AtFlags::EMPTY_PATH, StatxFlags::UID)?;
-        ensure!(
-            observed.stx_mask & mask.bits() == mask.bits()
-                && directory.stx_mask & StatxFlags::UID.bits() != 0
-                && FileType::from_raw_mode(u32::from(observed.stx_mode)) == FileType::RegularFile
-                && observed.stx_mode & 0o7777 == 0o600
-                && observed.stx_uid == directory.stx_uid
-                && observed.stx_nlink == 1 && observed.stx_ino != 0
-                && observed.stx_size == expected_length as u64
-                && observed.stx_dev_major == self.authority.identity.device_major
-                && observed.stx_dev_minor == self.authority.identity.device_minor
-                && observed.stx_mnt_id == self.authority.identity.mount,
-            "original_file_identity_required"
-        );
-        Ok(FileIdentity {
-            device_major: observed.stx_dev_major,
-            device_minor: observed.stx_dev_minor,
-            inode: observed.stx_ino,
-            mount: observed.stx_mnt_id,
-            uid: observed.stx_uid,
-        })
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (file, expected_length);
+            anyhow::bail!("original_file_platform_unsupported")
+        }
+        #[cfg(target_os = "linux")]
+        {
+            use rustix::fs::{AtFlags, FileType, StatxFlags};
+            let mask = StatxFlags::TYPE
+                | StatxFlags::MODE
+                | StatxFlags::NLINK
+                | StatxFlags::UID
+                | StatxFlags::INO
+                | StatxFlags::SIZE
+                | StatxFlags::MNT_ID;
+            let observed = rustix::fs::statx(file, "", AtFlags::EMPTY_PATH, mask)?;
+            let directory = rustix::fs::statx(
+                &self.authority.directory,
+                "",
+                AtFlags::EMPTY_PATH,
+                StatxFlags::UID,
+            )?;
+            ensure!(
+                observed.stx_mask & mask.bits() == mask.bits()
+                    && directory.stx_mask & StatxFlags::UID.bits() != 0
+                    && FileType::from_raw_mode(u32::from(observed.stx_mode))
+                        == FileType::RegularFile
+                    && observed.stx_mode & 0o7777 == 0o600
+                    && observed.stx_uid == directory.stx_uid
+                    && observed.stx_nlink == 1
+                    && observed.stx_ino != 0
+                    && observed.stx_size == expected_length as u64
+                    && observed.stx_dev_major == self.authority.identity.device_major
+                    && observed.stx_dev_minor == self.authority.identity.device_minor
+                    && observed.stx_mnt_id == self.authority.identity.mount,
+                "original_file_identity_required"
+            );
+            Ok(FileIdentity {
+                device_major: observed.stx_dev_major,
+                device_minor: observed.stx_dev_minor,
+                inode: observed.stx_ino,
+                mount: observed.stx_mnt_id,
+                uid: observed.stx_uid,
+            })
+        }
     }
 
-    #[cfg(target_os = "linux")]
-    fn check_file(&mut self, expected_length: usize, acquisition: &mut NativeAcquisition) -> Result<()> {
-        use rustix::fs::{AtFlags, StatxFlags};
-        self.authority.check_current(acquisition)?;
-        let observed = self.observe_file(self.file_ref()?, expected_length)?;
-        ensure!(self.identity.as_ref() == Some(&observed), "original_file_identity_changed");
-        // Join the fixed leaf to the SAME anchor without opening or adopting it.
-        // The issuer must separately qualify the physical volume/anchor root.
-        let mask = StatxFlags::INO | StatxFlags::MNT_ID;
-        let named = rustix::fs::statx(&self.authority.directory, INITIAL_FILE, AtFlags::SYMLINK_NOFOLLOW, mask)?;
-        ensure!(
-            named.stx_mask & mask.bits() == mask.bits()
-                && named.stx_ino == observed.inode && named.stx_mnt_id == observed.mount
-                && named.stx_dev_major == observed.device_major && named.stx_dev_minor == observed.device_minor,
-            "original_file_leaf_changed"
-        );
-        self.authority.check_current(acquisition)
+    fn check_file(
+        &mut self,
+        expected_length: usize,
+        acquisition: &mut NativeAcquisition,
+    ) -> Result<()> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (expected_length, acquisition);
+            anyhow::bail!("original_file_platform_unsupported")
+        }
+        #[cfg(target_os = "linux")]
+        {
+            use rustix::fs::{AtFlags, StatxFlags};
+            self.authority.check_current(acquisition)?;
+            let observed = self.observe_file(self.file_ref()?, expected_length)?;
+            ensure!(
+                self.identity.as_ref() == Some(&observed),
+                "original_file_identity_changed"
+            );
+            // Join the fixed leaf to the SAME anchor without opening or adopting it.
+            // The issuer must separately qualify the physical volume/anchor root.
+            let mask = StatxFlags::INO | StatxFlags::MNT_ID;
+            let named = rustix::fs::statx(
+                &self.authority.directory,
+                INITIAL_FILE,
+                AtFlags::SYMLINK_NOFOLLOW,
+                mask,
+            )?;
+            ensure!(
+                named.stx_mask & mask.bits() == mask.bits()
+                    && named.stx_ino == observed.inode
+                    && named.stx_mnt_id == observed.mount
+                    && named.stx_dev_major == observed.device_major
+                    && named.stx_dev_minor == observed.device_minor,
+                "original_file_leaf_changed"
+            );
+            self.authority.check_current(acquisition)
+        }
     }
 }
 
@@ -350,7 +419,10 @@ impl PreparationCoordinator {
 impl ReviewedFileLayout {
     // A deterministic local error cut, not a provider or kernel failure proof.
     fn fixture_cut(&self, phase: PreparationPhase) -> Result<()> {
-        ensure!(self.fixture_refusal != Some(phase), "original_file_fixture_refusal");
+        ensure!(
+            self.fixture_refusal != Some(phase),
+            "original_file_fixture_refusal"
+        );
         Ok(())
     }
 }

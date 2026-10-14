@@ -4,13 +4,18 @@
 
 use super::{firestore::Budget, native_clock::NativeAcquisition, seed_core::OriginalSeedCore};
 use anyhow::{Result, ensure};
-use day2_capabilities::{Digest, security_epoch::{EpochStore, bootstrap::InitialBootstrapPolicy}};
+use day2_capabilities::{
+    Digest,
+    security_epoch::{EpochStore, bootstrap::InitialBootstrapPolicy},
+};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fs::File, marker::PhantomData, rc::Rc, thread::ThreadId};
 
 mod preparation;
-pub(crate) use preparation::{NativeOriginalPreparationOutcome, OriginalCreatorFd,
-    RefusedBeforeAttempt, RefusedOriginalPreparation};
+pub(crate) use preparation::{
+    BeforeAttemptRefusal, NativeOriginalPreparationOutcome, OriginalCreatorFd,
+    PreparationCoordinator, RefusedOriginalPreparation,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -33,10 +38,16 @@ impl ReviewedStorageSelection {
         let value: serde_json::Value = crate::json::decode(bytes)?;
         ensure!(value.is_object(), "storage_selection_object_required");
         for field in ["policy", "store", "seed"] {
-            ensure!(value.get(field).is_some_and(serde_json::Value::is_object), "storage_selection_record_object_required");
+            ensure!(
+                value.get(field).is_some_and(serde_json::Value::is_object),
+                "storage_selection_record_object_required"
+            );
         }
         let data: SelectionData = serde_json::from_value(value)?;
-        data.policy.validate(&BTreeMap::from([(data.policy.epoch_store.id.clone(), data.store.clone())]))?;
+        data.policy.validate(&BTreeMap::from([(
+            data.policy.epoch_store.id.clone(),
+            data.store.clone(),
+        )]))?;
         data.seed.validate(&data.policy, &data.store)?;
         let digest = Digest::of(&("day2-native-storage-selection-v1", &data))?;
         Ok(Self { data, digest })
@@ -88,9 +99,17 @@ impl StorageIssuerOwner {
         let _ = &sample;
         match *self {
             #[cfg(test)]
-            Self::UnqualifiedFilesystemFixture { ref domain, process, ref thread } => {
-                ensure!(sample.domain == *domain && std::process::id() == process
-                    && std::thread::current().id() == *thread, "storage_fixture_owner_changed");
+            Self::UnqualifiedFilesystemFixture {
+                ref domain,
+                process,
+                ref thread,
+            } => {
+                ensure!(
+                    sample.domain == *domain
+                        && std::process::id() == process
+                        && std::thread::current().id() == *thread,
+                    "storage_fixture_owner_changed"
+                );
                 Ok(())
             }
         }
@@ -122,8 +141,10 @@ impl NativeStorageCreationAuthority {
         let result = (|| {
             ensure!(self.refusal.is_none(), "storage_creation_authority_refused");
             self.preparation.remaining_native(acquisition)?;
-            ensure!(std::process::id() == self.process && std::thread::current().id() == self.thread,
-                "storage_creation_owner_changed");
+            ensure!(
+                std::process::id() == self.process && std::thread::current().id() == self.thread,
+                "storage_creation_owner_changed"
+            );
             let identity = directory_identity(&self.directory)?;
             ensure!(identity == self.identity, "storage_creation_anchor_changed");
             self.preparation.remaining_native(acquisition)?;
@@ -157,19 +178,29 @@ impl NativeStorageCreationAuthority {
         acquisition: &mut NativeAcquisition,
     ) -> Result<Self> {
         let result = (|| {
-        let sample = acquisition.sample()?;
-        let preparation = acquisition.budget()?;
-        let process = std::process::id();
-        let thread = std::thread::current().id();
-        let identity = directory_identity(&directory)?;
-        acquisition.remaining()?;
-        let mut authority = Self {
-            selection, directory, identity, issuer: StorageIssuerOwner::UnqualifiedFilesystemFixture {
-                domain: sample.domain, process, thread,
-            }, preparation, process, thread, refusal: None, local: PhantomData,
-        };
-        authority.check_current(acquisition)?;
-        Ok(authority)
+            let sample = acquisition.sample()?;
+            let preparation = acquisition.budget()?;
+            let process = std::process::id();
+            let thread = std::thread::current().id();
+            let identity = directory_identity(&directory)?;
+            acquisition.remaining()?;
+            let mut authority = Self {
+                selection,
+                directory,
+                identity,
+                issuer: StorageIssuerOwner::UnqualifiedFilesystemFixture {
+                    domain: sample.domain,
+                    process,
+                    thread,
+                },
+                preparation,
+                process,
+                thread,
+                refusal: None,
+                local: PhantomData,
+            };
+            authority.check_current(acquisition)?;
+            Ok(authority)
         })();
         if result.is_err() {
             acquisition.refuse();
@@ -181,15 +212,25 @@ impl NativeStorageCreationAuthority {
 #[cfg(target_os = "linux")]
 fn directory_identity(file: &File) -> Result<DirectoryIdentity> {
     use rustix::fs::{AtFlags, StatxFlags};
-    ensure!(file.metadata()?.is_dir(), "storage_creation_directory_required");
+    ensure!(
+        file.metadata()?.is_dir(),
+        "storage_creation_directory_required"
+    );
     let filesystem = rustix::fs::fstatfs(file)?;
     let mask = StatxFlags::INO | StatxFlags::MNT_ID;
     let observed = rustix::fs::statx(file, "", AtFlags::EMPTY_PATH, mask)?;
-    ensure!(observed.stx_mask & mask.bits() == mask.bits()
-        && observed.stx_ino != 0 && observed.stx_mnt_id != 0, "storage_creation_anchor_identity_required");
+    ensure!(
+        observed.stx_mask & mask.bits() == mask.bits()
+            && observed.stx_ino != 0
+            && observed.stx_mnt_id != 0,
+        "storage_creation_anchor_identity_required"
+    );
     Ok(DirectoryIdentity {
-        filesystem: filesystem.f_type, device_major: observed.stx_dev_major,
-        device_minor: observed.stx_dev_minor, inode: observed.stx_ino, mount: observed.stx_mnt_id,
+        filesystem: filesystem.f_type,
+        device_major: observed.stx_dev_major,
+        device_minor: observed.stx_dev_minor,
+        inode: observed.stx_ino,
+        mount: observed.stx_mnt_id,
     })
 }
 

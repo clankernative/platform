@@ -103,7 +103,10 @@ impl Budget {
         self.observe(sample)
     }
 
-    pub(super) fn remaining_native(&mut self, acquisition: &mut super::native_clock::NativeAcquisition) -> Result<Duration> {
+    pub(super) fn remaining_native(
+        &mut self,
+        acquisition: &mut super::native_clock::NativeAcquisition,
+    ) -> Result<Duration> {
         self.observe(acquisition.sample()?)
     }
 

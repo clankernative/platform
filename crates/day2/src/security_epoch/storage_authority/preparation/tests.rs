@@ -6,18 +6,31 @@ use crate::security_epoch::{preparation_image::tests as image_fixture, tests as 
 use std::time::Duration;
 
 fn acquisition() -> NativeAcquisition {
-    NativeAcquisition::fixture(Digest::new(b"original-file-fixture"), std::process::id(),
-        Duration::from_secs(100), Duration::from_secs(5))
+    NativeAcquisition::fixture(
+        Digest::new(b"original-file-fixture"),
+        std::process::id(),
+        Duration::from_secs(100),
+        Duration::from_secs(5),
+    )
 }
 
-fn layout() -> (tempfile::TempDir, ReviewedStorageSelection, ReviewedFileLayout, NativeAcquisition) {
+fn layout() -> (
+    tempfile::TempDir,
+    ReviewedStorageSelection,
+    ReviewedFileLayout,
+    NativeAcquisition,
+) {
     let (directory, runtime) = image_fixture::runtime();
     let store = epoch_fixture::selection();
     let policy = image_fixture::policy(&runtime, &store);
     let seed = OriginalSeedCore::new(&policy, &store, image_fixture::incarnations()).unwrap();
-    let selection = ReviewedStorageSelection::decode(&serde_json::to_vec(&serde_json::json!({
-        "policy":policy,"store":store,"seed":seed,
-    })).unwrap()).unwrap();
+    let selection = ReviewedStorageSelection::decode(
+        &serde_json::to_vec(&serde_json::json!({
+            "policy":policy,"store":store,"seed":seed,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
     let mut interval = acquisition();
     let plan = ReviewedFileLayout::prepare(&runtime, &selection, &mut interval).unwrap();
     (directory, selection, plan, interval)
@@ -31,8 +44,17 @@ fn complete_layout_is_bound_to_the_original_selection_and_image() {
     assert_eq!(plan.proposal.store, *selection.store());
     assert_eq!(plan.proposal.marker, selection.seed().marker().unwrap());
     assert_eq!(plan.proposal.image, Digest::new(plan.image.bytes()));
-    let db = plan.image.decode_exact_readback(plan.image.bytes(), &mut interval).unwrap();
-    let count: i64 = db.query_row("SELECT count(*) FROM day2_initial_security_seed", [], |row| row.get(0)).unwrap();
+    let db = plan
+        .image
+        .decode_exact_readback(plan.image.bytes(), &mut interval)
+        .unwrap();
+    let count: i64 = db
+        .query_row(
+            "SELECT count(*) FROM day2_initial_security_seed",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
     assert_eq!(count, 1);
 }
 
@@ -43,51 +65,88 @@ fn wrong_selected_schema_cannot_prepare_a_layout_or_renew_the_acquisition() {
     let mut policy = image_fixture::policy(&runtime, &store);
     policy.fresh_storage.schema_contract = Digest::new(b"wrong-file-schema");
     let seed = OriginalSeedCore::new(&policy, &store, image_fixture::incarnations()).unwrap();
-    let selection = ReviewedStorageSelection::decode(&serde_json::to_vec(&serde_json::json!({
-        "policy":policy,"store":store,"seed":seed,
-    })).unwrap()).unwrap();
+    let selection = ReviewedStorageSelection::decode(
+        &serde_json::to_vec(&serde_json::json!({
+            "policy":policy,"store":store,"seed":seed,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
     let mut interval = acquisition();
     assert!(ReviewedFileLayout::prepare(&runtime, &selection, &mut interval).is_err());
     assert!(interval.remaining().is_err());
 }
 
-#[cfg(target_os="linux")]
+#[cfg(target_os = "linux")]
 mod linux {
     use super::*;
-    use std::os::unix::{fs::{MetadataExt, FileExt, symlink}, io::AsRawFd};
+    use std::os::unix::{
+        fs::{FileExt, MetadataExt, symlink},
+        io::AsRawFd,
+    };
 
-    fn authority(directory: &tempfile::TempDir, selection: ReviewedStorageSelection,
-        interval: &mut NativeAcquisition) -> NativeStorageCreationAuthority {
-        NativeStorageCreationAuthority::filesystem_fixture(selection, File::open(directory.path()).unwrap(), interval).unwrap()
+    fn authority(
+        directory: &tempfile::TempDir,
+        selection: ReviewedStorageSelection,
+        interval: &mut NativeAcquisition,
+    ) -> NativeStorageCreationAuthority {
+        NativeStorageCreationAuthority::filesystem_fixture(
+            selection,
+            File::open(directory.path()).unwrap(),
+            interval,
+        )
+        .unwrap()
     }
 
     #[test]
     fn complete_exact_file_has_independent_read_only_sqlite_oracle() {
         let (directory, selected, plan, mut interval) = layout();
         let auth = authority(&directory, selected, &mut interval);
-        let NativeOriginalPreparationOutcome::Prepared(owner) = prepare_original_file(auth, &plan, &mut interval) else {
+        let NativeOriginalPreparationOutcome::Prepared(owner) =
+            prepare_original_file(auth, &plan, &mut interval)
+        else {
             panic!("unqualified local filesystem fixture failed");
         };
         assert_eq!(owner.proposal.image, Digest::new(plan.image.bytes()));
         assert_eq!(owner.file.metadata().unwrap().ino(), owner.identity.inode);
-        assert_eq!(owner.file.metadata().unwrap().len(), plan.image.bytes().len() as u64);
+        assert_eq!(
+            owner.file.metadata().unwrap().len(),
+            plan.image.bytes().len() as u64
+        );
         assert_eq!(owner.file.metadata().unwrap().mode() & 0o7777, 0o600);
         assert_eq!(owner.file.metadata().unwrap().nlink(), 1);
         // This independently opens a TEST oracle after success. Production code
         // never opens/adopts an existing file or obtains readiness from it.
-        let db = rusqlite::Connection::open_with_flags(directory.path().join(INITIAL_FILE),
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
-        let integrity: String = db.query_row("PRAGMA integrity_check", [], |row| row.get(0)).unwrap();
+        let db = rusqlite::Connection::open_with_flags(
+            directory.path().join(INITIAL_FILE),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let integrity: String = db
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .unwrap();
         assert_eq!(integrity, "ok");
-        let (store, core, marker): (Vec<u8>, Vec<u8>, Vec<u8>) = db.query_row(
-            "SELECT store,core,marker FROM day2_initial_security_seed WHERE singleton=1", [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap();
+        let (store, core, marker): (Vec<u8>, Vec<u8>, Vec<u8>) = db
+            .query_row(
+                "SELECT store,core,marker FROM day2_initial_security_seed WHERE singleton=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
         assert_eq!(store, serde_json::to_vec(&owner.proposal.store).unwrap());
         assert_eq!(core, serde_json::to_vec(&owner.proposal.core).unwrap());
         assert_eq!(marker, serde_json::to_vec(&owner.proposal.marker).unwrap());
-        let items: i64 = db.query_row("SELECT count(*) FROM items", [], |row| row.get(0)).unwrap();
+        let items: i64 = db
+            .query_row("SELECT count(*) FROM items", [], |row| row.get(0))
+            .unwrap();
         assert_eq!(items, 0);
-        assert!(db.execute("INSERT INTO items(id,version,created_at,value) VALUES(1,1,0,'forbidden')", []).is_err());
+        assert!(
+            db.execute(
+                "INSERT INTO items(id,version,created_at,value) VALUES(1,1,0,'forbidden')",
+                []
+            )
+            .is_err()
+        );
         assert!(owner.authority.refusal.is_none());
     }
 
@@ -106,13 +165,17 @@ mod linux {
                 _ => unreachable!(),
             }
             let auth = authority(&directory, selected, &mut interval);
-            let NativeOriginalPreparationOutcome::RefusedAfterAttempt(mut owner) = prepare_original_file(auth, &plan, &mut interval) else {
+            let NativeOriginalPreparationOutcome::RefusedAfterAttempt(mut owner) =
+                prepare_original_file(auth, &plan, &mut interval)
+            else {
                 panic!("existing leaf was not refused: {kind}");
             };
             assert!(owner.file.is_none()); // No FD returned, not a noncreation claim.
             assert!(owner.phase == PreparationPhase::ExclusiveCreate);
             assert_eq!(std::fs::read(&old).unwrap(), b"persisted original bytes");
-            if kind == "file" { assert_eq!(std::fs::read(&leaf).unwrap(), b"existing leaf"); }
+            if kind == "file" {
+                assert_eq!(std::fs::read(&leaf).unwrap(), b"existing leaf");
+            }
             let mut later = acquisition();
             assert!(owner.authority.check_current(&mut later).is_err());
         }
@@ -124,7 +187,9 @@ mod linux {
         let auth = authority(&directory, selected, &mut interval);
         let anchor = auth.directory.as_raw_fd();
         plan.proposal.selection = Digest::new(b"not-the-original-selection");
-        let NativeOriginalPreparationOutcome::RefusedBeforeAttempt(owner) = prepare_original_file(auth, &plan, &mut interval) else {
+        let NativeOriginalPreparationOutcome::RefusedBeforeAttempt(owner) =
+            prepare_original_file(auth, &plan, &mut interval)
+        else {
             panic!("mismatched proposal dispatched create");
         };
         assert!(!directory.path().join(INITIAL_FILE).exists());
@@ -136,24 +201,40 @@ mod linux {
 
     #[test]
     fn every_after_create_error_cut_retains_the_exact_file_anchor_and_proposal() {
-        for phase in [PreparationPhase::ExclusiveCreate, PreparationPhase::Write,
-            PreparationPhase::FileSync, PreparationPhase::DirectorySync,
-            PreparationPhase::Readback, PreparationPhase::Decode] {
+        for phase in [
+            PreparationPhase::ExclusiveCreate,
+            PreparationPhase::Write,
+            PreparationPhase::FileSync,
+            PreparationPhase::DirectorySync,
+            PreparationPhase::Readback,
+            PreparationPhase::Decode,
+        ] {
             let (directory, selected, mut plan, mut interval) = layout();
             let auth = authority(&directory, selected, &mut interval);
             let anchor = auth.directory.as_raw_fd();
             plan.fixture_refusal = Some(phase);
-            let NativeOriginalPreparationOutcome::RefusedAfterAttempt(mut owner) = prepare_original_file(auth, &plan, &mut interval) else {
+            let NativeOriginalPreparationOutcome::RefusedAfterAttempt(mut owner) =
+                prepare_original_file(auth, &plan, &mut interval)
+            else {
                 panic!("fixture error lost owning outcome");
             };
             assert!(owner.phase == phase);
             assert_eq!(owner.authority.directory.as_raw_fd(), anchor);
             assert_eq!(owner.proposal.image, plan.proposal.image);
-            let file = owner.file.as_ref().expect("returned descriptor lost on error");
+            let file = owner
+                .file
+                .as_ref()
+                .expect("returned descriptor lost on error");
             let meta = file.metadata().unwrap();
-            assert_eq!(meta.ino(), std::fs::metadata(directory.path().join(INITIAL_FILE)).unwrap().ino());
-            if phase == PreparationPhase::ExclusiveCreate { assert_eq!(meta.len(), 0); }
-            else {
+            assert_eq!(
+                meta.ino(),
+                std::fs::metadata(directory.path().join(INITIAL_FILE))
+                    .unwrap()
+                    .ino()
+            );
+            if phase == PreparationPhase::ExclusiveCreate {
+                assert_eq!(meta.len(), 0);
+            } else {
                 let mut bytes = vec![0; meta.len() as usize];
                 file.read_exact_at(&mut bytes, 0).unwrap();
                 assert_eq!(bytes, plan.image.bytes()[..bytes.len()]);
@@ -169,10 +250,18 @@ mod linux {
         for change in ["replacement", "hardlink", "length"] {
             let (directory, selected, plan, mut interval) = layout();
             let auth = authority(&directory, selected, &mut interval);
-            let NativeOriginalPreparationOutcome::Prepared(original) = prepare_original_file(auth, &plan, &mut interval) else { panic!("fixture failed"); };
-            let mut coordinator = PreparationCoordinator { authority: original.authority,
-                proposal: original.proposal, file: Some(original.file), identity: Some(original.identity),
-                phase: PreparationPhase::FinalCheck };
+            let NativeOriginalPreparationOutcome::Prepared(original) =
+                prepare_original_file(auth, &plan, &mut interval)
+            else {
+                panic!("fixture failed");
+            };
+            let mut coordinator = PreparationCoordinator {
+                authority: original.authority,
+                proposal: original.proposal,
+                file: Some(original.file),
+                identity: Some(original.identity),
+                phase: PreparationPhase::FinalCheck,
+            };
             let file_number = coordinator.file.as_ref().unwrap().as_raw_fd();
             let inode = coordinator.file.as_ref().unwrap().metadata().unwrap().ino();
             let leaf = directory.path().join(INITIAL_FILE);
@@ -180,16 +269,30 @@ mod linux {
                 "replacement" => {
                     std::fs::rename(&leaf, directory.path().join("held-original.sqlite")).unwrap();
                     std::fs::write(&leaf, plan.image.bytes()).unwrap();
-                },
-                "hardlink" => std::fs::hard_link(&leaf, directory.path().join("extra.sqlite")).unwrap(),
+                }
+                "hardlink" => {
+                    std::fs::hard_link(&leaf, directory.path().join("extra.sqlite")).unwrap()
+                }
                 "length" => coordinator.file.as_ref().unwrap().set_len(1).unwrap(),
                 _ => unreachable!(),
             }
-            assert!(coordinator.check_file(plan.image.bytes().len(), &mut interval).is_err());
+            assert!(
+                coordinator
+                    .check_file(plan.image.bytes().len(), &mut interval)
+                    .is_err()
+            );
             assert_eq!(coordinator.file.as_ref().unwrap().as_raw_fd(), file_number);
-            assert_eq!(coordinator.file.as_ref().unwrap().metadata().unwrap().ino(), inode);
+            assert_eq!(
+                coordinator.file.as_ref().unwrap().metadata().unwrap().ino(),
+                inode
+            );
             coordinator.authority.refuse_preparation(&mut interval);
-            assert!(coordinator.authority.check_current(&mut acquisition()).is_err());
+            assert!(
+                coordinator
+                    .authority
+                    .check_current(&mut acquisition())
+                    .is_err()
+            );
         }
     }
 }

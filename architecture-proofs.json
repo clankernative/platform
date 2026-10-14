@@ -637,6 +637,133 @@
       "consuming_methods": [
         "into_data"
       ]
+    },
+    {
+      "source": "crates/day2/src/security_epoch/storage_authority.rs",
+      "type_name": "NativeStorageCreationAuthority",
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/storage_authority/preparation.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/storage_authority.rs",
+            "module": "preparation"
+          }
+        }
+      ],
+      "methods": [
+        "pub (super) fn check_current (& mut self , acquisition : & mut NativeAcquisition) -> Result < () >",
+        "fn filesystem_fixture (selection : ReviewedStorageSelection , directory : File , acquisition : & mut NativeAcquisition) -> Result < Self >",
+        "fn refuse_preparation (& mut self , acquisition : & mut NativeAcquisition)"
+      ],
+      "factories": [],
+      "material_uses": [
+        {
+          "owner": null,
+          "signature": "pub (super) fn prepare_original_file (authority : NativeStorageCreationAuthority , plan : & ReviewedFileLayout , acquisition : & mut NativeAcquisition) -> NativeOriginalPreparationOutcome"
+        },
+        {
+          "owner": "NativeStorageCreationAuthority",
+          "signature": "fn refuse_preparation (& mut self , acquisition : & mut NativeAcquisition)"
+        },
+        {
+          "owner": "NativeStorageCreationAuthority",
+          "signature": "pub (super) fn check_current (& mut self , acquisition : & mut NativeAcquisition) -> Result < () >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/storage_authority/preparation.rs",
+      "type_name": "BeforeAttemptRefusal",
+      "owning_children": [],
+      "methods": [],
+      "factories": [
+        {
+          "owner": null,
+          "signature": "pub (super) fn prepare_original_file (authority : NativeStorageCreationAuthority , plan : & ReviewedFileLayout , acquisition : & mut NativeAcquisition) -> NativeOriginalPreparationOutcome"
+        }
+      ],
+      "material_uses": [],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/storage_authority/preparation.rs",
+      "type_name": "OriginalCreatorFd",
+      "owning_children": [],
+      "methods": [],
+      "factories": [
+        {
+          "owner": null,
+          "signature": "pub (super) fn prepare_original_file (authority : NativeStorageCreationAuthority , plan : & ReviewedFileLayout , acquisition : & mut NativeAcquisition) -> NativeOriginalPreparationOutcome"
+        }
+      ],
+      "material_uses": [],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/storage_authority/preparation.rs",
+      "type_name": "PreparationCoordinator",
+      "owning_children": [],
+      "methods": [
+        "fn check_file (& mut self , expected_length : usize , acquisition : & mut NativeAcquisition) -> Result < () >",
+        "fn file_ref (& self) -> Result < & File >",
+        "fn observe_file (& self , file : & File , expected_length : usize) -> Result < FileIdentity >",
+        "fn prepare (& mut self , plan : & ReviewedFileLayout , acquisition : & mut NativeAcquisition) -> Result < () >",
+        "fn validate_plan (& mut self , plan : & ReviewedFileLayout , acquisition : & mut NativeAcquisition) -> Result < () >"
+      ],
+      "factories": [
+        {
+          "owner": null,
+          "signature": "pub (super) fn prepare_original_file (authority : NativeStorageCreationAuthority , plan : & ReviewedFileLayout , acquisition : & mut NativeAcquisition) -> NativeOriginalPreparationOutcome"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "PreparationCoordinator",
+          "signature": "fn check_file (& mut self , expected_length : usize , acquisition : & mut NativeAcquisition) -> Result < () >"
+        },
+        {
+          "owner": "PreparationCoordinator",
+          "signature": "fn file_ref (& self) -> Result < & File >"
+        },
+        {
+          "owner": "PreparationCoordinator",
+          "signature": "fn observe_file (& self , file : & File , expected_length : usize) -> Result < FileIdentity >"
+        },
+        {
+          "owner": "PreparationCoordinator",
+          "signature": "fn prepare (& mut self , plan : & ReviewedFileLayout , acquisition : & mut NativeAcquisition) -> Result < () >"
+        },
+        {
+          "owner": "PreparationCoordinator",
+          "signature": "fn validate_plan (& mut self , plan : & ReviewedFileLayout , acquisition : & mut NativeAcquisition) -> Result < () >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/storage_authority/preparation.rs",
+      "type_name": "RefusedOriginalPreparation",
+      "owning_children": [],
+      "methods": [],
+      "factories": [
+        {
+          "owner": null,
+          "signature": "pub (super) fn prepare_original_file (authority : NativeStorageCreationAuthority , plan : & ReviewedFileLayout , acquisition : & mut NativeAcquisition) -> NativeOriginalPreparationOutcome"
+        }
+      ],
+      "material_uses": [],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
     }
   ],
   "buffer_destructors": [

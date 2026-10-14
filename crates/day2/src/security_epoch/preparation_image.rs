@@ -475,7 +475,10 @@ pub(super) mod tests {
         }
     }
 
-    pub(in crate::security_epoch) fn policy(runtime: &crate::store::Runtime, store: &EpochStore) -> InitialBootstrapPolicy {
+    pub(in crate::security_epoch) fn policy(
+        runtime: &crate::store::Runtime,
+        store: &EpochStore,
+    ) -> InitialBootstrapPolicy {
         let mut memory = FreshMemoryDatabase::empty(&mut acquisition()).unwrap();
         let tx = memory.connection.transaction().unwrap();
         runtime.initialize_in_transaction(&tx).unwrap();

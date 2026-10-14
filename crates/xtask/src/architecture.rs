@@ -4934,9 +4934,14 @@ fn hazard(target: &str) -> Option<&'static str> {
     }
     if matches!(
         target,
-        "rustix::fs::open" | "rustix::fs::openat" | "rustix::fs::openat2"
-            | "rustix::fs::fstatfs" | "rustix::fs::statx" | "rustix::fs::fsync"
-            | "rustix::io::pread" | "rustix::io::pwrite"
+        "rustix::fs::open"
+            | "rustix::fs::openat"
+            | "rustix::fs::openat2"
+            | "rustix::fs::fstatfs"
+            | "rustix::fs::statx"
+            | "rustix::fs::fsync"
+            | "rustix::io::pread"
+            | "rustix::io::pwrite"
     ) || target
         .rsplit_once("::")
         .is_some_and(|(owner, method)| owner == "std::path::Path" && path_filesystem_method(method))
@@ -5465,27 +5470,48 @@ mod tests {
 
     #[test]
     fn original_file_operations_are_effects_through_exact_alias_and_glob_forms() {
-        for (module, operation) in [("fs", "openat2"), ("fs", "fsync"), ("io", "pread"), ("io", "pwrite")] {
+        for (module, operation) in [
+            ("fs", "openat2"),
+            ("fs", "fsync"),
+            ("io", "pread"),
+            ("io", "pwrite"),
+        ] {
             let target = format!("rustix::{module}::{operation}");
             for source in [
                 format!("fn f() {{ {target}(fd, argument); }}"),
                 format!("use {target} as access; fn f() {{ access(fd, argument); }}"),
-                format!("use rustix::{module} as disk; fn f() {{ disk::{operation}(fd, argument); }}"),
+                format!(
+                    "use rustix::{module} as disk; fn f() {{ disk::{operation}(fd, argument); }}"
+                ),
                 format!("use rustix::{module}::*; fn f() {{ {operation}(fd, argument); }}"),
                 format!("fn f() {{ r#rustix::r#{module}::r#{operation}(fd, argument); }}"),
             ] {
                 let findings = scan(&source);
-                let operations = findings.iter().filter(|f| f.kind == "filesystem").collect::<Vec<_>>();
+                let operations = findings
+                    .iter()
+                    .filter(|f| f.kind == "filesystem")
+                    .collect::<Vec<_>>();
                 assert_eq!(operations.len(), 1, "{source}: {findings:?}");
                 assert_eq!(operations[0].target, target, "{source}: {findings:?}");
                 assert_eq!(operations[0].count, 1);
-                let globs = findings.iter().filter(|f| f.kind == "effect-glob").collect::<Vec<_>>();
-                assert_eq!(globs.len(), usize::from(source.contains("::*")), "{source}: {findings:?}");
+                let globs = findings
+                    .iter()
+                    .filter(|f| f.kind == "effect-glob")
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    globs.len(),
+                    usize::from(source.contains("::*")),
+                    "{source}: {findings:?}"
+                );
                 if let Some(glob) = globs.first() {
                     assert_eq!(glob.target, format!("rustix::{module}"));
                     assert_eq!(glob.count, 1);
                 }
-                assert_eq!(findings.len(), operations.len() + globs.len(), "{source}: {findings:?}");
+                assert_eq!(
+                    findings.len(),
+                    operations.len() + globs.len(),
+                    "{source}: {findings:?}"
+                );
             }
         }
         for source in [
