@@ -109,7 +109,7 @@ GetConfiguration :: [].{
 				description: "",
 				revision: 0,
 				version: 0,
-				fields: CollectionPage.empty,
+				fields: CollectionPage.empty({}),
 				template: "",
 				template_revision: 0,
 				enabled: Bool.False,

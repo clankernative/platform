@@ -98,7 +98,7 @@ ListKeys :: [].{
 	}).credentials(Credential.metadata_access(KeyFamilies.clients))
 
 	empty : Str -> Output
-	empty = |status| { status, page: CollectionPage.empty }
+	empty = |status| { status, page: CollectionPage.empty({}) }
 
 	prepare : Context, ListKeysTypes.Input -> Observe(Output)
 	prepare = |_context, input| {

@@ -17,8 +17,8 @@
 Table(row, keys) :: { row_witness : List(row), key_witness : List(keys) }.{
 	# A table with no business keys. The platform supplies this for any model that
 	# declares no `table`, so applications never need to write it.
-	plain : Table(row, {})
-	plain = { row_witness: [], key_witness: [] }
+	plain : {} -> Table(row, {})
+	plain = |{}| { row_witness: [], key_witness: [] }
 
 	keyed : (row -> keys) -> Table(row, keys)
 	keyed = |_select| { row_witness: [], key_witness: [] }

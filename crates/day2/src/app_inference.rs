@@ -738,7 +738,7 @@ pub fn schema_source(registry: &str, sources: &BTreeMap<String, String>) -> Resu
         list(&|table, roc_type, keyed| if keyed {
             format!("{table}: {roc_type}.table")
         } else {
-            format!("{table}: Table.plain")
+            format!("{table}: Table.plain({{}})")
         })
     ));
     source.push_str(&format!(
@@ -775,10 +775,7 @@ pub fn provisional_modules(sources: &[String]) -> Result<BTreeMap<String, String
     }
     ensure!(names.len() <= 4096, "provisional handle name budget");
     let mut modules = BTreeMap::new();
-    for (module, kind, parameters) in [
-        ("Commands", "Write", "input, output"),
-        ("Reads", "Read", "input, output"),
-    ] {
+    for (module, kind, parameters) in [("Commands", "Write", "_, _"), ("Reads", "Read", "_, _")] {
         let mut source = format!(
             "import pf.{kind}\nimport pf.Input\nimport pf.Output\nimport pf.Model\nimport AppIdentity\n\n{module} :: [].{{\n"
         );
@@ -794,7 +791,7 @@ pub fn provisional_modules(sources: &[String]) -> Result<BTreeMap<String, String
     let mut paths = String::from("import pf.Path\nSelectors :: [].{\n");
     for name in &names {
         paths.push_str(&format!(
-            "    {name} : Path(root, value)\n    {name} = Path.define(\"inference_only\")\n"
+            "    {name} : Path(_, _)\n    {name} = Path.define(\"inference_only\")\n"
         ));
     }
     paths.push_str("}\n");
@@ -804,7 +801,7 @@ pub fn provisional_modules(sources: &[String]) -> Result<BTreeMap<String, String
     );
     let mut returns = String::from("import pf.ProductReturnRef\nProductReturns :: [].{\n");
     for name in &names {
-        actions.push_str(&format!("    {name} : SecurityAction(input)\n    {name} = SecurityAction.define(AppIdentity.namespace.concat(\".{name}\"), Input.define(\"inference_only\", |_raw| Err(\"inference_only\"), |_value| \"\"))\n\n"));
+        actions.push_str(&format!("    {name} : SecurityAction(_)\n    {name} = SecurityAction.define(AppIdentity.namespace.concat(\".{name}\"), Input.define(\"inference_only\", |_raw| Err(\"inference_only\"), |_value| \"\"))\n\n"));
         returns.push_str(&format!(
             "    {name} : ProductReturnRef\n    {name} = ProductReturnRef.define(\"{name}\")\n\n"
         ));
@@ -1002,8 +999,8 @@ mod tests {
     fn provisional_handles_support_aliases_without_declaring_operations() -> Result<()> {
         let sources = vec!["import Commands as Work\nimport Reads exposing [detail]\nimport Credentials as Keys exposing [clients]\nKeys.personal\nWork.analyze\nCommands.submit\n# Commands.fake\n\"Commands.fake\"".into()];
         let modules = provisional_modules(&sources)?;
-        assert!(modules["Commands.roc"].contains("analyze : Write(input, output)"));
-        assert!(modules["Reads.roc"].contains("detail : Read(input, output)"));
+        assert!(modules["Commands.roc"].contains("analyze : Write(_, _)"));
+        assert!(modules["Reads.roc"].contains("detail : Read(_, _)"));
         assert!(!modules["Commands.roc"].contains("fake"));
         assert!(modules["Credentials.roc"].contains("clients : { issue : InteractiveContext"));
         assert!(modules["Credentials.roc"].contains("personal : { issue : InteractiveContext"));
@@ -1046,7 +1043,7 @@ mod tests {
     fn every_model_is_a_table_named_by_the_ledger_with_keys_and_domains_derived() -> Result<()> {
         assert_eq!(
             schema_source(LEDGER, &sources(MODELS))?,
-            "import Models\nimport pf.Table\nimport Title\nSchemaSource :: [].{\n    Tables : { ad_days : List(Models.AdDay), campaigns : List(Models.Campaign) }\n    schema : Tables -> Tables\n    schema = |tables| tables\n    domains = { title: Title.rules }\n    tables : { ad_days : Table(Models.AdDay, _), campaigns : Table(Models.Campaign, {}) }\n    tables = { ad_days: Models.AdDay.table, campaigns: Table.plain }\n    identities = \"model-identities.json\"\n    storage = { schema, tables, domains, identities }\n}\n"
+            "import Models\nimport pf.Table\nimport Title\nSchemaSource :: [].{\n    Tables : { ad_days : List(Models.AdDay), campaigns : List(Models.Campaign) }\n    schema : Tables -> Tables\n    schema = |tables| tables\n    domains = { title: Title.rules }\n    tables : { ad_days : Table(Models.AdDay, _), campaigns : Table(Models.Campaign, {}) }\n    tables = { ad_days: Models.AdDay.table, campaigns: Table.plain({}) }\n    identities = \"model-identities.json\"\n    storage = { schema, tables, domains, identities }\n}\n"
         );
         Ok(())
     }

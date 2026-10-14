@@ -58,7 +58,7 @@ associated methods with each signature adjacent to its implementation. Wrap Roc
 code at 120 columns, allowing unbreakable strings, URLs, comments and identifiers.
 The pinned native formatter patch enforces width and group separation through xtask fmt / fmt-check;
 bootstrap it with xtask bootstrap-formatter. Apple Silicon app compilation uses the
-unmodified official September 12 compiler pinned in toolchain.json. The historical
+unmodified official October 13 compiler pinned in toolchain.json. The historical
 reflection backport remains documented in tools/roc-compiler. Keep each native
 compiler paired with its reviewed ABI generator; Linux retains its separate pin. Review sealed
 module byte changes and refresh admission pins explicitly, never bypass the checks.

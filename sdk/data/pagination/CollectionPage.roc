@@ -19,8 +19,8 @@ CollectionPage(a) :: { items : List(a), has_more : Bool, next_after : Cursor }.{
 	# than read has a lawful value for a branch it cannot reach: an application
 	# may not declare an error it cannot demonstrate, so an unreachable failure
 	# needs somewhere lawful to go.
-	empty : CollectionPage(a)
-	empty = { items: [], has_more: Bool.False, next_after: Cursor.start }
+	empty : {} -> CollectionPage(a)
+	empty = |{}| { items: [], has_more: Bool.False, next_after: Cursor.start }
 
 	# The whole of a collection small enough to be one page.
 	#
@@ -35,7 +35,7 @@ CollectionPage(a) :: { items : List(a), has_more : Bool, next_after : Cursor }.{
 	# wrong; a collection that can outgrow a page should be paged instead.
 	complete : List(a) -> CollectionPage(a)
 	complete = |values| if values.len() > 100 {
-		empty
+		empty({})
 	} else {
 		{ items: values, has_more: Bool.False, next_after: Cursor.start }
 	}

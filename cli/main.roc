@@ -1,5 +1,5 @@
 app [main!] {
-	pf: platform "https://github.com/roc-lang/basic-cli/releases/download/0.22.0/F1JVZPYfWP71s8vk6tHcV1Qx1Ef6CZkwswGoCn8VHZmL.tar.zst",
+	pf: platform "https://github.com/roc-lang/basic-cli/releases/download/0.26.0-rc2/Gj3zVDr3qrQa6aTh7Z1zgUfe9NeBE6R76T5ho3xrc8af.tar.zst",
 	ops: "../ops/main.roc",
 }
 
@@ -13,8 +13,7 @@ import Problem
 import Host
 
 main! : List(OsStr.OsStr) => Try({}, [Exit(I32)])
-main! = |raw_args| {
-	args = raw_args.drop_first(1)
+main! = |args| {
 	format = Cli.output_format(args.map(OsStr.display))
 	if args.len() > 128 {
 		return emit!(

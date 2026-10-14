@@ -2,6 +2,7 @@
 use std::alloc::{Layout, alloc, dealloc, realloc};
 use std::ffi::c_void;
 use std::io::{self, BufRead, Write};
+use std::ptr::NonNull;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[path = "../generated/roc_platform_abi.rs"]
@@ -112,8 +113,8 @@ pub extern "C" fn roc_crashed(_bytes: *const u8, _len: usize) {
     fatal();
 }
 
-extern "C" fn host_alloc(_: *mut abi::RocHost, n: usize, a: usize) -> *mut c_void {
-    roc_alloc(n, a)
+extern "C" fn host_alloc(_: *mut abi::RocHost, n: usize, a: usize) -> NonNull<c_void> {
+    NonNull::new(roc_alloc(n, a)).unwrap_or_else(|| fatal())
 }
 extern "C" fn host_dealloc(_: *mut abi::RocHost, p: *mut c_void, a: usize) {
     unsafe { roc_dealloc(p, a) }
@@ -123,8 +124,8 @@ extern "C" fn host_realloc(
     p: *mut c_void,
     n: usize,
     a: usize,
-) -> *mut c_void {
-    unsafe { roc_realloc(p, n, a) }
+) -> NonNull<c_void> {
+    NonNull::new(unsafe { roc_realloc(p, n, a) }).unwrap_or_else(|| fatal())
 }
 extern "C" fn host_diagnostic(_: *mut abi::RocHost, _: *const u8, _: usize) {
     fatal();
