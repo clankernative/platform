@@ -6,6 +6,18 @@ use day2::automation;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+fn ui_response(action: &str, installed: bool) -> Result<Value> {
+    Ok(match action {
+        "ui-dependency-inspect" => json!({"installed":installed}),
+        "ui-dependency-fetch" => json!({"fetched":true}),
+        "ui-dependency-extract" => json!({"extracted":true}),
+        "ui-dependency-verify" => json!({"verified":true}),
+        "ui-dependency-publish" => json!({"published":true}),
+        "ui-dependency-receipt" | "ui-lock" => json!({"json":json!({"fixture":true}).to_string()}),
+        _ => bail!("unexpected UI operation"),
+    })
+}
+
 #[test]
 fn ui_lock_command_emits_the_native_source_record() -> Result<()> {
     let mut effects = Vec::new();
@@ -18,7 +30,7 @@ fn ui_lock_command_emits_the_native_source_record() -> Result<()> {
                 request.decode::<Value>()?,
                 json!({"source":"fixture-source"})
             );
-            Ok(json!({"fixture":true}))
+            ui_response(&request.action, true)
         },
     )?;
     assert_eq!(effects, ["ui-lock"]);
@@ -32,11 +44,7 @@ fn bundled_ui_recipe_uses_verified_installation_without_network() -> Result<()> 
     automation::run(&automation::runner()?, &["ui-dependency"], |request| {
         effects.push(request.action.clone());
         assert_eq!(request.decode::<Value>()?, json!({}));
-        Ok(if request.action == "ui-dependency-inspect" {
-            json!({"installed": true})
-        } else {
-            json!({"verified": true})
-        })
+        ui_response(&request.action, true)
     })?;
     assert_eq!(effects, ["ui-dependency-inspect", "ui-dependency-receipt"]);
     Ok(())
@@ -47,11 +55,7 @@ fn bundled_ui_recipe_verifies_before_atomic_publication() -> Result<()> {
     let mut effects = Vec::new();
     automation::run(&automation::runner()?, &["ui-dependency"], |request| {
         effects.push(request.action.clone());
-        Ok(if request.action == "ui-dependency-inspect" {
-            json!({"installed": false})
-        } else {
-            json!({})
-        })
+        ui_response(&request.action, false)
     })?;
     assert_eq!(
         effects,
@@ -75,11 +79,7 @@ fn rejected_ui_dependency_never_reaches_publication() -> Result<()> {
         if request.action == "ui-dependency-verify" {
             bail!("injected bundle digest rejection");
         }
-        Ok(if request.action == "ui-dependency-inspect" {
-            json!({"installed": false})
-        } else {
-            json!({})
-        })
+        ui_response(&request.action, false)
     });
     assert!(
         result
@@ -91,6 +91,77 @@ fn rejected_ui_dependency_never_reaches_publication() -> Result<()> {
         effects.last().map(String::as_str),
         Some("ui-dependency-verify")
     );
+    Ok(())
+}
+
+#[test]
+fn malformed_typed_ui_response_stops_before_later_effects() -> Result<()> {
+    for (failed, malformed) in [
+        ("ui-dependency-inspect", json!({"installed":"false"})),
+        ("ui-dependency-fetch", json!({"fetched":"true"})),
+        ("ui-dependency-verify", json!({"verified":"true"})),
+        ("ui-dependency-receipt", json!({"json":false})),
+    ] {
+        let mut effects = Vec::new();
+        let result = automation::run(&automation::runner()?, &["ui-dependency"], |request| {
+            effects.push(request.action.clone());
+            if request.action == failed {
+                Ok(malformed.clone())
+            } else {
+                ui_response(&request.action, false)
+            }
+        });
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains(&format!("invalid {failed} response"))
+        );
+        assert_eq!(effects.last().map(String::as_str), Some(failed));
+    }
+    Ok(())
+}
+
+#[test]
+fn typed_lock_dispatch_round_trips_through_the_compiled_roc_recipe() -> Result<()> {
+    use automation::ui::{self, JsonReceipt, LockHost, LockInput};
+    struct Native {
+        calls: usize,
+    }
+    impl LockHost for Native {
+        fn lock(&mut self, input: LockInput) -> Result<JsonReceipt<day2::ui_lock::Lock>> {
+            assert_eq!(input.source, "app/é with spaces");
+            self.calls += 1;
+            let inputs = vec![day2::ui_lock::Input {
+                path: "component.html".into(),
+                bytes: 1,
+                digest: day2::digest(b"x"),
+            }];
+            Ok(JsonReceipt(day2::ui_lock::Lock {
+                schema_version: 2,
+                provider: "clanker-ui.native".into(),
+                package: day2::ui_lock::LockedPackage {
+                    name: "@clanker/vanilla".into(),
+                    version: "fixture".into(),
+                    digest: day2::ui_lock::manifest_digest(&inputs)?,
+                    inputs,
+                },
+            }))
+        }
+    }
+    let mut native = Native { calls: 0 };
+    let result = automation::run(
+        &automation::runner()?,
+        &["platform", "ui-lock", "app/é with spaces"],
+        |request| {
+            ui::dispatch_lock(&mut native, &request)?
+                .ok_or_else(|| anyhow::anyhow!("unknown operation"))
+        },
+    )?;
+    let lock: day2::ui_lock::Lock = serde_json::from_value(result)?;
+    day2::ui_lock::validate(&lock)?;
+    assert_eq!(lock.package.inputs[0].path, "component.html");
+    assert_eq!(native.calls, 1);
     Ok(())
 }
 

@@ -1,7 +1,10 @@
 use anyhow::{Context, Result, ensure};
-use day2::{automation::Request, build_dependencies};
+use day2::{
+    automation::{Request, ui},
+    build_dependencies,
+};
 use flate2::read::GzDecoder;
-use serde_json::{Value, json};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
     fs,
@@ -23,6 +26,7 @@ enum Phase {
     Extracted,
     Verified,
     Published,
+    Receipted,
 }
 
 pub struct Session {
@@ -30,7 +34,7 @@ pub struct Session {
     phase: Phase,
     archive: Option<Vec<u8>>,
     staging: Option<tempfile::TempDir>,
-    receipt: Option<Value>,
+    receipt: Option<ui::DependencyReceipt>,
 }
 
 impl Session {
@@ -51,20 +55,11 @@ impl Session {
     }
 
     pub fn effect(&mut self, request: Request) -> Result<Value> {
-        ensure!(request.protocol == 1, "unsupported workflow protocol");
-        ensure!(
-            request.decode::<Value>()? == json!({}),
-            "ui dependency effects accept only an empty object"
-        );
-        match request.action.as_str() {
-            "ui-dependency-inspect" => self.inspect(),
-            "ui-dependency-fetch" => self.fetch(),
-            "ui-dependency-extract" => self.extract(),
-            "ui-dependency-verify" => self.verify(),
-            "ui-dependency-publish" => self.publish(),
-            "ui-dependency-receipt" => self.receipt(),
-            other => anyhow::bail!("unsupported UI dependency effect: {other}"),
-        }
+        ui::dispatch_install(self, &request)?.context("unsupported UI dependency effect")
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.phase == Phase::Receipted
     }
 
     fn destination(&self) -> Result<PathBuf> {
@@ -85,8 +80,10 @@ impl Session {
         }
         Ok(destination)
     }
+}
 
-    fn inspect(&mut self) -> Result<Value> {
+impl ui::InstallHost for Session {
+    fn inspect(&mut self, _input: ui::Empty) -> Result<ui::Inspection> {
         ensure!(
             self.phase == Phase::Start,
             "dependency inspect out of order"
@@ -95,19 +92,19 @@ impl Session {
         match fs::symlink_metadata(&destination) {
             Ok(_) => {
                 let bundle = build_dependencies::installed(&self.root).context("installed managed UI dependency is corrupt; remove it deliberately before reinstalling")?;
-                self.receipt = Some(bundle.identity());
+                self.receipt = Some(bundle.receipt());
                 self.phase = Phase::Published;
-                Ok(json!({"installed":true}))
+                Ok(ui::Inspection { installed: true })
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 self.phase = Phase::Inspected;
-                Ok(json!({"installed":false}))
+                Ok(ui::Inspection { installed: false })
             }
             Err(error) => Err(error.into()),
         }
     }
 
-    fn fetch(&mut self) -> Result<Value> {
+    fn fetch(&mut self, _input: ui::Empty) -> Result<ui::Fetched> {
         ensure!(
             self.phase == Phase::Inspected,
             "dependency fetch out of order"
@@ -140,10 +137,10 @@ impl Session {
         );
         self.archive = Some(bytes);
         self.phase = Phase::Fetched;
-        Ok(json!({"fetched":true}))
+        Ok(ui::Fetched { fetched: true })
     }
 
-    fn extract(&mut self) -> Result<Value> {
+    fn extract(&mut self, _input: ui::Empty) -> Result<ui::Extracted> {
         ensure!(
             self.phase == Phase::Fetched,
             "dependency extract out of order"
@@ -174,10 +171,10 @@ impl Session {
         extract_archive(bytes, staging.path())?;
         self.staging = Some(staging);
         self.phase = Phase::Extracted;
-        Ok(json!({"extracted":true}))
+        Ok(ui::Extracted { extracted: true })
     }
 
-    fn verify(&mut self) -> Result<Value> {
+    fn verify(&mut self, _input: ui::Empty) -> Result<ui::Verified> {
         ensure!(
             self.phase == Phase::Extracted,
             "dependency verify out of order"
@@ -188,12 +185,12 @@ impl Session {
             .as_ref()
             .context("extracted dependency missing")?;
         let bundle = build_dependencies::verify_staged(stage.path(), &pin.target)?;
-        self.receipt = Some(bundle.identity());
+        self.receipt = Some(bundle.receipt());
         self.phase = Phase::Verified;
-        Ok(json!({"verified":true}))
+        Ok(ui::Verified { verified: true })
     }
 
-    fn publish(&mut self) -> Result<Value> {
+    fn publish(&mut self, _input: ui::Empty) -> Result<ui::Published> {
         ensure!(
             self.phase == Phase::Verified,
             "dependency publish requires successful verification"
@@ -215,7 +212,7 @@ impl Session {
                 let existing = build_dependencies::installed(&self.root)
                     .context("existing dependency blocks immutable publish")?;
                 ensure!(
-                    Some(existing.identity()) == self.receipt,
+                    Some(existing.receipt()) == self.receipt,
                     "a different dependency was published concurrently"
                 );
             }
@@ -224,21 +221,24 @@ impl Session {
         self.staging.take();
         let installed = build_dependencies::installed(&self.root)?;
         ensure!(
-            Some(installed.identity()) == self.receipt,
+            Some(installed.receipt()) == self.receipt,
             "published dependency identity changed"
         );
         self.phase = Phase::Published;
-        Ok(json!({"published":true}))
+        Ok(ui::Published { published: true })
     }
 
-    fn receipt(&mut self) -> Result<Value> {
+    fn receipt(&mut self, _input: ui::Empty) -> Result<ui::JsonReceipt<ui::DependencyReceipt>> {
         ensure!(
             self.phase == Phase::Published,
             "dependency receipt requested before publication/inspection"
         );
-        self.receipt
+        let receipt = self
+            .receipt
             .clone()
-            .context("verified dependency receipt missing")
+            .context("verified dependency receipt missing")?;
+        self.phase = Phase::Receipted;
+        Ok(ui::JsonReceipt(receipt))
     }
 }
 
@@ -346,6 +346,7 @@ fn extract_archive(bytes: &[u8], destination: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use day2::automation::Request;
+    use serde_json::json;
 
     fn request(action: &str, input: &str) -> Request {
         Request {

@@ -9,6 +9,7 @@ import Authority
 import Provision
 import Maintain
 import UiDependency
+import UiCapability
 
 Workflow :: [].{
 	Request := [
@@ -101,8 +102,8 @@ Workflow :: [].{
 		)
 	}
 
-	run! : Request, (Str => Try(Str, Str)) => Try(Str, Str)
-	run! = |request, host!| match request {
+	run! : Request, (Str => Try(Str, Str)), UiCapability.LockHost => Try(Str, Str)
+	run! = |request, host!, ui_lock| match request {
 		Help => Ok(
 			Json.to_str({
 				protocol: 1.U32,
@@ -129,7 +130,10 @@ Workflow :: [].{
 			receipt = Build.source!(source, host!)?
 			Ok(Json.to_str(receipt))
 		}
-		UiLock(source) => UiDependency.lock!(source, host!)
+		UiLock(source) => {
+			receipt = UiDependency.lock!(source, ui_lock)?
+			Ok(receipt.json)
+		}
 		Check(source, seed, count) => Check.run!(source, seed, count, host!)
 		LocalDev(args) => LocalDev.run!(args, host!)
 		Backup(instance, app_name, output) => Backup.take!(instance, app_name, output, host!)

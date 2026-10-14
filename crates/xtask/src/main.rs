@@ -991,6 +991,13 @@ fn main() -> Result<()> {
             );
             println!("{}", linux_provisioning_fixture::inspect(&instance)?);
         }
+        "workflow-contracts" => {
+            ensure!(
+                args.next().is_none(),
+                "workflow-contracts accepts no arguments"
+            );
+            workflows::contracts(&root, true)?;
+        }
         "workflows" => {
             ensure!(args.next().is_none(), "workflows accepts no arguments");
             workflows::build(&root)?;
@@ -1051,10 +1058,10 @@ fn build_cli(root: &Path) -> Result<()> {
     let mut completed = std::collections::BTreeSet::new();
     let mut ui_dependency = ui_dependency::Session::new(root)?;
     day2::automation::run(&runner, &["cli"], |request| {
-        if request.action.starts_with("ui-dependency-") {
-            let receipt = request.action == "ui-dependency-receipt";
-            let response = ui_dependency.effect(request)?;
-            if receipt {
+        if let Some(response) =
+            day2::automation::ui::dispatch_install(&mut ui_dependency, &request)?
+        {
+            if ui_dependency.is_complete() {
                 ensure!(
                     completed.insert("ui".to_owned()),
                     "duplicate UI dependency receipt"
