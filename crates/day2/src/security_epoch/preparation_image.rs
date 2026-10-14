@@ -452,7 +452,7 @@ mod tests {
         }))
         .unwrap();
         let artifact = crate::artifact::LoadedArtifact::from_contract_for_tests(
-            Digest::new(b"initial-image-artifact").to_string(),
+            Digest::new(b"initial-image-artifact").as_str().to_owned(),
             directory.path().into(),
             contract,
         );
