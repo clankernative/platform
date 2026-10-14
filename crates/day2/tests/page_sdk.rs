@@ -7,7 +7,7 @@ fn generated_template_handles_and_typed_page_registration_are_compiler_checked()
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()?;
-    let temporary = tempfile::tempdir_in(root.join("artifacts"))?;
+    let temporary = crate::support::compiler::stage(&root)?;
     let stage = temporary.path();
     fs::create_dir_all(stage.join("sdk"))?;
     fs::create_dir_all(stage.join("app"))?;

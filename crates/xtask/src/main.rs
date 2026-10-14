@@ -250,6 +250,7 @@ fn main() -> Result<()> {
     ]
     .contains(&action.as_str())
         || action == "app-contracts"
+        || action == "verify-linux-context"
     {
         None
     } else {
@@ -265,6 +266,10 @@ fn main() -> Result<()> {
         Some(lock)
     };
     match action.as_str() {
+        "verify-linux-context" => {
+            ensure!(args.next().is_none(), "CI context accepts no overrides");
+            verification::linux_context(&root)?;
+        }
         "architecture-check" => {
             ensure!(
                 args.next().is_none(),
@@ -766,7 +771,7 @@ fn main() -> Result<()> {
             );
             verification::queue_receipt(&root, &action)?;
         }
-        "verify-prepare" | "verify-prepare-join" | "verify-compose" => {
+        "verify-prepare" | "verify-prepare-join" | "verify-compose" | "verify-mac" => {
             ensure!(
                 args.next().is_none(),
                 "verification stage accepts no arguments"
