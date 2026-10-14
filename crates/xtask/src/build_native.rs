@@ -423,6 +423,7 @@ pub(super) fn platform_sources(root: &Path) -> Result<BTreeMap<String, String>> 
         "rust-toolchain.toml",
         "toolchain.json",
         ".dockerignore",
+        "build-dependencies/clanker-ui.json",
     ] {
         hashes.insert(path.to_string(), digest(&fs::read(root.join(path))?));
     }
@@ -902,6 +903,7 @@ mod platform_input_tests {
         let directory = tempfile::tempdir()?;
         let root = directory.path();
         fs::create_dir(root.join("architecture"))?;
+        fs::create_dir(root.join("build-dependencies"))?;
         for name in [
             "Cargo.toml",
             "Cargo.lock",
@@ -912,6 +914,7 @@ mod platform_input_tests {
             "rust-toolchain.toml",
             "toolchain.json",
             ".dockerignore",
+            "build-dependencies/clanker-ui.json",
         ] {
             fs::write(root.join(name), b"approved input")?;
         }
@@ -934,6 +937,7 @@ mod platform_input_tests {
             "architecture-boundaries.json",
             "architecture-proofs.json",
             "architecture/clippy.toml",
+            "build-dependencies/clanker-ui.json",
         ] {
             assert_eq!(approved[policy], digest(b"approved input"));
             fs::write(root.join(policy), b"weakened restrictions")?;

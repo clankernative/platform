@@ -1636,6 +1636,53 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ui_dependency_pin_changes_native_host_snapshots_and_missing_pin_is_refused() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path();
+        for name in [
+            "Cargo.toml",
+            "Cargo.lock",
+            "architecture-rules.json",
+            "architecture-boundaries.json",
+            "architecture-proofs.json",
+            "architecture/clippy.toml",
+            "rust-toolchain.toml",
+            "toolchain.json",
+            ".dockerignore",
+            "build-dependencies/clanker-ui.json",
+            ".github/workflows/ci.yml",
+            ".github/temporal.sha256",
+            ".github/temporal-linux.sha256",
+        ] {
+            let path = root.join(name);
+            fs::create_dir_all(path.parent().context("snapshot fixture parent")?)?;
+            fs::write(path, b"approved input")?;
+        }
+        for name in [
+            "crates", "tools", "vendor", "assets", "ops", "infra", "deploy", "toolchains",
+            "sdk", "cli", "fixtures", "examples/app-ownership", "examples/notifications", "examples/reports",
+        ] {
+            fs::create_dir_all(root.join(name))?;
+        }
+        let pin = root.join("build-dependencies/clanker-ui.json");
+        let snapshots = || -> Result<Vec<String>> {
+            [("linux", "x86_64"), ("macos", "aarch64")]
+                .into_iter()
+                .map(|(host, architecture)| verification_snapshot_for(root, "verify", host, architecture))
+                .collect()
+        };
+        let approved = snapshots()?;
+        fs::write(&pin, b"changed dependency pin")?;
+        let changed = snapshots()?;
+        assert!(approved.iter().zip(changed).all(|(before, after)| *before != after));
+        fs::remove_file(&pin)?;
+        assert!(snapshots().is_err());
+        fs::write(&pin, b"approved input")?;
+        assert_eq!(approved, snapshots()?);
+        Ok(())
+    }
+
+    #[test]
     fn linux_context_requires_private_finite_native_compiler_limits() -> Result<()> {
         validate_linux_context("0::/\n", "6442450944\n")?;
         for (group, memory) in [
