@@ -31,6 +31,8 @@ pub(super) const SOURCES: &[(&str, &str)] = &[
         "qualification_shell.rs",
         include_str!("qualification_shell.rs"),
     ),
+    ("refresh.rs", include_str!("refresh.rs")),
+    ("refresh_tests.rs", include_str!("refresh_tests.rs")),
     ("registration.rs", include_str!("registration.rs")),
     (
         "registration_publication.rs",
@@ -305,6 +307,7 @@ fn every_oauth_module_uses_the_controlled_effect_boundary() -> Result<()> {
                 | "simulation.rs"
                 | "simulation_sources.rs"
                 | "simulation_inbound.rs"
+                | "refresh_tests.rs"
                 | "registration_tests.rs"
                 | "shell_transport_tests.rs"
         ) || name.contains("day2-capabilities")

@@ -396,11 +396,22 @@ Use for `Connections.calendar.list_events`. Uses cannot enter persistent models
 or public API codecs; provider tokens remain in private host custody.
 
 Reads require a durable verified human origin and current native authority. They
-use original activation tokens and admit one GET, at most 100 events and a window
+use the exact currently published token material and admit one GET, at most 100 events and a window
 of at most 31 days. Any provider continuation returns `CapacityDeferred` without
 another request. The canary's native build, setup and compiled runtime/custody
 tests are part of full verification, with host-only simulated readiness and HTTP.
-Live Google registration, refresh publication, Calendar writes and qualified
+For the reviewed Google reusable profile, resolution privately refreshes when
+the access token has at most 60 seconds remaining. The host consumes a durable
+single-flight dispatch permit, verifies the unchanged account and exact scopes,
+then commits encrypted replacement material, head version and attempt receipt
+together. Tokens, credentials and refresh operations remain unavailable to apps.
+An ambiguous send is not retried; recovery observes a committed replacement or
+requires reconnection. Existing expiry, material and clock refusals are never
+cleared by refresh. The latest publication clock and exact material reference
+remain pinned through the transaction that issues the Use. Local conformance
+includes version 2/3 reads and process-exit recovery at the actual private
+dispatch and publication boundaries; these use native simulation ports.
+Live Google registration, Calendar writes and qualified
 clock/workload authority remain separate. See the canary README for byte/time
 limits and the precise scope of persistent clock refusal.
 
@@ -750,5 +761,5 @@ create a Google web client, establish
 complete installation readiness or enable OAuth on an installation. Live registration
 qualification requires the real client and deployed canary callback. Calendar
 read dispatch is available through the sealed client when current native
-authority and original activation tokens are available. The live connect/use
-canary, refresh publication and Calendar writes remain follow-up work.
+authority and authenticated current token material are available. The live
+connect/use/refresh canary and Calendar writes remain follow-up work.
