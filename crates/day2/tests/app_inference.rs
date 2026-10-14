@@ -25,7 +25,7 @@ impl Fixture {
         let artifact = LoadedArtifact::load(Path::new(
             &std::env::var_os("DAY2_TEST_REPORTS_ARTIFACT").context("run xtask verify-reports")?,
         ))?;
-        let temporary = tempfile::tempdir_in(root.join("artifacts"))?;
+        let temporary = crate::support::compiler::stage(&root)?;
         let stage = temporary.path().join("stage");
         fs::create_dir_all(stage.join("app"))?;
         let modules = day2::app_sources::stage(&root.join("examples/reports"), &stage.join("app"))?;

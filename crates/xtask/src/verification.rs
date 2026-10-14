@@ -15,6 +15,102 @@ mod shards;
 
 const CACHE_FORMAT: u32 = 2;
 
+/// Atomic setup for the hosted Linux compiler domain. The instance workflow
+/// supplies the private cgroup; neither an app nor a cache may select quotas,
+/// mount paths or a weaker compiler policy.
+pub(super) fn linux_context(root: &Path) -> Result<()> {
+    ensure!(
+        std::env::consts::OS == "linux" && std::env::consts::ARCH == "x86_64",
+        "native Linux x86_64 CI context required"
+    );
+    ensure!(
+        std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true"),
+        "hosted CI setup only"
+    );
+    let cgroup = fs::read_to_string("/proc/self/cgroup")?;
+    let memory = fs::read_to_string("/sys/fs/cgroup/memory.max")?;
+    validate_linux_context(&cgroup, &memory)?;
+    let root = root.canonicalize()?;
+    // The generated output directory also contains this checked-in ABI seed.
+    // Preserve its exact checkout bytes and permissions across the tmpfs mount;
+    // fresh source checks and the reviewed generator still admit it normally.
+    let abi = root.join("crates/worker/generated/roc_platform_abi.rs");
+    let abi_metadata: fs::Metadata = fs::symlink_metadata(&abi)?;
+    ensure!(
+        abi_metadata.is_file() && abi_metadata.len() <= 1024 * 1024,
+        "bounded regular checked-in worker ABI seed required"
+    );
+    let abi_seed = fs::read(&abi)?;
+    for (relative, bytes) in [
+        ("artifacts", 1024_u64 * 1024 * 1024),
+        ("crates/worker/generated", 64_u64 * 1024 * 1024),
+    ] {
+        let path = root.join(relative);
+        fs::create_dir_all(&path)?;
+        ensure!(
+            path.canonicalize()? == path && fs::symlink_metadata(&path)?.is_dir(),
+            "CI compiler output must be a regular owned directory"
+        );
+        let mounts = fs::read_to_string("/proc/self/mountinfo")?;
+        ensure!(
+            !mounts
+                .lines()
+                .any(|line| line.split_whitespace().nth(4) == path.to_str()),
+            "CI output mount already exists; setup must precede cache/transport restoration"
+        );
+        run_with_budget(
+            &root,
+            Command::new("/usr/bin/mount")
+                .args(["-t", "tmpfs", "-o"])
+                .arg(format!("rw,exec,nosuid,nodev,size={bytes}"))
+                .arg("day2-ci-output")
+                .arg(&path),
+            Duration::from_secs(30),
+        )?;
+    }
+    fs::write(&abi, &abi_seed)?;
+    fs::set_permissions(&abi, abi_metadata.permissions())?;
+    ensure!(
+        fs::read(&abi)? == abi_seed,
+        "worker ABI seed changed across bounded output setup"
+    );
+    let run = std::env::var("GITHUB_RUN_ID")?;
+    let attempt = std::env::var("GITHUB_RUN_ATTEMPT")?;
+    ensure!(
+        run.parse::<u64>().is_ok_and(|value| value > 0)
+            && attempt.parse::<u64>().is_ok_and(|value| value > 0),
+        "actual hosted context identity required"
+    );
+    let evidence = json!({"run":run,"attempt":attempt,"host":"linux","architecture":"x86_64",
+        "workspace":root,"cgroup":cgroup,"memory_max":memory.trim(),
+        "checkout_abi_seed":{"path":"crates/worker/generated/roc_platform_abi.rs",
+            "digest":day2::digest(&abi_seed),"bytes":abi_seed.len()},
+        "mountinfo":fs::read_to_string("/proc/self/mountinfo")?,
+        "compiler_policy":"unchanged mandatory native cgroup/tmpfs/Landlock/seccomp admission"});
+    fs::write(
+        "/tmp/day2-ci-linux-context.json",
+        serde_json::to_vec_pretty(&evidence)?,
+    )?;
+    println!("Established private Linux compiler context; native confinement remains mandatory");
+    Ok(())
+}
+
+fn validate_linux_context(cgroup: &str, memory: &str) -> Result<()> {
+    ensure!(
+        cgroup.trim() == "0::/",
+        "private cgroup v2 namespace required"
+    );
+    let memory: u64 = memory
+        .trim()
+        .parse()
+        .context("finite Linux CI memory quota required")?;
+    ensure!(
+        (1..=6 * 1024_u64 * 1024 * 1024).contains(&memory),
+        "Linux compiler cgroup exceeds6GiB"
+    );
+    Ok(())
+}
+
 // Every test campaign in the full gate selects the same Cargo packages and
 // targets. Only libtest filters change: selecting a narrower Cargo test target
 // can disable dev-dependency features and rebuild shared dependencies.
@@ -179,11 +275,12 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
     let mut fixtures: BTreeMap<String, PathBuf> = BTreeMap::new();
     let mut passed = BTreeSet::new();
     let mut executed_binaries = BTreeSet::new();
+    let mut mac_campaigns = BTreeMap::new();
     let mut simulation = None;
     let mut simulation_started = None;
     let mut timings = Timings::new();
     let mut cache = load_cache(root, scope, &snapshot)?;
-    let prepared = if recipe.starts_with("verify-shard-") || recipe == "verify-compose" {
+    let mut prepared = if recipe.starts_with("verify-shard-") || recipe == "verify-compose" {
         let prepared = shards::load(root, &snapshot)?;
         fixtures = shards::fixtures(root, &prepared)?;
         Some(prepared)
@@ -247,6 +344,9 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
             } else {
                 tests(root, &campaign.suite, &fixtures, budget)?;
             }
+            if recipe == "verify-mac" {
+                mac_campaigns.insert(campaign.suite.clone(), executed_binaries.clone());
+            }
             ensure_stable(root, recipe, &snapshot)?;
             let step = format!("test-{}", campaign.suite);
             ensure!(passed.insert(step.clone()), "duplicate verification effect");
@@ -267,6 +367,47 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
                 ensure!(parameters.is_empty(), "test build accepts no overrides");
                 shards::build(root, &snapshot)?;
                 "test-binaries".into()
+            }
+            "verify-mac-prepared" => {
+                ensure!(
+                    recipe == "verify-mac" && parameters.is_empty(),
+                    "closed native Mac preparation required"
+                );
+                prepared = Some(shards::mac::prepare(
+                    root,
+                    &snapshot,
+                    &fixtures,
+                    &passed,
+                    &timings.steps_ms,
+                )?);
+                return Ok(json!({}));
+            }
+            "verify-mac-native" => {
+                ensure!(
+                    recipe == "verify-mac" && parameters.is_empty(),
+                    "closed native Mac cases required"
+                );
+                shards::mac::focused(
+                    root,
+                    prepared.as_ref().context("Mac preparation required")?,
+                    &fixtures,
+                )?;
+                "test-mac-native".into()
+            }
+            "verify-mac-receipt" => {
+                ensure!(
+                    recipe == "verify-mac" && parameters.is_empty(),
+                    "closed native Mac receipt required"
+                );
+                ensure_stable(root, recipe, &snapshot)?;
+                shards::mac::finish(
+                    root,
+                    prepared.take().context("Mac preparation required")?,
+                    &passed,
+                    &timings.steps_ms,
+                    &mac_campaigns,
+                )?;
+                return Ok(json!({}));
             }
             "verify-test-docs" => {
                 ensure!(parameters.is_empty(), "doc tests accept no overrides");
@@ -666,6 +807,7 @@ fn recipe_scope(recipe: &str) -> Result<&'static str> {
         | "verify-prepare"
         | "verify-prepare-join"
         | "verify-compose"
+        | "verify-mac"
         | "verify-prepare-part-inputs"
         | "verify-prepare-part-tests" => Ok("all"),
         shard
@@ -681,7 +823,38 @@ fn recipe_scope(recipe: &str) -> Result<&'static str> {
 }
 
 fn verification_snapshot(root: &Path, recipe: &str) -> Result<String> {
+    verification_snapshot_for(root, recipe, std::env::consts::OS, std::env::consts::ARCH)
+}
+
+fn verification_source_identity(root: &Path, recipe: &str) -> Result<String> {
+    Ok(digest(&serde_json::to_vec(&verification_sources(
+        root, recipe,
+    )?)?))
+}
+
+fn verification_snapshot_for(
+    root: &Path,
+    recipe: &str,
+    host: &str,
+    architecture: &str,
+) -> Result<String> {
+    Ok(digest(&serde_json::to_vec(&json!({
+        "recipe":recipe,
+        "host":host,
+        "architecture":architecture,
+        "sources":verification_sources(root, recipe)?,
+    }))?))
+}
+
+fn verification_sources(root: &Path, recipe: &str) -> Result<BTreeMap<String, String>> {
     let mut hashes = build_native::platform_sources(root)?;
+    for pin in [
+        ".github/workflows/ci.yml",
+        ".github/temporal.sha256",
+        ".github/temporal-linux.sha256",
+    ] {
+        hashes.insert(pin.into(), digest(&fs::read(root.join(pin))?));
+    }
     let mut sources = vec![
         ("sdk", root.join("sdk")),
         ("cli", root.join("cli")),
@@ -696,12 +869,7 @@ fn verification_snapshot(root: &Path, recipe: &str) -> Result<String> {
     for (label, directory) in sources {
         hash_verification_tree(&directory, &directory, label, &mut hashes)?;
     }
-    Ok(digest(&serde_json::to_vec(&json!({
-        "recipe":recipe,
-        "host":std::env::consts::OS,
-        "architecture":std::env::consts::ARCH,
-        "sources":hashes,
-    }))?))
+    Ok(hashes)
 }
 
 fn hash_verification_tree(
@@ -1273,57 +1441,7 @@ fn configure_tests(
 /// Production worker lookup and confinement are unchanged.
 #[cfg(target_os = "linux")]
 fn prepare_linux_test_installation(root: &Path) -> Result<()> {
-    let output = Command::new("cargo")
-        .args([
-            "build",
-            "--locked",
-            "-p",
-            "day2-sandbox",
-            "--bins",
-            "--message-format=json",
-        ])
-        .current_dir(root)
-        .stderr(std::process::Stdio::inherit())
-        .output()?;
-    ensure!(output.status.success(), "build Linux test launchers");
-    let mut installed = BTreeSet::new();
-    for line in output.stdout.split(|byte| *byte == b'\n') {
-        if line.is_empty() {
-            continue;
-        }
-        let artifact: serde_json::Value = serde_json::from_slice(line)?;
-        if artifact["reason"] != "compiler-artifact" {
-            continue;
-        }
-        let Some(name @ ("day2-sandbox" | "day2-sandbox-probe")) =
-            artifact["target"]["name"].as_str()
-        else {
-            continue;
-        };
-        let executable = Path::new(
-            artifact["executable"]
-                .as_str()
-                .context("Linux test launcher executable missing")?,
-        );
-        let directory = executable
-            .parent()
-            .context("Linux test launcher directory")?
-            .join("deps");
-        ensure!(
-            fs::symlink_metadata(&directory)?.file_type().is_dir(),
-            "regular Cargo test directory required"
-        );
-        install_cli_file(executable, directory.join(name))?;
-        ensure!(
-            installed.insert(name.to_owned()),
-            "duplicate Linux test launcher"
-        );
-    }
-    ensure!(
-        installed.len() == 2,
-        "complete Linux test installation required"
-    );
-    Ok(())
+    shards::prepare_linux_installation(root)
 }
 
 fn receipt(
@@ -1516,6 +1634,87 @@ fn required_steps(scope: &str) -> Result<&'static [&'static str]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ui_dependency_pin_changes_native_host_snapshots_and_missing_pin_is_refused() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path();
+        for name in [
+            "Cargo.toml",
+            "Cargo.lock",
+            "architecture-rules.json",
+            "architecture-boundaries.json",
+            "architecture-proofs.json",
+            "architecture/clippy.toml",
+            "rust-toolchain.toml",
+            "toolchain.json",
+            ".dockerignore",
+            "build-dependencies/clanker-ui.json",
+            ".github/workflows/ci.yml",
+            ".github/temporal.sha256",
+            ".github/temporal-linux.sha256",
+        ] {
+            let path = root.join(name);
+            fs::create_dir_all(path.parent().context("snapshot fixture parent")?)?;
+            fs::write(path, b"approved input")?;
+        }
+        for name in [
+            "crates",
+            "tools",
+            "vendor",
+            "assets",
+            "ops",
+            "infra",
+            "deploy",
+            "toolchains",
+            "sdk",
+            "cli",
+            "fixtures",
+            "examples/app-ownership",
+            "examples/notifications",
+            "examples/reports",
+        ] {
+            fs::create_dir_all(root.join(name))?;
+        }
+        let pin = root.join("build-dependencies/clanker-ui.json");
+        let snapshots = || -> Result<Vec<String>> {
+            [("linux", "x86_64"), ("macos", "aarch64")]
+                .into_iter()
+                .map(|(host, architecture)| {
+                    verification_snapshot_for(root, "verify", host, architecture)
+                })
+                .collect()
+        };
+        let approved = snapshots()?;
+        fs::write(&pin, b"changed dependency pin")?;
+        let changed = snapshots()?;
+        assert!(
+            approved
+                .iter()
+                .zip(changed)
+                .all(|(before, after)| *before != after)
+        );
+        fs::remove_file(&pin)?;
+        assert!(snapshots().is_err());
+        fs::write(&pin, b"approved input")?;
+        assert_eq!(approved, snapshots()?);
+        Ok(())
+    }
+
+    #[test]
+    fn linux_context_requires_private_finite_native_compiler_limits() -> Result<()> {
+        validate_linux_context("0::/\n", "6442450944\n")?;
+        for (group, memory) in [
+            ("0::/host/job", "6442450944"),
+            ("0::/", "max"),
+            ("0::/", "0"),
+            ("0::/", "6442450945"),
+            ("0::/", "-1"),
+        ] {
+            assert!(validate_linux_context(group, memory).is_err());
+        }
+        Ok(())
+    }
 
     #[test]
     fn full_gate_filters_keep_the_same_cargo_package_and_target_graph() -> Result<()> {

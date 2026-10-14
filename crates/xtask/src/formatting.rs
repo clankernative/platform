@@ -23,7 +23,6 @@ struct CompilerPin {
     patch_sha256: String,
 }
 
-const PIN_PATH: &str = "tools/roc-formatter/toolchain.json";
 const PATCH_PATH: &str = "tools/roc-formatter/associated-method-spacing.patch";
 const BINARY_PATH: &str = "../.toolchains/roc-fmt-day2";
 
@@ -54,7 +53,7 @@ fn run_selected(root: &Path, mode: Mode) -> Result<usize> {
 }
 
 fn checked_compiler(root: &Path) -> Result<PathBuf> {
-    let path = root.join(PIN_PATH);
+    let path = root.join(crate::formatter_bootstrap::pin_path()?);
     ensure!(
         fs::symlink_metadata(&path)?.file_type().is_file(),
         "Roc formatter pin must be a regular file"
@@ -255,7 +254,10 @@ mod tests {
             "zig_version": "0.16.0",
             "build_args": ["roc"],
         });
-        fs::write(root.join(PIN_PATH), serde_json::to_vec(&pin)?)?;
+        fs::write(
+            root.join(crate::formatter_bootstrap::pin_path()?),
+            serde_json::to_vec(&pin)?,
+        )?;
         Ok(pin)
     }
 
@@ -351,14 +353,20 @@ mod tests {
         assert_eq!(checked_compiler(&root)?, compiler.canonicalize()?);
         let mut incorrect = pin.clone();
         incorrect["roc_binary_sha256"] = "0".repeat(64).into();
-        fs::write(root.join(PIN_PATH), serde_json::to_vec(&incorrect)?)?;
+        fs::write(
+            root.join(crate::formatter_bootstrap::pin_path()?),
+            serde_json::to_vec(&incorrect)?,
+        )?;
         assert!(
             run(&root, Mode::Write)
                 .unwrap_err()
                 .to_string()
                 .contains("compiler digest mismatch")
         );
-        fs::write(root.join(PIN_PATH), serde_json::to_vec(&pin)?)?;
+        fs::write(
+            root.join(crate::formatter_bootstrap::pin_path()?),
+            serde_json::to_vec(&pin)?,
+        )?;
         assert_eq!(checked_compiler(&root)?, compiler.canonicalize()?);
         Ok(())
     }
@@ -374,14 +382,20 @@ mod tests {
         for field in ["roc_version", "roc_binary_sha256", "patch_sha256"] {
             let mut missing = pin.clone();
             missing.as_object_mut().context("pin object")?.remove(field);
-            fs::write(root.join(PIN_PATH), serde_json::to_vec(&missing)?)?;
+            fs::write(
+                root.join(crate::formatter_bootstrap::pin_path()?),
+                serde_json::to_vec(&missing)?,
+            )?;
             assert!(checked_compiler(&root).is_err(), "missing {field}");
         }
         for field in ["roc_binary_sha256", "patch_sha256"] {
             for invalid in ["f".repeat(63), "A".repeat(64), "g".repeat(64)] {
                 let mut invalid_pin = pin.clone();
                 invalid_pin[field] = invalid.into();
-                fs::write(root.join(PIN_PATH), serde_json::to_vec(&invalid_pin)?)?;
+                fs::write(
+                    root.join(crate::formatter_bootstrap::pin_path()?),
+                    serde_json::to_vec(&invalid_pin)?,
+                )?;
                 assert!(
                     run(&root, Mode::Write)
                         .unwrap_err()
@@ -394,10 +408,16 @@ mod tests {
         for invalid in ["", "nightly\n", "nightly/version"] {
             let mut invalid_pin = pin.clone();
             invalid_pin["roc_version"] = invalid.into();
-            fs::write(root.join(PIN_PATH), serde_json::to_vec(&invalid_pin)?)?;
+            fs::write(
+                root.join(crate::formatter_bootstrap::pin_path()?),
+                serde_json::to_vec(&invalid_pin)?,
+            )?;
             assert!(checked_compiler(&root).is_err());
         }
-        fs::write(root.join(PIN_PATH), serde_json::to_vec(&pin)?)?;
+        fs::write(
+            root.join(crate::formatter_bootstrap::pin_path()?),
+            serde_json::to_vec(&pin)?,
+        )?;
         fs::write(root.join(PATCH_PATH), "unreviewed change")?;
         assert!(
             run(&root, Mode::Write)
@@ -426,7 +446,11 @@ mod tests {
         let workspace = workspace()?;
         let root = workspace.path().join("platform");
         formatter(&root)?;
-        for path in [PIN_PATH, PATCH_PATH, BINARY_PATH] {
+        for path in [
+            crate::formatter_bootstrap::pin_path()?,
+            PATCH_PATH,
+            BINARY_PATH,
+        ] {
             let path = root.join(path);
             let backup = path.with_extension("original");
             fs::rename(&path, &backup)?;
@@ -528,7 +552,9 @@ mod tests {
             assert_eq!(fs::read_to_string(&source)?, expected, "{name}");
         }
 
-        let pin: CompilerPin = serde_json::from_slice(&fs::read(root.join(PIN_PATH))?)?;
+        let pin: CompilerPin = serde_json::from_slice(&fs::read(
+            root.join(crate::formatter_bootstrap::pin_path()?),
+        )?)?;
         let header = format!("package [Typed] {{ roc: \"{}\" }}\n", pin.roc_version);
         let source = temporary.path().join("main.roc");
         fs::write(&source, &header)?;
