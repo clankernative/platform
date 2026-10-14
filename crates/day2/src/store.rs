@@ -1960,41 +1960,36 @@ impl Runtime {
         let snapshot = connection.transaction()?;
         self.check_binding(&snapshot)?;
         let schema = &self.artifact.contract().schema;
-        let limits = self.artifact.contract().verification_limits.as_ref();
-        let row_limit = limits.map_or(256, |limits| limits.rows_per_model);
-        let fact_limit = limits.map_or(usize::MAX, |limits| limits.total_facts);
-        let byte_limit = limits.map_or(usize::MAX, |limits| limits.snapshot_bytes);
+        let limits = &self.artifact.contract().verification_limits;
         let live = read_model_snapshot_bounded(
             &snapshot,
             schema,
             SnapshotScope::Live,
-            row_limit,
-            fact_limit,
-            byte_limit,
+            limits.rows_per_model,
+            limits.total_facts,
+            limits.snapshot_bytes,
         )?;
         let deleted = read_model_snapshot_bounded(
             &snapshot,
             schema,
             SnapshotScope::Deleted,
-            row_limit,
-            fact_limit,
-            byte_limit,
+            limits.rows_per_model,
+            limits.total_facts,
+            limits.snapshot_bytes,
         )?;
-        if let Some(limits) = limits {
-            let facts = snapshot_fact_count(&live)?.saturating_add(snapshot_fact_count(&deleted)?);
-            ensure!(
-                facts <= limits.total_facts,
-                "verification_total_fact_budget"
-            );
-            let combined = serde_json::to_vec(&json!({
-                "live": live.to_string(),
-                "deleted": deleted.to_string()
-            }))?;
-            ensure!(
-                combined.len() <= limits.snapshot_bytes,
-                "verification_snapshot_byte_budget"
-            );
-        }
+        let facts = snapshot_fact_count(&live)?.saturating_add(snapshot_fact_count(&deleted)?);
+        ensure!(
+            facts <= limits.total_facts,
+            "verification_total_fact_budget"
+        );
+        let combined = serde_json::to_vec(&json!({
+            "live": live.to_string(),
+            "deleted": deleted.to_string()
+        }))?;
+        ensure!(
+            combined.len() <= limits.snapshot_bytes,
+            "verification_snapshot_byte_budget"
+        );
         for rollup in &schema.rollups {
             ensure!(
                 rollup.mismatches(&snapshot)? == 0,
@@ -2010,22 +2005,20 @@ impl Runtime {
         let mut connection = open(&self.db)?;
         let snapshot = connection.transaction()?;
         self.check_binding(&snapshot)?;
-        let limits = self.artifact.contract().verification_limits.as_ref();
+        let limits = &self.artifact.contract().verification_limits;
         let models = read_model_snapshot_bounded(
             &snapshot,
             &self.artifact.contract().schema,
             scope,
-            limits.map_or(256, |limits| limits.rows_per_model),
-            limits.map_or(usize::MAX, |limits| limits.total_facts),
-            limits.map_or(usize::MAX, |limits| limits.snapshot_bytes),
+            limits.rows_per_model,
+            limits.total_facts,
+            limits.snapshot_bytes,
         )?;
         let encoded = serde_json::to_vec(&models)?;
-        if let Some(limits) = limits {
-            ensure!(
-                encoded.len() <= limits.snapshot_bytes,
-                "verification_snapshot_byte_budget"
-            );
-        }
+        ensure!(
+            encoded.len() <= limits.snapshot_bytes,
+            "verification_snapshot_byte_budget"
+        );
         for rollup in &self.artifact.contract().schema.rollups {
             ensure!(
                 rollup.mismatches(&snapshot)? == 0,

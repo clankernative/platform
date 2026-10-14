@@ -42,8 +42,6 @@ fn complete_backup_and_restore_do_not_inherit_the_property_snapshot_row_budget()
         .artifact()
         .contract()
         .verification_limits
-        .as_ref()
-        .context("Reports verification limits")?
         .rows_per_model as u64
         + 64;
     let mut connection = Connection::open(runtime.db())?;

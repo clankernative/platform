@@ -484,7 +484,7 @@ mod tests {
 
     fn checked_artifact() -> crate::artifact::Artifact {
         serde_json::from_value(json!({
-            "format":14,"namespace":"directory","roc_version":"test","worker_digest":"test",
+            "format":14,"verification_limits":crate::artifact::VerificationLimits::QUALIFIED,"namespace":"directory","roc_version":"test","worker_digest":"test",
             "schema_digest":"test","sources":{},"admission":"local-spike-only",
             "schema":{"models":{},"inputs":{"person":{"fields":{"name":"text"},"roc_type":"DirectoryTypes.Person"}},"foreign_keys":[]},
             "outputs":{"person":{"shape":{"record":{"name":"string"}},"roc_type":"{ name : Str }"}},

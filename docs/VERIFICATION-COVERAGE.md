@@ -22,10 +22,10 @@ repositories. Passing this public gate makes no claim about those applications.
 Linux kernel/runtime qualification is a separate native campaign documented in
 [the runtime guide](../deploy/linux-sqlite/README.md).
 
-Current artifacts declare one property-verification profile: 10,000 facts in
-total, at most 10,000 rows per model, 32 MiB of encoded snapshot data, 512 MiB of
-live Roc-owned allocation layouts and a 30-second evaluation deadline. The
-`worker_heap_bytes` quota includes ABI allocation prefixes; alloc/realloc reject
+Artifacts require one verification profile, with no missing-profile fallback:
+10,000 facts in total, at most 10,000 rows per model, 32 MiB of encoded snapshot
+data, 512 MiB of live Roc-owned allocation layouts and a 30-second evaluation
+deadline. The `worker_heap_bytes` quota includes ABI allocation prefixes; alloc/realloc reject
 excess before allocating, and deallocation returns that quota. This is not a
 whole-process RSS or address-space guarantee: Rust protocol frames have separate
 length bounds, and system mappings and allocator overhead are outside Roc heap
@@ -35,16 +35,22 @@ live/deleted views in one SQLite read transaction; their combined facts and
 bytes share the declared budget. Overflow fails rather than truncating state.
 Generated decoders enforce the same bounds.
 
-Property evaluation requires the current artifact contract and the qualified
-native profile on macOS or Linux. Both enforce the Roc heap quota, framed
-protocol bounds and host evaluation deadline; neither falls back to ordinary
-invocation limits. Linux additionally enforces a 512 MiB process address-space
-ceiling and a CPU-time bound through its sandbox launcher. macOS does not claim
-that process-wide address-space ceiling. Other hosts refuse evaluation. The
-native worker allocator tests reject aggregate/growing/oversized allocations;
+Property evaluation and operation input/check callbacks require the current
+artifact contract and the qualified native profile on macOS or Linux. Both
+enforce the Roc heap quota, framed protocol bounds and host evaluation deadline;
+neither falls back to ordinary invocation limits. The entire encoded verification request, including both
+before/after snapshots and JSON escaping, must fit the separate frame bound.
+Actual command/query execution retains ordinary worker limits. Linux additionally
+enforces a 512 MiB process address-space ceiling and a CPU-time bound through its
+sandbox launcher. macOS does not claim that process-wide address-space ceiling.
+Other hosts refuse evaluation. The native worker allocator tests reject
+aggregate/growing/oversized allocations;
 the shared property-worker suite exercises larger frames, 10,000 typed rows and
-artifact-bound replay on both supported hosts. Linux resource-limit tests remain
-separate. Passing host-side budget tests alone does not qualify native behavior.
+artifact-bound replay on both supported hosts. It also runs the complete Roc
+verification campaign over a SQLite snapshot larger than the ordinary frame
+limit, exercising operation generators, before/after checks and error cases.
+Linux resource-limit tests remain separate. Passing host-side budget tests alone
+does not qualify native behavior.
 
 OAuth's required seeded host/protocol campaigns, effect-boundary guard, catalog
 coverage gate, implementation-bound replay, and durable schema upgrades are

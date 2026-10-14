@@ -71,6 +71,25 @@ fn start_property_worker(
     }
 }
 
+/// Shared transport for pure property and operation-verification callbacks.
+/// The complete encoded request, including before/after snapshots, is bounded
+/// before materializing or starting a worker. Ordinary invocations do not use it.
+pub(crate) fn exchange_verification(artifact: &LoadedArtifact, request: &[u8]) -> Result<Vec<u8>> {
+    artifact.require_current_api()?;
+    let limits = &artifact.contract().verification_limits;
+    limits.validate()?;
+    ensure!(
+        request.len() < MAX_PROPERTY_FRAME && !request.contains(&b'\n'),
+        "verification request frame budget"
+    );
+    let executable = artifact.materialize_worker()?;
+    start_property_worker(&executable, limits)?.exchange_bounded(
+        request,
+        MAX_PROPERTY_FRAME,
+        Duration::from_millis(limits.evaluation_timeout_ms),
+    )
+}
+
 pub fn validate_catalog(names: &[String]) -> Result<()> {
     ensure!(
         !names.is_empty() && names.len() <= 64,
@@ -93,11 +112,7 @@ pub fn evaluate(artifact: &LoadedArtifact, snapshot: &Value) -> Result<Evidence>
         tables.len() == models.len(),
         "incomplete or unknown snapshot tables"
     );
-    let limits = artifact
-        .contract()
-        .verification_limits
-        .as_ref()
-        .context("artifact verification limits missing")?;
+    let limits = &artifact.contract().verification_limits;
     limits.validate()?;
     let snapshot_bytes = validate_snapshot_budget(snapshot, limits)?;
     for (name, model) in models {
@@ -117,8 +132,6 @@ pub fn evaluate(artifact: &LoadedArtifact, snapshot: &Value) -> Result<Evidence>
     }
     // Properties have no observations or effect interpreter. They can only
     // evaluate the complete, bounded snapshot supplied by the verifier.
-    let executable = artifact.materialize_worker()?;
-    let mut worker = start_property_worker(&executable, limits)?;
     let request = Request {
         operation: "$properties".into(),
         input: String::from_utf8(snapshot_bytes)?,
@@ -137,15 +150,7 @@ pub fn evaluate(artifact: &LoadedArtifact, snapshot: &Value) -> Result<Evidence>
         observations: Vec::new(),
     };
     let request_bytes = serde_json::to_vec(&request)?;
-    ensure!(
-        request_bytes.len() < MAX_PROPERTY_FRAME,
-        "property request frame budget"
-    );
-    let response_bytes = worker.exchange_bounded(
-        &request_bytes,
-        MAX_PROPERTY_FRAME,
-        Duration::from_millis(limits.evaluation_timeout_ms),
-    )?;
+    let response_bytes = exchange_verification(artifact, &request_bytes)?;
     let response: Response = serde_json::from_slice(&response_bytes)?;
     ensure!(
         response.kind == "done"
@@ -258,11 +263,7 @@ fn read_evidence_file(path: &Path, maximum: u64) -> Result<Vec<u8>> {
 /// Read bounded saved evidence without following links, then replay it offline.
 pub fn replay_file(artifact: &LoadedArtifact, path: &Path) -> Result<Evidence> {
     artifact.require_current_api()?;
-    let limits = artifact
-        .contract()
-        .verification_limits
-        .as_ref()
-        .context("artifact verification limits missing")?;
+    let limits = &artifact.contract().verification_limits;
     let bytes = read_evidence_file(path, evidence_byte_limit(limits)?)?;
     let evidence: Evidence = serde_json::from_slice(&bytes).context("decode property evidence")?;
     replay(artifact, &evidence)
@@ -344,21 +345,7 @@ mod tests {
 
     #[test]
     fn replay_rejects_evidence_from_another_artifact_before_evaluation() -> Result<()> {
-        let contract: crate::artifact::Artifact = serde_json::from_value(json!({
-            "format": 2,
-            "roc_version": "test",
-            "worker_digest": "test",
-            "schema_digest": "test",
-            "schema": {"models": {}, "inputs": {}, "foreign_keys": []},
-            "operations": [],
-            "sources": {},
-            "admission": "local-spike-only"
-        }))?;
-        let artifact = LoadedArtifact::from_contract_for_tests(
-            "expected-artifact".into(),
-            std::path::PathBuf::new(),
-            contract,
-        );
+        let artifact = replay_artifact()?;
         let evidence = Evidence {
             format: 1,
             artifact: "different-artifact".into(),
