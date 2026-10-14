@@ -1,7 +1,7 @@
 {
   "version": 1,
   "trait_checks": [
-    {"source":"crates/day2/src/structural_proofs.rs","scope":"module","fingerprint":"sha256:399329e0b4f32f9d2d8589cb0af8cfa6bdc574b6cf3b2d034ec08c0cb4acba91","registration":{"source":"crates/day2/src/lib.rs","module":"structural_proofs"}},
+    {"source":"crates/day2/src/structural_proofs.rs","scope":"module","fingerprint":"sha256:c9191a57b5b20ed364079d2dce37540a6875c569e58a5e2d30883a4bbfed8065","registration":{"source":"crates/day2/src/lib.rs","module":"structural_proofs"}},
     {"source":"crates/day2-control/src/release.rs","scope":"const","fingerprint":"sha256:9c616765ed20205205236e2e4d7cc7a77a49512dcd9d0c33c34e1c40da5209e3","registration":null}
   ],
   "proofs": [
@@ -569,6 +569,42 @@
       "consuming_methods": [
         "prepare",
         "send"
+      ]
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_namespace.rs",
+      "type_name": "NativeNamespaceObservation",
+      "owning_children": [],
+      "methods": [
+        "pub (super) fn acquire (acquisition : & mut NativeAcquisition) -> Result < Self >",
+        "pub (super) fn check (& mut self , acquisition : & mut NativeAcquisition) -> Result < () >",
+        "pub (super) fn into_data (self) -> NamespaceFacts",
+        "pub (super) fn mappings (& mut self , acquisition : & mut NativeAcquisition) -> Result < Vec < namespace_protocol :: Mapping > >"
+      ],
+      "factories": [
+        {
+          "owner": "NativeNamespaceObservation",
+          "signature": "pub (super) fn acquire (acquisition : & mut NativeAcquisition) -> Result < Self >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "NativeNamespaceObservation",
+          "signature": "pub (super) fn check (& mut self , acquisition : & mut NativeAcquisition) -> Result < () >"
+        },
+        {
+          "owner": "NativeNamespaceObservation",
+          "signature": "pub (super) fn into_data (self) -> NamespaceFacts"
+        },
+        {
+          "owner": "NativeNamespaceObservation",
+          "signature": "pub (super) fn mappings (& mut self , acquisition : & mut NativeAcquisition) -> Result < Vec < namespace_protocol :: Mapping > >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": [
+        "into_data"
       ]
     }
   ],

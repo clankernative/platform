@@ -747,7 +747,7 @@ fn glob_names(prefix: &str) -> &'static [&'static str] {
         "std::path" => &["Path", "PathBuf", "Components", "Iter", "absolute"],
         "time" => &["OffsetDateTime", "UtcDateTime"],
         "rustix" => &["time", "fs"],
-        "rustix::fs" => &["open"],
+        "rustix::fs" => &["open", "openat", "fstatfs", "statx"],
         "rustix::time" => &[
             "clock_gettime",
             "clock_gettime_dynamic",
@@ -4760,6 +4760,9 @@ fn ambient_binding(target: &str) -> bool {
                 | "std::path::absolute"
                 | "rustix::fs"
                 | "rustix::fs::open"
+                | "rustix::fs::openat"
+                | "rustix::fs::fstatfs"
+                | "rustix::fs::statx"
         )
 }
 
@@ -4902,10 +4905,12 @@ fn hazard(target: &str) -> Option<&'static str> {
     if target.starts_with("std::fs::") || target.starts_with("tokio::fs::") {
         return Some("filesystem");
     }
-    if target == "rustix::fs::open"
-        || target.rsplit_once("::").is_some_and(|(owner, method)| {
-            owner == "std::path::Path" && path_filesystem_method(method)
-        })
+    if matches!(
+        target,
+        "rustix::fs::open" | "rustix::fs::openat" | "rustix::fs::fstatfs" | "rustix::fs::statx"
+    ) || target
+        .rsplit_once("::")
+        .is_some_and(|(owner, method)| owner == "std::path::Path" && path_filesystem_method(method))
     {
         return Some("filesystem");
     }
@@ -5426,6 +5431,34 @@ mod tests {
                 "{source}: {findings:?}"
             );
             assert_eq!(findings[0].count, 1, "{source}: {findings:?}");
+        }
+    }
+
+    #[test]
+    fn rustix_descriptor_observations_are_effects_through_exact_alias_and_glob_forms() {
+        for operation in ["openat", "fstatfs", "statx"] {
+            let target = format!("rustix::fs::{operation}");
+            for source in [
+                format!("fn f() {{ rustix::fs::{operation}(fd, argument); }}"),
+                format!(
+                    "use rustix::fs::{operation} as observe; fn f() {{ observe(fd, argument); }}"
+                ),
+                format!("use rustix::fs as disk; fn f() {{ disk::{operation}(fd, argument); }}"),
+                format!("use rustix::fs::*; fn f() {{ {operation}(fd, argument); }}"),
+                format!("fn f() {{ r#rustix::r#fs::r#{operation}(fd, argument); }}"),
+            ] {
+                let findings = scan(&source);
+                assert_eq!(findings.len(), 1, "{source}: {findings:?}");
+                assert_eq!(findings[0].target, target, "{source}: {findings:?}");
+                assert_eq!(findings[0].kind, "filesystem");
+                assert_eq!(findings[0].count, 1);
+            }
+        }
+        for source in [
+            "fn f() { rustix::fs::Mode::empty(); rustix::fs::OFlags::RDONLY; }",
+            "mod local { pub mod fs { pub fn openat() {} pub fn fstatfs() {} pub fn statx() {} } } fn f() { local::fs::openat(); local::fs::fstatfs(); local::fs::statx(); }",
+        ] {
+            assert!(scan(source).is_empty(), "{source}");
         }
     }
 

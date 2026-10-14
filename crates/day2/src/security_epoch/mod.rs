@@ -13,8 +13,11 @@ mod firestore;
 mod identity_protocol;
 pub(crate) mod journal;
 mod kernel;
+mod namespace_protocol;
 mod native_clock;
 mod native_identity;
+mod native_namespace;
+mod runtime_profile;
 mod seed_core;
 mod transport;
 
@@ -23,6 +26,10 @@ pub(crate) use credential_material::CredentialMaterial;
 pub(crate) use firestore::EpochObservation;
 pub(crate) use native_clock::NativeAcquisition;
 pub(crate) use native_identity::NativeProcessObservation;
+pub(crate) use native_namespace::NativeNamespaceObservation;
+
+#[cfg(test)]
+mod runtime_identity_tests;
 
 #[cfg(test)]
 mod control_slot_tests;
