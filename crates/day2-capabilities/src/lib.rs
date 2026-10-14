@@ -342,7 +342,10 @@ impl InstallationControl {
         let mut bootstrap_scopes = BTreeSet::new();
         for policy in self.security_bootstraps.values() {
             policy.validate(&self.security_epochs)?;
-            ensure!(bootstrap_scopes.insert(policy.scope.clone()), "duplicate_security_bootstrap_scope");
+            ensure!(
+                bootstrap_scopes.insert(policy.scope.clone()),
+                "duplicate_security_bootstrap_scope"
+            );
         }
         ensure!(self.secrets.len() <= 1024, "secret binding budget");
         let mut used_sources = BTreeSet::new();
@@ -571,16 +574,24 @@ mod security_epoch_catalog_tests {
         let mut selected = control();
         let store = selected.security_epochs.values().next().unwrap();
         let policy = security_epoch::bootstrap::tests::selection(store, "epoch");
-        selected.security_bootstraps.insert("initial".to_owned().try_into()?, policy.clone());
+        selected
+            .security_bootstraps
+            .insert("initial".to_owned().try_into()?, policy.clone());
         selected.validate(["reports"])?;
         let mut duplicate = selected.clone();
-        duplicate.security_bootstraps.insert("replacement".to_owned().try_into()?, policy);
+        duplicate
+            .security_bootstraps
+            .insert("replacement".to_owned().try_into()?, policy);
         assert!(duplicate.validate(["reports"]).is_err());
         selected.security_epochs.clear();
         assert!(selected.validate(["reports"]).is_err());
         selected.security_bootstraps.clear();
         selected.validate(["reports"])?;
-        assert!(serde_json::to_value(selected)?.get("security_bootstraps").is_none());
+        assert!(
+            serde_json::to_value(selected)?
+                .get("security_bootstraps")
+                .is_none()
+        );
         Ok(())
     }
 }

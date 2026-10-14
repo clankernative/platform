@@ -749,16 +749,20 @@ mod tests {
         let family = serde_json::json!({"verifier_secret":"verify","custody":{"kind":"verifier_only"},"max_active_lineages":12});
         let runtime = serde_json::json!({"service_account":"app@company-tools.iam.gserviceaccount.com",
             "attestation":pin,"attestation_secret":"attest","families":{"agents":family}});
-        let store: day2_capabilities::security_epoch::EpochStore = serde_json::from_value(epoch.clone())?;
-        let selected_epoch = serde_json::json!({"id":"primary","revision":day2_capabilities::Digest::of(&store)?});
-        let role = |name: &str, uid: &str| serde_json::json!({
-            "namespace":{"name":"native","uid":"namespace-uid"},
-            "kubernetes_service_account":{"name":name,"uid":format!("{name}-ksa-uid")},
-            "google_service_account":{"kind":"gke_workload_identity_v1",
-                "service_account":format!("{name}@company-tools.iam.gserviceaccount.com"),"service_account_uid":uid},
-            "workload_kind":"deployment_v1","workload":{"name":name,"uid":format!("{name}-workload-uid")},
-            "token_review_audience":"https://kubernetes.default.svc"
-        });
+        let store: day2_capabilities::security_epoch::EpochStore =
+            serde_json::from_value(epoch.clone())?;
+        let selected_epoch =
+            serde_json::json!({"id":"primary","revision":day2_capabilities::Digest::of(&store)?});
+        let role = |name: &str, uid: &str| {
+            serde_json::json!({
+                "namespace":{"name":"native","uid":"namespace-uid"},
+                "kubernetes_service_account":{"name":name,"uid":format!("{name}-ksa-uid")},
+                "google_service_account":{"kind":"gke_workload_identity_v1",
+                    "service_account":format!("{name}@company-tools.iam.gserviceaccount.com"),"service_account_uid":uid},
+                "workload_kind":"deployment_v1","workload":{"name":name,"uid":format!("{name}-workload-uid")},
+                "token_review_audience":"https://kubernetes.default.svc"
+            })
+        };
         let bootstrap = serde_json::json!({
             "scope":store.scope,"epoch_store":selected_epoch,
             "cluster":{"project":"company-tools","location":"us-central1","name":"native","uid":"cluster-uid",
@@ -790,7 +794,10 @@ mod tests {
         );
         assert_eq!(projected.apps.len(), 1);
         let selected = projected.control.as_ref().unwrap();
-        assert_eq!(instance.control.as_ref().unwrap().security_bootstraps.len(), 1);
+        assert_eq!(
+            instance.control.as_ref().unwrap().security_bootstraps.len(),
+            1
+        );
         assert!(selected.security_bootstraps.is_empty());
         assert_eq!(selected.security_epochs.len(), 1);
         assert_eq!(

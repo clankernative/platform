@@ -971,7 +971,10 @@ fn observation_retains_before_io_budget_and_exact_selection() {
     let mut observed = firestore::read(&mut provider, &names).unwrap();
     assert!(observed.snapshot().root.is_none());
     provider.tick += Duration::from_millis(900);
-    assert_eq!(observed.remaining(&store, &mut provider).unwrap(), Duration::from_millis(100));
+    assert_eq!(
+        observed.remaining(&store, &mut provider).unwrap(),
+        Duration::from_millis(100)
+    );
     // Consuming almost all of a selected one-second lease cannot renew it.
     provider.tick += Duration::from_millis(100);
     assert!(observed.remaining(&store, &mut provider).is_err());
@@ -982,7 +985,9 @@ fn observation_retains_before_io_budget_and_exact_selection() {
     store.max_lease_seconds = 1;
     assert!(observed.remaining(&store, &mut provider).is_err());
     let mut observed = firestore::read(&mut provider, &names).unwrap();
-    provider.samples.push_back(Sample { domain: Digest::new(b"replacement-clock"), elapsed: Duration::from_secs(100) });
+    provider
+        .samples
+        .push_back((Digest::new(b"replacement-clock"), Duration::from_secs(100)));
     assert!(observed.remaining(&store, &mut provider).is_err());
     assert!(observed.remaining(&store, &mut provider).is_err());
     // Decoding data again cannot reconstruct the consumed observation handle.

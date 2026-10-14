@@ -100,7 +100,9 @@ pub enum EpochIam {
 
 impl EpochIam {
     pub fn validate(&self) -> Result<()> {
-        let Self::GkeWorkloadIdentityV1 { service_account, .. } = self;
+        let Self::GkeWorkloadIdentityV1 {
+            service_account, ..
+        } = self;
         crate::oauth::ShellTransport {
             service_account: service_account.clone(),
         }
@@ -109,8 +111,14 @@ impl EpochIam {
 
     /// A desired mint target, never evidence of the identity of an issued token.
     pub fn access_token_target(&self) -> String {
-        let Self::GkeWorkloadIdentityV1 { service_account_uid, .. } = self;
-        format!("projects/-/serviceAccounts/{}", service_account_uid.as_str())
+        let Self::GkeWorkloadIdentityV1 {
+            service_account_uid,
+            ..
+        } = self;
+        format!(
+            "projects/-/serviceAccounts/{}",
+            service_account_uid.as_str()
+        )
     }
 }
 
@@ -277,16 +285,26 @@ mod tests {
     fn immutable_gsa_identity_is_required_and_not_a_numeric_coercion() {
         let iam = serde_json::to_value(match selection().provider {
             EpochProvider::FirestoreNativeV1 { iam_source, .. } => iam_source,
-        }).unwrap();
+        })
+        .unwrap();
         let selected: EpochIam = serde_json::from_value(iam.clone()).unwrap();
-        assert_eq!(selected.access_token_target(), "projects/-/serviceAccounts/100000000000000000007");
+        assert_eq!(
+            selected.access_token_target(),
+            "projects/-/serviceAccounts/100000000000000000007"
+        );
         for invalid in ["", "0", "01", "+1", "1.0", "1e2", " 1", "١", "../other"] {
             let mut bad = iam.clone();
             bad["service_account_uid"] = invalid.into();
-            assert!(serde_json::from_value::<EpochIam>(bad).is_err(), "{invalid}");
+            assert!(
+                serde_json::from_value::<EpochIam>(bad).is_err(),
+                "{invalid}"
+            );
         }
         let mut missing = iam.clone();
-        missing.as_object_mut().unwrap().remove("service_account_uid");
+        missing
+            .as_object_mut()
+            .unwrap()
+            .remove("service_account_uid");
         assert!(serde_json::from_value::<EpochIam>(missing).is_err());
         let mut numeric = iam.clone();
         numeric["service_account_uid"] = 7.into();
@@ -294,9 +312,18 @@ mod tests {
         assert!(ServiceAccountUid::try_from("1".repeat(129)).is_err());
         let mut recreated = selection();
         let EpochProvider::FirestoreNativeV1 { iam_source, .. } = &mut recreated.provider;
-        let EpochIam::GkeWorkloadIdentityV1 { service_account_uid, .. } = iam_source;
+        let EpochIam::GkeWorkloadIdentityV1 {
+            service_account_uid,
+            ..
+        } = iam_source;
         *service_account_uid = "100000000000000000008".to_owned().try_into().unwrap();
-        assert_eq!(selection().authority_key().unwrap(), recreated.authority_key().unwrap());
-        assert_ne!(Digest::of(&selection()).unwrap(), Digest::of(&recreated).unwrap());
+        assert_eq!(
+            selection().authority_key().unwrap(),
+            recreated.authority_key().unwrap()
+        );
+        assert_ne!(
+            Digest::of(&selection()).unwrap(),
+            Digest::of(&recreated).unwrap()
+        );
     }
 }

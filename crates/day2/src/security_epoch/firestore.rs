@@ -368,10 +368,17 @@ impl EpochObservation {
         &self.snapshot
     }
 
-    pub(super) fn remaining(&mut self, selection: &EpochStore, port: &mut impl Port) -> Result<Duration> {
+    pub(super) fn remaining(
+        &mut self,
+        selection: &EpochStore,
+        port: &mut impl Port,
+    ) -> Result<Duration> {
         ensure!(self.valid, "security_epoch_observation_refused");
         let result = (|| {
-            ensure!(self.selection == Digest::of(selection)?, "security_epoch_observation_selection_changed");
+            ensure!(
+                self.selection == Digest::of(selection)?,
+                "security_epoch_observation_selection_changed"
+            );
             self.budget.remaining(port)
         })();
         if result.is_err() {

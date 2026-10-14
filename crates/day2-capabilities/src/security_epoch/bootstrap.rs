@@ -38,10 +38,16 @@ impl GkeClusterSelection {
         let origin = self.api_origin.strip_prefix("https://");
         ensure!(
             origin.is_some_and(|authority| {
-                let (host, port) = authority.split_once(':').map_or((authority, None), |(host, port)| (host, Some(port)));
-                !host.is_empty() && host.len() <= 253
+                let (host, port) = authority
+                    .split_once(':')
+                    .map_or((authority, None), |(host, port)| (host, Some(port)));
+                !host.is_empty()
+                    && host.len() <= 253
                     && host.split('.').all(dns_label)
-                    && port.is_none_or(|port| port.parse::<u16>().is_ok_and(|value| value != 0) && port.bytes().all(|byte| byte.is_ascii_digit()))
+                    && port.is_none_or(|port| {
+                        port.parse::<u16>().is_ok_and(|value| value != 0)
+                            && port.bytes().all(|byte| byte.is_ascii_digit())
+                    })
             }),
             "invalid_bootstrap_kubernetes_api_origin"
         );
@@ -143,7 +149,8 @@ impl InitialBootstrapPolicy {
         self.controller.validate()?;
         self.app.validate()?;
         bounded_identifier(&self.fresh_storage.provider_volume_uid, 512)?;
-        let store = stores.get(&self.epoch_store.id)
+        let store = stores
+            .get(&self.epoch_store.id)
             .ok_or_else(|| anyhow::anyhow!("bootstrap_epoch_store_missing"))?;
         store.validate()?;
         ensure!(
@@ -152,20 +159,36 @@ impl InitialBootstrapPolicy {
                 && self.scope == store.scope,
             "bootstrap_epoch_store_selection_mismatch"
         );
-        let EpochProvider::FirestoreNativeV1 { project, iam_source, .. } = &store.provider;
-        ensure!(self.cluster.project == *project && self.app.google_service_account == *iam_source,
-            "bootstrap_app_reader_selection_mismatch");
-        let EpochIam::GkeWorkloadIdentityV1 { service_account: controller_email, service_account_uid: controller_uid } = &self.controller.google_service_account;
-        let EpochIam::GkeWorkloadIdentityV1 { service_account: app_email, service_account_uid: app_uid } = &self.app.google_service_account;
-        ensure!(controller_email != app_email && controller_uid != app_uid,
-            "bootstrap_controller_must_be_distinct");
+        let EpochProvider::FirestoreNativeV1 {
+            project,
+            iam_source,
+            ..
+        } = &store.provider;
+        ensure!(
+            self.cluster.project == *project && self.app.google_service_account == *iam_source,
+            "bootstrap_app_reader_selection_mismatch"
+        );
+        let EpochIam::GkeWorkloadIdentityV1 {
+            service_account: controller_email,
+            service_account_uid: controller_uid,
+        } = &self.controller.google_service_account;
+        let EpochIam::GkeWorkloadIdentityV1 {
+            service_account: app_email,
+            service_account_uid: app_uid,
+        } = &self.app.google_service_account;
+        ensure!(
+            controller_email != app_email && controller_uid != app_uid,
+            "bootstrap_controller_must_be_distinct"
+        );
         ensure!(
             (self.controller.namespace.name == self.app.namespace.name)
                 == (self.controller.namespace.uid == self.app.namespace.uid)
-                && self.controller.kubernetes_service_account.uid != self.app.kubernetes_service_account.uid
+                && self.controller.kubernetes_service_account.uid
+                    != self.app.kubernetes_service_account.uid
                 && self.controller.workload.uid != self.app.workload.uid
                 && (self.controller.namespace.name != self.app.namespace.name
-                    || (self.controller.kubernetes_service_account.name != self.app.kubernetes_service_account.name
+                    || (self.controller.kubernetes_service_account.name
+                        != self.app.kubernetes_service_account.name
                         && self.controller.workload.name != self.app.workload.name)),
             "bootstrap_controller_workload_must_be_distinct"
         );
@@ -180,14 +203,27 @@ impl InitialBootstrapPolicy {
 
 fn dns_label(value: &str) -> bool {
     (1..=63).contains(&value.len())
-        && value.as_bytes().first().is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
-        && value.as_bytes().last().is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
-        && value.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        && value
+            .as_bytes()
+            .first()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        && value
+            .as_bytes()
+            .last()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
 }
 
 fn bounded_identifier(value: &str, limit: usize) -> Result<()> {
-    ensure!(!value.is_empty() && value.len() <= limit && !value.chars().any(char::is_whitespace)
-        && !value.chars().any(char::is_control), "invalid_bootstrap_identifier");
+    ensure!(
+        !value.is_empty()
+            && value.len() <= limit
+            && !value.chars().any(char::is_whitespace)
+            && !value.chars().any(char::is_control),
+        "invalid_bootstrap_identifier"
+    );
     Ok(())
 }
 
@@ -197,19 +233,31 @@ pub(crate) mod tests {
     use serde_json::json;
 
     pub(crate) fn selection(store: &EpochStore, alias: &str) -> InitialBootstrapPolicy {
-        let EpochProvider::FirestoreNativeV1 { project, iam_source, .. } = &store.provider;
-        let epoch = BindingRef { id: alias.to_owned().try_into().unwrap(), revision: Digest::of(store).unwrap() };
+        let EpochProvider::FirestoreNativeV1 {
+            project,
+            iam_source,
+            ..
+        } = &store.provider;
+        let epoch = BindingRef {
+            id: alias.to_owned().try_into().unwrap(),
+            revision: Digest::of(store).unwrap(),
+        };
         let mut controller = iam_source.clone();
-        let EpochIam::GkeWorkloadIdentityV1 { service_account, service_account_uid } = &mut controller;
+        let EpochIam::GkeWorkloadIdentityV1 {
+            service_account,
+            service_account_uid,
+        } = &mut controller;
         *service_account = format!("controller@{}.iam.gserviceaccount.com", project.as_str());
         *service_account_uid = "200000000000000000007".to_owned().try_into().unwrap();
-        let role = |account: EpochIam, name: &str| json!({
-            "namespace":{"name":"native","uid":"namespace-uid"},
-            "kubernetes_service_account":{"name":name,"uid":format!("{name}-ksa-uid")},
-            "google_service_account":account,"workload_kind":if name == "app" { "stateful_set_v1" } else { "deployment_v1" },
-            "workload":{"name":name,"uid":format!("{name}-workload-uid")},
-            "token_review_audience":"https://kubernetes.default.svc"
-        });
+        let role = |account: EpochIam, name: &str| {
+            json!({
+                "namespace":{"name":"native","uid":"namespace-uid"},
+                "kubernetes_service_account":{"name":name,"uid":format!("{name}-ksa-uid")},
+                "google_service_account":account,"workload_kind":if name == "app" { "stateful_set_v1" } else { "deployment_v1" },
+                "workload":{"name":name,"uid":format!("{name}-workload-uid")},
+                "token_review_audience":"https://kubernetes.default.svc"
+            })
+        };
         serde_json::from_value(json!({
             "scope":store.scope,"epoch_store":epoch,
             "cluster":{"project":project,"location":"us-central1","name":"native","uid":"cluster-uid",
@@ -230,34 +278,68 @@ pub(crate) mod tests {
         let good = selection(&store, "epoch");
         good.validate(&stores).unwrap();
         let mut cases = Vec::new();
-        let mut bad = good.clone(); bad.epoch_store.revision = Digest::new(b"other"); cases.push(bad);
-        let mut bad = good.clone(); bad.control_store.epoch_store.id = "other".to_owned().try_into().unwrap(); cases.push(bad);
-        let mut bad = good.clone(); bad.scope.app = "other".to_owned().try_into().unwrap(); cases.push(bad);
-        let mut bad = good.clone(); bad.app.google_service_account = good.controller.google_service_account.clone(); cases.push(bad);
-        let mut bad = good.clone(); bad.controller.google_service_account = good.app.google_service_account.clone(); cases.push(bad);
-        let mut bad = good.clone(); bad.controller.kubernetes_service_account = good.app.kubernetes_service_account.clone(); cases.push(bad);
-        for bad in cases { assert!(bad.validate(&stores).is_err()); }
+        let mut bad = good.clone();
+        bad.epoch_store.revision = Digest::new(b"other");
+        cases.push(bad);
+        let mut bad = good.clone();
+        bad.control_store.epoch_store.id = "other".to_owned().try_into().unwrap();
+        cases.push(bad);
+        let mut bad = good.clone();
+        bad.scope.app = "other".to_owned().try_into().unwrap();
+        cases.push(bad);
+        let mut bad = good.clone();
+        bad.app.google_service_account = good.controller.google_service_account.clone();
+        cases.push(bad);
+        let mut bad = good.clone();
+        bad.controller.google_service_account = good.app.google_service_account.clone();
+        cases.push(bad);
+        let mut bad = good.clone();
+        bad.controller.kubernetes_service_account = good.app.kubernetes_service_account.clone();
+        cases.push(bad);
+        for bad in cases {
+            assert!(bad.validate(&stores).is_err());
+        }
         let before = good.digest(&stores).unwrap();
-        let mut changed = good.clone(); changed.runtime_profile.controller_code = Digest::new(b"other-code");
+        let mut changed = good.clone();
+        changed.runtime_profile.controller_code = Digest::new(b"other-code");
         assert_ne!(before, changed.digest(&stores).unwrap());
         assert!(good.validate(&BTreeMap::new()).is_err());
     }
 
     #[test]
     fn desired_contract_rejects_generated_proof_and_unsupported_profiles() {
-        let good = serde_json::to_value(selection(&super::super::tests::selection(), "epoch")).unwrap();
+        let good =
+            serde_json::to_value(selection(&super::super::tests::selection(), "epoch")).unwrap();
         for (pointer, value) in [
-            ("/ready", json!(true)), ("/process_incarnation", json!("process")),
-            ("/runtime_profile/deadline", json!(5)), ("/runtime_profile/kind", json!("local_sqlite")),
+            ("/ready", json!(true)),
+            ("/process_incarnation", json!("process")),
+            ("/runtime_profile/deadline", json!(5)),
+            ("/runtime_profile/kind", json!("local_sqlite")),
             ("/control_store/namespace", json!("replacement-slots")),
-            ("/fresh_storage/marker", json!(Digest::new(b"generated-marker")))
+            (
+                "/fresh_storage/marker",
+                json!(Digest::new(b"generated-marker")),
+            ),
         ] {
             let mut bad = good.clone();
             let (parent, key) = pointer.rsplit_once('/').unwrap();
-            bad.pointer_mut(parent).unwrap().as_object_mut().unwrap().insert(key.into(), value);
-            assert!(serde_json::from_value::<InitialBootstrapPolicy>(bad).is_err(), "{pointer}");
+            bad.pointer_mut(parent)
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .insert(key.into(), value);
+            assert!(
+                serde_json::from_value::<InitialBootstrapPolicy>(bad).is_err(),
+                "{pointer}"
+            );
         }
-        for origin in ["http://10.0.0.1", "https://user@host", "https://host/path", "https://host?query", "https://host:0"] {
+        for origin in [
+            "http://10.0.0.1",
+            "https://user@host",
+            "https://host/path",
+            "https://host?query",
+            "https://host:0",
+        ] {
             let mut bad: InitialBootstrapPolicy = serde_json::from_value(good.clone()).unwrap();
             bad.cluster.api_origin = origin.into();
             assert!(bad.cluster.validate().is_err(), "{origin}");
