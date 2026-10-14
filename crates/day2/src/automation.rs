@@ -16,9 +16,29 @@ use std::{
 const MAX_MESSAGE: u64 = 16 * 1024 * 1024;
 const MAX_EFFECTS: usize = 4096;
 
+pub mod contract;
+pub mod ui;
+
 // Explicitly catalog the private package, as we do for the public SDK. Changes
 // invalidate both the executable cache and centralized CI recipe identity.
 pub const SOURCES: &[(&str, &[u8])] = &[
+    (
+        "crates/day2/src/automation/contract.rs",
+        include_bytes!("automation/contract.rs"),
+    ),
+    (
+        "crates/day2/src/automation/ui.rs",
+        include_bytes!("automation/ui.rs"),
+    ),
+    ("crates/day2/src/ui_lock.rs", include_bytes!("ui_lock.rs")),
+    (
+        "ops/UiCapability.roc",
+        include_bytes!("../../../ops/UiCapability.roc"),
+    ),
+    (
+        "ops/UiTransport.roc",
+        include_bytes!("../../../ops/UiTransport.roc"),
+    ),
     ("ops/Runner.roc", include_bytes!("../../../ops/Runner.roc")),
     ("ops/main.roc", include_bytes!("../../../ops/main.roc")),
     (

@@ -144,6 +144,8 @@
     "crates/day2/src/authority_state.rs",
     "crates/day2/src/authority_state_tests.rs",
     "crates/day2/src/automation.rs",
+    "crates/day2/src/automation/contract.rs",
+    "crates/day2/src/automation/ui.rs",
     "crates/day2/src/bin/day2-health.rs",
     "crates/day2/src/bin/day2-inspect.rs",
     "crates/day2/src/bin/day2-package.rs",
@@ -401,6 +403,7 @@
     "crates/xtask/src/verification.rs",
     "crates/xtask/src/verification/shards.rs",
     "crates/xtask/src/verification/shards/reuse.rs",
+    "crates/xtask/src/workflow_contract_tests.rs",
     "crates/xtask/src/workflows.rs"
   ],
   "allowances": [
@@ -2093,5 +2096,12 @@
     ,{"source":"crates/xtask/src/build_native.rs","kind":"filesystem","target":"std::fs::write","context":"execute","fingerprint":"66b7a628a73e1e07b69a44d0d1f1be7dc00897fdac96993dbdbfc4e4b6a5d53f","count":1,"reason":"Owner: native compiler staging. Write the trusted constant Str-to-Str SDK platform before pure ABI generation. Removal: Retire with staging. Limits: Fixed SDK path and source from the explicit SDK catalog; no authored App import in ABI generation. Both final admission profiles remain required before product linking."}
     ,{"source":"crates/xtask/src/build_native.rs","kind":"filesystem","target":"std::fs::write","context":"execute","fingerprint":"8999ce95070d7b0c692ec1a765abdf1d734101e7147d9e305d825715b139aa4c","count":1,"reason":"Owner: native declaration staging. Persist the canonical bounded connection requirements obtained from the pure probe and checked registration inventory for exact SDK regeneration. Removal: Retire with staging. Limits: Fixed own-stage file, complete checked inventory validation, full equality against the final admitted worker's declarations."}
     ,{"source":"crates/xtask/src/build_native.rs","kind":"filesystem","target":"std::fs::write","context":"execute","fingerprint":"ceda770adce143cb241704f517b9fd06b87e5c54a981251ffea68eeceb048b54","count":1,"reason":"Owner: native declaration probe adapter. Stage a pure App.connections metadata projection from checked registration names, then compile with the pinned sandboxed compiler and bounded worker. Removal: Retire with the probe. Limits: Fixed own-stage source; no runtime, provider dispatch or authority lookup; final product admission is separate and mandatory."}
+    ,{"source":"crates/day2/src/automation.rs","kind":"source-indirection","target":"include_bytes","context":"SOURCES","fingerprint":"131256d6db37cd2faa7ffe781d3d649bee88a4ae73d3bbded6ba964adc525b47","count":1,"reason":"Pin the generated private UI API, transport and canonical native contract/receipt sources into the workflow identity."}
+    ,{"source":"crates/day2/src/automation.rs","kind":"source-indirection","target":"include_bytes","context":"SOURCES","fingerprint":"1d0b4720969dd8aeb92817f95bb747589a48c828756f2a021389238c1d1c7438","count":1,"reason":"Pin the generated private UI API, transport and canonical native contract/receipt sources into the workflow identity."}
+    ,{"source":"crates/day2/src/automation.rs","kind":"source-indirection","target":"include_bytes","context":"SOURCES","fingerprint":"508eee4745ac5579bedb82fb68786f8aad54fbc7d977940484e4a9e98f898bd4","count":1,"reason":"Pin the generated private UI API, transport and canonical native contract/receipt sources into the workflow identity."}
+    ,{"source":"crates/day2/src/automation.rs","kind":"source-indirection","target":"include_bytes","context":"SOURCES","fingerprint":"ab4cf22dc0f6ecaffbe5e195ebba2ef05b41ca243a92964950ddb5ef6e0919e0","count":1,"reason":"Pin the generated private UI API, transport and canonical native contract/receipt sources into the workflow identity."}
+    ,{"source":"crates/day2/src/automation.rs","kind":"source-indirection","target":"include_bytes","context":"SOURCES","fingerprint":"bcec7b8e0d5fc88c8f3283a5bdedd57e6f6aaa323db116ceffa4c45ab9b10e26","count":1,"reason":"Pin the generated private UI API, transport and canonical native contract/receipt sources into the workflow identity."}
+    ,{"source":"crates/xtask/src/workflows.rs","kind":"filesystem","target":"std::fs::read","context":"contracts","fingerprint":"5e75531cd708aabcd31590f6c4280170b5e50a7d0a0c7702b082c7ee962cfd35","count":1,"reason":"Refuse stale generated UI workflow contract sources before compiling or reusing a native runner."}
+    ,{"source":"crates/xtask/src/workflows.rs","kind":"filesystem","target":"std::fs::write","context":"contracts","fingerprint":"738b7df3f75084892f513e406902f969e4031f28f14ecc998520340fa4c74f83","count":1,"reason":"Explicitly regenerate the two private UI workflow modules from their native contract definitions."}
   ]
 }

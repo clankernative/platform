@@ -7,7 +7,12 @@ use std::{
     process::Command,
 };
 
+#[cfg(test)]
+#[path = "workflow_contract_tests.rs"]
+mod tests;
+
 pub fn build(root: &Path) -> Result<PathBuf> {
+    contracts(root, false)?;
     let executable = root.join("target/debug/day2-workflows");
     let pin = native_toolchain::load(root)?;
     let roc = pin.verified_compiler(root)?;
@@ -58,4 +63,18 @@ pub fn build(root: &Path) -> Result<PathBuf> {
         })?,
     )?;
     day2::automation::checked_runner(&executable)
+}
+
+pub fn contracts(root: &Path, write: bool) -> Result<()> {
+    for (name, source) in day2::automation::ui::roc_sources() {
+        if write {
+            fs::write(root.join(name), source)?;
+        } else {
+            ensure!(
+                fs::read(root.join(name))? == source.as_bytes(),
+                "generated workflow contract is stale; run xtask workflow-contracts: {name}"
+            );
+        }
+    }
+    Ok(())
 }

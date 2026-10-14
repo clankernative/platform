@@ -128,7 +128,7 @@ pub struct InstalledBundle {
     pub package_root: PathBuf,
     pub executable_path: PathBuf,
     bundle_root: PathBuf,
-    identity: Value,
+    identity: crate::automation::ui::DependencyReceipt,
 }
 
 impl InstalledBundle {
@@ -138,6 +138,10 @@ impl InstalledBundle {
 
     /// Stable redacted receipt suitable for inclusion in the native tool identity.
     pub fn identity(&self) -> Value {
+        serde_json::to_value(&self.identity).expect("UI identity serializes")
+    }
+
+    pub fn receipt(&self) -> crate::automation::ui::DependencyReceipt {
         self.identity.clone()
     }
 }
@@ -437,16 +441,45 @@ fn verify_bundle(bundle_root: &Path, pin: TargetPin) -> Result<InstalledBundle> 
         "managed bundle contains missing or unlisted files"
     );
 
-    let identity = json!({
-        "provider": catalog["provider"], "release": catalog["release"], "target": pin.target,
-        "catalogDigest": format!("sha256:{}", sha(CATALOG)),
-        "manifestDigest": format!("sha256:{}", pin.manifest_sha256),
-        "providerPinDigest": format!("sha256:{}", pin.provider_pin_sha256),
-        "archiveDigest": format!("sha256:{}", pin.archive_sha256),
-        "presentationWorker": {"abi": catalog["presentationWorker"]["abi"], "contractsSha256": catalog["presentationWorker"]["contractsSha256"], "executable": {"path": "bin/clanker-chart-worker", "bytes": pin.chart_worker_bytes, "digest": format!("sha256:{}", pin.chart_worker_sha256)} },
-        "inputCount": catalog["inputCount"],
-        "package": {"name":catalog["name"], "version":catalog["version"], "digest":catalog["packageDigest"]}
-    });
+    use crate::automation::ui::{
+        DependencyReceipt, ExecutableIdentity, PackageIdentity, PresentationWorker,
+    };
+    let text = |value: &Value| -> Result<String> {
+        Ok(value
+            .as_str()
+            .context("catalog identity string")?
+            .to_owned())
+    };
+    let identity = DependencyReceipt {
+        provider: text(&catalog["provider"])?,
+        release: text(&catalog["release"])?,
+        target: pin.target,
+        catalog_digest: format!("sha256:{}", sha(CATALOG)),
+        manifest_digest: format!("sha256:{}", pin.manifest_sha256),
+        provider_pin_digest: format!("sha256:{}", pin.provider_pin_sha256),
+        archive_digest: format!("sha256:{}", pin.archive_sha256),
+        presentation_worker: PresentationWorker {
+            abi: u32::try_from(
+                catalog["presentationWorker"]["abi"]
+                    .as_u64()
+                    .context("catalog worker ABI")?,
+            )?,
+            contracts_sha256: text(&catalog["presentationWorker"]["contractsSha256"])?,
+            executable: ExecutableIdentity {
+                path: "bin/clanker-chart-worker".into(),
+                bytes: pin.chart_worker_bytes,
+                digest: format!("sha256:{}", pin.chart_worker_sha256),
+            },
+        },
+        input_count: catalog["inputCount"]
+            .as_u64()
+            .context("catalog inputCount")?,
+        package: PackageIdentity {
+            name: text(&catalog["name"])?,
+            version: text(&catalog["version"])?,
+            digest: text(&catalog["packageDigest"])?,
+        },
+    };
     Ok(InstalledBundle {
         provider_pin_path: provider_path,
         package_root,
@@ -534,7 +567,7 @@ fn check_executable(_path: &Path, _bytes: &[u8], _target: &str) -> Result<()> {
 }
 
 /// Write a schema-2 app-owned lock for the single reviewed package.
-pub fn write_lock(platform_root: &Path, source: &Path) -> Result<Value> {
+pub fn write_lock(platform_root: &Path, source: &Path) -> Result<crate::ui_lock::Lock> {
     let bundle = installed(platform_root)?;
     let source = if source.is_absolute() {
         source.to_path_buf()
@@ -573,7 +606,7 @@ pub fn write_lock(platform_root: &Path, source: &Path) -> Result<Value> {
                 existing == lock,
                 "UI package pin differs; perform a deliberate reviewed upgrade before replacing it"
             );
-            return Ok(lock);
+            return Ok(checked);
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
@@ -584,7 +617,7 @@ pub fn write_lock(platform_root: &Path, source: &Path) -> Result<Value> {
     temp.as_file().sync_all()?;
     temp.persist_noclobber(&lock_path)
         .context("UI lock was created concurrently or could not be published; retry to verify the existing pin")?;
-    Ok(lock)
+    Ok(checked)
 }
 
 fn lock_value(manifest: &Value) -> Result<Value> {

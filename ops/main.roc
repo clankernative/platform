@@ -16,6 +16,8 @@ package
 		GkeRelease,
 		SecretRetirement,
 		UiDependency,
+		UiCapability,
+		UiTransport,
 	]
 	{
 		infra: "../infra/main.roc",

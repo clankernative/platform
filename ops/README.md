@@ -56,6 +56,50 @@ hashes are checked before execution and pinned into the CI recipe/builder bindin
 isolated builds receive that same pinned runner. Changes require recompilation.
 This is private platform code, with no `automation/sdk` or app effect callbacks.
 
+The UI dependency and app-lock port uses a generated compile-time contract.
+[automation/ui.rs](../crates/day2/src/automation/ui.rs) defines each operation
+once: its wire name, input record, result and required native handler.
+[contract.rs](../crates/day2/src/automation/contract.rs) derives the Rust traits,
+strict input dispatch and [UiCapability.roc](UiCapability.roc) host records from
+those definitions. [UiDependency.roc](UiDependency.roc) receives only those
+typed hosts. A misspelled method, wrong input or result type, or missing handler
+fails compilation; it cannot fall back to a generic string request.
+
+[UiTransport.roc](UiTransport.roc) is the generated pipe adapter. Only the runner
+constructs the UI hosts from its transport callback. Native handlers construct
+typed results; Serde and Roc's typed JSON codec handle the process boundary.
+Incoming bytes still require protocol, shape, duplicate-key and size validation.
+The native installation session still enforces phase order, reviewed hashes,
+filesystem constraints and atomic publication. These checks concern runtime
+state and cannot be replaced by type checking.
+
+Terminal receipts use `JsonReceipt<T>`: Rust checks the canonical domain type
+before serializing it for CLI presentation, while Roc forwards the serialized
+receipt without making decisions from its fields. The inspection result and
+all other recipe inputs/results have concrete Roc record types. This avoids
+creating a second app-lock or distribution format in Roc. Other private workflow
+ports currently retain their string transport; this typed contract covers the
+seven UI dependency/lock operations, not the public app SDK or browser ABI.
+
+When changing this port, update its Rust contract and native implementations,
+then regenerate and compile the private package:
+
+```console
+cargo run --locked -p xtask -- workflow-contracts
+cargo run --locked -p xtask -- fmt
+cargo run --locked -p xtask -- workflows
+cargo test --locked -p day2 --lib automation::ui
+cargo test --locked -p day2 --doc automation::ui
+cargo test --locked -p xtask workflows::tests
+cargo test --locked -p day2-ops --lib workflow_tests
+```
+
+The build refuses stale generated API or transport sources before reusing a
+runner. Both generated files and the native contract/receipt sources belong to
+the workflow source pin, so changing either side invalidates cached executables
+and the centralized CI builder identity. Compilation regressions prove operation,
+payload, response and required-handler failures with the pinned compilers.
+
 Every build runs required verification before publishing and selecting an
 artifact. `check` and `test` then run a larger campaign in a fresh SQLite instance.
 The native host validates typed command/query inputs, checks actual results,

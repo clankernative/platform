@@ -22,6 +22,7 @@ import ops.Release
 import ops.GkeRelease
 import ops.SecretRetirement
 import ops.UiDependency
+import ops.UiTransport
 
 # Only the native supervisor launches this executable. Its stdout is a bounded
 # request/response pipe, never a terminal or an app-accessible effect channel.
@@ -41,7 +42,7 @@ call! = |request| {
 
 run! : List(Str) => Try(Str, Str)
 run! = |args| match args {
-	["platform", .. as rest] => Workflow.run!(Workflow.parse(rest)?, call!)
+	["platform", .. as rest] => Workflow.run!(Workflow.parse(rest)?, call!, UiTransport.lock(call!))
 	["local-dev-session", raw] => {
 		options : LocalDev.Options
 		options = Json.parse(raw).map_err(|_| "invalid local session settings")?
@@ -68,8 +69,11 @@ run! = |args| match args {
 	["gke-release"] => GkeRelease.run!(call!)
 	["gke-release-build"] => GkeRelease.build!(call!)
 	["secret-retirement-step", snapshot] => SecretRetirement.run(snapshot)
-	["ui-dependency"] => UiDependency.install!(call!)
-	["cli"] => Verify.cli!(call!)
+	["ui-dependency"] => {
+		receipt = UiDependency.install!(UiTransport.install(call!))?
+		Ok(receipt.json)
+	}
+	["cli"] => Verify.cli!(call!, UiTransport.install(call!))
 	["verify-fast"] => Verify.fast!(call!)
 	["verify-reports"] => Verify.reports!(call!)
 	["verify"] => Verify.all!(call!)

@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 use anyhow::{Context, Result, ensure};
+use day2::automation::{Request, ui};
 use day2_ops::{backup, infra, local_dev, maintenance, process, projection};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -9,14 +10,6 @@ use std::{
     process::Command,
     time::Duration,
 };
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Request {
-    protocol: u32,
-    action: String,
-    input: String,
-}
 
 fn input<T: DeserializeOwned>(request: &Request) -> Result<T> {
     ensure!(
@@ -50,6 +43,13 @@ impl Operations {
     }
 
     fn effect(&mut self, request: Request) -> Result<Value> {
+        ensure!(
+            request.protocol == 1 && request.input.len() <= 65_536,
+            "unsupported host protocol or input size"
+        );
+        if let Some(response) = ui::dispatch_lock(self, &request)? {
+            return Ok(response);
+        }
         if request.action == "local-resolve" {
             ensure!(self.local.is_none(), "one local session per workflow");
             let session = local_dev::Session::resolve(&platform()?, input(&request)?)?;
@@ -333,15 +333,6 @@ impl Operations {
                 )?;
                 Ok(json!({"artifact":target.id(),"receipt":receipt,"mode":"local-operator-only"}))
             }
-            "ui-lock" => {
-                #[derive(Deserialize)]
-                #[serde(deny_unknown_fields)]
-                struct Input {
-                    source: PathBuf,
-                }
-                let parameters: Input = input(&request)?;
-                day2::build_dependencies::write_lock(&platform()?, &parameters.source)
-            }
             "build-source" => {
                 #[derive(Deserialize)]
                 #[serde(deny_unknown_fields)]
@@ -594,6 +585,15 @@ impl Operations {
             "maintenance-finish" => self.maintenance()?.finish(),
             _ => anyhow::bail!("unknown private platform capability"),
         }
+    }
+}
+
+impl ui::LockHost for Operations {
+    fn lock(&mut self, input: ui::LockInput) -> Result<ui::JsonReceipt<day2::ui_lock::Lock>> {
+        Ok(ui::JsonReceipt(day2::build_dependencies::write_lock(
+            &platform()?,
+            Path::new(&input.source),
+        )?))
     }
 }
 
