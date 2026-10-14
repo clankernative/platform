@@ -746,6 +746,15 @@ mod tests {
             &files,
             "mac-snapshot",
         )?;
+        for fixture in ["reports", "reports-probe", "relational", "oauth-calendar"] {
+            let mut invalid = files.clone();
+            invalid.get_mut("ci-verification.json").unwrap()
+                .pointer_mut("/mac/prepared/fixtures").unwrap()
+                .as_object_mut().unwrap().remove(fixture);
+            assert!(admit_full(
+                &candidate, &current, &compiler, &targets, &invalid, "mac-snapshot",
+            ).is_err(), "missing native fixture admitted: {fixture}");
+        }
         for (name, pointer, replacement) in [
             ("ci-prepared.json", "/identity/checkout", json!("foreign")),
             (

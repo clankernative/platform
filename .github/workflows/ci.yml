@@ -191,6 +191,14 @@ jobs:
           save-if: ${{ matrix.part == 'inputs' }}
       - name: Establish the mandatory bounded native Linux compiler context
         run: cargo run --locked -p xtask -- verify-linux-context
+      - name: Retain current native Linux preparation context
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: day2-linux-context-preparation-${{ matrix.part }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/day2-ci-linux-context.json
+          if-no-files-found: error
+          retention-days: 14
       # Cross-run build outputs have their own source-bound namespace. Native
       # guards re-admit them; no step or runtime receipt is selected by cache-hit.
       - name: Restore completed fixture builds
@@ -398,6 +406,14 @@ jobs:
       - run: cargo fetch --locked
       - name: Establish the mandatory bounded native Linux compiler context
         run: cargo run --locked -p xtask -- verify-linux-context
+      - name: Retain current native Linux preparation join context
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: day2-linux-context-preparation-join-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/day2-ci-linux-context.json
+          if-no-files-found: error
+          retention-days: 14
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: day2-preparation-inputs-${{ github.run_id }}-${{ github.run_attempt }}
@@ -480,6 +496,14 @@ jobs:
       - run: cargo fetch --locked
       - name: Establish the mandatory bounded native Linux compiler context
         run: cargo run --locked -p xtask -- verify-linux-context
+      - name: Retain current native Linux shard context
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: day2-linux-context-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/day2-ci-linux-context.json
+          if-no-files-found: error
+          retention-days: 14
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: day2-verify-${{ github.run_id }}-${{ github.run_attempt }}
@@ -552,6 +576,14 @@ jobs:
       - name: Establish the mandatory bounded native Linux compiler context
         run: cargo run --locked -p xtask -- verify-linux-context
         if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
+      - name: Retain current native Linux final context
+        if: ${{ always() && !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: day2-linux-context-final-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/day2-ci-linux-context.json
+          if-no-files-found: error
+          retention-days: 14
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
         with:

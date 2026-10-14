@@ -31,6 +31,16 @@ pub(super) fn linux_context(root: &Path) -> Result<()> {
     let memory = fs::read_to_string("/sys/fs/cgroup/memory.max")?;
     validate_linux_context(&cgroup, &memory)?;
     let root = root.canonicalize()?;
+    // The generated output directory also contains this checked-in ABI seed.
+    // Preserve its exact checkout bytes and permissions across the tmpfs mount;
+    // fresh source checks and the reviewed generator still admit it normally.
+    let abi = root.join("crates/worker/generated/roc_platform_abi.rs");
+    let abi_metadata: fs::Metadata = fs::symlink_metadata(&abi)?;
+    ensure!(
+        abi_metadata.is_file() && abi_metadata.len() <= 1024 * 1024,
+        "bounded regular checked-in worker ABI seed required"
+    );
+    let abi_seed = fs::read(&abi)?;
     for (relative, bytes) in [
         ("artifacts", 1024_u64 * 1024 * 1024),
         ("crates/worker/generated", 64_u64 * 1024 * 1024),
@@ -58,6 +68,12 @@ pub(super) fn linux_context(root: &Path) -> Result<()> {
             Duration::from_secs(30),
         )?;
     }
+    fs::write(&abi, &abi_seed)?;
+    fs::set_permissions(&abi, abi_metadata.permissions())?;
+    ensure!(
+        fs::read(&abi)? == abi_seed,
+        "worker ABI seed changed across bounded output setup"
+    );
     let run = std::env::var("GITHUB_RUN_ID")?;
     let attempt = std::env::var("GITHUB_RUN_ATTEMPT")?;
     ensure!(
@@ -67,6 +83,8 @@ pub(super) fn linux_context(root: &Path) -> Result<()> {
     );
     let evidence = json!({"run":run,"attempt":attempt,"host":"linux","architecture":"x86_64",
         "workspace":root,"cgroup":cgroup,"memory_max":memory.trim(),
+        "checkout_abi_seed":{"path":"crates/worker/generated/roc_platform_abi.rs",
+            "digest":day2::digest(&abi_seed),"bytes":abi_seed.len()},
         "mountinfo":fs::read_to_string("/proc/self/mountinfo")?,
         "compiler_policy":"unchanged mandatory native cgroup/tmpfs/Landlock/seccomp admission"});
     fs::write(

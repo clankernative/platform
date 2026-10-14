@@ -114,12 +114,15 @@ formatter and compiler cases, including all three connection-use probes. Each
 exact case must exist in the actual Cargo harness with its expected ignored status;
 zero matches cannot qualify compatibility. The Mac job compiles the ordinary
 default graph once but runs this focused inventory instead of the full workspace
-runtime suite. Its native Reports fixtures, compiler, executables and fresh case
-outcomes have separate evidence. Installation and private build outcomes are uncached.
+runtime suite. Its native Reports, Reports-probe, relational and OAuth-calendar
+fixture prerequisites, compiler, executables and fresh case outcomes have separate
+evidence. Installation and private build outcomes are uncached.
 
 Linux jobs use the pinned Rust OCI image on Ubuntu with a finite private cgroup,
 6 GiB memory/no swap and bounded owned artifact/generated tmpfs directories.
-Trusted outer CI setup creates those mounts. Inner native compiler and worker
+Trusted outer CI setup creates those mounts and preserves the exact checked-in
+worker ABI seed across the generated-output mount. Each Linux job retains its
+current cgroup, mount and seed-digest evidence. Inner native compiler and worker
 Landlock/seccomp, memory and fixed launcher admission remain mandatory; this
 is not a port of the production Mac isolated Cargo builder. Native ELF/glibc/loader
 inputs are independently re-captured before fixture cache admission.
