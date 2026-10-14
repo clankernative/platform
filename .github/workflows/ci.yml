@@ -771,6 +771,8 @@ jobs:
 
       - name: Require clean hosted formatting before native preparation
         run: git diff --exit-code
+      - name: Require the exact reviewed native policy before preparation
+        run: target/debug/xtask architecture-check
       - name: Complete strict Linux workspace and all-targets lint before preparation
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Check existing worker frame and classification observations
