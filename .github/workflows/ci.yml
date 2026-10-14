@@ -190,9 +190,10 @@ jobs:
           shared-key: ${{ hashFiles('Cargo.toml') }}-verify
           save-if: ${{ matrix.part == 'inputs' }}
       - name: Establish the mandatory bounded native Linux compiler context
+        id: linux_context
         run: cargo run --locked -p xtask -- verify-linux-context
       - name: Retain current native Linux preparation context
-        if: ${{ always() }}
+        if: ${{ always() && steps.linux_context.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: day2-linux-context-preparation-${{ matrix.part }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -405,9 +406,10 @@ jobs:
           save-if: 'false'
       - run: cargo fetch --locked
       - name: Establish the mandatory bounded native Linux compiler context
+        id: linux_context
         run: cargo run --locked -p xtask -- verify-linux-context
       - name: Retain current native Linux preparation join context
-        if: ${{ always() }}
+        if: ${{ always() && steps.linux_context.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: day2-linux-context-preparation-join-${{ github.run_id }}-${{ github.run_attempt }}
@@ -495,9 +497,10 @@ jobs:
           save-if: 'false'
       - run: cargo fetch --locked
       - name: Establish the mandatory bounded native Linux compiler context
+        id: linux_context
         run: cargo run --locked -p xtask -- verify-linux-context
       - name: Retain current native Linux shard context
-        if: ${{ always() }}
+        if: ${{ always() && steps.linux_context.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: day2-linux-context-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -574,10 +577,11 @@ jobs:
       - run: cargo fetch --locked
         if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
       - name: Establish the mandatory bounded native Linux compiler context
+        id: linux_context
         run: cargo run --locked -p xtask -- verify-linux-context
         if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
       - name: Retain current native Linux final context
-        if: ${{ always() && !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
+        if: ${{ always() && steps.linux_context.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: day2-linux-context-final-${{ github.run_id }}-${{ github.run_attempt }}
