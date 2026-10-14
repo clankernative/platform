@@ -48,6 +48,7 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 
 [target.'cfg(target_os = "linux")'.dependencies]
 day2-sandbox = { path = "../day2-sandbox" }
+nix = { version = "=0.31.3", default-features = false, features = ["socket", "poll"] }
 
 [dev-dependencies]
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp"] }
