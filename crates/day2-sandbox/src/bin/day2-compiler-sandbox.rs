@@ -129,6 +129,23 @@ mod linux {
         Ok(())
     }
 
+    fn owned_stage(
+        root: &std::path::Path,
+        stage: &std::path::Path,
+        build: &std::path::Path,
+        admission: &std::path::Path,
+    ) -> Result<()> {
+        ensure!(
+            build == root.join("artifacts/build") && admission == root.join("artifacts/admission"),
+            "compiler stage roots must be fixed platform directories"
+        );
+        ensure!(
+            stage == build || stage.starts_with(admission),
+            "compiler stage must be a platform-owned build or admission stage"
+        );
+        Ok(())
+    }
+
     pub fn run() -> Result<()> {
         let mut args = std::env::args_os().skip(1);
         let root = PathBuf::from(args.next().context("missing platform root")?).canonicalize()?;
@@ -144,11 +161,11 @@ mod linux {
             args.next().is_some_and(|arg| arg == "--"),
             "missing compiler argument delimiter"
         );
-        ensure!(
-            stage == root.join("artifacts/build").canonicalize()?
-                || stage == root.join("artifacts/admission").canonicalize()?,
-            "compiler stage must be a platform-owned build or admission stage"
-        );
+        // Admit canonical admission children, but grant filesystem access only
+        // to the selected stage below, never its parent or sibling stages.
+        let build: PathBuf = root.join("artifacts/build").canonicalize()?;
+        let admission: PathBuf = root.join("artifacts/admission").canonicalize()?;
+        owned_stage(&root, &stage, &build, &admission)?;
         ensure!(
             roc == root.join("../.toolchains/roc").canonicalize()?,
             "compiler must be the pinned platform toolchain"
@@ -347,6 +364,45 @@ mod linux {
     mod tests {
         use super::*;
         use std::path::Path;
+
+        #[test]
+        fn compiler_stages_reject_foreign_paths_and_symlink_escapes() -> Result<()> {
+            use std::os::unix::fs::symlink;
+
+            let directory = tempfile::tempdir()?;
+            let root = directory.path().canonicalize()?;
+            let build = root.join("artifacts/build");
+            let admission = root.join("artifacts/admission");
+            let child = admission.join("probe/app");
+            let foreign = root.join("artifacts/foreign");
+            let sibling = root.join("artifacts/admission-other");
+            let build_child = build.join("child");
+            for path in [&build_child, &child, &foreign, &sibling] {
+                fs::create_dir_all(path)?;
+            }
+            let check = |path: &Path| {
+                owned_stage(
+                    &root,
+                    &path.canonicalize()?,
+                    &build.canonicalize()?,
+                    &admission.canonicalize()?,
+                )
+            };
+            for accepted in [&build, &admission, &child] {
+                check(accepted)?;
+            }
+            for rejected in [&foreign, &sibling, &build_child, &root] {
+                assert!(check(rejected).is_err());
+            }
+            let escape = admission.join("escape");
+            symlink(&foreign, &escape)?;
+            assert!(check(&escape).is_err());
+            fs::remove_file(&escape)?;
+            fs::remove_dir_all(&admission)?;
+            symlink(&foreign, &admission)?;
+            assert!(check(&foreign).is_err());
+            Ok(())
+        }
 
         #[test]
         fn real_compiler_outputs_require_bounded_tmpfs() -> Result<()> {

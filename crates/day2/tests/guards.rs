@@ -138,7 +138,7 @@ fn checked_compiler_rejects_wrong_models_forged_values_and_unavailable_io() -> R
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()?;
-    let temporary = tempfile::tempdir_in(root.join("artifacts"))?;
+    let temporary = crate::support::compiler::stage(&root)?;
     let stage = temporary.path();
     let artifact = verified_artifact()?;
     compiler_fixture(&root, stage, &artifact)?;
@@ -148,6 +148,8 @@ fn checked_compiler_rejects_wrong_models_forged_values_and_unavailable_io() -> R
     let outside = tempfile::tempdir_in(root.join("artifacts"))?;
     let secret = outside.path().join("secret.txt");
     fs::write(&secret, b"private fixture")?;
+    let sibling = crate::support::compiler::stage(&root)?;
+    fs::write(sibling.path().join("secret.txt"), b"private sibling fixture")?;
     let inside = guards.join("allowed.txt");
     fs::write(&inside, b"allowed fixture")?;
     let header = "app [step] { pf: platform \"../sdk/main.roc\" }\n";
@@ -418,8 +420,17 @@ step = |_| {{ _ = bad
         (
             "OutsideFile",
             format!(
-                "{header}import \"../../{}/secret.txt\" as value : Str\nstep : Str -> Str\nstep = |_| value\n",
+                "{header}import \"../../../{}/secret.txt\" as value : Str\nstep : Str -> Str\nstep = |_| value\n",
                 outside.path().file_name().unwrap().to_string_lossy()
+            ),
+            false,
+            "FILE",
+        ),
+        (
+            "SiblingFile",
+            format!(
+                "{header}import \"../../{}/secret.txt\" as value : Str\nstep : Str -> Str\nstep = |_| value\n",
+                sibling.path().file_name().unwrap().to_string_lossy()
             ),
             false,
             "FILE",
@@ -443,7 +454,7 @@ step = |_| {{ _ = bad
                 ),
             );
         fs::write(&file, source)?;
-        if name == "OutsideFile" {
+        if matches!(name, "OutsideFile" | "SiblingFile") {
             let control = Command::new(&roc)
                 .args(["check", "--no-cache"])
                 .arg(&file)

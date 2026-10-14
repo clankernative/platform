@@ -30,7 +30,7 @@ fn native_connection_use_is_nominal_and_private_in_both_profiles() -> Result<()>
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()?;
-    let temporary = tempfile::tempdir_in(root.join("artifacts"))?;
+    let temporary = crate::support::compiler::stage(&root)?;
     let stage = temporary.path().join("stage");
     fs::create_dir_all(stage.join("app"))?;
     day2::sdk::stage(&root.join("sdk"), &stage.join("sdk"))?;
@@ -134,7 +134,7 @@ fn native_reflected_use_cannot_enter_nested_public_codecs() -> Result<()> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()?;
-    let temporary = tempfile::tempdir_in(root.join("artifacts"))?;
+    let temporary = crate::support::compiler::stage(&root)?;
     let stage = temporary.path();
     fs::create_dir(stage.join("app"))?;
     day2::sdk::stage(&root.join("sdk"), &stage.join("sdk"))?;

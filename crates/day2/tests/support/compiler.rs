@@ -8,6 +8,18 @@ use std::{
 
 const OUTPUT_LIMIT: u64 = 1024 * 1024;
 
+// Each compiler probe owns one child of the fixed admission directory. The
+// compiler receives only that child's filesystem capability, not its siblings.
+pub fn stage(root: &std::path::Path) -> Result<tempfile::TempDir> {
+    let admission = root.join("artifacts/admission");
+    std::fs::create_dir_all(&admission)?;
+    ensure!(
+        admission.canonicalize()? == admission,
+        "compiler test admission root must be a fixed platform directory"
+    );
+    tempfile::tempdir_in(admission).context("create owned compiler probe stage")
+}
+
 struct Supervised {
     child: Child,
     stopped: bool,

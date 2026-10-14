@@ -16,7 +16,7 @@ fn native_error_cases_preserve_typed_command_query_inputs_and_singleton_authorin
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()?;
-    let temporary = tempfile::tempdir_in(root.join("artifacts"))?;
+    let temporary = crate::support::compiler::stage(&root)?;
     let stage = temporary.path();
     fs::create_dir(stage.join("app"))?;
     day2::sdk::stage(&root.join("sdk"), &stage.join("sdk"))?;
@@ -148,7 +148,7 @@ fn native_required_all_rows_builders_preserve_typed_definitions() -> Result<()> 
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()?;
-    let temporary = tempfile::tempdir_in(root.join("artifacts"))?;
+    let temporary = crate::support::compiler::stage(&root)?;
     let stage = temporary.path();
     fs::create_dir(stage.join("app"))?;
     day2::sdk::stage(&root.join("sdk"), &stage.join("sdk"))?;
