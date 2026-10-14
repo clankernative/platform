@@ -222,6 +222,45 @@ mod tests {
     }
 
     #[test]
+    fn managed_ui_lock_command_preserves_exact_app_pins() {
+        let scratch = Scratch::new();
+        let source = scratch.0.canonicalize().unwrap().join("app");
+        fs::create_dir(&source).unwrap();
+        let generate = || {
+            Command::new(binary())
+                .args(["platform", "ui-lock"])
+                .arg(&source)
+                .output()
+                .unwrap()
+        };
+        let first = generate();
+        assert!(
+            first.status.success(),
+            "{}",
+            String::from_utf8_lossy(&first.stderr)
+        );
+        let path = source.join("ui/ui.lock.json");
+        let authored = fs::read(&path).unwrap();
+        let lock: Value = serde_json::from_slice(&authored).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&first.stdout).unwrap(),
+            lock
+        );
+        assert_eq!(lock["schemaVersion"], 2);
+        assert!(lock["package"].get("path").is_none());
+        assert_eq!(lock["package"]["version"], "0.7.1");
+        assert_eq!(lock["package"]["inputs"].as_array().unwrap().len(), 455);
+        assert!(generate().status.success());
+        assert_eq!(fs::read(&path).unwrap(), authored);
+        let mut changed = lock;
+        changed["package"]["version"] = json!("9.9.9");
+        let changed = serde_json::to_vec(&changed).unwrap();
+        fs::write(&path, &changed).unwrap();
+        assert!(!generate().status.success());
+        assert_eq!(fs::read(&path).unwrap(), changed);
+    }
+
+    #[test]
     fn roc_infrastructure_description_produces_a_real_pinned_opentofu_plan() {
         let configuration = std::env::var_os("DAY2_TEST_TOFU_CONFIG")
             .map(PathBuf::from)

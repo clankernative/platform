@@ -4965,13 +4965,17 @@ dependencies = [
  "day2-contracts",
  "day2-control",
  "day2-ops",
+ "flate2",
  "proc-macro2",
  "quote",
+ "reqwest",
  "rusqlite",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",
  "syn 2.0.119",
+ "tar",
  "tempfile",
 ]
 

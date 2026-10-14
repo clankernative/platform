@@ -22,7 +22,6 @@ fn generic_package() -> (LockedPackage, BTreeMap<String, Vec<u8>>) {
         LockedPackage {
             name: "example-provider-package".into(),
             version: "0.1.0".into(),
-            path: "../../package".into(),
             digest,
             inputs,
         },
@@ -33,7 +32,7 @@ fn generic_package() -> (LockedPackage, BTreeMap<String, Vec<u8>>) {
 fn generic_lock() -> Lock {
     let (package, _) = generic_package();
     Lock {
-        schema_version: 1,
+        schema_version: 2,
         provider: "opaque-provider".into(),
         package,
     }
@@ -47,17 +46,6 @@ fn path_and_digest_validation_is_closed() {
     for bad in ["", "../x", "a/../b", "/tmp/x", "a\\b", "a//b", "a;whoami"] {
         assert!(!safe_rel(bad));
     }
-    assert!(safe_lock_path("../provider-package/files"));
-    assert!(safe_lock_path("../../packages/opaque"));
-    for bad in [
-        "packages/opaque",
-        "../../../packages/x",
-        "../a/../../b",
-        "../a//b",
-        "../a\\b",
-    ] {
-        assert!(!safe_lock_path(bad), "{bad}");
-    }
     assert!(valid_digest(&format!("sha256:{}", "a".repeat(64))));
     assert!(!valid_digest("sha256:wrong"));
 }
@@ -65,7 +53,6 @@ fn path_and_digest_validation_is_closed() {
 #[test]
 fn captured_non_provider_apps_are_unchanged_without_a_lock_or_pin() {
     let temp = tempfile::tempdir().unwrap();
-    let app = temp.path().join("app");
     let captured = temp.path().join("captured");
     fs::create_dir_all(captured.join("ui/pages")).unwrap();
     fs::write(
@@ -76,7 +63,7 @@ fn captured_non_provider_apps_are_unchanged_without_a_lock_or_pin() {
     fs::write(captured.join("ui/app.js"), b"not provider input").unwrap();
     let before = fs::read(captured.join("ui/pages/index.html")).unwrap();
     let mut hashes = BTreeMap::new();
-    expand(&app, &captured, &mut hashes).unwrap();
+    expand(temp.path(), &captured, &mut hashes).unwrap();
     assert_eq!(
         fs::read(captured.join("ui/pages/index.html")).unwrap(),
         before
@@ -105,7 +92,13 @@ fn no_lock_does_not_touch_sources_or_execute_an_adapter() {
     }
     let original = fs::read(&page).unwrap();
     let mut hashes = BTreeMap::new();
-    expand_with_pin(temp.path(), &captured, &mut hashes, &executable).unwrap();
+    expand_with_pin(
+        &captured,
+        &mut hashes,
+        &executable,
+        &temp.path().join("package"),
+    )
+    .unwrap();
     assert_eq!(fs::read(&page).unwrap(), original);
     assert!(!marker.exists());
     assert!(hashes.is_empty());
@@ -162,7 +155,11 @@ fn strict_generic_lock_rejects_unknown_fields_and_invalid_schema() {
     fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
     assert!(parse_lock(&path).is_err());
     json.as_object_mut().unwrap().remove("unexpected");
+    json["schemaVersion"] = 1.into();
+    fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+    assert!(parse_lock(&path).is_err());
     json["schemaVersion"] = 2.into();
+    json["package"]["path"] = "../../provider".into();
     fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
     assert!(parse_lock(&path).is_err());
 }
@@ -255,7 +252,7 @@ fn response_envelope_requires_fields_and_rejects_unknown_fields() {
 fn resource_policy_rejects_non_ui_paths() {
     let package = generic_lock().package;
     let lock = Lock {
-        schema_version: 1,
+        schema_version: 2,
         provider: "opaque-provider".into(),
         package,
     };

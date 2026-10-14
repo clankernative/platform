@@ -1,10 +1,12 @@
 import Capability
 import Simulation
+import UiDependency
 
 # Platform regression policy, shared by xtask and operator CLI commands.
 Verify :: [].{
 	cli! : (Str => Try(Str, Str)) => Try(Str, Str)
 	cli! = |host!| {
+		_ = UiDependency.install!(host!)?
 		_ = Capability.call!("cli-native", "{}", host!)?
 		for operation in ["check", "test", "build"] {
 			_ = Capability.call!("cli-roc", Json.to_str({ operation: operation }), host!)?

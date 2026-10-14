@@ -24,6 +24,7 @@ mod native_toolchain;
 mod provider_conformance;
 mod tooling;
 mod ui_assembly;
+mod ui_dependency;
 mod verification;
 mod workflows;
 
@@ -104,10 +105,9 @@ fn snapshot(
         // own repository carries it beside its sources. `.clanker` holds design
         // tool data (Studio fake-data scenes and canvas layout) committed with
         // the app; it is never compiled, served or admitted. Only the app root
-        // may carry it. `.ui-dependencies` is a build-only local package root;
-        // optional UI assembly captures only its explicit locked input closure.
+        // may carry it. UI build dependencies belong to the Platform distribution.
         if [".git", ".gitignore", ".gitattributes"].contains(&name.as_str())
-            || (prefix == "app" && [".clanker", ".ui-dependencies"].contains(&name.as_str()))
+            || (prefix == "app" && name == ".clanker")
         {
             continue;
         }
@@ -672,6 +672,25 @@ fn main() -> Result<()> {
             ensure!(args.next().is_none(), "xtask cli accepts no arguments");
             build_cli(&root)?;
         }
+        "bootstrap-ui" => {
+            ensure!(args.next().is_none(), "bootstrap-ui accepts no arguments");
+            let runner = workflows::build(&root)?;
+            let mut session = ui_dependency::Session::new(&root)?;
+            let receipt = day2::automation::run(&runner, &["ui-dependency"], |request| {
+                session.effect(request)
+            })?;
+            println!("{}", serde_json::to_string_pretty(&receipt)?);
+        }
+        "ui-lock" => {
+            let source = PathBuf::from(args.next().context("usage: ui-lock SOURCE")?);
+            ensure!(args.next().is_none(), "usage: ui-lock SOURCE");
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&day2::build_dependencies::write_lock(
+                    &root, &source
+                )?)?
+            );
+        }
         "build-migration-fixture" => {
             build_migration_fixture(&root)?;
         }
@@ -1035,7 +1054,19 @@ fn build_cli(root: &Path) -> Result<()> {
     let roc = native_pin.verified_compiler(root)?;
     let pin = native_pin.value;
     let mut completed = std::collections::BTreeSet::new();
+    let mut ui_dependency = ui_dependency::Session::new(root)?;
     day2::automation::run(&runner, &["cli"], |request| {
+        if request.action.starts_with("ui-dependency-") {
+            let receipt = request.action == "ui-dependency-receipt";
+            let response = ui_dependency.effect(request)?;
+            if receipt {
+                ensure!(
+                    completed.insert("ui".to_owned()),
+                    "duplicate UI dependency receipt"
+                );
+            }
+            return Ok(response);
+        }
         let args: BTreeMap<String, String> = request.decode()?;
         let effect = match request.action.as_str() {
             "cli-native" => {
@@ -1108,7 +1139,7 @@ fn build_cli(root: &Path) -> Result<()> {
             }
             "cli-receipt" => {
                 ensure!(
-                    ["native", "check", "test", "build", "workflows"]
+                    ["ui", "native", "check", "test", "build", "workflows"]
                         .iter()
                         .all(|step| completed.contains(*step)),
                     "CLI distribution incomplete"
@@ -1135,7 +1166,7 @@ fn build_cli(root: &Path) -> Result<()> {
                 fs::write(
                     root.join("cli/distribution.json"),
                     serde_json::to_vec_pretty(
-                        &serde_json::json!({"format":1,"protocol":1,"toolchain":pin,"workflow":day2::automation::source_digest(),"binaries":binaries,"kind":"local-source-distribution"}),
+                        &serde_json::json!({"format":1,"protocol":1,"toolchain":pin,"workflow":day2::automation::source_digest(),"binaries":binaries,"ui_dependency":day2::build_dependencies::installed(root)?.identity(),"kind":"local-source-distribution"}),
                     )?,
                 )?;
                 return Ok(serde_json::json!({}));
@@ -1153,7 +1184,9 @@ fn control_verify(root: &Path) -> Result<()> {
 }
 
 fn hash_tree(root: &Path, directory: &Path, hashes: &mut BTreeMap<String, String>) -> Result<()> {
-    if directory == root.join("crates/worker/generated") {
+    if directory == root.join("crates/worker/generated")
+        || directory == root.join("cli/build-dependencies")
+    {
         return Ok(());
     }
     for entry in fs::read_dir(directory)? {
@@ -1168,7 +1201,7 @@ fn hash_tree(root: &Path, directory: &Path, hashes: &mut BTreeMap<String, String
         } else {
             let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("");
             if ["rs", "roc", "toml"].contains(&extension)
-                || ["assets", "deploy", "toolchains"]
+                || ["assets", "deploy", "toolchains", "build-dependencies"]
                     .iter()
                     .any(|directory| path.starts_with(root.join(directory)))
             {

@@ -19,8 +19,17 @@ cd ..
 ```
 
 The distribution contains `day2`, `day2-host`, `day2-workflows`, `xtask`,
-`day2-workflows.json` and `distribution.json`.
-Keep its binaries together. It currently requires this source checkout and Apple
+`day2-workflows.json`, `distribution.json`, and the complete reviewed Clanker UI
+build dependency under `build-dependencies/`. Setup obtains and verifies that
+bundle automatically. Keep its binaries and dependency directory together.
+
+For new internal-tool presentation, `day2 platform ui-lock APP_DIRECTORY`
+initializes the managed Clanker package lock. Existing app builds discover the
+bundled tool and assets automatically, without filesystem paths in the lock,
+provider environment variables, or per-app dependency installation. Builds stay
+offline. The serving runtime does not contain or execute the Clanker builder.
+
+ It currently requires this source checkout and Apple
 Silicon macOS. The pinned upstream basic-cli 0.22.0 provides the native Roc CLI
 host; platform operations call only the adjacent Day2 Rust broker, never an
 executable found on a project's PATH. It is a versioned private protocol, not an
