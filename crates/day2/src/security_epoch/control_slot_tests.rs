@@ -281,7 +281,7 @@ impl Provider {
             "createTime":"2026-10-14T00:00:00.000001Z","updateTime":format!("2026-10-14T00:00:00.{n:06}Z")})).unwrap()
     }
 
-    fn rows(&self) -> u64 {
+    fn rows(&self) -> i64 {
         self.db
             .query_row("SELECT COUNT(*) FROM slots", [], |r| r.get(0))
             .unwrap()
@@ -376,7 +376,7 @@ fn concurrent_accepts_reserve_one_authority_stage_and_cas_only_one_attempt() {
     let (selection, core) = fixture();
     let temporary = tempfile::tempdir().unwrap();
     let path = temporary.path().join("oracle.sqlite");
-    let mut provider = Provider::open(&path);
+    let provider = Provider::open(&path);
     let create = codec::create_data(&selection, &Slot::prepared(core.clone())).unwrap();
     let barrier = Arc::new(Barrier::new(3));
     let mut children = Vec::new();
