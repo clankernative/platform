@@ -825,15 +825,25 @@ impl Runtime {
         let mut connection = open(&self.db)?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         let tx = crate::write_queue::immediate(&mut connection)?;
+        self.initialize_in_transaction(&tx)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Initialize the admitted framework and app schema inside the caller's
+    /// transaction. Native fresh preparation can add its immutable seed and
+    /// marker before the same commit. This helper does not open or create the
+    /// database file and does not authorize an external credential epoch mutation.
+    pub(crate) fn initialize_in_transaction(&self, tx: &Transaction<'_>) -> Result<()> {
         let exists: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='day2_meta')",
             [],
             |row| row.get(0),
         )?;
         if exists {
-            self.check_binding(&tx)?;
+            self.check_binding(tx)?;
             ensure!(
-                crate::authority_state::exists(&tx)?,
+                crate::authority_state::exists(tx)?,
                 "authority_migration_required: explicitly activate current authority"
             );
         } else {
@@ -857,19 +867,19 @@ impl Runtime {
                 desired.scope(&self.app)? == self.scope,
                 crate::error::Failure::InstallationChanged
             );
-            crate::authority_state::initialize_new(&tx, self, &desired)?;
+            crate::authority_state::initialize_new(tx, self, &desired)?;
         }
-        crate::audit::upgrade(&tx)?;
-        crate::delegation::upgrade_origin(&tx)?;
-        crate::delegation_commands::upgrade(&tx)?;
-        crate::invocations::upgrade(&tx)?;
-        crate::resources::upgrade(&tx)?;
-        crate::budget::upgrade(&tx)?;
-        crate::preparation::upgrade(&tx)?;
-        crate::execution::upgrade(&tx)?;
-        upgrade_selection_cursors(&tx)?;
-        crate::authority_state::upgrade(&tx)?;
-        crate::oauth::schema::admit_with_runtime_hook(&tx, |db| {
+        crate::audit::upgrade(tx)?;
+        crate::delegation::upgrade_origin(tx)?;
+        crate::delegation_commands::upgrade(tx)?;
+        crate::invocations::upgrade(tx)?;
+        crate::resources::upgrade(tx)?;
+        crate::budget::upgrade(tx)?;
+        crate::preparation::upgrade(tx)?;
+        crate::execution::upgrade(tx)?;
+        upgrade_selection_cursors(tx)?;
+        crate::authority_state::upgrade(tx)?;
+        crate::oauth::schema::admit_with_runtime_hook(tx, |db| {
             // GoLinks' persisted links are the one data migration AGENTS.md
             // allows; this replaces only an empty version-1 credential unit.
             crate::managed_credentials::store::replace_empty_version_1_unit(db)?;
@@ -887,7 +897,6 @@ impl Runtime {
             // counter before the writer may publish their initialized shape.
             crate::managed_credentials::store::install_schema(db)
         })?;
-        tx.commit()?;
         Ok(())
     }
     pub(crate) fn check_binding(&self, connection: &Connection) -> Result<()> {

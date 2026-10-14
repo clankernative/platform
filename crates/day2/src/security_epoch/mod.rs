@@ -18,6 +18,7 @@ mod native_clock;
 mod native_connection_peer;
 mod native_identity;
 mod native_namespace;
+mod preparation_image;
 mod runtime_profile;
 mod seed_core;
 mod transport;
