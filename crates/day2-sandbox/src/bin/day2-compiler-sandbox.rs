@@ -129,18 +129,26 @@ mod linux {
         Ok(())
     }
 
-    fn owned_stage(
-        root: &std::path::Path,
-        stage: &std::path::Path,
-        build: &std::path::Path,
-        admission: &std::path::Path,
-    ) -> Result<()> {
+    fn owned_stage(root: &std::path::Path, stage: &std::path::Path) -> Result<()> {
+        let build: PathBuf = root
+            .join("artifacts/build")
+            .canonicalize()
+            .context("resolve fixed compiler build root")?;
         ensure!(
-            build == root.join("artifacts/build") && admission == root.join("artifacts/admission"),
-            "compiler stage roots must be fixed platform directories"
+            build == root.join("artifacts/build"),
+            "compiler build root must be a fixed platform directory"
         );
+        // The first build runs before admission has been created. Resolve only
+        // the selected root; unused admission state grants no capability.
+        if stage == build {
+            return Ok(());
+        }
+        let admission: PathBuf = root
+            .join("artifacts/admission")
+            .canonicalize()
+            .context("resolve fixed compiler admission root")?;
         ensure!(
-            stage == build || stage.starts_with(admission),
+            admission == root.join("artifacts/admission") && stage.starts_with(&admission),
             "compiler stage must be a platform-owned build or admission stage"
         );
         Ok(())
@@ -163,9 +171,7 @@ mod linux {
         );
         // Admit canonical admission children, but grant filesystem access only
         // to the selected stage below, never its parent or sibling stages.
-        let build: PathBuf = root.join("artifacts/build").canonicalize()?;
-        let admission: PathBuf = root.join("artifacts/admission").canonicalize()?;
-        owned_stage(&root, &stage, &build, &admission)?;
+        owned_stage(&root, &stage)?;
         ensure!(
             roc == root.join("../.toolchains/roc").canonicalize()?,
             "compiler must be the pinned platform toolchain"
@@ -380,14 +386,7 @@ mod linux {
             for path in [&build_child, &child, &foreign, &sibling] {
                 fs::create_dir_all(path)?;
             }
-            let check = |path: &Path| {
-                owned_stage(
-                    &root,
-                    &path.canonicalize()?,
-                    &build.canonicalize()?,
-                    &admission.canonicalize()?,
-                )
-            };
+            let check = |path: &Path| owned_stage(&root, &path.canonicalize()?);
             for accepted in [&build, &admission, &child] {
                 check(accepted)?;
             }
@@ -401,6 +400,19 @@ mod linux {
             fs::remove_dir_all(&admission)?;
             symlink(&foreign, &admission)?;
             assert!(check(&foreign).is_err());
+            Ok(())
+        }
+
+        #[test]
+        fn cold_build_stage_does_not_require_an_admission_directory() -> Result<()> {
+            let directory = tempfile::tempdir()?;
+            let root = directory.path().canonicalize()?;
+            let build = root.join("artifacts/build");
+            let admission = root.join("artifacts/admission");
+            fs::create_dir_all(&build)?;
+            assert!(!admission.try_exists()?);
+            owned_stage(&root, &build.canonicalize()?)?;
+            assert!(!admission.try_exists()?);
             Ok(())
         }
 
