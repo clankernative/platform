@@ -73,6 +73,16 @@ fn response(body: Value) -> Result<effects::Response> {
     })
 }
 
+fn fixture_result(run: impl FnOnce() -> Result<()>) -> Result<()> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)).unwrap_or_else(|_| {
+        anyhow::bail!("conformance assertion panicked; see the original test output")
+    })
+}
+
+fn fixture_scope(port: Arc<Port>, run: impl FnOnce() -> Result<()>) -> Result<()> {
+    fixture_result(|| effects::scope(port, run))
+}
+
 impl Port {
     fn narrow_policy(&self) -> Result<()> {
         let db = store::open(&self.db)?;
@@ -591,7 +601,7 @@ fn compiled_calendar_refresh_publishes_versions_and_fences_failure_recovery() ->
             activate_on_fill: AtomicBool::new(false),
             fail_clock: AtomicBool::new(false),
         });
-        let result = effects::scope(port.clone(), || -> Result<()> {
+        let result = fixture_scope(port.clone(), || -> Result<()> {
             if case != Case::AbsentReturnRewind {
                 activate(&runtime, &fixture)?;
             }
@@ -884,7 +894,8 @@ fn compiled_calendar_refresh_publishes_versions_and_fences_failure_recovery() ->
                     assert_eq!(
                         db.query_row("SELECT status FROM oauth_connection_slots", [], |r| r
                             .get::<_, String>(0))?,
-                        "reauth_required"
+                        "reauth_required",
+                        "{case:?}: observed clock or material refusal must persist"
                     );
                 }
                 if matches!(case, Case::PolicyChanged | Case::CustodyFailure) {
@@ -1022,7 +1033,7 @@ fn compiled_refresh_crash_recovery_uses_sealed_dispatch_and_publication() -> Res
     }
     for point in points {
         let directory = tempfile::tempdir()?;
-        let result = (|| -> Result<()> {
+        let result = fixture_result(|| -> Result<()> {
             let transport = Connection::open(directory.path().join("transport.sqlite"))?;
             transport.execute_batch(
                 "CREATE TABLE sends(seq INTEGER PRIMARY KEY, phase TEXT NOT NULL)",
@@ -1210,7 +1221,7 @@ fn compiled_refresh_crash_recovery_uses_sealed_dispatch_and_publication() -> Res
                 child_posts
             );
             Ok(())
-        })();
+        });
         if let Err(error) = result {
             let retained = directory.keep();
             anyhow::bail!(
