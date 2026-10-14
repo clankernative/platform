@@ -677,16 +677,36 @@ fn compiled_calendar_refresh_publishes_versions_and_fences_failure_recovery() ->
                 assert_eq!(reopened.query_row("SELECT count(*) FROM oauth_refresh_attempts WHERE state='replacement_committed' AND base_version=1 AND next_version=2 AND length(receipt)>0", [], |r| r.get::<_,i64>(0))?, 1);
                 assert_eq!(invoke("after_lost_ack")?.result["status"], "ok");
                 assert_eq!(port.posts.load(SeqCst), 1);
-                // Stop a real compiled invocation after its observations have
-                // committed. Its genuine Use remains pending while another
+                // Stop a real compiled query after its preparation. Its genuine
+                // Use remains pending while another
                 // invocation publishes v3; ordinary cleanup must retain it.
-                let interrupted = runtime.invoke_verified("oauthcalendar.list_events",
-                    store::RequestIdentity { actor:&human.email, origin:Some(&human) },
-                    "pending_v2", &input, 250, store::Fault::AfterPrepare)
+                let interrupted = runtime
+                    .invoke_verified(
+                        "oauthcalendar.list_events",
+                        store::RequestIdentity {
+                            actor: &human.email,
+                            origin: Some(&human),
+                        },
+                        "pending_v2",
+                        &input,
+                        250,
+                        store::Fault::AfterPrepare,
+                    )
                     .expect_err("expected the actual preparation boundary interruption");
                 assert!(store::Fault::AfterPrepare.caused(&interrupted));
-                assert_eq!(db.query_row("SELECT status FROM day2_invocations WHERE id='pending_v2'", [], |r| r.get::<_,String>(0))?, "pending");
-                let reference: String = db.query_row("SELECT reference FROM oauth_use_handles WHERE invocation='pending_v2'", [], |r| r.get(0))?;
+                assert_eq!(
+                    db.query_row(
+                        "SELECT status FROM day2_invocations WHERE id='pending_v2'",
+                        [],
+                        |r| r.get::<_, String>(0)
+                    )?,
+                    "pending"
+                );
+                let reference: String = db.query_row(
+                    "SELECT reference FROM oauth_use_handles WHERE invocation='pending_v2'",
+                    [],
+                    |r| r.get(0),
+                )?;
                 port.now.store(280, SeqCst);
                 assert_eq!(invoke("refresh_v3")?.result["status"], "ok");
                 assert_eq!(port.posts.load(SeqCst), 2);
@@ -741,8 +761,17 @@ fn compiled_calendar_refresh_publishes_versions_and_fences_failure_recovery() ->
                     "Use must fail on its material pin while its 60-second lifetime remains valid"
                 );
                 let reads = port.reads.load(SeqCst);
-                assert!(runtime.execute("pending_v2", store::Fault::None).is_err(), "pending v2 preparation completed under v3 material");
-                assert_eq!(port.reads.load(SeqCst), reads, "resuming stale preparation dispatched another provider read");
+                // Query observations are not journaled: resuming prepares a
+                // fresh authenticated v3 read rather than reusing the old Use.
+                let resumed = runtime.execute("pending_v2", store::Fault::None)?;
+                assert_eq!(resumed.status, "success");
+                assert_eq!(resumed.result["status"], "ok");
+                assert_eq!(port.posts.load(SeqCst), 2);
+                assert_eq!(
+                    port.reads.load(SeqCst),
+                    reads + 1,
+                    "resuming the query must prepare a fresh current-version read"
+                );
             } else {
                 assert!(
                     !first
