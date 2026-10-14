@@ -79,6 +79,9 @@ pub mod schedules;
 pub mod schema;
 pub mod sdk;
 pub mod security_admission;
+// Private external-epoch protocol; live enrollment producers remain unqualified.
+#[allow(dead_code)]
+mod security_epoch;
 pub mod simulation;
 pub mod simulations;
 pub mod store;

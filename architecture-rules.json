@@ -290,6 +290,11 @@
     "crates/day2/src/schema.rs",
     "crates/day2/src/sdk.rs",
     "crates/day2/src/security_admission.rs",
+    "crates/day2/src/security_epoch/firestore.rs",
+    "crates/day2/src/security_epoch/journal.rs",
+    "crates/day2/src/security_epoch/kernel.rs",
+    "crates/day2/src/security_epoch/mod.rs",
+    "crates/day2/src/security_epoch/tests.rs",
     "crates/day2/src/simulation.rs",
     "crates/day2/src/simulations.rs",
     "crates/day2/src/store.rs",
@@ -2092,6 +2097,15 @@
     ,{"source":"crates/xtask/src/build_native.rs","kind":"filesystem","target":"std::fs::remove_file","context":"execute","fingerprint":"34c02283380af52fa82b2d56b8e4f341b790994caff29af641fec4a79c32f508","count":1,"reason":"Owner: native connection declaration probe. Remove its temporary executable after the pure worker closes. Removal: Retire with the probe. Limits: Fixed own-stage executable; no retained fixture, artifact or shared target cleanup."}
     ,{"source":"crates/xtask/src/build_native.rs","kind":"filesystem","target":"std::fs::write","context":"execute","fingerprint":"66b7a628a73e1e07b69a44d0d1f1be7dc00897fdac96993dbdbfc4e4b6a5d53f","count":1,"reason":"Owner: native compiler staging. Write the trusted constant Str-to-Str SDK platform before pure ABI generation. Removal: Retire with staging. Limits: Fixed SDK path and source from the explicit SDK catalog; no authored App import in ABI generation. Both final admission profiles remain required before product linking."}
     ,{"source":"crates/xtask/src/build_native.rs","kind":"filesystem","target":"std::fs::write","context":"execute","fingerprint":"8999ce95070d7b0c692ec1a765abdf1d734101e7147d9e305d825715b139aa4c","count":1,"reason":"Owner: native declaration staging. Persist the canonical bounded connection requirements obtained from the pure probe and checked registration inventory for exact SDK regeneration. Removal: Retire with staging. Limits: Fixed own-stage file, complete checked inventory validation, full equality against the final admitted worker's declarations."}
-    ,{"source":"crates/xtask/src/build_native.rs","kind":"filesystem","target":"std::fs::write","context":"execute","fingerprint":"ceda770adce143cb241704f517b9fd06b87e5c54a981251ffea68eeceb048b54","count":1,"reason":"Owner: native declaration probe adapter. Stage a pure App.connections metadata projection from checked registration names, then compile with the pinned sandboxed compiler and bounded worker. Removal: Retire with the probe. Limits: Fixed own-stage source; no runtime, provider dispatch or authority lookup; final product admission is separate and mandatory."}
+    ,{"source":"crates/xtask/src/build_native.rs","kind":"filesystem","target":"std::fs::write","context":"execute","fingerprint":"ceda770adce143cb241704f517b9fd06b87e5c54a981251ffea68eeceb048b54","count":1,"reason":"Owner: native declaration probe adapter. Stage a pure App.connections metadata projection from checked registration names, then compile with the pinned sandboxed compiler and bounded worker. Removal: Retire with the probe. Limits: Fixed own-stage source; no runtime, provider dispatch or authority lookup; final product admission is separate and mandatory."},
+    {
+      "source": "crates/day2/src/lib.rs",
+      "kind": "lint-suppression",
+      "target": "allow",
+      "context": "security_epoch",
+      "fingerprint": "ada25af9aa323ecfe72607bd60604fb6610da63981297401b6d30a5e6170370d",
+      "count": 1,
+      "reason": "Owner: credential external-epoch integration. Stages the private initial-only protocol until qualified native identity, clock, shared-journal and first-holder producers wire the serving consumer. Remove this exact dead-code allowance when that consumer is integrated; it grants no ambient I/O or readiness authority."
+    }
   ]
 }
