@@ -103,7 +103,12 @@ pub(crate) struct ClientCredential {
 }
 
 impl ClientCredential {
-    pub(super) fn new(client: String, secret: String, reference: BindingRef, checked_at: i64) -> Result<Self> {
+    pub(super) fn new(
+        client: String,
+        secret: String,
+        reference: BindingRef,
+        checked_at: i64,
+    ) -> Result<Self> {
         ensure!(checked_at >= 0, "invalid OAuth refresh credential clock");
         ensure!(
             !client.is_empty()
@@ -337,7 +342,9 @@ pub(super) fn ensure_current(
             store::claim_refresh(&mut db, &attempt, expected)?;
             permit = store::authorize_checked_dispatch(&mut db, &attempt, |tx| {
                 let at = effects::wall_time()?;
-                if at < dispatch_at { return Err(ClockRefusal.into()); }
+                if at < dispatch_at {
+                    return Err(ClockRefusal.into());
+                }
                 checked_dispatch = at;
                 local_matches(
                     tx,
@@ -356,7 +363,9 @@ pub(super) fn ensure_current(
     let admitted = match admitted {
         Ok(admitted) => admitted,
         Err(error) => {
-            if error.downcast_ref::<ClockRefusal>().is_some() || effects::wall_time()? < checked_dispatch {
+            if error.downcast_ref::<ClockRefusal>().is_some()
+                || effects::wall_time()? < checked_dispatch
+            {
                 clock_refusal(&db, &context)?;
                 return Ok(Resolution::unavailable("ReauthRequired"));
             }
@@ -557,11 +566,14 @@ pub(super) fn ensure_current(
                     .context("refresh settlement already consumed")?,
                 |tx| {
                     let at = effects::wall_time()?;
-                if at < observed_at || at >= expires_at {
-                    publication_clock_refused = true;
-                    return Err(ClockRefusal.into());
-                }
-                ensure!(monotonic.elapsed() <= BUDGET, "refresh publication elapsed fence changed");
+                    if at < observed_at || at >= expires_at {
+                        publication_clock_refused = true;
+                        return Err(ClockRefusal.into());
+                    }
+                    ensure!(
+                        monotonic.elapsed() <= BUDGET,
+                        "refresh publication elapsed fence changed"
+                    );
                     freshest = at;
                     local_matches(
                         tx,

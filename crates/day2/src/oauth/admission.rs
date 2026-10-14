@@ -1481,7 +1481,9 @@ impl super::usage::Authority for ArtifactApprovalAuthority {
         }
         let current = self.use_selection(&state, app, registration, owner, at);
         let completed_at = super::effects::wall_time()?;
-        if completed_at < at { return Err(super::refresh::ClockRefusal.into()); }
+        if completed_at < at {
+            return Err(super::refresh::ClockRefusal.into());
+        }
         let Some(current) = current? else {
             return Ok(None);
         };

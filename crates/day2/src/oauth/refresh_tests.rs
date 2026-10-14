@@ -204,7 +204,10 @@ impl effects::Hooks for Port {
                 if self.case == Case::RevokedAfterAccount {
                     self.revoke()?;
                 }
-                if matches!(self.case, Case::PublicationRewind | Case::PublicationErrorRecovery) {
+                if matches!(
+                    self.case,
+                    Case::PublicationRewind | Case::PublicationErrorRecovery
+                ) {
                     self.now.store(270, SeqCst);
                 }
                 if self.case == Case::CustodyFailure {
@@ -288,8 +291,14 @@ impl Authority for NativeAuthority {
             self.port.now.store(245, SeqCst);
             return Err(refresh::ClockRefusal.into());
         }
-        let checked_at = if self.port.case == Case::ClientReturnRewind { 270 } else { self.port.now.load(SeqCst) };
-        if self.port.case == Case::ClientReturnRewind { self.port.now.store(265, SeqCst); }
+        let checked_at = if self.port.case == Case::ClientReturnRewind {
+            270
+        } else {
+            self.port.now.load(SeqCst)
+        };
+        if self.port.case == Case::ClientReturnRewind {
+            self.port.now.store(265, SeqCst);
+        }
         Ok(Some(refresh::ClientCredential::new(
             "123-refresh.apps.googleusercontent.com".into(),
             "private_refresh_client_credential".into(),
@@ -310,10 +319,17 @@ impl Authority for NativeAuthority {
         commit: &mut dyn FnMut(&Selection) -> Result<bool>,
     ) -> Result<bool> {
         let call = self.commits.fetch_add(1, SeqCst);
-        if call == 0 && self.port.case == Case::DispatchReturnRewind { self.port.now.store(270, SeqCst); }
-        if call == 0 && self.port.case == Case::DispatchErrorRecovery { self.port.now.store(245, SeqCst); }
+        if call == 0 && self.port.case == Case::DispatchReturnRewind {
+            self.port.now.store(270, SeqCst);
+        }
+        if call == 0 && self.port.case == Case::DispatchErrorRecovery {
+            self.port.now.store(245, SeqCst);
+        }
         if call == 1 {
-            if matches!(self.port.case, Case::PublicationRewind | Case::PublicationErrorRecovery) {
+            if matches!(
+                self.port.case,
+                Case::PublicationRewind | Case::PublicationErrorRecovery
+            ) {
                 self.port.now.store(265, SeqCst);
             }
             if self.port.case == Case::PublicationExpired {
@@ -327,9 +343,16 @@ impl Authority for NativeAuthority {
             }
         }
         let result = commit(&self.selection);
-        if call == 0 && self.port.case == Case::DispatchErrorRecovery { self.port.now.store(250, SeqCst); }
-        if call == 1 && self.port.case == Case::PublicationErrorRecovery { self.port.now.store(270, SeqCst); }
-        if call == 0 && result.as_ref().is_ok_and(|value| *value) && self.port.case == Case::DispatchReturnRewind {
+        if call == 0 && self.port.case == Case::DispatchErrorRecovery {
+            self.port.now.store(250, SeqCst);
+        }
+        if call == 1 && self.port.case == Case::PublicationErrorRecovery {
+            self.port.now.store(270, SeqCst);
+        }
+        if call == 0
+            && result.as_ref().is_ok_and(|value| *value)
+            && self.port.case == Case::DispatchReturnRewind
+        {
             self.port.now.store(265, SeqCst);
         }
         if call == 1
@@ -671,9 +694,9 @@ fn compiled_calendar_refresh_publishes_versions_and_fences_failure_recovery() ->
                 let posts = match case {
                     Case::CredentialRewind
                     | Case::MaterialSubstitution
-                        | Case::AbsentReturnRewind
-                        | Case::ClientReturnRewind
-                        | Case::DispatchReturnRewind => 0,
+                    | Case::AbsentReturnRewind
+                    | Case::ClientReturnRewind
+                    | Case::DispatchReturnRewind => 0,
                     Case::DispatchErrorRecovery => 0,
                     Case::SuccessorReturnRewind => 2,
                     _ => 1,
