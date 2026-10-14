@@ -538,7 +538,7 @@ jobs:
 
       - name: Observe complete parallel runtime boundary 2
         id: eof_2
-        if: ${{ !cancelled() && steps.eof_1.outcome == 'success' }}
+        if: ${{ success() && !cancelled() && steps.eof_1.outcome == 'success' }}
         run: target/debug/xtask verify-shard ${{ matrix.shard }}
       - name: Retain successful boundary 2 independently
         if: ${{ !cancelled() && steps.eof_2.outcome == 'success' }}
@@ -550,7 +550,7 @@ jobs:
           retention-days: 14
       - name: Observe complete parallel runtime boundary 3
         id: eof_3
-        if: ${{ !cancelled() && steps.eof_2.outcome == 'success' }}
+        if: ${{ success() && !cancelled() && steps.eof_2.outcome == 'success' }}
         run: target/debug/xtask verify-shard ${{ matrix.shard }}
       - name: Retain successful boundary 3 independently
         if: ${{ !cancelled() && steps.eof_3.outcome == 'success' }}
@@ -562,7 +562,7 @@ jobs:
           retention-days: 14
       - name: Observe complete parallel runtime boundary 4
         id: eof_4
-        if: ${{ !cancelled() && steps.eof_3.outcome == 'success' }}
+        if: ${{ success() && !cancelled() && steps.eof_3.outcome == 'success' }}
         run: target/debug/xtask verify-shard ${{ matrix.shard }}
       - name: Retain successful boundary 4 independently
         if: ${{ !cancelled() && steps.eof_4.outcome == 'success' }}
@@ -574,7 +574,7 @@ jobs:
           retention-days: 14
       - name: Observe complete parallel runtime boundary 5
         id: eof_5
-        if: ${{ !cancelled() && steps.eof_4.outcome == 'success' }}
+        if: ${{ success() && !cancelled() && steps.eof_4.outcome == 'success' }}
         run: target/debug/xtask verify-shard ${{ matrix.shard }}
       - name: Retain successful boundary 5 independently
         if: ${{ !cancelled() && steps.eof_5.outcome == 'success' }}
