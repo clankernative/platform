@@ -42,3 +42,22 @@ preserves the saved file and checks the supervisor decisions against recorded
 snapshots and the independent oracle. Native SQLite, Tokio timer and blocking-task
 conformance remain separate tests; decision replay does not repeat native work or
 reproduce database/provider effects.
+
+The synthetic runtime-input fixtures retain source-bound histories for scoped ID
+seeds, generated IDs, wall/elapsed clocks, phase deadlines, and complete selected
+pages and cursor rows in real SQLite. Each history saves its inputs before
+execution and atomically checkpoints observations and failure position after
+each step. Fixture and native-step errors and panics retain their cause and stage.
+The producer prints the exact command for either history type:
+
+```console
+DAY2_RUNTIME_INPUT_REPLAY=/absolute/path/history.json cargo test --locked -p day2 --lib store::input_replay_tests::replay_saved_runtime_input_history -- --exact
+```
+
+Replay checks recorded observations and the independent fixture expectations,
+including every remaining step of an interrupted history. It preserves the
+input file and refuses stale source/fixture identities, unknown formats or
+fields, duplicate JSON keys, invalid failure positions, and excessive input
+sizes. Reads use one regular-file descriptor with a one-MiB byte limit and one
+lookahead byte; histories contain at most 16 actions. These host-input fixtures
+do not replay native Roc worker execution, OS watchdog timing, or provider I/O.

@@ -2405,8 +2405,12 @@ mod tests {
             runtime.scope(),
             &request,
             &product,
-            active.policy()?,
-            &request.operation,
+            crate::store::EffectContext {
+                scope: runtime.scope(),
+                policy: active.policy()?,
+                operation: &request.operation,
+                entropy: runtime.inputs().entropy.as_ref(),
+            },
         )?;
         for table in [
             "entries",
