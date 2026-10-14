@@ -46,7 +46,6 @@ fn fixture_bundle(
     let locked_package = LockedPackage {
         name: "example-provider-package".into(),
         version: "0.1.0".into(),
-        path: "../../package".into(),
         digest: package_digest.clone(),
         inputs: package_inputs.clone(),
     };
@@ -63,7 +62,7 @@ fn fixture_bundle(
         digest: sha(html),
     });
     let lock = Lock {
-        schema_version: 1,
+        schema_version: 2,
         provider: "opaque-provider".into(),
         package: locked_package,
     };
@@ -85,6 +84,33 @@ fn fixture_bundle(
         ),
     ]);
     (bundle, lock, package, hashes)
+}
+
+#[test]
+fn translated_lock_input_is_verified_separately_from_authored_source() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut bundle, lock, package, mut hashes) = fixture_bundle(temp.path());
+    let authored = serde_json::to_vec_pretty(&lock).unwrap();
+    fs::write(temp.path().join(LOCK), &authored).unwrap();
+    hashes.insert("app/ui/ui.lock.json".into(), sha(&authored));
+    let translated = serde_json::to_vec(&provider_lock(&lock)).unwrap();
+    bundle.inputs.push(Input {
+        path: LOCK.into(),
+        bytes: translated.len(),
+        digest: sha(&translated),
+    });
+    let ui = capture_fixture(temp.path());
+    validate_bundle(&bundle, &lock, &package, &ui, &hashes).unwrap();
+    let claim = bundle.inputs.last_mut().unwrap();
+    claim.bytes = authored.len();
+    claim.digest = sha(&authored);
+    assert!(validate_bundle(&bundle, &lock, &package, &ui, &hashes).is_err());
+    let claim = bundle.inputs.last_mut().unwrap();
+    claim.bytes = translated.len();
+    claim.digest = sha(&translated);
+    bundle.consumed_inputs.push(LOCK.into());
+    assert!(validate_bundle(&bundle, &lock, &package, &ui, &hashes).is_err());
+    assert_eq!(fs::read(temp.path().join(LOCK)).unwrap(), authored);
 }
 
 #[test]
@@ -313,7 +339,6 @@ fn fixture_bundle_package() -> (LockedPackage, BTreeMap<String, Vec<u8>>) {
     let package = LockedPackage {
         name: "example-provider-package".into(),
         version: "0.1.0".into(),
-        path: "../../package".into(),
         digest: manifest_digest(&inputs).unwrap(),
         inputs,
     };

@@ -169,15 +169,14 @@ fn run(schedule: Schedule) -> Replay {
     }];
     let lock = Lock {
         schema_version: if schedule.fault == Fault::UnsupportedLock {
-            2
-        } else {
             1
+        } else {
+            2
         },
         provider: "replay-provider".into(),
         package: LockedPackage {
             name: "opaque".into(),
             version: "1".into(),
-            path: "../package".into(),
             digest: manifest_digest(&package_inputs).unwrap(),
             inputs: package_inputs,
         },
@@ -214,9 +213,12 @@ fn run(schedule: Schedule) -> Replay {
             template_engine: "minijinja-2.12.0".into(),
         },
         // Opaque handles supplied by adapter composition, never entropy in decisions.
-        package: LockedPackage {
-            path: "opaque-package-handle".into(),
-            ..lock.package.clone()
+        package: RequestPackage {
+            name: lock.package.name.clone(),
+            version: lock.package.version.clone(),
+            path: PACKAGE_KEY.into(),
+            digest: lock.package.digest.clone(),
+            inputs: lock.package.inputs.clone(),
         },
         ui: "opaque-ui-handle".into(),
     };

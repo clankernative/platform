@@ -7,6 +7,94 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 #[test]
+fn ui_lock_command_emits_the_native_source_record() -> Result<()> {
+    let mut effects = Vec::new();
+    let receipt = automation::run(
+        &automation::runner()?,
+        &["platform", "ui-lock", "fixture-source"],
+        |request| {
+            effects.push(request.action.clone());
+            assert_eq!(
+                request.decode::<Value>()?,
+                json!({"source":"fixture-source"})
+            );
+            Ok(json!({"fixture":true}))
+        },
+    )?;
+    assert_eq!(effects, ["ui-lock"]);
+    assert_eq!(receipt, json!({"fixture":true}));
+    Ok(())
+}
+
+#[test]
+fn bundled_ui_recipe_uses_verified_installation_without_network() -> Result<()> {
+    let mut effects = Vec::new();
+    automation::run(&automation::runner()?, &["ui-dependency"], |request| {
+        effects.push(request.action.clone());
+        assert_eq!(request.decode::<Value>()?, json!({}));
+        Ok(if request.action == "ui-dependency-inspect" {
+            json!({"installed": true})
+        } else {
+            json!({"verified": true})
+        })
+    })?;
+    assert_eq!(effects, ["ui-dependency-inspect", "ui-dependency-receipt"]);
+    Ok(())
+}
+
+#[test]
+fn bundled_ui_recipe_verifies_before_atomic_publication() -> Result<()> {
+    let mut effects = Vec::new();
+    automation::run(&automation::runner()?, &["ui-dependency"], |request| {
+        effects.push(request.action.clone());
+        Ok(if request.action == "ui-dependency-inspect" {
+            json!({"installed": false})
+        } else {
+            json!({})
+        })
+    })?;
+    assert_eq!(
+        effects,
+        [
+            "ui-dependency-inspect",
+            "ui-dependency-fetch",
+            "ui-dependency-extract",
+            "ui-dependency-verify",
+            "ui-dependency-publish",
+            "ui-dependency-receipt",
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn rejected_ui_dependency_never_reaches_publication() -> Result<()> {
+    let mut effects = Vec::new();
+    let result = automation::run(&automation::runner()?, &["ui-dependency"], |request| {
+        effects.push(request.action.clone());
+        if request.action == "ui-dependency-verify" {
+            bail!("injected bundle digest rejection");
+        }
+        Ok(if request.action == "ui-dependency-inspect" {
+            json!({"installed": false})
+        } else {
+            json!({})
+        })
+    });
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("injected bundle digest rejection")
+    );
+    assert_eq!(
+        effects.last().map(String::as_str),
+        Some("ui-dependency-verify")
+    );
+    Ok(())
+}
+
+#[test]
 fn stale_or_modified_workflow_executables_are_rejected() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let original = automation::runner()?;

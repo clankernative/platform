@@ -15,15 +15,43 @@ fn request() -> AssemblyRequest {
             binding_abi: 2,
             template_engine: "minijinja-2.12.0".into(),
         },
-        package: LockedPackage {
+        package: RequestPackage {
             name: "opaque-package".into(),
             version: "1".into(),
-            path: "private".into(),
+            path: PACKAGE_KEY.into(),
             digest: manifest_digest(&inputs).unwrap(),
             inputs,
         },
         ui: "captured-ui".into(),
     }
+}
+
+#[test]
+fn released_provider_lock_is_a_private_translation_not_an_authored_path() {
+    let mut request = request();
+    request.package.path = "/private/build/package".into();
+    let lock = Lock {
+        schema_version: 2,
+        provider: request.provider.clone(),
+        package: LockedPackage {
+            name: request.package.name.clone(),
+            version: request.package.version.clone(),
+            digest: request.package.digest.clone(),
+            inputs: request.package.inputs.clone(),
+        },
+    };
+    let private = provider_lock(&lock);
+    assert_eq!(private["schemaVersion"], 1);
+    assert_eq!(private["package"]["path"], "../package");
+    assert_eq!(request.package.path, "/private/build/package");
+    assert_eq!(private["package"]["inputs"][0]["bytes"], 6);
+    assert!(serde_json::from_value::<Lock>(private.clone()).is_err());
+    let mut authored = private;
+    authored["schemaVersion"] = 2.into();
+    authored["package"].as_object_mut().unwrap().remove("path");
+    let authored: Lock = serde_json::from_value(authored).unwrap();
+    validate_lock(&authored).unwrap();
+    assert_eq!(authored.package.digest, request.package.digest);
 }
 
 // Minimal synthetic protocol bytes for unit tests; not a producer capture or CLI evidence.
@@ -195,12 +223,11 @@ fn application_fixture(root: &Path) -> ApplicationFixture {
     let package = LockedPackage {
         name: "opaque-package".into(),
         version: "1".into(),
-        path: "../package".into(),
         digest: package_digest.clone(),
         inputs: package_inputs.clone(),
     };
     let lock = Lock {
-        schema_version: 1,
+        schema_version: 2,
         provider: "test-provider".into(),
         package: package.clone(),
     };
@@ -210,8 +237,13 @@ fn application_fixture(root: &Path) -> ApplicationFixture {
         super::package_inputs(&root.join("package"), &admitted_lock.package).unwrap(),
         actual_inputs
     );
-    let mut private_package = package;
-    private_package.path = root.join("package").display().to_string();
+    let request_package = RequestPackage {
+        name: package.name,
+        version: package.version,
+        path: PACKAGE_KEY.into(),
+        digest: package.digest,
+        inputs: package.inputs,
+    };
     let request = AssemblyRequest {
         schema_version: 1,
         assembly_protocol: 2,
@@ -220,7 +252,7 @@ fn application_fixture(root: &Path) -> ApplicationFixture {
             binding_abi: 2,
             template_engine: "minijinja-2.12.0".into(),
         },
-        package: private_package,
+        package: request_package,
         ui: root.join("ui").display().to_string(),
     };
     let mut inputs = package_inputs
