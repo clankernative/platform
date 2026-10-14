@@ -40,6 +40,7 @@ mod owned_runtime;
 mod owned_web;
 mod page_sdk;
 mod pagination;
+mod property_worker;
 mod redirect_routes;
 mod reports_http;
 mod request_identity;

@@ -232,16 +232,16 @@ impl Worker {
         bail!("worker sandbox unsupported on this operating system");
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub fn start_verification(
         path: &Path,
-        memory_bytes: u64,
+        heap_bytes: u64,
         timeout: Duration,
         frame_limit: usize,
     ) -> Result<Self> {
         ensure!(
-            memory_bytes == 512 * 1024 * 1024,
-            "unsupported property worker memory profile"
+            heap_bytes == 512 * 1024 * 1024,
+            "unsupported property worker heap profile"
         );
         ensure!(
             !timeout.is_zero()
@@ -249,13 +249,14 @@ impl Worker {
                 && frame_limit == PROPERTY_MAX_FRAME,
             "unsupported property worker limits"
         );
-        Self::start_with_profile(
-            path,
-            &sibling("day2-sandbox")?,
-            memory_bytes,
-            30,
-            frame_limit,
-        )
+        #[cfg(target_os = "linux")]
+        {
+            Self::start_with_profile(path, &sibling("day2-sandbox")?, heap_bytes, 30, frame_limit)
+        }
+        #[cfg(target_os = "macos")]
+        {
+            Self::start_macos_profile(path, frame_limit)
+        }
     }
 
     /// The launcher path is supplied by trusted host installation/tests, never app input.
@@ -293,6 +294,15 @@ impl Worker {
 
     #[cfg(target_os = "macos")]
     fn start_macos(path: &Path) -> Result<Self> {
+        Self::start_macos_profile(path, MAX_FRAME)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn start_macos_profile(path: &Path, frame_limit: usize) -> Result<Self> {
+        ensure!(
+            matches!(frame_limit, MAX_FRAME | PROPERTY_MAX_FRAME),
+            "unsupported macOS worker profile"
+        );
         let path = path.canonicalize()?;
         let executable = path.to_str().context("non UTF-8 path")?;
         ensure!(
@@ -313,7 +323,10 @@ impl Worker {
         );
         let mut command = Command::new("/usr/bin/sandbox-exec");
         command.args(["-p", &profile, executable]);
-        Self::spawn(command, MAX_FRAME)
+        if frame_limit == PROPERTY_MAX_FRAME {
+            command.arg("--day2-qualified-property-v1");
+        }
+        Self::spawn(command, frame_limit)
     }
 
     fn spawn(command: Command, frame_limit: usize) -> Result<Self> {
@@ -321,7 +334,7 @@ impl Worker {
         {
             let progress = Arc::new(StageProgress::new());
             let mut owner = mac_lifetime::Owner::new(Arc::clone(&progress))?;
-            owner.launch(command)?;
+            owner.launch(command, frame_limit)?;
             Ok(Self {
                 owner,
                 progress,
@@ -720,6 +733,28 @@ mod tests {
         assert!(error.to_string().contains("oversized worker response"));
         assert_eq!(snapshot(&oversized).reader_first_byte, 1);
         assert_eq!(snapshot(&oversized).reader_frames_completed, 0);
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn qualified_profile_rejects_wrong_limits_before_materializing_or_spawning() {
+        let absent = std::path::Path::new("/DAY2_PROFILE_MUST_NOT_SPAWN");
+        for (heap, timeout, frame, message) in [
+            (64 * 1024 * 1024, 30, PROPERTY_MAX_FRAME, "heap profile"),
+            (512 * 1024 * 1024, 0, PROPERTY_MAX_FRAME, "worker limits"),
+            (512 * 1024 * 1024, 31, PROPERTY_MAX_FRAME, "worker limits"),
+            (512 * 1024 * 1024, 30, MAX_FRAME, "worker limits"),
+        ] {
+            let error = super::Worker::start_verification(
+                absent,
+                heap,
+                std::time::Duration::from_secs(timeout),
+                frame,
+            )
+            .err()
+            .expect("unsupported profile must refuse before spawning");
+            assert!(error.to_string().contains(message), "{error}");
+        }
     }
 
     #[test]

@@ -103,7 +103,7 @@ fn optional_text_output_reflection_and_wire_contract_are_exact() -> Result<()> {
         ),
         (
             "tags",
-            json!([{"name":"None","payload":[]}, {"name":"Some","payload":[1]}]),
+            json!([{"name":"None","payload":[]}, {"name":"Some","payload":[2]}]),
         ),
         (
             "tags",

@@ -55,19 +55,19 @@ fn start_property_worker(
     executable: &Path,
     limits: &crate::artifact::VerificationLimits,
 ) -> Result<Worker> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         Worker::start_verification(
             executable,
-            limits.worker_memory_bytes,
+            limits.worker_heap_bytes,
             Duration::from_millis(limits.evaluation_timeout_ms),
             MAX_PROPERTY_FRAME,
         )
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = (executable, limits);
-        bail!("qualified property worker memory limit unavailable on this platform")
+        bail!("qualified property worker unsupported on this platform")
     }
 }
 

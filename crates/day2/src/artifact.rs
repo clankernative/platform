@@ -215,7 +215,8 @@ pub struct VerificationLimits {
     pub total_facts: usize,
     pub rows_per_model: usize,
     pub snapshot_bytes: usize,
-    pub worker_memory_bytes: u64,
+    /// Live Roc-owned allocator bytes, including allocation headers; not process RSS.
+    pub worker_heap_bytes: u64,
     pub evaluation_timeout_ms: u64,
 }
 
@@ -224,7 +225,7 @@ impl VerificationLimits {
         total_facts: 10_000,
         rows_per_model: 10_000,
         snapshot_bytes: 32 * 1024 * 1024,
-        worker_memory_bytes: 512 * 1024 * 1024,
+        worker_heap_bytes: 512 * 1024 * 1024,
         evaluation_timeout_ms: 30_000,
     };
 
@@ -238,7 +239,7 @@ impl VerificationLimits {
             "invalid verification snapshot byte limit"
         );
         ensure!(
-            self.worker_memory_bytes > 0 && self.evaluation_timeout_ms > 0,
+            self.worker_heap_bytes > 0 && self.evaluation_timeout_ms > 0,
             "invalid verification worker limits"
         );
         Ok(())

@@ -240,7 +240,7 @@ fn run(limits: Limits) -> io::Result<()> {
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn main(argc: i32, argv: *const *const i8) -> i32 {
-    if !(1..=2).contains(&argc) || argv.is_null() || (argc == 2 && !cfg!(target_os = "linux")) {
+    if !(1..=2).contains(&argc) || argv.is_null() {
         return 64;
     }
     // The exported C entrypoint is invoked before Rust's process runtime is initialized.
@@ -282,5 +282,73 @@ mod tests {
             None
         );
         assert_eq!(select_limits(&[b"--day2-qualified-property-v1x"]), None);
+    }
+
+    #[test]
+    fn allocator_budget_probe() {
+        let Ok(case) = std::env::var("DAY2_ALLOCATOR_BUDGET_PROBE") else {
+            return;
+        };
+        let alignment = std::mem::align_of::<usize>();
+        HEAP_LIMIT.store(32, Ordering::SeqCst);
+        match case.as_str() {
+            "exact_and_release" => {
+                let pointer = roc_alloc(32 - alignment, alignment);
+                assert_eq!(HEAP.load(Ordering::SeqCst), 32);
+                unsafe {
+                    let pointer = roc_realloc(pointer, 16 - alignment, alignment);
+                    assert_eq!(HEAP.load(Ordering::SeqCst), 16);
+                    let pointer = roc_realloc(pointer, 32 - alignment, alignment);
+                    assert_eq!(HEAP.load(Ordering::SeqCst), 32);
+                    roc_dealloc(pointer, alignment);
+                }
+                assert_eq!(HEAP.load(Ordering::SeqCst), 0);
+            }
+            "sum_over" => {
+                roc_alloc(16 - alignment, alignment);
+                roc_alloc(16 - alignment, alignment);
+                roc_alloc(1, alignment);
+                panic!("aggregate heap quota was not enforced");
+            }
+            "realloc_over" => {
+                let pointer = roc_alloc(32 - alignment, alignment);
+                unsafe { roc_realloc(pointer, 33 - alignment, alignment) };
+                panic!("reallocation heap quota was not enforced");
+            }
+            "qualified_over" => {
+                HEAP_LIMIT.store(QUALIFIED_PROPERTY_LIMITS.max_heap, Ordering::SeqCst);
+                roc_alloc(QUALIFIED_PROPERTY_LIMITS.max_heap, alignment);
+                panic!("qualified heap quota did not include allocation headers");
+            }
+            "ordinary_over" => {
+                HEAP_LIMIT.store(ORDINARY_LIMITS.max_heap, Ordering::SeqCst);
+                roc_alloc(ORDINARY_LIMITS.max_heap, alignment);
+                panic!("ordinary heap quota did not include allocation headers");
+            }
+            _ => panic!("unknown allocator probe"),
+        }
+    }
+
+    #[test]
+    fn native_allocator_enforces_live_heap_quota_before_allocating() {
+        for (case, expected) in [
+            ("exact_and_release", 0),
+            ("sum_over", 70),
+            ("realloc_over", 70),
+            ("qualified_over", 70),
+            ("ordinary_over", 70),
+        ] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "tests::allocator_budget_probe", "--nocapture"])
+                .env("DAY2_ALLOCATOR_BUDGET_PROBE", case)
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(expected),
+                "{case}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
 }

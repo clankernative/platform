@@ -145,7 +145,7 @@ impl Owner {
         })
     }
 
-    pub(super) fn launch(&mut self, mut command: Command) -> Result<()> {
+    pub(super) fn launch(&mut self, mut command: Command, frame_limit: usize) -> Result<()> {
         ensure!(
             !self.closed && !self.launch_attempted,
             "diagnostic startup: owner already used"
@@ -240,7 +240,7 @@ impl Owner {
                     read_progress.reader_entered.store(1, Ordering::Release);
                     let mut reader = std::io::BufReader::new(&mut *stdout);
                     loop {
-                        let result = read_frame(&mut reader, &read_progress, super::MAX_FRAME);
+                        let result = read_frame(&mut reader, &read_progress, frame_limit);
                         let failed = result.is_err();
                         if sender.send(result).is_err() || failed {
                             break;
@@ -393,7 +393,7 @@ mod tests {
         Cleanup, Disposition, Owner, SetupFault, UNRESOLVED, cleanup_disposition, offer_retained,
         retain_pipe,
     };
-    use crate::worker::{StageProgress, child_milestones};
+    use crate::worker::{MAX_FRAME, StageProgress, child_milestones};
     use std::io::{self, Read};
     use std::os::unix::process::ExitStatusExt;
     use std::sync::{Arc, Mutex};
@@ -424,9 +424,10 @@ mod tests {
     fn real_spawn_refusal_cancels_and_joins_the_preexisting_collector() {
         let mut owner = Owner::new(Arc::new(StageProgress::new())).unwrap();
         let error = owner
-            .launch(std::process::Command::new(
-                "/DAY2_DIAGNOSTIC_MISSING_EXECUTABLE",
-            ))
+            .launch(
+                std::process::Command::new("/DAY2_DIAGNOSTIC_MISSING_EXECUTABLE"),
+                MAX_FRAME,
+            )
             .unwrap_err();
         assert!(error.to_string().contains("spawn isolated Roc worker"));
         assert_eq!(
@@ -461,7 +462,7 @@ mod tests {
             let mut owner = Owner::new(Arc::new(StageProgress::new())).unwrap();
             owner.setup_fault = Some(point);
             let error = owner
-                .launch(std::process::Command::new("/bin/cat"))
+                .launch(std::process::Command::new("/bin/cat"), MAX_FRAME)
                 .unwrap_err();
             if point == SetupFault::MissingStdout {
                 assert_eq!(error.to_string(), "worker stdout");
@@ -514,7 +515,7 @@ mod tests {
         let progress = Arc::new(StageProgress::new());
         let mut owner = Owner::new(Arc::clone(&progress)).unwrap();
         owner
-            .launch(std::process::Command::new("/bin/cat"))
+            .launch(std::process::Command::new("/bin/cat"), MAX_FRAME)
             .unwrap();
         let child = owner.child.as_ref().unwrap().id();
         let mut worker = crate::worker::Worker {
@@ -553,6 +554,36 @@ mod tests {
     }
 
     #[test]
+    fn qualified_owner_reads_frames_above_the_ordinary_limit() {
+        let progress = Arc::new(StageProgress::new());
+        let mut owner = Owner::new(Arc::clone(&progress)).unwrap();
+        owner
+            .launch(
+                std::process::Command::new("/bin/cat"),
+                crate::worker::PROPERTY_MAX_FRAME,
+            )
+            .unwrap();
+        let mut worker = crate::worker::Worker {
+            owner,
+            progress,
+            frame_limit: crate::worker::PROPERTY_MAX_FRAME,
+        };
+        let frame = vec![b'x'; MAX_FRAME + 1];
+        assert_eq!(
+            worker
+                .exchange_bounded(
+                    &frame,
+                    crate::worker::PROPERTY_MAX_FRAME,
+                    std::time::Duration::from_secs(3),
+                )
+                .unwrap(),
+            frame
+        );
+        worker.terminate();
+        assert!(worker.owner.closed && worker.owner.terminal_status.is_some());
+    }
+
+    #[test]
     fn failed_one_shot_handoff_keeps_the_exact_parent_descriptor_owner() {
         let owner = Arc::new(Mutex::new(io::Cursor::new(b"PRIVATE_PIPE")));
         let (send, receive) = std::sync::mpsc::sync_channel(1);
@@ -576,9 +607,10 @@ mod tests {
         owner.close();
         assert_eq!(first, serde_json::to_value(owner.final_snapshot()).unwrap());
         let error = owner
-            .launch(std::process::Command::new(
-                "/DAY2_DIAGNOSTIC_DO_NOT_EXECUTE",
-            ))
+            .launch(
+                std::process::Command::new("/DAY2_DIAGNOSTIC_DO_NOT_EXECUTE"),
+                MAX_FRAME,
+            )
             .unwrap_err();
         assert!(error.to_string().contains("owner already used"));
         assert!(!owner.launch_attempted);
@@ -669,7 +701,7 @@ mod tests {
     fn parked_owner_requires_external_guardian_closure() {
         let mut owner = Owner::new(Arc::new(StageProgress::new())).unwrap();
         owner
-            .launch(std::process::Command::new("/bin/cat"))
+            .launch(std::process::Command::new("/bin/cat"), MAX_FRAME)
             .unwrap();
         assert!(!owner.closed && owner.terminal_status.is_none());
         assert!(owner.child.is_some());
