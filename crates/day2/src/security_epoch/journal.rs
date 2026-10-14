@@ -184,7 +184,7 @@ pub(super) enum AuthorizedDispatch {
     Create(InitialEpochCreatePermit),
     #[cfg(test)]
     Activate(InitialFirstHolderActivationPermit),
-    Shared(super::control_slot_io::KnownClaim),
+    Shared(Box<super::control_slot_io::KnownClaim>),
 }
 
 impl AuthorizedDispatch {
@@ -194,7 +194,7 @@ impl AuthorizedDispatch {
         port: &mut impl Port,
     ) -> Result<(Request, Budget)> {
         match self {
-            Self::Shared(claim) => claim.prepare(selection, port),
+            Self::Shared(claim) => (*claim).prepare(selection, port),
             #[cfg(test)]
             Self::Create(permit) => {
                 fixture_dispatch(permit.request, permit.context, selection, port)

@@ -422,6 +422,6 @@ impl KnownClaim {
     }
 
     pub(super) fn send(self, selection: &EpochStore, port: &mut impl Port) -> Result<()> {
-        super::firestore::commit(port, selection, AuthorizedDispatch::Shared(self))
+        super::firestore::commit(port, selection, AuthorizedDispatch::Shared(Box::new(self)))
     }
 }
