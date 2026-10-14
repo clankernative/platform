@@ -1173,17 +1173,6 @@
   },
   {
     "license": "MIT OR Apache-2.0",
-    "name": "getopts",
-    "notices": [
-      "LICENSE-APACHE",
-      "LICENSE-MIT"
-    ],
-    "repository": "https://github.com/rust-lang/getopts",
-    "source": "registry+https://github.com/rust-lang/crates.io-index",
-    "version": "0.2.24"
-  },
-  {
-    "license": "MIT OR Apache-2.0",
     "name": "getrandom",
     "notices": [
       "LICENSE-APACHE",
@@ -2901,17 +2890,6 @@
     ],
     "repository": "http://github.com/tailhook/quick-error",
     "source": "registry+https://github.com/rust-lang/crates.io-index",
-    "version": "1.2.3"
-  },
-  {
-    "license": "MIT/Apache-2.0",
-    "name": "quick-error",
-    "notices": [
-      "LICENSE-APACHE",
-      "LICENSE-MIT"
-    ],
-    "repository": "http://github.com/tailhook/quick-error",
-    "source": "registry+https://github.com/rust-lang/crates.io-index",
     "version": "2.0.1"
   },
   {
@@ -3300,17 +3278,6 @@
     "repository": "https://github.com/dtolnay/rustversion",
     "source": "registry+https://github.com/rust-lang/crates.io-index",
     "version": "1.0.23"
-  },
-  {
-    "license": "MIT/Apache-2.0",
-    "name": "rusty-fork",
-    "notices": [
-      "LICENSE-APACHE",
-      "LICENSE-MIT"
-    ],
-    "repository": "https://github.com/altsysrq/rusty-fork",
-    "source": "registry+https://github.com/rust-lang/crates.io-index",
-    "version": "0.3.1"
   },
   {
     "license": "Apache-2.0 OR BSL-1.0",
@@ -4490,17 +4457,6 @@
     "repository": "https://github.com/SergioBenitez/version_check",
     "source": "registry+https://github.com/rust-lang/crates.io-index",
     "version": "0.9.5"
-  },
-  {
-    "license": "MIT/Apache-2.0",
-    "name": "wait-timeout",
-    "notices": [
-      "LICENSE-APACHE",
-      "LICENSE-MIT"
-    ],
-    "repository": "https://github.com/alexcrichton/wait-timeout",
-    "source": "registry+https://github.com/rust-lang/crates.io-index",
-    "version": "0.2.1"
   },
   {
     "license": "MIT",
