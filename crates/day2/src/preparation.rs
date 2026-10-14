@@ -175,8 +175,12 @@ pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
                 runtime.scope(),
                 &request,
                 &instruction,
-                &policy,
-                &registered_operation,
+                store::EffectContext {
+                    scope: runtime.scope(),
+                    policy: &policy,
+                    operation: &registered_operation,
+                    entropy: runtime.inputs().entropy.as_ref(),
+                },
             );
             tx.commit()?;
             result
@@ -416,8 +420,12 @@ pub(crate) fn validate_local(
                 runtime.scope(),
                 request,
                 &observation.instruction,
-                policy,
-                operation,
+                store::EffectContext {
+                    scope: runtime.scope(),
+                    policy,
+                    operation,
+                    entropy: runtime.inputs().entropy.as_ref(),
+                },
             )?;
             ensure!(
                 current == observation.result,

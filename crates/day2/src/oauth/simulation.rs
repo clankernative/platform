@@ -176,6 +176,18 @@ fn next(seed: &mut u64) -> u64 {
     value ^ (value >> 31)
 }
 
+impl crate::host_inputs::Clock for World {
+    fn wall_time(&self) -> Result<Duration> {
+        Ok(Duration::from_secs(u64::try_from(
+            *self.wall.lock().unwrap(),
+        )?))
+    }
+
+    fn monotonic(&self) -> Duration {
+        *self.ticks.lock().unwrap()
+    }
+}
+
 impl effects::Hooks for World {
     fn domain(&self) -> u64 {
         self.domain
