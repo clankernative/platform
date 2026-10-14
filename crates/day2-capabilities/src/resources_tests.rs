@@ -487,6 +487,10 @@ mod connections {
             | Provider::SyntheticGoogleDirectory
             | Provider::SyntheticLinear
             | Provider::SyntheticOperatorAlerts => None,
+            Provider::WorkspaceDirectory => Some(LiveConnection::WorkspaceDirectory {
+                service_account: "directory-reader@company.iam.gserviceaccount.com".into(),
+                auth: crate::integrations::WorkspaceDirectoryAuth::DirectServiceAccount,
+            }),
             Provider::Slack => Some(LiveConnection::Slack {
                 credential_ref: reference("slack_token"),
                 signing_secret_ref: None,
@@ -621,6 +625,9 @@ mod narrowing {
                 email_domain: "example.com".into(),
                 org_unit_prefix: "/people".into(),
                 groups: BTreeMap::from([("role".to_string(), "group@example.com".to_string())]),
+            },
+            ResourceKind::WorkspaceDirectory => ResourceTarget::WorkspaceDirectory {
+                customer_id: "C01".into(),
             },
             ResourceKind::LinearOrganization => ResourceTarget::LinearOrganization {
                 organization_id: "org-1".into(),

@@ -946,6 +946,17 @@ pub fn people_resource_fixture(
             ],
         ),
         (
+            "workspace_directory",
+            Provider::WorkspaceDirectory,
+            ResourceTarget::WorkspaceDirectory {
+                customer_id: "synthetic-customer-1".into(),
+            },
+            vec![
+                Action::WorkspaceDirectoryCapture,
+                Action::WorkspaceDirectoryPage,
+            ],
+        ),
+        (
             "linear",
             Provider::SyntheticLinear,
             ResourceTarget::LinearOrganization {
@@ -994,7 +1005,12 @@ pub fn people_resource_fixture(
             catalog.connections.insert(
                 (*name).into(),
                 ConnectionDefinition {
-                    live: None,
+                    live: (*provider == Provider::WorkspaceDirectory).then(|| {
+                        day2_capabilities::integrations::LiveConnection::WorkspaceDirectory {
+                            service_account: "directory-reader@company.iam.gserviceaccount.com".into(),
+                            auth: day2_capabilities::integrations::WorkspaceDirectoryAuth::DirectServiceAccount,
+                        }
+                    }),
                     revision: 1,
                     provider: *provider,
                 },
@@ -1460,6 +1476,26 @@ mod people_resource_tests {
         assert!(catalog.resolve("different-app", &attachments, 1).is_err());
         Ok(())
     }
+
+    #[test]
+    fn local_provider_fixture_seeds_selected_directory_actor_and_complete_hierarchy() -> Result<()>
+    {
+        let fixture = disposable_provider_worlds("selected@synthetic.example", 1_700_000_000);
+        assert_eq!(fixture.workspace_directory.users.len(), 1);
+        let user = &fixture.workspace_directory.users["selected@synthetic.example"];
+        assert_eq!(user["customerId"], "synthetic-customer-1");
+        assert_eq!(user["orgUnitPath"], "/Engineering");
+        let units = crate::workspace_directory::parse_org_unit_response(&serde_json::to_vec(
+            &fixture.workspace_directory.hierarchy,
+        )?)?;
+        let units = crate::workspace_directory::validate_complete(units, "/Engineering")?;
+        assert_eq!(units.len(), 2);
+        assert_eq!(
+            fixture.workspace_directory.hierarchy_captured_at,
+            1_700_000_000
+        );
+        Ok(())
+    }
 }
 
 pub fn create_for(
@@ -1485,7 +1521,7 @@ fn create_for_with_imports(
         "credential artifacts require explicit verification selection or an admitted installation"
     );
     let instance = instance_for_artifact(&artifact_path, &artifact, policy, actor, imports)?;
-    create_selected_instance(instance, directory, imports)
+    create_selected_instance(instance, directory, imports, actor)
 }
 
 /// Explicit disposable verification setup. Complete desired selections pass
@@ -1525,7 +1561,7 @@ fn create_verification_for_with_imports(
         });
         credential_verification_selection(&mut instance, &artifact)?;
     }
-    create_selected_instance(instance, directory, imports)
+    create_selected_instance(instance, directory, imports, actor)
 }
 
 /// Desired disposable test data only. The caller must admit the complete
@@ -1646,6 +1682,7 @@ fn create_selected_instance(
     instance: Instance,
     directory: &Path,
     imports: &[ImportedQueryFixture],
+    actor: &str,
 ) -> Result<Runtime> {
     use std::{io::Write, os::unix::fs::PermissionsExt};
     let instance = Instance::from_bytes(&serde_json::to_vec(&instance)?)?;
@@ -1673,7 +1710,8 @@ fn create_selected_instance(
     // differs. Synthetic providers are unaffected: they never reach this host.
     let database = runtime.db().to_path_buf();
     let scope = runtime.scope().to_owned();
-    let mut worlds = disposable_provider_worlds();
+    let captured_at = crate::oauth::effects::wall_time()?;
+    let mut worlds = disposable_provider_worlds(actor, captured_at);
     for import in imports {
         if import.kind != crate::operation_contract::Kind::Query {
             continue;
@@ -2013,7 +2051,10 @@ pub fn repin_credential_verification_data(
 /// with a due date and an owner, one with neither, so a compliance policy that
 /// looks for missing owners and missing due dates has both cases present rather
 /// than only the healthy one.
-fn disposable_provider_worlds() -> crate::integrations::simulated::SimulatedFixture {
+fn disposable_provider_worlds(
+    actor: &str,
+    captured_at: i64,
+) -> crate::integrations::simulated::SimulatedFixture {
     use crate::integrations::simulated::*;
     let issue = |id: &str, identifier: &str, owner: &str, due: i64, view: &str| LinearIssue {
         id: id.into(),
@@ -2116,6 +2157,21 @@ fn disposable_provider_worlds() -> crate::integrations::simulated::SimulatedFixt
             model: "model-synthetic".into(),
             max_input_tokens: 100_000,
         },
+        workspace_directory: crate::integrations::simulated::WorkspaceDirectoryWorld {
+            users: BTreeMap::from([(
+                actor.into(),
+                json!({
+                    "customerId":"synthetic-customer-1",
+                    "orgUnitPath":"/Engineering",
+                    "primaryEmail":actor,
+                    "kind":"admin#directory#user"
+                }),
+            )]),
+            hierarchy: json!({"kind":"admin#directory#orgUnits","organizationUnits":[
+                {"orgUnitId":"root","name":"Root","orgUnitPath":"/","parentOrgUnitId":null,"parentOrgUnitPath":null},
+                {"orgUnitId":"engineering","name":"Engineering","orgUnitPath":"/Engineering","parentOrgUnitId":"root","parentOrgUnitPath":"/"}]}),
+            hierarchy_captured_at: captured_at,
+        },
     }
 }
 
@@ -2143,6 +2199,7 @@ pub struct Campaign {
     pub evidence: Evidence,
     example: Option<String>,
     actor: String,
+    provider_clock: i64,
     include_examples: bool,
     catalog: Option<Vec<Example>>,
     selected: BTreeSet<String>,
@@ -2187,6 +2244,7 @@ impl Campaign {
         crate::carta::seed_verification_if_unconfigured(&runtime)?;
         crate::people_providers::seed_verification_if_unconfigured(&runtime)?;
         let runtime = crate::managed_credentials::verification::install(runtime)?;
+        let provider_clock = runtime.host().now_ms()?.div_euclid(1000);
         Ok(Self {
             evidence: Evidence {
                 format: 1,
@@ -2206,6 +2264,7 @@ impl Campaign {
             runtime,
             example: example.map(str::to_owned),
             actor: actor.into(),
+            provider_clock,
             include_examples,
             catalog: None,
             selected: BTreeSet::new(),
@@ -2398,7 +2457,7 @@ impl Campaign {
                 let now = if interactive {
                     self.runtime.host().now_ms()?.div_euclid(1000)
                 } else {
-                    1_700_000_000 + index as i64
+                    self.provider_clock + index as i64
                 };
                 let input: Value = serde_json::from_str(&step.input)?;
                 if interactive {

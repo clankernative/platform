@@ -117,15 +117,18 @@ struct Required {
 }
 
 impl Required {
-    fn credential_ref(&self) -> &VersionRef {
+    fn credential_ref(&self) -> Option<&VersionRef> {
         self.reference
             .as_ref()
-            .unwrap_or(self.connection.credential_ref())
+            .or_else(|| self.connection.credential_ref())
     }
 }
 
 fn require(required: &mut BTreeMap<String, Required>, secret: Required) -> Result<()> {
-    let key = reference_key(secret.credential_ref())?;
+    let Some(reference) = secret.credential_ref() else {
+        return Ok(());
+    };
+    let key = reference_key(reference)?;
     if let Some(previous) = required.insert(key, secret.clone()) {
         ensure!(
             previous == secret,
@@ -393,11 +396,20 @@ pub fn provisioning_inputs(
             connection: mount.connection.clone(),
             reference: mount.reference.clone(),
         };
-        let key = reference_key(secret.credential_ref())?;
+        let key = reference_key(
+            secret
+                .credential_ref()
+                .context("provisioning_credential_reference_missing")?,
+        )?;
         ensure!(
             pin.file == format!("credential-{key}.json")
                 && required.remove(&key).as_ref() == Some(&secret)
-                && mount.credential_file == Path::new(&credential_path(secret.credential_ref())?),
+                && mount.credential_file
+                    == Path::new(&credential_path(
+                        secret
+                            .credential_ref()
+                            .context("provisioning_credential_reference_missing")?
+                    )?),
             "provisioning_connection_changed"
         );
         ensure!(

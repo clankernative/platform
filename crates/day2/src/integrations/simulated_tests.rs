@@ -111,6 +111,7 @@ fn fixture() -> SimulatedFixture {
             model: "model-snapshot".into(),
             max_input_tokens: 100_000,
         },
+        workspace_directory: Default::default(),
     }
 }
 

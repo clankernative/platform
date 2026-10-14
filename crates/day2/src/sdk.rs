@@ -80,6 +80,11 @@ const MODULES: &[Module] = &[
         app_export: true,
     },
     Module {
+        file: "WorkspaceDirectory.roc",
+        source: "contracts/WorkspaceDirectory.roc",
+        app_export: true,
+    },
+    Module {
         file: "Linear.roc",
         source: "contracts/Linear.roc",
         app_export: true,

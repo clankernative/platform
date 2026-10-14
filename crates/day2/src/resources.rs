@@ -788,6 +788,10 @@ pub(crate) fn reserve_in(
             organization_id,
             ..
         }) => format!("linear_work/{organization_id}"),
+        Some(day2_capabilities::integrations::LiveConnection::WorkspaceDirectory {
+            service_account,
+            ..
+        }) => format!("workspace_directory/{service_account}"),
         None => format!("{:?}", resource.grant.provider),
     };
     crate::budget::reserve_in(

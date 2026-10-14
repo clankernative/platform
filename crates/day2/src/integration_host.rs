@@ -18,9 +18,11 @@ use std::{
 pub(crate) struct Host {
     resolver: Arc<dyn CredentialResolver>,
     transport: Arc<dyn Transport>,
-    /// Whether providers are served from their committed worlds rather than the
-    /// network. Capabilities with no transport of their own — a delegated read
-    /// reaches another application, not a socket — have no other way to tell.
+    /// Whether provider capabilities use committed worlds rather than native
+    /// provider adapters. Independent from app-call composition: hybrid
+    /// qualification may use native app calls while provider effects stay offline.
+    simulated_providers: bool,
+    /// Existing delegation semantics: whether calls remain within this process.
     simulated: bool,
 }
 
@@ -31,6 +33,7 @@ impl Host {
                 database: database(instance)?,
             }),
             transport: Arc::new(LazyTransport(OnceLock::new())),
+            simulated_providers: false,
             simulated: false,
         })
     }
@@ -50,6 +53,7 @@ impl Host {
             transport: Arc::new(integrations::simulated::SimulatedTransport::new(
                 database, scope,
             )),
+            simulated_providers: true,
             simulated: true,
         }
     }
@@ -58,11 +62,16 @@ impl Host {
         self.simulated
     }
 
+    pub(crate) fn uses_simulated_providers(&self) -> bool {
+        self.simulated_providers
+    }
+
     /// Hybrid host qualification: provider sockets remain offline, while the
     /// explicitly installed app-call port exercises independent native hosts.
     pub(crate) fn simulated_providers_with_app_calls(database: &Path, scope: &str) -> Self {
         Self {
             simulated: false,
+            simulated_providers: true,
             ..Self::simulated(database, scope)
         }
     }
@@ -88,6 +97,7 @@ impl Host {
         Self {
             resolver,
             transport,
+            simulated_providers: false,
             simulated: false,
         }
     }
@@ -102,6 +112,7 @@ impl Host {
                 database: database(instance)?,
             }),
             transport,
+            simulated_providers: false,
             simulated: false,
         })
     }
@@ -204,7 +215,9 @@ impl CredentialResolver for MountedCredentials {
             );
             let connection =
                 Connection::open_with_flags(&self.database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-            let reference = live.credential_ref();
+            let reference = live
+                .credential_ref()
+                .ok_or(AdapterError::CredentialUnavailable)?;
             let (profile, path, fingerprint): (String, String, String) = connection.query_row(
                 "SELECT profile,path,fingerprint FROM mounts WHERE id=?1 AND revision=?2",
                 params![reference.id, i64::try_from(reference.revision)?],
@@ -239,7 +252,11 @@ impl MountedCredentials {
         &self,
         live: &LiveConnection,
     ) -> Result<crate::integrations::LocalSecret, AdapterError> {
-        self.local_secret(live, live.credential_ref())
+        self.local_secret(
+            live,
+            live.credential_ref()
+                .ok_or(AdapterError::CredentialUnavailable)?,
+        )
     }
 
     /// Resolve the secret that verifies inbound deliveries for this connection.
@@ -359,7 +376,10 @@ pub fn mount(instance: &Path, operator: &str, request: &Mount) -> Result<serde_j
             );
             named
         }
-        None => request.connection.credential_ref(),
+        None => request
+            .connection
+            .credential_ref()
+            .ok_or_else(|| anyhow::anyhow!("workload_identity_has_no_mounted_credential"))?,
     };
     let revision = i64::try_from(reference.revision)?;
     let profile = serde_json::to_string(&request.connection)?;
