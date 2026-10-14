@@ -100,6 +100,14 @@ impl Budget {
 
     pub(super) fn remaining(&mut self, port: &mut impl Port) -> Result<Duration> {
         let sample = port.sample()?;
+        self.observe(sample)
+    }
+
+    pub(super) fn remaining_native(&mut self, acquisition: &mut super::native_clock::NativeAcquisition) -> Result<Duration> {
+        self.observe(acquisition.sample()?)
+    }
+
+    fn observe(&mut self, sample: Sample) -> Result<Duration> {
         ensure!(
             sample.domain == self.domain && sample.elapsed >= self.latest,
             "security_epoch_clock_domain_or_rewind"
