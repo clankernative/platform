@@ -14,7 +14,7 @@ use day2_capabilities::{
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value, json};
-use std::{collections::BTreeMap, time::Duration};
+use std::{collections::BTreeMap, marker::PhantomData, rc::Rc, time::Duration};
 
 const MAX_BYTES: usize = 65_536;
 const ACQUISITION_BUDGET: Duration = Duration::from_secs(5);
@@ -52,13 +52,13 @@ pub(super) struct Budget {
 }
 
 impl Budget {
-    pub(super) fn begin(port: &mut impl Port) -> Result<Self> {
+    fn begin(port: &mut impl Port, max_lease_seconds: u32) -> Result<Self> {
         let sample = port.sample()?;
         Ok(Self {
             domain: sample.domain,
             start: sample.elapsed,
             latest: sample.elapsed,
-            limit: ACQUISITION_BUDGET,
+            limit: ACQUISITION_BUDGET.min(Duration::from_secs(u64::from(max_lease_seconds))),
         })
     }
 
@@ -352,8 +352,42 @@ fn decode_snapshot(names: &Names, entries: Vec<Entry>) -> Result<Snapshot> {
     })
 }
 
-pub(super) fn read(port: &mut impl Port, names: &Names) -> Result<Snapshot> {
-    let mut budget = Budget::begin(port)?;
+/// Keeps the original before-I/O acquisition interval with parsed DATA. The
+/// controlled port is still unqualified: this is NOT a current role, physical
+/// database identity or bootstrap permission, and cannot construct one.
+pub(crate) struct EpochObservation {
+    selection: Digest,
+    snapshot: Snapshot,
+    budget: Budget,
+    valid: bool,
+    local: PhantomData<Rc<()>>,
+}
+
+impl EpochObservation {
+    pub(super) fn snapshot(&self) -> &Snapshot {
+        &self.snapshot
+    }
+
+    pub(super) fn remaining(&mut self, selection: &EpochStore, port: &mut impl Port) -> Result<Duration> {
+        ensure!(self.valid, "security_epoch_observation_refused");
+        let result = (|| {
+            ensure!(self.selection == Digest::of(selection)?, "security_epoch_observation_selection_changed");
+            self.budget.remaining(port)
+        })();
+        if result.is_err() {
+            self.valid = false;
+        }
+        result
+    }
+
+    /// Deliberately discards acquisition state. The result is historical DATA.
+    pub(super) fn into_data(self) -> Snapshot {
+        self.snapshot
+    }
+}
+
+pub(super) fn read(port: &mut impl Port, names: &Names) -> Result<EpochObservation> {
+    let mut budget = Budget::begin(port, names.selection.max_lease_seconds)?;
     let mut snapshot = read_once(port, &mut budget, names)?;
     if names.activate.is_none()
         && let Some(Versioned {
@@ -384,7 +418,13 @@ pub(super) fn read(port: &mut impl Port, names: &Names) -> Result<Snapshot> {
         &snapshot,
     )?;
     budget.remaining(port)?;
-    Ok(snapshot)
+    Ok(EpochObservation {
+        selection: Digest::of(&names.selection)?,
+        snapshot,
+        budget,
+        valid: true,
+        local: PhantomData,
+    })
 }
 
 fn read_once(port: &mut impl Port, budget: &mut Budget, names: &Names) -> Result<Snapshot> {

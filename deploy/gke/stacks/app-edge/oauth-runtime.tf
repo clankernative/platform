@@ -76,6 +76,7 @@ locals {
   false)
   oauth_runtime_contract = var.oauth_runtime == null ? {} : {
     OAUTH_APP_SERVICE_ACCOUNT            = local.runtime_google_email
+    OAUTH_APP_SERVICE_ACCOUNT_UID        = google_service_account.app_calls[0].unique_id
     OAUTH_APP_SECRET_IDS                 = jsonencode(sort(tolist(local.oauth_key_ids)))
     OAUTH_APP_PROVIDER_CLIENT_SECRET_IDS = jsonencode(sort(tolist(local.oauth_provider_client_ids)))
     OAUTH_APP_PROJECT                    = var.project_id

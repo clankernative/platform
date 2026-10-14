@@ -2,6 +2,11 @@ mock_provider "google" {}
 mock_provider "kubernetes" {}
 mock_provider "cloudflare" {}
 
+override_resource {
+  target = google_service_account.app_calls[0]
+  values = { unique_id = "100000000000000000007" }
+}
+
 variables {
   project_id              = "example-tools"
   project_number          = "123456789012"
@@ -81,6 +86,7 @@ run "one_native_identity_with_exact_read_and_key_grants" {
   assert {
     condition = (
       kubernetes_config_map_v1.platform_contract.data["OAUTH_APP_SERVICE_ACCOUNT"] == "app-native@example-tools.iam.gserviceaccount.com" &&
+      kubernetes_config_map_v1.platform_contract.data["OAUTH_APP_SERVICE_ACCOUNT_UID"] == "100000000000000000007" &&
       kubernetes_config_map_v1.platform_contract.data["SERVICE_ACCOUNT_NAME"] == "runtime" &&
       kubernetes_config_map_v1.platform_contract.data["OAUTH_SHELL_NAMESPACE"] == "day2-security" &&
       toset(jsondecode(kubernetes_config_map_v1.platform_contract.data["OAUTH_APP_SECRET_IDS"])) == toset(["custody_verifier", "custody_encryption", "shell_attestation"]) &&
