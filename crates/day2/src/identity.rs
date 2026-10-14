@@ -1,9 +1,9 @@
 //! Public TypeIDs, binary UUID storage, and permanent per-app model identities.
 use anyhow::{Context, Result, bail, ensure};
 use day2_contracts::identity::ModelIdentity;
+use ring::digest::{SHA256, digest};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt, fs,
@@ -77,13 +77,11 @@ pub fn parse_public_or_legacy(raw: &str) -> Result<Id> {
 /// Replay-stable UUIDv7. The host persists a fresh random seed at admission.
 pub fn generate(seed: &[u8; 32], millis: u64, model: &str, ordinal: u64) -> Result<[u8; 16]> {
     ensure!(millis < (1 << 48), "invalid_uuid_clock");
-    let hash = Sha256::digest(serde_json::to_vec(&(
-        "day2.uuid7.v1",
-        seed,
-        model,
-        ordinal,
-    ))?);
-    let mut bytes: [u8; 16] = hash[..16].try_into()?;
+    let hash = digest(
+        &SHA256,
+        &serde_json::to_vec(&("day2.uuid7.v1", seed, model, ordinal))?,
+    );
+    let mut bytes: [u8; 16] = hash.as_ref()[..16].try_into()?;
     bytes[..6].copy_from_slice(&millis.to_be_bytes()[2..]);
     bytes[6] = (bytes[6] & 15) | 0x70;
     bytes[8] = (bytes[8] & 63) | 0x80;

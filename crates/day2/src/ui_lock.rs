@@ -1,7 +1,7 @@
 //! Pure authored UI lock contract shared by admission and the offline builder.
 use anyhow::{Context, Result, ensure};
+use ring::digest::{Context as DigestContext, SHA256};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeSet,
     path::{Component, Path},
@@ -94,7 +94,7 @@ pub fn manifest_digest(inputs: &[Input]) -> Result<String> {
     sorted.sort_by(|a, b| a.path.cmp(&b.path));
     let mut names = BTreeSet::new();
     let mut total = 0usize;
-    let mut digest = Sha256::new();
+    let mut digest = DigestContext::new(&SHA256);
     for input in sorted {
         ensure!(
             safe_rel(&input.path)
@@ -113,13 +113,13 @@ pub fn manifest_digest(inputs: &[Input]) -> Result<String> {
             .context("locked byte count overflow")?;
         ensure!(total <= MAX_TOTAL, "locked package byte budget");
         digest.update(input.path.as_bytes());
-        digest.update([0]);
+        digest.update(&[0]);
         digest.update(input.bytes.to_string().as_bytes());
-        digest.update([0]);
+        digest.update(&[0]);
         digest.update(input.digest.as_bytes());
         digest.update(b"\n");
     }
-    Ok(format!("sha256:{:x}", digest.finalize()))
+    Ok(format!("sha256:{}", crate::hex(digest.finish().as_ref())))
 }
 
 #[cfg(test)]
@@ -133,6 +133,14 @@ mod tests {
             bytes: 4,
             digest: crate::digest(b"html"),
         }
+    }
+
+    #[test]
+    fn manifest_digest_preserves_input_framing() {
+        assert_eq!(
+            manifest_digest(&[input("file")]).unwrap(),
+            "sha256:48ac86795abf7f9d52a1a4e682c1db018da2249febc34a8617287a24b2d8c643"
+        );
     }
 
     #[test]

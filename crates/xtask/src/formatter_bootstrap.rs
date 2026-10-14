@@ -1,8 +1,8 @@
 //! Source-pinned formatter candidates and separately reviewed binary installation.
 
 use anyhow::{Context, Result, ensure};
+use ring::digest::{Context as DigestContext, SHA256};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::{
     fs,
     io::{Read, Seek, SeekFrom, Write},
@@ -182,7 +182,7 @@ fn file_digest(path: &Path, budget: u64) -> Result<String> {
         path.display()
     );
     let mut reader = fs::File::open(path)?.take(budget + 1);
-    let mut hash = Sha256::new();
+    let mut hash = DigestContext::new(&SHA256);
     let mut bytes = [0u8; 64 * 1024];
     let mut total = 0;
     loop {
@@ -194,7 +194,12 @@ fn file_digest(path: &Path, budget: u64) -> Result<String> {
         ensure!(total <= budget, "formatter input byte budget");
         hash.update(&bytes[..count]);
     }
-    Ok(format!("{:x}", hash.finalize()))
+    Ok(hash
+        .finish()
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
 }
 
 fn verify(path: &Path, expected: &str, budget: u64) -> Result<()> {
@@ -754,7 +759,7 @@ fn publish_candidate(root: &Path, binary: &Path, pin: &Pin) -> Result<PathBuf> {
         );
         verify(
             &destination.join("manifest.json"),
-            &format!("{:x}", Sha256::digest(&manifest)),
+            day2::digest(&manifest).trim_start_matches("sha256:"),
             32_768,
         )
         .context("existing formatter candidate has different provenance")?;

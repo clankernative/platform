@@ -19,8 +19,8 @@ pub mod security_epoch;
 mod tests;
 
 use anyhow::{Result, ensure};
+use ring::digest::{SHA256, digest};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
@@ -31,7 +31,12 @@ use std::{
 pub struct Digest(String);
 impl Digest {
     pub fn new(bytes: &[u8]) -> Self {
-        Self(format!("sha256:{:x}", Sha256::digest(bytes)))
+        let hex: String = digest(&SHA256, bytes)
+            .as_ref()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        Self(format!("sha256:{hex}"))
     }
     pub fn of<T: Serialize>(value: &T) -> Result<Self> {
         Ok(Self::new(&serde_json::to_vec(value)?))

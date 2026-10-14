@@ -20,7 +20,6 @@
 use anyhow::{Context, Result, bail, ensure};
 use quote::ToTokens;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -1975,12 +1974,11 @@ impl<'a> Scanner<'a> {
         } else {
             self.context.join("::")
         };
-        let fingerprint = format!(
-            "{:x}",
-            Sha256::digest(
-                format!("{kind}\n{target}\n{context}\n{}", tokens.to_token_stream()).as_bytes()
-            )
-        );
+        let fingerprint = day2::digest(
+            format!("{kind}\n{target}\n{context}\n{}", tokens.to_token_stream()).as_bytes(),
+        )
+        .trim_start_matches("sha256:")
+        .to_owned();
         let finding = Finding {
             source: self.source.to_owned(),
             kind: kind.to_owned(),

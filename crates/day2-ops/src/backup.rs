@@ -2,16 +2,17 @@
 //! main database file without its WAL, overwrite an instance, or resume commands.
 use anyhow::{Context, Result, bail, ensure};
 use day2::{artifact::Instance, authority_state, store::Runtime};
+use ring::digest::{Context as DigestContext, SHA256};
 use rusqlite::{
     Connection, ErrorCode, OpenFlags,
     backup::{Backup, StepResult},
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     ffi::c_int,
     fs,
+    io::Read,
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -145,9 +146,26 @@ fn database_digest(path: &Path) -> Result<String> {
         fs::symlink_metadata(path)?.file_type().is_file(),
         "regular database file required"
     );
-    let mut hasher = Sha256::new();
-    std::io::copy(&mut fs::File::open(path)?, &mut hasher)?;
-    Ok(format!("sha256:{:x}", hasher.finalize()))
+    let mut hasher = DigestContext::new(&SHA256);
+    let mut file = fs::File::open(path)?;
+    let mut buffer = [0; 64 * 1024];
+    loop {
+        let count = match file.read(&mut buffer) {
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            result => result?,
+        };
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    let hex: String = hasher
+        .finish()
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    Ok(format!("sha256:{hex}"))
 }
 
 fn copy_tree(source: &Path, target: &Path, budget: &mut u64, depth: u32) -> Result<()> {
@@ -491,6 +509,30 @@ pub fn restore(backup: &Path, output: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn database_digest_matches_known_answers_across_read_boundaries() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("snapshot");
+        for (bytes, expected) in [
+            (
+                Vec::new(),
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            ),
+            (
+                b"abc".to_vec(),
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            ),
+            (
+                vec![0; 131_073],
+                "d281209cc72d47b090175b22621840d9eb8267d09cc05dc122bfaa759a82830f",
+            ),
+        ] {
+            fs::write(&path, &bytes)?;
+            assert_eq!(database_digest(&path)?, format!("sha256:{expected}"));
+        }
+        Ok(())
+    }
 
     #[test]
     fn target_runtime_selection_is_preserved_but_foreign_only_runtime_does_not_secure_target()

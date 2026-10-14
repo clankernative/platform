@@ -9,9 +9,9 @@ use crate::{
     store::Runtime,
 };
 use anyhow::{Context, Result, ensure};
+use ring::digest::{SHA256, digest};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use std::{
     collections::VecDeque,
     path::Path,
@@ -42,7 +42,7 @@ impl Host for Inputs {
         // Independent identities do not depend on incidental PRNG draw order.
         let encoded =
             serde_json::to_vec(&("day2-simulation-entropy-v1", self.seed, scope, invocation))?;
-        let seed: [u8; 32] = Sha256::digest(encoded).into();
+        let seed: [u8; 32] = digest(&SHA256, &encoded).as_ref().try_into()?;
         self.state
             .lock()
             .unwrap()

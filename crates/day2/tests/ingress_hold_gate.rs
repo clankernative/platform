@@ -61,12 +61,18 @@ fn headers_for(
 }
 
 fn sign(secret: &str, timestamp: i64, body: &[u8]) -> String {
-    use hmac::{Hmac, Mac};
-    use sha2::Sha256;
-    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("key");
+    use ring::hmac;
+    let key = hmac::Key::new(hmac::HMAC_SHA256, secret.as_bytes());
+    let mut mac = hmac::Context::with_key(&key);
     mac.update(format!("v0:{timestamp}:").as_bytes());
     mac.update(body);
-    format!("v0={:x}", mac.finalize().into_bytes())
+    let hex: String = mac
+        .sign()
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("v0={hex}")
 }
 
 fn endpoint() -> Endpoint {
