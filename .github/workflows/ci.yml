@@ -595,77 +595,65 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  # TEMP security-prerequisite metadata scope; never land this workflow change.
   verification-diagnostics:
-    if: ${{ inputs.verification == 'diagnostics' }}
-    runs-on: macos-15
-    timeout-minutes: 360
+    needs: [secrets, dependencies]
+    if: ${{ !cancelled() && inputs.verification == 'diagnostics' && needs.secrets.result == 'success' && needs.dependencies.result == 'success' }}
+    runs-on: ubuntu-24.04
+    container:
+      image: rust@sha256:620dbcd124499c59e2406d3741574b5c5838cf9eb9656f0c3a03948f79b02959
+      options: --memory=6g --memory-swap=6g --cpus=4 --pids-limit=512 --cgroupns=private
+      volumes:
+        - /usr/bin/gh:/usr/local/bin/gh:ro
+    defaults:
+      run:
+        shell: bash
+    timeout-minutes: 30
     env:
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_BUILD_JOBS: '2'
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: 'true'
-      SCCACHE_GHA_VERSION: day2-platform-ci-v2
-      # Preserve compiler statistics through the long runtime campaigns.
+      SCCACHE_GHA_VERSION: day2-platform-ci-linux-v1
       SCCACHE_IDLE_TIMEOUT: '0'
-      DAY2_TEMPORAL_CLI: /tmp/day2-tools/temporal
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: opentofu/setup-opentofu@9d84900f3238fab8cd84ce47d658d25dd008be2f # v1
-        with:
-          tofu_version: 1.11.5
-          tofu_wrapper: false
-      - run: gh release download v1.6.1 --repo temporalio/cli --pattern temporal_cli_1.6.1_darwin_arm64.tar.gz --dir /tmp/day2-tools
-        env:
-          GH_TOKEN: ${{ github.token }}
-      - run: shasum -a 256 --check "$GITHUB_WORKSPACE/.github/temporal.sha256"
-        working-directory: /tmp/day2-tools
-      - run: tar -xzf /tmp/day2-tools/temporal_cli_1.6.1_darwin_arm64.tar.gz -C /tmp/day2-tools
-      - name: Select the pinned Rust toolchain
-        run: rustup show active-toolchain
-      - name: Set up the Rust compiler cache
-        uses: Mozilla-Actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - run: rustup show active-toolchain
+      - run: rustc -Vv
+      - run: cargo -Vv
+      - uses: Mozilla-Actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.18.0
-      - name: Restore Cargo dependencies and build outputs
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          prefix-key: day2-platform-ci-v2
-          # The virtual root manifest owns the compilation profiles.
-          key: ${{ hashFiles('Cargo.toml') }}
-          cache-bin: 'false'
-          cache-workspace-crates: 'false'
-          shared-key: ${{ hashFiles('Cargo.toml') }}-verify
-          save-if: 'false'
-      - run: cargo run --locked -p xtask -- source-check
+      - name: Confirm Cargo's precise patch resolution changes no other locked package
+        run: cargo update --package rustls --precise 0.23.46
+      - run: git diff --exit-code -- Cargo.lock
       - run: cargo fetch --locked
-      - run: cargo run --locked -p xtask -- notices
-      - run: git diff --exit-code -- THIRD-PARTY-NOTICES.txt dependency-inventory.json
-      - run: cargo run --locked -p xtask -- bootstrap
-      - run: gh release download roc-formatter-2026-09-12 --repo clankernative/platform --pattern roc-fmt-day2-aarch64-apple-darwin --dir /tmp/day2-tools
-        env:
-          GH_TOKEN: ${{ github.token }}
-      - run: cargo run --locked -p xtask -- bootstrap-formatter /tmp/day2-tools/roc-fmt-day2-aarch64-apple-darwin
-      - run: cargo run --locked -p xtask -- configure-tofu
-      - run: cargo run --locked -p xtask -- fmt
-      - run: git diff --binary > /tmp/day2-format.patch
-      - run: target/debug/xtask architecture-inventory > /tmp/day2-architecture-inventory.json
-      - run: target/debug/xtask architecture-dependencies > /tmp/day2-architecture-dependencies.json
-      - run: target/debug/xtask architecture-proof-inventory > /tmp/day2-architecture-proofs.json
+      - name: Retain actual locked metadata before regeneration
+        run: cargo metadata --locked --offline --format-version=1 > /tmp/day2-rustls-metadata.json
+      - run: cargo run --locked -p xtask -- source-check
+      - name: Generate all required current-package inventory and license notices
+        run: cargo run --locked -p xtask -- notices
+      - name: Retain the exact regeneration diff
+        run: git diff --binary > /tmp/day2-rustls-regeneration.patch
+      - name: Require exact reviewed lockfile, inventory and notice bytes
+        run: git diff --exit-code
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: ${{ always() }}
         with:
-          name: day2-verification-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          name: day2-rustls-security-metadata-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            /tmp/day2-format.patch
-            /tmp/day2-architecture-inventory.json
-            /tmp/day2-architecture-dependencies.json
-            /tmp/day2-architecture-proofs.json
+            Cargo.lock
+            dependency-inventory.json
+            THIRD-PARTY-NOTICES.txt
+            /tmp/day2-rustls-metadata.json
+            /tmp/day2-rustls-regeneration.patch
             target/debug/xtask.d
           if-no-files-found: error
-          retention-days: 3
+          retention-days: 14
 
   infrastructure:
     runs-on: ubuntu-24.04
