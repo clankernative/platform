@@ -30,7 +30,12 @@ pub(super) struct ReviewedStorageSelection {
 impl ReviewedStorageSelection {
     pub(super) fn decode(bytes: &[u8]) -> Result<Self> {
         ensure!(bytes.len() <= 65_536, "storage_selection_bound");
-        let data: SelectionData = crate::json::decode(bytes)?;
+        let value: serde_json::Value = crate::json::decode(bytes)?;
+        ensure!(value.is_object(), "storage_selection_object_required");
+        for field in ["policy", "store", "seed"] {
+            ensure!(value.get(field).is_some_and(serde_json::Value::is_object), "storage_selection_record_object_required");
+        }
+        let data: SelectionData = serde_json::from_value(value)?;
         data.policy.validate(&BTreeMap::from([(data.policy.epoch_store.id.clone(), data.store.clone())]))?;
         data.seed.validate(&data.policy, &data.store)?;
         let digest = Digest::of(&("day2-native-storage-selection-v1", &data))?;

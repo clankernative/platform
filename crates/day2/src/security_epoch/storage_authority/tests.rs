@@ -73,6 +73,25 @@ fn native_budget_keeps_original_origin_when_later_samples_have_a_new_window() {
     assert!(budget.remaining_native(&mut other).is_err());
 }
 
+#[test]
+fn selection_requires_object_envelope_and_named_record_objects() {
+    let good = data();
+    for bad in [
+        json!([good["policy"],good["store"],good["seed"]]),
+        Value::Null,json!(true),json!(17),json!("selection"),json!([]),
+    ] {
+        let error = ReviewedStorageSelection::decode(&serde_json::to_vec(&bad).unwrap()).unwrap_err();
+        assert!(error.to_string().contains("selection_object_required"));
+    }
+    for field in ["policy","store","seed"] {
+        for shape in [Value::Null,json!([]),json!(true),json!("record")] {
+            let mut bad = good.clone();bad[field] = shape;
+            let error = ReviewedStorageSelection::decode(&serde_json::to_vec(&bad).unwrap()).unwrap_err();
+            assert!(error.to_string().contains("record_object_required"),"{field}");
+        }
+    }
+}
+
 #[cfg(not(target_os="linux"))]
 #[test]
 fn unsupported_directory_profile_never_qualifies_a_test_owner() {
