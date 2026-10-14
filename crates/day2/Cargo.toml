@@ -52,8 +52,8 @@ day2-sandbox = { path = "../day2-sandbox" }
 
 [dev-dependencies]
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp"] }
-# Keep in-process generators; subprocess fork/timeout support is unused.
-proptest = { version = "=1.11.0", default-features = false, features = ["std", "bit-set"] }
+# Keep in-process generators without optional subprocess or bit-set dependencies.
+proptest = { version = "=1.11.0", default-features = false, features = ["std"] }
 proc-macro2 = "=1.0.107"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "cookies"] }
 syn = { version = "=2.0.119", features = ["full", "visit"] }

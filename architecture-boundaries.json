@@ -272,7 +272,6 @@
           "target": null,
           "rename": null,
           "features": [
-            "bit-set",
             "std"
           ],
           "default_features": false,
@@ -891,7 +890,6 @@
           "target": null,
           "rename": null,
           "features": [
-            "bit-set",
             "std"
           ],
           "default_features": false,

@@ -29,8 +29,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"
 
 [dev-dependencies]
 day2-assets = { path = "../day2-assets" }
-# Keep in-process generators; subprocess fork/timeout support is unused.
-proptest = { version = "=1.11.0", default-features = false, features = ["std", "bit-set"] }
+# Keep in-process generators without optional subprocess or bit-set dependencies.
+proptest = { version = "=1.11.0", default-features = false, features = ["std"] }
 axum = "0.8.9"
 
 [[test]]
