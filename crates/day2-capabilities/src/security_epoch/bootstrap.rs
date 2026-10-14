@@ -53,6 +53,7 @@ impl GkeClusterSelection {
 #[serde(rename_all = "snake_case")]
 pub enum WorkloadKind {
     DeploymentV1,
+    StatefulSetV1,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -205,7 +206,7 @@ pub(crate) mod tests {
         let role = |account: EpochIam, name: &str| json!({
             "namespace":{"name":"native","uid":"namespace-uid"},
             "kubernetes_service_account":{"name":name,"uid":format!("{name}-ksa-uid")},
-            "google_service_account":account,"workload_kind":"deployment_v1",
+            "google_service_account":account,"workload_kind":if name == "app" { "stateful_set_v1" } else { "deployment_v1" },
             "workload":{"name":name,"uid":format!("{name}-workload-uid")},
             "token_review_audience":"https://kubernetes.default.svc"
         });
