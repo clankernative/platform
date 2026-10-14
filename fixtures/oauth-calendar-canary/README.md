@@ -27,13 +27,29 @@ a problem; a provider continuation always returns capacity_deferred. It never
 returns a truncated success. Local sign-in or workload actor
 text does not establish a human connection.
 
-This slice uses original activation token material only. Expired tokens require
-reauthorization; real refresh publication, Calendar writes, live Google consent,
-effective IAM/workload qualification and production-role authority remain separate
-implementation and qualification work.
+The host selects authenticated current token material. For the reviewed Google
+reusable profile it refreshes privately during resolution when at most 60 seconds
+remain, including an expired access token whose connection has not already been
+refused. Refresh verifies the unchanged provider account and exact consented
+scopes. One transaction replaces ciphertext, advances the material version and
+records the attempt receipt. A failed or ambiguous send never authorizes another
+automatic refresh. Recovery reads the committed replacement or requires a new
+connection. A committed expiry, material or clock refusal is never cleared.
+
+The native conformance fixture exercises Calendar reads using material versions
+2 and 3, stale Uses, concurrent successor publication, and real process exits at
+the dispatch fence, ciphertext write and publication commit. Only the provider,
+readiness and clock ports are simulated. Calendar writes, live Google
+connect/use/refresh, effective IAM/workload qualification and production-role
+authority remain separate implementation and qualification work.
 
 Expiry and clock rollback observed at custody, dispatch and post-read readiness
 checks persist refusal for the exact token generation/version. Final and replay
 checks reject an invalid Use inside their decision transaction; a failed decision
 does not separately publish a persistent clock refusal. A qualified clock producer
 and complete cross-clock qualification remain follow-up work.
+
+Refresh also carries its latest checked clock and exact published material
+through Use issuance. A late refusal for version 2 cannot disable an independently
+authenticated version 3. Whole-database rollback and qualified clock/workload
+authority are not established by these local tests.

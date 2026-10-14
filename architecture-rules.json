@@ -245,6 +245,8 @@
     "crates/day2/src/oauth/profiles.rs",
     "crates/day2/src/oauth/protocol.rs",
     "crates/day2/src/oauth/qualification_shell.rs",
+    "crates/day2/src/oauth/refresh.rs",
+    "crates/day2/src/oauth/refresh_tests.rs",
     "crates/day2/src/oauth/registration.rs",
     "crates/day2/src/oauth/registration_publication.rs",
     "crates/day2/src/oauth/registration_tests.rs",

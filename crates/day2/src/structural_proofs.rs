@@ -35,6 +35,15 @@ const _: () = {
     assert_consuming!(crate::execution::DispatchPermit);
     assert_consuming!(crate::oauth::exchange::ExchangeDispatchPermit);
     assert_consuming!(crate::oauth::store::RefreshDispatchPermit);
+    assert_consuming!(crate::oauth::refresh::ClientCredential);
+    assert_consuming!(crate::oauth::refresh::PreparedReplacement);
+    assert_consuming!(crate::oauth::refresh::Resolution);
+    assert_not_impl!(crate::oauth::refresh::ClientCredential, std::fmt::Debug);
+    assert_not_impl!(crate::oauth::refresh::PreparedReplacement, std::fmt::Debug);
+    assert_not_impl!(crate::oauth::refresh::Resolution, std::fmt::Debug);
+    assert_secret_references!(crate::oauth::refresh::ClientCredential);
+    assert_secret_references!(crate::oauth::refresh::PreparedReplacement);
+    assert_secret_references!(crate::oauth::refresh::Resolution);
     assert_consuming!(crate::managed_credentials::store::HumanRevealPermit);
     assert_consuming!(crate::managed_credentials::store::PendingReveal);
     assert_not_impl!(
