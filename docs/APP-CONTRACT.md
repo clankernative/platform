@@ -185,6 +185,23 @@ state, trace replay and duplicate delivery. Shared wording never substitutes for
 an executable case. Platform capacity and authority failures stay on the sealed
 host path; they do not need fabricated business-error examples.
 
+Business authorization failures can require a different synthetic actor from the
+campaign's successful commands. Use `Api.failed_command_as` or
+`Api.failed_query_as` with `Api.verification_principal("denied-synthetic")` as the
+second argument; the generator retains the operation's actual input type. The
+principal must be nonempty, at most 128 ASCII bytes, using letters, digits or
+`._:-`. An explicit empty principal is invalid, not a default-actor request.
+The ordinary `failed_command` and `failed_query` helpers use the campaign actor.
+
+The artifact binds each override to its declared failure target. Disposable
+fixture policy grants that actor only the matching operation; fixture app
+membership respects a supplied narrower policy and never adds administrators.
+Actor overrides require simulated providers, and the authority boundary rejects
+those operation/actor pairs under nonsimulated providers. This declaration is not
+an impersonation facility or live-user enrollment. Failure traces retain the
+selected actor and replay through the existing saved-evidence entrypoint without
+repeating provider effects.
+
 Every persistent model has a typed invariant registration. Every public operation
 has required typed verification; declared failures have required cases.
 The campaign checks actual results, model snapshots, rollback, replay, duplicate

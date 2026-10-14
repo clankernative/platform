@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 use std::{
     fs,
     path::{Path, PathBuf},
+    process::Command,
 };
 
 #[test]
@@ -59,6 +60,32 @@ expect match (shared.verification)({}) {
     _ => Bool.False
 }
 expect Api.error_metadata("invalid", Api.error_cases({description: "Invalid.", recovery: "Correct it.", verification: |_| []})).is_err()
+actors = Api.error_cases({description: "Denied.", recovery: "Use an authorized principal.", verification: |_| [
+    Api.failed_command_as(write, Api.verification_principal("command-synthetic"), |_snapshot, _seed| Ok({reason: "denied"})),
+    Api.failed_query_as(read, Api.verification_principal("query-synthetic"), |_snapshot, _seed| Ok({path: "/denied"})),
+]})
+expect match Api.error_metadata("denied", actors) {
+    Ok(metadata) => metadata.verification_actors == [{operation: "example.create", actor: "command-synthetic"}, {operation: "example.preview", actor: "query-synthetic"}]
+    Err(_) => Bool.False
+}
+expect match (actors.verification)({}) {
+    [command, query] => (command.input)("{}", 1) == Ok("{\"reason\":\"denied\"}") and (query.input)("{}", 1) == Ok("{\"path\":\"/denied\"}")
+    _ => Bool.False
+}
+expect match Api.error_metadata("invalid", shared) {
+    Ok(metadata) => metadata.verification_actors.is_empty()
+    Err(_) => Bool.False
+}
+mixed = Api.error_cases({description: "Denied.", recovery: "Correct it.", verification: |_| [
+    Api.failed_command(write, |_snapshot, _seed| Ok({reason: ""})),
+    Api.failed_query_as(read, Api.verification_principal("query-synthetic"), |_snapshot, _seed| Ok({path: "/denied"})),
+]})
+expect match Api.error_metadata("denied", mixed) {
+    Ok(metadata) => metadata.verification_actors == [{operation: "example.preview", actor: "query-synthetic"}]
+    Err(_) => Bool.False
+}
+expect Api.error_metadata("denied", Api.error({description: "Denied.", recovery: "Correct it.", verification: |_| Api.failed_command_as(write, Api.verification_principal(""), |_snapshot, _seed| Ok({reason: ""}))})).is_err()
+expect Api.error_metadata("denied", Api.error({description: "Denied.", recovery: "Correct it.", verification: |_| Api.failed_query_as(read, Api.verification_principal(""), |_snapshot, _seed| Ok({path: ""}))})).is_err()
 "#,
     )?;
     let output = day2::sandbox::compiler(
@@ -75,8 +102,196 @@ expect Api.error_metadata("invalid", Api.error_cases({description: "Invalid.", r
         String::from_utf8_lossy(&output.stderr)
     );
     ensure!(
-        output.status.success() && diagnostics.contains("All (4) tests passed"),
+        output.status.success() && diagnostics.contains("All (10) tests passed"),
         "native error cases: {diagnostics}"
+    );
+    Ok(())
+}
+
+#[test]
+fn admitted_failure_principals_are_atomic_replayable_and_simulation_only() -> Result<()> {
+    let artifact_path = PathBuf::from(
+        std::env::var_os("DAY2_TEST_VERIFICATION_ACTORS_ARTIFACT")
+            .context("build fixtures/verification-actor-conformance or run xtask verify")?,
+    );
+    let loaded = LoadedArtifact::load(&artifact_path)?;
+    let definition = loaded
+        .contract()
+        .app_contract
+        .as_ref()
+        .context("app contract")?;
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()?;
+    // Retain both successful and failing histories under unique directories.
+    let directory = tempfile::Builder::new()
+        .prefix("verification-actors-")
+        .tempdir_in(root.join("artifacts"))?
+        .keep();
+    let runtime = development::create(&artifact_path, &directory.join("instance"), None)?;
+    let evidence = development::exercise(&runtime, None, 42, 2)?;
+    assert!(evidence.failure.is_none());
+    assert!(evidence.verification_complete);
+    assert_eq!(evidence.generated, 4);
+    assert_eq!(evidence.error_traces.len(), 4);
+    assert_eq!(evidence.obligations.len(), 4);
+    assert!(evidence.obligations.values().all(|count| *count == 2));
+    let after = runtime.inspect()?;
+    let expected = [
+        (
+            "verifiers.create_note",
+            "command-denied-synthetic",
+            "app:verifiers.create_denied",
+        ),
+        (
+            "verifiers.count_notes",
+            "query-denied-synthetic",
+            "app:verifiers.count_denied",
+        ),
+    ];
+    for (operation, actor, code) in expected {
+        let failure = definition.errors.get(code).context("declared failure")?;
+        assert_eq!(failure.verification_actor(&failure.operation), Some(actor));
+        let traces: Vec<_> = evidence
+            .error_traces
+            .iter()
+            .filter(|trace| trace.request.operation == operation)
+            .collect();
+        assert_eq!(traces.len(), 2);
+        for (index, trace) in traces.into_iter().enumerate() {
+            assert_eq!(trace.request.context.actor, actor);
+            assert_eq!(trace.artifact, loaded.id());
+            assert_eq!(trace.outcome.status, "failure");
+            assert_eq!(trace.outcome.error, code);
+            assert!(
+                trace
+                    .request
+                    .observations
+                    .iter()
+                    .all(|observation| observation.instruction.kind != "external")
+            );
+            replay(&loaded, trace)?;
+            let id = &trace.request.context.invocation_id;
+            runtime.accept(
+                operation,
+                actor,
+                id,
+                &serde_json::from_str(&trace.request.input)?,
+                trace.request.context.now,
+            )?;
+            assert_eq!(runtime.execute(id, Fault::None)?, trace.outcome);
+            assert_eq!(runtime.inspect()?, after);
+            let saved = directory.join(format!("{operation}-{index}.json"));
+            let bytes = serde_json::to_vec_pretty(trace)?;
+            fs::write(&saved, &bytes)?;
+            eprintln!(
+                "Replay: cargo run --locked -p day2 -- replay {} {}",
+                artifact_path.display(),
+                saved.display()
+            );
+            let replayed = Command::new(env!("CARGO_BIN_EXE_day2"))
+                .arg("replay")
+                .arg(&artifact_path)
+                .arg(&saved)
+                .output()?;
+            ensure!(
+                replayed.status.success(),
+                "saved failure replay: {}",
+                String::from_utf8_lossy(&replayed.stderr)
+            );
+            assert_eq!(fs::read(&saved)?, bytes);
+            let mut changed_actor = trace.clone();
+            changed_actor.request.context.actor = development::ACTOR.into();
+            assert!(replay(&loaded, &changed_actor).is_err());
+            let mut changed_artifact = trace.clone();
+            changed_artifact.artifact = format!("sha256:{}", "0".repeat(64));
+            assert!(replay(&loaded, &changed_artifact).is_err());
+        }
+    }
+    for (operation, actor, input) in [
+        (
+            "verifiers.create_note",
+            "query-denied-synthetic",
+            json!({"text":"cross-target"}),
+        ),
+        (
+            "verifiers.count_notes",
+            "command-denied-synthetic",
+            json!({}),
+        ),
+    ] {
+        assert_eq!(
+            runtime
+                .accept(operation, actor, "wrong-target", &input, 100)
+                .unwrap_err()
+                .to_string(),
+            "forbidden"
+        );
+        assert_eq!(runtime.inspect()?, after);
+    }
+    let mut narrowed = development::local_policy(&loaded)?;
+    narrowed
+        .operations
+        .get_mut("verifiers.create_note")
+        .context("command policy")?
+        .actors
+        .remove("command-denied-synthetic");
+    assert_eq!(
+        narrowed.admins,
+        std::collections::BTreeSet::from([development::ACTOR.into()])
+    );
+    let narrowed_runtime =
+        development::create(&artifact_path, &directory.join("narrowed"), Some(narrowed))?;
+    let empty = narrowed_runtime.inspect()?;
+    assert_eq!(
+        narrowed_runtime
+            .accept(
+                "verifiers.create_note",
+                "command-denied-synthetic",
+                "narrowed",
+                &json!({"text":"denied"}),
+                100
+            )
+            .unwrap_err()
+            .to_string(),
+        "forbidden"
+    );
+    assert_eq!(narrowed_runtime.inspect()?, empty);
+    let live = day2::store::Runtime::load(runtime.instance_path(), runtime.app())?;
+    for (operation, actor, input) in [
+        (
+            "verifiers.create_note",
+            "command-denied-synthetic",
+            json!({"text":"denied"}),
+        ),
+        ("verifiers.count_notes", "query-denied-synthetic", json!({})),
+    ] {
+        assert_eq!(
+            live.accept(operation, actor, "nonsimulated", &input, 100)
+                .unwrap_err()
+                .to_string(),
+            "forbidden"
+        );
+        assert_eq!(live.inspect()?, after);
+    }
+    live.accept(
+        "verifiers.create_note",
+        development::ACTOR,
+        "live-allowed",
+        &json!({"text":"allowed"}),
+        100,
+    )?;
+    assert_eq!(live.execute("live-allowed", Fault::None)?.status, "success");
+    live.accept(
+        "verifiers.count_notes",
+        development::ACTOR,
+        "live-read",
+        &json!({}),
+        100,
+    )?;
+    assert_eq!(
+        live.execute("live-read", Fault::None)?.result,
+        json!({"count":3})
     );
     Ok(())
 }

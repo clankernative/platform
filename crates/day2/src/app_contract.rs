@@ -90,6 +90,13 @@ impl Operation {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct VerificationActor {
+    pub operation: String,
+    pub actor: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Failure {
@@ -99,6 +106,8 @@ pub struct Failure {
     pub operation: operation_metadata::Target,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub additional_operations: Vec<operation_metadata::Target>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub verification_actors: Vec<VerificationActor>,
 }
 
 impl Failure {
@@ -112,6 +121,13 @@ impl Failure {
         } else {
             format!("{}@{}", self.code, target.operation)
         }
+    }
+
+    pub fn verification_actor(&self, target: &operation_metadata::Target) -> Option<&str> {
+        self.verification_actors
+            .iter()
+            .find(|entry| entry.operation == target.operation)
+            .map(|entry| entry.actor.as_str())
     }
 
     fn validate_targets(
@@ -143,6 +159,27 @@ impl Failure {
                     .get(&operation.name)
                     .is_some_and(|operation| operation.errors.contains(&self.code)),
                 "application failure requires a matching operation contract and scenario"
+            );
+        }
+        let mut actor_targets = BTreeSet::new();
+        for override_actor in &self.verification_actors {
+            ensure!(
+                self.targets()
+                    .any(|target| target.operation == override_actor.operation),
+                "verification actor requires a declared failure target"
+            );
+            ensure!(
+                actor_targets.insert(&override_actor.operation),
+                "duplicate failure verification actor"
+            );
+            ensure!(
+                !override_actor.actor.is_empty()
+                    && override_actor.actor.len() <= 128
+                    && override_actor
+                        .actor
+                        .bytes()
+                        .all(|byte| { byte.is_ascii_alphanumeric() || b"._:-".contains(&byte) }),
+                "invalid failure verification actor"
             );
         }
         Ok(())
@@ -182,6 +219,16 @@ pub struct Definition {
     pub invariants: BTreeMap<String, String>,
     pub domains: crate::domain::Catalog,
     pub errors: BTreeMap<String, Failure>,
+}
+
+impl Definition {
+    pub(crate) fn is_verification_actor(&self, operation: &str, actor: &str) -> bool {
+        self.errors.values().any(|failure| {
+            failure.verification_actors.iter().any(|override_actor| {
+                override_actor.operation == operation && override_actor.actor == actor
+            })
+        })
+    }
 }
 
 pub fn decode(raw: &[u8]) -> Result<Definition> {
@@ -1726,6 +1773,7 @@ mod selector_tests {
                 input_type: "preview_input".into(),
                 output_type: "result".into(),
             }],
+            verification_actors: Vec::new(),
         };
         Ok((failure, operations, contracts))
     }
@@ -1779,6 +1827,62 @@ mod selector_tests {
                 });
             assert!(admitted.is_err(), "{mutation} verification case");
         }
+        let mut actor_override = failure.clone();
+        actor_override.verification_actors = vec![VerificationActor {
+            operation: "create".into(),
+            actor: "freetool-denied-synthetic".into(),
+        }];
+        actor_override.validate_targets(&operations, &contracts)?;
+        assert_eq!(
+            actor_override.verification_actor(&actor_override.operation),
+            Some("freetool-denied-synthetic")
+        );
+        for (actors, expected) in [
+            (
+                vec![VerificationActor {
+                    operation: "missing".into(),
+                    actor: "freetool-denied-synthetic".into(),
+                }],
+                "verification actor requires a declared failure target",
+            ),
+            (
+                vec![
+                    VerificationActor {
+                        operation: "create".into(),
+                        actor: "first-synthetic".into(),
+                    },
+                    VerificationActor {
+                        operation: "create".into(),
+                        actor: "second-synthetic".into(),
+                    },
+                ],
+                "duplicate failure verification actor",
+            ),
+        ] {
+            let mut invalid = failure.clone();
+            invalid.verification_actors = actors;
+            assert_eq!(
+                invalid
+                    .validate_targets(&operations, &contracts)
+                    .unwrap_err()
+                    .to_string(),
+                expected,
+            );
+        }
+        for actor in ["".into(), "bad actor".into(), "é".into(), "a".repeat(129)] {
+            let mut invalid = failure.clone();
+            invalid.verification_actors = vec![VerificationActor {
+                operation: "create".into(),
+                actor,
+            }];
+            assert_eq!(
+                invalid
+                    .validate_targets(&operations, &contracts)
+                    .unwrap_err()
+                    .to_string(),
+                "invalid failure verification actor",
+            );
+        }
         let mut unlisted = contracts.clone();
         unlisted.get_mut("preview").unwrap().errors.clear();
         assert!(failure.validate_targets(&operations, &unlisted).is_err());
@@ -1809,6 +1913,16 @@ mod selector_tests {
             "app:example.invalid_input"
         );
         assert_eq!(serde_json::to_value(failure)?, wire);
+        let actor_wire = serde_json::json!({
+            "code":"app:example.invalid_input",
+            "description":"Invalid.",
+            "recovery":"Correct it.",
+            "operation":{"operation":"create","input_type":"input","output_type":"output"},
+            "verification_actors":[{"operation":"create","actor":"freetool-denied-synthetic"}]
+        });
+        let failure: Failure = serde_json::from_value(actor_wire.clone())?;
+        assert_eq!(failure.verification_actors.len(), 1);
+        assert_eq!(serde_json::to_value(failure)?, actor_wire);
         Ok(())
     }
 

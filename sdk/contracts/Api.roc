@@ -96,9 +96,24 @@ Api :: [].{
 		recovery : Str,
 		operation : Target,
 		additional_operations : List(Target),
+		verification_actors : List({ operation : Str, actor : Str }),
 	}
 
-	ErrorExample : { operation : Target, input : (Str, U64 -> Try(Str, Str)) }
+	VerificationPrincipal : [Synthetic(Str)]
+
+	verification_principal : Str -> VerificationPrincipal
+	verification_principal = |actor| Synthetic(actor)
+
+	verification_principal_actor : VerificationPrincipal -> Str
+	verification_principal_actor = |principal| match principal {
+		Synthetic(actor) => actor
+	}
+
+	ErrorExample : {
+		operation : Target,
+		input : (Str, U64 -> Try(Str, Str)),
+		verification_actor : [None, Some(Str)],
+	}
 
 	ErrorDef : { description : Str, recovery : Str, verification : {} -> List(ErrorExample) }
 
@@ -116,15 +131,29 @@ Api :: [].{
 	error_cases = |definition| definition
 
 	error_metadata : Str, ErrorDef -> Try(ErrorMetadata, Str)
-	error_metadata = |code, definition| match (definition.verification)({}) {
-		[] => Err("application error requires a verification case")
-		[first, .. as rest] => Ok({
-			code,
-			description: definition.description,
-			recovery: definition.recovery,
-			operation: first.operation,
-			additional_operations: rest.map(|scenario| scenario.operation),
-		})
+	error_metadata = |code, definition| {
+		scenarios = (definition.verification)({})
+		# An explicit empty principal is invalid, not a request for the default.
+		if scenarios.any(|scenario| scenario.verification_actor == Some("")) {
+			return Err("verification principal must be nonempty")
+		}
+		match scenarios {
+			[] => Err("application error requires a verification case")
+			[first, .. as rest] => Ok({
+				code,
+				description: definition.description,
+				recovery: definition.recovery,
+				operation: first.operation,
+				additional_operations: rest.map(|scenario| scenario.operation),
+				verification_actors: scenarios.fold(
+					[],
+					|actors, scenario| match scenario.verification_actor {
+						None => actors
+						Some(actor) => actors.append({ operation: scenario.operation.operation, actor })
+					},
+				),
+			})
+		}
 	}
 
 	failed_command : Write(input, output), (Str, U64 -> Try(input, Str)) -> ErrorExample
@@ -132,6 +161,7 @@ Api :: [].{
 		codec = operation.input()
 		{
 			operation: write(operation),
+			verification_actor: None,
 			input: |snapshot, seed| {
 				value = generate(snapshot, seed)?
 				Ok(codec.encode(value))
@@ -139,16 +169,29 @@ Api :: [].{
 		}
 	}
 
+	failed_command_as : Write(input, output), VerificationPrincipal, (Str, U64 -> Try(input, Str)) -> ErrorExample
+	failed_command_as = |operation, principal, generate| {
+		..failed_command(operation, generate),
+		verification_actor: Some(verification_principal_actor(principal)),
+	}
+
 	failed_query : Read(input, output), (Str, U64 -> Try(input, Str)) -> ErrorExample
 	failed_query = |operation, generate| {
 		codec = operation.input()
 		{
 			operation: read(operation),
+			verification_actor: None,
 			input: |snapshot, seed| {
 				value = generate(snapshot, seed)?
 				Ok(codec.encode(value))
 			},
 		}
+	}
+
+	failed_query_as : Read(input, output), VerificationPrincipal, (Str, U64 -> Try(input, Str)) -> ErrorExample
+	failed_query_as = |operation, principal, generate| {
+		..failed_query(operation, generate),
+		verification_actor: Some(verification_principal_actor(principal)),
 	}
 
 	Effect : { kind : Str, model : Str, fields : List(Str), command : Str }

@@ -614,6 +614,9 @@ fn fixture_build(
         ),
         "owned" => FixtureBuild::plain(root, "fixtures/row-authority-web-conformance"),
         "repeated-field" => FixtureBuild::plain(root, "fixtures/repeated-field-conformance"),
+        "verification-actors" => {
+            FixtureBuild::plain(root, "fixtures/verification-actor-conformance")
+        }
         "owned-probe" => FixtureBuild::overlay(
             root,
             "fixtures/row-authority-web-conformance",
@@ -1223,6 +1226,12 @@ fn configure_tests(
             "oauth::usage::refresh_tests::compiled_refresh_crash_recovery_uses_sealed_dispatch_and_publication",
         ]);
     }
+    if !fixtures.contains_key("verification-actors") {
+        command.args([
+            "--skip",
+            "app_contract::admitted_failure_principals_are_atomic_replayable_and_simulation_only",
+        ]);
+    }
     if !fixtures.contains_key("oauth-calendar") && fixtures.contains_key("credential-metadata") {
         command.args([
             "--skip",
@@ -1258,6 +1267,10 @@ fn configure_tests(
         ("owned", "DAY2_TEST_OWNED_ARTIFACT"),
         ("owned-probe", "DAY2_TEST_OWNED_PROBE_ARTIFACT"),
         ("repeated-field", "DAY2_TEST_REPEATED_FIELD_ARTIFACT"),
+        (
+            "verification-actors",
+            "DAY2_TEST_VERIFICATION_ACTORS_ARTIFACT",
+        ),
     ] {
         command.env_remove(variable);
         if let Some(path) = fixtures.get(fixture) {
@@ -1364,6 +1377,7 @@ fn receipt(
         let reports = artifact("reports")?;
         let reports_probe = artifact("reports-probe")?;
         let repeated_field = artifact("repeated-field")?;
+        let verification_actors = artifact("verification-actors")?;
         let artifact_id =
             |path: &Path| format!("sha256:{}", path.file_name().unwrap().to_string_lossy());
         let mut report = serde_json::json!({
@@ -1414,6 +1428,10 @@ fn receipt(
         report.insert(
             "repeated_field".into(),
             serde_json::Value::String(artifact_id(&repeated_field)),
+        );
+        report.insert(
+            "verification_actors".into(),
+            serde_json::Value::String(artifact_id(&verification_actors)),
         );
         report.insert(
             "input_snapshot".into(),
@@ -1504,6 +1522,7 @@ fn required_steps(scope: &str) -> Result<&'static [&'static str]> {
             "build-redirect",
             "build-relational",
             "build-lifecycle",
+            "build-verification-actors",
             "build-collection",
             "build-relational-next",
             "test-isolated-build",
@@ -1633,6 +1652,7 @@ mod tests {
             "build-redirect",
             "build-relational",
             "build-lifecycle",
+            "build-verification-actors",
             "build-collection",
             "build-relational-next",
             "build-http",
@@ -1705,7 +1725,8 @@ mod tests {
     }
 
     #[test]
-    fn full_receipt_requires_and_pins_lifecycle_and_redirect_artifacts() -> Result<()> {
+    fn full_receipt_requires_and_pins_lifecycle_redirect_and_verification_actor_artifacts()
+    -> Result<()> {
         let directory = tempfile::tempdir()?;
         fs::create_dir_all(directory.path().join("artifacts"))?;
         let required = required_steps("all")?;
@@ -1720,10 +1741,15 @@ mod tests {
             .collect();
         let redirect = "d".repeat(64);
         let lifecycle = "e".repeat(64);
+        let verification_actors = "f".repeat(64);
         fixtures.insert("redirect".into(), PathBuf::from(&redirect));
         fixtures.insert("lifecycle".into(), PathBuf::from(&lifecycle));
+        fixtures.insert(
+            "verification-actors".into(),
+            PathBuf::from(&verification_actors),
+        );
         let path = directory.path().join("artifacts/verification.json");
-        for name in ["redirect", "lifecycle"] {
+        for name in ["redirect", "lifecycle", "verification-actors"] {
             let mut missing = fixtures.clone();
             missing.remove(name);
             let error = receipt(
@@ -1754,6 +1780,10 @@ mod tests {
         let report: serde_json::Value = serde_json::from_slice(&fs::read(path)?)?;
         assert_eq!(report["redirect"], format!("sha256:{redirect}"));
         assert_eq!(report["lifecycle"], format!("sha256:{lifecycle}"));
+        assert_eq!(
+            report["verification_actors"],
+            format!("sha256:{verification_actors}")
+        );
         Ok(())
     }
 

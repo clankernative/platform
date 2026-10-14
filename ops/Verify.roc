@@ -60,6 +60,7 @@ Verify :: [].{
 			"redirect",
 			"relational",
 			"lifecycle",
+			"verification-actors",
 			"relational-next",
 			"collection",
 			"owned",
