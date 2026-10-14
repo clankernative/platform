@@ -156,7 +156,7 @@ impl CredentialMaterial {
 
     fn mint_reply(bytes: &[u8]) -> Result<Self> {
         ensure!(bytes.len() <= 65_536, "epoch_native_mint_reply_bound");
-        let mut value: MintReply = crate::json::decode(&bytes)
+        let mut value: MintReply = crate::json::decode(bytes)
             .map_err(|_| anyhow::anyhow!("epoch_native_mint_reply_shape"))?;
         let expiry = time::OffsetDateTime::parse(
             &value.expire_time,
