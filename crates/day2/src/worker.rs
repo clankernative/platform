@@ -206,7 +206,7 @@ pub struct Worker {
     #[cfg(not(target_os = "macos"))]
     child: Child,
     #[cfg(target_os = "linux")]
-    cleanup_exit: Option<ExitStatus>,
+    cleanup_exit: Option<ExitEvidence>,
     #[cfg(not(target_os = "macos"))]
     requests: Option<SyncSender<Vec<u8>>>,
     #[cfg(not(target_os = "macos"))]
@@ -371,10 +371,16 @@ impl Worker {
                 let error = error.context(stages).context(evidence);
                 #[cfg(target_os = "linux")]
                 let error = {
-                    let final_exit = exit_evidence(Ok(self.cleanup_exit.take()));
+                    let final_exit = self
+                        .cleanup_exit
+                        .take()
+                        .unwrap_or_else(|| exit_evidence(Ok(None)));
                     error.context(format!(
-                        "TEMP Linux cleanup [kill_requested=true final_code={:?} final_signal={:?}]",
-                        final_exit.code, final_exit.signal
+                        "TEMP Linux cleanup [kill_requested=true final_code={:?} final_signal={:?} wait_failed={} wait_errno={:?}]",
+                        final_exit.code,
+                        final_exit.signal,
+                        final_exit.try_wait_failed,
+                        final_exit.try_wait_errno
                     ))
                 };
                 Err(error)
@@ -414,7 +420,7 @@ impl Worker {
             let _waited = self.child.wait();
             #[cfg(target_os = "linux")]
             {
-                self.cleanup_exit = _waited.ok();
+                self.cleanup_exit = Some(exit_evidence(_waited.map(Some)));
             }
             if let Some(reader) = self.reader.take() {
                 let _ = reader.join();
