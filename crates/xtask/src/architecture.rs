@@ -5448,10 +5448,31 @@ mod tests {
                 format!("fn f() {{ r#rustix::r#fs::r#{operation}(fd, argument); }}"),
             ] {
                 let findings = scan(&source);
-                assert_eq!(findings.len(), 1, "{source}: {findings:?}");
-                assert_eq!(findings[0].target, target, "{source}: {findings:?}");
-                assert_eq!(findings[0].kind, "filesystem");
-                assert_eq!(findings[0].count, 1);
+                let operations = findings
+                    .iter()
+                    .filter(|f| f.kind == "filesystem")
+                    .collect::<Vec<_>>();
+                assert_eq!(operations.len(), 1, "{source}: {findings:?}");
+                assert_eq!(operations[0].target, target, "{source}: {findings:?}");
+                assert_eq!(operations[0].count, 1);
+                let globs = findings
+                    .iter()
+                    .filter(|f| f.kind == "effect-glob")
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    globs.len(),
+                    usize::from(source.contains("::*")),
+                    "{source}: {findings:?}"
+                );
+                if let Some(glob) = globs.first() {
+                    assert_eq!(glob.target, "rustix::fs");
+                    assert_eq!(glob.count, 1);
+                }
+                assert_eq!(
+                    findings.len(),
+                    operations.len() + globs.len(),
+                    "{source}: {findings:?}"
+                );
             }
         }
         for source in [
