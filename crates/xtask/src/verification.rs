@@ -1659,8 +1659,20 @@ mod tests {
             fs::write(path, b"approved input")?;
         }
         for name in [
-            "crates", "tools", "vendor", "assets", "ops", "infra", "deploy", "toolchains",
-            "sdk", "cli", "fixtures", "examples/app-ownership", "examples/notifications", "examples/reports",
+            "crates",
+            "tools",
+            "vendor",
+            "assets",
+            "ops",
+            "infra",
+            "deploy",
+            "toolchains",
+            "sdk",
+            "cli",
+            "fixtures",
+            "examples/app-ownership",
+            "examples/notifications",
+            "examples/reports",
         ] {
             fs::create_dir_all(root.join(name))?;
         }
@@ -1668,13 +1680,20 @@ mod tests {
         let snapshots = || -> Result<Vec<String>> {
             [("linux", "x86_64"), ("macos", "aarch64")]
                 .into_iter()
-                .map(|(host, architecture)| verification_snapshot_for(root, "verify", host, architecture))
+                .map(|(host, architecture)| {
+                    verification_snapshot_for(root, "verify", host, architecture)
+                })
                 .collect()
         };
         let approved = snapshots()?;
         fs::write(&pin, b"changed dependency pin")?;
         let changed = snapshots()?;
-        assert!(approved.iter().zip(changed).all(|(before, after)| *before != after));
+        assert!(
+            approved
+                .iter()
+                .zip(changed)
+                .all(|(before, after)| *before != after)
+        );
         fs::remove_file(&pin)?;
         assert!(snapshots().is_err());
         fs::write(&pin, b"approved input")?;
