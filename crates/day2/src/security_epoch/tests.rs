@@ -702,7 +702,6 @@ fn independent_controller_connections_accept_only_one_first_holder() {
         *operation = Digest::new(b"other-controller-op");
         holder.process_incarnation = Digest::new(b"other-app-process");
     }
-    drop(journal);
     drop(db);
     let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
     let mut threads = Vec::new();
