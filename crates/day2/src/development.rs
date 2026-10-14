@@ -20,6 +20,25 @@ pub const ACTOR: &str = "developer";
 pub const DEFAULT_SEED: u64 = 0xDA72_2026;
 pub const DEFAULT_CASES: u64 = 16;
 const MAX_STEPS: usize = 128;
+const VERIFICATION_TIME: i64 = 1_700_000_000;
+
+/// Non-interactive invocation and provider-fixture time. Verification uses a
+/// repeatable epoch; local serving uses the runtime clock for fresh providers.
+/// Interactive credential confirmations always use the runtime clock.
+#[derive(Clone, Copy)]
+pub enum CampaignTime {
+    Verification,
+    Local,
+}
+
+impl CampaignTime {
+    fn start(self, runtime: &Runtime) -> Result<i64> {
+        match self {
+            Self::Verification => Ok(VERIFICATION_TIME),
+            Self::Local => Ok(runtime.host().now_ms()?.div_euclid(1000)),
+        }
+    }
+}
 
 /// A selected callee's checked example, used only by disposable verification.
 /// The target and schema pin also authorize the caller's simulated read.
@@ -1521,7 +1540,7 @@ fn create_for_with_imports(
         "credential artifacts require explicit verification selection or an admitted installation"
     );
     let instance = instance_for_artifact(&artifact_path, &artifact, policy, actor, imports)?;
-    create_selected_instance(instance, directory, imports, actor)
+    create_selected_instance(instance, directory, imports, actor, CampaignTime::Local)
 }
 
 /// Explicit disposable verification setup. Complete desired selections pass
@@ -1561,7 +1580,13 @@ fn create_verification_for_with_imports(
         });
         credential_verification_selection(&mut instance, &artifact)?;
     }
-    create_selected_instance(instance, directory, imports, actor)
+    create_selected_instance(
+        instance,
+        directory,
+        imports,
+        actor,
+        CampaignTime::Verification,
+    )
 }
 
 /// Desired disposable test data only. The caller must admit the complete
@@ -1683,6 +1708,7 @@ fn create_selected_instance(
     directory: &Path,
     imports: &[ImportedQueryFixture],
     actor: &str,
+    time: CampaignTime,
 ) -> Result<Runtime> {
     use std::{io::Write, os::unix::fs::PermissionsExt};
     let instance = Instance::from_bytes(&serde_json::to_vec(&instance)?)?;
@@ -1710,7 +1736,7 @@ fn create_selected_instance(
     // differs. Synthetic providers are unaffected: they never reach this host.
     let database = runtime.db().to_path_buf();
     let scope = runtime.scope().to_owned();
-    let captured_at = crate::oauth::effects::wall_time()?;
+    let captured_at = time.start(&runtime)?;
     let mut worlds = disposable_provider_worlds(actor, captured_at);
     for import in imports {
         if import.kind != crate::operation_contract::Kind::Query {
@@ -2226,8 +2252,14 @@ struct Active {
 }
 
 impl Campaign {
-    pub fn new(runtime: Runtime, example: Option<&str>, seed: u64, count: u64) -> Result<Self> {
-        Self::for_actor(runtime, example, seed, count, "developer", true)
+    pub fn new(
+        runtime: Runtime,
+        example: Option<&str>,
+        seed: u64,
+        count: u64,
+        time: CampaignTime,
+    ) -> Result<Self> {
+        Self::for_actor(runtime, example, seed, count, "developer", true, time)
     }
 
     pub fn for_actor(
@@ -2237,6 +2269,7 @@ impl Campaign {
         count: u64,
         actor: &str,
         include_examples: bool,
+        time: CampaignTime,
     ) -> Result<Self> {
         ensure!(count <= 100, "generator count budget");
         // Campaigns explicitly provide shared synthetic capability worlds. This
@@ -2244,7 +2277,7 @@ impl Campaign {
         crate::carta::seed_verification_if_unconfigured(&runtime)?;
         crate::people_providers::seed_verification_if_unconfigured(&runtime)?;
         let runtime = crate::managed_credentials::verification::install(runtime)?;
-        let provider_clock = runtime.host().now_ms()?.div_euclid(1000);
+        let provider_clock = time.start(&runtime)?;
         Ok(Self {
             evidence: Evidence {
                 format: 1,
@@ -2834,7 +2867,13 @@ pub fn exercise(
     seed: u64,
     count: u64,
 ) -> Result<Evidence> {
-    let mut campaign = Campaign::new(runtime.clone(), example_name, seed, count)?;
+    let mut campaign = Campaign::new(
+        runtime.clone(),
+        example_name,
+        seed,
+        count,
+        CampaignTime::Local,
+    )?;
     let outcome = crate::automation::run(
         &crate::automation::runner()?,
         &["exercise", example_name.unwrap_or(""), &count.to_string()],
@@ -2883,6 +2922,7 @@ pub fn verify_with_runner_imports(
         None,
         seed,
         count,
+        CampaignTime::Verification,
     )?;
     let outcome =
         crate::automation::run(runner, &["exercise", "", &count.to_string()], |request| {

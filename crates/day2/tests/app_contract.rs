@@ -460,7 +460,8 @@ fn internal_examples_are_offline_only_and_do_not_expose_public_commands() -> Res
         "unknown_operation"
     );
     let live = day2::store::Runtime::load(runtime.instance_path(), runtime.app())?;
-    let mut campaign = development::Campaign::new(live, Some("demo"), 42, 0)?;
+    let mut campaign =
+        development::Campaign::new(live, Some("demo"), 42, 0, development::CampaignTime::Local)?;
     let request = day2::json::decode(br#"{"protocol":1,"action":"dev-examples","input":"{}"}"#)?;
     assert_eq!(
         campaign.effect(request).unwrap_err().to_string(),
