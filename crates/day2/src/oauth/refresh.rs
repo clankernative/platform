@@ -374,8 +374,8 @@ pub(super) fn ensure_current(
     };
     let sent_at = effects::wall_time()?;
     if sent_at < checked_dispatch {
-        store::mark_uncertain(&db, &attempt)?;
         clock_refusal(&db, &context)?;
+        store::mark_uncertain(&db, &attempt)?;
         return Ok(Resolution::unavailable("ReauthRequired"));
     }
     if !admitted {
@@ -503,10 +503,10 @@ pub(super) fn ensure_current(
             return Ok(Resolution::unavailable("ReauthRequired"));
         }
         Err(_) => {
-            store::mark_uncertain(&db, &attempt)?;
             if clock_failed {
                 clock_refusal(&db, &context)?;
             }
+            store::mark_uncertain(&db, &attempt)?;
             return Ok(Resolution::unavailable("ReauthRequired"));
         }
     };
@@ -516,8 +516,8 @@ pub(super) fn ensure_current(
         .context("OAuth refresh expiry overflow")?;
     let observed_at = effects::wall_time()?;
     if observed_at < last_clock || observed_at >= expires_at || monotonic.elapsed() > BUDGET {
-        store::mark_uncertain(&db, &attempt)?;
         clock_refusal(&db, &context)?;
+        store::mark_uncertain(&db, &attempt)?;
         return Ok(Resolution::unavailable("ReauthRequired"));
     }
     let material = custody::prepare_replacement_tokens(
@@ -593,10 +593,13 @@ pub(super) fn ensure_current(
     match publication {
         Ok(true) => Resolution::ready(&context, next, freshest),
         _ => {
-            store::mark_uncertain(&db, &attempt)?;
-            let at = effects::wall_time()?;
-            if publication_clock_refused || at < observed_at || at >= expires_at {
+            if publication_clock_refused {
                 clock_refusal(&db, &context)?;
+                store::mark_uncertain(&db, &attempt)?;
+            } else {
+                store::mark_uncertain(&db, &attempt)?;
+                let at = effects::wall_time()?;
+                if at < freshest || at >= expires_at { clock_refusal(&db, &context)?; }
             }
             Ok(Resolution::unavailable("ReauthRequired"))
         }
