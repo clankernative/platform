@@ -702,3 +702,20 @@ jobs:
       - run: tofu -chdir=deploy/integrations/gitea-instance-ci init -backend=false -lockfile=readonly
       - run: tofu -chdir=deploy/integrations/gitea-instance-ci validate
       - run: tofu -chdir=deploy/integrations/gitea-instance-ci test
+
+  firestore-epoch-integration-example:
+    # Resource-only provider example; no credentials or live cloud operations.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: opentofu/setup-opentofu@9d84900f3238fab8cd84ce47d658d25dd008be2f # v1
+        with:
+          tofu_version: 1.11.5
+          tofu_wrapper: false
+      - run: tofu fmt -check -recursive deploy/integrations/firestore-security-epoch
+      - run: tofu -chdir=deploy/integrations/firestore-security-epoch init -backend=false -lockfile=readonly
+      - run: tofu -chdir=deploy/integrations/firestore-security-epoch validate
+      - run: tofu -chdir=deploy/integrations/firestore-security-epoch test
