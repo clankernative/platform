@@ -242,6 +242,20 @@ fn selected_container_profile_refuses_malformed_names_and_digest_references() {
     }
 }
 
+#[test]
+fn process_time_offsets_require_exact_current_thread_namespace_join() {
+    use super::native_namespace::{NamespaceIdentity, require_process_time_join_data};
+    let current = NamespaceIdentity { device: 5, inode: 17 };
+    let other = NamespaceIdentity { device: 5, inode: 23 };
+    let other_device = NamespaceIdentity { device: 7, inode: 17 };
+    let zero = NamespaceIdentity { device: 5, inode: 0 };
+    assert!(require_process_time_join_data(&current, &current, &current).is_ok());
+    assert!(require_process_time_join_data(&current, &other, &current).is_err());
+    assert!(require_process_time_join_data(&current, &current, &other).is_err());
+    assert!(require_process_time_join_data(&current, &other_device, &other_device).is_err());
+    assert!(require_process_time_join_data(&zero, &zero, &zero).is_err());
+}
+
 #[cfg(not(target_os = "linux"))]
 #[test]
 fn unsupported_namespace_observation_refuses_original_acquisition() {
