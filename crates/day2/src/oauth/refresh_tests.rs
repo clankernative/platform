@@ -6,8 +6,6 @@ use crate::{
     authority_state,
     oauth::{account, effects, exchange, outbound, profiles, refresh},
 };
-use anyhow::Context as _;
-use rusqlite::OptionalExtension as _;
 use std::{
     collections::BTreeSet,
     fs,
