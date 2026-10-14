@@ -81,14 +81,22 @@ impl InitialPreparationImage {
             acquisition.remaining()?;
             let core = OriginalSeedCore::new(policy, store, incarnations)?;
             ensure!(
-                runtime.scope() == format!("{}/{}/{}", core.scope.installation.as_str(), core.scope.environment.as_str(), core.scope.app.as_str())
+                runtime.scope()
+                    == format!(
+                        "{}/{}/{}",
+                        core.scope.installation.as_str(),
+                        core.scope.environment.as_str(),
+                        core.scope.app.as_str()
+                    )
                     && runtime.app() == core.scope.app.as_str()
                     && runtime.artifact().id() == core.artifact.as_str(),
                 "epoch_preparation_runtime_selection_mismatch"
             );
             let marker = core.marker()?;
             let mut memory = FreshMemoryDatabase::empty(acquisition)?;
-            let tx = memory.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let tx = memory
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
             runtime.initialize_in_transaction(&tx)?;
             tx.execute_batch(INITIAL_SEED_SCHEMA)?;
             ensure!(
@@ -97,14 +105,26 @@ impl InitialPreparationImage {
             );
             tx.execute(
                 "INSERT INTO day2_initial_security_seed VALUES(1,?1,?2,?3)",
-                params![serde_json::to_vec(store)?, serde_json::to_vec(&core)?, serde_json::to_vec(&marker)?],
+                params![
+                    serde_json::to_vec(store)?,
+                    serde_json::to_vec(&core)?,
+                    serde_json::to_vec(&marker)?
+                ],
             )?;
             acquisition.remaining()?;
             tx.commit()?;
             let image = memory.freeze(acquisition)?;
-            ensure!(image.schema == core.schema_contract, "epoch_preparation_schema_changed");
+            ensure!(
+                image.schema == core.schema_contract,
+                "epoch_preparation_schema_changed"
+            );
             acquisition.remaining()?;
-            Ok(Self { image, store: store.clone(), core, marker })
+            Ok(Self {
+                image,
+                store: store.clone(),
+                core,
+                marker,
+            })
         })();
         if result.is_err() {
             acquisition.refuse();
@@ -138,10 +158,15 @@ impl InitialPreparationImage {
     ) -> Result<Connection> {
         let result = (|| {
             let decoded = self.image.decode_exact_readback(readback, acquisition)?;
-            let count: i64 = decoded.query_row("SELECT count(*) FROM day2_initial_security_seed", [], |row| row.get(0))?;
+            let count: i64 = decoded.query_row(
+                "SELECT count(*) FROM day2_initial_security_seed",
+                [],
+                |row| row.get(0),
+            )?;
             ensure!(count == 1, "epoch_preparation_seed_cardinality");
             let (store, core, marker): (Vec<u8>, Vec<u8>, Vec<u8>) = decoded.query_row(
-                "SELECT store,core,marker FROM day2_initial_security_seed WHERE singleton=1", [],
+                "SELECT store,core,marker FROM day2_initial_security_seed WHERE singleton=1",
+                [],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )?;
             ensure!(
@@ -174,55 +199,57 @@ impl FrozenPreparationImage {
     /// The caller must have initialized the complete admitted framework/app
     /// schema and seed/marker in one committed transaction. This function only
     /// freezes DATA; it does not admit that schema or authorize file creation.
-    fn freeze(
-        connection: &Connection,
-        acquisition: &mut NativeAcquisition,
-    ) -> Result<Self> {
+    fn freeze(connection: &Connection, acquisition: &mut NativeAcquisition) -> Result<Self> {
         let result = (|| {
-        acquisition.remaining()?;
-        ensure!(
-            connection.pragma_query_value(None, "temp_store", |row| row.get::<_, i64>(0))? == 2,
-            "epoch_preparation_temp_store_required"
-        );
-        ensure!(connection.is_autocommit(), "epoch_preparation_uncommitted_image");
-        ensure!(
-            connection.path().is_none_or(str::is_empty),
-            "epoch_preparation_memory_image_required"
-        );
-        let mut databases = connection.prepare("PRAGMA database_list")?;
-        let mut rows = databases.query([])?;
-        while let Some(row) = rows.next()? {
-            let name: String = row.get(1)?;
-            let file: String = row.get(2)?;
+            acquisition.remaining()?;
             ensure!(
-                matches!(name.as_str(), "main" | "temp") && file.is_empty(),
-                "epoch_preparation_attached_database_refused"
+                connection.pragma_query_value(None, "temp_store", |row| row.get::<_, i64>(0))? == 2,
+                "epoch_preparation_temp_store_required"
             );
-        }
-        let mode: String = connection.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
-        ensure!(mode == "memory", "epoch_preparation_initial_journal_mode");
-        let pages: i64 = connection.pragma_query_value(None, "page_count", |row| row.get(0))?;
-        let page_size: i64 = connection.pragma_query_value(None, "page_size", |row| row.get(0))?;
-        ensure!(pages > 0 && page_size > 0, "epoch_preparation_empty_image");
-        let expected = usize::try_from(pages)?
-            .checked_mul(usize::try_from(page_size)?)
-            .ok_or_else(|| anyhow::anyhow!("epoch_preparation_image_bound"))?;
-        ensure!(expected <= MAX_IMAGE_BYTES, "epoch_preparation_image_bound");
-        let schema = schema_contract(connection)?;
-        acquisition.remaining()?;
-        let data = connection.serialize(MAIN_DB)?;
-        ensure!(data.len() == expected, "epoch_preparation_image_length");
-        ensure!(
-            data.len() >= 100
-                && &data[..16] == b"SQLite format 3\0"
-                && data[18] == 1
-                && data[19] == 1,
-            "epoch_preparation_initial_image_format"
-        );
-        let bytes = data.to_vec();
-        drop(data);
-        acquisition.remaining()?;
-        Ok(Self { bytes, schema })
+            ensure!(
+                connection.is_autocommit(),
+                "epoch_preparation_uncommitted_image"
+            );
+            ensure!(
+                connection.path().is_none_or(str::is_empty),
+                "epoch_preparation_memory_image_required"
+            );
+            let mut databases = connection.prepare("PRAGMA database_list")?;
+            let mut rows = databases.query([])?;
+            while let Some(row) = rows.next()? {
+                let name: String = row.get(1)?;
+                let file: String = row.get(2)?;
+                ensure!(
+                    matches!(name.as_str(), "main" | "temp") && file.is_empty(),
+                    "epoch_preparation_attached_database_refused"
+                );
+            }
+            let mode: String =
+                connection.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
+            ensure!(mode == "memory", "epoch_preparation_initial_journal_mode");
+            let pages: i64 = connection.pragma_query_value(None, "page_count", |row| row.get(0))?;
+            let page_size: i64 =
+                connection.pragma_query_value(None, "page_size", |row| row.get(0))?;
+            ensure!(pages > 0 && page_size > 0, "epoch_preparation_empty_image");
+            let expected = usize::try_from(pages)?
+                .checked_mul(usize::try_from(page_size)?)
+                .ok_or_else(|| anyhow::anyhow!("epoch_preparation_image_bound"))?;
+            ensure!(expected <= MAX_IMAGE_BYTES, "epoch_preparation_image_bound");
+            let schema = schema_contract(connection)?;
+            acquisition.remaining()?;
+            let data = connection.serialize(MAIN_DB)?;
+            ensure!(data.len() == expected, "epoch_preparation_image_length");
+            ensure!(
+                data.len() >= 100
+                    && &data[..16] == b"SQLite format 3\0"
+                    && data[18] == 1
+                    && data[19] == 1,
+                "epoch_preparation_initial_image_format"
+            );
+            let bytes = data.to_vec();
+            drop(data);
+            acquisition.remaining()?;
+            Ok(Self { bytes, schema })
         })();
         if result.is_err() {
             acquisition.refuse();
@@ -247,21 +274,27 @@ impl FrozenPreparationImage {
         acquisition: &mut NativeAcquisition,
     ) -> Result<Connection> {
         let result = (|| {
-        acquisition.remaining()?;
-        ensure!(readback == self.bytes, "epoch_preparation_image_readback_mismatch");
-        let mut memory = FreshMemoryDatabase::empty(acquisition)?;
-        // Safe pinned API over an already verified, complete immutable slice;
-        // never a live descriptor, uncertain input or WAL-header repair.
-        memory.connection.deserialize_read_exact(MAIN_DB, readback, readback.len(), true)?;
-        let decoded = memory.connection;
-        ensure!(
-            schema_contract(&decoded)? == self.schema,
-            "epoch_preparation_schema_readback_mismatch"
-        );
-        let integrity: String = decoded.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
-        ensure!(integrity == "ok", "epoch_preparation_image_integrity");
-        acquisition.remaining()?;
-        Ok(decoded)
+            acquisition.remaining()?;
+            ensure!(
+                readback == self.bytes,
+                "epoch_preparation_image_readback_mismatch"
+            );
+            let mut memory = FreshMemoryDatabase::empty(acquisition)?;
+            // Safe pinned API over an already verified, complete immutable slice;
+            // never a live descriptor, uncertain input or WAL-header repair.
+            memory
+                .connection
+                .deserialize_read_exact(MAIN_DB, readback, readback.len(), true)?;
+            let decoded = memory.connection;
+            ensure!(
+                schema_contract(&decoded)? == self.schema,
+                "epoch_preparation_schema_readback_mismatch"
+            );
+            let integrity: String =
+                decoded.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+            ensure!(integrity == "ok", "epoch_preparation_image_integrity");
+            acquisition.remaining()?;
+            Ok(decoded)
         })();
         if result.is_err() {
             acquisition.refuse();
@@ -274,9 +307,8 @@ impl FrozenPreparationImage {
 /// The selected contract must be derived from the admitted initialization path;
 /// hashing an arbitrary existing database never makes its schema admitted.
 pub(super) fn schema_contract(connection: &Connection) -> Result<Digest> {
-    let mut statement = connection.prepare(
-        "SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name",
-    )?;
+    let mut statement = connection
+        .prepare("SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name")?;
     let mut rows = statement.query([])?;
     let mut definitions = Vec::new();
     let mut size = 0_usize;
@@ -292,8 +324,12 @@ pub(super) fn schema_contract(connection: &Connection) -> Result<Digest> {
             Some(definition.1.as_str()),
             Some(definition.2.as_str()),
             definition.3.as_deref(),
-        ].into_iter().flatten() {
-            size = size.checked_add(value.len())
+        ]
+        .into_iter()
+        .flatten()
+        {
+            size = size
+                .checked_add(value.len())
                 .ok_or_else(|| anyhow::anyhow!("epoch_preparation_schema_bound"))?;
         }
         ensure!(size <= MAX_SCHEMA_BYTES, "epoch_preparation_schema_bound");
@@ -318,7 +354,9 @@ mod tests {
     }
 
     fn database() -> Connection {
-        let db = FreshMemoryDatabase::empty(&mut acquisition()).unwrap().connection;
+        let db = FreshMemoryDatabase::empty(&mut acquisition())
+            .unwrap()
+            .connection;
         db.execute_batch("CREATE TABLE initial_marker(seed TEXT PRIMARY KEY); INSERT INTO initial_marker VALUES('original');").unwrap();
         db
     }
@@ -327,16 +365,29 @@ mod tests {
     fn frozen_image_survives_source_mutation_and_readback_is_read_only() {
         let db = database();
         let image = FrozenPreparationImage::freeze(&db, &mut acquisition()).unwrap();
-        db.execute("UPDATE initial_marker SET seed='replacement'", []).unwrap();
+        db.execute("UPDATE initial_marker SET seed='replacement'", [])
+            .unwrap();
         drop(db);
-        let restored = image.decode_exact_readback(image.bytes(), &mut acquisition()).unwrap();
-        let seed: String = restored.query_row("SELECT seed FROM initial_marker", [], |row| row.get(0)).unwrap();
+        let restored = image
+            .decode_exact_readback(image.bytes(), &mut acquisition())
+            .unwrap();
+        let seed: String = restored
+            .query_row("SELECT seed FROM initial_marker", [], |row| row.get(0))
+            .unwrap();
         assert_eq!(seed, "original");
-        assert!(restored.execute("UPDATE initial_marker SET seed='wrong'", []).is_err());
+        assert!(
+            restored
+                .execute("UPDATE initial_marker SET seed='wrong'", [])
+                .is_err()
+        );
         let mut corrupt = image.bytes().to_vec();
         corrupt[18] = 2;
         let mut interval = acquisition();
-        assert!(image.decode_exact_readback(&corrupt, &mut interval).is_err());
+        assert!(
+            image
+                .decode_exact_readback(&corrupt, &mut interval)
+                .is_err()
+        );
         assert!(interval.remaining().is_err());
     }
 
@@ -344,9 +395,11 @@ mod tests {
     fn schema_contract_excludes_values_and_changes_with_definitions() {
         let db = database();
         let original = schema_contract(&db).unwrap();
-        db.execute("UPDATE initial_marker SET seed='another-incarnation'", []).unwrap();
+        db.execute("UPDATE initial_marker SET seed='another-incarnation'", [])
+            .unwrap();
         assert_eq!(schema_contract(&db).unwrap(), original);
-        db.execute_batch("CREATE TABLE other_definition(value INTEGER NOT NULL)").unwrap();
+        db.execute_batch("CREATE TABLE other_definition(value INTEGER NOT NULL)")
+            .unwrap();
         assert_ne!(schema_contract(&db).unwrap(), original);
     }
 
@@ -382,22 +435,34 @@ mod tests {
     fn runtime() -> (tempfile::TempDir, crate::store::Runtime) {
         let directory = tempfile::tempdir().unwrap();
         let instance_path = directory.path().join("instance.json");
-        std::fs::write(&instance_path, serde_json::to_vec(&serde_json::json!({
-            "installation":"company","environment":"canary",
-            "apps":{"calendar":{"artifact":"unused","readers":[],"writers":[]}}
-        })).unwrap()).unwrap();
+        std::fs::write(
+            &instance_path,
+            serde_json::to_vec(&serde_json::json!({
+                "installation":"company","environment":"canary",
+                "apps":{"calendar":{"artifact":"unused","readers":[],"writers":[]}}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
         let contract: crate::artifact::Artifact = serde_json::from_value(serde_json::json!({
             "format":crate::artifact::CURRENT_FORMAT,"roc_version":"image-test",
             "worker_digest":"image-test","schema_digest":"image-test",
             "schema":{"models":{"items":{"fields":{"value":"text"}}},"inputs":{},"foreign_keys":[]},
             "operations":[],"sources":{},"admission":"local-spike-only"
-        })).unwrap();
+        }))
+        .unwrap();
         let artifact = crate::artifact::LoadedArtifact::from_contract_for_tests(
-            Digest::new(b"initial-image-artifact").to_string(), directory.path().into(), contract,
+            Digest::new(b"initial-image-artifact").to_string(),
+            directory.path().into(),
+            contract,
         );
         let runtime = crate::store::Runtime::from_artifact_for_tests(
-            instance_path, "calendar".into(), directory.path().join("must-not-create.sqlite"), artifact,
-        ).unwrap();
+            instance_path,
+            "calendar".into(),
+            directory.path().join("must-not-create.sqlite"),
+            artifact,
+        )
+        .unwrap();
         (directory, runtime)
     }
 
@@ -417,14 +482,18 @@ mod tests {
         let schema = schema_contract(&tx).unwrap();
         tx.rollback().unwrap();
         let epoch = serde_json::json!({"id":"epoch","revision":Digest::of(store).unwrap()});
-        let day2_capabilities::security_epoch::EpochProvider::FirestoreNativeV1 { iam_source, .. } = &store.provider;
-        let role = |account: serde_json::Value, name: &str| serde_json::json!({
-            "namespace":{"name":"native","uid":"namespace-uid"},
-            "kubernetes_service_account":{"name":name,"uid":format!("{name}-ksa-uid")},
-            "google_service_account":account,"workload_kind":if name=="app" { "stateful_set_v1" } else { "deployment_v1" },
-            "workload":{"name":name,"uid":format!("{name}-workload-uid")},
-            "token_review_audience":"https://kubernetes.default.svc"
-        });
+        let day2_capabilities::security_epoch::EpochProvider::FirestoreNativeV1 {
+            iam_source, ..
+        } = &store.provider;
+        let role = |account: serde_json::Value, name: &str| {
+            serde_json::json!({
+                "namespace":{"name":"native","uid":"namespace-uid"},
+                "kubernetes_service_account":{"name":name,"uid":format!("{name}-ksa-uid")},
+                "google_service_account":account,"workload_kind":if name=="app" { "stateful_set_v1" } else { "deployment_v1" },
+                "workload":{"name":name,"uid":format!("{name}-workload-uid")},
+                "token_review_audience":"https://kubernetes.default.svc"
+            })
+        };
         serde_json::from_value(serde_json::json!({
             "scope":store.scope,"epoch_store":epoch,
             "cluster":{"project":"project-seven","location":"us-central1","name":"native","uid":"cluster-uid",
@@ -448,13 +517,30 @@ mod tests {
         let tx = memory.connection.transaction().unwrap();
         runtime.initialize_in_transaction(&tx).unwrap();
         tx.execute_batch(INITIAL_SEED_SCHEMA).unwrap();
-        for name in ["items", "day2_meta", "day2_authority", "day2_initial_security_seed"] {
-            let count: i64 = tx.query_row("SELECT count(*) FROM sqlite_schema WHERE name=?1", [name], |row| row.get(0)).unwrap();
+        for name in [
+            "items",
+            "day2_meta",
+            "day2_authority",
+            "day2_initial_security_seed",
+        ] {
+            let count: i64 = tx
+                .query_row(
+                    "SELECT count(*) FROM sqlite_schema WHERE name=?1",
+                    [name],
+                    |row| row.get(0),
+                )
+                .unwrap();
             assert_eq!(count, 1, "missing complete initial definition: {name}");
         }
         tx.rollback().unwrap();
-        let tables: i64 = memory.connection.query_row("SELECT count(*) FROM sqlite_schema", [], |row| row.get(0)).unwrap();
-        assert_eq!(tables, 0, "initializer committed outside the callers transaction");
+        let tables: i64 = memory
+            .connection
+            .query_row("SELECT count(*) FROM sqlite_schema", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            tables, 0,
+            "initializer committed outside the callers transaction"
+        );
         assert!(!runtime.db().exists());
     }
 
@@ -463,21 +549,46 @@ mod tests {
         let (_directory, runtime) = runtime();
         let store = super::super::tests::selection();
         let policy = policy(&runtime, &store);
-        let image = InitialPreparationImage::prepare(&runtime, &policy, &store, incarnations(), &mut acquisition()).unwrap();
-        let decoded = image.decode_exact_readback(image.bytes(), &mut acquisition()).unwrap();
-        let row: (Vec<u8>, Vec<u8>, Vec<u8>) = decoded.query_row(
-            "SELECT store,core,marker FROM day2_initial_security_seed WHERE singleton=1", [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        ).unwrap();
+        let image = InitialPreparationImage::prepare(
+            &runtime,
+            &policy,
+            &store,
+            incarnations(),
+            &mut acquisition(),
+        )
+        .unwrap();
+        let decoded = image
+            .decode_exact_readback(image.bytes(), &mut acquisition())
+            .unwrap();
+        let row: (Vec<u8>, Vec<u8>, Vec<u8>) = decoded
+            .query_row(
+                "SELECT store,core,marker FROM day2_initial_security_seed WHERE singleton=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
         assert_eq!(row.0, serde_json::to_vec(image.store()).unwrap());
         assert_eq!(row.1, serde_json::to_vec(image.core()).unwrap());
         assert_eq!(row.2, serde_json::to_vec(image.marker()).unwrap());
         assert_eq!(image.core().marker().unwrap(), *image.marker());
-        let scope: String = decoded.query_row("SELECT value FROM day2_meta WHERE key='scope'", [], |row| row.get(0)).unwrap();
+        let scope: String = decoded
+            .query_row("SELECT value FROM day2_meta WHERE key='scope'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
         assert_eq!(scope, runtime.scope());
-        let items: i64 = decoded.query_row("SELECT count(*) FROM items", [], |row| row.get(0)).unwrap();
+        let items: i64 = decoded
+            .query_row("SELECT count(*) FROM items", [], |row| row.get(0))
+            .unwrap();
         assert_eq!(items, 0);
-        assert!(decoded.execute("INSERT INTO items(id,version,created_at,value) VALUES(1,1,0,'forbidden')", []).is_err());
+        assert!(
+            decoded
+                .execute(
+                    "INSERT INTO items(id,version,created_at,value) VALUES(1,1,0,'forbidden')",
+                    []
+                )
+                .is_err()
+        );
         assert!(!runtime.db().exists());
     }
 
@@ -489,11 +600,29 @@ mod tests {
         let mut bad_schema = good.clone();
         bad_schema.fresh_storage.schema_contract = Digest::new(b"not-complete-framework-schema");
         let mut interval = acquisition();
-        assert!(InitialPreparationImage::prepare(&runtime, &bad_schema, &store, incarnations(), &mut interval).is_err());
+        assert!(
+            InitialPreparationImage::prepare(
+                &runtime,
+                &bad_schema,
+                &store,
+                incarnations(),
+                &mut interval
+            )
+            .is_err()
+        );
         assert!(interval.remaining().is_err());
         let mut bad_artifact = good;
         bad_artifact.runtime_profile.app_artifact = Digest::new(b"different-artifact");
-        assert!(InitialPreparationImage::prepare(&runtime, &bad_artifact, &store, incarnations(), &mut acquisition()).is_err());
+        assert!(
+            InitialPreparationImage::prepare(
+                &runtime,
+                &bad_artifact,
+                &store,
+                incarnations(),
+                &mut acquisition()
+            )
+            .is_err()
+        );
         assert!(!runtime.db().exists());
     }
 }
