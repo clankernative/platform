@@ -571,6 +571,13 @@ pub(crate) fn open(path: &Path) -> Result<Connection> {
     use std::os::unix::fs::PermissionsExt;
     let connection = Connection::open(path)?;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    configure_connection(&connection)?;
+    Ok(connection)
+}
+
+/// The same bounded SQLite execution settings apply to an owned fresh memory
+/// database. Configuring a connection supplies no storage or epoch authority.
+pub(crate) fn configure_connection(connection: &Connection) -> Result<()> {
     connection.busy_timeout(Duration::from_secs(2))?;
     connection.pragma_update(None, "foreign_keys", true)?;
     connection.pragma_update(None, "synchronous", "FULL")?;
@@ -583,7 +590,7 @@ pub(crate) fn open(path: &Path) -> Result<Connection> {
             crate::oauth::schema::admission_step(1_000) || runtime_exhausted
         }),
     )?;
-    Ok(connection)
+    Ok(())
 }
 
 impl Runtime {
