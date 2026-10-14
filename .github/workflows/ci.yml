@@ -689,6 +689,17 @@ jobs:
           cache-workspace-crates: 'false'
           shared-key: ${{ hashFiles('Cargo.toml') }}-verify
           save-if: 'false'
+      - name: Establish current bounded Linux runtime diagnostic context
+        id: runtime_context
+        run: cargo run --locked -p xtask -- verify-linux-context
+      - name: Retain current Linux runtime diagnostic context immediately
+        if: ${{ always() && steps.runtime_context.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: day2-linux-runtime-diagnostic-context-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/day2-ci-linux-context.json
+          if-no-files-found: error
+          retention-days: 14
       - run: cargo run --locked -p xtask -- source-check
       - run: cargo fetch --locked
       - run: cargo run --locked -p xtask -- notices
@@ -704,6 +715,44 @@ jobs:
       - run: target/debug/xtask architecture-inventory > /tmp/day2-architecture-inventory.json
       - run: target/debug/xtask architecture-dependencies > /tmp/day2-architecture-dependencies.json
       - run: target/debug/xtask architecture-proof-inventory > /tmp/day2-architecture-proofs.json
+      - name: Retain formatter and exact native inventory before runtime checks
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: day2-runtime-diagnostic-source-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            /tmp/day2-format.patch
+            /tmp/day2-architecture-inventory.json
+            /tmp/day2-architecture-dependencies.json
+            /tmp/day2-architecture-proofs.json
+            target/debug/xtask.d
+          if-no-files-found: error
+          retention-days: 14
+      - name: Complete strict Linux workspace and all-targets lint before preparation
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Test managed UI pin snapshot invalidation and missing-input refusal
+        run: cargo test --locked -p xtask --bin xtask -- verification::tests::ui_dependency_pin_changes_native_host_snapshots_and_missing_pin_is_refused --exact --nocapture
+      - name: Test native platform input tampering and missing-input refusal
+        run: cargo test --locked -p xtask --bin xtask -- build_native::platform_input_tests::architecture_policy_tampering_changes_native_build_identity --exact --nocapture
+      - name: Test compiler stage escape refusal and bounded output guards
+        run: cargo test --locked -p day2-sandbox --bin day2-compiler-sandbox -- --nocapture
+      - name: Prepare all current fixtures and native test executables once
+        id: runtime_prepare
+        run: cargo run --locked -p xtask -- verify-prepare
+      - name: Complete the parallel runtime shard
+        if: ${{ !cancelled() && steps.runtime_prepare.outcome == 'success' }}
+        run: target/debug/xtask verify-shard parallel-runtime
+      - name: Complete the day2 workspace runtime shard independently
+        if: ${{ !cancelled() && steps.runtime_prepare.outcome == 'success' }}
+        run: target/debug/xtask verify-shard workspace-day2
+      - name: Complete the UI control-plane runtime shard independently
+        if: ${{ !cancelled() && steps.runtime_prepare.outcome == 'success' }}
+        run: target/debug/xtask verify-shard workspace-control
+      - name: Complete the UI operations and tooling runtime shard independently
+        if: ${{ !cancelled() && steps.runtime_prepare.outcome == 'success' }}
+        run: target/debug/xtask verify-shard workspace-other
+      - name: Retain complete current compiler cache counters
+        if: ${{ always() }}
+        run: sccache --show-stats > /tmp/day2-runtime-diagnostic-sccache.txt
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: ${{ always() }}
         with:
@@ -713,6 +762,13 @@ jobs:
             /tmp/day2-architecture-inventory.json
             /tmp/day2-architecture-dependencies.json
             /tmp/day2-architecture-proofs.json
+            /tmp/day2-runtime-diagnostic-sccache.txt
+            /tmp/day2-ci-linux-context.json
+            artifacts/ci-prepared.json
+            artifacts/ci-results/*.json
+            artifacts/ci-test-binaries.json
+            artifacts/ci-test-build-cache.json
+            artifacts/all-verification-cache.json
             target/debug/xtask.d
           if-no-files-found: error
           retention-days: 3
