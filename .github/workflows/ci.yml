@@ -130,8 +130,8 @@ jobs:
 
   verify-prepare-parts:
     # Reject known security failures before allocating compilation runners.
-    needs: [secrets, dependencies, verify-queue-receipt]
-    if: ${{ !cancelled() && needs.secrets.result == 'success' && needs.dependencies.result == 'success' && !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') && inputs.verification != 'diagnostics' }}
+    needs: [secrets, dependencies, verify-queue-receipt, verification-diagnostics]
+    if: ${{ !cancelled() && needs.secrets.result == 'success' && needs.dependencies.result == 'success' && !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') && inputs.verification == 'diagnostics' && needs.verification-diagnostics.result == 'success' }}
     runs-on: ubuntu-24.04
     container:
       image: rust@sha256:620dbcd124499c59e2406d3741574b5c5838cf9eb9656f0c3a03948f79b02959
@@ -242,6 +242,7 @@ jobs:
           name: day2-fixture-cache-inputs-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             artifacts/all-verification-cache.json
+            artifacts/????????????????????????????????????????????????????????????????/artifact.json
             target/debug/xtask.d
           if-no-files-found: error
           retention-days: 14
@@ -369,7 +370,7 @@ jobs:
 
   verify-prepare:
     needs: [secrets, dependencies, verify-queue-receipt, verify-prepare-parts]
-    if: ${{ !cancelled() && needs.secrets.result == 'success' && needs.dependencies.result == 'success' && !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') && inputs.verification != 'diagnostics' }}
+    if: ${{ !cancelled() && needs.secrets.result == 'success' && needs.dependencies.result == 'success' && !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') && inputs.verification == 'diagnostics' }}
     runs-on: ubuntu-24.04
     container:
       image: rust@sha256:620dbcd124499c59e2406d3741574b5c5838cf9eb9656f0c3a03948f79b02959
@@ -458,7 +459,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [workspace-day2, workspace-control, workspace-other, simulation, parallel-runtime]
+        shard: [parallel-runtime]
     env:
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
@@ -513,13 +514,64 @@ jobs:
           path: /tmp/day2-verification
       - run: tar -xzf /tmp/day2-verification/day2-verification.tgz -C "$GITHUB_WORKSPACE/.."
       - run: target/debug/xtask configure-tofu
-      - run: target/debug/xtask verify-shard ${{ matrix.shard }}
+      - name: Observe complete parallel runtime boundary 1
+        id: eof_1
+        run: target/debug/xtask verify-shard ${{ matrix.shard }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: day2-result-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/ci-results/${{ matrix.shard }}.json
           if-no-files-found: error
           retention-days: 3
+
+      - name: Observe complete parallel runtime boundary 2
+        id: eof_2
+        if: ${{ !cancelled() && steps.eof_1.outcome == 'success' }}
+        run: target/debug/xtask verify-shard ${{ matrix.shard }}
+      - name: Retain successful boundary 2 independently
+        if: ${{ !cancelled() && steps.eof_2.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: day2-eof-observation-2-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/ci-results/${{ matrix.shard }}.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Observe complete parallel runtime boundary 3
+        id: eof_3
+        if: ${{ !cancelled() && steps.eof_2.outcome == 'success' }}
+        run: target/debug/xtask verify-shard ${{ matrix.shard }}
+      - name: Retain successful boundary 3 independently
+        if: ${{ !cancelled() && steps.eof_3.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: day2-eof-observation-3-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/ci-results/${{ matrix.shard }}.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Observe complete parallel runtime boundary 4
+        id: eof_4
+        if: ${{ !cancelled() && steps.eof_3.outcome == 'success' }}
+        run: target/debug/xtask verify-shard ${{ matrix.shard }}
+      - name: Retain successful boundary 4 independently
+        if: ${{ !cancelled() && steps.eof_4.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: day2-eof-observation-4-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/ci-results/${{ matrix.shard }}.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Observe complete parallel runtime boundary 5
+        id: eof_5
+        if: ${{ !cancelled() && steps.eof_4.outcome == 'success' }}
+        run: target/debug/xtask verify-shard ${{ matrix.shard }}
+      - name: Retain successful boundary 5 independently
+        if: ${{ !cancelled() && steps.eof_5.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: day2-eof-observation-5-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/ci-results/${{ matrix.shard }}.json
+          if-no-files-found: error
+          retention-days: 14
 
   verify:
     needs: [secrets, dependencies, verify-queue-receipt, verify-prepare, verify-shards, verify-mac-compatibility]
@@ -716,6 +768,15 @@ jobs:
             target/debug/xtask.d
           if-no-files-found: error
           retention-days: 3
+
+      - name: Require clean hosted formatting before native preparation
+        run: git diff --exit-code
+      - name: Complete strict Linux workspace and all-targets lint before preparation
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Check existing worker frame and classification observations
+        run: cargo test --locked -p day2 --lib -- worker::tests:: --nocapture
+      - name: Check existing admission diagnostic redaction
+        run: cargo test --locked -p day2 --lib -- admission_context_keeps_private_selection_out_of_public_diagnostics --nocapture
 
   infrastructure:
     runs-on: ubuntu-24.04

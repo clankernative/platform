@@ -17,14 +17,57 @@ struct Fixture {
     authored: BTreeSet<PathBuf>,
 }
 
+#[cfg(target_os = "linux")]
+fn linux_resource_observation() -> String {
+    use std::io::Read;
+
+    let mut observed = std::collections::BTreeMap::new();
+    for name in [
+        "memory.max",
+        "memory.current",
+        "memory.peak",
+        "memory.events",
+        "memory.events.local",
+        "pids.max",
+        "pids.current",
+        "pids.peak",
+        "pids.events",
+    ] {
+        let read = || -> std::io::Result<String> {
+            let mut value = String::new();
+            fs::File::open(Path::new("/sys/fs/cgroup").join(name))?
+                .take(4097)
+                .read_to_string(&mut value)?;
+            Ok(value)
+        };
+        let value = match read() {
+            Ok(value) if value.len() <= 4096 => value,
+            Ok(_) => "oversize".into(),
+            Err(error) => format!("unavailable errno={:?}", error.raw_os_error()),
+        };
+        observed.insert(name, value);
+    }
+    format!("{observed:?}")
+}
+
 impl Fixture {
     fn new() -> Result<Self> {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .canonicalize()?;
+        #[cfg(target_os = "linux")]
+        let before = linux_resource_observation();
         let artifact = LoadedArtifact::load(Path::new(
             &std::env::var_os("DAY2_TEST_REPORTS_ARTIFACT").context("run xtask verify-reports")?,
-        ))?;
+        ));
+        #[cfg(target_os = "linux")]
+        let artifact = artifact.with_context(|| {
+            format!(
+                "TEMP fixed Linux cgroup observations before={before}; after={}",
+                linux_resource_observation()
+            )
+        });
+        let artifact = artifact?;
         let temporary = crate::support::compiler::stage(&root)?;
         let stage = temporary.path().join("stage");
         fs::create_dir_all(stage.join("app"))?;

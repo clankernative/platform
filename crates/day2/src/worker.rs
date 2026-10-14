@@ -205,6 +205,8 @@ pub struct Worker {
     owner: mac_lifetime::Owner,
     #[cfg(not(target_os = "macos"))]
     child: Child,
+    #[cfg(target_os = "linux")]
+    cleanup_exit: Option<ExitStatus>,
     #[cfg(not(target_os = "macos"))]
     requests: Option<SyncSender<Vec<u8>>>,
     #[cfg(not(target_os = "macos"))]
@@ -286,7 +288,7 @@ impl Worker {
                 .env("LC_ALL", "C")
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
-                .stderr(Stdio::null())
+                .stderr(Stdio::inherit())
                 .spawn()
                 .context("spawn isolated Roc worker")?;
             let mut stdin = child.stdin.take().context("worker stdin")?;
@@ -339,6 +341,8 @@ impl Worker {
             };
             Ok(Self {
                 child,
+                #[cfg(target_os = "linux")]
+                cleanup_exit: None,
                 requests: Some(requests),
                 responses: Some(responses),
                 reader: Some(reader),
@@ -364,7 +368,16 @@ impl Worker {
                     child_after_termination_drain: Some(self.owner.final_snapshot()),
                     ..stages
                 };
-                Err(error.context(stages).context(evidence))
+                let error = error.context(stages).context(evidence);
+                #[cfg(target_os = "linux")]
+                let error = {
+                    let final_exit = exit_evidence(Ok(self.cleanup_exit.take()));
+                    error.context(format!(
+                        "TEMP Linux cleanup [kill_requested=true final_code={:?} final_signal={:?}]",
+                        final_exit.code, final_exit.signal
+                    ))
+                };
+                Err(error)
             }
         }
     }
@@ -398,7 +411,11 @@ impl Worker {
             self.requests.take();
             self.responses.take();
             let _ = self.child.kill();
-            let _ = self.child.wait();
+            let _waited = self.child.wait();
+            #[cfg(target_os = "linux")]
+            {
+                self.cleanup_exit = _waited.ok();
+            }
             if let Some(reader) = self.reader.take() {
                 let _ = reader.join();
             }
