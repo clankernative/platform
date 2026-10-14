@@ -149,7 +149,10 @@ fn checked_compiler_rejects_wrong_models_forged_values_and_unavailable_io() -> R
     let secret = outside.path().join("secret.txt");
     fs::write(&secret, b"private fixture")?;
     let sibling = crate::support::compiler::stage(&root)?;
-    fs::write(sibling.path().join("secret.txt"), b"private sibling fixture")?;
+    fs::write(
+        sibling.path().join("secret.txt"),
+        b"private sibling fixture",
+    )?;
     let inside = guards.join("allowed.txt");
     fs::write(&inside, b"allowed fixture")?;
     let header = "app [step] { pf: platform \"../sdk/main.roc\" }\n";
