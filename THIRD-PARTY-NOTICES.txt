@@ -54107,10 +54107,10 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 
-===== rustls 0.23.45 =====
+===== rustls 0.23.46 =====
 License: Apache-2.0 OR ISC OR MIT
 Source: registry+https://github.com/rust-lang/crates.io-index
-Unmodified source: https://crates.io/api/v1/crates/rustls/0.23.45/download
+Unmodified source: https://crates.io/api/v1/crates/rustls/0.23.46/download
 
 --- LICENSE-APACHE ---
                               Apache License
