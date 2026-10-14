@@ -3,7 +3,8 @@
 //! role, execution and continuous-clock producers have been qualified together.
 //! Parsing authenticated bytes alone would still not mint readiness.
 use super::kernel::{
-    self, AuthorityRecord, Bootstrap, Phase, Receipt, Request, SentinelRecord, Snapshot, UpdateTime, Versioned,
+    self, AuthorityRecord, Bootstrap, Phase, Receipt, Request, SentinelRecord, Snapshot,
+    UpdateTime, Versioned,
 };
 use anyhow::{Context, Result, bail, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -355,7 +356,14 @@ pub(super) fn read(port: &mut impl Port, names: &Names) -> Result<Snapshot> {
     let mut budget = Budget::begin(port)?;
     let mut snapshot = read_once(port, &mut budget, names)?;
     if names.activate.is_none()
-        && let Some(Versioned { value: AuthorityRecord { phase: Phase::ActiveFirstHolder { completion }, .. }, .. }) = &snapshot.root
+        && let Some(Versioned {
+            value:
+                AuthorityRecord {
+                    phase: Phase::ActiveFirstHolder { completion },
+                    ..
+                },
+            ..
+        }) = &snapshot.root
     {
         // Discovery supplies only a bounded document selector. Discard the first
         // snapshot and reread ALL four documents in a fresh coherent transaction
@@ -363,9 +371,18 @@ pub(super) fn read(port: &mut impl Port, names: &Names) -> Result<Snapshot> {
         let operation = completion.operation.clone();
         let complete = Names::new(&names.selection, &names.bootstrap, Some(&operation))?;
         snapshot = read_once(port, &mut budget, &complete)?;
-        ensure!(matches!(&snapshot.root, Some(root) if matches!(&root.value.phase, Phase::ActiveFirstHolder { completion } if completion.operation == operation)), "security_epoch_discovery_state_changed");
+        ensure!(
+            matches!(&snapshot.root, Some(root) if matches!(&root.value.phase, Phase::ActiveFirstHolder { completion } if completion.operation == operation)),
+            "security_epoch_discovery_state_changed"
+        );
     }
-    kernel::reconcile(&names.selection, &Request::CreateInitialAuthority { bootstrap: names.bootstrap.clone() }, &snapshot)?;
+    kernel::reconcile(
+        &names.selection,
+        &Request::CreateInitialAuthority {
+            bootstrap: names.bootstrap.clone(),
+        },
+        &snapshot,
+    )?;
     budget.remaining(port)?;
     Ok(snapshot)
 }

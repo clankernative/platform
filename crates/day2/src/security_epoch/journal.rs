@@ -128,8 +128,10 @@ impl CurrentBootstrapExecution {
             floor: sample.elapsed,
             deadline: sample
                 .elapsed
-                .checked_add(Duration::from_secs(u64::from(selection.max_lease_seconds.min(5))))
-                .ok_or_else(||anyhow::anyhow!("fixture clock overflow"))?,
+                .checked_add(Duration::from_secs(u64::from(
+                    selection.max_lease_seconds.min(5),
+                )))
+                .ok_or_else(|| anyhow::anyhow!("fixture clock overflow"))?,
             local: PhantomData,
         })
     }

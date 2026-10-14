@@ -1,7 +1,7 @@
 {
   "version": 1,
   "trait_checks": [
-    {"source":"crates/day2/src/structural_proofs.rs","scope":"module","fingerprint":"sha256:5d241c23787b9880558381f209a69e005c116b237bb44eec92d0d793409b645c","registration":{"source":"crates/day2/src/lib.rs","module":"structural_proofs"}},
+    {"source":"crates/day2/src/structural_proofs.rs","scope":"module","fingerprint":"sha256:e18d675f758cfce8e98a463c1f03f5ebe40d9389337f473ee96c194dbbb0cb90","registration":{"source":"crates/day2/src/lib.rs","module":"structural_proofs"}},
     {"source":"crates/day2-control/src/release.rs","scope":"const","fingerprint":"sha256:9c616765ed20205205236e2e4d7cc7a77a49512dcd9d0c33c34e1c40da5209e3","registration":null}
   ],
   "proofs": [
@@ -153,6 +153,87 @@
         {"owner":"Resolution","signature":"pub(super) fn problem(&self) -> Option<&'static str>"},
         {"owner":"Resolution","signature":"pub(super) fn validate(&self, db: &Connection, now: i64) -> Result<bool>"}
       ],
+      "owning_children": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/journal.rs",
+      "type_name": "CurrentBootstrapExecution",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "methods": [
+        "fn budget (& mut self , port : & mut impl Port) -> Result < Budget >",
+        "fn check (& mut self , selection : & EpochStore , request : & Request , snapshot : & Snapshot , purpose : Purpose , port : & mut impl Port) -> Result < () >",
+        "pub (super) fn fixture (selection : & EpochStore , request : & Request , snapshot : & Snapshot , purpose : Purpose , sample : Sample) -> Result < Self >",
+        "fn sample (& mut self , port : & mut impl Port) -> Result < Sample >"
+      ],
+      "factories": [],
+      "material_uses": [
+        {
+          "owner": "CurrentBootstrapExecution",
+          "signature": "fn budget (& mut self , port : & mut impl Port) -> Result < Budget >"
+        },
+        {
+          "owner": "CurrentBootstrapExecution",
+          "signature": "fn check (& mut self , selection : & EpochStore , request : & Request , snapshot : & Snapshot , purpose : Purpose , port : & mut impl Port) -> Result < () >"
+        },
+        {
+          "owner": "CurrentBootstrapExecution",
+          "signature": "fn sample (& mut self , port : & mut impl Port) -> Result < Sample >"
+        },
+        {
+          "owner": "Journal < 'a >",
+          "signature": "pub (super) fn authorize_activate (& mut self , selection : & EpochStore , request : & Request , snapshot : & Snapshot , mut context : CurrentBootstrapExecution , port : & mut impl Port) -> Result < InitialFirstHolderActivationPermit >"
+        },
+        {
+          "owner": "Journal < 'a >",
+          "signature": "pub (super) fn authorize_create (& mut self , selection : & EpochStore , request : & Request , snapshot : & Snapshot , mut context : CurrentBootstrapExecution , port : & mut impl Port) -> Result < InitialEpochCreatePermit >"
+        },
+        {
+          "owner": "Journal < 'a >",
+          "signature": "pub (super) fn reconcile_attempt (& mut self , selection : & EpochStore , request : & Request , snapshot : & Snapshot , mut context : CurrentBootstrapExecution , port : & mut impl Port) -> Result < Outcome >"
+        }
+      ],
+      "proof_uses": [],
+      "owning_children": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/journal.rs",
+      "type_name": "InitialEpochCreatePermit",
+      "kind": "consuming",
+      "consuming_methods": [
+        "send"
+      ],
+      "methods": [
+        "pub (super) fn send (self , selection : & EpochStore , port : & mut impl Port) -> Result < () >"
+      ],
+      "factories": [
+        {
+          "owner": "Journal < 'a >",
+          "signature": "pub (super) fn authorize_create (& mut self , selection : & EpochStore , request : & Request , snapshot : & Snapshot , mut context : CurrentBootstrapExecution , port : & mut impl Port) -> Result < InitialEpochCreatePermit >"
+        }
+      ],
+      "material_uses": [],
+      "proof_uses": [],
+      "owning_children": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/journal.rs",
+      "type_name": "InitialFirstHolderActivationPermit",
+      "kind": "consuming",
+      "consuming_methods": [
+        "send"
+      ],
+      "methods": [
+        "pub (super) fn send (self , selection : & EpochStore , port : & mut impl Port) -> Result < () >"
+      ],
+      "factories": [
+        {
+          "owner": "Journal < 'a >",
+          "signature": "pub (super) fn authorize_activate (& mut self , selection : & EpochStore , request : & Request , snapshot : & Snapshot , mut context : CurrentBootstrapExecution , port : & mut impl Port) -> Result < InitialFirstHolderActivationPermit >"
+        }
+      ],
+      "material_uses": [],
+      "proof_uses": [],
       "owning_children": []
     }
   ]

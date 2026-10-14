@@ -265,18 +265,25 @@ impl<'de> Deserialize<'de> for Phase {
                 formatter.write_str("a closed external epoch phase map")
             }
 
-            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Phase, A::Error> {
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Phase, A::Error> {
                 use serde::de::Error;
                 let mut phase = None;
                 let mut completion = None;
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
                         "phase" => {
-                            if phase.is_some() { return Err(A::Error::duplicate_field("phase")); }
+                            if phase.is_some() {
+                                return Err(A::Error::duplicate_field("phase"));
+                            }
                             phase = Some(map.next_value::<String>()?);
                         }
                         "completion" => {
-                            if completion.is_some() { return Err(A::Error::duplicate_field("completion")); }
+                            if completion.is_some() {
+                                return Err(A::Error::duplicate_field("completion"));
+                            }
                             completion = Some(map.next_value::<serde_json::Value>()?);
                         }
                         _ => return Err(A::Error::unknown_field(&key, &["phase", "completion"])),
@@ -285,7 +292,9 @@ impl<'de> Deserialize<'de> for Phase {
                 match (phase.as_deref(), completion) {
                     (Some("pending_first_holder"), None) => Ok(Phase::PendingFirstHolder),
                     (Some("active_first_holder"), Some(value)) if value.is_object() => {
-                        Ok(Phase::ActiveFirstHolder { completion: serde_json::from_value(value).map_err(A::Error::custom)? })
+                        Ok(Phase::ActiveFirstHolder {
+                            completion: serde_json::from_value(value).map_err(A::Error::custom)?,
+                        })
                     }
                     _ => Err(A::Error::custom("invalid closed external epoch phase")),
                 }

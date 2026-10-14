@@ -398,12 +398,22 @@ fn first_activation_has_distinct_cas_receipt_and_permanent_candidate() {
     let before_read = provider.calls.len();
     let recovered_create = provider.read(&create).unwrap();
     assert_eq!(provider.calls.len() - before_read, 4); // discovery+cleanup, full coherent read+cleanup
-    assert!(matches!(reconcile(&selection(), &create, &recovered_create).unwrap(), Outcome::Applied(_)));
+    assert!(matches!(
+        reconcile(&selection(), &create, &recovered_create).unwrap(),
+        Outcome::Applied(_)
+    ));
     assert_eq!(recovered_create.activate, active.activate);
     // The second acquisition shares the first deadline. A reset would permit
     // another five seconds and incorrectly succeed with the now-105 clock.
     provider.tick = Duration::from_secs(105);
-    provider.samples = vec![(Digest::new(b"controller-process-clock"), Duration::from_secs(100));7].into();
+    provider.samples = vec![
+        (
+            Digest::new(b"controller-process-clock"),
+            Duration::from_secs(100)
+        );
+        7
+    ]
+    .into();
     let before_read = provider.calls.len();
     assert!(provider.read(&create).is_err());
     assert_eq!(provider.calls.len() - before_read, 2);
@@ -443,8 +453,14 @@ fn first_activation_has_distinct_cas_receipt_and_permanent_candidate() {
         firestore::commit_body(&selection(), &activate).unwrap()
     );
     assert_eq!(provider.sends(), 2);
-    let names=Names::new(&selection(),create.bootstrap(),Some(activate.operation())).unwrap();
-    provider.db.execute("DELETE FROM documents WHERE name=?1",[names.activate.as_ref().unwrap()]).unwrap();
+    let names = Names::new(&selection(), create.bootstrap(), Some(activate.operation())).unwrap();
+    provider
+        .db
+        .execute(
+            "DELETE FROM documents WHERE name=?1",
+            [names.activate.as_ref().unwrap()],
+        )
+        .unwrap();
     assert!(provider.read(&create).is_err());
     assert!(journal.accept(&selection(), &replacement).is_err());
 }
@@ -834,21 +850,52 @@ fn phase_decoder_rejects_unknown_duplicate_and_nonmap_states() {
         r#"{"phase":["pending_first_holder"]}"#,
         r#"{"phase":"active_first_holder","completion":[]}"#,
         r#"{"phase":"advance"}"#,
-    ] { assert!(serde_json::from_str::<Phase>(raw).is_err(),"{raw}"); }
-    assert!(serde_json::from_value::<Phase>(json!({"phase":"pending_first_holder","advance":"1"})).is_err());
+    ] {
+        assert!(serde_json::from_str::<Phase>(raw).is_err(), "{raw}");
+    }
+    assert!(
+        serde_json::from_value::<Phase>(json!({"phase":"pending_first_holder","advance":"1"}))
+            .is_err()
+    );
     assert!(serde_json::from_value::<Phase>(json!(["pending_first_holder"])).is_err());
-    assert_eq!(serde_json::from_value::<Phase>(json!({"phase":"pending_first_holder"})).unwrap(),Phase::PendingFirstHolder);
+    assert_eq!(
+        serde_json::from_value::<Phase>(json!({"phase":"pending_first_holder"})).unwrap(),
+        Phase::PendingFirstHolder
+    );
     // Exercise the actual Firestore decoder for both lifecycle documents.
-    let mut db=Connection::open_in_memory().unwrap();let mut journal=Journal::create(&mut db).unwrap();let mut provider=Provider::new();let create=create();
-    create_pending(&mut journal,&mut provider,&create);
-    let names=Names::new(&selection(),create.bootstrap(),None).unwrap();
-    for name in [&names.root,&names.sentinel] {
-        let original:String=provider.db.query_row("SELECT fields FROM documents WHERE name=?1",[name],|row|row.get(0)).unwrap();
-        let mut fields:Value=serde_json::from_str(&original).unwrap();
-        fields["phase"]["mapValue"]["fields"]["advance"]=json!({"stringValue":"1"});
-        provider.db.execute("UPDATE documents SET fields=?2 WHERE name=?1",params![name,serde_json::to_string(&fields).unwrap()]).unwrap();
-        assert!(provider.read(&create).is_err());assert!(provider.calls.last().unwrap().0.ends_with(":rollback"));
-        provider.db.execute("UPDATE documents SET fields=?2 WHERE name=?1",params![name,original]).unwrap();
+    let mut db = Connection::open_in_memory().unwrap();
+    let mut journal = Journal::create(&mut db).unwrap();
+    let mut provider = Provider::new();
+    let create = create();
+    create_pending(&mut journal, &mut provider, &create);
+    let names = Names::new(&selection(), create.bootstrap(), None).unwrap();
+    for name in [&names.root, &names.sentinel] {
+        let original: String = provider
+            .db
+            .query_row(
+                "SELECT fields FROM documents WHERE name=?1",
+                [name],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut fields: Value = serde_json::from_str(&original).unwrap();
+        fields["phase"]["mapValue"]["fields"]["advance"] = json!({"stringValue":"1"});
+        provider
+            .db
+            .execute(
+                "UPDATE documents SET fields=?2 WHERE name=?1",
+                params![name, serde_json::to_string(&fields).unwrap()],
+            )
+            .unwrap();
+        assert!(provider.read(&create).is_err());
+        assert!(provider.calls.last().unwrap().0.ends_with(":rollback"));
+        provider
+            .db
+            .execute(
+                "UPDATE documents SET fields=?2 WHERE name=?1",
+                params![name, original],
+            )
+            .unwrap();
     }
 }
 
