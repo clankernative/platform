@@ -112,9 +112,9 @@
       "type_name": "ClientCredential",
       "kind": "private_material",
       "consuming_methods": [],
-      "methods": ["pub(super) fn new(client: String, secret: String, reference: BindingRef) -> Result<Self>"],
+      "methods": ["pub(super) fn new(client: String, secret: String, reference: BindingRef, checked_at: i64) -> Result<Self>"],
       "factories": [
-        {"owner":"ClientCredential","signature":"pub(super) fn new(client: String, secret: String, reference: BindingRef) -> Result<Self>"}
+        {"owner":"ClientCredential","signature":"pub(super) fn new(client: String, secret: String, reference: BindingRef, checked_at: i64) -> Result<Self>"}
       ],
       "material_uses": [],
       "owning_children": []

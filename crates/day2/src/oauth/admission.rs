@@ -1479,7 +1479,10 @@ impl super::usage::Authority for ArtifactApprovalAuthority {
         if at < now {
             return Err(super::refresh::ClockRefusal.into());
         }
-        let Some(current) = self.use_selection(&state, app, registration, owner, at)? else {
+        let current = self.use_selection(&state, app, registration, owner, at);
+        let completed_at = super::effects::wall_time()?;
+        if completed_at < at { return Err(super::refresh::ClockRefusal.into()); }
+        let Some(current) = current? else {
             return Ok(None);
         };
         ensure!(
@@ -1490,6 +1493,7 @@ impl super::usage::Authority for ArtifactApprovalAuthority {
             client.client_id().to_owned(),
             secret,
             reference,
+            completed_at,
         )?))
     }
 

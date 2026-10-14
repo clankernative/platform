@@ -17,7 +17,7 @@ pub(super) struct ClockRefusal;
 
 impl std::fmt::Display for ClockRefusal {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("OAuth refresh credential clock rewound")
+        formatter.write_str("OAuth refresh clock fence refused")
     }
 }
 
@@ -99,10 +99,12 @@ pub(crate) struct ClientCredential {
     client: String,
     secret: String,
     reference: BindingRef,
+    checked_at: i64,
 }
 
 impl ClientCredential {
-    pub(super) fn new(client: String, secret: String, reference: BindingRef) -> Result<Self> {
+    pub(super) fn new(client: String, secret: String, reference: BindingRef, checked_at: i64) -> Result<Self> {
+        ensure!(checked_at >= 0, "invalid OAuth refresh credential clock");
         ensure!(
             !client.is_empty()
                 && client.len() <= 512
@@ -119,6 +121,7 @@ impl ClientCredential {
             client,
             secret,
             reference,
+            checked_at,
         })
     }
 }
@@ -295,7 +298,7 @@ pub(super) fn ensure_current(
         "refresh credential binding changed"
     );
     let dispatch_at = effects::wall_time()?;
-    if dispatch_at < now || dispatch_at < source.issued_at {
+    if dispatch_at < now || dispatch_at < source.issued_at || dispatch_at < client.checked_at {
         clock_refusal(&db, &context)?;
         return Ok(Resolution::unavailable("ReauthRequired"));
     }
@@ -307,6 +310,7 @@ pub(super) fn ensure_current(
         .as_str()
         .to_owned();
     let mut permit = None;
+    let mut checked_dispatch = dispatch_at;
     let admitted = authority.with_current(
         runtime.app(),
         registration,
@@ -333,7 +337,8 @@ pub(super) fn ensure_current(
             store::claim_refresh(&mut db, &attempt, expected)?;
             permit = store::authorize_checked_dispatch(&mut db, &attempt, |tx| {
                 let at = effects::wall_time()?;
-                ensure!(at >= dispatch_at, "refresh dispatch clock rewound");
+                if at < dispatch_at { return Err(ClockRefusal.into()); }
+                checked_dispatch = at;
                 local_matches(
                     tx,
                     runtime,
@@ -351,22 +356,23 @@ pub(super) fn ensure_current(
     let admitted = match admitted {
         Ok(admitted) => admitted,
         Err(error) => {
-            if effects::wall_time()? < dispatch_at {
+            if error.downcast_ref::<ClockRefusal>().is_some() || effects::wall_time()? < checked_dispatch {
                 clock_refusal(&db, &context)?;
+                return Ok(Resolution::unavailable("ReauthRequired"));
             }
             return Err(error);
         }
     };
-    if !admitted {
-        return Ok(Resolution::unavailable("CapacityDeferred"));
-    }
-    let permit = permit.context("refresh dispatch permit missing")?;
     let sent_at = effects::wall_time()?;
-    if sent_at < dispatch_at {
+    if sent_at < checked_dispatch {
         store::mark_uncertain(&db, &attempt)?;
         clock_refusal(&db, &context)?;
         return Ok(Resolution::unavailable("ReauthRequired"));
     }
+    if !admitted {
+        return Ok(Resolution::unavailable("CapacityDeferred"));
+    }
+    let permit = permit.context("refresh dispatch permit missing")?;
     let monotonic = effects::Instant::now();
     let mut last_clock = sent_at;
     let mut clock_failed = false;
@@ -534,6 +540,7 @@ pub(super) fn ensure_current(
         material,
     });
     let mut freshest = observed_at;
+    let mut publication_clock_refused = false;
     let publication = authority.with_current(
         runtime.app(),
         registration,
@@ -550,10 +557,11 @@ pub(super) fn ensure_current(
                     .context("refresh settlement already consumed")?,
                 |tx| {
                     let at = effects::wall_time()?;
-                    ensure!(
-                        at >= observed_at && at < expires_at && monotonic.elapsed() <= BUDGET,
-                        "refresh publication clock or elapsed fence changed"
-                    );
+                if at < observed_at || at >= expires_at {
+                    publication_clock_refused = true;
+                    return Err(ClockRefusal.into());
+                }
+                ensure!(monotonic.elapsed() <= BUDGET, "refresh publication elapsed fence changed");
                     freshest = at;
                     local_matches(
                         tx,
@@ -575,7 +583,7 @@ pub(super) fn ensure_current(
         _ => {
             store::mark_uncertain(&db, &attempt)?;
             let at = effects::wall_time()?;
-            if at < observed_at || at >= expires_at {
+            if publication_clock_refused || at < observed_at || at >= expires_at {
                 clock_refusal(&db, &context)?;
             }
             Ok(Resolution::unavailable("ReauthRequired"))
