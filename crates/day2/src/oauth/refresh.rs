@@ -168,22 +168,6 @@ fn clock_refusal(db: &Connection, context: &usage::RefreshContext) -> Result<()>
     )
 }
 
-fn local_matches(
-    db: &rusqlite::Transaction<'_>,
-    runtime: &crate::store::Runtime,
-    request: &crate::protocol::Request,
-    registration: &str,
-    subject: &str,
-    selection: &usage::Selection,
-    context: &usage::RefreshContext,
-    now: i64,
-) -> Result<bool> {
-    Ok(
-        usage::refresh_context(db, runtime, request, registration, subject, selection, now)?
-            .is_some_and(|current| current.pin() == context.pin()),
-    )
-}
-
 /// Called before resolve publishes its immutable invocation-affine Use. An
 /// already committed expiry/clock refusal is never cleared by refresh.
 pub(super) fn ensure_current(
@@ -221,6 +205,13 @@ pub(super) fn ensure_current(
         }
         Err(_) => return Ok(Resolution::unavailable("ReauthRequired")),
     };
+    let local_matches =
+        |db: &rusqlite::Transaction<'_>, current: &usage::Selection, at: i64| -> Result<bool> {
+            Ok(
+                usage::refresh_context(db, runtime, request, registration, subject, current, at)?
+                    .is_some_and(|current| current.pin() == context.pin()),
+            )
+        };
     let selected = selection.identity()?;
     let Some(key) = authority.custody(
         runtime.app(),
@@ -239,16 +230,7 @@ pub(super) fn ensure_current(
     }
     let snapshot = crate::write_queue::immediate(&mut db)?;
     ensure!(
-        local_matches(
-            &snapshot,
-            runtime,
-            request,
-            registration,
-            subject,
-            selection,
-            &context,
-            now
-        )?,
+        local_matches(&snapshot, selection, now)?,
         "refresh authority changed during key retrieval"
     );
     let expected = context.eligibility();
@@ -326,16 +308,7 @@ pub(super) fn ensure_current(
                 return Ok(false);
             }
             let snapshot = db.transaction()?;
-            let eligible = local_matches(
-                &snapshot,
-                runtime,
-                request,
-                registration,
-                subject,
-                current,
-                &context,
-                dispatch_at,
-            )?;
+            let eligible = local_matches(&snapshot, current, dispatch_at)?;
             snapshot.commit()?;
             if !eligible {
                 return Ok(false);
@@ -349,16 +322,7 @@ pub(super) fn ensure_current(
                     return Err(ClockRefusal.into());
                 }
                 checked_dispatch = at;
-                local_matches(
-                    tx,
-                    runtime,
-                    request,
-                    registration,
-                    subject,
-                    current,
-                    &context,
-                    at,
-                )
+                local_matches(tx, current, at)
             })?;
             Ok(permit.is_some())
         },
@@ -455,16 +419,7 @@ pub(super) fn ensure_current(
             last_clock = at;
             let snapshot = db.transaction()?;
             ensure!(
-                local_matches(
-                    &snapshot,
-                    runtime,
-                    request,
-                    registration,
-                    subject,
-                    &current,
-                    &context,
-                    at
-                )?,
+                local_matches(&snapshot, &current, at)?,
                 "OAuth refresh authority changed before account read"
             );
             snapshot.commit()?;
@@ -578,16 +533,7 @@ pub(super) fn ensure_current(
                         "refresh publication elapsed fence changed"
                     );
                     freshest = at;
-                    local_matches(
-                        tx,
-                        runtime,
-                        request,
-                        registration,
-                        subject,
-                        current,
-                        &context,
-                        at,
-                    )
+                    local_matches(tx, current, at)
                 },
             )?
             .is_some())
