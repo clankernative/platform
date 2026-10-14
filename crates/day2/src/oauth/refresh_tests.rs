@@ -59,6 +59,7 @@ struct Port {
     transport: Option<PathBuf>,
     activate_on_fill: AtomicBool,
     fail_clock: AtomicBool,
+    publication_clock_reads: AtomicUsize,
 }
 
 fn response(body: Value) -> Result<effects::Response> {
@@ -93,11 +94,16 @@ impl Port {
             .as_mut()
             .context("policy")?
             .operations
-            .get_mut("list_events")
+            .get_mut("oauthcalendar.list_events")
             .context("list policy")?
             .observations
             .clear();
-        authority_state::apply(
+        document
+            .resources
+            .operations
+            .remove("oauthcalendar.list_events");
+        let previous = current.stamp.revision;
+        let receipt = authority_state::apply(
             &self.local_runtime,
             &authority_state::LocalOperator::assert_local("admin")?,
             &authority_state::ApplyAuthority {
@@ -106,6 +112,26 @@ impl Port {
                 document,
             },
         )?;
+        let applied = authority_state::current(&db)?;
+        assert_eq!(applied.stamp, receipt.stamp);
+        assert_eq!(applied.stamp.revision, previous + 1);
+        assert!(
+            applied
+                .document
+                .policy
+                .as_ref()
+                .context("applied policy")?
+                .operations["oauthcalendar.list_events"]
+                .observations
+                .is_empty()
+        );
+        assert!(
+            !applied
+                .document
+                .resources
+                .operations
+                .contains_key("oauthcalendar.list_events")
+        );
         Ok(())
     }
 
@@ -142,7 +168,11 @@ impl effects::Hooks for Port {
             !self.fail_clock.load(SeqCst),
             "injected unavailable native clock"
         );
-        Ok(self.now.load(SeqCst))
+        let now = self.now.load(SeqCst);
+        if self.case == Case::PublicationFallbackRewind && now == 270 {
+            self.publication_clock_reads.fetch_add(1, SeqCst);
+        }
+        Ok(now)
     }
     fn monotonic(&self) -> Duration {
         Duration::ZERO
@@ -198,26 +228,7 @@ impl effects::Hooks for Port {
                     )?;
                 }
                 if self.case == Case::PolicyChanged {
-                    let current = authority_state::current(&db)?;
-                    let mut document = current.document;
-                    document
-                        .policy
-                        .as_mut()
-                        .context("policy")?
-                        .operations
-                        .get_mut("list_events")
-                        .context("list policy")?
-                        .observations
-                        .clear();
-                    authority_state::apply(
-                        &self.local_runtime,
-                        &authority_state::LocalOperator::assert_local("admin")?,
-                        &authority_state::ApplyAuthority {
-                            request_id: "narrow_during_refresh".into(),
-                            expected: Some(current.stamp),
-                            document,
-                        },
-                    )?;
+                    self.narrow_policy()?;
                 }
                 if self.case == Case::ReadinessRewind {
                     self.now.store(260, SeqCst);
@@ -388,6 +399,7 @@ impl Authority for NativeAuthority {
             if self.port.case == Case::PublicationFallbackRewind {
                 self.port.now.store(270, SeqCst);
                 self.port.narrow_policy()?;
+                self.port.publication_clock_reads.store(0, SeqCst);
             }
         }
         let result = commit(&self.selection);
@@ -401,6 +413,15 @@ impl Authority for NativeAuthority {
             self.port.fail_clock.store(true, SeqCst);
         }
         if call == 1 && self.port.case == Case::PublicationFallbackRewind {
+            assert_eq!(
+                self.port.publication_clock_reads.load(SeqCst),
+                1,
+                "the actual publication validator must sample 270 before its authority error"
+            );
+            assert!(
+                result.is_err(),
+                "the narrowed authority must reject publication"
+            );
             self.port.now.store(265, SeqCst);
         }
         if call == 0
@@ -600,6 +621,7 @@ fn compiled_calendar_refresh_publishes_versions_and_fences_failure_recovery() ->
             transport: None,
             activate_on_fill: AtomicBool::new(false),
             fail_clock: AtomicBool::new(false),
+            publication_clock_reads: AtomicUsize::new(0),
         });
         let result = fixture_scope(port.clone(), || -> Result<()> {
             if case != Case::AbsentReturnRewind {
@@ -980,6 +1002,7 @@ fn crash_authority(
         transport: Some(directory.join("transport.sqlite")),
         activate_on_fill: AtomicBool::new(false),
         fail_clock: AtomicBool::new(false),
+        publication_clock_reads: AtomicUsize::new(0),
     });
     runtime.connections = Some(Arc::new(NativeAuthority {
         selection,
