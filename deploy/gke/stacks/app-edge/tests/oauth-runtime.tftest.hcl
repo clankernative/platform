@@ -19,6 +19,7 @@ variables {
   cluster_cidrs           = ["10.20.0.0/16", "10.30.0.0/20", "10.10.0.0/20"]
   security_shell_contract = { namespace = "day2-security", name = "security-shell-contract" }
   oauth_runtime           = { service_account_id = "app-native", custody_secret_ids = ["custody_verifier", "custody_encryption"], attestation_secret_ids = ["shell_attestation"] }
+  oauth_instance_json     = file("tests/oauth-instance.json")
 }
 
 override_data {
@@ -62,9 +63,10 @@ run "one_native_identity_with_exact_read_and_key_grants" {
       toset(google_project_iam_custom_role.oauth_edge_reads[0].permissions) == toset(["resourcemanager.projects.get", "compute.backendServices.get", "compute.urlMaps.get", "compute.targetHttpsProxies.get", "compute.globalForwardingRules.get"]) &&
       google_project_iam_member.oauth_edge_reads[0].member == "serviceAccount:app-native@example-tools.iam.gserviceaccount.com" &&
       toset(keys(google_secret_manager_secret_iam_member.oauth_keys)) == toset(["custody_verifier", "custody_encryption", "shell_attestation"]) &&
-      alltrue([for grant in values(google_secret_manager_secret_iam_member.oauth_keys) : grant.project == "example-tools" && grant.member == "serviceAccount:app-native@example-tools.iam.gserviceaccount.com" && grant.role == "roles/secretmanager.secretAccessor"])
+      toset(keys(google_secret_manager_secret_iam_member.oauth_provider_clients)) == toset(["google_calendar"]) &&
+      alltrue([for grant in concat(values(google_secret_manager_secret_iam_member.oauth_keys), values(google_secret_manager_secret_iam_member.oauth_provider_clients)) : grant.project == "example-tools" && grant.member == "serviceAccount:app-native@example-tools.iam.gserviceaccount.com" && grant.role == "roles/secretmanager.secretAccessor"])
     )
-    error_message = "Native app facts need the Resource Manager project read, exactly four Compute reads and the selected key containers, never OAuth clients."
+    error_message = "The native host needs exact edge reads, its selected keys and its bound Calendar client, never the reauthentication client or unrelated secrets."
   }
   assert {
     condition = (
@@ -81,7 +83,8 @@ run "one_native_identity_with_exact_read_and_key_grants" {
       kubernetes_config_map_v1.platform_contract.data["OAUTH_APP_SERVICE_ACCOUNT"] == "app-native@example-tools.iam.gserviceaccount.com" &&
       kubernetes_config_map_v1.platform_contract.data["SERVICE_ACCOUNT_NAME"] == "runtime" &&
       kubernetes_config_map_v1.platform_contract.data["OAUTH_SHELL_NAMESPACE"] == "day2-security" &&
-      toset(jsondecode(kubernetes_config_map_v1.platform_contract.data["OAUTH_APP_SECRET_IDS"])) == toset(["custody_verifier", "custody_encryption", "shell_attestation"])
+      toset(jsondecode(kubernetes_config_map_v1.platform_contract.data["OAUTH_APP_SECRET_IDS"])) == toset(["custody_verifier", "custody_encryption", "shell_attestation"]) &&
+      toset(jsondecode(kubernetes_config_map_v1.platform_contract.data["OAUTH_APP_PROVIDER_CLIENT_SECRET_IDS"])) == toset(["google_calendar"])
     )
     error_message = "The workload contract must publish the actual identity and named grants selected by this edge."
   }
@@ -115,7 +118,7 @@ run "refuses_conflicting_app_call_identity" {
     target = google_service_account.app_calls
     values = { email = "other-native@example-tools.iam.gserviceaccount.com", name = "projects/example-tools/serviceAccounts/other-native@example-tools.iam.gserviceaccount.com" }
   }
-  expect_failures = [kubernetes_config_map_v1.platform_contract]
+  expect_failures = [google_secret_manager_secret_iam_member.oauth_keys, google_secret_manager_secret_iam_member.oauth_provider_clients]
 }
 
 run "refuses_custody_on_the_shell" {
@@ -123,7 +126,7 @@ run "refuses_custody_on_the_shell" {
   variables {
     oauth_runtime = { service_account_id = "app-native", custody_secret_ids = ["google_reauth", "custody_encryption"], attestation_secret_ids = ["shell_attestation"] }
   }
-  expect_failures = [kubernetes_config_map_v1.platform_contract]
+  expect_failures = [google_secret_manager_secret_iam_member.oauth_keys, google_secret_manager_secret_iam_member.oauth_provider_clients]
 }
 
 run "refuses_shell_credentials_through_csi" {
@@ -137,7 +140,69 @@ run "refuses_attestation_not_granted_to_shell" {
   variables {
     oauth_runtime = { service_account_id = "app-native", custody_secret_ids = ["custody_verifier", "custody_encryption"], attestation_secret_ids = ["other_attestation"] }
   }
-  expect_failures = [kubernetes_config_map_v1.platform_contract]
+  expect_failures = [google_secret_manager_secret_iam_member.oauth_keys, google_secret_manager_secret_iam_member.oauth_provider_clients]
+}
+
+run "refuses_missing_canonical_client_roles" {
+  command = plan
+  variables { oauth_instance_json = null }
+  expect_failures = [google_secret_manager_secret_iam_member.oauth_keys]
+}
+
+run "refuses_reauthentication_container_as_provider_even_at_another_version" {
+  command = plan
+  variables {
+    oauth_instance_json = jsonencode(merge(jsondecode(file("tests/oauth-instance.json")), {
+      control = merge(jsondecode(file("tests/oauth-instance.json")).control, {
+        secrets = merge(jsondecode(file("tests/oauth-instance.json")).control.secrets, {
+          calendar = { kind = "gcp_version", project_number = 123456789012, secret = "google_reauth", version = 9 }
+        })
+      })
+    }))
+  }
+  expect_failures = [google_secret_manager_secret_iam_member.oauth_keys, google_secret_manager_secret_iam_member.oauth_provider_clients]
+}
+
+run "refuses_unbound_registration_client" {
+  command = plan
+  variables {
+    oauth_instance_json = jsonencode(merge(jsondecode(file("tests/oauth-instance.json")), {
+      oauth_clients = merge(jsondecode(file("tests/oauth-instance.json")).oauth_clients, {
+        registrations = merge(jsondecode(file("tests/oauth-instance.json")).oauth_clients.registrations, {
+          unrelated_client = jsondecode(file("tests/oauth-instance.json")).oauth_clients.registrations.calendar_client
+        })
+      })
+    }))
+  }
+  expect_failures = [google_secret_manager_secret_iam_member.oauth_keys, google_secret_manager_secret_iam_member.oauth_provider_clients]
+}
+
+run "refuses_provider_client_from_another_project" {
+  command = plan
+  variables {
+    oauth_instance_json = jsonencode(merge(jsondecode(file("tests/oauth-instance.json")), {
+      control = merge(jsondecode(file("tests/oauth-instance.json")).control, {
+        secrets = merge(jsondecode(file("tests/oauth-instance.json")).control.secrets, {
+          calendar = { kind = "gcp_version", project_number = 999999999999, secret = "google_calendar", version = 7 }
+        })
+      })
+    }))
+  }
+  expect_failures = [google_secret_manager_secret_iam_member.oauth_keys, google_secret_manager_secret_iam_member.oauth_provider_clients]
+}
+
+run "refuses_provider_client_aliasing_an_app_key_across_versions" {
+  command = plan
+  variables {
+    oauth_instance_json = jsonencode(merge(jsondecode(file("tests/oauth-instance.json")), {
+      control = merge(jsondecode(file("tests/oauth-instance.json")).control, {
+        secrets = merge(jsondecode(file("tests/oauth-instance.json")).control.secrets, {
+          calendar = { kind = "gcp_version", project_number = 123456789012, secret = "custody_verifier", version = 2 }
+        })
+      })
+    }))
+  }
+  expect_failures = [google_secret_manager_secret_iam_member.oauth_keys, google_secret_manager_secret_iam_member.oauth_provider_clients]
 }
 
 run "refuses_a_different_shell_project" {
