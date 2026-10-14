@@ -178,7 +178,7 @@ pub fn authorize_and_commit_dispatch(
 pub(super) fn authorize_checked_dispatch(
     db: &mut Connection,
     attempt: &str,
-    authorize: impl FnOnce(&Connection) -> Result<bool>,
+    authorize: impl FnOnce(&Transaction<'_>) -> Result<bool>,
 ) -> Result<Option<RefreshDispatchPermit>> {
     validate_id(attempt)?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -303,7 +303,7 @@ pub fn commit_replacement(
 pub(super) fn publish_replacement(
     db: &mut Connection,
     prepared: super::refresh::PreparedReplacement,
-    authorize: impl FnOnce(&Connection) -> Result<bool>,
+    authorize: impl FnOnce(&Transaction<'_>) -> Result<bool>,
 ) -> Result<Option<ReplacementReceipt>> {
     let (attempt, next, receipt, base, material) = prepared.into_parts();
     commit_replacement_with(db, &attempt, next, &receipt, |tx| {

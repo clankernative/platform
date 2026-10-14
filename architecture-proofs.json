@@ -104,7 +104,7 @@
       ],
       "methods": ["pub fn attempt(&self) -> &str", "pub fn send<T>(self, transport: impl FnOnce(&RefreshEligibility) -> T) -> T"],
       "factories": [
-        {"owner": null, "signature": "pub(super) fn authorize_checked_dispatch(db: &mut Connection, attempt: &str, authorize: impl FnOnce(&Connection) -> Result<bool>) -> Result<Option<RefreshDispatchPermit>>"}
+        {"owner": null, "signature": "pub(super) fn authorize_checked_dispatch(db: &mut Connection, attempt: &str, authorize: impl FnOnce(&Transaction<'_>) -> Result<bool>) -> Result<Option<RefreshDispatchPermit>>"}
       ]
     },
     {

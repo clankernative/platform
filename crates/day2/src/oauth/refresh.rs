@@ -169,7 +169,7 @@ fn clock_refusal(db: &Connection, context: &usage::RefreshContext) -> Result<()>
 }
 
 fn local_matches(
-    db: &Connection,
+    db: &rusqlite::Transaction<'_>,
     runtime: &crate::store::Runtime,
     request: &crate::protocol::Request,
     registration: &str,
@@ -325,8 +325,9 @@ pub(super) fn ensure_current(
             if current.identity()? != selected {
                 return Ok(false);
             }
-            if !local_matches(
-                &db,
+            let snapshot = db.transaction()?;
+            let eligible = local_matches(
+                &snapshot,
                 runtime,
                 request,
                 registration,
@@ -334,7 +335,9 @@ pub(super) fn ensure_current(
                 current,
                 &context,
                 dispatch_at,
-            )? {
+            )?;
+            snapshot.commit()?;
+            if !eligible {
                 return Ok(false);
             }
             // Reclaiming an unsent Ready attempt is safe; the durable CAS still

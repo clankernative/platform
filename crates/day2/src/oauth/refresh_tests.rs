@@ -723,8 +723,11 @@ fn compiled_calendar_refresh_publishes_versions_and_fences_failure_recovery() ->
                     context: store::invocation_context(&db, "refresh_v2")?,
                     observations: vec![],
                 };
+                let snapshot = db.unchecked_transaction()?;
+                let stale = load(&snapshot, &runtime, &old, "calendar", &reference, 280);
+                snapshot.commit()?;
                 assert_eq!(
-                    load(&db, &runtime, &old, "calendar", &reference, 280)
+                    stale
                         .err()
                         .context("stale Use survived publication")?
                         .to_string(),
