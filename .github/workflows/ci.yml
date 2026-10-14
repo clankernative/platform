@@ -701,7 +701,7 @@ jobs:
       - run: target/debug/xtask architecture-dependencies > /tmp/day2-architecture-dependencies.json
       - run: target/debug/xtask architecture-proof-inventory > /tmp/day2-architecture-proofs.json
       - name: Check current mixed proof and fixture prerequisite guards
-        run: cargo test --locked -p xtask verification::shards:: -- --nocapture
+        run: 'cargo test --locked -p xtask verification::shards:: -- --nocapture'
       - name: Check mandatory finite private Linux context guard
         run: cargo test --locked -p xtask linux_context_requires_private_finite_native_compiler_limits -- --nocapture
       - name: Exercise native bounded mounts with the exact checkout ABI seed
