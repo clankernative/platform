@@ -1,7 +1,7 @@
 #![cfg(target_os = "linux")]
 
 use anyhow::{Context, Result, ensure};
-use day2::worker::Worker;
+use day2::{properties, worker::Worker};
 use std::{
     path::PathBuf,
     time::{Duration, Instant},
@@ -97,6 +97,86 @@ fn timeout_eof_oversize_and_bad_input_poison_and_reap_worker() -> Result<()> {
             "poisoned worker was reused"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn property_worker_uses_qualified_limits_and_keeps_invocation_profile_unchanged() -> Result<()> {
+    let executable = std::env::current_exe()?;
+    let directory = executable
+        .parent()
+        .and_then(|path| path.parent())
+        .context("test binary directory")?;
+    let probe = directory.join("day2-sandbox-probe");
+    let launcher = directory.join("day2-sandbox");
+
+    let mut ordinary = Worker::start_with_trusted_launcher(&probe, &launcher)?;
+    ensure!(
+        ordinary
+            .exchange_bounded(
+                b"limits",
+                properties::MAX_PROPERTY_FRAME,
+                Duration::from_secs(3)
+            )
+            .is_err(),
+        "ordinary worker admitted the property frame profile"
+    );
+    ensure!(
+        ordinary
+            .exchange_bounded(b"limits", 1_048_576, Duration::from_secs(4))
+            .is_err(),
+        "ordinary worker admitted a longer timeout"
+    );
+    ensure!(ordinary.exchange(b"limits")? == b"268435456,5");
+    ensure!(ordinary.exchange(b"reserve 314572800")? == b"denied");
+    ensure!(
+        ordinary.exchange(b"oversize").is_err(),
+        "ordinary response limit changed"
+    );
+
+    let mut qualified = Worker::start_verification(
+        &probe,
+        512 * 1024 * 1024,
+        Duration::from_secs(30),
+        properties::MAX_PROPERTY_FRAME,
+    )?;
+    ensure!(
+        qualified
+            .exchange_bounded(
+                b"limits",
+                properties::MAX_PROPERTY_FRAME,
+                Duration::from_secs(31)
+            )
+            .is_err(),
+        "property worker admitted a longer timeout"
+    );
+    ensure!(qualified.exchange(b"limits")? == b"536870912,30");
+    ensure!(qualified.exchange(b"reserve 629145600")? == b"denied");
+    let response = qualified.exchange_bounded(
+        b"oversize",
+        properties::MAX_PROPERTY_FRAME,
+        Duration::from_secs(3),
+    )?;
+    ensure!(
+        response.len() == 1_048_577,
+        "qualified response frame was truncated"
+    );
+
+    let started = Instant::now();
+    ensure!(
+        qualified
+            .exchange_bounded(
+                b"spin",
+                properties::MAX_PROPERTY_FRAME,
+                Duration::from_millis(100),
+            )
+            .is_err(),
+        "qualified evaluation timeout was not enforced"
+    );
+    ensure!(
+        started.elapsed() < Duration::from_secs(3),
+        "timeout cleanup exceeded bound"
+    );
     Ok(())
 }
 

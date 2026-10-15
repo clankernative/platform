@@ -265,6 +265,12 @@ fn describe(entry: &operation_metadata::Entry) -> String {
 fn string_schema() -> Value {
     json!({"type":"string","x-day2-max-utf8-bytes":16384,"description":"At most 16384 UTF-8 bytes."})
 }
+
+fn optional_schema(payload: Value) -> Value {
+    json!({"oneOf":[{"type":"string","const":"None"},{"type":"object","required":["Some"],"additionalProperties":false,"properties":{"Some":payload}}],
+        "description":"Roc optional values use the string None or an object with one Some field. The field itself is required."})
+}
+
 pub fn input_schema(kind: &Kind) -> Value {
     match kind {
         Kind::ModelReference { prefix, .. } => crate::identity::json_schema(prefix),
@@ -303,10 +309,9 @@ pub fn input_schema(kind: &Kind) -> Value {
             json!({"type":"string","format":"uri","pattern":"^https://","x-day2-max-utf8-bytes":2048,
             "description":"HTTPS URL with a host and no credentials, whitespace, controls or backslashes; at most 2048 UTF-8 bytes.","examples":["https://example.com/"]})
         }
-        Kind::OptionalText => {
-            json!({"oneOf":[{"type":"string","const":"None"},{"type":"object","required":["Some"],"additionalProperties":false,"properties":{"Some":string_schema()}}],
-            "description":"Roc optional text uses the string None or an object with one Some string field. The field itself is required."})
-        }
+        Kind::OptionalText => optional_schema(string_schema()),
+        Kind::OptionalInteger => optional_schema(input_schema(&Kind::Integer)),
+        Kind::OptionalUnsigned(width) => optional_schema(width.schema()),
         Kind::InputShape { shape, .. } => crate::input_shape::json_schema(shape),
     }
 }
@@ -330,6 +335,8 @@ pub fn output_schema(shape: &Type) -> Value {
         Type::IdCursor => input_schema(&Kind::IdCursor),
         Type::String => string_schema(),
         Type::OptionalText => input_schema(&Kind::OptionalText),
+        Type::OptionalInteger => input_schema(&Kind::OptionalInteger),
+        Type::OptionalUnsigned(width) => input_schema(&Kind::OptionalUnsigned(*width)),
         Type::StandardText { domain } => {
             let mut schema = string_schema();
             schema["x-day2-standard-domain"] = json!(domain);
@@ -387,7 +394,9 @@ pub fn input_example(record: &Record) -> Value {
                         Kind::Cursor => json!("0"),
                         Kind::Reference { .. } => json!("1"),
                         Kind::Boolean => json!(false),
-                        Kind::OptionalText => json!("None"),
+                        Kind::OptionalText | Kind::OptionalInteger | Kind::OptionalUnsigned(_) => {
+                            json!("None")
+                        }
                         Kind::WebUrl => json!("https://example.com/"),
                         Kind::ModelReference { prefix, .. } => {
                             json!(crate::identity::example(prefix))

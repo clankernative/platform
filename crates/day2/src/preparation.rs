@@ -408,7 +408,7 @@ pub(crate) fn validate_local(
         if observation.error.is_empty()
             && matches!(
                 observation.instruction.kind.as_str(),
-                "get" | "page" | "find" | "select_page"
+                "get" | "page" | "find" | "select_page" | "count"
             )
         {
             let current = store::effect(

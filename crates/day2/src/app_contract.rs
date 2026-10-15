@@ -1400,9 +1400,13 @@ fn selector_field_imports(kind: &Kind, schema: &Schema) -> Result<BTreeSet<Strin
         Kind::Cursor | Kind::IdCursor => (Some("Cursor"), None),
         Kind::PageSize => (Some("PageSize"), None),
         // Optional text is a closed built-in union, not a pair of modules.
-        Kind::Integer | Kind::Unsigned(_) | Kind::Text | Kind::Boolean | Kind::OptionalText => {
-            (None, None)
-        }
+        Kind::Integer
+        | Kind::Unsigned(_)
+        | Kind::Text
+        | Kind::Boolean
+        | Kind::OptionalText
+        | Kind::OptionalInteger
+        | Kind::OptionalUnsigned(_) => (None, None),
         // Structured inputs were built only from builtins until nominal collections
         // existed, so their annotations now have to contribute imports too.
         Kind::InputShape { roc_type, .. } => {
@@ -1669,7 +1673,7 @@ mod selector_tests {
             output_type: "result".into(),
         };
         let artifact: Artifact = serde_json::from_value(serde_json::json!({
-            "format":13,"roc_version":"test","worker_digest":"test","schema_digest":"test",
+            "format":13,"verification_limits":crate::artifact::VerificationLimits::QUALIFIED,"roc_version":"test","worker_digest":"test","schema_digest":"test",
             "schema":schema,"operations":[operation],"sources":{},"admission":"test"
         }))?;
         let effect = Effect {

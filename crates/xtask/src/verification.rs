@@ -1138,27 +1138,17 @@ fn test_command(suite: &str) -> Result<Command> {
     // Each crate links its integration tests into one binary. A module filter
     // after `--` selects the tests of what used to be a separate test target.
     let (arguments, modules): (&[&str], &[&str]) = match suite {
-        "libraries" => (
-            &["--workspace", "--exclude", "day2-roc-worker", "--lib"],
-            &[],
-        ),
+        "libraries" => (&["--workspace", "--lib"], &[]),
         // The compile-fail checks drive the Roc compiler for about a minute;
         // workspace-runtime and libraries keep them in the full gates.
         "fast-libraries" => (
-            &[
-                "--workspace",
-                "--exclude",
-                "day2-roc-worker",
-                "--exclude",
-                "day2-cli-checks",
-                "--lib",
-            ],
+            &["--workspace", "--exclude", "day2-cli-checks", "--lib"],
             &[],
         ),
         "linux-sandbox" => (&["-p", "day2-sandbox", "--test", "isolation"], &[]),
         "linux-worker" => (
             &["-p", "day2", "--test", "day2_integration"],
-            &["linux_worker::"],
+            &["linux_worker::", "property_worker::"],
         ),
         "linux-delegation" => (
             &["-p", "day2-control", "--test", "control_integration"],
@@ -1196,6 +1186,7 @@ fn test_command(suite: &str) -> Result<Command> {
                 "authority::",
                 "instance_capabilities::",
                 "linux_worker::",
+                "property_worker::",
                 "numeric::",
                 "output_schema::",
                 "page_sdk::",

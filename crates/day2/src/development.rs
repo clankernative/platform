@@ -129,9 +129,9 @@ fn verification(
         "verify:{}",
         json!({ "action": action, "operation": operation, "snapshot": snapshot.to_string(), "before": before.to_string(), "output": output.to_string(), "seed": seed })
     );
-    let bytes = exchange(artifact, &request)?;
+    let bytes = properties::exchange_verification(artifact, request.as_bytes())?;
     ensure!(
-        bytes == exchange(artifact, &request)?,
+        bytes == properties::exchange_verification(artifact, request.as_bytes())?,
         "verification callback is not deterministic"
     );
     let reply: Reply = serde_json::from_slice(&bytes)?;

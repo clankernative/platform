@@ -9,12 +9,26 @@ fn run() -> anyhow::Result<()> {
     let parent = args
         .next()
         .ok_or_else(|| anyhow::anyhow!("missing parent identity"))?;
+    let memory = args
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("missing memory limit"))?;
+    let cpu = args
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("missing CPU limit"))?;
     anyhow::ensure!(args.next().is_none(), "unexpected launcher argument");
     let parent = parent
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("invalid parent identity"))?
         .parse::<u32>()?;
-    day2_sandbox::launch(std::path::Path::new(&worker), parent)
+    let memory = memory
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("invalid memory limit"))?
+        .parse::<u64>()?;
+    let cpu = cpu
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("invalid CPU limit"))?
+        .parse::<u64>()?;
+    day2_sandbox::launch(std::path::Path::new(&worker), parent, memory, cpu)
 }
 
 fn main() -> std::process::ExitCode {

@@ -855,7 +855,7 @@ mod tests {
                 usage: "Read work events.".into(),
             };
             let contract = serde_json::from_value(json!({
-                "format":crate::artifact::CURRENT_FORMAT,"roc_version":"host-test","worker_digest":"host-test","schema_digest":"host-test",
+                "format":crate::artifact::CURRENT_FORMAT,"verification_limits":crate::artifact::VerificationLimits::QUALIFIED,"roc_version":"host-test","worker_digest":"host-test","schema_digest":"host-test",
                 "schema":{"models":{"entries":{"fields":{"note":"text"}}},"inputs":{"input":{"fields":{}}},"foreign_keys":[]},
                 "operations":[{"name":"read","kind":"query","input_type":"input","output_type":""}],
                 "connection_declarations":[ConnectionDeclaration { registration: Name::try_from("calendar".to_owned())?, requirement: requirement.clone() }],

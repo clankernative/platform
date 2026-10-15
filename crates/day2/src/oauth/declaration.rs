@@ -138,7 +138,7 @@ mod tests {
 
     fn artifact() -> Artifact {
         serde_json::from_value(json!({
-            "format":14,"roc_version":"test","worker_digest":"test","schema_digest":"test",
+            "format":14,"verification_limits":crate::artifact::VerificationLimits::QUALIFIED,"roc_version":"test","worker_digest":"test","schema_digest":"test",
             "sources":{},"admission":"local-spike-only",
             "schema":{"models":{},"inputs":{},"foreign_keys":[]},"operations":[],
             "declarations":{"commands":{},"queries":{},"connections":{"calendar":"current_human"}}

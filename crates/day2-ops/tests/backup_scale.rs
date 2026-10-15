@@ -38,7 +38,12 @@ fn complete_backup_and_restore_do_not_inherit_the_property_snapshot_row_budget()
         .identity
         .as_ref()
         .context("Reports identity")?;
-    let count = day2::properties::MAX_ROWS_PER_MODEL as u64 + 64;
+    let count = runtime
+        .artifact()
+        .contract()
+        .verification_limits
+        .rows_per_model as u64
+        + 64;
     let mut connection = Connection::open(runtime.db())?;
     let transaction = connection.transaction()?;
     for ordinal in 1..=count {
@@ -55,12 +60,9 @@ fn complete_backup_and_restore_do_not_inherit_the_property_snapshot_row_budget()
         )?;
     }
     transaction.commit()?;
-    assert!(
-        runtime
-            .inspect()
-            .unwrap_err()
-            .to_string()
-            .contains("inspection_limit")
+    assert_eq!(
+        runtime.inspect().unwrap_err().to_string(),
+        "verification_rows_per_model_budget"
     );
     runtime.validate_storage()?;
     let expected = rows(&runtime)?;
@@ -71,12 +73,9 @@ fn complete_backup_and_restore_do_not_inherit_the_property_snapshot_row_budget()
     let restored = Runtime::load(&restored_path, "app")?;
     restored.validate_storage()?;
     assert_eq!(rows(&restored)?, expected);
-    assert!(
-        restored
-            .inspect()
-            .unwrap_err()
-            .to_string()
-            .contains("inspection_limit")
+    assert_eq!(
+        restored.inspect().unwrap_err().to_string(),
+        "verification_rows_per_model_budget"
     );
 
     // Corruption beyond the property budget must still prevent a new backup.

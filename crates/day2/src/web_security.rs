@@ -412,7 +412,9 @@ pub(crate) fn field_value(kind: &crate::schema::Kind, raw: &str) -> Result<Value
             "false" => Value::Bool(false),
             _ => anyhow::bail!("invalid_boolean"),
         },
-        Kind::OptionalText => anyhow::bail!("optional_form_field_not_supported"),
+        Kind::OptionalText | Kind::OptionalInteger | Kind::OptionalUnsigned(_) => {
+            anyhow::bail!("optional_form_field_not_supported")
+        }
         Kind::InputShape { .. } => anyhow::bail!("structured_form_field_not_supported"),
         _ => Value::String(raw.into()),
     })

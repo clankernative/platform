@@ -715,7 +715,18 @@ fn input_kind_schema(kind: &Kind) -> Result<Value> {
             schema["kind"] = json!("string")
         }
         Kind::Boolean => schema["kind"] = json!("boolean"),
-        Kind::OptionalText => schema["kind"] = json!("option"),
+        Kind::OptionalText => {
+            schema["kind"] = json!("option");
+            schema["payload"] = crate::operation_catalog::input_schema(&Kind::Text);
+        }
+        Kind::OptionalInteger => {
+            schema["kind"] = json!("option");
+            schema["payload"] = crate::operation_catalog::input_schema(&Kind::Integer);
+        }
+        Kind::OptionalUnsigned(unsigned) => {
+            schema["kind"] = json!("option");
+            schema["payload"] = unsigned.schema();
+        }
         Kind::Reference { target } => {
             schema["kind"] = json!("ref");
             schema["target"] = json!(target);
@@ -739,7 +750,18 @@ fn input_kind_schema(kind: &Kind) -> Result<Value> {
 fn add_output_kinds(schema: &mut Value, shape: &Type) -> Result<()> {
     match shape {
         Type::String => schema["kind"] = json!("string"),
-        Type::OptionalText => schema["kind"] = json!("option"),
+        Type::OptionalText => {
+            schema["kind"] = json!("option");
+            schema["payload"] = crate::operation_catalog::output_schema(&Type::String);
+        }
+        Type::OptionalInteger => {
+            schema["kind"] = json!("option");
+            schema["payload"] = crate::operation_catalog::output_schema(&Type::Integer);
+        }
+        Type::OptionalUnsigned(unsigned) => {
+            schema["kind"] = json!("option");
+            schema["payload"] = unsigned.schema();
+        }
         Type::StandardText { domain } => {
             schema["kind"] = json!("string");
             schema["domain"] = json!(domain);
@@ -1105,6 +1127,7 @@ mod tests {
                 },
             ],
             properties: Vec::new(),
+            verification_limits: crate::artifact::VerificationLimits::QUALIFIED,
             pages: vec![
                 Page {
                     name: "home".into(),

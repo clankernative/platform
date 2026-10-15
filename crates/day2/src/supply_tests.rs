@@ -42,7 +42,7 @@ fn runtime(directory: &Path) -> Result<Runtime> {
     fs::create_dir_all(&state)?;
     let db = state.join("app.sqlite");
     let contract = serde_json::from_value(json!({
-        "format":crate::artifact::CURRENT_FORMAT,"roc_version":"supply-test",
+        "format":crate::artifact::CURRENT_FORMAT,"verification_limits":crate::artifact::VerificationLimits::QUALIFIED,"roc_version":"supply-test",
         "worker_digest":"supply-test","schema_digest":"supply-test",
         "schema":{"models":{},"inputs":{},"foreign_keys":[]},
         "operations":[],"sources":{},"admission":"local-spike-only"
