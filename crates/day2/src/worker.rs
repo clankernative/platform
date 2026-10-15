@@ -70,6 +70,8 @@ impl StageProgress {
             child_before_termination: Some(self.child.snapshot()),
             #[cfg(target_os = "macos")]
             child_after_termination_drain: None,
+            #[cfg(not(target_os = "macos"))]
+            child_after_termination: None,
             requests_enqueued: self.requests_enqueued.load(Ordering::Acquire),
             writer_entered: self.writer_entered.load(Ordering::Acquire),
             writer_dequeued: self.writer_dequeued.load(Ordering::Acquire),
@@ -108,6 +110,8 @@ pub(crate) struct StageEvidence {
     child_before_termination: Option<child_milestones::Snapshot>,
     #[cfg(target_os = "macos")]
     child_after_termination_drain: Option<mac_lifetime::Final>,
+    #[cfg(not(target_os = "macos"))]
+    child_after_termination: Option<TerminationEvidence>,
     requests_enqueued: u32,
     writer_entered: u8,
     writer_dequeued: u32,
@@ -142,6 +146,10 @@ impl std::fmt::Display for StageEvidence {
             self.try_wait_failed,
             self.try_wait_errno,
         )?;
+        #[cfg(not(target_os = "macos"))]
+        if let Some(after) = &self.child_after_termination {
+            write!(formatter, " child-after-termination[{after}]")?;
+        }
         #[cfg(target_os = "macos")]
         {
             formatter.write_str(" first-child-before[")?;
@@ -201,6 +209,56 @@ impl std::fmt::Display for ExitEvidence {
     }
 }
 
+/// Results of the existing supervisor kill and wait, never the original exit
+/// cause. In particular, signal 9 here can be the supervisor's requested kill.
+/// Error messages, paths, frame bytes and environment values are not retained.
+#[cfg(not(target_os = "macos"))]
+#[derive(Debug, serde::Serialize)]
+struct TerminationEvidence {
+    kill_requested: bool,
+    kill_failed: u8,
+    kill_errno: Option<i32>,
+    wait_failed: u8,
+    wait_errno: Option<i32>,
+    code: Option<i32>,
+    signal: Option<i32>,
+}
+
+#[cfg(not(target_os = "macos"))]
+impl TerminationEvidence {
+    fn observe(kill: std::io::Result<()>, wait: std::io::Result<ExitStatus>) -> Self {
+        let kill_failed = u8::from(kill.is_err());
+        let kill_errno = kill.err().and_then(|error| error.raw_os_error());
+        let waited = exit_evidence(wait.map(Some));
+        Self {
+            kill_requested: true,
+            kill_failed,
+            kill_errno,
+            wait_failed: waited.try_wait_failed,
+            wait_errno: waited.try_wait_errno,
+            code: waited.code,
+            signal: waited.signal,
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+impl std::fmt::Display for TerminationEvidence {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "kill_requested={} kill_failed={} kill_errno={:?} wait_failed={} wait_errno={:?} code={:?} signal={:?}",
+            self.kill_requested,
+            self.kill_failed,
+            self.kill_errno,
+            self.wait_failed,
+            self.wait_errno,
+            self.code,
+            self.signal,
+        )
+    }
+}
+
 pub struct Worker {
     #[cfg(target_os = "macos")]
     owner: mac_lifetime::Owner,
@@ -214,6 +272,8 @@ pub struct Worker {
     reader: Option<JoinHandle<()>>,
     #[cfg(not(target_os = "macos"))]
     writer: Option<JoinHandle<()>>,
+    #[cfg(not(target_os = "macos"))]
+    termination: Option<TerminationEvidence>,
     progress: Arc<StageProgress>,
     frame_limit: usize,
 }
@@ -407,6 +467,7 @@ impl Worker {
                 responses: Some(responses),
                 reader: Some(reader),
                 writer: Some(writer),
+                termination: None,
                 progress,
                 frame_limit,
             })
@@ -446,6 +507,11 @@ impl Worker {
                 let evidence = exit_evidence(self.child.try_wait());
                 let stages = self.progress.snapshot(&evidence);
                 self.terminate();
+                #[cfg(not(target_os = "macos"))]
+                let stages = StageEvidence {
+                    child_after_termination: self.termination.take(),
+                    ..stages
+                };
                 #[cfg(target_os = "macos")]
                 let stages = StageEvidence {
                     child_after_termination_drain: Some(self.owner.final_snapshot()),
@@ -489,8 +555,9 @@ impl Worker {
         {
             self.requests.take();
             self.responses.take();
-            let _ = self.child.kill();
-            let _ = self.child.wait();
+            let kill = self.child.kill();
+            let wait = self.child.wait();
+            self.termination = Some(TerminationEvidence::observe(kill, wait));
             if let Some(reader) = self.reader.take() {
                 let _ = reader.join();
             }
@@ -683,6 +750,120 @@ mod tests {
             assert_eq!(stages.try_wait_failed, 0);
             assert_eq!(stages.try_wait_errno, None);
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn natural_exit_keeps_original_status_separate_from_requested_cleanup() {
+        let mut worker = super::Worker::spawn(std::process::Command::new("/usr/bin/false"))
+            .unwrap();
+        // This controlled child has already exited before the exchange. The
+        // production exchange still performs its unchanged try-wait/kill/wait.
+        assert_eq!(worker.child.wait().unwrap().code(), Some(1));
+        let error = worker.exchange(b"PRIVATE_FRAME").unwrap_err();
+        let diagnostic = crate::error::diagnostic(&error);
+        assert_eq!(diagnostic["failure"], "worker_crashed");
+        assert_eq!(diagnostic["worker_exit"]["code"], 1);
+        let after = &diagnostic["worker_stage"]["child_after_termination"];
+        assert_eq!(after["kill_requested"], true);
+        assert_eq!(after["wait_failed"], 0);
+        assert_eq!(after["code"], 1);
+        assert!(after["signal"].is_null());
+        assert!(!diagnostic.to_string().contains("PRIVATE"));
+        assert!(worker.reader.is_none() && worker.writer.is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn actual_timeout_labels_supervisor_kill_and_reaps_the_child() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let mut command = std::process::Command::new("/usr/bin/sleep");
+        command.arg("60");
+        let mut worker = super::Worker::spawn(command).unwrap();
+        let error = worker.exchange(b"PRIVATE_FRAME").unwrap_err();
+        let diagnostic = crate::error::diagnostic(&error);
+        assert_eq!(diagnostic["failure"], "worker_timeout");
+        assert!(diagnostic["worker_exit"]["code"].is_null());
+        assert!(diagnostic["worker_exit"]["signal"].is_null());
+        let after = &diagnostic["worker_stage"]["child_after_termination"];
+        assert_eq!(after["kill_requested"], true);
+        assert_eq!(after["kill_failed"], 0);
+        assert_eq!(after["wait_failed"], 0);
+        assert_eq!(after["signal"], 9);
+        assert!(after["code"].is_null());
+        assert_eq!(worker.child.try_wait().unwrap().unwrap().signal(), Some(9));
+        assert!(worker.reader.is_none() && worker.writer.is_none());
+        assert!(!diagnostic.to_string().contains("PRIVATE"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn actual_trusted_launcher_refusal_retains_exit_without_private_bytes() {
+        // The ordinary native preparation supplies the admitted sibling launcher.
+        // A regular, non-executable file must be refused before worker execution.
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("PRIVATE_WORKER_PATH");
+        std::fs::write(&path, b"PRIVATE_WORKER_IMAGE").unwrap();
+        let mut worker = super::Worker::start(&path).unwrap();
+        assert_eq!(worker.child.wait().unwrap().code(), Some(77));
+        let error = worker.exchange(b"PRIVATE_FRAME").unwrap_err();
+        let diagnostic = crate::error::diagnostic(&error);
+        assert_eq!(diagnostic["failure"], "worker_crashed");
+        assert_eq!(diagnostic["worker_exit"]["code"], 77);
+        let after = &diagnostic["worker_stage"]["child_after_termination"];
+        assert_eq!(after["kill_requested"], true);
+        assert_eq!(after["wait_failed"], 0);
+        assert_eq!(after["code"], 77);
+        assert!(!diagnostic.to_string().contains("PRIVATE"));
+        assert!(worker.reader.is_none() && worker.writer.is_none());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn cleanup_faults_and_maximal_evidence_remain_bounded_and_redacted() {
+        for errno in [Some(5), None] {
+            let fault = || errno.map_or_else(
+                || std::io::Error::other("PRIVATE_TERMINATION_ERROR"),
+                std::io::Error::from_raw_os_error,
+            );
+            let after = super::TerminationEvidence::observe(Err(fault()), Err(fault()));
+            assert!(after.kill_requested);
+            assert_eq!(after.kill_failed, 1);
+            assert_eq!(after.kill_errno, errno);
+            assert_eq!(after.wait_failed, 1);
+            assert_eq!(after.wait_errno, errno);
+            assert!(after.code.is_none() && after.signal.is_none());
+            let mut stages = snapshot(&StageProgress::new());
+            stages.child_after_termination = Some(after);
+            let error = anyhow::Error::new(crate::error::Failure::WorkerCrashed)
+                .context(stages);
+            let diagnostic = crate::error::diagnostic(&error);
+            assert_eq!(diagnostic["failure"], "worker_crashed");
+            assert!(!diagnostic.to_string().contains("PRIVATE"));
+            assert!(!error.to_string().contains("PRIVATE"));
+        }
+        let mut stages = snapshot(&StageProgress::new());
+        stages.requests_enqueued = u32::MAX;
+        stages.writer_dequeued = u32::MAX;
+        stages.writer_flushed = u32::MAX;
+        stages.reader_frames_completed = u32::MAX;
+        stages.write_errno = Some(i32::MIN);
+        stages.child_code = Some(i32::MIN);
+        stages.child_signal = Some(i32::MIN);
+        stages.try_wait_errno = Some(i32::MIN);
+        stages.child_after_termination = Some(super::TerminationEvidence {
+            kill_requested: true,
+            kill_failed: u8::MAX,
+            kill_errno: Some(i32::MIN),
+            wait_failed: u8::MAX,
+            wait_errno: Some(i32::MIN),
+            code: Some(i32::MIN),
+            signal: Some(i32::MIN),
+        });
+        let text = stages.to_string();
+        assert!(text.len() < 1024);
+        assert!(text.contains("child-after-termination[kill_requested=true"));
     }
 
     #[test]
