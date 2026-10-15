@@ -10,8 +10,8 @@
 //! GCS accepts it against `storage.googleapis.com` with HMAC keys.
 
 use super::AdapterError;
-use hmac::{Hmac, Mac};
-use sha2::{Digest, Sha256};
+use crate::hex;
+use ring::hmac;
 
 /// How long a granted authorization is valid. Short by design: a presigned URL is
 /// a bearer capability for one object, and the window is the whole of its
@@ -55,13 +55,9 @@ pub(crate) fn timestamps(now: i64) -> (String, String) {
 }
 
 fn hmac(key: &[u8], message: &str) -> Vec<u8> {
-    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("hmac accepts any key length");
-    mac.update(message.as_bytes());
-    mac.finalize().into_bytes().to_vec()
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    hmac::sign(&hmac::Key::new(hmac::HMAC_SHA256, key), message.as_bytes())
+        .as_ref()
+        .to_vec()
 }
 
 /// Percent-encoding for S3 canonical requests: unreserved characters pass, and
@@ -120,7 +116,7 @@ impl Signer<'_> {
             format!("{method}\n{canonical_path}\n{query}\nhost:{host}\n\nhost\nUNSIGNED-PAYLOAD");
         let to_sign = format!(
             "AWS4-HMAC-SHA256\n{stamp}\n{scope}\n{}",
-            hex(&Sha256::digest(canonical.as_bytes()))
+            crate::digest_hex(canonical.as_bytes())
         );
         let signature = hex(&hmac(&self.signing_key(&date), &to_sign));
         Ok(format!(

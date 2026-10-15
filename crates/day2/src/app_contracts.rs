@@ -1078,6 +1078,7 @@ mod tests {
             recovery: "Correct the item and retry.".into(),
             operation: command.intent.target.clone(),
             additional_operations: Vec::new(),
+            verification_actors: Vec::new(),
         };
         let template_bytes =
             b"<form data-command=\"gallery.save\"><input name=\"limit\" type=\"number\"></form>";

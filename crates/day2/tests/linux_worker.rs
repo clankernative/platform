@@ -27,6 +27,34 @@ fn process(worker: &mut Worker) -> Result<PathBuf> {
 }
 
 #[test]
+fn compiler_rejects_foreign_stages_and_canonical_symlink_escapes() -> Result<()> {
+    use std::{fs, os::unix::fs::symlink, path::Path};
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()?;
+    let stage = crate::support::compiler::stage(&root)?;
+    let foreign = tempfile::tempdir_in(root.join("artifacts"))?;
+    let escape = stage.path().join("escape");
+    symlink(foreign.path(), &escape)?;
+    let roc = root.join("../.toolchains/roc").canonicalize()?;
+    for rejected in [foreign.path(), escape.as_path()] {
+        let output = crate::support::compiler::output(
+            &mut day2::sandbox::compiler(&root, rejected, &roc)?,
+            Duration::from_secs(10),
+        )?;
+        ensure!(
+            !output.status.success()
+                && String::from_utf8_lossy(&output.stderr)
+                    .contains("compiler stage must be a platform-owned build or admission stage"),
+            "foreign compiler stage was not refused at admission: {output:?}"
+        );
+    }
+    fs::remove_file(escape)?;
+    Ok(())
+}
+
+#[test]
 fn qualified_worker_exchanges_frames_and_drop_reaps_it() -> Result<()> {
     let mut worker = start()?;
     let path = process(&mut worker)?;

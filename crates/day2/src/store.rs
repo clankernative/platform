@@ -11,11 +11,11 @@ use crate::{
     worker::Worker,
 };
 use anyhow::{Context as _, Result, bail, ensure};
+use ring::digest::{SHA256, digest};
 use rusqlite::{
     Connection, OptionalExtension, Transaction, params, params_from_iter, types::Value as SqlValue,
 };
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -2924,7 +2924,7 @@ pub(crate) fn encode_selection_cursor(
 ) -> Result<String> {
     let boundary = serde_json::to_string(cursor)?;
     ensure!(boundary.len() <= 8192, "selection_cursor_limit");
-    let boundary_key = format!("{:x}", Sha256::digest(boundary.as_bytes()));
+    let boundary_key = crate::digest_hex(boundary.as_bytes());
     let expires_at = now
         .checked_add(SELECTION_CURSOR_TTL)
         .context("invalid_cursor_clock")?;
@@ -3082,18 +3082,15 @@ fn select_rows(
             descending: false,
         });
     }
-    let binding = format!(
-        "{:x}",
-        Sha256::digest(serde_json::to_vec(&(
-            "day2.selection.v1",
-            schema.hash()?,
-            model,
-            &plan.predicate,
-            &orders,
-            context.actor,
-            context.operation,
-        ))?)
-    );
+    let binding = crate::digest_hex(&serde_json::to_vec(&(
+        "day2.selection.v1",
+        schema.hash()?,
+        model,
+        &plan.predicate,
+        &orders,
+        context.actor,
+        context.operation,
+    ))?);
     let mut values = Vec::new();
     let mut predicates = vec![selection_predicate(
         schema,
@@ -4953,13 +4950,18 @@ pub(crate) fn effect(
                             )?,
                         )?
                     } else {
-                        let hash = Sha256::digest(serde_json::to_vec(&(
-                            scope,
-                            &request.context.invocation_id,
-                            request.observations.len(),
-                            model,
-                        ))?);
-                        Id::Legacy((i64::from_be_bytes(hash[..8].try_into()?) & i64::MAX).max(1))
+                        let hash = digest(
+                            &SHA256,
+                            &serde_json::to_vec(&(
+                                scope,
+                                &request.context.invocation_id,
+                                request.observations.len(),
+                                model,
+                            ))?,
+                        );
+                        Id::Legacy(
+                            (i64::from_be_bytes(hash.as_ref()[..8].try_into()?) & i64::MAX).max(1),
+                        )
                     };
                     let mut parameters = vec![
                         id.sql(record.identity.as_ref())?,

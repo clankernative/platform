@@ -70,7 +70,7 @@ fn native_connection_declarations_require_nominal_access_and_account_policy() ->
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()?;
-    let temporary = tempfile::tempdir_in(root.join("artifacts"))?;
+    let temporary = crate::support::compiler::stage(&root)?;
     let stage = temporary.path();
     fs::create_dir(stage.join("app"))?;
     day2::sdk::stage(&root.join("sdk"), &stage.join("sdk"))?;

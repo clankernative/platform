@@ -2,7 +2,6 @@ use anyhow::{Context, Result, ensure};
 use day2::{automation::Request, build_dependencies};
 use flate2::read::GzDecoder;
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use std::{
     fs,
     io::Read,
@@ -11,7 +10,6 @@ use std::{
 };
 use tar::{Archive, EntryType};
 
-const RELEASE: &str = "0.1.1";
 const MAX_ARCHIVE: u64 = 8_000_000;
 const MAX_EXTRACTED: u64 = 80_000_000;
 const MAX_FILES: usize = 512;
@@ -76,14 +74,15 @@ impl Session {
                 "Platform cli path must be a real directory"
             );
         }
-        let parent = self.root.join("cli/build-dependencies");
-        if let Ok(meta) = fs::symlink_metadata(&parent) {
+        let destination = build_dependencies::installation_path(&self.root)?;
+        let parent = destination.parent().context("dependency install parent")?;
+        if let Ok(meta) = fs::symlink_metadata(parent) {
             ensure!(
                 meta.is_dir() && !meta.file_type().is_symlink(),
                 "dependency install parent must be a real directory"
             );
         }
-        Ok(parent.join(format!("clanker-ui-{RELEASE}")))
+        Ok(destination)
     }
 
     fn inspect(&mut self) -> Result<Value> {
@@ -114,8 +113,8 @@ impl Session {
         );
         let pin = build_dependencies::download_pin()?;
         let url = format!(
-            "https://github.com/clankernative/clanker-ui/releases/download/v{RELEASE}/{}",
-            pin.archive
+            "https://github.com/clankernative/clanker-ui/releases/download/v{}/{}",
+            pin.release, pin.archive
         );
         let client = reqwest::blocking::Client::builder()
             .https_only(true)
@@ -158,18 +157,19 @@ impl Session {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => fs::create_dir(&cli)?,
             Err(error) => return Err(error.into()),
         }
-        let parent = cli.join("build-dependencies");
-        match fs::symlink_metadata(&parent) {
+        let destination = self.destination()?;
+        let parent = destination.parent().context("dependency install parent")?;
+        match fs::symlink_metadata(parent) {
             Ok(meta) => ensure!(
                 meta.is_dir() && !meta.file_type().is_symlink(),
                 "dependency install parent must be a real directory"
             ),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => fs::create_dir(&parent)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => fs::create_dir(parent)?,
             Err(error) => return Err(error.into()),
         }
         let staging = tempfile::Builder::new()
             .prefix(".clanker-ui-")
-            .tempdir_in(&parent)?;
+            .tempdir_in(parent)?;
         extract_archive(bytes, staging.path())?;
         self.staging = Some(staging);
         self.phase = Phase::Extracted;
@@ -254,7 +254,7 @@ fn set_mode(_path: &Path, _mode: u32) -> Result<()> {
 }
 
 fn sha(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    day2::digest(bytes).trim_start_matches("sha256:").to_owned()
 }
 
 fn extract_archive(bytes: &[u8], destination: &Path) -> Result<()> {
@@ -380,9 +380,8 @@ mod tests {
                 .is_err()
         );
         assert!(
-            !temp
-                .path()
-                .join("cli/build-dependencies/clanker-ui-0.1.1")
+            !build_dependencies::installation_path(temp.path())
+                .unwrap()
                 .exists()
         );
     }

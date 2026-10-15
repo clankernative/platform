@@ -8,6 +8,18 @@ use std::{
 
 const OUTPUT_LIMIT: u64 = 1024 * 1024;
 
+// Each compiler probe owns one child of the fixed admission directory. The
+// compiler receives only that child's filesystem capability, not its siblings.
+pub fn stage(root: &std::path::Path) -> Result<tempfile::TempDir> {
+    let admission = root.join("artifacts/admission");
+    std::fs::create_dir_all(&admission)?;
+    ensure!(
+        admission.canonicalize()? == admission,
+        "compiler test admission root must be a fixed platform directory"
+    );
+    tempfile::tempdir_in(admission).context("create owned compiler probe stage")
+}
+
 struct Supervised {
     child: Child,
     stopped: bool,
@@ -20,13 +32,17 @@ impl Supervised {
         }
         self.stopped = true;
         #[cfg(unix)]
-        let _ = Command::new("/bin/kill")
-            .env_clear()
-            .args(["-KILL", &format!("-{}", self.child.id())])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        if let Ok(group) = i32::try_from(self.child.id())
+            && group > 1
+        {
+            let _ = Command::new("/bin/kill")
+                .env_clear()
+                .args(["-KILL", "--", &format!("-{group}")])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
@@ -93,6 +109,16 @@ pub fn output(command: &mut Command, budget: Duration) -> Result<Output> {
 #[cfg(unix)]
 #[test]
 fn captures_completed_output() -> Result<()> {
+    #[cfg(unix)]
+    let mut sibling = {
+        use std::os::unix::process::CommandExt;
+        let mut command = Command::new("/bin/sleep");
+        command.arg("60").process_group(0);
+        Supervised {
+            child: command.spawn()?,
+            stopped: false,
+        }
+    };
     let result = output(
         Command::new("/bin/echo").arg("checked"),
         Duration::from_secs(5),
@@ -100,6 +126,11 @@ fn captures_completed_output() -> Result<()> {
     assert!(result.status.success());
     assert_eq!(result.stdout, b"checked\n");
     assert!(result.stderr.is_empty());
+    #[cfg(unix)]
+    assert!(
+        sibling.child.try_wait()?.is_none(),
+        "cleanup killed a sibling outside its owned group"
+    );
     Ok(())
 }
 

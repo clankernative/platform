@@ -5,7 +5,6 @@
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use day2::ui_lock::{Input, Lock, LockedPackage, manifest_digest, safe_rel, valid_digest};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -104,7 +103,7 @@ struct Resource {
 }
 
 fn sha(bytes: &[u8]) -> String {
-    format!("sha256:{:x}", Sha256::digest(bytes))
+    day2::digest(bytes)
 }
 fn checked(root: &Path, rel: &str) -> Result<Vec<u8>> {
     ensure!(safe_rel(rel), "unsafe input path: {rel}");

@@ -128,7 +128,7 @@ mod probe {
                     denied(std::fs::write(&line[6..], b"forbidden"))?;
                     output.write_all(b"denied")?;
                 }
-                _ if line.starts_with("echo ") => output.write_all(line[5..].as_bytes())?,
+                _ if line.starts_with("echo ") => output.write_all(&line.as_bytes()[5..])?,
                 _ => anyhow::bail!("unknown host acceptance probe"),
             }
             output.write_all(b"\n")?;

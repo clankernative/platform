@@ -424,6 +424,7 @@ pub(super) fn platform_sources(root: &Path) -> Result<BTreeMap<String, String>> 
         "rust-toolchain.toml",
         "toolchain.json",
         ".dockerignore",
+        "build-dependencies/clanker-ui.json",
     ] {
         hashes.insert(path.to_string(), digest(&fs::read(root.join(path))?));
     }
@@ -452,12 +453,12 @@ pub(super) fn admit_cached_fixture(
     directory: &Path,
 ) -> Result<()> {
     let mut prepared = prepare(root, app, overrides, imports)?;
-    ensure!(
-        prepared.target == native_toolchain::Target::MacArm64,
-        "fixture output reuse requires the hosted macOS target"
-    );
     let loaded = day2::artifact::LoadedArtifact::load(directory)?;
     loaded.require_current_api()?;
+    native_toolchain::verify_executable_target(
+        prepared.target,
+        loaded.materialize_worker()?.as_ref(),
+    )?;
     let contract = loaded.contract();
     ensure!(
         contract.namespace == prepared.namespace && contract.imports == prepared.imports,
@@ -481,10 +482,17 @@ pub(super) fn admit_cached_fixture(
         )?),
     );
     prepared.hashes.extend(prepared.platform_hashes);
-    admit_fixture_sources(&prepared.hashes, &contract.sources)
+    prepared
+        .hashes
+        .extend(native_toolchain::stage_system_link_inputs(
+            prepared.target,
+            &prepared.stage,
+        )?);
+    admit_fixture_sources(prepared.target, &prepared.hashes, &contract.sources)
 }
 
 fn admit_fixture_sources(
+    target: native_toolchain::Target,
     expected: &BTreeMap<String, String>,
     sources: &BTreeMap<String, String>,
 ) -> Result<()> {
@@ -492,7 +500,7 @@ fn admit_fixture_sources(
     // The release host archive is an output, admitted by the artifact's worker
     // digest and the separate exact compiler/profile/source cache identity.
     let archive = actual
-        .remove("native/arm64mac/libhost.a")
+        .remove(&format!("native/{}/libhost.a", target.roc_target()))
         .context("cached fixture native archive identity missing")?;
     ensure!(
         archive.len() == 71
@@ -896,6 +904,7 @@ mod platform_input_tests {
         let directory = tempfile::tempdir()?;
         let root = directory.path();
         fs::create_dir(root.join("architecture"))?;
+        fs::create_dir(root.join("build-dependencies"))?;
         for name in [
             "Cargo.toml",
             "Cargo.lock",
@@ -906,6 +915,7 @@ mod platform_input_tests {
             "rust-toolchain.toml",
             "toolchain.json",
             ".dockerignore",
+            "build-dependencies/clanker-ui.json",
         ] {
             fs::write(root.join(name), b"approved input")?;
         }
@@ -928,6 +938,7 @@ mod platform_input_tests {
             "architecture-boundaries.json",
             "architecture-proofs.json",
             "architecture/clippy.toml",
+            "build-dependencies/clanker-ui.json",
         ] {
             assert_eq!(approved[policy], digest(b"approved input"));
             fs::write(root.join(policy), b"weakened restrictions")?;
@@ -962,29 +973,78 @@ mod fixture_cache_admission_tests {
         .collect();
         let mut artifact = expected.clone();
         artifact.insert("native/arm64mac/libhost.a".into(), digest(b"host archive"));
-        admit_fixture_sources(&expected, &artifact)?;
+        admit_fixture_sources(native_toolchain::Target::MacArm64, &expected, &artifact)?;
         for name in expected.keys() {
             let mut changed = artifact.clone();
             changed.insert(name.clone(), digest(b"changed input"));
             assert!(
-                admit_fixture_sources(&expected, &changed).is_err(),
+                admit_fixture_sources(native_toolchain::Target::MacArm64, &expected, &changed)
+                    .is_err(),
                 "{name}"
             );
             let mut missing = artifact.clone();
             missing.remove(name);
             assert!(
-                admit_fixture_sources(&expected, &missing).is_err(),
+                admit_fixture_sources(native_toolchain::Target::MacArm64, &expected, &missing)
+                    .is_err(),
                 "{name}"
             );
         }
         let mut extra = artifact.clone();
         extra.insert("app/deleted.roc".into(), digest(b"old input"));
-        assert!(admit_fixture_sources(&expected, &extra).is_err());
+        assert!(
+            admit_fixture_sources(native_toolchain::Target::MacArm64, &expected, &extra).is_err()
+        );
         let mut missing_host = artifact.clone();
         missing_host.remove("native/arm64mac/libhost.a");
-        assert!(admit_fixture_sources(&expected, &missing_host).is_err());
+        assert!(
+            admit_fixture_sources(native_toolchain::Target::MacArm64, &expected, &missing_host)
+                .is_err()
+        );
         artifact.insert("native/arm64mac/libhost.a".into(), "not a digest".into());
-        assert!(admit_fixture_sources(&expected, &artifact).is_err());
+        assert!(
+            admit_fixture_sources(native_toolchain::Target::MacArm64, &expected, &artifact)
+                .is_err()
+        );
+        Ok(())
+    }
+    #[test]
+    fn cached_fixture_linker_inputs_and_native_archive_are_target_bound() -> Result<()> {
+        for target in [
+            native_toolchain::Target::LinuxX64,
+            native_toolchain::Target::LinuxArm64,
+        ] {
+            let prefix = format!("native/{}", target.roc_target());
+            let expected = BTreeMap::from([
+                ("app/App.roc".into(), digest(b"app")),
+                (
+                    format!("{prefix}/libc.so.6"),
+                    digest(b"current reviewed image libc"),
+                ),
+                (
+                    format!("{prefix}/loader"),
+                    digest(b"current reviewed image loader"),
+                ),
+            ]);
+            let host = format!("{prefix}/libhost.a");
+            let mut sources = expected.clone();
+            sources.insert(host.clone(), digest(b"native output"));
+            admit_fixture_sources(target, &expected, &sources)?;
+            for name in expected.keys() {
+                let mut changed = sources.clone();
+                changed.insert(name.clone(), digest(b"foreign source or image"));
+                assert!(admit_fixture_sources(target, &expected, &changed).is_err());
+                let mut missing = sources.clone();
+                missing.remove(name);
+                assert!(admit_fixture_sources(target, &expected, &missing).is_err());
+            }
+            sources.remove(&host);
+            sources.insert(
+                "native/arm64mac/libhost.a".into(),
+                digest(b"foreign host output"),
+            );
+            assert!(admit_fixture_sources(target, &expected, &sources).is_err());
+        }
         Ok(())
     }
 }

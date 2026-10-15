@@ -14,7 +14,6 @@ const PACKAGE_FILE_LIMIT: usize = 4096;
 const BUNDLE_TOTAL_LIMIT: u64 = 64 * 1024 * 1024;
 const BUNDLE_ITEM_LIMIT: u64 = 16 * 1024 * 1024;
 const LOCK_PATH: &str = "ui/ui.lock.json";
-const BUNDLE_RELATIVE: &str = "cli/build-dependencies/clanker-ui-0.1.1";
 
 #[derive(Clone, Debug)]
 pub(super) struct UiAssemblyInputs {
@@ -146,7 +145,7 @@ impl UiAssemblyInputs {
         } else {
             self.revalidate_installed()?;
         }
-        let target = job.join("platform").join(BUNDLE_RELATIVE);
+        let target = day2::build_dependencies::installation_path(&job.join("platform"))?;
         fs::create_dir_all(
             target
                 .parent()
@@ -360,7 +359,7 @@ mod tests {
         approved
             .materialize(&job)
             .context("initial bundle materialization")?;
-        let staged = job.join("platform").join(BUNDLE_RELATIVE);
+        let staged = day2::build_dependencies::installation_path(&job.join("platform"))?;
         assert_eq!(fs::read(staged.join("manifest.json"))?, b"manifest");
         assert_eq!(
             fs::read(staged.join("package/templates/index.html"))?,

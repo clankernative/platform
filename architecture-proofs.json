@@ -1,7 +1,7 @@
 {
   "version": 1,
   "trait_checks": [
-    {"source":"crates/day2/src/structural_proofs.rs","scope":"module","fingerprint":"sha256:e18d675f758cfce8e98a463c1f03f5ebe40d9389337f473ee96c194dbbb0cb90","registration":{"source":"crates/day2/src/lib.rs","module":"structural_proofs"}},
+    {"source":"crates/day2/src/structural_proofs.rs","scope":"module","fingerprint":"sha256:cf9f502a6f9bb0941bf93d1569e382f9df4c5127f4eddf2400a6cec13374c2ab","registration":{"source":"crates/day2/src/lib.rs","module":"structural_proofs"}},
     {"source":"crates/day2-control/src/release.rs","scope":"const","fingerprint":"sha256:9c616765ed20205205236e2e4d7cc7a77a49512dcd9d0c33c34e1c40da5209e3","registration":null}
   ],
   "proofs": [
@@ -235,6 +235,41 @@
       "material_uses": [],
       "proof_uses": [],
       "owning_children": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/firestore.rs",
+      "type_name": "EpochObservation",
+      "owning_children": [],
+      "methods": [
+        "pub (super) fn into_data (self) -> Snapshot",
+        "pub (super) fn remaining (& mut self , selection : & EpochStore , port : & mut impl Port) -> Result < Duration >",
+        "pub (super) fn snapshot (& self) -> & Snapshot"
+      ],
+      "factories": [
+        {
+          "owner": null,
+          "signature": "pub (super) fn read (port : & mut impl Port , names : & Names) -> Result < EpochObservation >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "EpochObservation",
+          "signature": "pub (super) fn into_data (self) -> Snapshot"
+        },
+        {
+          "owner": "EpochObservation",
+          "signature": "pub (super) fn remaining (& mut self , selection : & EpochStore , port : & mut impl Port) -> Result < Duration >"
+        },
+        {
+          "owner": "EpochObservation",
+          "signature": "pub (super) fn snapshot (& self) -> & Snapshot"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": [
+        "into_data"
+      ]
     }
   ]
 }

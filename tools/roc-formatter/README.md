@@ -39,20 +39,24 @@ cargo run --locked -p xtask -- verify-reports
 `fmt`, `fmt-check` and `verify` cover the public platform, fixtures and
 `examples/reports`. No company app checkout is required.
 
-Bootstrap downloads the reviewed Apple Silicon macOS binary from the
-[formatter release](https://github.com/clankernative/platform/releases/tag/roc-formatter-2026-09-12)
-and verifies its committed SHA-256 before atomic installation. To supply a copy
+Bootstrap selects the reviewed native binary: Apple Silicon macOS from the
+[macOS formatter release](https://github.com/clankernative/platform/releases/tag/roc-formatter-2026-09-12)
+or Linux x86_64 from the
+[Linux formatter release](https://github.com/clankernative/platform/releases/tag/roc-formatter-linux-2026-09-12).
+It verifies the committed SHA-256 before atomic installation. To supply a copy
 from an authenticated download or offline mirror:
 
 ```console
 cargo run --locked -p xtask -- bootstrap-formatter /path/to/reviewed/roc
 ```
 
-Mismatched installed or supplied bytes are rejected. This formatter supports
-Apple Silicon macOS; Linux runtime qualification uses the separate Linux compiler.
+Mismatched installed or supplied bytes are rejected. The formatter supports
+Apple Silicon macOS and Linux x86_64. Application compilation on each host keeps
+its independently pinned official compiler and ABI generator.
 
-[`toolchain.json`](toolchain.json) records the upstream source, patch, Zig archive,
-native build arguments and reviewed output hash. Build dependencies are locked by
+[`toolchain.json`](toolchain.json) and [`linux-x86_64.json`](linux-x86_64.json)
+record each native source, both patches, Zig archive, exact build arguments and
+reviewed output hash. Build dependencies are locked by
 the upstream source archive's Zig package manifest. Roc embeds absolute source,
 Zig and cache paths even in a stripped optimized binary. A fresh source build can
 therefore differ byte-for-byte without a source change. Source builds are not
@@ -63,8 +67,11 @@ digest-pinned upstream source and Zig 0.16.0 into a private build directory,
 checks the source commit and patch, runs the native formatter module tests, then
 builds Roc. It emits `artifacts/roc-formatter/<actual-hash>/roc` plus provenance,
 but does not install it or update any pin. Downloads and subprocesses are bounded;
-caches and Git configuration are isolated. Building requires Apple Command Line
-Tools (the initial build used macOS SDK 15.2). Review and update the output pin
+caches and Git configuration are isolated. macOS builds require Apple Command Line
+Tools (the initial build used macOS SDK 15.2); Linux builds run natively on x86_64
+with the fixed Zig distribution. Linux builds use one Zig job, a 12 GiB per-process
+address-space ceiling, an 8 GiB sampled process-group RSS ceiling and 4 GiB disk
+headroom. Sampling is not kernel process-tree confinement. Review and update the output pin
 explicitly before installing and distributing a new candidate.
 
 Installed tools have separate purposes:
@@ -98,7 +105,10 @@ single record arguments, signatures, variants, lambdas, operators, access chains
 interpolation, match alternatives and exports. Boundary tests exercise 120 versus
 121 columns, indentation, Unicode and long literal/comment content. Tests check
 stable repeated formatting and parser structure before/after, ignoring source
-positions. The September 12 native formatter suite has 113 declared tests.
+positions. The historical September 12 suite declared 113 tests. The reviewed Linux build
+with both committed patches passed all 114 native formatter tests; its complete
+source, recipe and hosted receipt are recorded in
+[Linux provenance](LINUX-SOURCE-PROVENANCE.json).
 The [source provenance](SOURCE-PROVENANCE.md) records the reviewed rebase,
 new upstream dependency, native test/build commands and CLI integration outcomes.
 

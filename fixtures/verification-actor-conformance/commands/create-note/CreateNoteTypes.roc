@@ -1,0 +1,3 @@
+CreateNoteTypes :: [].{
+	Input := { text : Str }
+}

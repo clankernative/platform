@@ -2200,7 +2200,7 @@ mod security_authority_selection_tests {
             "scope":{"installation":instance.installation,"environment":instance.environment,"app":"workspace"},
             "provider":{"kind":"firestore_native_v1","project":"company-tools","project_number":7,"database":"tools",
                 "database_uid":"00000000-0000-4000-8000-000000000007","iam_source":{"kind":"gke_workload_identity_v1",
-                    "service_account":"epoch@company-tools.iam.gserviceaccount.com"}},
+                    "service_account":"epoch@company-tools.iam.gserviceaccount.com","service_account_uid":"100000000000000000007"}},
             "key_set":Digest::of(&"pending-selection")?,"max_lease_seconds":30,
         }))?.as_slice())?;
         store.key_set = instance.security_key_set("workspace")?;

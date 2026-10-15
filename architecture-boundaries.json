@@ -127,16 +127,6 @@
           "local_path": null
         },
         {
-          "name": "hmac",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
-          "features": [],
-          "default_features": true,
-          "optional": false,
-          "local_path": null
-        },
-        {
           "name": "html5ever",
           "kind": "normal",
           "target": null,
@@ -271,8 +261,10 @@
           "kind": "dev",
           "target": null,
           "rename": null,
-          "features": [],
-          "default_features": true,
+          "features": [
+            "std"
+          ],
+          "default_features": false,
           "optional": false,
           "local_path": null
         },
@@ -343,8 +335,10 @@
           "kind": "normal",
           "target": null,
           "rename": null,
-          "features": [],
-          "default_features": true,
+          "features": [
+            "errors"
+          ],
+          "default_features": false,
           "optional": false,
           "local_path": null
         },
@@ -362,16 +356,6 @@
         },
         {
           "name": "serde_json",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
-          "features": [],
-          "default_features": true,
-          "optional": false,
-          "local_path": null
-        },
-        {
-          "name": "sha2",
           "kind": "normal",
           "target": null,
           "rename": null,
@@ -578,6 +562,16 @@
           "local_path": null
         },
         {
+          "name": "ring",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
           "name": "roxmltree",
           "kind": "normal",
           "target": null,
@@ -595,16 +589,6 @@
           "features": [
             "derive"
           ],
-          "default_features": true,
-          "optional": false,
-          "local_path": null
-        },
-        {
-          "name": "sha2",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
-          "features": [],
           "default_features": true,
           "optional": false,
           "local_path": null
@@ -636,6 +620,16 @@
           "local_path": null
         },
         {
+          "name": "ring",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": false,
+          "optional": false,
+          "local_path": null
+        },
+        {
           "name": "serde",
           "kind": "normal",
           "target": null,
@@ -649,16 +643,6 @@
         },
         {
           "name": "serde_json",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
-          "features": [],
-          "default_features": true,
-          "optional": false,
-          "local_path": null
-        },
-        {
-          "name": "sha2",
           "kind": "normal",
           "target": null,
           "rename": null,
@@ -871,22 +855,14 @@
           "local_path": "crates/durable-temporal"
         },
         {
-          "name": "hmac",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
-          "features": [],
-          "default_features": true,
-          "optional": false,
-          "local_path": null
-        },
-        {
           "name": "proptest",
           "kind": "dev",
           "target": null,
           "rename": null,
-          "features": [],
-          "default_features": true,
+          "features": [
+            "std"
+          ],
+          "default_features": false,
           "optional": false,
           "local_path": null
         },
@@ -952,26 +928,6 @@
         },
         {
           "name": "serde_json",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
-          "features": [],
-          "default_features": true,
-          "optional": false,
-          "local_path": null
-        },
-        {
-          "name": "sha1",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
-          "features": [],
-          "default_features": true,
-          "optional": false,
-          "local_path": null
-        },
-        {
-          "name": "sha2",
           "kind": "normal",
           "target": null,
           "rename": null,
@@ -1212,6 +1168,16 @@
           "local_path": null
         },
         {
+          "name": "ring",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
           "name": "rusqlite",
           "kind": "normal",
           "target": null,
@@ -1250,16 +1216,6 @@
         },
         {
           "name": "serde_json",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
-          "features": [],
-          "default_features": true,
-          "optional": false,
-          "local_path": null
-        },
-        {
-          "name": "sha2",
           "kind": "normal",
           "target": null,
           "rename": null,
@@ -1706,6 +1662,16 @@
           "local_path": null
         },
         {
+          "name": "ring",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
           "name": "rusqlite",
           "kind": "normal",
           "target": null,
@@ -1743,16 +1709,6 @@
         },
         {
           "name": "serde_json",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
-          "features": [],
-          "default_features": true,
-          "optional": false,
-          "local_path": null
-        },
-        {
-          "name": "sha2",
           "kind": "normal",
           "target": null,
           "rename": null,

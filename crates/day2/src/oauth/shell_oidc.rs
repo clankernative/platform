@@ -12,9 +12,9 @@ use anyhow::{Context, Result, ensure};
 use axum::http::HeaderMap;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use day2_capabilities::Digest;
+use ring::digest::{SHA256, digest};
 use ring::signature::{RSA_PKCS1_2048_8192_SHA256, RsaPublicKeyComponents};
 use serde::Deserialize;
-use sha2::{Digest as _, Sha256};
 use std::{
     collections::{BTreeMap, HashMap},
     sync::Mutex,
@@ -483,7 +483,7 @@ impl GoogleOidc {
         let state = effects::random()?;
         let nonce = effects::random()?;
         let verifier = effects::random()?;
-        let code_challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
+        let code_challenge = URL_SAFE_NO_PAD.encode(digest(&SHA256, verifier.as_bytes()).as_ref());
         let mut url = url::Url::parse(AUTHORIZATION_URL)?;
         url.query_pairs_mut()
             .append_pair("response_type", "code")
@@ -934,7 +934,7 @@ mod signed_fixtures {
                 .take()
                 .context("replay authorization already consumed")?;
             ensure!(
-                URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
+                URL_SAFE_NO_PAD.encode(digest(&SHA256, verifier.as_bytes()).as_ref())
                     == authorization.challenge,
                 "replay original PKCE changed"
             );

@@ -1,14 +1,13 @@
 //! Reviewed, bounded build-time dependency bundle for Platform-owned tools.
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::{Component, Path, PathBuf},
 };
 
-const RELEASE: &str = "0.1.1";
+const INSTALLATIONS: &str = "cli/build-dependencies";
 const MAX_MANIFEST: u64 = 1_000_000;
 const MAX_FILE: u64 = 16 * 1024 * 1024;
 const MAX_PACKAGE_BYTES: u64 = 64 * 1024 * 1024;
@@ -31,6 +30,7 @@ struct TargetPin {
 }
 
 pub struct DownloadPin {
+    pub release: String,
     pub target: String,
     pub archive: String,
     pub sha256: String,
@@ -39,6 +39,32 @@ pub struct DownloadPin {
 
 fn catalog() -> Result<Value> {
     serde_json::from_slice(CATALOG).context("parse reviewed managed dependency catalog")
+}
+
+/// The reviewed catalog is the sole release selector for acquisition and installation.
+pub fn release() -> Result<String> {
+    let catalog = catalog()?;
+    let release = catalog["release"]
+        .as_str()
+        .context("catalog release required")?;
+    ensure!(
+        !release.is_empty()
+            && release.len() <= 128
+            && release != "."
+            && release != ".."
+            && release
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte)),
+        "invalid catalog release"
+    );
+    Ok(release.to_owned())
+}
+
+/// Shared destination for setup, offline discovery and isolated-job materialization.
+pub fn installation_path(platform_root: &Path) -> Result<PathBuf> {
+    Ok(platform_root
+        .join(INSTALLATIONS)
+        .join(format!("clanker-ui-{}", release()?)))
 }
 
 fn pin_for(target: &str) -> Result<TargetPin> {
@@ -78,6 +104,7 @@ fn pin_for(target: &str) -> Result<TargetPin> {
 pub fn download_pin() -> Result<DownloadPin> {
     let pin = target_pin()?;
     Ok(DownloadPin {
+        release: release()?,
         target: pin.target,
         archive: pin.archive,
         sha256: pin.archive_sha256,
@@ -130,13 +157,13 @@ pub fn installed(platform_root: &Path) -> Result<InstalledBundle> {
 }
 
 fn installed_with_pin(platform_root: &Path, pin: TargetPin) -> Result<InstalledBundle> {
-    ensure_directory_chain(&platform_root.join("cli/build-dependencies"))?;
-    let bundle_root = platform_root.join(format!("cli/build-dependencies/clanker-ui-{RELEASE}"));
+    let bundle_root = installation_path(platform_root)?;
+    ensure_directory_chain(bundle_root.parent().context("bundle parent")?)?;
     verify_bundle(&bundle_root, pin)
 }
 
 fn sha(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    crate::digest_hex(bytes)
 }
 
 fn read_regular(path: &Path, limit: u64) -> Result<Vec<u8>> {
@@ -645,7 +672,7 @@ mod tests {
     fn reviewed_fixture(root: &Path) -> (TargetPin, String) {
         let catalog = catalog().unwrap();
         let target = target_pin().unwrap().target;
-        let bundle = root.join(format!("cli/build-dependencies/clanker-ui-{RELEASE}"));
+        let bundle = installation_path(root).unwrap();
         let package = bundle.join("package");
         fs::create_dir_all(package.join("files")).unwrap();
         fs::create_dir_all(bundle.join("bin")).unwrap();
@@ -758,8 +785,9 @@ mod tests {
         let (changed_pin, _) = reviewed_fixture(changed.path());
         let changed_root = changed.path().canonicalize().unwrap();
         fs::write(
-            changed_root
-                .join("cli/build-dependencies/clanker-ui-0.1.1/package/files/input-000.txt"),
+            installation_path(&changed_root)
+                .unwrap()
+                .join("package/files/input-000.txt"),
             b"tampered",
         )
         .unwrap();
@@ -769,8 +797,9 @@ mod tests {
         let (missing_pin, _) = reviewed_fixture(missing.path());
         let missing_root = missing.path().canonicalize().unwrap();
         fs::remove_file(
-            missing_root
-                .join("cli/build-dependencies/clanker-ui-0.1.1/package/files/input-000.txt"),
+            installation_path(&missing_root)
+                .unwrap()
+                .join("package/files/input-000.txt"),
         )
         .unwrap();
         assert!(installed_with_pin(&missing_root, missing_pin).is_err());
@@ -781,18 +810,18 @@ mod tests {
         let tampered = tempfile::tempdir().unwrap();
         let (pin, _) = reviewed_fixture(tampered.path());
         let root = tampered.path().canonicalize().unwrap();
-        let worker_path = root.join(format!(
-            "cli/build-dependencies/clanker-ui-{RELEASE}/bin/clanker-chart-worker"
-        ));
+        let worker_path = installation_path(&root)
+            .unwrap()
+            .join("bin/clanker-chart-worker");
         fs::write(&worker_path, b"tampered").unwrap();
         assert!(installed_with_pin(&root, pin).is_err());
 
         let missing = tempfile::tempdir().unwrap();
         let (pin, _) = reviewed_fixture(missing.path());
         let root = missing.path().canonicalize().unwrap();
-        let worker_path = root.join(format!(
-            "cli/build-dependencies/clanker-ui-{RELEASE}/bin/clanker-chart-worker"
-        ));
+        let worker_path = installation_path(&root)
+            .unwrap()
+            .join("bin/clanker-chart-worker");
         fs::remove_file(worker_path).unwrap();
         assert!(installed_with_pin(&root, pin).is_err());
 
@@ -801,9 +830,9 @@ mod tests {
             let mode = tempfile::tempdir().unwrap();
             let (pin, _) = reviewed_fixture(mode.path());
             let root = mode.path().canonicalize().unwrap();
-            let worker_path = root.join(format!(
-                "cli/build-dependencies/clanker-ui-{RELEASE}/bin/clanker-chart-worker"
-            ));
+            let worker_path = installation_path(&root)
+                .unwrap()
+                .join("bin/clanker-chart-worker");
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&worker_path, fs::Permissions::from_mode(0o644)).unwrap();
             assert!(installed_with_pin(&root, pin).is_err());
@@ -812,9 +841,7 @@ mod tests {
         let oversized = tempfile::tempdir().unwrap();
         let (mut pin, _) = reviewed_fixture(oversized.path());
         let root = oversized.path().canonicalize().unwrap();
-        let manifest_path = root.join(format!(
-            "cli/build-dependencies/clanker-ui-{RELEASE}/manifest.json"
-        ));
+        let manifest_path = installation_path(&root).unwrap().join("manifest.json");
         let mut manifest: Value =
             serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
         pin.chart_worker_bytes = MAX_EXECUTABLE_BYTES - pin.executable_bytes + 1;
@@ -833,9 +860,7 @@ mod tests {
             let changed = tempfile::tempdir().unwrap();
             let (mut pin, _) = reviewed_fixture(changed.path());
             let root = changed.path().canonicalize().unwrap();
-            let manifest_path = root.join(format!(
-                "cli/build-dependencies/clanker-ui-{RELEASE}/manifest.json"
-            ));
+            let manifest_path = installation_path(&root).unwrap().join("manifest.json");
             let mut manifest: Value =
                 serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
             if field == "abi" {

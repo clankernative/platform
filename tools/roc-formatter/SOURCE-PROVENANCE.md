@@ -23,3 +23,25 @@ cache paths vary. The fixed build root `/tmp/day2-roc-formatter-build` removes
 checkout-path variation but does not solve those remaining causes. A rebuilt
 candidate requires explicit review and pin promotion before distribution.
 Historical local logs are not public release evidence.
+
+
+## Linux x86_64
+
+The Linux output is separately pinned by [linux-x86_64.json](linux-x86_64.json).
+Its reviewed SHA-256 is
+`4b4eed88a6540d041fc33fe5eecdbc43ee8fcfa4a549931bf4369e21fad49825`
+(226,687,584 bytes, ELF64 x86_64 with `/lib64/ld-linux-x86-64.so.2`).
+The [hosted build](https://github.com/clankernative/platform/actions/runs/38468385595)
+at commit `313a32b12c66ec0ee2bdd716b0f09e97c00b44d7` passed 114 native formatter
+tests and 22 Rust admission, process-group and resource-monitor guards.
+One existing installed-formatter integration case was ignored during this
+candidate build; installed formatting and platform qualification are separate.
+
+[The bounded provenance](LINUX-SOURCE-PROVENANCE.json) binds the exact upstream
+source commit/archive, both patch hashes, Zig 0.16.0 archive, native baseline CPU,
+ReleaseFast/strip/version flags and one-job build. The Linux release contains
+these reviewed bytes and provenance; it leaves the macOS release and pin intact.
+The native binary build completed in 1,283.6 seconds. Its sampled group RSS peaked
+at 8,193,581,056 bytes under the unchanged 8 GiB guard. This is one tool build,
+not a CI speedup measurement or a reproducibility guarantee. Application
+compilation retains its separate unmodified official compiler and ABI generator.

@@ -25,11 +25,12 @@ does not imply equivalent webhook, check-publication, hosted runner or
 deployment-CI integrations. Provider adapters retain their actual semantics and
 qualification requirements; no generalized CI interface is introduced here.
 
-## Included example
+## Included examples
 
 | Example | Provider-specific implementation |
 | --- | --- |
 | [Gitea instance CI](gitea-instance-ci/README.md) | Optional GCE runner and workload identity provider for infrastructure plans/applies from one private Gitea repository |
+| [Firestore security authority](firestore-security-epoch/README.md) | Optional dedicated Native database and separate app reader/controller IAM resources; no native readiness or bootstrap workload |
 
 The Gitea example is reusable because every company endpoint and repository
 identity is an explicit input. It is not required for GitHub- or GitLab-backed

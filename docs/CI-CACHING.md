@@ -41,7 +41,9 @@ one PR is scoped to that PR and cannot seed other PRs or `main`. The first
 successful run on `main` populates the shared base cache; later PRs can reuse it.
 The first run in an empty namespace is still cold.
 
-`day2-platform-ci-v2` is the dependency cache prefix and compiler cache namespace.
+`day2-platform-ci-linux-v1` is the Linux dependency/compiler namespace; the focused
+Mac lane retains `day2-platform-ci-v2`. OS and architecture remain cache inputs.
+Neither lane can admit the other host's executables.
 Change both only when deliberately retiring a cache generation. Toolchain,
 dependency and compiler input changes already invalidate the corresponding
 entries automatically; do not add a commit SHA or run ID to either namespace.
@@ -79,7 +81,7 @@ The secret scan and dependency audit finish before CI starts ordinary compilatio
 or looks up a main-push queue receipt. If either fails, preparation and runtime
 campaigns do not allocate runners. The required `verify` job runs its failure
 guard on Ubuntu; skipped preparation cannot produce a successful full check.
-This avoids spending macOS compilation time on already-rejected changes. Passing
+This avoids spending native compilation time on already-rejected changes. Passing
 runs retain the full gate and incur the initial security-check wait.
 
 Hosted `diagnostics` remains independent of those checks so maintainers can
@@ -97,37 +99,55 @@ workspace. Missing, swapped, incomplete or foreign parts fail preparation. The
 prepared binaries and fixtures travel in a permission-preserving archive scoped
 to one Actions run attempt; this is separate from the dependency/compiler caches.
 
-`Verify.roc` selects seven hosted campaigns: disjoint serial day2, control and
-remaining-package tests, control simulation, the reviewed four-thread compiler
-probes, isolated build and installation build. The test binaries receive the
-same libtest filters and fixture environment as ordinary full verification.
-Each binary runs from its Cargo package directory. Compiler inputs, package/target
-graph, worker limits and isolated-build environment remain unchanged.
+`Verify.roc` selects seven hosted campaigns. Five run on native Linux x86_64:
+disjoint serial day2, control and remaining-package tests, control simulation,
+and the reviewed four-thread compiler probes. Their ordinary default package,
+profile, target and filter inventories remain complete. The three Linux sandbox,
+compiler-sandbox and probe launchers are a separate mandatory inventory: built
+once in preparation, byte/mode/ELF-admitted and transported at their fixed native
+sibling paths. Shards never Cargo-build these launchers again.
 
-The required `verify` job fails if preparation or any campaign fails or skips.
-Its native admission also requires all seven receipts from the same checkout,
-source snapshot, workflow, run attempt, host and workspace path, plus unchanged
-test executable hashes and admitted fixtures. Missing test targets, effects or
-timings prevent a full receipt. It joins all 29 steps and twenty-one fixtures;
-the combined workspace campaign retains its original 12,600-second budget.
-Rerun the entire workflow when retrying: partial job reruns cannot mix prepared
-artifacts and successful receipts from different attempts.
+One focused native Mac ARM64 job runs the real isolated-build and installation-build
+campaigns because the production build sandbox supports that host. It also runs
+an explicit source-owned inventory of native ABI, worker lifetime, confinement,
+formatter and compiler cases, including all three connection-use probes. Each
+exact case must exist in the actual Cargo harness with its expected ignored status;
+zero matches cannot qualify compatibility. The Mac job compiles the ordinary
+default graph once but runs this focused inventory instead of the full workspace
+runtime suite. Its native Reports, Reports-probe, relational and OAuth-calendar
+fixture prerequisites, compiler, executables and fresh case outcomes have separate
+evidence. Installation and private build outcomes are uncached.
 
-Manual `Platform CI` dispatch supports `serial-prepare` for the original sequential
-preparation followed by the same seven campaigns, `full` for the ordinary `xtask verify`
-recipe, `compare` for both pipelines on one checkout, and `diagnostics` for hosted
-formatting and admission inventories. Diagnostics provide no verification claim.
-Use complete prepare-to-join timestamps for sharded latency, including queue,
-archive, upload/download and setup costs. The short join job's duration is not
-the full gate duration; joined step timings sum campaign work across hosts.
-The additional runners also increase runner minutes. Qualify correctness and
-measure that cost before claiming a latency improvement.
+Linux jobs use the pinned Rust OCI image on Ubuntu with a finite private cgroup,
+6 GiB memory/no swap and bounded owned artifact/generated tmpfs directories.
+Trusted outer CI setup creates those mounts and preserves the exact checked-in
+worker ABI seed across the generated-output mount. Each Linux job retains its
+current cgroup, mount and seed-digest evidence. Inner native compiler and worker
+Landlock/seccomp, memory and fixed launcher admission remain mandatory; this
+is not a port of the production Mac isolated Cargo builder. Native ELF/glibc/loader
+inputs are independently re-captured before fixture cache admission.
 
-Compare `serial-prepare` and `sharded` on the exact same checkout and cache scope,
-one complete workflow at a time. Start the preparation clock at the first selected
-preparation job, including the two-part join, queues and every artifact transfer.
-Include both preparation jobs in runner minutes. The parts are run-scoped outputs,
-not cross-run caches; no runtime outcome is reused by this change.
+The required `verify` job fails if either preparation part, any portable campaign,
+or the Mac job fails or skips. Its native join binds exact checkout/tree, closed
+source catalog, workflow, run and attempt across both domains. Native snapshots,
+workspace paths, compiler/configuration identities and executable digests remain
+host-specific. The joined proof carries the mandatory Mac preparation, compiler,
+focused cases and two real campaign receipts inside the existing six JSON proof
+files. Missing, foreign or incomplete native evidence fails admission. All 29
+steps and twenty-one Linux fixtures remain required; the combined Linux workspace
+campaign keeps its original 12,600-second budget.
+
+Manual `Platform CI` dispatch selects `sharded` for this complete mixed-host
+pipeline or `diagnostics` for independent hosted formatting and inventories.
+The earlier same-host comparison modes are removed. Local `xtask verify` retains
+its ordinary native maintainer recipe. Rerun every job when retrying a workflow;
+run-scoped preparation and case outcomes cannot mix attempts.
+
+Measure security wait through final join, starting preparation at the earliest
+selected native job. Include both Linux preparation jobs, their join, five
+portable campaigns, the focused Mac job, final verification, setup, queues and
+all transfers. Report Linux and Mac runner work separately. Historical Mac-only
+timings do not qualify this source or establish a mixed-host speedup.
 
 ## Completed build outputs
 
@@ -137,7 +157,7 @@ workflow, host and architecture inputs as a common prefix. A source-specific
 suffix saves changed app and fixture trees separately. Prefix restoration may
 supply older fixture outputs; native admission decides each selected entry.
 The ordinary test output cache keeps its complete reviewed source key and has
-no prefix restoration. Dependency and compiler cache namespaces stay unchanged.
+no prefix restoration. Dependency and compiler caches remain separate from these completed-output keys.
 
 The fixture cache contains only content-addressed artifact directories and the
 format-2 fixture index. Cargo's ordinary compiler dep-info captures embedded
@@ -169,7 +189,9 @@ receipts or runtime state. Cargo’s authoritative compiler messages and fresh
 metadata must close both inventories. Supporting programs are cached separately
 from Cargo’s ordinary output directory; only admitted programs are restored to
 the exact `CARGO_BIN_EXE_*` paths with executable permissions preserved. The
-current-run preparation join and every campaign re-admit their byte digests. Native admission checks the
+current-run preparation join and every campaign re-admit their byte digests and
+exact executable permissions. Linux auxiliary programs are admitted separately.
+Native admission checks the
 current full source snapshot, embedded workflow, canonical workspace, host and
 architecture, actual Rust/Cargo/C compiler versions, compiler/profile environment
 digest and repository Cargo configuration. Fresh Cargo metadata must match every
@@ -203,7 +225,8 @@ looks for the latest merge-group run of this repository's active `ci.yml` workfl
 at the exact checked-out SHA and tree. A different SHA with an identical tree is
 insufficient. Authenticated GitHub metadata must show a completed successful
 latest attempt, all ten successful required jobs and their actual GitHub Actions
-app15368 checks, and its unexpired immutable full-receipt artifact. This job has
+app15368 checks, plus the successful actual `verify-mac-compatibility` job with
+its native runner label and app pin, and its unexpired immutable full-receipt artifact. This job has
 only contents, Actions and checks read permissions; it accepts no caller-selected
 repository, URL, workflow, run, artifact or source override.
 
@@ -214,7 +237,10 @@ host/architecture, canonical workspace, compiler/config/profile identity, fresh
 Cargo metadata for all default targets and supporting programs, exhaustive fixture
 and campaign evidence, original step timings and campaign budgets. Downloaded
 proof is read as confined bounded JSON; its executables are never downloaded or
-run. The authenticated latest run is checked again after artifact admission.
+run. The authenticated latest run, jobs, checks and artifact identities are checked
+again after artifact admission. The current source independently derives the Mac
+snapshot and exact native case/target requirements; a Linux-only receipt cannot
+be reused as a complete full outcome.
 
 Missing, expired, foreign, incomplete, changed or unavailable proof selects
 ordinary complete preparation and all seven fresh campaigns. A setup, lookup,
