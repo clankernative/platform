@@ -117,7 +117,7 @@ impl Budget {
         Ok(remaining)
     }
 
-    fn call(&mut self, port: &mut impl Port, url: &str, body: &[u8]) -> Result<Vec<u8>> {
+    pub(super) fn call(&mut self, port: &mut impl Port, url: &str, body: &[u8]) -> Result<Vec<u8>> {
         ensure!(body.len() <= MAX_BYTES, "security_epoch_request_budget");
         let timeout = self.remaining(port)?;
         let response = port.post(url, body, timeout, MAX_BYTES)?;

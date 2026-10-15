@@ -1,7 +1,7 @@
 {
   "version": 1,
   "trait_checks": [
-    {"source":"crates/day2/src/structural_proofs.rs","scope":"module","fingerprint":"sha256:d6835d8485e5936fdbeff5777a0e3800b823928d7e19d0b5f17660d1e602f2cd","registration":{"source":"crates/day2/src/lib.rs","module":"structural_proofs"}},
+    {"source":"crates/day2/src/structural_proofs.rs","scope":"module","fingerprint":"sha256:399329e0b4f32f9d2d8589cb0af8cfa6bdc574b6cf3b2d034ec08c0cb4acba91","registration":{"source":"crates/day2/src/lib.rs","module":"structural_proofs"}},
     {"source":"crates/day2-control/src/release.rs","scope":"const","fingerprint":"sha256:9c616765ed20205205236e2e4d7cc7a77a49512dcd9d0c33c34e1c40da5209e3","registration":null}
   ],
   "proofs": [
@@ -161,78 +161,27 @@
       "kind": "private_material",
       "consuming_methods": [],
       "methods": [
-        "fn budget (& mut self , port : & mut impl Port) -> Result < Budget >",
-        "fn check (& mut self , selection : & EpochStore , request : & Request , snapshot : & Snapshot , purpose : Purpose , port : & mut impl Port) -> Result < () >",
+        "pub (super) fn budget (& mut self , port : & mut impl Port) -> Result < Budget >",
+        "pub (super) fn check (& mut self , selection : & EpochStore , request : & Request , snapshot : & Snapshot , purpose : Purpose , port : & mut impl Port) -> Result < () >",
         "pub (super) fn fixture (selection : & EpochStore , request : & Request , snapshot : & Snapshot , purpose : Purpose , sample : Sample) -> Result < Self >",
+        "pub (super) fn lose_original_creator_fixture (& mut self)",
         "fn sample (& mut self , port : & mut impl Port) -> Result < Sample >"
       ],
       "factories": [],
       "material_uses": [
         {
           "owner": "CurrentBootstrapExecution",
-          "signature": "fn budget (& mut self , port : & mut impl Port) -> Result < Budget >"
-        },
-        {
-          "owner": "CurrentBootstrapExecution",
-          "signature": "fn check (& mut self , selection : & EpochStore , request : & Request , snapshot : & Snapshot , purpose : Purpose , port : & mut impl Port) -> Result < () >"
-        },
-        {
-          "owner": "CurrentBootstrapExecution",
           "signature": "fn sample (& mut self , port : & mut impl Port) -> Result < Sample >"
         },
         {
-          "owner": "Journal < 'a >",
-          "signature": "pub (super) fn authorize_activate (& mut self , selection : & EpochStore , request : & Request , snapshot : & Snapshot , mut context : CurrentBootstrapExecution , port : & mut impl Port) -> Result < InitialFirstHolderActivationPermit >"
+          "owner": "CurrentBootstrapExecution",
+          "signature": "pub (super) fn budget (& mut self , port : & mut impl Port) -> Result < Budget >"
         },
         {
-          "owner": "Journal < 'a >",
-          "signature": "pub (super) fn authorize_create (& mut self , selection : & EpochStore , request : & Request , snapshot : & Snapshot , mut context : CurrentBootstrapExecution , port : & mut impl Port) -> Result < InitialEpochCreatePermit >"
-        },
-        {
-          "owner": "Journal < 'a >",
-          "signature": "pub (super) fn reconcile_attempt (& mut self , selection : & EpochStore , request : & Request , snapshot : & Snapshot , mut context : CurrentBootstrapExecution , port : & mut impl Port) -> Result < Outcome >"
+          "owner": "CurrentBootstrapExecution",
+          "signature": "pub (super) fn check (& mut self , selection : & EpochStore , request : & Request , snapshot : & Snapshot , purpose : Purpose , port : & mut impl Port) -> Result < () >"
         }
       ],
-      "proof_uses": [],
-      "owning_children": []
-    },
-    {
-      "source": "crates/day2/src/security_epoch/journal.rs",
-      "type_name": "InitialEpochCreatePermit",
-      "kind": "consuming",
-      "consuming_methods": [
-        "send"
-      ],
-      "methods": [
-        "pub (super) fn send (self , selection : & EpochStore , port : & mut impl Port) -> Result < () >"
-      ],
-      "factories": [
-        {
-          "owner": "Journal < 'a >",
-          "signature": "pub (super) fn authorize_create (& mut self , selection : & EpochStore , request : & Request , snapshot : & Snapshot , mut context : CurrentBootstrapExecution , port : & mut impl Port) -> Result < InitialEpochCreatePermit >"
-        }
-      ],
-      "material_uses": [],
-      "proof_uses": [],
-      "owning_children": []
-    },
-    {
-      "source": "crates/day2/src/security_epoch/journal.rs",
-      "type_name": "InitialFirstHolderActivationPermit",
-      "kind": "consuming",
-      "consuming_methods": [
-        "send"
-      ],
-      "methods": [
-        "pub (super) fn send (self , selection : & EpochStore , port : & mut impl Port) -> Result < () >"
-      ],
-      "factories": [
-        {
-          "owner": "Journal < 'a >",
-          "signature": "pub (super) fn authorize_activate (& mut self , selection : & EpochStore , request : & Request , snapshot : & Snapshot , mut context : CurrentBootstrapExecution , port : & mut impl Port) -> Result < InitialFirstHolderActivationPermit >"
-        }
-      ],
-      "material_uses": [],
       "proof_uses": [],
       "owning_children": []
     },
@@ -451,6 +400,176 @@
       "proof_uses": [],
       "kind": "private_material",
       "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/control_slot_io.rs",
+      "type_name": "SlotObservation",
+      "owning_children": [],
+      "methods": [
+        "pub (super) fn into_data (self) -> Option < VersionedSlot >",
+        "pub (super) fn remaining (& mut self , selection : & EpochStore , core : & LogicalCore , port : & mut impl Port) -> Result < Duration >"
+      ],
+      "factories": [
+        {
+          "owner": null,
+          "signature": "pub (super) fn read_with_budget (selection : & EpochStore , core : & LogicalCore , port : & mut impl Port , mut budget : Budget) -> Result < SlotObservation >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": null,
+          "signature": "pub (super) fn accept (selection : & EpochStore , core : LogicalCore , counter : EpochObservation , slot : SlotObservation , context : CurrentBootstrapExecution , port : & mut impl Port) -> Result < SlotMaintenanceMutation >"
+        },
+        {
+          "owner": null,
+          "signature": "pub (super) fn claim (selection : & EpochStore , core : LogicalCore , counter : EpochObservation , slot : SlotObservation , context : CurrentBootstrapExecution , attempt : AttemptCore , port : & mut impl Port) -> Result < SlotClaimMutation >"
+        },
+        {
+          "owner": null,
+          "signature": "pub (super) fn rearm (selection : & EpochStore , core : LogicalCore , counter : EpochObservation , slot : SlotObservation , context : CurrentBootstrapExecution , rearm : RearmCore , port : & mut impl Port) -> Result < SlotMaintenanceMutation >"
+        },
+        {
+          "owner": null,
+          "signature": "pub (super) fn settle (selection : & EpochStore , core : LogicalCore , counter : EpochObservation , slot : SlotObservation , context : CurrentBootstrapExecution , settlement : SettlementCore , port : & mut impl Port) -> Result < SlotMaintenanceMutation >"
+        },
+        {
+          "owner": "SlotObservation",
+          "signature": "pub (super) fn into_data (self) -> Option < VersionedSlot >"
+        },
+        {
+          "owner": "SlotObservation",
+          "signature": "pub (super) fn remaining (& mut self , selection : & EpochStore , core : & LogicalCore , port : & mut impl Port) -> Result < Duration >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": [
+        "into_data"
+      ]
+    },
+    {
+      "source": "crates/day2/src/security_epoch/control_slot_io.rs",
+      "type_name": "Mutation",
+      "owning_children": [],
+      "methods": [
+        "fn check (& mut self , selection : & EpochStore , port : & mut impl Port) -> Result < () >",
+        "fn send (mut self , selection : & EpochStore , port : & mut impl Port) -> Result < (Self , UpdateTime) >"
+      ],
+      "factories": [
+        {
+          "owner": null,
+          "signature": "fn checked (mut mutation : Mutation , selection : & EpochStore , port : & mut impl Port , expected : Outcome) -> Result < Mutation >"
+        },
+        {
+          "owner": null,
+          "signature": "pub (super) fn accept (selection : & EpochStore , core : LogicalCore , counter : EpochObservation , slot : SlotObservation , context : CurrentBootstrapExecution , port : & mut impl Port) -> Result < SlotMaintenanceMutation >"
+        },
+        {
+          "owner": null,
+          "signature": "pub (super) fn claim (selection : & EpochStore , core : LogicalCore , counter : EpochObservation , slot : SlotObservation , context : CurrentBootstrapExecution , attempt : AttemptCore , port : & mut impl Port) -> Result < SlotClaimMutation >"
+        },
+        {
+          "owner": null,
+          "signature": "pub (super) fn rearm (selection : & EpochStore , core : LogicalCore , counter : EpochObservation , slot : SlotObservation , context : CurrentBootstrapExecution , rearm : RearmCore , port : & mut impl Port) -> Result < SlotMaintenanceMutation >"
+        },
+        {
+          "owner": null,
+          "signature": "pub (super) fn settle (selection : & EpochStore , core : LogicalCore , counter : EpochObservation , slot : SlotObservation , context : CurrentBootstrapExecution , settlement : SettlementCore , port : & mut impl Port) -> Result < SlotMaintenanceMutation >"
+        },
+        {
+          "owner": "Mutation",
+          "signature": "fn send (mut self , selection : & EpochStore , port : & mut impl Port) -> Result < (Self , UpdateTime) >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": null,
+          "signature": "fn checked (mut mutation : Mutation , selection : & EpochStore , port : & mut impl Port , expected : Outcome) -> Result < Mutation >"
+        },
+        {
+          "owner": "Mutation",
+          "signature": "fn check (& mut self , selection : & EpochStore , port : & mut impl Port) -> Result < () >"
+        },
+        {
+          "owner": "Mutation",
+          "signature": "fn send (mut self , selection : & EpochStore , port : & mut impl Port) -> Result < (Self , UpdateTime) >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": [
+        "send"
+      ]
+    },
+    {
+      "source": "crates/day2/src/security_epoch/control_slot_io.rs",
+      "type_name": "SlotMaintenanceMutation",
+      "owning_children": [],
+      "methods": [
+        "pub (super) fn send (self , selection : & EpochStore , port : & mut impl Port) -> Result < UpdateTime >"
+      ],
+      "factories": [
+        {
+          "owner": null,
+          "signature": "pub (super) fn accept (selection : & EpochStore , core : LogicalCore , counter : EpochObservation , slot : SlotObservation , context : CurrentBootstrapExecution , port : & mut impl Port) -> Result < SlotMaintenanceMutation >"
+        },
+        {
+          "owner": null,
+          "signature": "pub (super) fn rearm (selection : & EpochStore , core : LogicalCore , counter : EpochObservation , slot : SlotObservation , context : CurrentBootstrapExecution , rearm : RearmCore , port : & mut impl Port) -> Result < SlotMaintenanceMutation >"
+        },
+        {
+          "owner": null,
+          "signature": "pub (super) fn settle (selection : & EpochStore , core : LogicalCore , counter : EpochObservation , slot : SlotObservation , context : CurrentBootstrapExecution , settlement : SettlementCore , port : & mut impl Port) -> Result < SlotMaintenanceMutation >"
+        }
+      ],
+      "material_uses": [],
+      "proof_uses": [],
+      "kind": "consuming",
+      "consuming_methods": [
+        "send"
+      ]
+    },
+    {
+      "source": "crates/day2/src/security_epoch/control_slot_io.rs",
+      "type_name": "SlotClaimMutation",
+      "owning_children": [],
+      "methods": [
+        "pub (super) fn send (self , selection : & EpochStore , port : & mut impl Port) -> Result < KnownClaim >"
+      ],
+      "factories": [
+        {
+          "owner": null,
+          "signature": "pub (super) fn claim (selection : & EpochStore , core : LogicalCore , counter : EpochObservation , slot : SlotObservation , context : CurrentBootstrapExecution , attempt : AttemptCore , port : & mut impl Port) -> Result < SlotClaimMutation >"
+        }
+      ],
+      "material_uses": [],
+      "proof_uses": [],
+      "kind": "consuming",
+      "consuming_methods": [
+        "send"
+      ]
+    },
+    {
+      "source": "crates/day2/src/security_epoch/control_slot_io.rs",
+      "type_name": "KnownClaim",
+      "owning_children": [],
+      "methods": [
+        "pub (super) fn prepare (mut self , selection : & EpochStore , port : & mut impl Port) -> Result < (Request , Budget) >",
+        "pub (super) fn send (self , selection : & EpochStore , port : & mut impl Port) -> Result < () >"
+      ],
+      "factories": [
+        {
+          "owner": "SlotClaimMutation",
+          "signature": "pub (super) fn send (self , selection : & EpochStore , port : & mut impl Port) -> Result < KnownClaim >"
+        }
+      ],
+      "material_uses": [],
+      "proof_uses": [],
+      "kind": "consuming",
+      "consuming_methods": [
+        "prepare",
+        "send"
+      ]
     }
   ],
   "buffer_destructors": [
