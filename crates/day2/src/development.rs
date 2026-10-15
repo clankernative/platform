@@ -1049,8 +1049,16 @@ pub fn people_resource_fixture(
                     allowed_resources: BTreeSet::from([resource.clone()]),
                     actions,
                     limits: Limits {
-                        max_request_bytes: 16_384,
-                        max_response_bytes: 16_384,
+                        max_request_bytes: if *provider == Provider::WorkspaceDirectory {
+                            crate::workspace_directory::MAX_CAPTURE_REQUEST_BYTES
+                        } else {
+                            16_384
+                        },
+                        max_response_bytes: if *provider == Provider::WorkspaceDirectory {
+                            crate::workspace_directory::MAX_CAPTURE_RESPONSE_BYTES
+                        } else {
+                            16_384
+                        },
                         max_calls_per_invocation: 256,
                     },
                     budgets: Vec::new(),
@@ -1499,6 +1507,37 @@ mod people_resource_tests {
     #[test]
     fn local_provider_fixture_seeds_selected_directory_actor_and_complete_hierarchy() -> Result<()>
     {
+        let policy = Policy {
+            version: 1,
+            admins: BTreeSet::new(),
+            delegations: Default::default(),
+            constraints: BTreeMap::new(),
+            operations: BTreeMap::from([(
+                "directory".into(),
+                OperationPolicy {
+                    actors: BTreeSet::from(["selected@synthetic.example".into()]),
+                    mode: Mode::Read,
+                    models: BTreeMap::new(),
+                    commands: BTreeSet::new(),
+                    observations: BTreeSet::from([
+                        "workspace_directory.capture.v1".into(),
+                        "workspace_directory.page.v1".into(),
+                    ]),
+                    effects: BTreeSet::new(),
+                },
+            )]),
+        };
+        let (catalog, attachments) = people_resource_fixture("fixture", &policy)?;
+        let resolved = catalog.resolve("fixture", &attachments, 1)?;
+        let grant = &resolved.operations["directory"]["workspace_directory"];
+        assert_eq!(
+            grant.limits.max_request_bytes,
+            crate::workspace_directory::MAX_CAPTURE_REQUEST_BYTES
+        );
+        assert_eq!(
+            grant.limits.max_response_bytes,
+            crate::workspace_directory::MAX_CAPTURE_RESPONSE_BYTES
+        );
         let fixture = disposable_provider_worlds("selected@synthetic.example", 1_700_000_000);
         assert_eq!(fixture.workspace_directory.users.len(), 1);
         let user = &fixture.workspace_directory.users["selected@synthetic.example"];

@@ -81,6 +81,72 @@ expect Api.error_metadata("invalid", Api.error_cases({description: "Invalid.", r
     Ok(())
 }
 
+#[test]
+fn native_workspace_directory_pages_decode_through_public_sdk() -> Result<()> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()?;
+    let temporary = tempfile::tempdir_in(root.join("artifacts"))?;
+    let stage = temporary.path();
+    fs::create_dir(stage.join("app"))?;
+    day2::sdk::stage(&root.join("sdk"), &stage.join("sdk"))?;
+    fs::write(stage.join("sdk/main.roc"), day2::sdk::app_platform())?;
+    let units = day2::workspace_directory::parse_org_unit_response(br#"{"organizationUnits":[{"orgUnitId":"root","name":"Root","orgUnitPath":"/"},{"orgUnitId":"eng","name":"Engineering","orgUnitPath":"/Engineering","parentOrgUnitId":"root","parentOrgUnitPath":"/"}]}"#)?;
+    let page = serde_json::to_string(&day2::workspace_directory::page(&units, 0)?)?;
+    let empty = serde_json::to_string(&day2::workspace_directory::page(&units, 2)?)?;
+    let source = r#"app [step] { pf: platform "../sdk/main.roc" }
+import pf.WorkspaceDirectory
+import pf.Resource
+import pf.Observe
+import pf.Tx
+step : Str -> Str
+step = |raw| raw
+read_page = |raw, offset| {
+    program = Resource.decode("{\"token\":\"fixture-handle\"}")
+        .and_then(|resource| WorkspaceDirectory.page_with(resource, "fixture-capture", offset))
+        .program()
+    match Tx.evaluate(program, []) {
+        Pending(request) => Tx.evaluate(program, [{instruction: request.instruction, result: raw, error: ""}])
+        other => other
+    }
+}
+expect match read_page(PAGE_JSON, 0) {
+    Done(result) => result.consumed == 1 and result.value.done and result.value.next == 2
+        and result.value.items.len() == 2
+        and result.value.items.any(|unit| unit.id == "root" and unit.parent_id == None and unit.parent_path == None)
+        and result.value.items.any(|unit| unit.id == "eng" and unit.parent_id == Some("root") and unit.parent_path == Some("/"))
+    _ => Bool.False
+}
+expect match read_page(EMPTY_JSON, 2) {
+    Done(result) => result.consumed == 1 and result.value.done and result.value.next == 2 and result.value.items.is_empty()
+    _ => Bool.False
+}
+"#
+        .replace("PAGE_JSON", &serde_json::to_string(&page)?)
+        .replace("EMPTY_JSON", &serde_json::to_string(&empty)?);
+    fs::write(stage.join("app/main.roc"), source)?;
+    let output = crate::support::compiler::output(
+        day2::sandbox::compiler(
+            &root,
+            stage,
+            &root.join("../.toolchains/roc").canonicalize()?,
+        )?
+        .arg("test")
+        .arg(stage.join("app/main.roc")),
+        std::time::Duration::from_secs(60),
+    )?;
+    let diagnostics = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    ensure!(
+        output.status.success() && diagnostics.contains("All (2) tests passed"),
+        "native Directory pages: {diagnostics}"
+    );
+    Ok(())
+}
+
 fn artifact() -> Result<PathBuf> {
     Ok(std::env::var_os("DAY2_TEST_REPORTS_ARTIFACT")
         .context("run xtask verify-reports")?

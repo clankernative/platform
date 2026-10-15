@@ -1000,7 +1000,10 @@ fn hybrid_qualification_keeps_workspace_directory_offline_through_admitted_capab
     const SCOPE: &str = "hybridco/test/app";
     const NOW: i64 = 1_700_000_001;
 
-    fn fixture_runtime(with_world: bool) -> Result<(tempfile::TempDir, Runtime)> {
+    fn fixture_runtime(
+        with_world: bool,
+        response_limit: u64,
+    ) -> Result<(tempfile::TempDir, Runtime)> {
         let directory = tempfile::tempdir()?;
         let instance_path = directory.path().join("instance.json");
         let state = directory.path().join(".state");
@@ -1022,7 +1025,7 @@ fn hybrid_qualification_keeps_workspace_directory_offline_through_admitted_capab
             "resources":{"directory":{"revision":1,"connection":{"id":"directory","revision":1},"target":target}},
             "policies":{"directory_read":{"revision":1,"owner":"it","actors":[ACTOR],"allowed_apps":["app"],"max_duration_seconds":null,
                 "slots":{"directory":{"kind":"workspace_directory","allowed_resources":[{"id":"directory","revision":1}],
-                    "actions":[action],"limits":{"max_request_bytes":32768,"max_response_bytes":4194304,"max_calls_per_invocation":5},
+                    "actions":[action],"limits":{"max_request_bytes":32768,"max_response_bytes":response_limit,"max_calls_per_invocation":5},
                     "budgets":[{"id":"directory_budget","revision":1}]}}}},
             "budgets":{"directory_budget":{"revision":1,"scope":"app","period_seconds":3600,
                 "limits":{"calls":100,"bytes":10000000,"concurrency":1}}}});
@@ -1037,7 +1040,15 @@ fn hybrid_qualification_keeps_workspace_directory_offline_through_admitted_capab
             "schema":{"models":{"items":{"fields":{"value":"text"}}},"inputs":{"input":{"fields":{}}},"foreign_keys":[]},
             "operations":[{"name":"run","kind":"query","input_type":"input","output_type":"output"}],
             "sources":{},"admission":"local-spike-only"}))?;
-        let inputs = crate::host_inputs::Inputs::default();
+        let inputs = crate::host_inputs::Inputs {
+            clock: Arc::new(crate::host_inputs::simulation::VirtualClock(
+                std::sync::Mutex::new((
+                    std::time::Duration::from_secs(NOW as u64),
+                    std::time::Duration::ZERO,
+                )),
+            )),
+            ..Default::default()
+        };
         let runtime = Runtime {
             integrations: Arc::new(integration_host::Host::local(&instance_path)?),
             app_calls: None,
@@ -1129,24 +1140,47 @@ fn hybrid_qualification_keeps_workspace_directory_offline_through_admitted_capab
             .context("opaque directory handle")?
             .to_owned();
         let active = authority_state::current(&tx)?;
+        let instruction = Instruction {
+            kind: "observe".into(),
+            model: "workspace_directory.capture.v1".into(),
+            data: json!({"handle":handle}).to_string(),
+            ..Default::default()
+        };
         let capability = crate::capabilities::authorized(
             &tx,
             runtime,
             &request,
-            &Instruction {
-                kind: "observe".into(),
-                model: "workspace_directory.capture.v1".into(),
-                data: json!({"handle":handle}).to_string(),
-                ..Default::default()
-            },
+            &instruction,
             active.policy()?,
             "ob_hybrid_directory",
         )?;
+        let reservation = crate::resources::reserve_in(
+            &tx,
+            runtime,
+            &request,
+            &instruction,
+            invocation,
+            capability.resource(),
+            capability.quote(),
+        )?;
         tx.commit()?;
-        crate::capabilities::observe(runtime, capability, "hybrid-directory-test").result
+        let outcome = crate::capabilities::observe(runtime, capability, "hybrid-directory-test");
+        assert_eq!(
+            outcome.usage.response_bytes,
+            crate::workspace_directory::MAX_CAPTURE_RESPONSE_BYTES
+        );
+        assert_eq!(
+            outcome.usage.request_bytes,
+            crate::workspace_directory::MAX_CAPTURE_REQUEST_BYTES
+        );
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        crate::resources::settle_in(&tx, &reservation, outcome.usage)?;
+        tx.commit()?;
+        outcome.result
     }
 
-    let (_directory, runtime) = fixture_runtime(true)?;
+    let response_limit = crate::workspace_directory::MAX_CAPTURE_RESPONSE_BYTES;
+    let (_directory, runtime) = fixture_runtime(true, response_limit)?;
     assert!(
         !runtime.integrations().is_simulated(),
         "delegation semantics changed"
@@ -1157,14 +1191,42 @@ fn hybrid_qualification_keeps_workspace_directory_offline_through_admitted_capab
     assert_eq!(capture["actor"], ACTOR);
     assert_eq!(capture["user_path"], "/Engineering");
     assert_eq!(capture["org_unit_count"], 2);
+    admitted_capture(&runtime, "second")?;
+    let exhausted = admitted_capture(&runtime, "budget-exhausted")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        exhausted.starts_with("budget_exhausted:") && exhausted.ends_with(":bytes"),
+        "{exhausted}"
+    );
 
-    let (_directory, runtime) = fixture_runtime(false)?;
+    let (_directory, runtime) = fixture_runtime(false, response_limit)?;
     assert_eq!(
         admitted_capture(&runtime, "missing-world")
             .unwrap_err()
             .to_string(),
         "simulated_directory_user_unconfigured",
         "a missing fixture must fail closed instead of falling back to native credentials or HTTP"
+    );
+    assert_eq!(
+        admitted_capture(&runtime, "second-failure")
+            .unwrap_err()
+            .to_string(),
+        "simulated_directory_user_unconfigured"
+    );
+    let exhausted = admitted_capture(&runtime, "failure-budget-exhausted")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        exhausted.starts_with("budget_exhausted:") && exhausted.ends_with(":bytes"),
+        "{exhausted}"
+    );
+    let (_directory, runtime) = fixture_runtime(true, response_limit - 1)?;
+    assert_eq!(
+        admitted_capture(&runtime, "insufficient-response-allowance")
+            .unwrap_err()
+            .to_string(),
+        crate::error::Failure::ResourceForbidden.to_string()
     );
     Ok(())
 }

@@ -287,7 +287,9 @@ pub(crate) fn authorized(
                     );
                     ensure!(
                         resource.grant.limits.max_response_bytes
-                            >= crate::workspace_directory::MAX_RESPONSE_BYTES as u64
+                            >= crate::workspace_directory::MAX_CAPTURE_RESPONSE_BYTES
+                            && resource.grant.limits.max_request_bytes
+                                >= crate::workspace_directory::MAX_CAPTURE_REQUEST_BYTES
                             && instruction.data.len() as u64
                                 <= crate::workspace_directory::MAX_CAPTURE_REQUEST_BYTES,
                         crate::error::Failure::ResourceForbidden
@@ -599,7 +601,14 @@ impl ProviderResult {
             } => workspace_directory_page(runtime, resource, capture_id, *offset, *now),
             _ => Err(anyhow::anyhow!("workspace_directory_action_invalid")),
         };
-        let response_bytes = result.as_ref().map_or(0, |value| value.len() as u64);
+        // Capture is one bounded multi-request adapter. Retain its entire
+        // response allowance even on errors or cache hits: returned metadata
+        // does not measure the authentication/user/hierarchy traffic consumed.
+        let response_bytes = if matches!(action, Action::WorkspaceDirectoryCapture { .. }) {
+            crate::workspace_directory::MAX_CAPTURE_RESPONSE_BYTES
+        } else {
+            result.as_ref().map_or(0, |value| value.len() as u64)
+        };
         Self {
             result,
             correlation: Vec::new(),

@@ -51,6 +51,7 @@ const PARALLEL_RUNTIME_TESTS: &[&str] = &[
     "app_inference::resource_handles_and_issuance_context_cannot_be_forged_or_broadened",
     "app_inference::omissions_stale_references_and_forged_factories_fail_compilation",
     "app_contract::native_error_cases_preserve_typed_command_query_inputs_and_singleton_authoring",
+    "app_contract::native_workspace_directory_pages_decode_through_public_sdk",
     "app_contract::native_required_all_rows_builders_preserve_typed_definitions",
     "guards::checked_compiler_rejects_wrong_models_forged_values_and_unavailable_io",
     "credential_metadata::native_compiler_preserves_family_types_and_seals_host_read_constructors",

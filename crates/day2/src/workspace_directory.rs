@@ -18,7 +18,9 @@ pub const MAX_PAGE_ITEMS: usize = 32;
 pub const MAX_PAGE_BYTES: usize = 16 * 1024;
 pub const MAX_PROVIDER_CALLS: u64 = 5;
 pub const MAX_CAPTURE_REQUEST_BYTES: u64 = 32 * 1024;
-pub const MAX_CAPTURE_RESPONSE_BYTES: u64 = (MAX_RESPONSE_BYTES + 4 * 16 * 1024) as u64;
+// Five responses in the delegated flow, including the one-byte oversize probe
+// on the final response before a rejected capture stops reading.
+pub const MAX_CAPTURE_RESPONSE_BYTES: u64 = (MAX_RESPONSE_BYTES + 4 * 16 * 1024 + 1) as u64;
 pub const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_USER_RESPONSE_BYTES: usize = 16 * 1024;
 pub const MAX_STORE_BYTES: u64 = 64 * 1024 * 1024;
@@ -152,6 +154,7 @@ pub fn collect_complete(
         &input.connection_id,
         &input.actor,
         input.captured_at,
+        result.hierarchy_captured_at,
         &user_path,
         &units,
     ))?);
@@ -180,8 +183,42 @@ pub struct OrgUnit {
     pub id: String,
     pub name: String,
     pub path: String,
+    #[serde(with = "optional_text")]
     pub parent_id: Option<String>,
+    #[serde(with = "optional_text")]
     pub parent_path: Option<String>,
+}
+
+// The public Roc union uses tagged values, while Google's DTO uses null/string.
+// Keep that translation at the app-facing record boundary, including storage.
+mod optional_text {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    #[derive(Serialize, Deserialize)]
+    enum Text<T> {
+        None,
+        Some(T),
+    }
+
+    pub fn serialize<S: Serializer>(
+        value: &Option<String>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match value.as_deref() {
+            None => Text::<&str>::None,
+            Some(value) => Text::Some(value),
+        }
+        .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<String>, D::Error> {
+        Ok(match Text::<String>::deserialize(deserializer)? {
+            Text::None => None,
+            Text::Some(value) => Some(value),
+        })
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -340,9 +377,17 @@ pub fn validate_complete(units: Vec<OrgUnit>, user_path: &str) -> Result<Vec<Org
     Ok(sorted)
 }
 
-/// Publish a fully validated capture and its records atomically. The store is
-/// append-only: no capture can be refreshed in place or partially observed.
+/// Publish a fully validated capture and its records atomically. Live captures
+/// are immutable; expired records are reclaimed within the same transaction.
 pub fn publish(connection: &mut Connection, capture: &CompleteCapture) -> Result<()> {
+    publish_with_limit(connection, capture, MAX_STORE_BYTES)
+}
+
+fn publish_with_limit(
+    connection: &mut Connection,
+    capture: &CompleteCapture,
+    max_bytes: u64,
+) -> Result<()> {
     ensure!(
         capture.units.len() == usize::try_from(capture.metadata.org_unit_count)?,
         "workspace_directory_capture_count_mismatch"
@@ -368,8 +413,25 @@ pub fn publish(connection: &mut Connection, capture: &CompleteCapture) -> Result
         serde_json::to_vec(&capture.units)?.len() <= MAX_CAPTURE_BYTES,
         "workspace_directory_capture_too_large"
     );
+    initialize_store(connection)?;
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    tx.execute_batch(
+    tx.execute(
+        "DELETE FROM workspace_directory_org_units WHERE capture_id IN
+            (SELECT id FROM workspace_directory_captures WHERE expires_at<=?1)",
+        [capture.metadata.captured_at],
+    )?;
+    tx.execute(
+        "DELETE FROM workspace_directory_captures WHERE expires_at<=?1",
+        [capture.metadata.captured_at],
+    )?;
+    insert_capture(&tx, capture)?;
+    ensure_store_within_bound(&tx, max_bytes)?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn initialize_store(connection: &Connection) -> Result<()> {
+    connection.execute_batch(
         "CREATE TABLE IF NOT EXISTS workspace_directory_captures (
             id TEXT PRIMARY KEY NOT NULL,
             customer_id TEXT NOT NULL,
@@ -388,14 +450,14 @@ pub fn publish(connection: &mut Connection, capture: &CompleteCapture) -> Result
         ) STRICT;
         CREATE TRIGGER IF NOT EXISTS workspace_directory_captures_no_update
             BEFORE UPDATE ON workspace_directory_captures BEGIN SELECT RAISE(ABORT,'immutable_capture'); END;
-        CREATE TRIGGER IF NOT EXISTS workspace_directory_captures_no_delete
-            BEFORE DELETE ON workspace_directory_captures BEGIN SELECT RAISE(ABORT,'immutable_capture'); END;
         CREATE TRIGGER IF NOT EXISTS workspace_directory_org_units_no_update
-            BEFORE UPDATE ON workspace_directory_org_units BEGIN SELECT RAISE(ABORT,'immutable_capture'); END;
-        CREATE TRIGGER IF NOT EXISTS workspace_directory_org_units_no_delete
-            BEFORE DELETE ON workspace_directory_org_units BEGIN SELECT RAISE(ABORT,'immutable_capture'); END;",
+            BEFORE UPDATE ON workspace_directory_org_units BEGIN SELECT RAISE(ABORT,'immutable_capture'); END;",
     )?;
-    let inserted = tx.execute(
+    Ok(())
+}
+
+fn insert_capture(connection: &Connection, capture: &CompleteCapture) -> Result<()> {
+    let inserted = connection.execute(
         "INSERT OR IGNORE INTO workspace_directory_captures VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
         params![
             capture.metadata.id,
@@ -410,7 +472,7 @@ pub fn publish(connection: &mut Connection, capture: &CompleteCapture) -> Result
     )?;
     if inserted == 1 {
         for (index, unit) in capture.units.iter().enumerate() {
-            tx.execute(
+            connection.execute(
                 "INSERT INTO workspace_directory_org_units VALUES(?1,?2,?3)",
                 params![
                     capture.metadata.id,
@@ -420,7 +482,7 @@ pub fn publish(connection: &mut Connection, capture: &CompleteCapture) -> Result
             )?;
         }
     } else {
-        let old: (String, String, String, String, i64, i64, i64) = tx.query_row(
+        let old: (String, String, String, String, i64, i64, i64) = connection.query_row(
             "SELECT customer_id,connection_id,actor,user_path,org_unit_count,captured_at,expires_at FROM workspace_directory_captures WHERE id=?1",
             [&capture.metadata.id],
             |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?)),
@@ -439,15 +501,13 @@ pub fn publish(connection: &mut Connection, capture: &CompleteCapture) -> Result
         );
         ensure!(
             units_for_page(
-                &tx,
+                connection,
                 &capture.metadata.id,
                 i64::try_from(capture.metadata.org_unit_count)?
             )? == capture.units,
             "workspace_directory_capture_id_conflict"
         );
     }
-    ensure_store_within_bound(&tx, MAX_STORE_BYTES)?;
-    tx.commit()?;
     Ok(())
 }
 
@@ -513,11 +573,11 @@ fn units_for_page(connection: &Connection, capture_id: &str, total: i64) -> Resu
 }
 
 pub fn open_store(path: &std::path::Path) -> Result<Connection> {
-    crate::store::open(path)
+    let connection = crate::store::open(path)?;
+    initialize_store(&connection)?;
+    Ok(connection)
 }
 
-/// Reuse only the source org-unit list while its 15-minute source cache is live.
-/// The current user's path is deliberately not part of this lookup.
 fn ensure_store_within_bound(connection: &Connection, max_bytes: u64) -> Result<()> {
     let pages: i64 = connection.query_row("PRAGMA page_count", [], |row| row.get(0))?;
     let page_size: i64 = connection.query_row("PRAGMA page_size", [], |row| row.get(0))?;
@@ -528,6 +588,8 @@ fn ensure_store_within_bound(connection: &Connection, max_bytes: u64) -> Result<
     Ok(())
 }
 
+/// Reuse only the source org-unit list while its 15-minute source cache is live.
+/// The current user's path is deliberately not part of this lookup.
 pub fn cached_hierarchy(
     connection: &Connection,
     customer_id: &str,
@@ -543,17 +605,22 @@ pub fn cached_hierarchy(
         return Ok(None);
     };
     ensure!(
-        expires_at
-            <= captured_at
-                .checked_add(SOURCE_TTL_SECONDS)
-                .context("workspace_directory_expiry_overflow")?,
+        expires_at > captured_at
+            && expires_at
+                <= captured_at
+                    .checked_add(SOURCE_TTL_SECONDS)
+                    .context("workspace_directory_expiry_overflow")?,
         "workspace_directory_cache_expiry_invalid"
     );
     ensure!(
         (1..=i64::try_from(MAX_ORG_UNITS)?).contains(&count),
         "workspace_directory_capture_count_invalid"
     );
-    Ok(Some((units_for_page(connection, &id, count)?, captured_at)))
+    let source_time = expires_at
+        .checked_sub(SOURCE_TTL_SECONDS)
+        .filter(|time| *time >= 0)
+        .context("workspace_directory_cache_expiry_invalid")?;
+    Ok(Some((units_for_page(connection, &id, count)?, source_time)))
 }
 
 pub fn page(units: &[OrgUnit], offset: u64) -> Result<Page> {
@@ -1214,6 +1281,140 @@ mod tests {
         }
     }
 
+    fn capture_at(units: Vec<OrgUnit>, now: i64, source_time: i64) -> Result<CompleteCapture> {
+        let mut port = FixturePort {
+            pages: vec![ProviderPage {
+                units,
+                response_bytes: 256,
+                hierarchy_captured_at: source_time,
+            }],
+            fail_after: None,
+            calls: 0,
+        };
+        collect_complete(
+            CaptureInput {
+                captured_at: now,
+                ..capture_input("alice@example.test")
+            },
+            &mut port,
+        )
+    }
+
+    #[test]
+    fn fresh_cache_and_repeated_reuse_preserve_source_expiry() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("directory.sqlite");
+        let mut db = open_store(&path)?;
+        assert_eq!(
+            cached_hierarchy(&db, "customer-1", "directory-connection/1", 100)?,
+            None
+        );
+        let initial = capture_at(fixture(), 100, 100)?;
+        publish(&mut db, &initial)?;
+        drop(db);
+        let mut db = open_store(&path)?;
+        for now in [200, 300, 999] {
+            let (units, source_time) =
+                cached_hierarchy(&db, "customer-1", "directory-connection/1", now)?
+                    .context("live source cache")?;
+            assert_eq!(source_time, 100);
+            let reused = capture_at(units, now, source_time)?;
+            assert_eq!(reused.expires_at, 1000);
+            publish(&mut db, &reused)?;
+            assert!(
+                page_for_grant(
+                    &db,
+                    &reused.metadata.id,
+                    "customer-1",
+                    "directory-connection/1",
+                    "alice@example.test",
+                    now,
+                    0
+                )?
+                .done
+            );
+            assert!(
+                page_for_grant(
+                    &db,
+                    &reused.metadata.id,
+                    "customer-1",
+                    "directory-connection/1",
+                    "alice@example.test",
+                    1000,
+                    0
+                )
+                .is_err()
+            );
+        }
+        assert_eq!(
+            cached_hierarchy(&db, "customer-1", "directory-connection/1", 1000)?,
+            None
+        );
+        assert!(capture_at(fixture(), 1000, 100).is_err());
+        // A new provider read has a different freshness identity, even when
+        // the actor, invocation time and hierarchy records are identical.
+        assert_ne!(
+            capture_at(fixture(), 300, 100)?.metadata.id,
+            capture_at(fixture(), 300, 300)?.metadata.id
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn expired_captures_reuse_bounded_storage_without_evicting_live_data() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let mut db = open_store(&directory.path().join("directory.sqlite"))?;
+        let mut units = fixture();
+        for index in 0..100 {
+            units.push(OrgUnit {
+                id: format!("unit-{index}"),
+                name: "n".repeat(512),
+                path: format!("/Unit{index}"),
+                parent_id: Some("root".into()),
+                parent_path: Some("/".into()),
+            });
+        }
+        let limit = 128 * 1024;
+        let first = capture_at(units.clone(), 100, 100)?;
+        publish_with_limit(&mut db, &first, limit)?;
+        let still_live = capture_at(units.clone(), 101, 101)?;
+        assert_eq!(
+            publish_with_limit(&mut db, &still_live, limit)
+                .unwrap_err()
+                .to_string(),
+            "workspace_directory_store_full"
+        );
+        assert_eq!(
+            units_for_page(&db, &first.metadata.id, first.units.len() as i64)?,
+            first.units
+        );
+        let mut previous = first.metadata.id;
+        for index in 1..=32 {
+            let now = 100 + index * SOURCE_TTL_SECONDS;
+            let next = capture_at(units.clone(), now, now)?;
+            publish_with_limit(&mut db, &next, limit)?;
+            ensure_store_within_bound(&db, limit)?;
+            let count: i64 = db.query_row(
+                "SELECT count(*) FROM workspace_directory_captures",
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!(count, 1);
+            let orphaned: i64 = db.query_row(
+                "SELECT count(*) FROM workspace_directory_org_units WHERE capture_id=?1",
+                [&previous],
+                |row| row.get(0),
+            )?;
+            assert_eq!(orphaned, 0);
+            assert_eq!(
+                units_for_page(&db, &next.metadata.id, next.units.len() as i64)?,
+                next.units
+            );
+            previous = next.metadata.id;
+        }
+        Ok(())
+    }
+
     #[test]
     fn complete_pipeline_publishes_only_after_all_pages_and_binds_identity() -> Result<()> {
         let mut port = FixturePort {
@@ -1479,11 +1680,16 @@ mod tests {
                     service_account: "directory-reader@company.iam.gserviceaccount.com".into(),
                 }
             };
+            let directory = tempfile::tempdir()?;
+            let mut db = open_store(&directory.path().join("directory.sqlite"))?;
+            if cached {
+                publish(&mut db, &capture_at(fixture(), 100, 100)?)?;
+            }
             let mut port = NativeDirectoryPort::transport_fixture(
                 plan,
                 "customer-1",
                 100,
-                cached.then(|| (fixture(), 100)),
+                cached_hierarchy(&db, "customer-1", "directory-connection/1", 100)?,
                 [origin.as_str(); 4],
             )?;
             let capture = collect_complete(capture_input("alice@example.test"), &mut port);
@@ -1491,6 +1697,19 @@ mod tests {
             let capture = capture?;
             assert_eq!(capture.metadata.user_path, "/Engineering");
             assert_eq!(capture.units.len(), 2);
+            publish(&mut db, &capture)?;
+            assert!(
+                page_for_grant(
+                    &db,
+                    &capture.metadata.id,
+                    "customer-1",
+                    "directory-connection/1",
+                    "alice@example.test",
+                    100,
+                    0
+                )?
+                .done
+            );
         }
         Ok(())
     }
