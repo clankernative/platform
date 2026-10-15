@@ -20,6 +20,25 @@ pub const ACTOR: &str = "developer";
 pub const DEFAULT_SEED: u64 = 0xDA72_2026;
 pub const DEFAULT_CASES: u64 = 16;
 const MAX_STEPS: usize = 128;
+const VERIFICATION_TIME: i64 = 1_700_000_000;
+
+/// Non-interactive invocation and provider-fixture time. Verification uses a
+/// repeatable epoch; local serving uses the runtime clock for fresh providers.
+/// Interactive credential confirmations always use the runtime clock.
+#[derive(Clone, Copy)]
+pub enum CampaignTime {
+    Verification,
+    Local,
+}
+
+impl CampaignTime {
+    fn start(self, runtime: &Runtime) -> Result<i64> {
+        match self {
+            Self::Verification => Ok(VERIFICATION_TIME),
+            Self::Local => Ok(runtime.host().now_ms()?.div_euclid(1000)),
+        }
+    }
+}
 
 /// A selected callee's checked example, used only by disposable verification.
 /// The target and schema pin also authorize the caller's simulated read.
@@ -1015,6 +1034,17 @@ pub fn people_resource_fixture(
             ],
         ),
         (
+            "workspace_directory",
+            Provider::WorkspaceDirectory,
+            ResourceTarget::WorkspaceDirectory {
+                customer_id: "synthetic-customer-1".into(),
+            },
+            vec![
+                Action::WorkspaceDirectoryCapture,
+                Action::WorkspaceDirectoryPage,
+            ],
+        ),
+        (
             "linear",
             Provider::SyntheticLinear,
             ResourceTarget::LinearOrganization {
@@ -1063,7 +1093,12 @@ pub fn people_resource_fixture(
             catalog.connections.insert(
                 (*name).into(),
                 ConnectionDefinition {
-                    live: None,
+                    live: (*provider == Provider::WorkspaceDirectory).then(|| {
+                        day2_capabilities::integrations::LiveConnection::WorkspaceDirectory {
+                            service_account: "directory-reader@company.iam.gserviceaccount.com".into(),
+                            auth: day2_capabilities::integrations::WorkspaceDirectoryAuth::DirectServiceAccount,
+                        }
+                    }),
                     revision: 1,
                     provider: *provider,
                 },
@@ -1083,8 +1118,16 @@ pub fn people_resource_fixture(
                     allowed_resources: BTreeSet::from([resource.clone()]),
                     actions,
                     limits: Limits {
-                        max_request_bytes: 16_384,
-                        max_response_bytes: 16_384,
+                        max_request_bytes: if *provider == Provider::WorkspaceDirectory {
+                            crate::workspace_directory::MAX_CAPTURE_REQUEST_BYTES
+                        } else {
+                            16_384
+                        },
+                        max_response_bytes: if *provider == Provider::WorkspaceDirectory {
+                            crate::workspace_directory::MAX_RESPONSE_BYTES as u64
+                        } else {
+                            16_384
+                        },
                         max_calls_per_invocation: 256,
                     },
                     budgets: Vec::new(),
@@ -1683,6 +1726,57 @@ mod people_resource_tests {
         assert!(catalog.resolve("different-app", &attachments, 1).is_err());
         Ok(())
     }
+
+    #[test]
+    fn local_provider_fixture_seeds_selected_directory_actor_and_complete_hierarchy() -> Result<()>
+    {
+        let policy = Policy {
+            version: 1,
+            admins: BTreeSet::new(),
+            delegations: Default::default(),
+            constraints: BTreeMap::new(),
+            operations: BTreeMap::from([(
+                "directory".into(),
+                OperationPolicy {
+                    actors: BTreeSet::from(["selected@synthetic.example".into()]),
+                    mode: Mode::Read,
+                    models: BTreeMap::new(),
+                    commands: BTreeSet::new(),
+                    observations: BTreeSet::from([
+                        "workspace_directory.capture.v1".into(),
+                        "workspace_directory.page.v1".into(),
+                    ]),
+                    effects: BTreeSet::new(),
+                },
+            )]),
+        };
+        let (catalog, attachments) = people_resource_fixture("fixture", &policy)?;
+        let resolved = catalog.resolve("fixture", &attachments, 1)?;
+        let grant = &resolved.operations["directory"]["workspace_directory"];
+        assert_eq!(
+            grant.limits.max_request_bytes,
+            crate::workspace_directory::MAX_CAPTURE_REQUEST_BYTES
+        );
+        assert_eq!(
+            grant.limits.max_response_bytes,
+            crate::workspace_directory::MAX_RESPONSE_BYTES as u64
+        );
+        let fixture = disposable_provider_worlds("selected@synthetic.example", 1_700_000_000);
+        assert_eq!(fixture.workspace_directory.users.len(), 1);
+        let user = &fixture.workspace_directory.users["selected@synthetic.example"];
+        assert_eq!(user["customerId"], "synthetic-customer-1");
+        assert_eq!(user["orgUnitPath"], "/Engineering");
+        let units = crate::workspace_directory::parse_org_unit_response(&serde_json::to_vec(
+            &fixture.workspace_directory.hierarchy,
+        )?)?;
+        let units = crate::workspace_directory::validate_complete(units, "/Engineering")?;
+        assert_eq!(units.len(), 2);
+        assert_eq!(
+            fixture.workspace_directory.hierarchy_captured_at,
+            1_700_000_000
+        );
+        Ok(())
+    }
 }
 
 pub fn create_for(
@@ -1708,7 +1802,7 @@ fn create_for_with_imports(
         "credential artifacts require explicit verification selection or an admitted installation"
     );
     let instance = instance_for_artifact(&artifact_path, &artifact, policy, actor, imports)?;
-    create_selected_instance(instance, directory, imports)
+    create_selected_instance(instance, directory, imports, actor, CampaignTime::Local)
 }
 
 /// Explicit disposable verification setup. Complete desired selections pass
@@ -1748,7 +1842,13 @@ fn create_verification_for_with_imports(
         });
         credential_verification_selection(&mut instance, &artifact)?;
     }
-    create_selected_instance(instance, directory, imports)
+    create_selected_instance(
+        instance,
+        directory,
+        imports,
+        actor,
+        CampaignTime::Verification,
+    )
 }
 
 /// Desired disposable test data only. The caller must admit the complete
@@ -1876,6 +1976,8 @@ fn create_selected_instance(
     instance: Instance,
     directory: &Path,
     imports: &[ImportedQueryFixture],
+    actor: &str,
+    time: CampaignTime,
 ) -> Result<Runtime> {
     use std::{io::Write, os::unix::fs::PermissionsExt};
     let instance = Instance::from_bytes(&serde_json::to_vec(&instance)?)?;
@@ -1903,7 +2005,8 @@ fn create_selected_instance(
     // differs. Synthetic providers are unaffected: they never reach this host.
     let database = runtime.db().to_path_buf();
     let scope = runtime.scope().to_owned();
-    let mut worlds = disposable_provider_worlds();
+    let captured_at = time.start(&runtime)?;
+    let mut worlds = disposable_provider_worlds(actor, captured_at);
     for import in imports {
         if import.kind != crate::operation_contract::Kind::Query {
             continue;
@@ -2243,7 +2346,10 @@ pub fn repin_credential_verification_data(
 /// with a due date and an owner, one with neither, so a compliance policy that
 /// looks for missing owners and missing due dates has both cases present rather
 /// than only the healthy one.
-fn disposable_provider_worlds() -> crate::integrations::simulated::SimulatedFixture {
+fn disposable_provider_worlds(
+    actor: &str,
+    captured_at: i64,
+) -> crate::integrations::simulated::SimulatedFixture {
     use crate::integrations::simulated::*;
     let issue = |id: &str, identifier: &str, owner: &str, due: i64, view: &str| LinearIssue {
         id: id.into(),
@@ -2346,6 +2452,21 @@ fn disposable_provider_worlds() -> crate::integrations::simulated::SimulatedFixt
             model: "model-synthetic".into(),
             max_input_tokens: 100_000,
         },
+        workspace_directory: crate::integrations::simulated::WorkspaceDirectoryWorld {
+            users: BTreeMap::from([(
+                actor.into(),
+                json!({
+                    "customerId":"synthetic-customer-1",
+                    "orgUnitPath":"/Engineering",
+                    "primaryEmail":actor,
+                    "kind":"admin#directory#user"
+                }),
+            )]),
+            hierarchy: json!({"kind":"admin#directory#orgUnits","organizationUnits":[
+                {"orgUnitId":"root","name":"Root","orgUnitPath":"/","parentOrgUnitId":null,"parentOrgUnitPath":null},
+                {"orgUnitId":"engineering","name":"Engineering","orgUnitPath":"/Engineering","parentOrgUnitId":"root","parentOrgUnitPath":"/"}]}),
+            hierarchy_captured_at: captured_at,
+        },
     }
 }
 
@@ -2373,6 +2494,7 @@ pub struct Campaign {
     pub evidence: Evidence,
     example: Option<String>,
     actor: String,
+    provider_clock: i64,
     include_examples: bool,
     catalog: Option<Vec<Example>>,
     selected: BTreeSet<String>,
@@ -2399,8 +2521,14 @@ struct Active {
 }
 
 impl Campaign {
-    pub fn new(runtime: Runtime, example: Option<&str>, seed: u64, count: u64) -> Result<Self> {
-        Self::for_actor(runtime, example, seed, count, "developer", true)
+    pub fn new(
+        runtime: Runtime,
+        example: Option<&str>,
+        seed: u64,
+        count: u64,
+        time: CampaignTime,
+    ) -> Result<Self> {
+        Self::for_actor(runtime, example, seed, count, "developer", true, time)
     }
 
     pub fn for_actor(
@@ -2410,6 +2538,7 @@ impl Campaign {
         count: u64,
         actor: &str,
         include_examples: bool,
+        time: CampaignTime,
     ) -> Result<Self> {
         ensure!(count <= 100, "generator count budget");
         // Campaigns explicitly provide shared synthetic capability worlds. This
@@ -2417,6 +2546,7 @@ impl Campaign {
         crate::carta::seed_verification_if_unconfigured(&runtime)?;
         crate::people_providers::seed_verification_if_unconfigured(&runtime)?;
         let runtime = crate::managed_credentials::verification::install(runtime)?;
+        let provider_clock = time.start(&runtime)?;
         Ok(Self {
             evidence: Evidence {
                 format: 1,
@@ -2436,6 +2566,7 @@ impl Campaign {
             runtime,
             example: example.map(str::to_owned),
             actor: actor.into(),
+            provider_clock,
             include_examples,
             catalog: None,
             selected: BTreeSet::new(),
@@ -2628,7 +2759,7 @@ impl Campaign {
                 let now = if interactive {
                     self.runtime.host().now_ms()?.div_euclid(1000)
                 } else {
-                    1_700_000_000 + index as i64
+                    self.provider_clock + index as i64
                 };
                 let input: Value = serde_json::from_str(&step.input)?;
                 if interactive {
@@ -3011,7 +3142,13 @@ pub fn exercise(
     seed: u64,
     count: u64,
 ) -> Result<Evidence> {
-    let mut campaign = Campaign::new(runtime.clone(), example_name, seed, count)?;
+    let mut campaign = Campaign::new(
+        runtime.clone(),
+        example_name,
+        seed,
+        count,
+        CampaignTime::Local,
+    )?;
     let outcome = crate::automation::run(
         &crate::automation::runner()?,
         &["exercise", example_name.unwrap_or(""), &count.to_string()],
@@ -3060,6 +3197,7 @@ pub fn verify_with_runner_imports(
         None,
         seed,
         count,
+        CampaignTime::Verification,
     )?;
     let outcome =
         crate::automation::run(runner, &["exercise", "", &count.to_string()], |request| {
