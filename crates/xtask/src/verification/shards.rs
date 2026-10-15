@@ -108,11 +108,17 @@ impl std::fmt::Display for CargoReportingFailure {
             formatter,
             "Cargo {} failed: primary={}, cargo_exit={:?}, signal={:?}, errno={:?}; capture={}; evidence_retained={}",
             self.stage,
-            if self.process.category == "success" { "capture" } else { self.process.category },
+            if self.process.category == "success" {
+                "capture"
+            } else {
+                self.process.category
+            },
             self.process.code,
             self.process.signal,
             self.process.os_error,
-            self.capture.as_ref().map_or("valid", |problem| problem.category),
+            self.capture
+                .as_ref()
+                .map_or("valid", |problem| problem.category),
             self.retained,
         )
     }
@@ -129,17 +135,31 @@ fn retain_cargo_failure(
 ) -> Result<PathBuf> {
     use std::io::Write;
     // The raw spool is local operator evidence, never an Actions upload input.
-    // TempDir/NamedTempFile create private 0700/0600 entries on Unix.
-    let directory = tempfile::Builder::new()
-        .prefix("ci-compiler-failure-")
-        .tempdir_in(root.join("artifacts"))?;
+    // Unix tempdirs otherwise use 0777 subject to umask. Make this directory
+    // owner-only at creation, before any raw bytes; NamedTempFile uses 0600.
+    let mut builder = tempfile::Builder::new();
+    builder.prefix("ci-compiler-failure-");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(fs::Permissions::from_mode(0o700));
+    }
+    let directory = builder.tempdir_in(root.join("artifacts"))?;
     let mut spool = tempfile::NamedTempFile::new_in(directory.path())?;
     let retained = output.map(|bytes| &bytes[..bytes.len().min(CARGO_FAILURE_CAPTURE_BYTES)]);
     if let Some(bytes) = retained {
         spool.write_all(bytes)?;
     }
     spool.persist(directory.path().join("stdout.bin"))?;
-    write_cargo_failure_manifest(directory.path(), root, stage, process, problem, output, &BTreeSet::new())?;
+    write_cargo_failure_manifest(
+        directory.path(),
+        root,
+        stage,
+        process,
+        problem,
+        output,
+        &BTreeSet::new(),
+    )?;
     Ok(directory.keep())
 }
 
@@ -175,7 +195,10 @@ fn write_cargo_failure_manifest(
         "raw_retention":"private job-workspace spool only; not durable after runner disposal",
         "cleanup_signal_is_not_original_exit":true,
     });
-    fs::write(directory.join("manifest.json"), serde_json::to_vec_pretty(&metadata)?)?;
+    fs::write(
+        directory.join("manifest.json"),
+        serde_json::to_vec_pretty(&metadata)?,
+    )?;
     Ok(())
 }
 
@@ -192,20 +215,22 @@ fn report_cargo_capture(
 ) -> Result<Vec<serde_json::Value>> {
     let (output, mut problem) = match output {
         Ok(output) => (Some(output), None),
-        Err(error) => (None, Some(CargoCaptureProblem {
-            category: "read",
-            line: None,
-            byte_offset: None,
-            os_error: error.raw_os_error(),
-        })),
+        Err(error) => (
+            None,
+            Some(CargoCaptureProblem {
+                category: "read",
+                line: None,
+                byte_offset: None,
+                os_error: error.raw_os_error(),
+            }),
+        ),
     };
     let mut messages = Vec::new();
     let mut offset = 0;
     // Preserve failed-command evidence before any JSON decoding. A parser or
     // evidence failure can add context, but cannot replace this process result.
-    let early_evidence = (process.category != "success").then(|| {
-        retain_cargo_failure(root, stage, &process, &problem, output.as_deref())
-    });
+    let early_evidence = (process.category != "success")
+        .then(|| retain_cargo_failure(root, stage, &process, &problem, output.as_deref()));
     if let Some(output) = &output {
         for (index, line) in output.split(|byte| *byte == b'\n').enumerate() {
             if !line.is_empty() {
@@ -227,10 +252,15 @@ fn report_cargo_capture(
         }
     }
     if process.category != "success" || problem.is_some() {
-        let diagnostic_codes: BTreeSet<String> = messages.iter()
+        let diagnostic_codes: BTreeSet<String> = messages
+            .iter()
             .filter(|message| message["reason"] == "compiler-message")
             .filter_map(|message| message["message"]["code"]["code"].as_str())
-            .filter(|code| code.len() == 5 && code.starts_with('E') && code.as_bytes()[1..].iter().all(u8::is_ascii_digit))
+            .filter(|code| {
+                code.len() == 5
+                    && code.starts_with('E')
+                    && code.as_bytes()[1..].iter().all(u8::is_ascii_digit)
+            })
             .take(32)
             .map(str::to_owned)
             .collect();
@@ -238,12 +268,27 @@ fn report_cargo_capture(
             Some(result) => result,
             None => retain_cargo_failure(root, stage, &process, &problem, output.as_deref()),
         };
-        let retained = evidence.and_then(|directory| {
-            write_cargo_failure_manifest(&directory, root, stage, &process, &problem, output.as_deref(), &diagnostic_codes)
-        }).is_ok();
+        let retained = evidence
+            .and_then(|directory| {
+                write_cargo_failure_manifest(
+                    &directory,
+                    root,
+                    stage,
+                    &process,
+                    &problem,
+                    output.as_deref(),
+                    &diagnostic_codes,
+                )
+            })
+            .is_ok();
         // Neither free-form compiler text nor malformed bytes enter the error.
         // Registered-secret masking on the runner is not a private raw archive.
-        let failure = CargoReportingFailure { stage, process, capture: problem, retained };
+        let failure = CargoReportingFailure {
+            stage,
+            process,
+            capture: problem,
+            retained,
+        };
         eprintln!("{failure}");
         eprintln!("Cargo diagnostic codes: {diagnostic_codes:?}");
         return Err(failure.into());
@@ -669,15 +714,14 @@ fn build_auxiliaries(
     let messages = capture_cargo(
         root,
         "auxiliaries",
-        Command::new("cargo")
-            .args([
-                "build",
-                "--locked",
-                "-p",
-                "day2-sandbox",
-                "--bins",
-                "--message-format=json-render-diagnostics",
-            ]),
+        Command::new("cargo").args([
+            "build",
+            "--locked",
+            "-p",
+            "day2-sandbox",
+            "--bins",
+            "--message-format=json-render-diagnostics",
+        ]),
         Duration::from_secs(12600),
     )?;
     let mut binaries = Vec::new();
@@ -1551,10 +1595,15 @@ mod tests {
     }
 
     fn cargo_failure_manifest(root: &Path) -> Result<(PathBuf, serde_json::Value)> {
-        let entries = fs::read_dir(root.join("artifacts"))?
-            .collect::<std::io::Result<Vec<_>>>()?;
-        let directories: Vec<_> = entries.into_iter()
-            .filter(|entry| entry.file_name().to_string_lossy().starts_with("ci-compiler-failure-"))
+        let entries = fs::read_dir(root.join("artifacts"))?.collect::<std::io::Result<Vec<_>>>()?;
+        let directories: Vec<_> = entries
+            .into_iter()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("ci-compiler-failure-")
+            })
             .collect();
         ensure!(directories.len() == 1, "one current failure spool required");
         let directory = directories[0].path();
@@ -1564,11 +1613,13 @@ mod tests {
 
     fn cargo_control_command(mode: &str) -> Result<Command> {
         let mut command = Command::new(std::env::current_exe()?);
-        command.args([
-            "--exact",
-            "verification::shards::tests::cargo_failure_child",
-            "--nocapture",
-        ]).env("DAY2_CARGO_CAPTURE_CONTROL", mode);
+        command
+            .args([
+                "--exact",
+                "verification::shards::tests::cargo_failure_child",
+                "--nocapture",
+            ])
+            .env("DAY2_CARGO_CAPTURE_CONTROL", mode);
         Ok(command)
     }
 
@@ -1576,7 +1627,9 @@ mod tests {
     // exercises the same spawn/timeout/wait and stdout path as Cargo.
     #[test]
     fn cargo_failure_child() {
-        let Ok(mode) = std::env::var("DAY2_CARGO_CAPTURE_CONTROL") else { return; };
+        let Ok(mode) = std::env::var("DAY2_CARGO_CAPTURE_CONTROL") else {
+            return;
+        };
         println!("PRIVATE-CARGO-CONTROL-INVALID-OUTPUT");
         if mode == "timeout" {
             std::thread::sleep(Duration::from_secs(10));
@@ -1587,8 +1640,16 @@ mod tests {
     #[test]
     fn cargo_nonzero_remains_primary_when_real_child_stdout_is_malformed() -> Result<()> {
         let root = cargo_capture_root()?;
-        let error = capture_cargo(root.path(), "tests", &mut cargo_control_command("failure")?, Duration::from_secs(3)).unwrap_err();
-        let failure = error.downcast_ref::<CargoReportingFailure>().context("typed Cargo outcome")?;
+        let error = capture_cargo(
+            root.path(),
+            "tests",
+            &mut cargo_control_command("failure")?,
+            Duration::from_secs(3),
+        )
+        .unwrap_err();
+        let failure = error
+            .downcast_ref::<CargoReportingFailure>()
+            .context("typed Cargo outcome")?;
         assert_eq!(failure.process.category, "exit");
         assert_eq!(failure.process.code, Some(2));
         assert_eq!(failure.capture.as_ref().map(|p| p.category), Some("json"));
@@ -1601,12 +1662,21 @@ mod tests {
         assert_eq!(manifest["complete"], true);
         assert_eq!(manifest["identity_status"], "unavailable");
         assert!(manifest["identity"].is_null());
-        assert_eq!(manifest["diagnostic_only_not_a_preparation_or_runtime_receipt"], true);
+        assert_eq!(
+            manifest["diagnostic_only_not_a_preparation_or_runtime_receipt"],
+            true
+        );
         assert!(!manifest.to_string().contains("PRIVATE-CARGO"));
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(fs::metadata(directory.join("stdout.bin"))?.permissions().mode() & 0o777, 0o600);
+            assert_eq!(
+                fs::metadata(directory.join("stdout.bin"))?
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
             assert_eq!(fs::metadata(directory)?.permissions().mode() & 0o777, 0o700);
         }
         assert!(!root.path().join(PREPARED).exists());
@@ -1617,8 +1687,16 @@ mod tests {
     #[test]
     fn cargo_success_with_real_malformed_output_cannot_be_admitted() -> Result<()> {
         let root = cargo_capture_root()?;
-        let error = capture_cargo(root.path(), "auxiliaries", &mut cargo_control_command("success")?, Duration::from_secs(3)).unwrap_err();
-        let failure = error.downcast_ref::<CargoReportingFailure>().context("typed Cargo outcome")?;
+        let error = capture_cargo(
+            root.path(),
+            "auxiliaries",
+            &mut cargo_control_command("success")?,
+            Duration::from_secs(3),
+        )
+        .unwrap_err();
+        let failure = error
+            .downcast_ref::<CargoReportingFailure>()
+            .context("typed Cargo outcome")?;
         assert_eq!(failure.process.category, "success");
         assert_eq!(failure.process.code, Some(0));
         assert_eq!(failure.capture.as_ref().map(|p| p.category), Some("json"));
@@ -1631,8 +1709,16 @@ mod tests {
     fn cargo_timeout_remains_primary_without_fabricating_an_original_signal() -> Result<()> {
         let root = cargo_capture_root()?;
         let started = Instant::now();
-        let error = capture_cargo(root.path(), "tests", &mut cargo_control_command("timeout")?, Duration::from_millis(100)).unwrap_err();
-        let failure = error.downcast_ref::<CargoReportingFailure>().context("typed Cargo outcome")?;
+        let error = capture_cargo(
+            root.path(),
+            "tests",
+            &mut cargo_control_command("timeout")?,
+            Duration::from_millis(100),
+        )
+        .unwrap_err();
+        let failure = error
+            .downcast_ref::<CargoReportingFailure>()
+            .context("typed Cargo outcome")?;
         assert_eq!(failure.process.category, "timeout");
         assert_eq!(failure.process.code, None);
         assert_eq!(failure.process.signal, None);
@@ -1645,8 +1731,11 @@ mod tests {
     fn cargo_spawn_refusal_keeps_errno_without_exporting_the_command_path() -> Result<()> {
         let root = cargo_capture_root()?;
         let mut command = Command::new(root.path().join("PRIVATE-CARGO-NONEXISTENT-COMMAND"));
-        let error = capture_cargo(root.path(), "tests", &mut command, Duration::from_secs(1)).unwrap_err();
-        let failure = error.downcast_ref::<CargoReportingFailure>().context("typed Cargo outcome")?;
+        let error =
+            capture_cargo(root.path(), "tests", &mut command, Duration::from_secs(1)).unwrap_err();
+        let failure = error
+            .downcast_ref::<CargoReportingFailure>()
+            .context("typed Cargo outcome")?;
         assert_eq!(failure.process.category, "spawn");
         assert!(failure.process.os_error.is_some());
         assert_eq!(failure.process.code, None);
@@ -1655,7 +1744,12 @@ mod tests {
     }
 
     fn failed_cargo_outcome() -> CargoProcessOutcome {
-        CargoProcessOutcome { category: "exit", code: Some(2), signal: None, os_error: None }
+        CargoProcessOutcome {
+            category: "exit",
+            code: Some(2),
+            signal: None,
+            os_error: None,
+        }
     }
 
     #[test]
@@ -1666,8 +1760,11 @@ mod tests {
             "reason":"compiler-message",
             "message":{"code":{"code":"E0308"},"rendered":"PRIVATE-CARGO-RENDERED"}
         }))?);
-        let error = report_cargo_capture(root.path(), "tests", failed_cargo_outcome(), Ok(output)).unwrap_err();
-        let failure = error.downcast_ref::<CargoReportingFailure>().context("typed Cargo outcome")?;
+        let error = report_cargo_capture(root.path(), "tests", failed_cargo_outcome(), Ok(output))
+            .unwrap_err();
+        let failure = error
+            .downcast_ref::<CargoReportingFailure>()
+            .context("typed Cargo outcome")?;
         assert_eq!(failure.process.code, Some(2));
         assert_eq!(failure.capture.as_ref().and_then(|p| p.line), Some(1));
         let (_, manifest) = cargo_failure_manifest(root.path())?;
@@ -1680,8 +1777,16 @@ mod tests {
     fn cargo_valid_output_does_not_turn_a_failed_compile_into_success() -> Result<()> {
         let root = cargo_capture_root()?;
         let output = serde_json::to_vec(&json!({"reason":"build-finished","success":false}))?;
-        let error = report_cargo_capture(root.path(), "auxiliaries", failed_cargo_outcome(), Ok(output)).unwrap_err();
-        let failure = error.downcast_ref::<CargoReportingFailure>().context("typed Cargo outcome")?;
+        let error = report_cargo_capture(
+            root.path(),
+            "auxiliaries",
+            failed_cargo_outcome(),
+            Ok(output),
+        )
+        .unwrap_err();
+        let failure = error
+            .downcast_ref::<CargoReportingFailure>()
+            .context("typed Cargo outcome")?;
         assert_eq!(failure.process.code, Some(2));
         assert!(failure.capture.is_none());
         assert!(failure.retained);
@@ -1696,8 +1801,11 @@ mod tests {
             (Err(std::io::Error::from_raw_os_error(5)), "read"),
             (Ok(b"PRIVATE-CARGO-INVALID".to_vec()), "json"),
         ] {
-            let error = report_cargo_capture(root.path(), "tests", failed_cargo_outcome(), output).unwrap_err();
-            let failure = error.downcast_ref::<CargoReportingFailure>().context("typed Cargo outcome")?;
+            let error = report_cargo_capture(root.path(), "tests", failed_cargo_outcome(), output)
+                .unwrap_err();
+            let failure = error
+                .downcast_ref::<CargoReportingFailure>()
+                .context("typed Cargo outcome")?;
             assert_eq!(failure.process.code, Some(2));
             assert_eq!(failure.capture.as_ref().map(|p| p.category), Some(category));
             assert!(!failure.retained);
@@ -1711,13 +1819,22 @@ mod tests {
     fn cargo_failure_spool_is_bounded_and_explicitly_incomplete() -> Result<()> {
         let root = cargo_capture_root()?;
         let output = vec![b'x'; CARGO_FAILURE_CAPTURE_BYTES + 1];
-        let error = report_cargo_capture(root.path(), "tests", failed_cargo_outcome(), Ok(output)).unwrap_err();
-        assert!(error.downcast_ref::<CargoReportingFailure>().context("typed Cargo outcome")?.retained);
+        let error = report_cargo_capture(root.path(), "tests", failed_cargo_outcome(), Ok(output))
+            .unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<CargoReportingFailure>()
+                .context("typed Cargo outcome")?
+                .retained
+        );
         let (directory, manifest) = cargo_failure_manifest(root.path())?;
         assert_eq!(manifest["capture_bytes"], CARGO_FAILURE_CAPTURE_BYTES + 1);
         assert_eq!(manifest["retained_bytes"], CARGO_FAILURE_CAPTURE_BYTES);
         assert_eq!(manifest["complete"], false);
-        assert_eq!(fs::metadata(directory.join("stdout.bin"))?.len(), CARGO_FAILURE_CAPTURE_BYTES as u64);
+        assert_eq!(
+            fs::metadata(directory.join("stdout.bin"))?.len(),
+            CARGO_FAILURE_CAPTURE_BYTES as u64
+        );
         Ok(())
     }
 
@@ -1725,8 +1842,18 @@ mod tests {
     fn cargo_success_keeps_valid_messages_without_a_failure_spool() -> Result<()> {
         let root = cargo_capture_root()?;
         let message = json!({"reason":"build-finished","success":true});
-        let outcome = CargoProcessOutcome { category: "success", code: Some(0), signal: None, os_error: None };
-        let messages = report_cargo_capture(root.path(), "tests", outcome, Ok(serde_json::to_vec(&message)?))?;
+        let outcome = CargoProcessOutcome {
+            category: "success",
+            code: Some(0),
+            signal: None,
+            os_error: None,
+        };
+        let messages = report_cargo_capture(
+            root.path(),
+            "tests",
+            outcome,
+            Ok(serde_json::to_vec(&message)?),
+        )?;
         assert_eq!(messages, vec![message]);
         assert_eq!(fs::read_dir(root.path().join("artifacts"))?.count(), 0);
         // Hosted controls also exercise the genuine source/run/snapshot path.
@@ -1736,13 +1863,21 @@ mod tests {
             std::env::var("GITHUB_RUN_ATTEMPT"),
         ) {
             let source_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-                .parent().context("crates directory")?
-                .parent().context("workspace directory")?;
+                .parent()
+                .context("crates directory")?
+                .parent()
+                .context("workspace directory")?;
             let binding = cargo_failure_identity(source_root)?;
             assert_eq!(binding.run, run);
             assert_eq!(binding.attempt, attempt);
-            assert_eq!(binding.snapshot, super::super::verification_snapshot(source_root, "verify")?);
-            assert_eq!(binding.source_identity, super::super::verification_source_identity(source_root, "verify")?);
+            assert_eq!(
+                binding.snapshot,
+                super::super::verification_snapshot(source_root, "verify")?
+            );
+            assert_eq!(
+                binding.source_identity,
+                super::super::verification_source_identity(source_root, "verify")?
+            );
             assert_eq!(binding.workspace, source_root.canonicalize()?);
             assert_eq!(binding.workflow, day2::automation::source_digest());
             assert_eq!(binding.checkout.len(), 40);
