@@ -149,6 +149,8 @@ fn regular_file_stdio_and_mutable_worker_fail_before_execution() -> anyhow::Resu
 
 #[test]
 fn missing_worker_and_unreviewed_profile_report_distinct_refusals() -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
     let missing = tempfile::tempdir()?;
     let output = launcher(&missing.path().join("PRIVATE_MISSING_WORKER")).output()?;
     anyhow::ensure!(output.status.code() == Some(77));
@@ -167,6 +169,18 @@ fn missing_worker_and_unreviewed_profile_report_distinct_refusals() -> anyhow::R
     let report = day2_sandbox::RefusalReport::parse(output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout))
         .ok_or_else(|| anyhow::anyhow!("missing numeric refusal"))?;
     anyhow::ensure!(report.stage == day2_sandbox::RefusalStage::Profile as u8 && report.errno.is_none());
+    // Reach the exec handoff only after the ordinary confinement checks. The
+    // reported OS error may describe invalid ELF or refused shell fallback;
+    // assert the actual numeric evidence, never guess a particular errno.
+    let invalid = missing.path().join("PRIVATE_INVALID_EXECUTABLE");
+    std::fs::write(&invalid, b"PRIVATE_NOT_A_NATIVE_IMAGE")?;
+    std::fs::set_permissions(&invalid, std::fs::Permissions::from_mode(0o500))?;
+    let output = launcher(&invalid).output()?;
+    anyhow::ensure!(output.status.code() == Some(77));
+    let report = day2_sandbox::RefusalReport::parse(output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout))
+        .ok_or_else(|| anyhow::anyhow!("missing numeric confined exec refusal"))?;
+    anyhow::ensure!(report.stage == day2_sandbox::RefusalStage::ExecuteWorker as u8 && report.errno.is_some());
+    anyhow::ensure!(!String::from_utf8_lossy(&output.stdout).contains("PRIVATE") && output.stderr.is_empty());
     Ok(())
 }
 
