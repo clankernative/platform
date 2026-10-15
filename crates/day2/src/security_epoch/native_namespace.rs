@@ -36,6 +36,8 @@ pub(crate) struct NativeNamespaceObservation {
     #[cfg(target_os = "linux")]
     proc_root: std::fs::File,
     #[cfg(target_os = "linux")]
+    process_root: std::fs::File,
+    #[cfg(target_os = "linux")]
     task: std::fs::File,
     #[cfg(target_os = "linux")]
     stat: std::fs::File,
@@ -80,10 +82,16 @@ impl NativeNamespaceObservation {
                     identities["time"] == identities["time_for_children"],
                     "epoch_native_child_timens_changed"
                 );
-                let mut offsets = open_proc(&task, "timens_offsets", acquisition)?;
+                // timens_offsets is a TGID entry, absent from the per-thread
+                // proc directory. Bind its process view to this exact thread's
+                // retained time namespace before and after reading it.
+                let process_root = open_process(&proc_root, acquisition)?;
+                require_process_time_join(&process_root, &identities["time"], acquisition)?;
+                let mut offsets = open_proc(&process_root, "timens_offsets", acquisition)?;
                 let time_offsets =
                     namespace_protocol::offsets(&read_proc(&mut offsets, 1024, acquisition)?)?;
                 namespace_protocol::require_zero(&time_offsets)?;
+                require_process_time_join(&process_root, &identities["time"], acquisition)?;
                 let mut observed = Self {
                     process,
                     thread,
@@ -94,6 +102,7 @@ impl NativeNamespaceObservation {
                         offsets: time_offsets,
                     },
                     proc_root,
+                    process_root,
                     task,
                     stat,
                     status,
@@ -128,6 +137,7 @@ impl NativeNamespaceObservation {
             #[cfg(target_os = "linux")]
             {
                 require_proc(&self.proc_root)?;
+                require_proc(&self.process_root)?;
                 require_proc(&self.task)?;
                 // Old descriptors alone cannot establish that the fixed current
                 // proc mount and kernel self-task path still join those objects.
@@ -141,6 +151,16 @@ impl NativeNamespaceObservation {
                     proc_identity(&task)? == proc_identity(&self.task)?,
                     "epoch_native_task_path_changed"
                 );
+                let process_root = open_process(&proc_root, acquisition)?;
+                ensure!(
+                    proc_identity(&process_root)? == proc_identity(&self.process_root)?,
+                    "epoch_native_process_path_changed"
+                );
+                require_process_time_join(
+                    &process_root,
+                    &self.facts.namespaces["time"],
+                    acquisition,
+                )?;
                 let current = namespace_protocol::task(
                     &read_proc(&mut self.stat, 16_384, acquisition)?,
                     &read_proc(&mut self.status, 65_536, acquisition)?,
@@ -163,6 +183,11 @@ impl NativeNamespaceObservation {
                     namespace_protocol::offsets(&read_proc(&mut self.offsets, 1024, acquisition)?)?;
                 namespace_protocol::require_zero(&offsets)?;
                 ensure!(offsets == self.facts.offsets, "epoch_native_timens_changed");
+                require_process_time_join(
+                    &process_root,
+                    &self.facts.namespaces["time"],
+                    acquisition,
+                )?;
                 acquisition.remaining()?;
                 Ok(())
             }
@@ -249,6 +274,54 @@ fn open_task(root: &std::fs::File, acquisition: &mut NativeAcquisition) -> Resul
 }
 
 #[cfg(target_os = "linux")]
+fn open_process(
+    root: &std::fs::File,
+    acquisition: &mut NativeAcquisition,
+) -> Result<std::fs::File> {
+    use rustix::fs::{Mode, OFlags};
+    acquisition.remaining()?;
+    // This fixed kernel-owned link selects our TGID, never a supplied PID.
+    let file = std::fs::File::from(rustix::fs::openat(
+        root,
+        "self",
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NONBLOCK,
+        Mode::empty(),
+    )?);
+    require_proc(&file)?;
+    acquisition.remaining()?;
+    Ok(file)
+}
+
+pub(super) fn require_process_time_join_data(
+    thread_time: &NamespaceIdentity,
+    process_time: &NamespaceIdentity,
+    process_children: &NamespaceIdentity,
+) -> Result<()> {
+    ensure!(
+        thread_time.inode != 0 && thread_time == process_time && thread_time == process_children,
+        "epoch_native_process_timens_changed"
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn require_process_time_join(
+    process_root: &std::fs::File,
+    thread_time: &NamespaceIdentity,
+    acquisition: &mut NativeAcquisition,
+) -> Result<()> {
+    let time = open_namespace(process_root, "time", acquisition)?;
+    let children = open_namespace(process_root, "time_for_children", acquisition)?;
+    require_process_time_join_data(
+        thread_time,
+        &namespace_identity(&time)?,
+        &namespace_identity(&children)?,
+    )?;
+    acquisition.remaining()?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
 fn proc_identity(file: &std::fs::File) -> Result<(u32, u32, u64, u64)> {
     use rustix::fs::{AtFlags, StatxFlags};
     require_proc(file)?;
@@ -272,18 +345,22 @@ fn open_proc(
     name: &str,
     acquisition: &mut NativeAcquisition,
 ) -> Result<std::fs::File> {
+    use anyhow::Context;
     use rustix::fs::{Mode, OFlags};
     ensure!(
         ["stat", "status", "timens_offsets", "maps"].contains(&name),
         "epoch_native_proc_path"
     );
     acquisition.remaining()?;
-    let file = std::fs::File::from(rustix::fs::openat(
-        task,
-        name,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
-        Mode::empty(),
-    )?);
+    let file = std::fs::File::from(
+        rustix::fs::openat(
+            task,
+            name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+            Mode::empty(),
+        )
+        .with_context(|| format!("epoch_native_proc_open:{name}"))?,
+    );
     require_proc(&file)?;
     ensure!(
         file.metadata()?.is_file(),
@@ -345,4 +422,24 @@ fn read_proc(
     acquisition.remaining()?;
     ensure!(bytes.len() <= max, "epoch_native_proc_bound");
     Ok(bytes)
+}
+
+#[cfg(test)]
+#[cfg(target_os = "linux")]
+mod tests {
+    use super::NativeNamespaceObservation;
+    use crate::security_epoch::native_clock::NativeAcquisition;
+
+    #[test]
+    fn substituted_process_directory_refuses_and_keeps_original_acquisition_refused() {
+        let mut acquisition = NativeAcquisition::begin(5).unwrap();
+        let mut observation = NativeNamespaceObservation::acquire(&mut acquisition).unwrap();
+        let unrelated = tempfile::tempdir().unwrap();
+        observation.process_root = std::fs::File::open(unrelated.path()).unwrap();
+        let reason = observation.check(&mut acquisition).unwrap_err().to_string();
+        assert_eq!(reason, "epoch_native_procfs_required");
+        assert!(!observation.valid);
+        assert!(acquisition.remaining().is_err());
+        assert!(observation.check(&mut acquisition).is_err());
+    }
 }
