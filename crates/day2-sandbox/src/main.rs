@@ -1,6 +1,8 @@
 //! Restricted launcher entrypoint, invoked only by the platform supervisor.
 #![forbid(unsafe_code)]
 
+use std::io::Write;
+
 fn run() -> anyhow::Result<()> {
     day2_sandbox::mark_refusal_stage(day2_sandbox::RefusalStage::Arguments);
     let mut args = std::env::args_os().skip(1);
@@ -41,9 +43,9 @@ fn main() -> std::process::ExitCode {
                 // A short pipe record is not a nonblocking-write guarantee.
                 // The supervisor's existing exchange timeout/kill/wait remains
                 // mandatory, including when a peer stops draining this pipe.
-                println!("{report}");
+                let _ = writeln!(std::io::stdout().lock(), "{report}");
             } else {
-                eprintln!("{report}");
+                let _ = writeln!(std::io::stderr().lock(), "{report}");
             }
             std::process::ExitCode::from(77)
         }
