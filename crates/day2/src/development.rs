@@ -1055,7 +1055,7 @@ pub fn people_resource_fixture(
                             16_384
                         },
                         max_response_bytes: if *provider == Provider::WorkspaceDirectory {
-                            crate::workspace_directory::MAX_CAPTURE_RESPONSE_BYTES
+                            crate::workspace_directory::MAX_RESPONSE_BYTES as u64
                         } else {
                             16_384
                         },
@@ -1536,7 +1536,7 @@ mod people_resource_tests {
         );
         assert_eq!(
             grant.limits.max_response_bytes,
-            crate::workspace_directory::MAX_CAPTURE_RESPONSE_BYTES
+            crate::workspace_directory::MAX_RESPONSE_BYTES as u64
         );
         let fixture = disposable_provider_worlds("selected@synthetic.example", 1_700_000_000);
         assert_eq!(fixture.workspace_directory.users.len(), 1);

@@ -1179,7 +1179,7 @@ fn hybrid_qualification_keeps_workspace_directory_offline_through_admitted_capab
         outcome.result
     }
 
-    let response_limit = crate::workspace_directory::MAX_CAPTURE_RESPONSE_BYTES;
+    let response_limit = crate::workspace_directory::MAX_RESPONSE_BYTES as u64;
     let (_directory, runtime) = fixture_runtime(true, response_limit)?;
     assert!(
         !runtime.integrations().is_simulated(),

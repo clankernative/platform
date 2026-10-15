@@ -220,6 +220,7 @@ pub(crate) fn authorized(
         crate::resources::authorize(connection, runtime, request, instruction, resource_action)?;
     let mut quote = crate::resources::ProviderQuote {
         request_bytes: instruction.data.len() as u64,
+        response_bytes: resource.grant.limits.max_response_bytes,
         cost_microunits: Some(0),
     };
     let action = match instruction.model.as_str() {
@@ -255,6 +256,7 @@ pub(crate) fn authorized(
             )?;
             quote = crate::resources::ProviderQuote {
                 request_bytes: call.request_bytes(),
+                response_bytes: resource.grant.limits.max_response_bytes,
                 cost_microunits: call.reserved_monetary_microusd(),
             };
             resource.planned_calls = call.max_calls();
@@ -287,7 +289,7 @@ pub(crate) fn authorized(
                     );
                     ensure!(
                         resource.grant.limits.max_response_bytes
-                            >= crate::workspace_directory::MAX_CAPTURE_RESPONSE_BYTES
+                            >= crate::workspace_directory::MAX_RESPONSE_BYTES as u64
                             && resource.grant.limits.max_request_bytes
                                 >= crate::workspace_directory::MAX_CAPTURE_REQUEST_BYTES
                             && instruction.data.len() as u64
@@ -295,6 +297,7 @@ pub(crate) fn authorized(
                         crate::error::Failure::ResourceForbidden
                     );
                     quote.request_bytes = crate::workspace_directory::MAX_CAPTURE_REQUEST_BYTES;
+                    quote.response_bytes = crate::workspace_directory::MAX_CAPTURE_RESPONSE_BYTES;
                     let connection = resource
                         .grant
                         .live

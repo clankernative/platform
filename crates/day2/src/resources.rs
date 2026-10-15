@@ -811,7 +811,7 @@ pub(crate) fn reserve_in(
                 calls: resource.planned_calls,
                 bytes: quote
                     .request_bytes
-                    .checked_add(resource.grant.limits.max_response_bytes)
+                    .checked_add(quote.response_bytes)
                     .context("resource_byte_overflow")?,
                 cost_microunits: quote.cost_microunits.unwrap_or(0),
                 concurrency: 1,
@@ -823,6 +823,9 @@ pub(crate) fn reserve_in(
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ProviderQuote {
     pub request_bytes: u64,
+    /// Aggregate response allowance for the whole adapter call, including
+    /// authentication exchanges. Individual responses still obey grant limits.
+    pub response_bytes: u64,
     /// None means this adapter does not provide a monetary bound. Such a call
     /// cannot use any money-metered binding or inherited root obligation.
     pub cost_microunits: Option<u64>,
