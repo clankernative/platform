@@ -749,8 +749,12 @@ jobs:
           if-no-files-found: error
           retention-days: 3
 
-      # This first scoped gate retains formatter/native facts for exact review.
-      # It does not qualify unreviewed native sites or select platform campaigns.
+      # Admit only the reviewed current source and exact owned native sites.
+      # Retain facts above even when these strict guards refuse the candidate.
+      - name: Require unchanged reviewed formatter and source bytes
+        run: git diff --exit-code
+      - name: Require exact current native sites, dependency roles and proofs
+        run: target/debug/xtask architecture-check
       - name: Require complete strict workspace and all-target reporter lint
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Exercise the complete reporter and existing admission control module
