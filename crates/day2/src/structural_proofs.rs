@@ -32,6 +32,13 @@ macro_rules! assert_secret_references {
 }
 
 const _: () = {
+    assert_consuming!(crate::security_epoch::NativeNamespaceObservation);
+    assert_not_impl!(
+        crate::security_epoch::NativeNamespaceObservation,
+        std::fmt::Debug
+    );
+    assert_not_impl!(crate::security_epoch::NativeNamespaceObservation, Send);
+    assert_not_impl!(crate::security_epoch::NativeNamespaceObservation, Sync);
     assert_consuming!(crate::security_epoch::control_slot_io::SlotObservation);
     assert_consuming!(crate::security_epoch::control_slot_io::Mutation);
     assert_consuming!(crate::security_epoch::control_slot_io::SlotMaintenanceMutation);
