@@ -190,6 +190,7 @@ fn the_service_refuses_exports_to_a_remote_source() -> Result<()> {
         runtimes: BTreeMap::new(),
         secrets: BTreeMap::new(),
         security_epochs: BTreeMap::new(),
+        security_bootstraps: BTreeMap::new(),
     };
     let service = Service::open(
         ControlScope {

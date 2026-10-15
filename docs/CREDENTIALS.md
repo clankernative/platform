@@ -164,6 +164,32 @@ required. There is no live transport installation, app startup initialization,
 SDK endpoint or cloud action in this slice. Data read from records, configuration
 or a local marker cannot manufacture a current proof.
 
+## Initial bootstrap selection and observations
+
+Every `EpochIam` selects both the GSA email and mandatory `service_account_uid`,
+a canonical decimal string. A deleted and recreated account changes the complete
+binding revision even when its email is reused. The scoped counter identity
+still belongs to the immutable authority database and app scope. Native token
+minting must use the immutable UID target; selecting that target is DATA. The
+app-edge contract exports the actual managed GSA UID, and day2-app refuses a
+different selected UID even when the email matches.
+
+`control.security_bootstraps` holds explicit operator-owned initial intents.
+Each pins the exact epoch-store revision and scope, distinct controller and app
+GKE roles, the same database for permanent control-intent slots, immutable native
+runtime manifests, and the fresh volume/schema/marker-format selections. The
+schema excludes generated seeds, holders, operation IDs, actual marker hashes,
+deadlines and readiness flags. No intent means no initial bootstrap request.
+App backups discard these intents rather than making them available to restore.
+
+The private bounded Firestore reader returns an opaque `EpochObservation` that
+retains its original before-I/O clock domain and deadline, clamped to the lesser
+of five seconds and the selected lease. It cannot be cloned, serialized or moved
+between threads. Extracting its snapshot discards acquisition state and returns
+historical DATA. A controlled-port observation still grants no current physical
+resource, role or execution authority. The production context factory and live
+port remain unavailable until their actual native producers are qualified.
+
 ## Private per-app state
 
 `day2::managed_credentials` owns a host-only token/envelope format and SQLite

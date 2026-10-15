@@ -20,7 +20,7 @@ fn selection() -> EpochStore {
         "scope":{"installation":"company","environment":"canary","app":"calendar"},
         "provider":{"kind":"firestore_native_v1","project":"project-seven","project_number":7,
             "database":"security","database_uid":"01234567-89ab-4cde-8fab-0123456789ab",
-            "iam_source":{"kind":"gke_workload_identity_v1","service_account":"epoch@project-seven.iam.gserviceaccount.com"}},
+            "iam_source":{"kind":"gke_workload_identity_v1","service_account":"epoch@project-seven.iam.gserviceaccount.com","service_account_uid":"100000000000000000007"}},
         "key_set":Digest::new(b"keys"),"max_lease_seconds":5
     })).unwrap()
 }
@@ -135,7 +135,7 @@ impl Provider {
             _ => None,
         };
         let names = Names::new(&selection(), request.bootstrap(), active)?;
-        firestore::read(self, &names)
+        Ok(firestore::read(self, &names)?.into_data())
     }
 
     fn sends(&self) -> i64 {
@@ -952,12 +952,46 @@ fn streamed_parser_is_closed_complete_and_rolls_back_on_semantic_failure() {
     assert!(
         firestore::read(&mut provider, &names)
             .unwrap()
+            .snapshot()
             .root
             .is_none()
     );
     assert_eq!(provider.calls.len(), 2);
     assert!(provider.calls[0].1.get("transaction").is_none());
     assert!(provider.calls[0].1.get("readTime").is_none());
+}
+
+#[test]
+fn observation_retains_before_io_budget_and_exact_selection() {
+    let create = create();
+    let mut store = selection();
+    store.max_lease_seconds = 1;
+    let names = Names::new(&store, create.bootstrap(), None).unwrap();
+    let mut provider = Provider::new();
+    let mut observed = firestore::read(&mut provider, &names).unwrap();
+    assert!(observed.snapshot().root.is_none());
+    provider.tick += Duration::from_millis(900);
+    assert_eq!(
+        observed.remaining(&store, &mut provider).unwrap(),
+        Duration::from_millis(100)
+    );
+    // Consuming almost all of a selected one-second lease cannot renew it.
+    provider.tick += Duration::from_millis(100);
+    assert!(observed.remaining(&store, &mut provider).is_err());
+    let mut provider = Provider::new();
+    let mut observed = firestore::read(&mut provider, &names).unwrap();
+    store.max_lease_seconds = 2;
+    assert!(observed.remaining(&store, &mut provider).is_err());
+    store.max_lease_seconds = 1;
+    assert!(observed.remaining(&store, &mut provider).is_err());
+    let mut observed = firestore::read(&mut provider, &names).unwrap();
+    provider
+        .samples
+        .push_back((Digest::new(b"replacement-clock"), Duration::from_secs(100)));
+    assert!(observed.remaining(&store, &mut provider).is_err());
+    assert!(observed.remaining(&store, &mut provider).is_err());
+    // Decoding data again cannot reconstruct the consumed observation handle.
+    assert!(observed.into_data().root.is_none());
 }
 
 #[test]
