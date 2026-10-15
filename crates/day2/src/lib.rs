@@ -96,6 +96,7 @@ pub mod web_resources;
 mod web_security;
 pub mod web_templates;
 pub mod worker;
+pub mod workspace_directory;
 pub mod write_queue;
 
 use ring::digest::{SHA256, digest as hash};

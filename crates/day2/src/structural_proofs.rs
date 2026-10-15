@@ -32,6 +32,26 @@ macro_rules! assert_secret_references {
 }
 
 const _: () = {
+    assert_consuming!(crate::security_epoch::AuthenticatedReads);
+    assert_not_impl!(crate::security_epoch::AuthenticatedReads, std::fmt::Debug);
+    assert_not_impl!(crate::security_epoch::AuthenticatedReads, Send);
+    assert_not_impl!(crate::security_epoch::AuthenticatedReads, Sync);
+    assert_consuming!(crate::security_epoch::NativeAcquisition);
+    assert_not_impl!(crate::security_epoch::NativeAcquisition, std::fmt::Debug);
+    assert_not_impl!(crate::security_epoch::NativeAcquisition, Send);
+    assert_not_impl!(crate::security_epoch::NativeAcquisition, Sync);
+    assert_consuming!(crate::security_epoch::NativeProcessObservation);
+    assert_not_impl!(
+        crate::security_epoch::NativeProcessObservation,
+        std::fmt::Debug
+    );
+    assert_not_impl!(crate::security_epoch::NativeProcessObservation, Send);
+    assert_not_impl!(crate::security_epoch::NativeProcessObservation, Sync);
+    assert_consuming!(crate::security_epoch::CredentialMaterial);
+    assert_not_impl!(crate::security_epoch::CredentialMaterial, std::fmt::Debug);
+    assert_not_impl!(crate::security_epoch::CredentialMaterial, Send);
+    assert_not_impl!(crate::security_epoch::CredentialMaterial, Sync);
+    assert_secret_references!(crate::security_epoch::CredentialMaterial);
     assert_consuming!(crate::security_epoch::EpochObservation);
     assert_not_impl!(crate::security_epoch::EpochObservation, std::fmt::Debug);
     assert_not_impl!(crate::security_epoch::EpochObservation, Send);

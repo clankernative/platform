@@ -510,6 +510,7 @@ dependencies = [
  "tokio-stream",
  "unicode-segmentation",
  "url",
+ "zeroize",
 ]
 
 [[package]]

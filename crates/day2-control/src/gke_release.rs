@@ -222,8 +222,8 @@ impl ProviderCredentials {
                     && mount
                         .reference
                         .as_ref()
-                        .unwrap_or(mount.connection.credential_ref())
-                        == &entry.credential_ref,
+                        .or_else(|| mount.connection.credential_ref())
+                        == Some(&entry.credential_ref),
                 "gke_release_credential_plan_changed"
             );
         }

@@ -97,6 +97,7 @@ fn simulated_fixture() -> crate::integrations::simulated::SimulatedFixture {
             model: "model-supply".into(),
             max_input_tokens: 1000,
         },
+        workspace_directory: Default::default(),
     }
 }
 

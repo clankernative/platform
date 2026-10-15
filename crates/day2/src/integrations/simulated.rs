@@ -163,6 +163,17 @@ pub struct OpenAiWorld {
     pub max_input_tokens: u64,
 }
 
+/// Google Directory wire responses committed by the offline provider. Keeping
+/// the response bodies in the provider world lets native capture exercise the
+/// same strict DTO parser and attribution checks as the live adapter.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceDirectoryWorld {
+    pub users: BTreeMap<String, Value>,
+    pub hierarchy: Value,
+    pub hierarchy_captured_at: i64,
+}
+
 /// One stored object, as the store reports it.
 ///
 /// No bytes. An application never holds an object's contents: it asks for an
@@ -410,6 +421,7 @@ pub struct SimulatedFixture {
     pub slack: SlackWorld,
     pub snowflake: SnowflakeWorld,
     pub openai: OpenAiWorld,
+    pub workspace_directory: WorkspaceDirectoryWorld,
 }
 
 /// What another application answers, for a campaign that is not running it.
@@ -606,7 +618,13 @@ pub fn seed(database: &Path, scope: &str, fixture: &SimulatedFixture) -> Result<
     seed_world(database, scope, SLACK_WORLD, &fixture.slack)?;
     seed_world(database, scope, SNOWFLAKE_WORLD, &fixture.snowflake)?;
     seed_world(database, scope, OPENAI_WORLD, &fixture.openai)?;
-    seed_world(database, scope, DELEGATION_WORLD, &fixture.delegation)
+    seed_world(database, scope, DELEGATION_WORLD, &fixture.delegation)?;
+    seed_world(
+        database,
+        scope,
+        crate::simulations::simulation(Provider::WorkspaceDirectory),
+        &fixture.workspace_directory,
+    )
 }
 
 /// The answer this campaign recorded for one delegated read.
@@ -786,6 +804,33 @@ fn read_world<W: serde::de::DeserializeOwned>(
         "simulated_provider_world_budget"
     );
     crate::json::decode(encoded.as_bytes())
+}
+
+/// Read the configured Workspace Directory world for one application and
+/// actor. This is intentionally read-only: capture cache state belongs in the
+/// adapter's separate store, never in the provider's source world.
+pub(crate) fn workspace_directory_responses(
+    database: &Path,
+    scope: &str,
+    actor: &str,
+) -> Result<(Value, Value, i64)> {
+    let path =
+        database.with_file_name(crate::simulations::simulation(Provider::WorkspaceDirectory));
+    ensure!(path.is_file(), "simulated_provider_unconfigured");
+    let connection =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let state: World<WorkspaceDirectoryWorld> = read_world(&connection, scope)?;
+    let user = state
+        .world
+        .users
+        .get(actor)
+        .cloned()
+        .context("simulated_directory_user_unconfigured")?;
+    Ok((
+        user,
+        state.world.hierarchy,
+        state.world.hierarchy_captured_at,
+    ))
 }
 
 fn write_world<W: Serialize>(

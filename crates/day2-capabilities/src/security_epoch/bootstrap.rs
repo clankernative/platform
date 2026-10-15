@@ -112,6 +112,9 @@ pub enum RuntimeProfileKind {
 pub struct BootstrapRuntimeProfile {
     pub kind: RuntimeProfileKind,
     pub manifest: Digest,
+    /// SHA-256 of the exact native controller executable bytes, observed from
+    /// its retained self-executable descriptor. This is an executable selection,
+    /// not a whole image, dependency or runtime qualification proof.
     pub controller_code: Digest,
     pub app_artifact: Digest,
 }
