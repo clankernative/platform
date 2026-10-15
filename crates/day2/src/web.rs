@@ -70,6 +70,18 @@ struct Notice<'a> {
     invocation: &'a str,
     operation: &'a str,
 }
+#[derive(Debug)]
+struct DeclaredPageRejection {
+    code: String,
+    description: String,
+    recovery: String,
+}
+impl std::fmt::Display for DeclaredPageRejection {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.code)
+    }
+}
+impl std::error::Error for DeclaredPageRejection {}
 struct Host {
     entropy: Arc<dyn Entropy>,
     clock: Arc<dyn Clock>,
@@ -1517,13 +1529,22 @@ impl Host {
                 .render_page(name, &session.actor, id, input, at)
         })?;
         if outcome.status != "success" {
-            anyhow::bail!(match outcome.error.as_str() {
-                "not_found" => crate::error::Failure::UnknownPage,
-                "invalid_input" | "invalid_page_bounds" => crate::error::Failure::InvalidPageInput,
-                "forbidden" => crate::error::Failure::Forbidden,
-                "preparation_conflict" => crate::error::Failure::PreparationConflict,
-                _ => crate::error::Failure::Internal,
-            });
+            let platform_failure = match outcome.error.as_str() {
+                "not_found" => Some(crate::error::Failure::UnknownPage),
+                "invalid_input" | "invalid_page_bounds" => {
+                    Some(crate::error::Failure::InvalidPageInput)
+                }
+                "forbidden" => Some(crate::error::Failure::Forbidden),
+                "preparation_conflict" => Some(crate::error::Failure::PreparationConflict),
+                _ => None,
+            };
+            if let Some(failure) = platform_failure {
+                anyhow::bail!(failure);
+            }
+            if let Some(rejection) = declared_page_rejection(&self.runtime, name, &outcome.error) {
+                return Err(anyhow::Error::new(rejection));
+            }
+            anyhow::bail!(crate::error::Failure::Internal);
         }
         let renderer = view::View {
             runtime: &self.runtime,
@@ -2045,6 +2066,12 @@ fn edge_refusal(json: bool, error: &anyhow::Error) -> Response {
     }
 }
 fn failure(error: &anyhow::Error) -> Response {
+    if let Some(rejection) = error.downcast_ref::<DeclaredPageRejection>() {
+        return error_page(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            &format!("{} {}", rejection.description, rejection.recovery),
+        );
+    }
     crate::web_api::record_failure(error);
     if crate::error::classify(error) == crate::error::Failure::InvalidLoginLink {
         return error_page(
@@ -2054,6 +2081,42 @@ fn failure(error: &anyhow::Error) -> Response {
     }
     let (status, _, message) = crate::web_api::failure_details(error);
     error_page(status, message)
+}
+
+fn declared_page_rejection(
+    runtime: &Runtime,
+    page_name: &str,
+    code: &str,
+) -> Option<DeclaredPageRejection> {
+    let artifact = runtime.artifact();
+    let page = artifact.page(page_name).ok()?;
+    let contract = artifact.contract().app_contract.as_ref()?;
+    let operation = contract.operations.get(&page.operation)?;
+    declared_page_rejection_for(&page.operation, &operation.errors, &contract.errors, code)
+}
+
+fn declared_page_rejection_for(
+    operation_name: &str,
+    declared_errors: &[String],
+    failures: &std::collections::BTreeMap<String, crate::app_contract::Failure>,
+    code: &str,
+) -> Option<DeclaredPageRejection> {
+    if !declared_errors.iter().any(|declared| declared == code) {
+        return None;
+    }
+    let failure = failures.get(code)?;
+    if failure.code != code
+        || !failure
+            .targets()
+            .any(|target| target.operation == operation_name)
+    {
+        return None;
+    }
+    Some(DeclaredPageRejection {
+        code: failure.code.clone(),
+        description: failure.description.clone(),
+        recovery: failure.recovery.clone(),
+    })
 }
 
 fn fresh_page_query(
@@ -2105,6 +2168,69 @@ fn patch(markup: Markup) -> Response {
     }
     event.push('\n');
     ([(header::CONTENT_TYPE, "text/event-stream")], event).into_response()
+}
+
+#[cfg(test)]
+mod declared_page_rejection_tests {
+    use super::*;
+
+    fn app_failure(operation: &str) -> crate::app_contract::Failure {
+        crate::app_contract::Failure {
+            code: "app:freetool.space_page_denied".into(),
+            description: "<No access & denied>".into(),
+            recovery: "Choose a permitted space & retry.".into(),
+            operation: crate::operation_metadata::Target {
+                operation: operation.into(),
+                input_type: "input".into(),
+                output_type: "output".into(),
+            },
+            additional_operations: Vec::new(),
+            verification_actors: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn declared_page_rejection_is_escaped_422_without_operational_diagnostics() -> Result<()>
+    {
+        let error = anyhow::Error::new(DeclaredPageRejection {
+            code: "app:freetool.space_page_denied".into(),
+            description: "<No access & denied>".into(),
+            recovery: "Choose a permitted space & retry.".into(),
+        });
+        let response = failure(&error);
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = String::from_utf8(to_bytes(response.into_body(), 4096).await?.to_vec())?;
+        assert!(body.contains("&lt;No access &amp; denied&gt;"));
+        assert!(body.contains("Choose a permitted space &amp; retry."));
+        assert!(!body.contains("internal_error") && !body.contains("Retry commands"));
+
+        let operational = anyhow::anyhow!("database connection details");
+        let response = failure(&operational);
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = String::from_utf8(to_bytes(response.into_body(), 4096).await?.to_vec())?;
+        assert!(!body.contains("database connection details"));
+        assert!(body.contains("Retry commands with the same idempotency key."));
+        Ok(())
+    }
+
+    #[test]
+    fn app_failure_requires_exact_operation_declaration_and_matching_target() {
+        let code = "app:freetool.space_page_denied";
+        let declarations = vec![code.into()];
+        let matching =
+            std::collections::BTreeMap::from([(code.into(), app_failure("freetool.space_page"))]);
+        assert!(
+            declared_page_rejection_for("freetool.space_page", &declarations, &matching, code,)
+                .is_some()
+        );
+        assert!(
+            declared_page_rejection_for("freetool.other_page", &declarations, &matching, code,)
+                .is_none()
+        );
+        assert!(
+            declared_page_rejection_for("freetool.space_page", &[], &matching, code,).is_none()
+        );
+    }
 }
 
 #[cfg(test)]
