@@ -92,7 +92,12 @@ struct StartupFailure {
 }
 
 impl StartupFailure {
-    fn capture(phase: StartupPhase, status: Option<ExitStatus>, path: &Path, launch_offset: u64) -> Self {
+    fn capture(
+        phase: StartupPhase,
+        status: Option<ExitStatus>,
+        path: &Path,
+        launch_offset: u64,
+    ) -> Self {
         #[cfg(unix)]
         let signal = {
             use std::os::unix::process::ExitStatusExt;
@@ -269,7 +274,13 @@ impl LocalServer {
                 .context("missing server process")?
                 .try_wait()?
             {
-                return Err(StartupFailure::capture(phase, Some(status), &self.log(), launch_offset).into());
+                return Err(StartupFailure::capture(
+                    phase,
+                    Some(status),
+                    &self.log(),
+                    launch_offset,
+                )
+                .into());
             }
             if matches!(
                 tokio::time::timeout(Duration::from_secs(3), self.adapter()).await,
@@ -305,12 +316,8 @@ mod tests {
         bytes.extend_from_slice(b"PRIVATE_TOKEN address already in use; database is locked");
         fs::write(&log, bytes)?;
         for phase in [StartupPhase::Initial, StartupPhase::Restart] {
-            let failure = StartupFailure::capture(
-                phase,
-                Some(ExitStatus::from_raw(1 << 8)),
-                &log,
-                0,
-            );
+            let failure =
+                StartupFailure::capture(phase, Some(ExitStatus::from_raw(1 << 8)), &log, 0);
             assert_eq!(failure.code, Some(1));
             assert_eq!(failure.signal, None);
             assert!(!failure.readiness_timed_out);
@@ -375,7 +382,9 @@ mod tests {
         let occupied = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
         server.address = occupied.local_addr()?;
         let restart = server.restart().await.unwrap_err();
-        let restart = restart.downcast_ref::<StartupFailure>().context("missing restart evidence")?;
+        let restart = restart
+            .downcast_ref::<StartupFailure>()
+            .context("missing restart evidence")?;
         assert!(matches!(restart.phase, StartupPhase::Restart));
         assert_eq!(restart.code, Some(1));
         assert!(restart.log.address_in_use);
@@ -389,7 +398,9 @@ mod tests {
             child: None,
         };
         let failure = initial.launch(StartupPhase::Initial).await.unwrap_err();
-        let failure = failure.downcast_ref::<StartupFailure>().context("missing initial evidence")?;
+        let failure = failure
+            .downcast_ref::<StartupFailure>()
+            .context("missing initial evidence")?;
         assert!(matches!(failure.phase, StartupPhase::Initial));
         assert_eq!(failure.code, Some(1));
         assert!(failure.log.address_in_use);
