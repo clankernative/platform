@@ -39,6 +39,105 @@ fn apply_desired_authority(runtime: &Runtime) -> Result<()> {
 }
 
 #[test]
+fn admitted_page_business_rejection_is_an_escaped_http_422() -> Result<()> {
+    let Some(artifact) = std::env::var_os("DAY2_TEST_FREETOOL_ARTIFACT").map(PathBuf::from) else {
+        eprintln!(
+            "set DAY2_TEST_FREETOOL_ARTIFACT to run the admitted Freetool page rejection test"
+        );
+        return Ok(());
+    };
+    let actor = "freetool-space-page-unenrolled-synthetic";
+    let manifest: Value = serde_json::from_slice(&fs::read(artifact.join("artifact.json"))?)?;
+    let models = manifest["schema"]["models"]
+        .as_object()
+        .context("Freetool artifact has no model catalog")?;
+    let model_authority: serde_json::Map<String, Value> = models
+        .keys()
+        .map(|model| (model.clone(), json!({"read":true,"rows":{"kind":"all"}})))
+        .collect();
+    let operations: serde_json::Map<String, Value> = manifest["operations"]
+        .as_array()
+        .context("Freetool artifact has no operation catalog")?
+        .iter()
+        .map(|operation| {
+            let name = operation["name"].as_str().context("operation name")?;
+            let kind = operation["kind"].as_str().context("operation kind")?;
+            Ok((
+                name.to_owned(),
+                json!({
+                    "actors": if kind == "query" {vec![actor]} else {Vec::<&str>::new()},
+                    "mode": {"kind": if kind == "query" {"read"} else {"current_state"}},
+                    "models": if kind == "query" {model_authority.clone()} else {serde_json::Map::new()}
+                }),
+            ))
+        })
+        .collect::<Result<_>>()?;
+    let authority = json!({
+        "version": 1,
+        "admins": [],
+        "operations": operations,
+        "constraints": {}
+    });
+    let directory = tempfile::tempdir()?;
+    let instance_path = directory.path().join("instance.json");
+    fs::write(
+        &instance_path,
+        serde_json::to_vec(&json!({
+            "installation":"freetool_web_test",
+            "environment":"test",
+            "apps":{"freetool":{
+                "artifact":artifact,
+                "readers":[actor],
+                "writers":[],
+                "authority":authority
+            }}
+        }))?,
+    )?;
+    let runtime = Runtime::load(&instance_path, "freetool")?;
+    runtime.initialize()?;
+    let page_query = runtime.render_page(
+        "space",
+        actor,
+        "page-rejection-http-test",
+        &json!({"space_id":"spa_0000000000e008000000000000"}),
+        100,
+    )?;
+    assert_eq!(page_query.status, "failure");
+    assert_eq!(page_query.error, "app:freetool.space_page_denied");
+    let db_path = runtime.db().to_path_buf();
+    let server = Server::start(runtime, actor, 0)?;
+    let client = server.client()?;
+    let response = client
+        .get(format!(
+            "{}/spaces/spa_0000000000e008000000000000",
+            server.origin
+        ))
+        .send()?;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = response.text()?;
+    assert!(body.contains("The current active profile cannot read this live space."));
+    assert!(
+        body.contains(
+            "Choose an accessible space from the directory or complete trusted enrollment."
+        )
+    );
+    assert!(!body.contains("Retry commands") && !body.contains("internal_error"));
+
+    rusqlite::Connection::open(db_path)?.execute_batch("DROP TABLE users")?;
+    let response = client
+        .get(format!(
+            "{}/spaces/spa_0000000000e008000000000000",
+            server.origin
+        ))
+        .send()?;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = response.text()?;
+    assert!(body.contains("internal_error") || body.contains("could not be completed"));
+    assert!(!body.contains("no such table") && !body.contains("database connection"));
+    Ok(())
+}
+
+#[test]
 fn openapi_docs_and_json_queries_share_the_admitted_contract() -> Result<()> {
     let world = World::new()?;
     world.seed("api-docs-seed")?;
@@ -911,7 +1010,7 @@ fn apps_without_pages_get_the_same_api_and_documentation() -> Result<()> {
 }
 impl Server {
     fn start(runtime: Runtime, actor: &str, port: u16) -> Result<Self> {
-        let (send, receive) = mpsc::channel();
+        let (send, receive) = mpsc::channel::<Result<(String, String)>>();
         let (stop, done) = tokio::sync::oneshot::channel();
         let actor = actor.to_string();
         let thread = thread::spawn(move || {
@@ -920,8 +1019,14 @@ impl Server {
                 .enable_all()
                 .build()?
                 .block_on(async move {
-                    let server = LocalServer::bind(runtime, &actor, port).await?;
-                    send.send((server.origin.clone(), server.login_url.clone()))?;
+                    let server = match LocalServer::bind(runtime, &actor, port).await {
+                        Ok(server) => server,
+                        Err(error) => {
+                            send.send(Err(anyhow::anyhow!("{error:#}")))?;
+                            return Err(error);
+                        }
+                    };
+                    send.send(Ok((server.origin.clone(), server.login_url.clone())))?;
                     server
                         .serve(async {
                             let _ = done.await;
@@ -929,7 +1034,7 @@ impl Server {
                         .await
                 })
         });
-        let (origin, login) = receive.recv_timeout(Duration::from_secs(10))?;
+        let (origin, login) = receive.recv_timeout(Duration::from_secs(10))??;
         Ok(Self {
             origin,
             login,

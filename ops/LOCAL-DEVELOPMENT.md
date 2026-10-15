@@ -49,6 +49,14 @@ reuses a running session. Use explicit data options to initialize a fresh sessio
 ./cli/day2 platform local-dev examples/reports --reset --empty
 ```
 
+App examples use `Example.Step.command(handle, input)` for concrete typed inputs.
+Use `Example.Step.generated(handle, seed)` when input needs the state produced by
+preceding steps, such as checked references to newly created records. At that
+position the recipe runs the command's declared verification generator against
+the current bounded snapshot, then validates and executes its input normally.
+The handle must name a command; a generated step grants no extra authority and
+accepts no arbitrary callback. It is not interpolation of earlier command results.
+
 Examples and generated commands go through the shared Roc check recipe, normal
 app transactions, durable commands, replay and property checks. Artifact-owned
 examples may include internal scheduled commands when the provider host is

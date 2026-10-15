@@ -30,7 +30,11 @@ fn native_campaign_cannot_receipt_omitted_checks_or_invented_commands() -> Resul
         campaign
             .effect(request(
                 "dev-invoke",
-                serde_json::json!({"operation":"reports.submit","input":"{}"})
+                serde_json::json!({
+                    "kind":"command",
+                    "operation":"reports.submit",
+                    "payload":"{}"
+                })
             ))
             .is_err()
     );
