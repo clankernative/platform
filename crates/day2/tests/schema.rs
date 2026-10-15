@@ -129,7 +129,7 @@ fn cached_glue_generators_keep_metadata_and_native_abi_outputs_distinct() -> Res
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()?;
-    let temporary = tempfile::tempdir_in(root.join("artifacts"))?;
+    let temporary = crate::support::compiler::stage(&root)?;
     let stage = temporary.path();
     day2::sdk::stage(&root.join("sdk"), &stage.join("sdk"))?;
     fs::write(stage.join("sdk/main.roc"), day2::sdk::app_platform())?;

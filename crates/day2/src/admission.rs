@@ -114,6 +114,11 @@ const SEALED: &[(&str, &str, &str)] = &[
         "412a00e9ffc8988c224efb3da3fb96ed3f00e3fb0c58bfa966461687ee355767",
     ),
     (
+        "WorkspaceDirectory.roc",
+        "",
+        "7e3f807674d5b887100aedd0c752ec5209933f14e26759542844ebdd478da53d",
+    ),
+    (
         "Linear.roc",
         "",
         "f8695efa1f64c52898737f7369afead1fe4d298547fad77cbdca722623fae729",
