@@ -1,7 +1,7 @@
 //! Native protocol conformance, with an independently conditional SQLite provider
 //! model. No Google requests or serving-build execution context is available.
 use super::{
-    firestore::{self, Names, Port, Response, Sample},
+    firestore::{self, EpochReply, Names, Port, Sample},
     journal::{CurrentBootstrapExecution, Journal, Purpose},
     kernel::*,
 };
@@ -23,6 +23,40 @@ fn selection() -> EpochStore {
             "iam_source":{"kind":"gke_workload_identity_v1","service_account":"epoch@project-seven.iam.gserviceaccount.com","service_account_uid":"100000000000000000007"}},
         "key_set":Digest::new(b"keys"),"max_lease_seconds":5
     })).unwrap()
+}
+
+#[test]
+fn native_read_budget_keeps_time_spent_before_database_io() {
+    let mut provider = Provider::new();
+    let domain = Digest::new(b"controller-process-clock");
+    provider.tick = Duration::from_millis(104_900);
+    let mut budget = firestore::Budget::from_native_origin(
+        Sample {
+            domain: domain.clone(),
+            elapsed: provider.tick,
+        },
+        Duration::from_secs(100),
+        Duration::from_secs(105),
+    )
+    .unwrap();
+    assert_eq!(
+        budget.remaining(&mut provider).unwrap(),
+        Duration::from_millis(100)
+    );
+    provider.tick = Duration::from_secs(105);
+    assert!(budget.remaining(&mut provider).is_err());
+    assert!(provider.calls.is_empty());
+    assert!(
+        firestore::Budget::from_native_origin(
+            Sample {
+                domain,
+                elapsed: Duration::from_secs(106)
+            },
+            Duration::from_secs(100),
+            Duration::from_secs(105)
+        )
+        .is_err()
+    );
 }
 
 fn create() -> Request {
@@ -267,7 +301,7 @@ impl Port for Provider {
         body: &[u8],
         timeout: Duration,
         max_bytes: usize,
-    ) -> Result<Response> {
+    ) -> Result<EpochReply> {
         ensure!(url.starts_with("https://firestore.googleapis.com/v1/projects/project-seven/databases/security/documents:"),"fixed selected endpoint");
         ensure!(
             body.len() <= 65_536
@@ -295,7 +329,7 @@ impl Port for Provider {
         } else {
             bail!("unknown endpoint");
         };
-        Ok(Response {
+        Ok(EpochReply {
             status: 200,
             body: bytes,
         })

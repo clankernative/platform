@@ -82,6 +82,9 @@ pub enum ResourceTarget {
         /// Explicit operator-approved role (or email) to group email mapping.
         groups: BTreeMap<String, String>,
     },
+    WorkspaceDirectory {
+        customer_id: String,
+    },
     LinearOrganization {
         organization_id: String,
         email_domain: String,
@@ -157,6 +160,7 @@ impl ResourceTarget {
             Self::NotificationMailbox { .. } => ResourceKind::NotificationMailbox,
             Self::CartaIssuer { .. } => ResourceKind::CartaIssuer,
             Self::GoogleDirectory { .. } => ResourceKind::GoogleDirectory,
+            Self::WorkspaceDirectory { .. } => ResourceKind::WorkspaceDirectory,
             Self::LinearOrganization { .. } => ResourceKind::LinearOrganization,
             Self::LinearIssueSource { .. } => ResourceKind::LinearIssueSource,
             Self::GitHubRepository { .. } => ResourceKind::GitHubRepository,
@@ -233,6 +237,7 @@ impl ResourceTarget {
                 );
                 Ok(())
             }
+            Self::WorkspaceDirectory { customer_id } => bounded_text(customer_id, 256),
             Self::GoogleDirectory {
                 customer_id,
                 email_domain,
@@ -323,6 +328,12 @@ impl ResourceTarget {
             (Self::CartaIssuer { issuer_id }, Self::CartaIssuer { issuer_id: parent }) => {
                 issuer_id == parent
             }
+            (
+                Self::WorkspaceDirectory { customer_id },
+                Self::WorkspaceDirectory {
+                    customer_id: parent,
+                },
+            ) => customer_id == parent,
             (
                 Self::GoogleDirectory {
                     customer_id,
@@ -756,7 +767,8 @@ fn validate_connection(
         | (Provider::LinearWork, Some(value @ LiveConnection::LinearWork { .. }))
         | (Provider::GitHubActions, Some(value @ LiveConnection::GitHubActions { .. }))
         | (Provider::GiteaActions, Some(value @ LiveConnection::GiteaActions { .. }))
-        | (Provider::OpenAi, Some(value @ LiveConnection::OpenAi { .. })) => value.validate(),
+        | (Provider::OpenAi, Some(value @ LiveConnection::OpenAi { .. }))
+        | (Provider::WorkspaceDirectory, Some(value @ LiveConnection::WorkspaceDirectory { .. })) => value.validate(),
         (
             Provider::LocalNotifications
             // Delegation reaches another application in this same instance, so

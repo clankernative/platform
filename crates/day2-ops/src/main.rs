@@ -417,6 +417,7 @@ impl Operations {
                     example,
                     parameters.seed.parse()?,
                     parameters.count,
+                    day2::development::CampaignTime::Local,
                 )?);
                 Ok(json!({}))
             }

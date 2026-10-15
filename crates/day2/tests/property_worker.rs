@@ -53,8 +53,15 @@ fn operation_campaign_checks_large_before_and_after_snapshots() -> Result<()> {
         "campaign must exceed the ordinary frame limit within the verification budget"
     );
 
-    let mut campaign =
-        development::Campaign::for_actor(runtime, None, 42, 1, development::ACTOR, false)?;
+    let mut campaign = development::Campaign::for_actor(
+        runtime,
+        None,
+        42,
+        1,
+        development::ACTOR,
+        false,
+        development::CampaignTime::Verification,
+    )?;
     let mut completed = BTreeMap::<String, usize>::new();
     automation::run(&automation::runner()?, &["exercise", "", "1"], |request| {
         let action = request.action.clone();

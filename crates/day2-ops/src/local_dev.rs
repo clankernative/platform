@@ -1072,6 +1072,7 @@ impl Session {
                     self.options.generated,
                     &self.options.actor,
                     !self.options.example.is_empty(),
+                    day2::development::CampaignTime::Local,
                 )?);
                 Ok(json!({}))
             }

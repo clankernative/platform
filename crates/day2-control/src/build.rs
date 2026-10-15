@@ -792,6 +792,7 @@ impl TrustedRunner {
                         None,
                         input.seed.parse()?,
                         input.count,
+                        day2::development::CampaignTime::Verification,
                     )?);
                 }
                 "ci-evidence" => {
