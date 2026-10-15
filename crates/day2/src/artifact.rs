@@ -277,8 +277,7 @@ pub struct Artifact {
     pub operations: Vec<Operation>,
     #[serde(default)]
     pub properties: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub verification_limits: Option<VerificationLimits>,
+    pub verification_limits: VerificationLimits,
     #[serde(default)]
     pub pages: Vec<Page>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -569,17 +568,11 @@ impl LoadedArtifact {
             "schema digest mismatch"
         );
         contract.schema.validate()?;
-        if contract.format >= 15 {
-            let limits = contract
-                .verification_limits
-                .as_ref()
-                .context("current artifact requires verification_limits")?;
-            limits.validate()?;
-            ensure!(
-                limits == &VerificationLimits::QUALIFIED,
-                "unsupported verification limits"
-            );
-        }
+        contract.verification_limits.validate()?;
+        ensure!(
+            contract.verification_limits == VerificationLimits::QUALIFIED,
+            "unsupported verification limits"
+        );
         if contract.format >= 2 {
             contract.schema.validate_typed()?;
             crate::properties::validate_catalog(&contract.properties)?;
@@ -2652,7 +2645,7 @@ mod worker_executable_tests {
             .collect::<Vec<_>>();
         fs::write(directory.path().join("worker"), &bytes)?;
         let contract = serde_json::from_value(json!({
-            "format":1,"roc_version":"fixture","worker_digest":digest(&bytes),
+            "format":1,"verification_limits":VerificationLimits::QUALIFIED,"roc_version":"fixture","worker_digest":digest(&bytes),
             "schema_digest":"fixture","schema":{"models":{},"inputs":{},"foreign_keys":[]},
             "operations":[],"sources":{},"admission":"local-spike-only"
         }))?;
@@ -2807,7 +2800,7 @@ mod output_contract_tests {
             directory: PathBuf::new(),
             executable: Arc::default(),
             contract: serde_json::from_value(json!({
-                "format":6,"roc_version":"fixture","worker_digest":"fixture",
+                "format":6,"verification_limits":VerificationLimits::QUALIFIED,"roc_version":"fixture","worker_digest":"fixture",
                 "schema_digest":"fixture","schema":{"models":{},"inputs":{},"foreign_keys":[]},
                 "operations":[{"name":"links.list","kind":"query","input_type":"list_links","output_type":"links"}],
                 "pages":[{"name":"links","title":"Links","operation":"links.list","defaults":"{}","template":"pages/links.html","output_type":"links"}],
@@ -2815,6 +2808,28 @@ mod output_contract_tests {
                 "sources":{},"admission":"local-spike-only"
             }))?,
         })
+    }
+
+    #[test]
+    fn verification_limits_are_required_for_every_decoded_contract() -> Result<()> {
+        let contract = serde_json::to_value(artifact()?.contract())?;
+        for format in [1, CURRENT_FORMAT] {
+            let mut missing = contract.clone();
+            missing["format"] = json!(format);
+            missing
+                .as_object_mut()
+                .unwrap()
+                .remove("verification_limits");
+            let error = serde_json::from_value::<Artifact>(missing.clone()).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("missing field `verification_limits`")
+            );
+            missing["verification_limits"] = serde_json::Value::Null;
+            assert!(serde_json::from_value::<Artifact>(missing).is_err());
+        }
+        Ok(())
     }
 
     #[test]

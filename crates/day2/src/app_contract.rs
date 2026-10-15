@@ -1626,7 +1626,7 @@ mod selector_tests {
             output_type: "result".into(),
         };
         let artifact: Artifact = serde_json::from_value(serde_json::json!({
-            "format":13,"roc_version":"test","worker_digest":"test","schema_digest":"test",
+            "format":13,"verification_limits":crate::artifact::VerificationLimits::QUALIFIED,"roc_version":"test","worker_digest":"test","schema_digest":"test",
             "schema":schema,"operations":[operation],"sources":{},"admission":"test"
         }))?;
         let effect = Effect {

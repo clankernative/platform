@@ -1126,7 +1126,7 @@ mod tests {
                 },
             ],
             properties: Vec::new(),
-            verification_limits: Some(crate::artifact::VerificationLimits::QUALIFIED),
+            verification_limits: crate::artifact::VerificationLimits::QUALIFIED,
             pages: vec![
                 Page {
                     name: "home".into(),
