@@ -5,7 +5,10 @@ use super::*;
 
 #[test]
 fn kernel_process_visibility_preserves_zero_as_data_and_refuses_negative_pid() {
-    assert_eq!(process_visibility(0).unwrap(), PeerProcessData::NotVisible {});
+    assert_eq!(
+        process_visibility(0).unwrap(),
+        PeerProcessData::NotVisible {}
+    );
     assert_eq!(
         process_visibility(7).unwrap(),
         PeerProcessData::Visible {
@@ -98,7 +101,8 @@ fn visibility_decoders_reject_arrays_and_duplicate_or_unknown_fields() {
     ] {
         assert!(serde_json::from_str::<ConnectionPeerData>(raw).is_err());
     }
-    let visible = serde_json::json!({"process":{"visibility":"visible","process":7},"user":1,"group":2});
+    let visible =
+        serde_json::json!({"process":{"visibility":"visible","process":7},"user":1,"group":2});
     let data = serde_json::from_value::<ConnectionPeerData>(visible.clone()).unwrap();
     assert_eq!(data.process, process_visibility(7).unwrap());
     assert_eq!(serde_json::to_value(data).unwrap(), visible);
