@@ -635,7 +635,8 @@ jobs:
           retention-days: 14
 
   verification-diagnostics:
-    if: ${{ inputs.verification == 'diagnostics' }}
+    needs: [secrets, dependencies]
+    if: ${{ inputs.verification == 'diagnostics' && needs.secrets.result == 'success' && needs.dependencies.result == 'success' }}
     runs-on: ubuntu-24.04
     container:
       image: rust@sha256:620dbcd124499c59e2406d3741574b5c5838cf9eb9656f0c3a03948f79b02959
@@ -647,7 +648,7 @@ jobs:
     defaults:
       run:
         shell: bash
-    timeout-minutes: 360
+    timeout-minutes: 45
     env:
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
@@ -689,6 +690,17 @@ jobs:
           cache-workspace-crates: 'false'
           shared-key: ${{ hashFiles('Cargo.toml') }}-verify
           save-if: 'false'
+      - name: Establish the unchanged bounded Linux context for startup controls
+        id: startup_context
+        run: cargo run --locked -p xtask -- verify-linux-context
+      - name: Retain this diagnostic context before later failures
+        if: ${{ always() && steps.startup_context.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: day2-startup-context-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/day2-ci-linux-context.json
+          if-no-files-found: error
+          retention-days: 3
       - run: cargo run --locked -p xtask -- source-check
       - run: cargo fetch --locked
       - run: cargo run --locked -p xtask -- notices
@@ -716,6 +728,16 @@ jobs:
             target/debug/xtask.d
           if-no-files-found: error
           retention-days: 3
+      - name: Require the exact current native, dependency and proof admission
+        run: target/debug/xtask architecture-check
+      - name: Require complete strict workspace and all-targets lint
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Run real sandbox, compiler-driver and fixed-report controls
+        run: cargo test --locked -p day2-sandbox --lib --bins --test isolation -- --nocapture
+      - name: Run all current worker controls including a backlogged forged report
+        run: cargo test --locked -p day2 --lib worker::tests -- --nocapture
+      - name: Require the existing operator privacy control
+        run: cargo test --locked -p day2 --lib error::tests::operator_diagnostics_retain_codes_without_context_or_payloads -- --exact --nocapture
 
   infrastructure:
     runs-on: ubuntu-24.04
