@@ -23,3 +23,11 @@ These joins remain response data. They cannot mint a role capability or reconstr
 ## Remaining runtime join
 
 Production enrollment still requires a qualified trusted native issuer that joins the current process incarnation, actual container/sandbox/Pod, image and node initial time namespace. Projected Pod UID, cgroup text, Kubernetes status, zero offsets, historical receipts or a peer PID alone do not establish that join. The endpoint, kernel process handle, issuer/runtime profile and deployment must be implemented and qualified before the production factory can become available.
+
+## Connection creator PID visibility
+
+Connection-time credential data records numeric PID visibility explicitly. A positive kernel PID becomes `Visible` with a checked nonzero value; zero becomes `NotVisible`. Negative PIDs and unavailable user/group values refuse. A peer outside the receiver's PID namespace may have no visible numeric PID.
+
+The observation still requires the actual socket, successfully acquired original `SO_PEERPIDFD`, live retained process handle, unchanged original acquisition, current process/thread and sticky refusal checks. It never reopens or substitutes a numeric PID. Serialized visibility data cannot recreate that observation.
+
+This data shape does not qualify a node-to-Pod endpoint, per-message sender, image, runtime, role or storage authority. The safe per-message receiver, two-sided issuer/requester joins and actual cross-namespace deployment qualification remain separate requirements.
