@@ -295,4 +295,187 @@ mod linux {
             );
         }
     }
+
+    #[test]
+    fn unchanged_initial_file_checks_keep_the_original_owner_and_budget() {
+        let (directory, selected, plan, mut interval) = layout();
+        let auth = authority(&directory, selected, &mut interval);
+        let NativeOriginalPreparationOutcome::Prepared(mut owner) =
+            prepare_original_file(auth, &plan, &mut interval)
+        else {
+            panic!("fixture failed");
+        };
+        let file = owner.file.as_raw_fd();
+        let anchor = owner.authority.directory.as_raw_fd();
+        owner
+            .check_unchanged_initial_file(&plan, &mut interval)
+            .unwrap();
+        owner
+            .check_unchanged_initial_file(&plan, &mut interval)
+            .unwrap();
+        assert_eq!(owner.file.as_raw_fd(), file);
+        assert_eq!(owner.authority.directory.as_raw_fd(), anchor);
+        // A test clock with the same domain and a new live interval cannot
+        // renew the retained authority's original deadline at105 seconds.
+        let mut later = NativeAcquisition::fixture(
+            Digest::new(b"original-file-fixture"),
+            std::process::id(),
+            Duration::from_secs(106),
+            Duration::from_secs(5),
+        );
+        assert!(
+            owner
+                .check_unchanged_initial_file(&plan, &mut later)
+                .is_err()
+        );
+        assert!(later.remaining().is_err());
+        assert!(
+            owner
+                .check_unchanged_initial_file(&plan, &mut interval)
+                .is_err()
+        );
+        assert_eq!(owner.file.as_raw_fd(), file);
+        assert_eq!(owner.authority.directory.as_raw_fd(), anchor);
+    }
+
+    #[test]
+    fn initial_continuity_refusal_keeps_owner_after_leaf_link_mode_or_length_change() {
+        for change in ["replacement", "hardlink", "mode", "length"] {
+            let (directory, selected, plan, mut interval) = layout();
+            let auth = authority(&directory, selected, &mut interval);
+            let NativeOriginalPreparationOutcome::Prepared(mut owner) =
+                prepare_original_file(auth, &plan, &mut interval)
+            else {
+                panic!("fixture failed");
+            };
+            let file = owner.file.as_raw_fd();
+            let inode = owner.file.metadata().unwrap().ino();
+            let anchor = owner.authority.directory.as_raw_fd();
+            let leaf = directory.path().join(INITIAL_FILE);
+            match change {
+                "replacement" => {
+                    std::fs::rename(&leaf, directory.path().join("original.sqlite")).unwrap();
+                    std::fs::write(&leaf, plan.image.bytes()).unwrap();
+                }
+                "hardlink" => {
+                    std::fs::hard_link(&leaf, directory.path().join("extra.sqlite")).unwrap()
+                }
+                "mode" => {
+                    use std::os::unix::fs::PermissionsExt;
+                    owner
+                        .file
+                        .set_permissions(std::fs::Permissions::from_mode(0o640))
+                        .unwrap();
+                }
+                "length" => owner.file.set_len(1).unwrap(),
+                _ => unreachable!(),
+            }
+            assert!(
+                owner
+                    .check_unchanged_initial_file(&plan, &mut interval)
+                    .is_err()
+            );
+            assert!(
+                owner
+                    .check_unchanged_initial_file(&plan, &mut acquisition())
+                    .is_err()
+            );
+            assert_eq!(owner.file.as_raw_fd(), file);
+            assert_eq!(owner.file.metadata().unwrap().ino(), inode);
+            assert_eq!(owner.authority.directory.as_raw_fd(), anchor);
+        }
+    }
+
+    #[test]
+    fn restoring_changed_initial_bytes_never_clears_the_owning_refusal() {
+        let (directory, selected, plan, mut interval) = layout();
+        let auth = authority(&directory, selected, &mut interval);
+        let NativeOriginalPreparationOutcome::Prepared(mut owner) =
+            prepare_original_file(auth, &plan, &mut interval)
+        else {
+            panic!("fixture failed");
+        };
+        let file = owner.file.as_raw_fd();
+        let anchor = owner.authority.directory.as_raw_fd();
+        let byte = plan.image.bytes()[100];
+        owner.file.write_all_at(&[byte ^ 1], 100).unwrap();
+        let error = owner
+            .check_unchanged_initial_file(&plan, &mut interval)
+            .err()
+            .unwrap();
+        assert_eq!(error.to_string(), "original_file_continuity_bytes");
+        owner.file.write_all_at(&[byte], 100).unwrap();
+        assert!(
+            owner
+                .check_unchanged_initial_file(&plan, &mut acquisition())
+                .is_err()
+        );
+        assert_eq!(owner.file.as_raw_fd(), file);
+        assert_eq!(owner.authority.directory.as_raw_fd(), anchor);
+    }
+
+    #[test]
+    fn a_changed_layout_cannot_replace_the_initial_owner_or_clear_refusal() {
+        let (directory, selected, mut plan, mut interval) = layout();
+        let auth = authority(&directory, selected, &mut interval);
+        let NativeOriginalPreparationOutcome::Prepared(mut owner) =
+            prepare_original_file(auth, &plan, &mut interval)
+        else {
+            panic!("fixture failed");
+        };
+        let file = owner.file.as_raw_fd();
+        let anchor = owner.authority.directory.as_raw_fd();
+        let original = plan.proposal.clone();
+        plan.proposal.image = Digest::new(b"replacement image");
+        let error = owner
+            .check_unchanged_initial_file(&plan, &mut interval)
+            .err()
+            .unwrap();
+        assert_eq!(error.to_string(), "original_file_continuity_layout");
+        assert_eq!(
+            std::fs::read(directory.path().join(INITIAL_FILE)).unwrap(),
+            plan.image.bytes()
+        );
+        plan.proposal = original;
+        assert!(
+            owner
+                .check_unchanged_initial_file(&plan, &mut acquisition())
+                .is_err()
+        );
+        assert_eq!(owner.file.as_raw_fd(), file);
+        assert_eq!(owner.authority.directory.as_raw_fd(), anchor);
+    }
+
+    #[test]
+    fn valid_sqlite_write_refuses_initial_continuity_without_claiming_serving_integrity() {
+        let (directory, selected, plan, mut interval) = layout();
+        let auth = authority(&directory, selected, &mut interval);
+        let NativeOriginalPreparationOutcome::Prepared(mut owner) =
+            prepare_original_file(auth, &plan, &mut interval)
+        else {
+            panic!("fixture failed");
+        };
+        let db = rusqlite::Connection::open(directory.path().join(INITIAL_FILE)).unwrap();
+        db.execute(
+            "INSERT INTO items(id,version,created_at,value) VALUES(1,1,0,'later')",
+            [],
+        )
+        .unwrap();
+        let integrity: String = db
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(integrity, "ok");
+        drop(db);
+        assert!(
+            owner
+                .check_unchanged_initial_file(&plan, &mut interval)
+                .is_err()
+        );
+        assert!(
+            owner
+                .check_unchanged_initial_file(&plan, &mut acquisition())
+                .is_err()
+        );
+        assert!(owner.file.metadata().is_ok());
+    }
 }
