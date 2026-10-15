@@ -26,6 +26,12 @@ pub enum OptionalText {
 pub struct Snapshot {
     pub id: String,
     pub issuer_id: String,
+    pub record_count: u64,
+    pub stakeholder_count: u64,
+    pub grant_count: u64,
+    pub vesting_event_count: u64,
+    pub exercise_count: u64,
+    pub source_profile: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -208,11 +214,33 @@ pub(crate) fn authorized(
     }
 }
 
+fn snapshot_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Snapshot> {
+    let count = |index| {
+        let value = row.get::<_, i64>(index)?;
+        u64::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(index, value))
+    };
+    Ok(Snapshot {
+        id: row.get(0)?,
+        issuer_id: row.get(1)?,
+        record_count: count(2)?,
+        stakeholder_count: count(3)?,
+        grant_count: count(4)?,
+        vesting_event_count: count(5)?,
+        exercise_count: count(6)?,
+        source_profile: row.get(7)?,
+    })
+}
+
 fn upgrade(connection: &Connection) -> Result<()> {
     connection.execute_batch(
         "CREATE TABLE IF NOT EXISTS carta_snapshots (
             scope TEXT NOT NULL, id TEXT NOT NULL, issuer_id TEXT NOT NULL,
             record_count INTEGER NOT NULL CHECK(record_count >= 0),
+            stakeholder_count INTEGER NOT NULL CHECK(stakeholder_count >= 0),
+            grant_count INTEGER NOT NULL CHECK(grant_count >= 0),
+            vesting_event_count INTEGER NOT NULL CHECK(vesting_event_count >= 0),
+            exercise_count INTEGER NOT NULL CHECK(exercise_count >= 0),
+            source_profile TEXT NOT NULL CHECK(source_profile = 'synthetic'),
             PRIMARY KEY(scope,id)
         ) STRICT;
         CREATE TABLE IF NOT EXISTS carta_records (
@@ -295,22 +323,54 @@ fn seed_with_mode(
         ensure!(bytes <= MAX_CAPTURE_BYTES, "carta_capture_byte_budget");
         envelopes.push(envelope);
     }
+    let stakeholder_count = capture
+        .records
+        .iter()
+        .filter(|record| matches!(record, Record::Stakeholder(_)))
+        .count();
+    let grant_count = capture
+        .records
+        .iter()
+        .filter(|record| matches!(record, Record::Grant(_)))
+        .count();
+    let vesting_event_count = capture
+        .records
+        .iter()
+        .filter(|record| matches!(record, Record::VestingEvent(_)))
+        .count();
+    let exercise_count = capture
+        .records
+        .iter()
+        .filter(|record| matches!(record, Record::Exercise(_)))
+        .count();
+    let source_profile = "synthetic";
     let identity = crate::digest(&serde_json::to_vec(&(
         "carta-synthetic-v1",
         scope,
         capture,
+        stakeholder_count,
+        grant_count,
+        vesting_event_count,
+        exercise_count,
+        source_profile,
     ))?);
     let snapshot = Snapshot {
         id: format!("carta_{}", &identity[7..]),
         issuer_id: capture.issuer_id.clone(),
+        record_count: u64::try_from(capture.records.len())?,
+        stakeholder_count: u64::try_from(stakeholder_count)?,
+        grant_count: u64::try_from(grant_count)?,
+        vesting_event_count: u64::try_from(vesting_event_count)?,
+        exercise_count: u64::try_from(exercise_count)?,
+        source_profile: source_profile.into(),
     };
     let mut connection = crate::store::open(path)?;
     let tx = crate::write_queue::immediate(&mut connection)?;
     upgrade(&tx)?;
     if only_unconfigured {
         let existing = tx.query_row(
-            "SELECT s.id,s.issuer_id FROM carta_active a JOIN carta_snapshots s ON s.scope=a.scope AND s.id=a.snapshot WHERE a.scope=?1",
-            [scope], |row| Ok(Snapshot { id: row.get(0)?, issuer_id: row.get(1)? }),
+            "SELECT s.id,s.issuer_id,s.record_count,s.stakeholder_count,s.grant_count,s.vesting_event_count,s.exercise_count,s.source_profile FROM carta_active a JOIN carta_snapshots s ON s.scope=a.scope AND s.id=a.snapshot WHERE a.scope=?1",
+            [scope], snapshot_from_row,
         ).optional()?;
         if let Some(existing) = existing {
             tx.commit()?;
@@ -324,12 +384,17 @@ fn seed_with_mode(
     )?;
     if !present {
         tx.execute(
-            "INSERT INTO carta_snapshots VALUES(?1,?2,?3,?4)",
+            "INSERT INTO carta_snapshots VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
             params![
                 scope,
                 snapshot.id,
                 snapshot.issuer_id,
-                i64::try_from(envelopes.len())?
+                i64::try_from(snapshot.record_count)?,
+                i64::try_from(snapshot.stakeholder_count)?,
+                i64::try_from(snapshot.grant_count)?,
+                i64::try_from(snapshot.vesting_event_count)?,
+                i64::try_from(snapshot.exercise_count)?,
+                snapshot.source_profile,
             ],
         )?;
         for (ordinal, envelope) in envelopes.iter().enumerate() {
@@ -470,8 +535,8 @@ fn read_at(path: &Path, read: Read) -> Result<String> {
     match read {
         Read::Begin { scope, issuer_id } => {
             let snapshot: Option<Snapshot> = connection.query_row(
-                "SELECT s.id,s.issuer_id FROM carta_active a JOIN carta_snapshots s ON s.scope=a.scope AND s.id=a.snapshot WHERE a.scope=?1 AND s.issuer_id=?2",
-                params![scope,issuer_id], |row| Ok(Snapshot { id: row.get(0)?, issuer_id: row.get(1)? }),
+                "SELECT s.id,s.issuer_id,s.record_count,s.stakeholder_count,s.grant_count,s.vesting_event_count,s.exercise_count,s.source_profile FROM carta_active a JOIN carta_snapshots s ON s.scope=a.scope AND s.id=a.snapshot WHERE a.scope=?1 AND s.issuer_id=?2",
+                params![scope,issuer_id], snapshot_from_row,
             ).optional()?;
             Ok(serde_json::to_string(
                 &snapshot.context("carta_unconfigured")?,
@@ -536,11 +601,15 @@ mod tests {
     }
 
     fn next(scope: &str, id: &str, cursor: u64) -> Read {
+        next_for(scope, id, cursor, "synthetic-issuer")
+    }
+
+    fn next_for(scope: &str, id: &str, cursor: u64, issuer_id: &str) -> Read {
         Read::Next {
             scope: scope.into(),
             snapshot_id: id.into(),
             cursor,
-            issuer_id: "synthetic-issuer".into(),
+            issuer_id: issuer_id.into(),
         }
     }
 
@@ -604,6 +673,51 @@ mod tests {
             )?)?["kind"],
             "done"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn mixed_capture_counts_every_record_and_reopens_immutable_metadata() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("provider.sqlite");
+        let mut capture = synthetic_example();
+        let duplicate = capture.records[0].clone();
+        capture.records.push(duplicate);
+
+        let snapshot = seed(&path, "first", &capture)?;
+        assert_eq!(snapshot.record_count, 9);
+        assert_eq!(snapshot.stakeholder_count, 3);
+        assert_eq!(snapshot.grant_count, 2);
+        assert_eq!(snapshot.vesting_event_count, 2);
+        assert_eq!(snapshot.exercise_count, 2);
+        assert_eq!(snapshot.source_profile, "synthetic");
+        assert_eq!(seed(&path, "first", &capture)?, snapshot);
+        assert_eq!(
+            seed_with_mode(&path, "first", &synthetic_example(), true)?,
+            snapshot
+        );
+
+        let reopened: Snapshot = serde_json::from_str(&read_at(
+            &path,
+            Read::Begin {
+                scope: "first".into(),
+                issuer_id: capture.issuer_id.clone(),
+            },
+        )?)?;
+        assert_eq!(reopened, snapshot);
+        let records = (0..snapshot.record_count)
+            .map(|cursor| {
+                read_at(
+                    &path,
+                    next_for("first", &snapshot.id, cursor, &capture.issuer_id),
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        assert_eq!(records.len(), capture.records.len());
+        let final_record: serde_json::Value = serde_json::from_str(&records[records.len() - 1])?;
+        assert_eq!(final_record["kind"], "stakeholder");
+        assert_eq!(records[0], records[records.len() - 1]);
+        assert_ne!(seed(&path, "other", &capture)?.id, snapshot.id);
         Ok(())
     }
 
