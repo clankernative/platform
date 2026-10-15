@@ -655,7 +655,8 @@ jobs:
           retention-days: 14
 
   verification-diagnostics:
-    if: ${{ inputs.verification == 'diagnostics' }}
+    needs: [secrets, dependencies]
+    if: ${{ inputs.verification == 'diagnostics' && needs.secrets.result == 'success' && needs.dependencies.result == 'success' }}
     runs-on: ubuntu-24.04
     container:
       image: rust@sha256:620dbcd124499c59e2406d3741574b5c5838cf9eb9656f0c3a03948f79b02959
@@ -667,7 +668,7 @@ jobs:
     defaults:
       run:
         shell: bash
-    timeout-minutes: 360
+    timeout-minutes: 45
     env:
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
@@ -709,6 +710,17 @@ jobs:
           cache-workspace-crates: 'false'
           shared-key: ${{ hashFiles('Cargo.toml') }}-verify
           save-if: 'false'
+      - name: Establish the unchanged bounded Linux reporter context
+        id: reporter_context
+        run: cargo run --locked -p xtask -- verify-linux-context
+      - name: Retain the current reporter context before later failures
+        if: ${{ always() && steps.reporter_context.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: day2-compiler-reporter-context-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/day2-ci-linux-context.json
+          if-no-files-found: error
+          retention-days: 3
       - run: cargo run --locked -p xtask -- source-check
       - run: cargo fetch --locked
       - run: cargo run --locked -p xtask -- notices
@@ -727,7 +739,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: ${{ always() }}
         with:
-          name: day2-verification-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          name: day2-compiler-reporter-facts-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             /tmp/day2-format.patch
             /tmp/day2-architecture-inventory.json
@@ -735,6 +747,22 @@ jobs:
             /tmp/day2-architecture-proofs.json
             target/debug/xtask.d
           if-no-files-found: error
+          retention-days: 3
+
+      # This first scoped gate retains formatter/native facts for exact review.
+      # It does not qualify unreviewed native sites or select platform campaigns.
+      - name: Require complete strict workspace and all-target reporter lint
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Exercise the complete reporter and existing admission control module
+        id: reporter_controls
+        run: cargo test --locked -p xtask --bin xtask verification::shards::tests:: -- --test-threads=1 --nocapture
+      - name: Retain only any current structured reporter failure metadata
+        if: ${{ failure() && steps.reporter_controls.outcome == 'failure' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: day2-compiler-reporter-control-failures-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/ci-compiler-failure-*/manifest.json
+          if-no-files-found: warn
           retention-days: 3
 
   infrastructure:
