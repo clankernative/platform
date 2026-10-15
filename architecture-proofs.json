@@ -1,7 +1,7 @@
 {
   "version": 1,
   "trait_checks": [
-    {"source":"crates/day2/src/structural_proofs.rs","scope":"module","fingerprint":"sha256:cf9f502a6f9bb0941bf93d1569e382f9df4c5127f4eddf2400a6cec13374c2ab","registration":{"source":"crates/day2/src/lib.rs","module":"structural_proofs"}},
+    {"source":"crates/day2/src/structural_proofs.rs","scope":"module","fingerprint":"sha256:d6835d8485e5936fdbeff5777a0e3800b823928d7e19d0b5f17660d1e602f2cd","registration":{"source":"crates/day2/src/lib.rs","module":"structural_proofs"}},
     {"source":"crates/day2-control/src/release.rs","scope":"const","fingerprint":"sha256:9c616765ed20205205236e2e4d7cc7a77a49512dcd9d0c33c34e1c40da5209e3","registration":null}
   ],
   "proofs": [
@@ -249,6 +249,10 @@
         {
           "owner": null,
           "signature": "pub (super) fn read (port : & mut impl Port , names : & Names) -> Result < EpochObservation >"
+        },
+        {
+          "owner": null,
+          "signature": "pub (super) fn read_with_budget (port : & mut impl Port , names : & Names , mut budget : Budget) -> Result < EpochObservation >"
         }
       ],
       "material_uses": [
@@ -270,6 +274,197 @@
       "consuming_methods": [
         "into_data"
       ]
+    },
+    {
+      "source": "crates/day2/src/security_epoch/authenticated_reads.rs",
+      "type_name": "AuthenticatedReads",
+      "owning_children": [],
+      "methods": [
+        "pub (super) fn acquire (policy : & InitialBootstrapPolicy , selection : & EpochStore , purpose : RolePurpose) -> Result < Self >",
+        "fn post (& mut self , url : & str , body : & [u8] , timeout : Duration , max_bytes : usize) -> Result < EpochReply >",
+        "pub (super) fn read (& mut self , selection : & EpochStore , names : & Names) -> Result < EpochObservation >",
+        "fn sample (& mut self) -> Result < Sample >"
+      ],
+      "factories": [
+        {
+          "owner": "AuthenticatedReads",
+          "signature": "pub (super) fn acquire (policy : & InitialBootstrapPolicy , selection : & EpochStore , purpose : RolePurpose) -> Result < Self >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "AuthenticatedReads",
+          "signature": "fn post (& mut self , url : & str , body : & [u8] , timeout : Duration , max_bytes : usize) -> Result < EpochReply >"
+        },
+        {
+          "owner": "AuthenticatedReads",
+          "signature": "fn sample (& mut self) -> Result < Sample >"
+        },
+        {
+          "owner": "AuthenticatedReads",
+          "signature": "pub (super) fn read (& mut self , selection : & EpochStore , names : & Names) -> Result < EpochObservation >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/credential_material.rs",
+      "type_name": "CredentialMaterial",
+      "owning_children": [],
+      "methods": [
+        "pub (super) fn authorization (& self) -> Result < HeaderValue >",
+        "fn from_bytes (mut bytes : Vec < u8 >) -> Result < Self >",
+        "pub (super) fn kubernetes_api (acquisition : & mut NativeAcquisition) -> Result < Self >",
+        "fn metadata_reply (bytes : & [u8]) -> Result < Self >",
+        "pub (super) fn metadata_source (acquisition : & mut NativeAcquisition) -> Result < Self >",
+        "fn mint_reply (bytes : & [u8]) -> Result < Self >",
+        "pub (super) fn mint_target (source : & Self , selected : & EpochIam , http : & NativeHttp , acquisition : & mut NativeAcquisition) -> Result < Self >",
+        "fn projection (path : & str , acquisition : & mut NativeAcquisition) -> Result < Self >",
+        "pub (super) fn subject (acquisition : & mut NativeAcquisition) -> Result < Self >",
+        "pub (super) fn subject_text (& self) -> Result < & str >"
+      ],
+      "factories": [
+        {
+          "owner": "CredentialMaterial",
+          "signature": "fn from_bytes (mut bytes : Vec < u8 >) -> Result < Self >"
+        },
+        {
+          "owner": "CredentialMaterial",
+          "signature": "fn metadata_reply (bytes : & [u8]) -> Result < Self >"
+        },
+        {
+          "owner": "CredentialMaterial",
+          "signature": "fn mint_reply (bytes : & [u8]) -> Result < Self >"
+        },
+        {
+          "owner": "CredentialMaterial",
+          "signature": "fn projection (path : & str , acquisition : & mut NativeAcquisition) -> Result < Self >"
+        },
+        {
+          "owner": "CredentialMaterial",
+          "signature": "pub (super) fn kubernetes_api (acquisition : & mut NativeAcquisition) -> Result < Self >"
+        },
+        {
+          "owner": "CredentialMaterial",
+          "signature": "pub (super) fn metadata_source (acquisition : & mut NativeAcquisition) -> Result < Self >"
+        },
+        {
+          "owner": "CredentialMaterial",
+          "signature": "pub (super) fn mint_target (source : & Self , selected : & EpochIam , http : & NativeHttp , acquisition : & mut NativeAcquisition) -> Result < Self >"
+        },
+        {
+          "owner": "CredentialMaterial",
+          "signature": "pub (super) fn subject (acquisition : & mut NativeAcquisition) -> Result < Self >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "CredentialMaterial",
+          "signature": "pub (super) fn authorization (& self) -> Result < HeaderValue >"
+        },
+        {
+          "owner": "CredentialMaterial",
+          "signature": "pub (super) fn mint_target (source : & Self , selected : & EpochIam , http : & NativeHttp , acquisition : & mut NativeAcquisition) -> Result < Self >"
+        },
+        {
+          "owner": "CredentialMaterial",
+          "signature": "pub (super) fn subject_text (& self) -> Result < & str >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": [],
+      "destructor": "sha256:11539a2b6e7ef88bbb1887caca3528713cf9d1ba921050ddd330770ff41fcda8"
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_clock.rs",
+      "type_name": "NativeAcquisition",
+      "owning_children": [],
+      "methods": [
+        "pub (super) fn begin (max_lease_seconds : u32) -> Result < Self >",
+        "pub (super) fn budget (& mut self) -> Result < Budget >",
+        "pub (super) fn fixture (domain : Digest , process : u32 , origin : Duration , limit : Duration) -> Self",
+        "fn observe (& mut self , now : Duration) -> Result < Sample >",
+        "pub (super) fn refuse (& mut self)",
+        "pub (super) fn remaining (& mut self) -> Result < Duration >",
+        "pub (super) fn sample (& mut self) -> Result < Sample >"
+      ],
+      "factories": [
+        {
+          "owner": "NativeAcquisition",
+          "signature": "pub (super) fn begin (max_lease_seconds : u32) -> Result < Self >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "NativeAcquisition",
+          "signature": "fn observe (& mut self , now : Duration) -> Result < Sample >"
+        },
+        {
+          "owner": "NativeAcquisition",
+          "signature": "pub (super) fn budget (& mut self) -> Result < Budget >"
+        },
+        {
+          "owner": "NativeAcquisition",
+          "signature": "pub (super) fn refuse (& mut self)"
+        },
+        {
+          "owner": "NativeAcquisition",
+          "signature": "pub (super) fn remaining (& mut self) -> Result < Duration >"
+        },
+        {
+          "owner": "NativeAcquisition",
+          "signature": "pub (super) fn sample (& mut self) -> Result < Sample >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_identity.rs",
+      "type_name": "NativeProcessObservation",
+      "owning_children": [],
+      "methods": [
+        "pub (super) fn acquire (expected_executable : & Digest , acquisition : & mut NativeAcquisition) -> Result < Self >",
+        "pub (super) fn check (& mut self , acquisition : & mut NativeAcquisition) -> Result < () >",
+        "pub (super) fn code (& self) -> & Digest"
+      ],
+      "factories": [
+        {
+          "owner": "NativeProcessObservation",
+          "signature": "pub (super) fn acquire (expected_executable : & Digest , acquisition : & mut NativeAcquisition) -> Result < Self >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "NativeProcessObservation",
+          "signature": "pub (super) fn check (& mut self , acquisition : & mut NativeAcquisition) -> Result < () >"
+        },
+        {
+          "owner": "NativeProcessObservation",
+          "signature": "pub (super) fn code (& self) -> & Digest"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    }
+  ],
+  "buffer_destructors": [
+    {
+      "source": "crates/day2/src/security_epoch/credential_material.rs",
+      "type_name": "MetadataReply",
+      "definition_fingerprint": "sha256:4aba86be945ef8882fd8083241df46f56feed3c37336f473725be479749fb0d3",
+      "destructor_fingerprint": "sha256:6426ca689e33cf488950308c77b84102ddfec1b89d073155b944ac8adcb625f0"
+    },
+    {
+      "source": "crates/day2/src/security_epoch/credential_material.rs",
+      "type_name": "MintReply",
+      "definition_fingerprint": "sha256:e83ebcebcd2538ff81bac6dfaac5b8872c938c9b36ff53080a13aca56b26e4e4",
+      "destructor_fingerprint": "sha256:eebed0c0414710308026b786cdb18df94a0e774ace7582c3f885544a968f9cdb"
     }
   ]
 }

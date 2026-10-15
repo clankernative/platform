@@ -26,7 +26,7 @@ pub(super) struct Sample {
     pub elapsed: Duration,
 }
 
-pub(super) struct Response {
+pub(super) struct EpochReply {
     pub status: u16,
     pub body: Vec<u8>,
 }
@@ -41,7 +41,7 @@ pub(super) trait Port {
         body: &[u8],
         timeout: Duration,
         max_bytes: usize,
-    ) -> Result<Response>;
+    ) -> Result<EpochReply>;
 }
 
 pub(super) struct Budget {
@@ -52,6 +52,26 @@ pub(super) struct Budget {
 }
 
 impl Budget {
+    pub(super) fn from_native_origin(
+        sample: Sample,
+        origin: Duration,
+        deadline: Duration,
+    ) -> Result<Self> {
+        ensure!(
+            sample.elapsed >= origin
+                && sample.elapsed < deadline
+                && deadline > origin
+                && deadline - origin <= ACQUISITION_BUDGET,
+            "security_epoch_original_native_budget"
+        );
+        Ok(Self {
+            domain: sample.domain,
+            start: origin,
+            latest: sample.elapsed,
+            limit: deadline - origin,
+        })
+    }
+
     fn begin(port: &mut impl Port, max_lease_seconds: u32) -> Result<Self> {
         let sample = port.sample()?;
         Ok(Self {
@@ -126,6 +146,10 @@ pub(super) struct Names {
 }
 
 impl Names {
+    pub(super) fn matches_selection(&self, selection: &EpochStore) -> bool {
+        self.selection == *selection
+    }
+
     pub(super) fn new(
         selection: &EpochStore,
         bootstrap: &Bootstrap,
@@ -394,7 +418,15 @@ impl EpochObservation {
 }
 
 pub(super) fn read(port: &mut impl Port, names: &Names) -> Result<EpochObservation> {
-    let mut budget = Budget::begin(port, names.selection.max_lease_seconds)?;
+    let budget = Budget::begin(port, names.selection.max_lease_seconds)?;
+    read_with_budget(port, names, budget)
+}
+
+pub(super) fn read_with_budget(
+    port: &mut impl Port,
+    names: &Names,
+    mut budget: Budget,
+) -> Result<EpochObservation> {
     let mut snapshot = read_once(port, &mut budget, names)?;
     if names.activate.is_none()
         && let Some(Versioned {
