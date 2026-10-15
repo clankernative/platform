@@ -755,7 +755,8 @@ jobs:
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Exercise the complete reporter and existing admission control module
         id: reporter_controls
-        run: cargo test --locked -p xtask --bin xtask verification::shards::tests:: -- --test-threads=1 --nocapture
+        run: >-
+          cargo test --locked -p xtask --bin xtask verification::shards::tests:: -- --test-threads=1 --nocapture
       - name: Retain only any current structured reporter failure metadata
         if: ${{ failure() && steps.reporter_controls.outcome == 'failure' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
