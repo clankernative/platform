@@ -635,6 +635,7 @@ jobs:
           retention-days: 14
 
   verification-diagnostics:
+    needs: [secrets, dependencies]
     if: ${{ inputs.verification == 'diagnostics' }}
     runs-on: ubuntu-24.04
     container:
@@ -716,6 +717,86 @@ jobs:
             target/debug/xtask.d
           if-no-files-found: error
           retention-days: 3
+
+      - name: Require exact current Git source before native preparation
+        run: git diff --exit-code
+      - name: Check the exact reviewed native sites
+        run: target/debug/xtask architecture-check
+      - name: Complete strict workspace and all-target Linux lint
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Exercise transport exit, timeout and redaction controls
+        run: cargo test --locked -p day2 --lib worker::tests -- --nocapture --skip worker::tests::actual_trusted_launcher_refusal_retains_exit_without_private_bytes
+      - name: Require the operator diagnostic privacy guard
+        run: cargo test --locked -p day2 --lib error::tests::operator_diagnostics_retain_codes_without_context_or_payloads -- --exact --nocapture
+      - name: Exercise bounded Temporal diagnostics and real bind refusals
+        run: cargo test --locked -p durable-temporal --lib local::tests -- --nocapture
+
+      - name: Establish mandatory bounded current native Linux context
+        id: runtime_context
+        run: target/debug/xtask verify-linux-context
+      - name: Retain current native context before preparation or runtime failures
+        id: retain_runtime_context
+        if: ${{ always() && steps.runtime_context.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: day2-reliability-linux-context-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/day2-ci-linux-context.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Complete the ordinary combined native preparation once
+        id: runtime_prepare
+        run: cargo run --locked -p xtask -- verify-prepare
+      - name: Retain the current admitted preparation and compiler inventories
+        id: retain_runtime_prepared
+        if: ${{ always() && steps.runtime_prepare.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: day2-reliability-prepared-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            artifacts/ci-prepared.json
+            artifacts/ci-test-binaries.json
+            artifacts/ci-test-build-cache.json
+            artifacts/all-verification-cache.json
+            artifacts/*/artifact.json
+            target/debug/xtask.d
+          if-no-files-found: error
+          retention-days: 14
+      - name: Complete ordinary parallel-runtime with its default four threads
+        id: parallel_runtime
+        if: ${{ always() && steps.runtime_prepare.outcome == 'success' && steps.retain_runtime_prepared.outcome == 'success' }}
+        run: target/debug/xtask verify-shard parallel-runtime
+      - name: Retain the actual successful parallel-runtime receipt
+        if: ${{ always() && steps.parallel_runtime.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: day2-reliability-result-parallel-runtime-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/ci-results/parallel-runtime.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Complete ordinary workspace-day2 including real launcher control
+        id: workspace_day2
+        if: ${{ always() && steps.runtime_prepare.outcome == 'success' && steps.retain_runtime_prepared.outcome == 'success' }}
+        run: target/debug/xtask verify-shard workspace-day2
+      - name: Retain the actual successful workspace-day2 receipt
+        if: ${{ always() && steps.workspace_day2.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: day2-reliability-result-workspace-day2-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/ci-results/workspace-day2.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Complete ordinary workspace-control including Temporal retirement
+        id: workspace_control
+        if: ${{ always() && steps.runtime_prepare.outcome == 'success' && steps.retain_runtime_prepared.outcome == 'success' }}
+        run: target/debug/xtask verify-shard workspace-control
+      - name: Retain the actual successful workspace-control receipt
+        if: ${{ always() && steps.workspace_control.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: day2-reliability-result-workspace-control-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/ci-results/workspace-control.json
+          if-no-files-found: error
+          retention-days: 14
 
   infrastructure:
     runs-on: ubuntu-24.04
