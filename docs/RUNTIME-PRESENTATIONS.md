@@ -83,7 +83,9 @@ and crashes reject without admitting partial scenes.
 - Memoization is within one render only, at most eight distinct results.
 - Renderer-specific engine/input bounds cannot be enlarged by declarations.
 - Slow rendering is followed by authority/binding and persisted-session checks
-  before returning the page. Recheck logic still needs revocation HTTP proof.
+  before returning the page. `http_delivery_rechecks_revocation_after_render`
+  exercises the actual HTTP/query/template path with a paused presentation port,
+  including session deletion, exclusive expiry and policy revoke/restore.
 
 ## Ports and verification
 
@@ -102,8 +104,10 @@ independently approved `DAY2_PRESENTATION_PIN_JSON`,
 
 [Chart Live](../examples/chart-live/README.md) demonstrates ordinary persisted
 Roc data, commands and server-backed ranges. Its injected browser navigation
-ports are tested with
-`node --test crates/day2/tests/chart_live_navigation.test.mjs`.
+ports and the platform navigation adapter are tested with
+`node --test crates/day2/tests/chart_live_navigation.test.mjs`. The full Roc
+verification recipe requires that suite and the native Chart Live fixture build;
+both the app and `.mjs` test bytes participate in verification identity.
 Its [verification record](../examples/chart-live/VERIFICATION.md) distinguishes
 simulation, confined adapter, Native build, HTTP and browser evidence. Full
 application DST, full Platform verification and release qualification are not

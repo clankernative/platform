@@ -54,7 +54,7 @@ UpdateSample :: [].{
 								)
 									.map(|updated| { time: updated.value.time, version: updated.version })
 							}
-					},
+						},
 			)
 		}
 
@@ -86,37 +86,56 @@ UpdateSample :: [].{
 	example = |_| {
 		version = RowVersion.from_u64(2.U64).map_err(|_| "invalid example version")?
 		Ok({
-			input: { sample_time: 1735689600000, expected_version: RowVersion.one, value: 0, missing: Bool.False },
-			output: { time: 1735689600000, version },
+			input: { sample_time: 1_735_689_600_000, expected_version: RowVersion.one, value: 0, missing: Bool.False },
+			output: { time: 1_735_689_600_000, version },
 		})
 	}
 
 	verify_input : Str, U64 -> Try(UpdateSampleTypes.Input, Str)
 	verify_input = |snapshot, _seed| {
+		context = Api.verification_context(snapshot)?
 		state = Data.verification_snapshot(snapshot)?.live
-		row = state.chart_samples.first().map_err(|_| "sample update verification requires seeded data")?
+		row = state.chart_samples.find_first(|candidate| candidate.value.owner == context.actor)
+			.map_err(|_| "sample update verification requires owned seeded data")?
 		Ok({
 			sample_time: row.value.time,
 			expected_version: row.version,
-			value: if row.value.value == 100 { 99 } else { row.value.value + 1 },
+			value: if row.value.value == 100 {
+				99
+			} else {
+				row.value.value + 1
+			},
 			missing: !row.value.missing,
 		})
 	}
 
 	verify_result : Str, UpdateSampleTypes.Output, Str -> Try(Bool, Str)
 	verify_result = |before, saved, after| {
-		old = Data.verification_snapshot(before)?.live
-		next = Data.verification_snapshot(after)?.live
-		original = old.chart_samples.find_first(|row| row.value.time == saved.time)
+		context = Api.verification_context(before)?
+		decoded : Try({ sample_time : I64, expected_version : U64, value : I64, missing : Bool }, _)
+		decoded = Json.parse(context.input)
+		input = decoded.map_err(|_| "invalid_verification_input")?
+		old = Data.verification_snapshot(before)?
+		next = Data.verification_snapshot(after)?
+		original = old.live.chart_samples.find_first(
+			|row| row.value.owner == context.actor and row.value.time == input.sample_time,
+		)
 			.map_err(|_| "sample missing before update")?
-		updated = next.chart_samples.find_first(|row| row.value.time == saved.time)
-			.map_err(|_| "sample missing after update")?
+		version = RowVersion.from_u64(original.version.to_u64() + 1).map_err(|_| "invalid next revision")?
+		expected = old.live.chart_samples.map(
+			|row| if row.id == original.id {
+				{ ..row, version, value: { ..row.value, value: input.value, missing: input.missing } }
+			} else {
+				row
+			},
+		)
 		Ok(
-			before != after
-				and updated.value.owner == original.value.owner
-				and updated.value.time == original.value.time
-				and updated.version == saved.version
-				and (updated.value.value != original.value.value or updated.value.missing != original.value.missing),
+			[
+				original.version.to_u64() == input.expected_version,
+				saved.time == input.sample_time,
+				saved.version == version,
+				next == { ..old, live: { ..old.live, chart_samples: expected } },
+			].all(|passed| passed),
 		)
 	}
 }

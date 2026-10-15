@@ -256,6 +256,11 @@ fn validate_woff2(bytes: &[u8]) -> Result<()> {
 }
 
 fn resolve_import(path: &str, specifier: &str, catalog: &Catalog) -> Result<()> {
+    // One closed host module, served from embedded platform bytes. This does
+    // not admit arbitrary absolute URLs or external dependency graphs.
+    if specifier == "/assets/platform/navigation.js" {
+        return Ok(());
+    }
     ensure!(
         (specifier.starts_with("./") || specifier.starts_with("../"))
             && !specifier.contains(['\\', '%', '?', '#']),

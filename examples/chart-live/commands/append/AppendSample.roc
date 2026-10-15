@@ -34,7 +34,7 @@ AppendSample :: [].{
 					} else {
 						Tx.create(
 							Data.chart_samples,
-						{ owner, time: input.time, value: input.value, missing: input.missing },
+							{ owner, time: input.time, value: input.value, missing: input.missing },
 						)
 							.map(|_| { time: input.time, owner })
 					},
@@ -72,14 +72,14 @@ AppendSample :: [].{
 
 	example : {} -> Try({ input : AppendSampleTypes.Input, output : AppendSampleTypes.Output }, Str)
 	example = |_| Ok({
-		input: { time: 1735689600000, value: 0, missing: Bool.False },
-		output: { time: 1735689600000, owner: "example-actor" },
+		input: { time: 1_735_689_600_000, value: 0, missing: Bool.False },
+		output: { time: 1_735_689_600_000, owner: "example-actor" },
 	})
 
 	verify_input : Str, U64 -> Try(AppendSampleTypes.Input, Str)
 	verify_input = |_snapshot, seed| {
 		delta = (seed % 1_000_000).to_i64_try().map_err(|_| "invalid bounded seed")?
-		Ok({ time: 1735689600000 + delta, value: 0, missing: Bool.False })
+		Ok({ time: 1_735_689_600_000 + delta, value: 0, missing: Bool.False })
 	}
 
 	verify_result : Str, AppendSampleTypes.Output, Str -> Try(Bool, Str)
@@ -91,10 +91,10 @@ AppendSample :: [].{
 		Ok(
 			old.chart_samples.len() + 1 == next.chart_samples.len()
 				and row.value.owner == saved.owner
-				and row.value.owner != ""
-				and row.value.time == saved.time
-				and row.value.value == 0
-				and !row.value.missing,
+					and row.value.owner != ""
+						and row.value.time == saved.time
+							and row.value.value == 0
+								and !row.value.missing,
 		)
 	}
 }

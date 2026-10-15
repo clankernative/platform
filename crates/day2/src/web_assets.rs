@@ -337,6 +337,10 @@ fn platform(path: &str, headers: &HeaderMap) -> Result<Response> {
             "text/javascript",
             include_bytes!("../../../assets/forms.js"),
         ),
+        "/assets/platform/navigation.js" => (
+            "text/javascript",
+            include_bytes!("../../../assets/navigation.js"),
+        ),
         "/assets/platform/datastar-1.0.1.js" => (
             "text/javascript",
             include_bytes!("../../../assets/datastar-1.0.1.js"),

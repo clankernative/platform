@@ -3,6 +3,7 @@ import pf.CollectionPage
 
 ChartView :: [].{
 	Sample : { time : I64, value : I64, missing : Bool, key : Str }
+
 	EditableSample : { sample_time : I64, expected_version : RowVersion, value : I64, missing : Bool }
 
 	Chart : {

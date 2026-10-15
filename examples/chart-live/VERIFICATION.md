@@ -32,15 +32,20 @@ These are focused source/adapter checks, not a substitute for the gates below.
 
 ## Remaining gates
 
+The ordinary gate now includes the Chart Live native build, independent multi-actor
+range and exact-update regressions, the paused-render HTTP revocation test, and
+the Node navigation suite. Those sources are part of the verification identity.
+The HTTP test uses a controlled presentation port through real HTTP, Roc, SQLite,
+template and form paths; it does not qualify a particular renderer executable.
+
 - Continuous/reversed/clipped/short pointer ranges, SVG-only text-selection
   suppression and table copying. The current browser bridge lacks drag operations.
 - Dialog focus return, mobile, no-JS, reduced motion, stale cancellation,
   replacement/back/BFCache and concurrent GET/live acknowledgements. Current
   browser proof covers keyboard navigation/selection/apply/cancel and dialog
   open/close, but its tools lack viewport, console and JS-disabled contexts.
-- HTTP range/reset/empty, owner isolation/version conflicts and authority/session
-  revocation during slow render; login-consumption regression with the separately
-  built HTTP-conformance artifact.
+- Real-browser range/reset/empty and login-consumption journeys remain separate
+  from native dispatcher and controlled-port HTTP regression coverage.
 - Full application DST and the current candidate's frozen-source Platform gate.
   Use the repository's pinned toolchain and verification recipes; hosted portable
   Linux and focused Mac validation have separate receipts. Historical local

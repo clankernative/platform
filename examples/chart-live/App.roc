@@ -15,7 +15,7 @@ App :: [].{
 			chart: ChartQuery.definition,
 		},
 		pages: { home: Routes.home.register(), chart: Routes.chart.register() },
-		properties: { chart_samples: ChartInvariants.samples }
+		properties: { chart_samples: ChartInvariants.samples },
 		errors: {
 			invalid_sample: ChartErrors.invalid_sample,
 			sample_edit_rejected: ChartErrors.sample_edit_rejected,

@@ -630,7 +630,13 @@ declares the GoLinks shape and is exercised end to end at the edge by
 
 The required `App.definition.presentation` explicitly names stylesheet and script
 entries under `ui/`; empty strings mean absent. Modules can import other
-local admitted `.js` modules with relative paths. A Rust Oxc parser rejects bare,
+local admitted `.js` modules with relative paths. The one host import
+`/assets/platform/navigation.js` exposes `canonicalPageURL` and
+`createPageNavigation` from embedded platform bytes. It owns named-route query
+serialization and live-stream replacement; apps supply view-specific response
+checks and UI feedback. Its admitted regions exclude forms and editable controls
+so command drafts survive navigation. Other absolute imports remain forbidden.
+A Rust Oxc parser rejects bare,
 remote, computed, escaping and missing module imports; no npm, Node server or
 app build scripts run. The complete source graph and resource hashes are bound
 to the app artifact and verified again on load/serve. HTML templates and their

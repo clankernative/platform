@@ -8,6 +8,14 @@ Models :: [].{
 		value : I64,
 		missing : Bool,
 	}.{
+		is_eq : ChartSample, ChartSample -> Bool
+		is_eq = |left, right| [
+			left.owner == right.owner,
+			left.time == right.time,
+			left.value == right.value,
+			left.missing == right.missing,
+		].all(|equal| equal)
+
 		table : Table(ChartSample, _)
 		table = Table.keyed(
 			|row| {

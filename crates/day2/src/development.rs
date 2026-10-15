@@ -129,6 +129,33 @@ fn exchange(artifact: &LoadedArtifact, request: &str) -> Result<Vec<u8>> {
     Worker::start(&executable)?.exchange(request.as_bytes())
 }
 
+struct VerificationInvocation<'a> {
+    actor: &'a str,
+    input: &'a str,
+    seed: u64,
+}
+
+fn verification_snapshot_context(
+    snapshot: &Value,
+    invocation: &VerificationInvocation<'_>,
+) -> Result<String> {
+    let mut snapshot = snapshot.clone();
+    let fields = snapshot
+        .as_object_mut()
+        .context("verification snapshot object required")?;
+    ensure!(!invocation.actor.is_empty(), "verification actor required");
+    fields.insert(
+        "verification".into(),
+        json!({"actor": invocation.actor, "input": invocation.input}),
+    );
+    let encoded = snapshot.to_string();
+    ensure!(
+        encoded.len() <= crate::artifact::VerificationLimits::QUALIFIED.snapshot_bytes,
+        "verification_snapshot_byte_budget"
+    );
+    Ok(encoded)
+}
+
 fn verification(
     artifact: &LoadedArtifact,
     action: &str,
@@ -136,7 +163,7 @@ fn verification(
     snapshot: &Value,
     before: &Value,
     output: &Value,
-    seed: u64,
+    invocation: VerificationInvocation<'_>,
 ) -> Result<String> {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -146,7 +173,7 @@ fn verification(
     }
     let request = format!(
         "verify:{}",
-        json!({ "action": action, "operation": operation, "snapshot": snapshot.to_string(), "before": before.to_string(), "output": output.to_string(), "seed": seed })
+        json!({ "action": action, "operation": operation, "snapshot": verification_snapshot_context(snapshot, &invocation)?, "before": verification_snapshot_context(before, &invocation)?, "output": output.to_string(), "seed": invocation.seed })
     );
     let bytes = properties::exchange_verification(artifact, request.as_bytes())?;
     ensure!(
@@ -1509,6 +1536,28 @@ mod people_resource_tests {
     use super::*;
 
     #[test]
+    fn verification_context_comes_from_the_dispatched_case_and_preserves_snapshot_bounds()
+    -> Result<()> {
+        let state =
+            json!({"live":"{}","deleted":"{}","verification":{"actor":"forged","input":"forged"}});
+        let invocation = VerificationInvocation {
+            actor: "alice",
+            input: "{\"start\":1}",
+            seed: 7,
+        };
+        let encoded: Value =
+            serde_json::from_str(&verification_snapshot_context(&state, &invocation)?)?;
+        assert_eq!(encoded["live"], state["live"]);
+        assert_eq!(encoded["deleted"], state["deleted"]);
+        assert_eq!(
+            encoded["verification"],
+            json!({"actor":"alice","input":"{\"start\":1}"})
+        );
+        assert!(verification_snapshot_context(&json!({"live":"x".repeat(crate::artifact::VerificationLimits::QUALIFIED.snapshot_bytes)}), &invocation).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn failure_principal_override_is_simulation_only_and_defaults_are_unchanged() -> Result<()> {
         let target = crate::operation_metadata::Target {
             operation: "invite_user".into(),
@@ -2723,7 +2772,11 @@ impl Campaign {
                         &self.runtime.verification_snapshot()?,
                         &json!({}),
                         &Value::Null,
-                        sample.seed.parse()?,
+                        VerificationInvocation {
+                            actor: &self.actor,
+                            input: "",
+                            seed: sample.seed.parse()?,
+                        },
                     )?;
                 }
                 self.prepared = true;
@@ -2835,7 +2888,11 @@ impl Campaign {
                         &active.application_after,
                         &active.application_initial,
                         &active.outcome.result,
-                        0,
+                        VerificationInvocation {
+                            actor: &self.actor,
+                            input: &active.step.input,
+                            seed: 0,
+                        },
                     )?;
                     *self
                         .evidence
@@ -2860,6 +2917,12 @@ impl Campaign {
                             for index in 0..self.evidence.requested_cases_per_generator {
                                 let before = self.runtime.inspect()?;
                                 let application_before = self.runtime.verification_snapshot()?;
+                                let verification_actor = failure_verification_actor(
+                                    error,
+                                    target,
+                                    &self.actor,
+                                    self.runtime.integrations().is_simulated(),
+                                )?;
                                 let input = verification(
                                     self.runtime.artifact(),
                                     "error-input",
@@ -2867,16 +2930,18 @@ impl Campaign {
                                     &application_before,
                                     &json!({}),
                                     &Value::Null,
-                                    self.evidence.seed.parse::<u64>()?.wrapping_add(index),
+                                    VerificationInvocation {
+                                        actor: verification_actor,
+                                        input: "",
+                                        seed: self
+                                            .evidence
+                                            .seed
+                                            .parse::<u64>()?
+                                            .wrapping_add(index),
+                                    },
                                 )?;
                                 let input: Value = serde_json::from_str(&input)?;
                                 let id = format!("failure-{}", self.evidence.error_traces.len());
-                                let verification_actor = failure_verification_actor(
-                                    error,
-                                    target,
-                                    &self.actor,
-                                    self.runtime.integrations().is_simulated(),
-                                )?;
                                 // These typed, admitted cases have the same access
                                 // to internal workers as ordinary generated checks.
                                 self.runtime.accept_route(

@@ -140,3 +140,6 @@ mod digest_tests {
 mod codegen;
 
 mod structural_proofs;
+
+#[cfg(test)]
+mod chart_live_tests;

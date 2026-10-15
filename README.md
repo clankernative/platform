@@ -47,6 +47,9 @@ cargo run --locked -p xtask -- verify
 `verify-fast` runs formatting, Clippy and fixture-free library checks. Full
 `verify` builds the public fixtures and exercises native execution, SQLite,
 HTTP, authorization, recovery, simulations and the Temporal control plane.
+The full gate also builds Chart Live and runs its injected browser navigation
+tests with Node.js 22 (CI pins 22.23.3). No npm dependencies or app build scripts
+are used; Node is a test runtime only.
 It requires substantial time and disk space. Private company apps are never
 discovered or included by either command. Company acceptance suites run in their
 own private repos against the platform version they deploy.

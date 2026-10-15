@@ -82,10 +82,18 @@ Request-time execution still requires an independently approved
 worker and its ABI contract. Build-provider installation is not execution
 authority. No deployment or production qualification is implied.
 
-`ui/app.js` wires browser adapters only. `ui/chart-navigation.js` receives DOM,
-network, parsing, cancellation and timer ports explicitly; its route/generation
-decisions use supplied inputs. Seeded tests replace network/timers without global
-mutation or real waits. These are not application-DST or browser qualification.
+`ui/app.js` wires browser adapters only. `ui/chart-navigation.js` owns range
+validation, dialogs and feedback. It imports Native's
+`/assets/platform/navigation.js` for route serialization, cancellation, response
+admission, live-stream replacement and history. Both receive DOM, network,
+parsing and timer ports explicitly. Seeded tests replace network/timers without
+global mutation or real waits. These are not real-browser qualification.
+
+The ordinary full verification recipe builds this app, runs its native actor/range
+and exact-update regressions, runs the HTTP revocation boundary test, and executes
+the browser adapter tests. App verification checks use the host's independent
+caller/input context and compare complete snapshots. Approved real-renderer
+qualification remains an explicit separate invocation.
 
 ## Local qualification
 

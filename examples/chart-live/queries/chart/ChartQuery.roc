@@ -34,38 +34,42 @@ ChartQuery :: [].{
 						|row| row.value.time >= input.start and row.value.time < input.end,
 					)
 					{
-					actor: context.actor(),
-					title: "Chart samples",
-					full_start: 1735689600000,
-					full_end: 1736294400000,
-					sample_edits: CollectionPage.complete(selected.map(
-						|row|
-							{
-								sample_time: row.value.time,
-								expected_version: row.version,
-								value: row.value.value,
-								missing: row.value.missing,
-							},
-					)),
-					chart: {
-						width: 640,
-						height: 240,
-						start: input.start,
-						end: input.end,
+						actor: context.actor(),
 						title: "Chart samples",
-						kind: "line",
-						samples: CollectionPage.complete(selected.map(
-							|row|
-							{
-								time: row.value.time,
-								value: row.value.value,
-								missing: row.value.missing,
-								key: row.id.to_str(),
-							},
-						)),
-						y_min: 0,
-						y_max: 100,
-					},
+						full_start: 1_735_689_600_000,
+						full_end: 1_736_294_400_000,
+						sample_edits: CollectionPage.complete(
+							selected.map(
+								|row|
+									{
+										sample_time: row.value.time,
+										expected_version: row.version,
+										value: row.value.value,
+										missing: row.value.missing,
+									},
+							),
+						),
+						chart: {
+							width: 640,
+							height: 240,
+							start: input.start,
+							end: input.end,
+							title: "Chart samples",
+							kind: "line",
+							samples: CollectionPage.complete(
+								selected.map(
+									|row|
+										{
+											time: row.value.time,
+											value: row.value.value,
+											missing: row.value.missing,
+											key: row.id.to_str(),
+										},
+								),
+							),
+							y_min: 0,
+							y_max: 100,
+						},
 					}
 				},
 			)
@@ -102,21 +106,21 @@ ChartQuery :: [].{
 
 	example : {} -> Try({ input : ChartQueryTypes.Input, output : ChartView.Result }, Str)
 	example = |_| Ok({
-		input: { start: 1735689600000, end: 1736294400000 },
+		input: { start: 1_735_689_600_000, end: 1_736_294_400_000 },
 		output: {
 			actor: "example-actor",
 			title: "Chart samples",
-			full_start: 1735689600000,
-			full_end: 1736294400000,
-			sample_edits: CollectionPage.empty,
+			full_start: 1_735_689_600_000,
+			full_end: 1_736_294_400_000,
+			sample_edits: CollectionPage.empty({}),
 			chart: {
 				width: 640,
 				height: 240,
-				start: 1735689600000,
-				end: 1736294400000,
+				start: 1_735_689_600_000,
+				end: 1_736_294_400_000,
 				title: "Chart samples",
 				kind: "line",
-				samples: CollectionPage.empty,
+				samples: CollectionPage.empty({}),
 				y_min: 0,
 				y_max: 100,
 			},
@@ -124,18 +128,33 @@ ChartQuery :: [].{
 	})
 
 	verify_input : Str, U64 -> Try(ChartQueryTypes.Input, Str)
-	verify_input = |_snapshot, _seed| Ok({ start: 1735689600000, end: 1736294400000 })
+	verify_input = |_snapshot, seed| {
+		days = (seed % 8).to_i64_try().map_err(|_| "invalid bounded seed")?
+		start = 1_735_689_600_000 + days * 86_400_000
+		duration = if seed % 3 == 0 {
+			1
+		} else if seed % 3 == 1 {
+			86_400_000
+		} else {
+			2_678_400_000
+		}
+		Ok({ start, end: start + duration })
+	}
 
 	verify_result : Str, ChartView.Result, Str -> Try(Bool, Str)
 	verify_result = |before, result, after| {
+		context = Api.verification_context(before)?
+		decoded : Try({ start : I64, end : I64 }, _)
+		decoded = Json.parse(context.input)
+		input = decoded.map_err(|_| "invalid_verification_input")?
 		state = Data.verification_snapshot(before)?.live
 		chart = result.chart
-		expected_samples = state.chart_samples
+		expected_rows = state.chart_samples
 			.keep_if(
 				|row|
-					row.value.owner == result.actor
-						and row.value.time >= chart.start
-						and row.value.time < chart.end,
+					row.value.owner == context.actor
+						and row.value.time >= input.start
+							and row.value.time < input.end,
 			)
 			.sort_with(
 				|left, right|
@@ -147,33 +166,46 @@ ChartQuery :: [].{
 						Same
 					},
 			)
-			.map(
-				|row|
-					{
-						time: row.value.time,
-						value: row.value.value,
-						missing: row.value.missing,
-						key: row.id.to_str(),
-					},
-			)
+		expected_samples = expected_rows.map(
+			|row|
+				{
+					time: row.value.time,
+					value: row.value.value,
+					missing: row.value.missing,
+					key: row.id.to_str(),
+				},
+		)
+		expected_edits = expected_rows.map(
+			|row| {
+				sample_time: row.value.time,
+				expected_version: row.version,
+				value: row.value.value,
+				missing: row.value.missing,
+			},
+		)
 		actual_samples = CollectionPage.items(chart.samples)
 		Ok(
-			before == after
-				and chart.width == 640
-				and chart.height == 240
-				and chart.y_min == 0
-				and chart.y_max == 100
-				and chart.kind == "line"
-				and result.full_start == 1735689600000
-				and result.full_end == 1736294400000
-				and chart.start == 1735689600000
-				and chart.end == 1736294400000
-				and chart.end - chart.start <= 2_678_400_000
-				and expected_samples == actual_samples
-				and actual_samples.all(
-					|sample|
-						sample.value >= 0 and sample.value <= 100 and sample.time <= 4_102_444_800_000,
-				),
+			[
+				before == after,
+				result.actor == context.actor,
+				result.title == "Chart samples",
+				chart.title == "Chart samples",
+				result.sample_edits.items() == expected_edits,
+				!result.sample_edits.has_more(),
+				result.sample_edits.next_after().is_start(),
+				!chart.samples.has_more(),
+				chart.samples.next_after().is_start(),
+				chart.width == 640,
+				chart.height == 240,
+				chart.y_min == 0,
+				chart.y_max == 100,
+				chart.kind == "line",
+				result.full_start == 1_735_689_600_000,
+				result.full_end == 1_736_294_400_000,
+				chart.start == input.start,
+				chart.end == input.end,
+				expected_samples == actual_samples,
+			].all(|passed| passed),
 		)
 	}
 }

@@ -7,10 +7,10 @@ import Data
 ChartErrors :: [].{
 	invalid_sample = Api.error({
 		description: "The sample fields are invalid, its timestamp is duplicated, or the actor's sample limit is reached.",
-		recovery: "Use a timestamp from epoch through 2100-01-01, an in-range value, and no more than 100 samples."
+		recovery: "Use a timestamp from epoch through 2100-01-01, an in-range value, and no more than 100 samples.",
 		verification: |_| Api.failed_command(
 			Commands.append_sample,
-			|_snapshot, _seed| Ok({ time: 1735689600000, value: 101, missing: Bool.False }),
+			|_snapshot, _seed| Ok({ time: 1_735_689_600_000, value: 101, missing: Bool.False }),
 		),
 	})
 
@@ -38,7 +38,7 @@ ChartErrors :: [].{
 		recovery: "Choose a nonnegative start and a later exclusive end within 31 days.",
 		verification: |_| Api.failed_query(
 			Reads.chart,
-			|_snapshot, _seed| Ok({ start: 1735689600000, end: 1735689600000 }),
+			|_snapshot, _seed| Ok({ start: 1_735_689_600_000, end: 1_735_689_600_000 }),
 		),
 	})
 }

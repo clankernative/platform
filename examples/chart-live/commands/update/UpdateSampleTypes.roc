@@ -7,5 +7,6 @@ UpdateSampleTypes :: [].{
 		value : I64,
 		missing : Bool,
 	}
+
 	Output : { time : I64, version : RowVersion }
 }

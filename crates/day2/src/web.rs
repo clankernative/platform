@@ -108,6 +108,18 @@ pub struct LocalServer {
     pub login_url: String,
 }
 
+enum PresentationSource {
+    Environment,
+    #[cfg(test)]
+    Test(Arc<dyn crate::presentation::Port>),
+}
+
+struct ListenerOptions {
+    concurrency: usize,
+    health_endpoints: bool,
+    presentation: PresentationSource,
+}
+
 pub(crate) struct Admission(Arc<AtomicBool>);
 
 impl Admission {
@@ -287,8 +299,11 @@ impl LocalServer {
             edge.authority().into(),
             edge.origin.clone(),
             SignIn::Edge(verifier),
-            concurrency,
-            true,
+            ListenerOptions {
+                concurrency,
+                health_endpoints: true,
+                presentation: PresentationSource::Environment,
+            },
         )
     }
 
@@ -318,8 +333,11 @@ impl LocalServer {
             authority,
             origin.clone(),
             SignIn::Link(Mutex::new(Some(grant))),
-            concurrency,
-            health_endpoints,
+            ListenerOptions {
+                concurrency,
+                health_endpoints,
+                presentation: PresentationSource::Environment,
+            },
         )?;
         server.login_url = format!("{origin}/login?token={token}");
         Ok(server)
@@ -331,8 +349,7 @@ impl LocalServer {
         authority: String,
         origin: String,
         sign_in: SignIn,
-        concurrency: usize,
-        health_endpoints: bool,
+        options: ListenerOptions,
     ) -> Result<Self> {
         runtime.artifact().require_current_api()?;
         let api = crate::openapi::Catalog::from_artifact(runtime.artifact().contract())?;
@@ -350,7 +367,13 @@ impl LocalServer {
         let entropy = inputs.entropy.clone();
         let declarations =
             crate::web_templates::presentation_catalog(&runtime.artifact().contract().templates)?;
-        let presentation = crate::presentation::load_environment(&declarations)?;
+        let presentation = match options.presentation {
+            PresentationSource::Environment => {
+                crate::presentation::load_environment(&declarations)?
+            }
+            #[cfg(test)]
+            PresentationSource::Test(port) => Some(port),
+        };
         let host = Arc::new(Host {
             entropy: entropy.clone(),
             clock: inputs.clock.clone(),
@@ -374,7 +397,7 @@ impl LocalServer {
             authority,
             origin: origin.clone(),
             sign_in,
-            capacity: Arc::new(Semaphore::new(concurrency)),
+            capacity: Arc::new(Semaphore::new(options.concurrency)),
             app_capacity: Arc::new(Semaphore::new(16)),
             app_issue_capacity: Arc::new(Semaphore::new(4)),
             app_execute_capacity: Arc::new(Semaphore::new(6)),
@@ -382,7 +405,7 @@ impl LocalServer {
             queued: std::sync::atomic::AtomicUsize::new(0),
             live_capacity: Arc::new(Semaphore::new(64)),
             admitting: Arc::new(AtomicBool::new(true)),
-            health_endpoints,
+            health_endpoints: options.health_endpoints,
         });
         Ok(Self {
             listener,
@@ -1500,8 +1523,8 @@ impl Host {
         response.headers_mut().insert(
             header::CONTENT_SECURITY_POLICY,
             format!(
-                "default-src 'none'; script-src 'unsafe-eval' {}/assets/platform/datastar-1.0.1.js {}/assets/platform/forms.js {}{}; script-src-attr 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' {};{} connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'; worker-src 'none'",
-                self.origin, self.origin, self.origin, self.appearance.resource_prefix(), image_sources, font_policy
+                "default-src 'none'; script-src 'unsafe-eval' {}/assets/platform/datastar-1.0.1.js {}/assets/platform/forms.js {}/assets/platform/navigation.js {}{}; script-src-attr 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' {};{} connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'; worker-src 'none'",
+                self.origin, self.origin, self.origin, self.origin, self.appearance.resource_prefix(), image_sources, font_policy
             ).parse()?,
         );
         Ok(response)

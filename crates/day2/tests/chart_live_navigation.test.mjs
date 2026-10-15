@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
 import {readFile} from 'node:fs/promises';
-const source = await readFile(new URL('../../../examples/chart-live/ui/chart-navigation.js', import.meta.url), 'utf8');
-const {rangeTarget, navigationState, responseRange, installChartNavigation} = await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
+const platform = await readFile(new URL('../../../assets/navigation.js', import.meta.url), 'utf8');
+const platformURL = 'data:text/javascript;base64,' + Buffer.from(platform).toString('base64');
+const {navigationState, canonicalPageURL} = await import(platformURL);
+const source = (await readFile(new URL('../../../examples/chart-live/ui/chart-navigation.js', import.meta.url), 'utf8')).replace('/assets/platform/navigation.js', platformURL);
+const {rangeTarget, responseRange, installChartNavigation} = await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
 const base = 'https://native.test/chart', start = 1735689600000, end = 1736294400000;
 const target = url => rangeTarget(url, base, start, end, 'https://native.test');
 const drain = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
@@ -51,8 +54,12 @@ function harness() {
     },
     fetch(url, options) { const headers = deferred(), body = deferred(); requests.push({url: String(url), options, headers, body}); return headers.promise; },
     parseHTML(text) {
-      const {start: s, end: e, url} = JSON.parse(text);
+      const {start: s, end: e, url, corruption} = JSON.parse(text);
       const parsed = new Map([['chart-region', node('chart-region', {start: String(s), end: String(e)})], ['sample-revisions', node('sample-revisions')], ['day2-live', node('day2-live', {liveUrl: '/_live?path=' + encodeURIComponent(new URL(url).pathname + new URL(url).search)})]]);
+      if (corruption === 'editable') parsed.get('sample-revisions').querySelector = () => ({tagName: 'INPUT'});
+      if (corruption === 'foreign-stream') parsed.get('day2-live').dataset.liveUrl = 'https://other.test/_live';
+      if (corruption === 'wrong-stream') parsed.get('day2-live').dataset.liveUrl = '/_live?path=%2Fother';
+      if (corruption === 'missing-region') parsed.delete('sample-revisions');
       return {getElementById: id => parsed.get(id)};
     },
     createAbortController: () => new AbortController(),
@@ -63,7 +70,7 @@ function harness() {
     nodes, requests, historyURLs, timers, document, view, stop, draft,
     submit(s, e) { form.elements.start.value = String(s); form.elements.end.value = String(e); form.emit('submit'); },
     async headers(index, status = 200) { const r = requests[index]; r.headers.resolve({ok: status === 200, headers: {get: () => 'text/html'}, text: () => r.body.promise}); await drain(); },
-    async body(index, valid = true) { const r = requests[index], url = new URL(r.url); r.body.resolve(JSON.stringify({start: Number(url.searchParams.get('start')) + (valid ? 0 : 1), end: Number(url.searchParams.get('end')), url: r.url})); await drain(); },
+    async body(index, valid = true, corruption = null) { const r = requests[index], url = new URL(r.url); r.body.resolve(JSON.stringify({start: Number(url.searchParams.get('start') ?? start) + (valid ? 0 : 1), end: Number(url.searchParams.get('end') ?? end), url: r.url, corruption})); await drain(); },
     async advance(ms) { now += ms; for (const [id, t] of [...timers]) if (t.at <= now) { timers.delete(id); t.callback(); } await drain(); }
   };
 }
@@ -78,13 +85,13 @@ test('range routes match Native default omission, identity and field ordering', 
   assert.equal(target('https://native.test/other'), null);
 });
 
-test('response admission rejects wrong ranges and editable or executable children', () => {
+test('app response admission checks the selected range', () => {
   const node = () => ({dataset: {start: String(start), end: String(end)}, hasAttribute: key => key === 'data-live', querySelector: () => null});
   const region = node(), revisions = node(), live = {};
   const document = {getElementById: id => ({'chart-region': region, 'sample-revisions': revisions, 'day2-live': live}[id])};
   assert.ok(responseRange(document, start, end));
   region.dataset.end = String(end - 1); assert.equal(responseRange(document, start, end), null);
-  region.dataset.end = String(end); revisions.querySelector = () => ({tagName: 'FORM'}); assert.equal(responseRange(document, start, end), null);
+  assert.equal(responseRange({getElementById: () => null}, start, end), null);
 });
 
 test('seeded navigation decisions follow an independent generation model', () => {
@@ -152,4 +159,24 @@ test('stop aborts pending work and releases timers/listeners before bodies compl
   await h.body(0);
   assert.equal(h.nodes.get('chart-region').dataset.start, String(start));
   assert.equal(h.document.listenerCount(), 0); assert.equal(h.view.listenerCount(), 0);
+});
+
+
+test('platform navigation rejects editable regions and foreign or mismatched streams before replacement', async () => {
+  for (const corruption of ['editable', 'foreign-stream', 'wrong-stream', 'missing-region']) {
+    const h = harness(), original = h.nodes.get('day2-live');
+    try {
+      h.submit(start + 1, end - 1); await h.headers(0); await h.body(0, true, corruption);
+      assert.equal(h.nodes.get('day2-live'), original, corruption);
+      assert.equal(h.nodes.get('chart-region').dataset.start, String(start), corruption);
+      assert.equal(h.historyURLs.length, 0, corruption);
+      assert.equal(h.nodes.get('command-draft'), h.draft, corruption);
+    } finally { h.stop(); }
+  }
+});
+
+test('platform route serialization is independent of chart vocabulary', () => {
+  const route = canonicalPageURL('/report?z=changed&a=1', 'https://native.test/report', {z: 'default', a: '1'}, 'https://native.test');
+  assert.equal(route.url.href, 'https://native.test/report?z=changed');
+  assert.equal(canonicalPageURL('/report?unknown=x', 'https://native.test/report', {z: ''}, 'https://native.test'), null);
 });
