@@ -696,6 +696,45 @@ The new backend authority checks do not change that browser trust model. App
 scripts can submit commands allowed to the signed-in session; neither a ticket
 nor a valid Edit precondition proves a human intended the action.
 
+#### Upgrading an app UI lock
+
+Choose the reviewed Platform release whose `build-dependencies/clanker-ui.json`
+pins the desired Clanker package. Install that release through normal Platform
+setup and make the same builder available in CI before committing the app lock.
+Review the catalog's release, package version and package digest first; the
+builder supports exactly its bundled package, not an independently edited version.
+
+Start in the app repository with a clean Git working tree and a committed
+`ui/ui.lock.json`. The lock command only initializes a missing lock or confirms
+an identical one. To authorize a different pin, remove the old source lock and
+regenerate it with the selected Platform distribution:
+
+```console
+git status --short
+rm ui/ui.lock.json
+/path/to/reviewed-platform/cli/day2 platform ui-lock "$PWD"
+git diff -- ui/ui.lock.json
+```
+
+Review the schema, provider, package name/version/digest and complete per-file
+input closure. Do not hand-edit only the version or digest, copy dependency files
+into the app, or configure a provider override. Running `ui-lock` again with the
+same package confirms the pin without rewriting the file.
+
+Build and run the app's required verification using that same distribution:
+
+```console
+/path/to/reviewed-platform/cli/day2 platform build "$PWD"
+/path/to/reviewed-platform/cli/day2 platform check "$PWD"
+```
+
+Exercise the affected browser journeys separately, then commit the regenerated
+lock with any required template/style changes. Build and product checks do not
+establish browser interaction or visual conformance. If generation or review
+fails, `git restore -- ui/ui.lock.json` restores the previously committed source
+lock; select its matching Platform release before rebuilding. This procedure
+changes source inputs, not application data or the active installation.
+
 ## Three Asset Owners
 
 | Owner | Inputs | Runtime URLs |

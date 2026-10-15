@@ -1074,7 +1074,9 @@ fn input_type(kind: &crate::schema::Kind) -> Result<Type> {
             prefix: prefix.clone(),
         },
         crate::schema::Kind::Boolean => Type::Boolean,
-        crate::schema::Kind::OptionalText => {
+        crate::schema::Kind::OptionalText
+        | crate::schema::Kind::OptionalInteger
+        | crate::schema::Kind::OptionalUnsigned(_) => {
             bail!("template_optional_route_argument_not_supported")
         }
         crate::schema::Kind::InputShape { .. } => {
@@ -1746,9 +1748,13 @@ fn validate_forms(
                     "template_unexpected_form_field_key: {field}"
                 );
                 ensure!(
-                    !matches!(kind, crate::schema::Kind::OptionalText)
-                        && (!matches!(kind, crate::schema::Kind::InputShape { .. })
-                            || carried != crate::web_forms::Carrier::Scalar),
+                    !matches!(
+                        kind,
+                        crate::schema::Kind::OptionalText
+                            | crate::schema::Kind::OptionalInteger
+                            | crate::schema::Kind::OptionalUnsigned(_)
+                    ) && (!matches!(kind, crate::schema::Kind::InputShape { .. })
+                        || carried != crate::web_forms::Carrier::Scalar),
                     "template_optional_or_structured_form_field_unsupported"
                 );
                 // A collection is authored as editable controls; a hidden row binding

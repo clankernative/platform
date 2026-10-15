@@ -129,9 +129,9 @@ fn verification(
         "verify:{}",
         json!({ "action": action, "operation": operation, "snapshot": snapshot.to_string(), "before": before.to_string(), "output": output.to_string(), "seed": seed })
     );
-    let bytes = exchange(artifact, &request)?;
+    let bytes = properties::exchange_verification(artifact, request.as_bytes())?;
     ensure!(
-        bytes == exchange(artifact, &request)?,
+        bytes == properties::exchange_verification(artifact, request.as_bytes())?,
         "verification callback is not deterministic"
     );
     let reply: Reply = serde_json::from_slice(&bytes)?;
@@ -273,6 +273,65 @@ pub fn local_policy(artifact: &LoadedArtifact) -> Result<Policy> {
     local_policy_for(artifact, ACTOR)
 }
 
+fn verification_membership(
+    operations: &[crate::artifact::Operation],
+    definition: Option<&crate::app_contract::Definition>,
+    policy: &Policy,
+    default_actor: &str,
+) -> (BTreeSet<String>, BTreeSet<String>) {
+    let mut readers = BTreeSet::from([default_actor.to_owned()]);
+    let mut writers = BTreeSet::from([default_actor.to_owned()]);
+    if let Some(definition) = definition {
+        for override_actor in definition
+            .errors
+            .values()
+            .flat_map(|failure| &failure.verification_actors)
+        {
+            let Some(operation) = operations
+                .iter()
+                .find(|operation| operation.name == override_actor.operation)
+            else {
+                continue;
+            };
+            if !policy
+                .operations
+                .get(&operation.name)
+                .is_some_and(|grant| grant.actors.contains(&override_actor.actor))
+            {
+                continue;
+            }
+            match operation.kind.as_str() {
+                "command" => {
+                    writers.insert(override_actor.actor.clone());
+                }
+                "query" => {
+                    readers.insert(override_actor.actor.clone());
+                }
+                _ => {}
+            }
+        }
+    }
+    (readers, writers)
+}
+
+fn failure_verification_actor<'a>(
+    failure: &'a crate::app_contract::Failure,
+    target: &crate::operation_metadata::Target,
+    default_actor: &'a str,
+    simulated: bool,
+) -> Result<&'a str> {
+    match failure.verification_actor(target) {
+        Some(actor) => {
+            ensure!(
+                simulated,
+                "failure verification actor requires simulated providers"
+            );
+            Ok(actor)
+        }
+        None => Ok(default_actor),
+    }
+}
+
 pub fn local_policy_for(artifact: &LoadedArtifact, actor: &str) -> Result<Policy> {
     let mut operations = BTreeMap::new();
     for operation in &artifact.contract().operations {
@@ -339,7 +398,17 @@ pub fn local_policy_for(artifact: &LoadedArtifact, actor: &str) -> Result<Policy
                             .collect()
                     })
                     .unwrap_or_default(),
-                actors: BTreeSet::from([actor.into()]),
+                actors: artifact
+                    .contract()
+                    .app_contract
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(|definition| definition.errors.values())
+                    .flat_map(|failure| &failure.verification_actors)
+                    .filter(|override_actor| override_actor.operation == operation.name)
+                    .map(|override_actor| override_actor.actor.clone())
+                    .chain(std::iter::once(actor.into()))
+                    .collect(),
                 mode,
                 models,
             },
@@ -1397,6 +1466,160 @@ mod people_resource_tests {
     use super::*;
 
     #[test]
+    fn failure_principal_override_is_simulation_only_and_defaults_are_unchanged() -> Result<()> {
+        let target = crate::operation_metadata::Target {
+            operation: "invite_user".into(),
+            input_type: "InviteInput".into(),
+            output_type: "InviteOutput".into(),
+        };
+        let failure = crate::app_contract::Failure {
+            code: "freetool:invite_denied".into(),
+            description: "Denied".into(),
+            recovery: "Retry with access".into(),
+            operation: target.clone(),
+            additional_operations: Vec::new(),
+            verification_actors: vec![crate::app_contract::VerificationActor {
+                operation: target.operation.clone(),
+                actor: "freetool-denied-synthetic".into(),
+            }],
+        };
+        assert_eq!(
+            failure_verification_actor(&failure, &target, "developer", true)?,
+            "freetool-denied-synthetic"
+        );
+        assert!(failure_verification_actor(&failure, &target, "developer", false).is_err());
+        let default_failure = crate::app_contract::Failure {
+            verification_actors: Vec::new(),
+            ..failure
+        };
+        assert_eq!(
+            failure_verification_actor(&default_failure, &target, "developer", false)?,
+            "developer"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn verification_membership_projects_only_policy_admitted_declared_targets() {
+        use crate::artifact::Operation;
+        let operations = [
+            Operation {
+                name: "bootstrap_administrator".into(),
+                kind: "command".into(),
+                input_type: "BootstrapInput".into(),
+                output_type: "User".into(),
+            },
+            Operation {
+                name: "invite_user".into(),
+                kind: "command".into(),
+                input_type: "InviteInput".into(),
+                output_type: "User".into(),
+            },
+            Operation {
+                name: "own_access".into(),
+                kind: "query".into(),
+                input_type: "AccessInput".into(),
+                output_type: "Access".into(),
+            },
+        ];
+        let failures = [
+            ("bootstrap_administrator", "freetool-conflicting-synthetic"),
+            ("invite_user", "freetool-denied-synthetic"),
+            ("own_access", "freetool-access-synthetic"),
+        ]
+        .into_iter()
+        .map(|(operation, actor)| {
+            let target = crate::operation_metadata::Target {
+                operation: operation.into(),
+                input_type: "Input".into(),
+                output_type: "Output".into(),
+            };
+            (
+                format!("app:{operation}"),
+                crate::app_contract::Failure {
+                    code: format!("app:{operation}"),
+                    description: "Expected rejection".into(),
+                    recovery: "Correct the input".into(),
+                    operation: target,
+                    additional_operations: Vec::new(),
+                    verification_actors: vec![crate::app_contract::VerificationActor {
+                        operation: operation.into(),
+                        actor: actor.into(),
+                    }],
+                },
+            )
+        })
+        .collect();
+        let definition = crate::app_contract::Definition {
+            operations: BTreeMap::new(),
+            presentation: crate::app_contract::Presentation {
+                stylesheet: String::new(),
+                script: String::new(),
+            },
+            identities: String::new(),
+            invariants: BTreeMap::new(),
+            domains: BTreeMap::new(),
+            errors: failures,
+        };
+        let grant = |actor: &str, mode| OperationPolicy {
+            actors: BTreeSet::from(["developer".into(), actor.into()]),
+            mode,
+            models: BTreeMap::new(),
+            commands: BTreeSet::new(),
+            observations: BTreeSet::new(),
+            effects: BTreeSet::new(),
+        };
+        let mut policy = Policy {
+            version: 1,
+            admins: BTreeSet::from(["developer".into()]),
+            delegations: BTreeMap::new(),
+            constraints: BTreeMap::new(),
+            operations: BTreeMap::from([
+                (
+                    "bootstrap_administrator".into(),
+                    grant("freetool-conflicting-synthetic", Mode::CurrentState),
+                ),
+                (
+                    "invite_user".into(),
+                    grant("freetool-denied-synthetic", Mode::CurrentState),
+                ),
+                (
+                    "own_access".into(),
+                    grant("freetool-access-synthetic", Mode::Read),
+                ),
+            ]),
+        };
+
+        let (readers, writers) =
+            verification_membership(&operations, Some(&definition), &policy, "developer");
+        assert_eq!(
+            readers,
+            BTreeSet::from(["developer".into(), "freetool-access-synthetic".into()])
+        );
+        assert_eq!(
+            writers,
+            BTreeSet::from([
+                "developer".into(),
+                "freetool-conflicting-synthetic".into(),
+                "freetool-denied-synthetic".into(),
+            ])
+        );
+        assert_eq!(policy.admins, BTreeSet::from(["developer".into()]));
+
+        policy
+            .operations
+            .get_mut("invite_user")
+            .unwrap()
+            .actors
+            .remove("freetool-denied-synthetic");
+        let (readers, writers) =
+            verification_membership(&operations, Some(&definition), &policy, "developer");
+        assert!(!writers.contains("freetool-denied-synthetic"));
+        assert!(writers.contains("freetool-conflicting-synthetic"));
+        assert!(!readers.contains("freetool-denied-synthetic"));
+    }
+
+    #[test]
     fn fixture_resolves_only_declared_people_actions_and_fixed_targets() -> Result<()> {
         use day2_capabilities::resources::{Action, ResourceTarget, TopicScope};
         let operation = |observations: &[&str], effects: &[&str]| OperationPolicy {
@@ -1565,6 +1788,13 @@ fn instance_for_artifact(
     actor: &str,
     imports: &[ImportedQueryFixture],
 ) -> Result<Instance> {
+    let authority = policy.unwrap_or(local_policy_for(artifact, actor)?);
+    let (readers, writers) = verification_membership(
+        &artifact.contract().operations,
+        artifact.contract().app_contract.as_ref(),
+        &authority,
+        actor,
+    );
     let mut instance = Instance {
         installation: "localdev".into(),
         environment: "disposable".into(),
@@ -1588,9 +1818,9 @@ fn instance_for_artifact(
                     .to_str()
                     .context("artifact path UTF-8")?
                     .into(),
-                readers: BTreeSet::from([actor.into()]),
-                writers: BTreeSet::from([actor.into()]),
-                authority: Some(policy.unwrap_or(local_policy_for(artifact, actor)?)),
+                readers,
+                writers,
+                authority: Some(authority),
                 resource_policies: Vec::new(),
                 credential_families: Default::default(),
                 oauth_connections: Default::default(),
@@ -1814,7 +2044,7 @@ fn credential_verification_selection(
         "scope":{"installation":instance.installation,"environment":instance.environment,"app":"app"},
         "provider":{"kind":"firestore_native_v1","project":"day2-verification","project_number":1,
             "database":"security","database_uid":"01234567-89ab-4cde-8fab-0123456789ab",
-            "iam_source":{"kind":"gke_workload_identity_v1","service_account":"app@day2-verification.iam.gserviceaccount.com"}},
+            "iam_source":{"kind":"gke_workload_identity_v1","service_account":"app@day2-verification.iam.gserviceaccount.com","service_account_uid":"100000000000000000007"}},
         "key_set":Digest::new(b"pending complete desired selection"),"max_lease_seconds":30
     }))?;
     instance
@@ -2510,11 +2740,17 @@ impl Campaign {
                                 )?;
                                 let input: Value = serde_json::from_str(&input)?;
                                 let id = format!("failure-{}", self.evidence.error_traces.len());
+                                let verification_actor = failure_verification_actor(
+                                    error,
+                                    target,
+                                    &self.actor,
+                                    self.runtime.integrations().is_simulated(),
+                                )?;
                                 // These typed, admitted cases have the same access
                                 // to internal workers as ordinary generated checks.
                                 self.runtime.accept_route(
                                     &target.operation,
-                                    &self.actor,
+                                    verification_actor,
                                     &id,
                                     &input,
                                     1_700_100_000 + index as i64,
@@ -2541,7 +2777,7 @@ impl Campaign {
                                 crate::store::replay(self.runtime.artifact(), &trace)?;
                                 self.runtime.accept_route(
                                     &target.operation,
-                                    &self.actor,
+                                    verification_actor,
                                     &id,
                                     &input,
                                     1_700_100_000 + index as i64,

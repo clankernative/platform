@@ -12,6 +12,8 @@ fn launcher(worker: &Path) -> Command {
     command
         .arg(worker)
         .arg(std::process::id().to_string())
+        .arg(day2_sandbox::ADDRESS_SPACE_BYTES.to_string())
+        .arg(day2_sandbox::CPU_SECONDS.to_string())
         .env("DAY2_SANDBOX_SECRET", "must-not-be-inherited")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

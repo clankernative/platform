@@ -26,6 +26,7 @@ mod child_milestones;
 mod mac_lifetime;
 
 const MAX_FRAME: usize = 1_048_576;
+pub(crate) const PROPERTY_MAX_FRAME: usize = 6 * 32 * 1024 * 1024 + 65_536;
 const NO_ERRNO: i64 = i64::MIN;
 
 /// Fixed-size, cumulative transport observations for one worker lifetime.
@@ -214,6 +215,7 @@ pub struct Worker {
     #[cfg(not(target_os = "macos"))]
     writer: Option<JoinHandle<()>>,
     progress: Arc<StageProgress>,
+    frame_limit: usize,
 }
 
 impl Worker {
@@ -230,9 +232,53 @@ impl Worker {
         bail!("worker sandbox unsupported on this operating system");
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn start_verification(
+        path: &Path,
+        heap_bytes: u64,
+        timeout: Duration,
+        frame_limit: usize,
+    ) -> Result<Self> {
+        ensure!(
+            heap_bytes == 512 * 1024 * 1024,
+            "unsupported property worker heap profile"
+        );
+        ensure!(
+            !timeout.is_zero()
+                && timeout <= Duration::from_secs(30)
+                && frame_limit == PROPERTY_MAX_FRAME,
+            "unsupported property worker limits"
+        );
+        #[cfg(target_os = "linux")]
+        {
+            Self::start_with_profile(path, &sibling("day2-sandbox")?, heap_bytes, 30, frame_limit)
+        }
+        #[cfg(target_os = "macos")]
+        {
+            Self::start_macos_profile(path, frame_limit)
+        }
+    }
+
     /// The launcher path is supplied by trusted host installation/tests, never app input.
     #[cfg(target_os = "linux")]
     pub fn start_with_trusted_launcher(path: &Path, launcher: &Path) -> Result<Self> {
+        Self::start_with_profile(
+            path,
+            launcher,
+            day2_sandbox::ADDRESS_SPACE_BYTES,
+            day2_sandbox::CPU_SECONDS,
+            MAX_FRAME,
+        )
+    }
+
+    #[cfg(target_os = "linux")]
+    fn start_with_profile(
+        path: &Path,
+        launcher: &Path,
+        memory_bytes: u64,
+        cpu_seconds: u64,
+        frame_limit: usize,
+    ) -> Result<Self> {
         let mut command = Command::new(
             launcher
                 .canonicalize()
@@ -240,12 +286,23 @@ impl Worker {
         );
         command
             .arg(path.canonicalize()?)
-            .arg(std::process::id().to_string());
-        Self::spawn(command)
+            .arg(std::process::id().to_string())
+            .arg(memory_bytes.to_string())
+            .arg(cpu_seconds.to_string());
+        Self::spawn(command, frame_limit)
     }
 
     #[cfg(target_os = "macos")]
     fn start_macos(path: &Path) -> Result<Self> {
+        Self::start_macos_profile(path, MAX_FRAME)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn start_macos_profile(path: &Path, frame_limit: usize) -> Result<Self> {
+        ensure!(
+            matches!(frame_limit, MAX_FRAME | PROPERTY_MAX_FRAME),
+            "unsupported macOS worker profile"
+        );
         let path = path.canonicalize()?;
         let executable = path.to_str().context("non UTF-8 path")?;
         ensure!(
@@ -266,16 +323,23 @@ impl Worker {
         );
         let mut command = Command::new("/usr/bin/sandbox-exec");
         command.args(["-p", &profile, executable]);
-        Self::spawn(command)
+        if frame_limit == PROPERTY_MAX_FRAME {
+            command.arg("--day2-qualified-property-v1");
+        }
+        Self::spawn(command, frame_limit)
     }
 
-    fn spawn(command: Command) -> Result<Self> {
+    fn spawn(command: Command, frame_limit: usize) -> Result<Self> {
         #[cfg(target_os = "macos")]
         {
             let progress = Arc::new(StageProgress::new());
             let mut owner = mac_lifetime::Owner::new(Arc::clone(&progress))?;
-            owner.launch(command)?;
-            Ok(Self { owner, progress })
+            owner.launch(command, frame_limit)?;
+            Ok(Self {
+                owner,
+                progress,
+                frame_limit,
+            })
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -320,7 +384,7 @@ impl Worker {
                     read_progress.reader_entered.store(1, Ordering::Release);
                     let mut reader = BufReader::new(stdout);
                     loop {
-                        let result = read_frame(&mut reader, &read_progress);
+                        let result = read_frame(&mut reader, &read_progress, frame_limit);
                         let failed = result.is_err();
                         if sender.send(result).is_err() || failed {
                             break;
@@ -344,12 +408,35 @@ impl Worker {
                 reader: Some(reader),
                 writer: Some(writer),
                 progress,
+                frame_limit,
             })
         }
     }
 
     pub fn exchange(&mut self, input: &[u8]) -> Result<Vec<u8>> {
-        let result = self.exchange_frame(input);
+        self.exchange_bounded(input, MAX_FRAME, Duration::from_secs(3))
+    }
+
+    pub fn exchange_bounded(
+        &mut self,
+        input: &[u8],
+        frame_limit: usize,
+        timeout: Duration,
+    ) -> Result<Vec<u8>> {
+        ensure!(
+            frame_limit <= self.frame_limit,
+            "worker frame limit exceeds profile"
+        );
+        let maximum_timeout = if self.frame_limit == PROPERTY_MAX_FRAME {
+            Duration::from_secs(30)
+        } else {
+            Duration::from_secs(3)
+        };
+        ensure!(
+            !timeout.is_zero() && timeout <= maximum_timeout,
+            "worker timeout exceeds profile"
+        );
+        let result = self.exchange_frame(input, frame_limit, timeout);
         match result {
             Ok(frame) => Ok(frame),
             Err(error) => {
@@ -369,9 +456,14 @@ impl Worker {
         }
     }
 
-    fn exchange_frame(&mut self, input: &[u8]) -> Result<Vec<u8>> {
+    fn exchange_frame(
+        &mut self,
+        input: &[u8],
+        frame_limit: usize,
+        timeout: Duration,
+    ) -> Result<Vec<u8>> {
         ensure!(
-            input.len() < MAX_FRAME && !input.contains(&b'\n'),
+            input.len() < frame_limit && !input.contains(&b'\n'),
             "invalid worker frame"
         );
         self.requests()
@@ -383,7 +475,7 @@ impl Worker {
         self.responses()
             .as_ref()
             .context("closed worker")?
-            .recv_timeout(Duration::from_secs(3))
+            .recv_timeout(timeout)
             .map_err(|error| match error {
                 mpsc::RecvTimeoutError::Timeout => crate::error::Failure::WorkerTimeout,
                 mpsc::RecvTimeoutError::Disconnected => crate::error::Failure::WorkerCrashed,
@@ -478,7 +570,11 @@ fn write_frame(
     result
 }
 
-fn read_frame(reader: &mut impl BufRead, progress: &StageProgress) -> Result<Vec<u8>> {
+fn read_frame(
+    reader: &mut impl BufRead,
+    progress: &StageProgress,
+    frame_limit: usize,
+) -> Result<Vec<u8>> {
     let mut frame = Vec::new();
     loop {
         let data = reader.fill_buf()?;
@@ -492,7 +588,7 @@ fn read_frame(reader: &mut impl BufRead, progress: &StageProgress) -> Result<Vec
             .position(|b| *b == b'\n')
             .map_or(data.len(), |i| i + 1);
         ensure!(
-            frame.len() + count <= MAX_FRAME,
+            frame.len() + count <= frame_limit,
             "oversized worker response"
         );
         frame.extend_from_slice(&data[..count]);
@@ -514,7 +610,8 @@ impl Drop for Worker {
 #[cfg(test)]
 mod tests {
     use super::{
-        ExitEvidence, MAX_FRAME, StageProgress, exit_evidence, increment, read_frame, write_frame,
+        ExitEvidence, MAX_FRAME, PROPERTY_MAX_FRAME, StageProgress, exit_evidence, increment,
+        read_frame, write_frame,
     };
     use std::io::{Cursor, Write};
     use std::sync::atomic::Ordering;
@@ -592,10 +689,16 @@ mod tests {
     fn frames_preserve_exact_payload_and_buffered_next_response() {
         let mut bytes = Cursor::new(b"first\n\nlast\n");
         let progress = StageProgress::new();
-        assert_eq!(read_frame(&mut bytes, &progress).unwrap(), b"first");
-        assert_eq!(read_frame(&mut bytes, &progress).unwrap(), b"");
-        assert_eq!(read_frame(&mut bytes, &progress).unwrap(), b"last");
-        assert!(read_frame(&mut bytes, &progress).is_err());
+        assert_eq!(
+            read_frame(&mut bytes, &progress, MAX_FRAME).unwrap(),
+            b"first"
+        );
+        assert_eq!(read_frame(&mut bytes, &progress, MAX_FRAME).unwrap(), b"");
+        assert_eq!(
+            read_frame(&mut bytes, &progress, MAX_FRAME).unwrap(),
+            b"last"
+        );
+        assert!(read_frame(&mut bytes, &progress, MAX_FRAME).is_err());
         let observed = snapshot(&progress);
         assert_eq!(observed.reader_first_byte, 1);
         assert_eq!(observed.reader_frames_completed, 3);
@@ -604,7 +707,7 @@ mod tests {
     #[test]
     fn eof_and_size_limit_fail_without_accepting_partial_frames() {
         let partial = StageProgress::new();
-        let error = read_frame(&mut Cursor::new(b"partial"), &partial).unwrap_err();
+        let error = read_frame(&mut Cursor::new(b"partial"), &partial, MAX_FRAME).unwrap_err();
         assert_eq!(
             crate::error::classify(&error),
             crate::error::Failure::WorkerCrashed
@@ -612,13 +715,13 @@ mod tests {
         assert_eq!(snapshot(&partial).reader_first_byte, 1);
         assert_eq!(snapshot(&partial).reader_frames_completed, 0);
         let empty = StageProgress::new();
-        assert!(read_frame(&mut Cursor::new(b""), &empty).is_err());
+        assert!(read_frame(&mut Cursor::new(b""), &empty, MAX_FRAME).is_err());
         assert_eq!(snapshot(&empty).reader_first_byte, 0);
         let mut maximum = vec![b'x'; MAX_FRAME - 1];
         maximum.push(b'\n');
         let accepted = StageProgress::new();
         assert_eq!(
-            read_frame(&mut Cursor::new(&maximum), &accepted)
+            read_frame(&mut Cursor::new(&maximum), &accepted, MAX_FRAME)
                 .unwrap()
                 .len(),
             MAX_FRAME - 1
@@ -626,10 +729,46 @@ mod tests {
         assert_eq!(snapshot(&accepted).reader_frames_completed, 1);
         maximum.insert(0, b'x');
         let oversized = StageProgress::new();
-        let error = read_frame(&mut Cursor::new(maximum), &oversized).unwrap_err();
+        let error = read_frame(&mut Cursor::new(maximum), &oversized, MAX_FRAME).unwrap_err();
         assert!(error.to_string().contains("oversized worker response"));
         assert_eq!(snapshot(&oversized).reader_first_byte, 1);
         assert_eq!(snapshot(&oversized).reader_frames_completed, 0);
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn qualified_profile_rejects_wrong_limits_before_materializing_or_spawning() {
+        let absent = std::path::Path::new("/DAY2_PROFILE_MUST_NOT_SPAWN");
+        for (heap, timeout, frame, message) in [
+            (64 * 1024 * 1024, 30, PROPERTY_MAX_FRAME, "heap profile"),
+            (512 * 1024 * 1024, 0, PROPERTY_MAX_FRAME, "worker limits"),
+            (512 * 1024 * 1024, 31, PROPERTY_MAX_FRAME, "worker limits"),
+            (512 * 1024 * 1024, 30, MAX_FRAME, "worker limits"),
+        ] {
+            let error = super::Worker::start_verification(
+                absent,
+                heap,
+                std::time::Duration::from_secs(timeout),
+                frame,
+            )
+            .err()
+            .expect("unsupported profile must refuse before spawning");
+            assert!(error.to_string().contains(message), "{error}");
+        }
+    }
+
+    #[test]
+    fn property_frame_profile_reads_responses_above_the_invocation_limit() {
+        let mut frame = vec![b'x'; MAX_FRAME + 1];
+        frame.push(b'\n');
+        let progress = StageProgress::new();
+        assert_eq!(
+            read_frame(&mut Cursor::new(&frame), &progress, PROPERTY_MAX_FRAME)
+                .unwrap()
+                .len(),
+            MAX_FRAME + 1
+        );
+        assert_eq!(snapshot(&progress).reader_frames_completed, 1);
     }
 
     #[test]

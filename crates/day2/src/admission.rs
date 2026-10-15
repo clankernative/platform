@@ -176,7 +176,7 @@ const SEALED: &[(&str, &str, &str)] = &[
     (
         "Api.roc",
         "",
-        "44584a59c8411fceb3bb8989e79ef0be2dca128920416428897fc50cebcede88",
+        "768852fb2abc1c5de33b8b93960c338f31328108fe91605c29fb72ae62390faf",
     ),
     (
         "Effects.roc",
@@ -246,7 +246,7 @@ const SEALED: &[(&str, &str, &str)] = &[
     (
         "Tx.roc",
         "evaluate",
-        "f0b63e65441932e9d60d4efacc1c36e492bb47e240bb69dfecd2bfe4f0c28813",
+        "510664a26964d768a2b081d12cc98115251c278396f67e95aba52abf2d799cea",
     ),
     (
         "Operation.roc",

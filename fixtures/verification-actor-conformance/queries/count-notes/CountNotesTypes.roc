@@ -1,0 +1,3 @@
+CountNotesTypes :: [].{
+	Input : {}
+}

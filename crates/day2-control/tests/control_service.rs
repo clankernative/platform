@@ -39,6 +39,7 @@ fn configuration(directory: &std::path::Path) -> InstallationControl {
         runtimes: BTreeMap::new(),
         secrets: BTreeMap::new(),
         security_epochs: BTreeMap::new(),
+        security_bootstraps: BTreeMap::new(),
     }
 }
 fn scope() -> ControlScope {

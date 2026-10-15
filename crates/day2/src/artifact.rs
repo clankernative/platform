@@ -1,4 +1,4 @@
-pub const CURRENT_FORMAT: u32 = 14;
+pub const CURRENT_FORMAT: u32 = 15;
 
 use crate::{digest, schema::Schema};
 use anyhow::{Context, Result, bail, ensure};
@@ -209,6 +209,43 @@ impl Page {
         Ok(())
     }
 }
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct VerificationLimits {
+    pub total_facts: usize,
+    pub rows_per_model: usize,
+    pub snapshot_bytes: usize,
+    /// Live Roc-owned allocator bytes, including allocation headers; not process RSS.
+    pub worker_heap_bytes: u64,
+    pub evaluation_timeout_ms: u64,
+}
+
+impl VerificationLimits {
+    pub const QUALIFIED: Self = Self {
+        total_facts: 10_000,
+        rows_per_model: 10_000,
+        snapshot_bytes: 32 * 1024 * 1024,
+        worker_heap_bytes: 512 * 1024 * 1024,
+        evaluation_timeout_ms: 30_000,
+    };
+
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.total_facts > 0 && self.rows_per_model > 0,
+            "invalid verification fact limits"
+        );
+        ensure!(
+            self.snapshot_bytes > 0,
+            "invalid verification snapshot byte limit"
+        );
+        ensure!(
+            self.worker_heap_bytes > 0 && self.evaluation_timeout_ms > 0,
+            "invalid verification worker limits"
+        );
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Artifact {
@@ -240,6 +277,7 @@ pub struct Artifact {
     pub operations: Vec<Operation>,
     #[serde(default)]
     pub properties: Vec<String>,
+    pub verification_limits: VerificationLimits,
     #[serde(default)]
     pub pages: Vec<Page>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -504,6 +542,7 @@ impl LoadedArtifact {
                 "identities",
                 "operations",
                 "properties",
+                "verification_limits",
                 "pages",
                 "assets",
                 "web_resources",
@@ -529,6 +568,11 @@ impl LoadedArtifact {
             "schema digest mismatch"
         );
         contract.schema.validate()?;
+        contract.verification_limits.validate()?;
+        ensure!(
+            contract.verification_limits == VerificationLimits::QUALIFIED,
+            "unsupported verification limits"
+        );
         if contract.format >= 2 {
             contract.schema.validate_typed()?;
             crate::properties::validate_catalog(&contract.properties)?;
@@ -2156,7 +2200,7 @@ mod security_authority_selection_tests {
             "scope":{"installation":instance.installation,"environment":instance.environment,"app":"workspace"},
             "provider":{"kind":"firestore_native_v1","project":"company-tools","project_number":7,"database":"tools",
                 "database_uid":"00000000-0000-4000-8000-000000000007","iam_source":{"kind":"gke_workload_identity_v1",
-                    "service_account":"epoch@company-tools.iam.gserviceaccount.com"}},
+                    "service_account":"epoch@company-tools.iam.gserviceaccount.com","service_account_uid":"100000000000000000007"}},
             "key_set":Digest::of(&"pending-selection")?,"max_lease_seconds":30,
         }))?.as_slice())?;
         store.key_set = instance.security_key_set("workspace")?;
@@ -2601,7 +2645,7 @@ mod worker_executable_tests {
             .collect::<Vec<_>>();
         fs::write(directory.path().join("worker"), &bytes)?;
         let contract = serde_json::from_value(json!({
-            "format":1,"roc_version":"fixture","worker_digest":digest(&bytes),
+            "format":1,"verification_limits":VerificationLimits::QUALIFIED,"roc_version":"fixture","worker_digest":digest(&bytes),
             "schema_digest":"fixture","schema":{"models":{},"inputs":{},"foreign_keys":[]},
             "operations":[],"sources":{},"admission":"local-spike-only"
         }))?;
@@ -2756,7 +2800,7 @@ mod output_contract_tests {
             directory: PathBuf::new(),
             executable: Arc::default(),
             contract: serde_json::from_value(json!({
-                "format":6,"roc_version":"fixture","worker_digest":"fixture",
+                "format":6,"verification_limits":VerificationLimits::QUALIFIED,"roc_version":"fixture","worker_digest":"fixture",
                 "schema_digest":"fixture","schema":{"models":{},"inputs":{},"foreign_keys":[]},
                 "operations":[{"name":"links.list","kind":"query","input_type":"list_links","output_type":"links"}],
                 "pages":[{"name":"links","title":"Links","operation":"links.list","defaults":"{}","template":"pages/links.html","output_type":"links"}],
@@ -2764,6 +2808,28 @@ mod output_contract_tests {
                 "sources":{},"admission":"local-spike-only"
             }))?,
         })
+    }
+
+    #[test]
+    fn verification_limits_are_required_for_every_decoded_contract() -> Result<()> {
+        let contract = serde_json::to_value(artifact()?.contract())?;
+        for format in [1, CURRENT_FORMAT] {
+            let mut missing = contract.clone();
+            missing["format"] = json!(format);
+            missing
+                .as_object_mut()
+                .unwrap()
+                .remove("verification_limits");
+            let error = serde_json::from_value::<Artifact>(missing.clone()).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("missing field `verification_limits`")
+            );
+            missing["verification_limits"] = serde_json::Value::Null;
+            assert!(serde_json::from_value::<Artifact>(missing).is_err());
+        }
+        Ok(())
     }
 
     #[test]
@@ -2947,7 +3013,8 @@ mod schedule_admission_tests {
     /// which is the shape a schedule or an endpoint can legitimately bind.
     pub(super) fn fixture() -> Result<Artifact> {
         Ok(serde_json::from_value(json!({
-        "format": 14,
+        "format": CURRENT_FORMAT,
+        "verification_limits": VerificationLimits::QUALIFIED,
         "roc_version": "fixture",
         "worker_digest": "fixture",
         "schema_digest": "fixture",

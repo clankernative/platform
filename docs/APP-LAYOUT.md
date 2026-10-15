@@ -38,6 +38,7 @@ builder discovers its bundled package and executable; apps contain no dependency
 installation scripts, copied package implementation, or provider configuration.
 Clanker remains build-only. Apps still own their templates, presentation resources,
 view models, command bindings, and ordinary semantic content.
+For a different package pin, follow the [app UI lock upgrade procedure](WEB.md#upgrading-an-app-ui-lock).
 
 Root-level `.clanker/` design-tool metadata is excluded from ordinary source
 capture. Assembly captures only the package closure explicitly locked by

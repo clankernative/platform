@@ -83,6 +83,26 @@ impl Schema {
         }
     }
 
+    fn range_handles(
+        result: &mut String,
+        name: &str,
+        field: &str,
+        ty: &str,
+        field_type: &str,
+        prefix: &str,
+    ) {
+        let encoded = if field_type == "RowVersion" {
+            "RowVersion.to_i64(value)"
+        } else {
+            "value"
+        };
+        for operator in ["at_least", "at_most"] {
+            result.push_str(&format!(
+                "    {name}_{field}_{operator} : {field_type} -> Predicate({ty})\n    {name}_{field}_{operator} = |value| Predicate.{prefix}define({name}, \"{field}\", \"{operator}\", Json.to_str({encoded}))\n"
+            ));
+        }
+    }
+
     fn decoder(&self, record: &Record, input: bool) -> String {
         let fields = record
             .fields
@@ -232,6 +252,9 @@ impl Schema {
                 result.push_str(&format!(
                     "    {name}_{field}_equal : {field_type} -> Predicate({ty})\n    {name}_{field}_equal = |value| Predicate.{prefix}define({name}, \"{field}\", \"equal\", Json.to_str({encoded}))\n"
                 ));
+                if matches!(kind, Kind::Integer | Kind::Unsigned(_) | Kind::RowVersion) {
+                    Self::range_handles(&mut result, name, field, &ty, &field_type, prefix);
+                }
                 if matches!(
                     kind,
                     Kind::Text
@@ -275,6 +298,9 @@ impl Schema {
                 result.push_str(&format!(
                     "    {name}_{field}_equal : {field_type} -> Predicate({ty})\n    {name}_{field}_equal = |value| Predicate.{prefix}define({name}, \"{field}\", \"equal\", Json.to_str({encoded}))\n"
                 ));
+                if field != "id" {
+                    Self::range_handles(&mut result, name, field, &ty, &field_type, prefix);
+                }
                 for (suffix, descending) in [("asc", "Bool.False"), ("desc", "Bool.True")] {
                     result.push_str(&format!(
                         "    {name}_{field}_{suffix} : Order({ty})\n    {name}_{field}_{suffix} = Order.{prefix}define({name}, \"{field}\", {descending})\n"
@@ -311,6 +337,9 @@ impl Schema {
                 result.push_str(&format!(
                     "    {name}_{field}_equal : {field_type} -> Predicate({ty})\n    {name}_{field}_equal = |value| Predicate.{prefix}define({name}, \"{field}\", \"equal\", Json.to_str({encoded}))\n"
                 ));
+                if matches!(kind, Kind::Integer | Kind::Unsigned(_) | Kind::RowVersion) {
+                    Self::range_handles(&mut result, &name, field, &ty, &field_type, prefix);
+                }
                 if matches!(
                     kind,
                     Kind::Text | Kind::TextDomain { .. } | Kind::StandardText { .. }
@@ -340,7 +369,7 @@ impl Schema {
         result.push_str(&format!(
             "    Snapshot : {{ {snapshot_fields} }}\n    snapshot : Str -> Try(Snapshot, Str)\n"
         ));
-        result.push_str("    snapshot = |raw| {\n");
+        result.push_str(&format!("    snapshot = |raw| {{\n        if raw.count_utf8_bytes() > {} {{ return Err(\"snapshot_byte_budget\") }}\n", crate::artifact::VerificationLimits::QUALIFIED.snapshot_bytes));
         let wire_fields = self
             .models
             .keys()
@@ -352,8 +381,23 @@ impl Schema {
             .collect::<Vec<_>>()
             .join(", ");
         result.push_str(&format!("        dto : Try({{ {wire_fields} }}, _)\n        dto = Json.parse(raw)\n        rows = dto.map_err(|_| \"invalid_snapshot\")?\n"));
+        let total_facts = self
+            .models
+            .keys()
+            .map(|name| format!("rows.{name}.len()"))
+            .collect::<Vec<_>>()
+            .join(" + ");
+        let total_facts = if total_facts.is_empty() {
+            "0".to_owned()
+        } else {
+            total_facts
+        };
+        result.push_str(&format!(
+            "        if {total_facts} > {} {{ return Err(\"snapshot_fact_budget\") }}\n",
+            crate::artifact::VerificationLimits::QUALIFIED.total_facts
+        ));
         for name in self.models.keys() {
-            result.push_str(&format!("        if rows.{name}.len() > {} {{ return Err(\"snapshot_row_budget\") }}\n        {name}_rows = rows.{name}.map_try(|row| Model.decode_row({name}, row))?\n", crate::properties::MAX_ROWS_PER_MODEL));
+            result.push_str(&format!("        if rows.{name}.len() > {} {{ return Err(\"snapshot_row_budget\") }}\n        {name}_rows = rows.{name}.map_try(|row| Model.decode_row({name}, row))?\n", crate::artifact::VerificationLimits::QUALIFIED.rows_per_model));
         }
         let values = self
             .models
@@ -363,8 +407,31 @@ impl Schema {
             .join(", ");
         result.push_str(&format!("        Ok({{ {values} }})\n    }}\n"));
         result.push_str(
-            "    VerificationSnapshot : { live : Snapshot, deleted : Snapshot }\n    verification_snapshot : Str -> Try(VerificationSnapshot, Str)\n    verification_snapshot = |raw| {\n        dto : Try({ live : Str, deleted : Str }, _)\n        dto = Json.parse(raw)\n        rows = dto.map_err(|_| \"invalid_verification_snapshot\")?\n        live = snapshot(rows.live)?\n        deleted = snapshot(rows.deleted)?\n        Ok({ live, deleted })\n    }\n}\n"
+            "    VerificationSnapshot : { live : Snapshot, deleted : Snapshot }\n    verification_snapshot : Str -> Try(VerificationSnapshot, Str)\n    verification_snapshot = |raw| {\n",
         );
+        result.push_str(&format!(
+            "        if raw.count_utf8_bytes() > {} {{ return Err(\"snapshot_byte_budget\") }}\n",
+            crate::artifact::VerificationLimits::QUALIFIED.snapshot_bytes,
+        ));
+        result.push_str(
+            "        dto : Try({ live : Str, deleted : Str }, _)\n        dto = Json.parse(raw)\n        rows = dto.map_err(|_| \"invalid_verification_snapshot\")?\n        live = snapshot(rows.live)?\n        deleted = snapshot(rows.deleted)?\n",
+        );
+        let retained_facts = self
+            .models
+            .keys()
+            .map(|name| format!("live.{name}.len() + deleted.{name}.len()"))
+            .collect::<Vec<_>>()
+            .join(" + ");
+        let retained_facts = if retained_facts.is_empty() {
+            "0".to_owned()
+        } else {
+            retained_facts
+        };
+        result.push_str(&format!(
+            "        if {retained_facts} > {} {{ return Err(\"snapshot_fact_budget\") }}\n",
+            crate::artifact::VerificationLimits::QUALIFIED.total_facts,
+        ));
+        result.push_str("        Ok({ live, deleted })\n    }\n}\n");
         Ok(result)
     }
 

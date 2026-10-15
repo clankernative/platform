@@ -73,7 +73,8 @@ fn check_access(access: &CredentialAccess, operation: &str, step: Step<'_>) -> R
         Step::Database(
             Database::Get { model, .. }
             | Database::Page { model, .. }
-            | Database::Select { model, .. },
+            | Database::Select { model, .. }
+            | Database::Count { model, .. },
         ) => ensure!(
             access.local_reads.iter().any(|declared| declared == model),
             "undeclared credential local read: {operation}/{model}"

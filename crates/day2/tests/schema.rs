@@ -21,7 +21,7 @@ fn native_structured_inputs_reflect_and_roundtrip_without_flattening_records() -
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()?;
-    let temporary = tempfile::tempdir_in(root.join("artifacts"))?;
+    let temporary = crate::support::compiler::stage(&root)?;
     let stage = temporary.path();
     fs::create_dir(stage.join("app"))?;
     day2::sdk::stage(&root.join("sdk"), &stage.join("sdk"))?;
@@ -187,7 +187,7 @@ fn relational_storage_reflection_rejects_forged_text_codec_shapes() -> Result<()
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()?;
-    let temporary = tempfile::tempdir_in(root.join("artifacts"))?;
+    let temporary = crate::support::compiler::stage(&root)?;
     let stage = temporary.path();
     let fixture = root.join("fixtures/relational-conformance");
     let modules = day2::app_sources::stage(&fixture, &stage.join("app"))?;

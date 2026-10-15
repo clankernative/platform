@@ -623,7 +623,10 @@ impl View<'_> {
             ensure!(
                 !matches!(
                     record.fields[&field.name],
-                    Kind::OptionalText | Kind::InputShape { .. }
+                    Kind::OptionalText
+                        | Kind::OptionalInteger
+                        | Kind::OptionalUnsigned(_)
+                        | Kind::InputShape { .. }
                 ),
                 "unsupported_form_field"
             );

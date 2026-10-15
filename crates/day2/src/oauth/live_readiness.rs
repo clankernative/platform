@@ -940,7 +940,7 @@ pub(crate) mod tests {
             serde_json::from_value(json!({"kind":"firestore_native_v1",
             "project":"example-tools","project_number":123456789012_u64,"database":"security",
             "database_uid":"01234567-89ab-4cde-8fab-0123456789ab",
-            "iam_source":{"kind":"gke_workload_identity_v1","service_account":"app-native@example-tools.iam.gserviceaccount.com"}}))?
+            "iam_source":{"kind":"gke_workload_identity_v1","service_account":"app-native@example-tools.iam.gserviceaccount.com","service_account_uid":"100000000000000000007"}}))?
         );
         let mut missing_runtime = instance.clone();
         missing_runtime.oauth_runtime = None;

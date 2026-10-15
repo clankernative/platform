@@ -15,13 +15,13 @@ use reqwest::{
     header::{COOKIE, HOST, SET_COOKIE},
     redirect::Policy,
 };
+use ring::digest::{SHA256, digest};
 use ring::{
     rand::SystemRandom,
     signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, KeyPair},
 };
 use rusqlite::params;
 use serde_json::{Value, json};
-use sha2::{Digest as _, Sha256};
 use std::{collections::BTreeMap, fs, path::PathBuf, sync::mpsc, thread, time::Duration};
 
 use crate::support::compiler;
@@ -74,10 +74,13 @@ fn metadata_iap(edge: &day2::artifact::Edge, domain: &str) -> Result<(String, St
 
 /// Canonical public fixture data, never a generated credential or entropy port.
 fn metadata_selector(id: &str) -> String {
-    let bytes = Sha256::digest(format!("credential-metadata-selector-v1:{id}"));
+    let bytes = digest(
+        &SHA256,
+        format!("credential-metadata-selector-v1:{id}").as_bytes(),
+    );
     base64::Engine::encode(
         &base64::engine::general_purpose::URL_SAFE_NO_PAD,
-        &bytes[..16],
+        &bytes.as_ref()[..16],
     )
 }
 
@@ -846,7 +849,7 @@ fn native_compiler_preserves_family_types_and_seals_host_read_constructors() -> 
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()?;
-    let temporary = tempfile::tempdir_in(root.join("artifacts"))?;
+    let temporary = crate::support::compiler::stage(&root)?;
     let stage = temporary.path().join("stage");
     fs::create_dir_all(stage.join("app"))?;
     day2::sdk::stage(&root.join("sdk"), &stage.join("sdk"))?;

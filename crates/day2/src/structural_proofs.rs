@@ -32,6 +32,33 @@ macro_rules! assert_secret_references {
 }
 
 const _: () = {
+    assert_consuming!(crate::security_epoch::EpochObservation);
+    assert_not_impl!(crate::security_epoch::EpochObservation, std::fmt::Debug);
+    assert_not_impl!(crate::security_epoch::EpochObservation, Send);
+    assert_not_impl!(crate::security_epoch::EpochObservation, Sync);
+    assert_consuming!(crate::security_epoch::journal::CurrentBootstrapExecution);
+    assert_consuming!(crate::security_epoch::journal::InitialEpochCreatePermit);
+    assert_consuming!(crate::security_epoch::journal::InitialFirstHolderActivationPermit);
+    assert_not_impl!(
+        crate::security_epoch::journal::CurrentBootstrapExecution,
+        std::fmt::Debug
+    );
+    assert_not_impl!(
+        crate::security_epoch::journal::InitialEpochCreatePermit,
+        std::fmt::Debug
+    );
+    assert_not_impl!(
+        crate::security_epoch::journal::InitialFirstHolderActivationPermit,
+        std::fmt::Debug
+    );
+    assert_not_impl!(
+        crate::security_epoch::journal::CurrentBootstrapExecution,
+        Send
+    );
+    assert_not_impl!(
+        crate::security_epoch::journal::CurrentBootstrapExecution,
+        Sync
+    );
     assert_consuming!(crate::execution::DispatchPermit);
     assert_consuming!(crate::oauth::exchange::ExchangeDispatchPermit);
     assert_consuming!(crate::oauth::store::RefreshDispatchPermit);

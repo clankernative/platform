@@ -381,7 +381,13 @@ fn insert_type(catalog: &mut BTreeMap<String, TypeObject>, object: TypeObject) -
 fn supported_input(kind: &crate::schema::Kind) -> bool {
     use crate::schema::Kind as K;
     match kind {
-        K::Integer | K::Unsigned(_) | K::Text | K::Boolean | K::OptionalText => true,
+        K::Integer
+        | K::Unsigned(_)
+        | K::Text
+        | K::Boolean
+        | K::OptionalText
+        | K::OptionalInteger
+        | K::OptionalUnsigned(_) => true,
         K::InputShape { shape, .. } => supported_output(shape),
         _ => false,
     }
@@ -401,6 +407,8 @@ pub(crate) fn input_contract(
                 K::Text => T::String,
                 K::Boolean => T::Boolean,
                 K::OptionalText => T::OptionalText,
+                K::OptionalInteger => T::OptionalInteger,
+                K::OptionalUnsigned(width) => T::OptionalUnsigned(*width),
                 K::InputShape { shape, .. } => shape.clone(),
                 _ => anyhow::bail!("unsupported exported input codec"),
             };
@@ -420,7 +428,13 @@ pub(crate) fn input_contract(
 fn supported_output(shape: &crate::output_schema::Type) -> bool {
     use crate::output_schema::Type as T;
     match shape {
-        T::String | T::OptionalText | T::Integer | T::Unsigned(_) | T::Boolean => true,
+        T::String
+        | T::OptionalText
+        | T::OptionalInteger
+        | T::OptionalUnsigned(_)
+        | T::Integer
+        | T::Unsigned(_)
+        | T::Boolean => true,
         T::Record(fields) => fields.values().all(supported_output),
         T::List(item) => supported_output(item),
         _ => false,
@@ -470,7 +484,7 @@ mod tests {
 
     fn checked_artifact() -> crate::artifact::Artifact {
         serde_json::from_value(json!({
-            "format":14,"namespace":"directory","roc_version":"test","worker_digest":"test",
+            "format":14,"verification_limits":crate::artifact::VerificationLimits::QUALIFIED,"namespace":"directory","roc_version":"test","worker_digest":"test",
             "schema_digest":"test","sources":{},"admission":"local-spike-only",
             "schema":{"models":{},"inputs":{"person":{"fields":{"name":"text"},"roc_type":"DirectoryTypes.Person"}},"foreign_keys":[]},
             "outputs":{"person":{"shape":{"record":{"name":"string"}},"roc_type":"{ name : Str }"}},

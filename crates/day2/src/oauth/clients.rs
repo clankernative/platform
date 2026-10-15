@@ -334,6 +334,7 @@ pub(crate) mod tests {
                 database_uid: "01234567-89ab-4cde-8fab-0123456789ab".into(),
                 iam_source: EpochIam::GkeWorkloadIdentityV1 {
                     service_account: account.into(),
+                    service_account_uid: "100000000000000000007".to_owned().try_into()?,
                 },
             },
             key_set: instance.security_key_set(app)?,
@@ -531,6 +532,7 @@ pub(crate) mod tests {
                 database_uid: "00000000-0000-4000-8000-000000000007".into(),
                 iam_source: EpochIam::GkeWorkloadIdentityV1 {
                     service_account: account,
+                    service_account_uid: "100000000000000000007".to_owned().try_into()?,
                 },
             },
             key_set: instance.security_key_set(app)?,

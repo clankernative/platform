@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 
 fn artifact() -> Result<Artifact> {
     Ok(serde_json::from_value(json!({
-        "format":10,"namespace":"example","roc_version":"test","worker_digest":"test","schema_digest":"test",
+        "format":10,"verification_limits":day2::artifact::VerificationLimits::QUALIFIED,"namespace":"example","roc_version":"test","worker_digest":"test","schema_digest":"test",
         "schema":{"models":{},"foreign_keys":[],"inputs":{"request":{"fields":{"note":"optional_text","version":"integer"}}}},
         "operations":[
             {"name":"example.save","kind":"command","input_type":"request","output_type":"page"},

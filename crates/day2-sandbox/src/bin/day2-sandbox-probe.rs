@@ -101,11 +101,25 @@ mod probe {
                     output.write_all(day2_sandbox::QUALIFIED)?;
                 }
                 "pid" => write!(output, "{}", std::process::id())?,
+                "limits" => {
+                    let memory = nix::sys::resource::getrlimit(Resource::RLIMIT_AS)?.0;
+                    let cpu = nix::sys::resource::getrlimit(Resource::RLIMIT_CPU)?.0;
+                    write!(output, "{memory},{cpu}")?;
+                }
                 "spin" => loop {
                     std::hint::spin_loop();
                 },
                 "oversize" => output.write_all(&vec![b'x'; 1_048_577])?,
                 "exit" => return Ok(()),
+                _ if line.starts_with("reserve ") => {
+                    let bytes = line[8..].parse::<usize>()?;
+                    let mut allocation = Vec::<u8>::new();
+                    output.write_all(if allocation.try_reserve_exact(bytes).is_err() {
+                        b"denied".as_slice()
+                    } else {
+                        b"allowed".as_slice()
+                    })?;
+                }
                 _ if line.starts_with("read ") => {
                     denied(std::fs::read(&line[5..]))?;
                     output.write_all(b"denied")?;
@@ -114,7 +128,7 @@ mod probe {
                     denied(std::fs::write(&line[6..], b"forbidden"))?;
                     output.write_all(b"denied")?;
                 }
-                _ if line.starts_with("echo ") => output.write_all(line[5..].as_bytes())?,
+                _ if line.starts_with("echo ") => output.write_all(&line.as_bytes()[5..])?,
                 _ => anyhow::bail!("unknown host acceptance probe"),
             }
             output.write_all(b"\n")?;

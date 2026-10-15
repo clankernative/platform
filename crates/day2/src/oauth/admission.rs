@@ -3204,7 +3204,8 @@ pub(super) mod tests {
             "app@company-tools.iam.gserviceaccount.com",
         )?;
         let mut artifact: Artifact = serde_json::from_value(json!({
-            "format":14,"namespace":"workspace","roc_version":"test","worker_digest":"test","schema_digest":"test",
+            "format":crate::artifact::CURRENT_FORMAT,"verification_limits":crate::artifact::VerificationLimits::QUALIFIED,
+            "namespace":"workspace","roc_version":"test","worker_digest":"test","schema_digest":"test",
             "sources":{},"admission":"local-spike-only","schema":{"models":{},"inputs":{},"foreign_keys":[]},
             "operations":[],"declarations":{"commands":{},"queries":{},"connections":{"calendar":"current_human"}}
         }))?;
