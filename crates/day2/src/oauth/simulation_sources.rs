@@ -8,6 +8,7 @@ pub(super) const SOURCES: &[(&str, &str)] = &[
     ("admission.rs", include_str!("admission.rs")),
     ("approval_keys.rs", include_str!("approval_keys.rs")),
     ("approval_registry.rs", include_str!("approval_registry.rs")),
+    ("calendar.rs", include_str!("calendar.rs")),
     ("catalog.rs", include_str!("catalog.rs")),
     ("clients.rs", include_str!("clients.rs")),
     ("connect.rs", include_str!("connect.rs")),
@@ -30,6 +31,8 @@ pub(super) const SOURCES: &[(&str, &str)] = &[
         "qualification_shell.rs",
         include_str!("qualification_shell.rs"),
     ),
+    ("refresh.rs", include_str!("refresh.rs")),
+    ("refresh_tests.rs", include_str!("refresh_tests.rs")),
     ("registration.rs", include_str!("registration.rs")),
     (
         "registration_publication.rs",
@@ -57,6 +60,7 @@ pub(super) const SOURCES: &[(&str, &str)] = &[
         include_str!("simulation_sources.rs"),
     ),
     ("store.rs", include_str!("store.rs")),
+    ("usage.rs", include_str!("usage.rs")),
     ("workload.rs", include_str!("workload.rs")),
     ("../iap.rs", include_str!("../iap.rs")),
     ("../iap_workload.rs", include_str!("../iap_workload.rs")),
@@ -72,6 +76,10 @@ pub(super) const SOURCES: &[(&str, &str)] = &[
     (
         "ops/OAuthRegistration.roc",
         include_str!("../../../../ops/OAuthRegistration.roc"),
+    ),
+    (
+        "sdk/Connection.roc",
+        include_str!("../../../../sdk/contracts/Connection.roc"),
     ),
     (
         "sdk/ConnectionAccess.roc",
@@ -299,6 +307,7 @@ fn every_oauth_module_uses_the_controlled_effect_boundary() -> Result<()> {
                 | "simulation.rs"
                 | "simulation_sources.rs"
                 | "simulation_inbound.rs"
+                | "refresh_tests.rs"
                 | "registration_tests.rs"
                 | "shell_transport_tests.rs"
         ) || name.contains("day2-capabilities")

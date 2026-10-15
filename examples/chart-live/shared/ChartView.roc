@@ -18,6 +18,7 @@ ChartView :: [].{
 	}
 
 	Result : {
+		actor : Str,
 		title : Str,
 		full_start : I64,
 		full_end : I64,
@@ -26,6 +27,7 @@ ChartView :: [].{
 	}
 
 	fields = {
+		actor: "The current actor whose owned samples are included.",
 		title: "The page title for the selected UTC range.",
 		full_start: "Inclusive lower bound of the app's initial UTC range.",
 		full_end: "Exclusive upper bound of the app's initial UTC range.",

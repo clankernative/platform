@@ -3,13 +3,13 @@
 //! The host owns locked capture, admission and staging. Providers own expansion.
 //! Execution requires an operator-trusted executable pin; an app lock grants no authority.
 use anyhow::{Context, Result, anyhow, bail, ensure};
+use day2::ui_lock::{Input, Lock, LockedPackage, manifest_digest, safe_rel, valid_digest};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     io::Read,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
     time::{Duration, Instant},
@@ -32,14 +32,7 @@ const LOCK: &str = "ui/ui.lock.json";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Lock {
-    schema_version: u32,
-    provider: String,
-    package: LockedPackage,
-}
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct LockedPackage {
+struct RequestPackage {
     name: String,
     version: String,
     path: String,
@@ -62,7 +55,7 @@ struct AssemblyRequest {
     assembly_protocol: u32,
     provider: String,
     target: AssemblyTarget,
-    package: LockedPackage,
+    package: RequestPackage,
     ui: String,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -108,30 +101,9 @@ struct Resource {
     bytes: usize,
     kind: String,
 }
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Input {
-    path: String,
-    digest: String,
-    bytes: usize,
-}
 
 fn sha(bytes: &[u8]) -> String {
-    format!("sha256:{:x}", Sha256::digest(bytes))
-}
-fn safe_rel(s: &str) -> bool {
-    !s.is_empty()
-        && !s.contains('\\')
-        && Path::new(s)
-            .components()
-            .all(|c| matches!(c, Component::Normal(_)))
-        && s.split('/').all(|p| {
-            !p.is_empty()
-                && p != "."
-                && p != ".."
-                && p.bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
-        })
+    day2::digest(bytes)
 }
 fn checked(root: &Path, rel: &str) -> Result<Vec<u8>> {
     ensure!(safe_rel(rel), "unsafe input path: {rel}");
@@ -173,132 +145,7 @@ fn parse_lock(path: &Path) -> Result<Lock> {
     Ok(lock)
 }
 fn validate_lock(lock: &Lock) -> Result<()> {
-    ensure!(
-        lock.schema_version == 1
-            && !lock.provider.is_empty()
-            && lock.provider.len() <= 128
-            && lock
-                .provider
-                .bytes()
-                .all(|c| c.is_ascii_alphanumeric() || b"-_.".contains(&c))
-            && !lock.package.name.trim().is_empty()
-            && !lock.package.version.trim().is_empty(),
-        "unsupported UI lock"
-    );
-    ensure!(
-        safe_lock_path(&lock.package.path),
-        "invalid package lock path"
-    );
-    ensure!(
-        valid_digest(&lock.package.digest),
-        "invalid package digest in lock"
-    );
-    ensure!(
-        manifest_digest(&lock.package.inputs)? == lock.package.digest,
-        "locked input manifest digest mismatch"
-    );
-    Ok(())
-}
-fn safe_lock_path(s: &str) -> bool {
-    if s.contains('\\') || s.is_empty() {
-        return false;
-    }
-    let parts = s.split('/').collect::<Vec<_>>();
-    let parents = parts.iter().take_while(|p| **p == "..").count();
-    (1..=2).contains(&parents)
-        && parents < parts.len()
-        && parts[parents..].iter().all(|p| {
-            !p.is_empty()
-                && *p != "."
-                && *p != ".."
-                && p.bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
-        })
-}
-fn valid_digest(s: &str) -> bool {
-    s.len() == 71
-        && s.starts_with("sha256:")
-        && s[7..]
-            .bytes()
-            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
-}
-fn package_root(app: &Path, lock: &Lock) -> Result<PathBuf> {
-    let app = app.canonicalize().context("canonicalize app source")?;
-    let parent = app.parent().context("app has no parent")?;
-    let ui_root = app.join("ui");
-    let ui_meta = fs::symlink_metadata(&ui_root).context("inspect app UI root")?;
-    ensure!(
-        ui_meta.is_dir() && !ui_meta.file_type().is_symlink(),
-        "app UI root must be a real directory"
-    );
-    let lexical = ui_root.join(&lock.package.path);
-    let root = lexical
-        .canonicalize()
-        .context("canonicalize locked package")?;
-    ensure!(
-        root.starts_with(parent) && root != parent,
-        "locked package escapes app sibling boundary"
-    );
-    let m = fs::symlink_metadata(&root)?;
-    ensure!(
-        m.is_dir() && !m.file_type().is_symlink(),
-        "invalid package root"
-    );
-    // Reject symlinks in every traversed lexical package path component.
-    let mut cursor = ui_root;
-    for part in Path::new(&lock.package.path).components() {
-        match part {
-            Component::ParentDir => {
-                cursor.pop();
-            }
-            Component::Normal(n) => cursor.push(n),
-            _ => bail!("invalid package path"),
-        }
-        let meta = fs::symlink_metadata(&cursor)?;
-        ensure!(
-            !meta.file_type().is_symlink(),
-            "package path ancestor symlink forbidden"
-        );
-    }
-    Ok(root)
-}
-
-/// A manifest is a content-addressed input closure, not a provider package schema.
-fn manifest_digest(inputs: &[Input]) -> Result<String> {
-    ensure!(
-        !inputs.is_empty() && inputs.len() <= MAX_INPUTS,
-        "locked input count budget"
-    );
-    let mut sorted = inputs.iter().collect::<Vec<_>>();
-    sorted.sort_by(|a, b| a.path.cmp(&b.path));
-    let mut names = BTreeSet::new();
-    let mut total = 0usize;
-    let mut digest = Sha256::new();
-    for input in sorted {
-        ensure!(
-            safe_rel(&input.path)
-                && input.path.len() <= 512
-                && input.path.split('/').count() <= 8
-                && input.bytes <= MAX_FILE
-                && valid_digest(&input.digest),
-            "invalid locked input"
-        );
-        ensure!(
-            names.insert(input.path.to_ascii_lowercase()),
-            "duplicate/case-colliding locked input"
-        );
-        total = total
-            .checked_add(input.bytes)
-            .context("locked byte count overflow")?;
-        ensure!(total <= MAX_TOTAL, "locked package byte budget");
-        digest.update(input.path.as_bytes());
-        digest.update([0]);
-        digest.update(input.bytes.to_string().as_bytes());
-        digest.update([0]);
-        digest.update(input.digest.as_bytes());
-        digest.update(b"\n");
-    }
-    Ok(format!("sha256:{:x}", digest.finalize()))
+    day2::ui_lock::validate(lock)
 }
 
 fn package_inputs(root: &Path, package: &LockedPackage) -> Result<BTreeMap<String, Vec<u8>>> {
@@ -373,27 +220,39 @@ fn lock_present(captured: &Path) -> Result<bool> {
     }
 }
 
-/// Production entry point; opt-in and intentionally unavailable without a valid local pin.
+/// Production entry point; only Platform's installed trusted bundle can authorize assembly.
 pub fn expand(
-    app_source: &Path,
+    platform_root: &Path,
     captured: &Path,
     hashes: &mut BTreeMap<String, String>,
 ) -> Result<()> {
     if !lock_present(captured)? {
         return Ok(());
     }
-    let pin = std::env::var_os("DAY2_UI_PROVIDER_PIN_JSON").context(
-        "UI assembly is opt-in: set DAY2_UI_PROVIDER_PIN_JSON to an operator-trusted executable pin",
-    )?;
-    expand_with_pin(app_source, captured, hashes, Path::new(&pin))
+    let bundle = day2::build_dependencies::installed(platform_root)?;
+    let lock = parse_lock(&captured.join(LOCK))?;
+    let identity = bundle.identity();
+    ensure!(
+        identity["provider"] == lock.provider
+            && identity["package"]["name"] == lock.package.name
+            && identity["package"]["version"] == lock.package.version
+            && identity["package"]["digest"] == lock.package.digest,
+        "app UI lock differs from the Platform bundled dependency; select a matching reviewed Platform release"
+    );
+    expand_with_pin(
+        captured,
+        hashes,
+        &bundle.provider_pin_path,
+        &bundle.package_root,
+    )
 }
 
-/// Testable explicit-pin variant; production callers must use `expand` above.
-pub fn expand_with_pin(
-    app_source: &Path,
+/// Explicit trusted bundle seam for tests and external conformance fixtures.
+fn expand_with_pin(
     captured: &Path,
     hashes: &mut BTreeMap<String, String>,
     pin_path: &Path,
+    package_root: &Path,
 ) -> Result<()> {
     let lock_path = captured.join(LOCK);
     if !lock_present(captured)? {
@@ -402,8 +261,7 @@ pub fn expand_with_pin(
         return Ok(());
     }
     let lock = parse_lock(&lock_path)?;
-    let root = package_root(app_source, &lock)?;
-    let actual_inputs = package_inputs(&root, &lock.package)?;
+    let actual_inputs = package_inputs(package_root, &lock.package)?;
     let pin_meta = fs::symlink_metadata(pin_path).context("inspect explicit UI adapter pin")?;
     ensure!(
         pin_meta.is_file()
@@ -455,11 +313,16 @@ pub fn expand_with_pin(
     copy_tree_checked(&captured.join("ui"), &private_ui)?;
     let private_package = temp.path().join("package");
     capture_package(&actual_inputs, &private_package)?;
-    let mut request_package = lock.package.clone();
-    request_package.path = private_package
-        .to_str()
-        .context("private package path is not UTF-8")?
-        .into();
+    let request_package = RequestPackage {
+        name: lock.package.name.clone(),
+        version: lock.package.version.clone(),
+        path: private_package
+            .to_str()
+            .context("private package path is not UTF-8")?
+            .into(),
+        digest: lock.package.digest.clone(),
+        inputs: lock.package.inputs.clone(),
+    };
     let request = AssemblyRequest {
         schema_version: 1,
         assembly_protocol: 2,
@@ -474,6 +337,12 @@ pub fn expand_with_pin(
             .context("private UI path is not UTF-8")?
             .into(),
     };
+    // The released compiler owns its private input contract. Translate the
+    // authored path-free lock without changing the captured app source.
+    fs::write(
+        private_ui.join("ui.lock.json"),
+        serde_json::to_vec(&provider_lock(&lock))?,
+    )?;
     let adapter = ProcessAssembler {
         executable: &private_exe,
         timeout: Duration::from_secs(60),
@@ -489,6 +358,20 @@ pub fn expand_with_pin(
     )?;
     hashes.insert("ui-provider/executable".into(), exe_digest);
     Ok(())
+}
+
+fn provider_lock(lock: &Lock) -> serde_json::Value {
+    serde_json::json!({
+        "schemaVersion": 1,
+        "provider": lock.provider,
+        "package": {
+            "name": lock.package.name,
+            "version": lock.package.version,
+            "path": "../package",
+            "digest": lock.package.digest,
+            "inputs": lock.package.inputs,
+        },
+    })
 }
 
 /// Application boundary shared by production and deterministic port simulations.
@@ -524,7 +407,9 @@ fn assemble_and_stage(
     publication.publish(&current, &plan)?;
     hashes.insert(PACKAGE_KEY.into(), lock.package.digest.clone());
     for input in &env.data.inputs {
-        if input.path.starts_with("ui/") {
+        if input.path == LOCK {
+            hashes.insert("ui-provider/input-lock".into(), input.digest.clone());
+        } else if input.path.starts_with("ui/") {
             hashes.insert(
                 format!("ui-source/app/{}", input.path),
                 input.digest.clone(),
@@ -724,7 +609,9 @@ fn validate_bundle(
             inputmap.insert(i.path.clone(), i).is_none(),
             "duplicate bundle input"
         );
-        let bytes = if let Some(p) = i.path.strip_prefix("package/") {
+        let bytes = if i.path == LOCK {
+            serde_json::to_vec(&provider_lock(lock))?
+        } else if let Some(p) = i.path.strip_prefix("package/") {
             package
                 .get(p)
                 .cloned()

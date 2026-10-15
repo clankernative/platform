@@ -34,6 +34,7 @@ ChartQuery :: [].{
 						|row| row.value.time >= input.start and row.value.time < input.end,
 					)
 					{
+					actor: context.actor(),
 					title: "Chart samples",
 					full_start: 1735689600000,
 					full_end: 1736294400000,
@@ -103,6 +104,7 @@ ChartQuery :: [].{
 	example = |_| Ok({
 		input: { start: 1735689600000, end: 1736294400000 },
 		output: {
+			actor: "example-actor",
 			title: "Chart samples",
 			full_start: 1735689600000,
 			full_end: 1736294400000,
@@ -126,10 +128,35 @@ ChartQuery :: [].{
 
 	verify_result : Str, ChartView.Result, Str -> Try(Bool, Str)
 	verify_result = |before, result, after| {
-		state = Data.snapshot(before)?
+		state = Data.verification_snapshot(before)?.live
 		chart = result.chart
-		times = CollectionPage.items(chart.samples).map(|sample| sample.time)
-		ordered_times = times.sort_with(|left, right| if left < right { Before } else if left > right { After } else { Same })
+		expected_samples = state.chart_samples
+			.keep_if(
+				|row|
+					row.value.owner == result.actor
+						and row.value.time >= chart.start
+						and row.value.time < chart.end,
+			)
+			.sort_with(
+				|left, right|
+					if left.value.time < right.value.time {
+						Before
+					} else if left.value.time > right.value.time {
+						After
+					} else {
+						Same
+					},
+			)
+			.map(
+				|row|
+					{
+						time: row.value.time,
+						value: row.value.value,
+						missing: row.value.missing,
+						key: row.id.to_str(),
+					},
+			)
+		actual_samples = CollectionPage.items(chart.samples)
 		Ok(
 			before == after
 				and chart.width == 640
@@ -139,25 +166,13 @@ ChartQuery :: [].{
 				and chart.kind == "line"
 				and result.full_start == 1735689600000
 				and result.full_end == 1736294400000
-				and chart.start >= 0
-				and chart.end > chart.start
-				and chart.end <= 4_102_444_800_001
+				and chart.start == 1735689600000
+				and chart.end == 1736294400000
 				and chart.end - chart.start <= 2_678_400_000
-				and times == ordered_times
-				and CollectionPage.items(chart.samples).all(
+				and expected_samples == actual_samples
+				and actual_samples.all(
 					|sample|
-						sample.time >= chart.start
-							and sample.time < chart.end
-							and sample.value >= 0
-							and sample.value <= 100
-							and sample.time <= 4_102_444_800_000
-							and state.chart_samples.any(
-								|row|
-									row.id.to_str() == sample.key
-										and row.value.time == sample.time
-										and row.value.value == sample.value
-										and row.value.missing == sample.missing,
-							),
+						sample.value >= 0 and sample.value <= 100 and sample.time <= 4_102_444_800_000,
 				),
 		)
 	}

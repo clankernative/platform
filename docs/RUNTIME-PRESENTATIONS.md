@@ -49,7 +49,13 @@ For an operator-owned private pin file:
 DAY2_PRESENTATION_PIN_JSON="$(< /absolute/private/presentation-pin.json)" ./cli/day2 platform local-dev /absolute/app --directory /absolute/private/instance
 ```
 
-Build-provider approval remains separate via `DAY2_UI_PROVIDER_PIN_JSON`.
+The build provider is approved separately by the Platform distribution's managed
+Clanker UI catalog; apps use a path-free schema-2 `ui/ui.lock.json`. Install the
+reviewed dependency with `xtask bootstrap-ui` (or normal CLI setup), then initialize
+the app lock with `day2 platform ui-lock APP_DIRECTORY`. Do not configure a build
+provider override or copy dependency bytes into the app. The distribution also
+carries the chart worker and its ABI contract, but bundling does not grant
+request-time execution authority: `DAY2_PRESENTATION_PIN_JSON` remains required.
 Assembly protocol 2, binding ABI 2 and presentation ABI 1 are distinct. The build
 provider never runs on HTTP requests.
 

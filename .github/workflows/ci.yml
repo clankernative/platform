@@ -8,9 +8,9 @@ on:
   workflow_dispatch:
     inputs:
       verification:
-        description: Verification pipeline or ordinary full-recipe comparison
+        description: Complete Linux and focused Mac verification, or independent diagnostics
         type: choice
-        options: [sharded, serial-prepare, full, compare, diagnostics]
+        options: [sharded, diagnostics]
         default: sharded
 
 permissions:
@@ -58,7 +58,17 @@ jobs:
   verify-queue-receipt:
     needs: [secrets, dependencies]
     if: ${{ !cancelled() && needs.secrets.result == 'success' && needs.dependencies.result == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-    runs-on: macos-15
+    runs-on: ubuntu-24.04
+    container:
+      image: rust@sha256:620dbcd124499c59e2406d3741574b5c5838cf9eb9656f0c3a03948f79b02959
+      # Trusted CI setup mounts only bounded owned outputs. Inner compiler and
+      # worker Landlock/seccomp, memory and launcher admission remain mandatory.
+      options: --memory=6g --memory-swap=6g --cpus=4 --pids-limit=512 --cgroupns=private --cap-add=SYS_ADMIN --security-opt apparmor=unconfined
+      volumes:
+        - /usr/bin/gh:/usr/local/bin/gh:ro
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 20
     permissions:
       contents: read
@@ -72,19 +82,20 @@ jobs:
       CARGO_BUILD_JOBS: '2'
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: 'true'
-      SCCACHE_GHA_VERSION: day2-platform-ci-v2
+      SCCACHE_GHA_VERSION: day2-platform-ci-linux-v1
       SCCACHE_IDLE_TIMEOUT: '0'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - run: rustup show active-toolchain
       - uses: Mozilla-Actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.18.0
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          prefix-key: day2-platform-ci-v2
+          prefix-key: day2-platform-ci-linux-v1
           shared-key: ${{ hashFiles('Cargo.toml') }}-verify
           key: ${{ hashFiles('Cargo.toml') }}
           cache-bin: 'false'
@@ -120,8 +131,18 @@ jobs:
   verify-prepare-parts:
     # Reject known security failures before allocating compilation runners.
     needs: [secrets, dependencies, verify-queue-receipt]
-    if: ${{ !cancelled() && needs.secrets.result == 'success' && needs.dependencies.result == 'success' && !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') && inputs.verification != 'full' && inputs.verification != 'diagnostics' && inputs.verification != 'serial-prepare' }}
-    runs-on: macos-15
+    if: ${{ !cancelled() && needs.secrets.result == 'success' && needs.dependencies.result == 'success' && !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') && inputs.verification != 'diagnostics' }}
+    runs-on: ubuntu-24.04
+    container:
+      image: rust@sha256:620dbcd124499c59e2406d3741574b5c5838cf9eb9656f0c3a03948f79b02959
+      # Trusted CI setup mounts only bounded owned outputs. Inner compiler and
+      # worker Landlock/seccomp, memory and launcher admission remain mandatory.
+      options: --memory=6g --memory-swap=6g --cpus=4 --pids-limit=512 --cgroupns=private --cap-add=SYS_ADMIN --security-opt apparmor=unconfined
+      volumes:
+        - /usr/bin/gh:/usr/local/bin/gh:ro
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 360
     strategy:
       fail-fast: false
@@ -133,7 +154,7 @@ jobs:
       CARGO_BUILD_JOBS: '2'
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: 'true'
-      SCCACHE_GHA_VERSION: day2-platform-ci-v2
+      SCCACHE_GHA_VERSION: day2-platform-ci-linux-v1
       # Preserve compiler statistics through the long runtime campaigns.
       SCCACHE_IDLE_TIMEOUT: '0'
       DAY2_TEMPORAL_CLI: /tmp/day2-tools/temporal
@@ -141,16 +162,17 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - uses: opentofu/setup-opentofu@9d84900f3238fab8cd84ce47d658d25dd008be2f # v1
         with:
           tofu_version: 1.11.5
           tofu_wrapper: false
-      - run: gh release download v1.6.1 --repo temporalio/cli --pattern temporal_cli_1.6.1_darwin_arm64.tar.gz --dir /tmp/day2-tools
+      - run: gh release download v1.6.1 --repo temporalio/cli --pattern temporal_cli_1.6.1_linux_amd64.tar.gz --dir /tmp/day2-tools
         env:
           GH_TOKEN: ${{ github.token }}
-      - run: shasum -a 256 --check "$GITHUB_WORKSPACE/.github/temporal.sha256"
+      - run: sha256sum --check "$GITHUB_WORKSPACE/.github/temporal-linux.sha256"
         working-directory: /tmp/day2-tools
-      - run: tar -xzf /tmp/day2-tools/temporal_cli_1.6.1_darwin_arm64.tar.gz -C /tmp/day2-tools
+      - run: tar -xzf /tmp/day2-tools/temporal_cli_1.6.1_linux_amd64.tar.gz -C /tmp/day2-tools
       - name: Select the pinned Rust toolchain
         run: rustup show active-toolchain
       - name: Set up the Rust compiler cache
@@ -160,20 +182,33 @@ jobs:
       - name: Restore Cargo dependencies and build outputs
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          prefix-key: day2-platform-ci-v2
+          prefix-key: day2-platform-ci-linux-v1
           # The virtual root manifest owns the compilation profiles.
           key: ${{ hashFiles('Cargo.toml') }}
           cache-bin: 'false'
           cache-workspace-crates: 'false'
           shared-key: ${{ hashFiles('Cargo.toml') }}-verify
           save-if: ${{ matrix.part == 'inputs' }}
+      - name: Establish the mandatory bounded native Linux compiler context
+        id: linux_context
+        run: cargo run --locked -p xtask -- verify-linux-context
+      - name: Retain current native Linux preparation context
+        if: ${{ always() && steps.linux_context.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: day2-linux-context-preparation-${{ matrix.part }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/day2-ci-linux-context.json
+          if-no-files-found: error
+          retention-days: 14
       # Cross-run build outputs have their own source-bound namespace. Native
       # guards re-admit them; no step or runtime receipt is selected by cache-hit.
       - name: Restore completed fixture builds
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         if: ${{ matrix.part == 'inputs' }}
         with:
-          key: day2-fixtures-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', '.dockerignore', 'rust-toolchain.toml', '.cargo/**', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**', 'cli/**', 'fixtures/**', 'examples/**') }}
+          key: day2-fixtures-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', '.cargo/**', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**') }}-${{ hashFiles('cli/**', 'fixtures/**', 'examples/**') }}
+          restore-keys: |
+            day2-fixtures-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', '.cargo/**', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**') }}-
           path: |
             artifacts/all-verification-cache.json
             artifacts/????????????????????????????????????????????????????????????????
@@ -181,7 +216,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         if: ${{ matrix.part == 'tests' }}
         with:
-          key: day2-test-outputs-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', '.dockerignore', 'rust-toolchain.toml', '.cargo/**', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**', 'cli/**', 'fixtures/**', 'examples/**') }}
+          key: day2-test-outputs-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', '.cargo/**', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**', 'cli/**', 'fixtures/**', 'examples/**') }}
           path: |
             artifacts/ci-test-build-cache.json
             artifacts/ci-test-programs
@@ -194,12 +229,22 @@ jobs:
       - run: cargo run --locked -p xtask -- notices
       - run: git diff --exit-code -- THIRD-PARTY-NOTICES.txt dependency-inventory.json
       - run: cargo run --locked -p xtask -- bootstrap
-      - run: gh release download roc-formatter-2026-09-12 --repo clankernative/platform --pattern roc-fmt-day2-aarch64-apple-darwin --dir /tmp/day2-tools
+      - run: gh release download roc-formatter-linux-2026-09-12 --repo clankernative/platform --pattern roc-fmt-day2-x86_64-unknown-linux-gnu --dir /tmp/day2-tools
         env:
           GH_TOKEN: ${{ github.token }}
-      - run: cargo run --locked -p xtask -- bootstrap-formatter /tmp/day2-tools/roc-fmt-day2-aarch64-apple-darwin
+      - run: cargo run --locked -p xtask -- bootstrap-formatter /tmp/day2-tools/roc-fmt-day2-x86_64-unknown-linux-gnu
       - run: cargo run --locked -p xtask -- configure-tofu
       - run: cargo run --locked -p xtask -- verify-prepare-part ${{ matrix.part }}
+      - name: Retain fixture compiler input identity and inventory
+        if: ${{ matrix.part == 'inputs' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: day2-fixture-cache-inputs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            artifacts/all-verification-cache.json
+            target/debug/xtask.d
+          if-no-files-found: error
+          retention-days: 14
       - name: Retain compiled test input identity and inventory
         if: ${{ matrix.part == 'tests' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -226,9 +271,10 @@ jobs:
           compression-level: 0
           retention-days: 3
 
-  verify-prepare-serial:
+  verify-mac-compatibility:
+    # Reject known security failures before allocating compilation runners.
     needs: [secrets, dependencies, verify-queue-receipt]
-    if: ${{ !cancelled() && needs.secrets.result == 'success' && needs.dependencies.result == 'success' && !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') && inputs.verification == 'serial-prepare' }}
+    if: ${{ !cancelled() && needs.secrets.result == 'success' && needs.dependencies.result == 'success' && !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') && inputs.verification != 'diagnostics' }}
     runs-on: macos-15
     timeout-minutes: 360
     env:
@@ -275,14 +321,16 @@ jobs:
       - name: Restore completed fixture builds
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
-          key: day2-fixtures-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', '.dockerignore', 'rust-toolchain.toml', '.cargo/**', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**', 'cli/**', 'fixtures/**', 'examples/**') }}
+          key: day2-fixtures-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', '.cargo/**', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**') }}-${{ hashFiles('cli/**', 'fixtures/**', 'examples/**') }}
+          restore-keys: |
+            day2-fixtures-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', '.cargo/**', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**') }}-
           path: |
             artifacts/all-verification-cache.json
             artifacts/????????????????????????????????????????????????????????????????
       - name: Restore completed test executables
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
-          key: day2-test-outputs-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', '.dockerignore', 'rust-toolchain.toml', '.cargo/**', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**', 'cli/**', 'fixtures/**', 'examples/**') }}
+          key: day2-test-outputs-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', '.cargo/**', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**', 'cli/**', 'fixtures/**', 'examples/**') }}
           path: |
             artifacts/ci-test-build-cache.json
             artifacts/ci-test-programs
@@ -300,23 +348,39 @@ jobs:
           GH_TOKEN: ${{ github.token }}
       - run: cargo run --locked -p xtask -- bootstrap-formatter /tmp/day2-tools/roc-fmt-day2-aarch64-apple-darwin
       - run: cargo run --locked -p xtask -- configure-tofu
-      - run: cargo run --locked -p xtask -- verify-prepare
-      # tar retains executable permissions. Artifacts belong only to this exact
-      # run attempt; compiled outputs use separate source-bound caches.
-      - name: Archive prepared verification workspace
-        run: tar -czf /tmp/day2-verification.tgz --exclude=platform/target/debug/incremental --exclude=platform/target/debug/build --exclude=platform/target/debug/.fingerprint --exclude='platform/target/debug/deps/*.rlib' --exclude='platform/target/debug/deps/*.rmeta' --exclude='platform/target/debug/deps/*.d' -C "$GITHUB_WORKSPACE/.." platform/target platform/artifacts platform/cli platform/crates/worker/generated .toolchains
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - run: cargo run --locked -p xtask -- verify-mac
+      - name: Retain real Mac native preparation, exact cases and both build campaigns
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: day2-verify-${{ github.run_id }}-${{ github.run_attempt }}
-          path: /tmp/day2-verification.tgz
+          name: day2-mac-compatibility-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/ci-mac-compatibility.json
           if-no-files-found: error
-          compression-level: 0
-          retention-days: 3
+          retention-days: 14
+      - name: Retain the separate native Mac compiler inventory
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: day2-mac-compiler-inputs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            artifacts/ci-test-build-cache.json
+            artifacts/ci-test-binaries.json
+            target/debug/xtask.d
+          if-no-files-found: error
+          retention-days: 14
 
   verify-prepare:
-    needs: [secrets, dependencies, verify-queue-receipt, verify-prepare-parts, verify-prepare-serial]
-    if: ${{ !cancelled() && needs.secrets.result == 'success' && needs.dependencies.result == 'success' && !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') && inputs.verification != 'full' && inputs.verification != 'diagnostics' }}
-    runs-on: macos-15
+    needs: [secrets, dependencies, verify-queue-receipt, verify-prepare-parts]
+    if: ${{ !cancelled() && needs.secrets.result == 'success' && needs.dependencies.result == 'success' && !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') && inputs.verification != 'diagnostics' }}
+    runs-on: ubuntu-24.04
+    container:
+      image: rust@sha256:620dbcd124499c59e2406d3741574b5c5838cf9eb9656f0c3a03948f79b02959
+      # Trusted CI setup mounts only bounded owned outputs. Inner compiler and
+      # worker Landlock/seccomp, memory and launcher admission remain mandatory.
+      options: --memory=6g --memory-swap=6g --cpus=4 --pids-limit=512 --cgroupns=private --cap-add=SYS_ADMIN --security-opt apparmor=unconfined
+      volumes:
+        - /usr/bin/gh:/usr/local/bin/gh:ro
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 20
     env:
       CARGO_INCREMENTAL: '0'
@@ -326,48 +390,49 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Require the selected complete preparation pipeline
-        run: test "$PARALLEL" = success -o "$SERIAL" = success
+        run: test "$PARALLEL" = success
         env:
           PARALLEL: ${{ needs.verify-prepare-parts.result }}
-          SERIAL: ${{ needs.verify-prepare-serial.result }}
       - run: rustup show active-toolchain
-        if: ${{ needs.verify-prepare-parts.result == 'success' }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        if: ${{ needs.verify-prepare-parts.result == 'success' }}
         with:
-          prefix-key: day2-platform-ci-v2
+          prefix-key: day2-platform-ci-linux-v1
           shared-key: ${{ hashFiles('Cargo.toml') }}-verify
           key: ${{ hashFiles('Cargo.toml') }}
           cache-bin: 'false'
           cache-workspace-crates: 'false'
           save-if: 'false'
       - run: cargo fetch --locked
-        if: ${{ needs.verify-prepare-parts.result == 'success' }}
+      - name: Establish the mandatory bounded native Linux compiler context
+        id: linux_context
+        run: cargo run --locked -p xtask -- verify-linux-context
+      - name: Retain current native Linux preparation join context
+        if: ${{ always() && steps.linux_context.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: day2-linux-context-preparation-join-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/day2-ci-linux-context.json
+          if-no-files-found: error
+          retention-days: 14
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        if: ${{ needs.verify-prepare-parts.result == 'success' }}
         with:
           name: day2-preparation-inputs-${{ github.run_id }}-${{ github.run_attempt }}
           path: /tmp/day2-preparation-inputs
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        if: ${{ needs.verify-prepare-parts.result == 'success' }}
         with:
           name: day2-preparation-tests-${{ github.run_id }}-${{ github.run_attempt }}
           path: /tmp/day2-preparation-tests
       - name: Restore fixture and check outputs
-        if: ${{ needs.verify-prepare-parts.result == 'success' }}
         run: tar -xzf /tmp/day2-preparation-inputs/day2-preparation.tgz -C "$GITHUB_WORKSPACE/.."
       - name: Restore test compilation outputs
-        if: ${{ needs.verify-prepare-parts.result == 'success' }}
         run: tar -xzf /tmp/day2-preparation-tests/day2-preparation.tgz -C "$GITHUB_WORKSPACE/.."
       - name: Admit both preparation parts
-        if: ${{ needs.verify-prepare-parts.result == 'success' }}
         run: target/debug/xtask verify-prepare-join
       - name: Archive complete admitted preparation
-        if: ${{ needs.verify-prepare-parts.result == 'success' }}
         run: tar -czf /tmp/day2-verification.tgz --exclude=platform/target/debug/incremental --exclude=platform/target/debug/build --exclude=platform/target/debug/.fingerprint --exclude='platform/target/debug/deps/*.rlib' --exclude='platform/target/debug/deps/*.rmeta' --exclude='platform/target/debug/deps/*.d' -C "$GITHUB_WORKSPACE/.." platform/target platform/artifacts platform/cli platform/crates/worker/generated .toolchains
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        if: ${{ needs.verify-prepare-parts.result == 'success' }}
         with:
           name: day2-verify-${{ github.run_id }}-${{ github.run_attempt }}
           path: /tmp/day2-verification.tgz
@@ -378,48 +443,70 @@ jobs:
   verify-shards:
     needs: verify-prepare
     if: ${{ !cancelled() && needs.verify-prepare.result == 'success' }}
-    runs-on: macos-15
+    runs-on: ubuntu-24.04
+    container:
+      image: rust@sha256:620dbcd124499c59e2406d3741574b5c5838cf9eb9656f0c3a03948f79b02959
+      # Trusted CI setup mounts only bounded owned outputs. Inner compiler and
+      # worker Landlock/seccomp, memory and launcher admission remain mandatory.
+      options: --memory=6g --memory-swap=6g --cpus=4 --pids-limit=512 --cgroupns=private --cap-add=SYS_ADMIN --security-opt apparmor=unconfined
+      volumes:
+        - /usr/bin/gh:/usr/local/bin/gh:ro
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 240
     strategy:
       fail-fast: false
       matrix:
-        shard: [workspace-day2, workspace-control, workspace-other, simulation, parallel-runtime, isolated-build, installation-build]
+        shard: [workspace-day2, workspace-control, workspace-other, simulation, parallel-runtime]
     env:
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_BUILD_JOBS: '2'
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: 'true'
-      SCCACHE_GHA_VERSION: day2-platform-ci-v2
+      SCCACHE_GHA_VERSION: day2-platform-ci-linux-v1
       SCCACHE_IDLE_TIMEOUT: '0'
       DAY2_TEMPORAL_CLI: /tmp/day2-tools/temporal
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - uses: opentofu/setup-opentofu@9d84900f3238fab8cd84ce47d658d25dd008be2f # v1
         with:
           tofu_version: 1.11.5
           tofu_wrapper: false
-      - run: gh release download v1.6.1 --repo temporalio/cli --pattern temporal_cli_1.6.1_darwin_arm64.tar.gz --dir /tmp/day2-tools
+      - run: gh release download v1.6.1 --repo temporalio/cli --pattern temporal_cli_1.6.1_linux_amd64.tar.gz --dir /tmp/day2-tools
         env:
           GH_TOKEN: ${{ github.token }}
-      - run: shasum -a 256 --check "$GITHUB_WORKSPACE/.github/temporal.sha256"
+      - run: sha256sum --check "$GITHUB_WORKSPACE/.github/temporal-linux.sha256"
         working-directory: /tmp/day2-tools
-      - run: tar -xzf /tmp/day2-tools/temporal_cli_1.6.1_darwin_arm64.tar.gz -C /tmp/day2-tools
+      - run: tar -xzf /tmp/day2-tools/temporal_cli_1.6.1_linux_amd64.tar.gz -C /tmp/day2-tools
       - run: rustup show active-toolchain
       - uses: Mozilla-Actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.18.0
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          prefix-key: day2-platform-ci-v2
+          prefix-key: day2-platform-ci-linux-v1
           shared-key: ${{ hashFiles('Cargo.toml') }}-verify
           key: ${{ hashFiles('Cargo.toml') }}
           cache-bin: 'false'
           cache-workspace-crates: 'false'
           save-if: 'false'
       - run: cargo fetch --locked
+      - name: Establish the mandatory bounded native Linux compiler context
+        id: linux_context
+        run: cargo run --locked -p xtask -- verify-linux-context
+      - name: Retain current native Linux shard context
+        if: ${{ always() && steps.linux_context.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: day2-linux-context-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/day2-ci-linux-context.json
+          if-no-files-found: error
+          retention-days: 14
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: day2-verify-${{ github.run_id }}-${{ github.run_attempt }}
@@ -435,10 +522,20 @@ jobs:
           retention-days: 3
 
   verify:
-    needs: [secrets, dependencies, verify-queue-receipt, verify-prepare, verify-shards]
-    if: ${{ always() && inputs.verification != 'full' && inputs.verification != 'diagnostics' }}
+    needs: [secrets, dependencies, verify-queue-receipt, verify-prepare, verify-shards, verify-mac-compatibility]
+    if: ${{ always() && inputs.verification != 'diagnostics' }}
     # A rejected source only needs the failure guard, not a macOS queue slot.
-    runs-on: ${{ needs.secrets.result == 'success' && needs.dependencies.result == 'success' && 'macos-15' || 'ubuntu-24.04' }}
+    runs-on: ubuntu-24.04
+    container:
+      image: rust@sha256:620dbcd124499c59e2406d3741574b5c5838cf9eb9656f0c3a03948f79b02959
+      # Trusted CI setup mounts only bounded owned outputs. Inner compiler and
+      # worker Landlock/seccomp, memory and launcher admission remain mandatory.
+      options: --memory=6g --memory-swap=6g --cpus=4 --pids-limit=512 --cgroupns=private --cap-add=SYS_ADMIN --security-opt apparmor=unconfined
+      volumes:
+        - /usr/bin/gh:/usr/local/bin/gh:ro
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 20
     env:
       CARGO_INCREMENTAL: '0'
@@ -446,20 +543,22 @@ jobs:
       CARGO_BUILD_JOBS: '2'
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: 'true'
-      SCCACHE_GHA_VERSION: day2-platform-ci-v2
+      SCCACHE_GHA_VERSION: day2-platform-ci-linux-v1
       SCCACHE_IDLE_TIMEOUT: '0'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Require security checks and complete verification
-        run: test "$SECRETS:$DEPENDENCIES:$REUSED" = success:success:true -o "$SECRETS:$DEPENDENCIES:$PREPARATION:$SHARDS" = success:success:success:success
+        run: test "$SECRETS:$DEPENDENCIES:$REUSED" = success:success:true -o "$SECRETS:$DEPENDENCIES:$PREPARATION:$SHARDS:$MAC" = success:success:success:success:success
         env:
           SECRETS: ${{ needs.secrets.result }}
           DEPENDENCIES: ${{ needs.dependencies.result }}
           REUSED: ${{ needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true' }}
           PREPARATION: ${{ needs.verify-prepare.result }}
           SHARDS: ${{ needs.verify-shards.result }}
+          MAC: ${{ needs.verify-mac-compatibility.result }}
       - run: rustup show active-toolchain
         if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
       - uses: Mozilla-Actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
@@ -469,7 +568,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
         with:
-          prefix-key: day2-platform-ci-v2
+          prefix-key: day2-platform-ci-linux-v1
           shared-key: ${{ hashFiles('Cargo.toml') }}-verify
           key: ${{ hashFiles('Cargo.toml') }}
           cache-bin: 'false'
@@ -477,6 +576,18 @@ jobs:
           save-if: 'false'
       - run: cargo fetch --locked
         if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
+      - name: Establish the mandatory bounded native Linux compiler context
+        id: linux_context
+        run: cargo run --locked -p xtask -- verify-linux-context
+        if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
+      - name: Retain current native Linux final context
+        if: ${{ always() && steps.linux_context.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: day2-linux-context-final-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/day2-ci-linux-context.json
+          if-no-files-found: error
+          retention-days: 14
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
         with:
@@ -490,6 +601,11 @@ jobs:
           pattern: day2-result-*-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/ci-results
           merge-multiple: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
+        with:
+          name: day2-mac-compatibility-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts
       - run: target/debug/xtask verify-compose
         if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -518,72 +634,19 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  verify-full:
-    needs: [secrets, dependencies]
-    if: ${{ !cancelled() && needs.secrets.result == 'success' && needs.dependencies.result == 'success' && (inputs.verification == 'full' || inputs.verification == 'compare') }}
-    runs-on: macos-15
-    timeout-minutes: 360
-    env:
-      CARGO_INCREMENTAL: '0'
-      CARGO_PROFILE_DEV_DEBUG: '0'
-      CARGO_BUILD_JOBS: '2'
-      RUSTC_WRAPPER: sccache
-      SCCACHE_GHA_ENABLED: 'true'
-      SCCACHE_GHA_VERSION: day2-platform-ci-v2
-      # Preserve compiler statistics through the long runtime campaigns.
-      SCCACHE_IDLE_TIMEOUT: '0'
-      DAY2_TEMPORAL_CLI: /tmp/day2-tools/temporal
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - uses: opentofu/setup-opentofu@9d84900f3238fab8cd84ce47d658d25dd008be2f # v1
-        with:
-          tofu_version: 1.11.5
-          tofu_wrapper: false
-      - run: gh release download v1.6.1 --repo temporalio/cli --pattern temporal_cli_1.6.1_darwin_arm64.tar.gz --dir /tmp/day2-tools
-        env:
-          GH_TOKEN: ${{ github.token }}
-      - run: shasum -a 256 --check "$GITHUB_WORKSPACE/.github/temporal.sha256"
-        working-directory: /tmp/day2-tools
-      - run: tar -xzf /tmp/day2-tools/temporal_cli_1.6.1_darwin_arm64.tar.gz -C /tmp/day2-tools
-      - name: Select the pinned Rust toolchain
-        run: rustup show active-toolchain
-      - name: Set up the Rust compiler cache
-        uses: Mozilla-Actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-        with:
-          version: v0.18.0
-      - name: Restore Cargo dependencies and build outputs
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          prefix-key: day2-platform-ci-v2
-          # The virtual root manifest owns the compilation profiles.
-          key: ${{ hashFiles('Cargo.toml') }}
-          cache-bin: 'false'
-          cache-workspace-crates: 'false'
-          shared-key: ${{ hashFiles('Cargo.toml') }}-verify
-          save-if: ${{ inputs.verification != 'compare' }}
-      - run: cargo run --locked -p xtask -- source-check
-      - run: cargo fetch --locked
-      - run: cargo run --locked -p xtask -- notices
-      - run: git diff --exit-code -- THIRD-PARTY-NOTICES.txt dependency-inventory.json
-      - run: cargo run --locked -p xtask -- bootstrap
-      - run: gh release download roc-formatter-2026-09-12 --repo clankernative/platform --pattern roc-fmt-day2-aarch64-apple-darwin --dir /tmp/day2-tools
-        env:
-          GH_TOKEN: ${{ github.token }}
-      - run: cargo run --locked -p xtask -- bootstrap-formatter /tmp/day2-tools/roc-fmt-day2-aarch64-apple-darwin
-      - run: cargo run --locked -p xtask -- configure-tofu
-      - run: cargo run --locked -p xtask -- verify
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: day2-ordinary-full-receipt-${{ github.run_id }}-${{ github.run_attempt }}
-          path: artifacts/verification.json
-          if-no-files-found: error
-          retention-days: 14
-
   verification-diagnostics:
     if: ${{ inputs.verification == 'diagnostics' }}
-    runs-on: macos-15
+    runs-on: ubuntu-24.04
+    container:
+      image: rust@sha256:620dbcd124499c59e2406d3741574b5c5838cf9eb9656f0c3a03948f79b02959
+      # Trusted CI setup mounts only bounded owned outputs. Inner compiler and
+      # worker Landlock/seccomp, memory and launcher admission remain mandatory.
+      options: --memory=6g --memory-swap=6g --cpus=4 --pids-limit=512 --cgroupns=private --cap-add=SYS_ADMIN --security-opt apparmor=unconfined
+      volumes:
+        - /usr/bin/gh:/usr/local/bin/gh:ro
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 360
     env:
       CARGO_INCREMENTAL: '0'
@@ -591,7 +654,7 @@ jobs:
       CARGO_BUILD_JOBS: '2'
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: 'true'
-      SCCACHE_GHA_VERSION: day2-platform-ci-v2
+      SCCACHE_GHA_VERSION: day2-platform-ci-linux-v1
       # Preserve compiler statistics through the long runtime campaigns.
       SCCACHE_IDLE_TIMEOUT: '0'
       DAY2_TEMPORAL_CLI: /tmp/day2-tools/temporal
@@ -599,16 +662,17 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - uses: opentofu/setup-opentofu@9d84900f3238fab8cd84ce47d658d25dd008be2f # v1
         with:
           tofu_version: 1.11.5
           tofu_wrapper: false
-      - run: gh release download v1.6.1 --repo temporalio/cli --pattern temporal_cli_1.6.1_darwin_arm64.tar.gz --dir /tmp/day2-tools
+      - run: gh release download v1.6.1 --repo temporalio/cli --pattern temporal_cli_1.6.1_linux_amd64.tar.gz --dir /tmp/day2-tools
         env:
           GH_TOKEN: ${{ github.token }}
-      - run: shasum -a 256 --check "$GITHUB_WORKSPACE/.github/temporal.sha256"
+      - run: sha256sum --check "$GITHUB_WORKSPACE/.github/temporal-linux.sha256"
         working-directory: /tmp/day2-tools
-      - run: tar -xzf /tmp/day2-tools/temporal_cli_1.6.1_darwin_arm64.tar.gz -C /tmp/day2-tools
+      - run: tar -xzf /tmp/day2-tools/temporal_cli_1.6.1_linux_amd64.tar.gz -C /tmp/day2-tools
       - name: Select the pinned Rust toolchain
         run: rustup show active-toolchain
       - name: Set up the Rust compiler cache
@@ -618,7 +682,7 @@ jobs:
       - name: Restore Cargo dependencies and build outputs
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          prefix-key: day2-platform-ci-v2
+          prefix-key: day2-platform-ci-linux-v1
           # The virtual root manifest owns the compilation profiles.
           key: ${{ hashFiles('Cargo.toml') }}
           cache-bin: 'false'
@@ -630,10 +694,10 @@ jobs:
       - run: cargo run --locked -p xtask -- notices
       - run: git diff --exit-code -- THIRD-PARTY-NOTICES.txt dependency-inventory.json
       - run: cargo run --locked -p xtask -- bootstrap
-      - run: gh release download roc-formatter-2026-09-12 --repo clankernative/platform --pattern roc-fmt-day2-aarch64-apple-darwin --dir /tmp/day2-tools
+      - run: gh release download roc-formatter-linux-2026-09-12 --repo clankernative/platform --pattern roc-fmt-day2-x86_64-unknown-linux-gnu --dir /tmp/day2-tools
         env:
           GH_TOKEN: ${{ github.token }}
-      - run: cargo run --locked -p xtask -- bootstrap-formatter /tmp/day2-tools/roc-fmt-day2-aarch64-apple-darwin
+      - run: cargo run --locked -p xtask -- bootstrap-formatter /tmp/day2-tools/roc-fmt-day2-x86_64-unknown-linux-gnu
       - run: cargo run --locked -p xtask -- configure-tofu
       - run: cargo run --locked -p xtask -- fmt
       - run: git diff --binary > /tmp/day2-format.patch
@@ -649,6 +713,7 @@ jobs:
             /tmp/day2-architecture-inventory.json
             /tmp/day2-architecture-dependencies.json
             /tmp/day2-architecture-proofs.json
+            target/debug/xtask.d
           if-no-files-found: error
           retention-days: 3
 
@@ -687,3 +752,20 @@ jobs:
       - run: tofu -chdir=deploy/integrations/gitea-instance-ci init -backend=false -lockfile=readonly
       - run: tofu -chdir=deploy/integrations/gitea-instance-ci validate
       - run: tofu -chdir=deploy/integrations/gitea-instance-ci test
+
+  firestore-epoch-integration-example:
+    # Resource-only provider example; no credentials or live cloud operations.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: opentofu/setup-opentofu@9d84900f3238fab8cd84ce47d658d25dd008be2f # v1
+        with:
+          tofu_version: 1.11.5
+          tofu_wrapper: false
+      - run: tofu fmt -check -recursive deploy/integrations/firestore-security-epoch
+      - run: tofu -chdir=deploy/integrations/firestore-security-epoch init -backend=false -lockfile=readonly
+      - run: tofu -chdir=deploy/integrations/firestore-security-epoch validate
+      - run: tofu -chdir=deploy/integrations/firestore-security-epoch test

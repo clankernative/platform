@@ -7,8 +7,8 @@ use reqwest::{
     blocking::{Client, Response},
     header::{AUTHORIZATION, HeaderMap, HeaderValue},
 };
+use ring::digest::{Context as DigestContext, SHA1_FOR_LEGACY_USE_ONLY};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use sha1::{Digest as _, Sha1};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt, fs,
@@ -716,11 +716,37 @@ fn git_oid(value: String) -> Result<GitOid> {
         .try_into()
         .map_err(|_| integrity("github_invalid_object_id"))
 }
+#[test]
+fn git_blob_ids_match_git_hash_object() {
+    assert_eq!(
+        git_blob_oid(b""),
+        "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+    );
+    assert_eq!(
+        git_blob_oid(b"hello\n"),
+        "ce013625030ba8dba906f756967f9e9ca394464a"
+    );
+    assert_eq!(
+        git_blob_oid(b"test content\n"),
+        "d670460b4b4aece5915caf5c68d12f560a9fe3e4"
+    );
+    assert_eq!(
+        git_blob_oid(b"\0\xffbinary\0"),
+        "14c7d9f8e920476b93c4ccc54362e5d1059f4b67"
+    );
+}
+
 fn git_blob_oid(bytes: &[u8]) -> String {
-    let mut digest = Sha1::new();
-    digest.update(format!("blob {}\0", bytes.len()));
+    // SHA-1 is required by the Git object format, not used for platform identities.
+    let mut digest = DigestContext::new(&SHA1_FOR_LEGACY_USE_ONLY);
+    digest.update(format!("blob {}\0", bytes.len()).as_bytes());
     digest.update(bytes);
-    format!("{:x}", digest.finalize())
+    digest
+        .finish()
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 fn response_error(response: &Response) -> SourceError {
     let status = response.status().as_u16();

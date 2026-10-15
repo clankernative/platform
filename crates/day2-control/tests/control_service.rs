@@ -39,6 +39,7 @@ fn configuration(directory: &std::path::Path) -> InstallationControl {
         runtimes: BTreeMap::new(),
         secrets: BTreeMap::new(),
         security_epochs: BTreeMap::new(),
+        security_bootstraps: BTreeMap::new(),
     }
 }
 fn scope() -> ControlScope {
@@ -379,7 +380,6 @@ async fn real_installation_export_build_and_temporal_completion() -> Result<()> 
             xtask: operator_path("DAY2_TEST_BUILD_XTASK")?,
             rust: operator_path("DAY2_TEST_BUILD_RUST")?,
             registry: operator_path("DAY2_TEST_BUILD_REGISTRY")?,
-            ui_assembly: None,
         },
     );
     config.runtimes.insert(

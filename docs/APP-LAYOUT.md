@@ -26,15 +26,24 @@ pages/Routes.roc                     # typed routes and template bindings
 pages/Redirects.roc                  # optional redirect routes bound to commands
 ui/pages/                           # HTML templates
 ui/app.css                          # presentation resources
-.ui-dependencies/vanilla/            # optional explicitly locked build-only package
+ui/ui.lock.json                     # exact managed Clanker UI package lock
 assets/                             # admitted images
 model-identities.json                # committed identity history
 .clanker/                            # optional design-tool data; never captured
 ```
 
-Root-level `.clanker/` tool metadata and `.ui-dependencies/` are excluded from
-ordinary source capture. Optional assembly captures only the package closure
-explicitly locked by `ui/ui.lock.json`; raw dependency files are not served.
+Use Clanker UI for new internal-tool presentation. After installing the Platform
+CLI, `day2 platform ui-lock APP_DIRECTORY` creates the exact package lock. The
+builder discovers its bundled package and executable; apps contain no dependency
+installation scripts, copied package implementation, or provider configuration.
+Clanker remains build-only. Apps still own their templates, presentation resources,
+view models, command bindings, and ordinary semantic content.
+For a different package pin, follow the [app UI lock upgrade procedure](WEB.md#upgrading-an-app-ui-lock).
+
+Root-level `.clanker/` design-tool metadata is excluded from ordinary source
+capture. Assembly captures only the package closure explicitly locked by
+`ui/ui.lock.json`; raw dependency files are not served. Tools without UI assembly
+need no lock.
 
 Each operation has its own folder. The main module keeps its handler, contract,
 typed example and verification together; an adjacent `SubmitReportTypes.roc`

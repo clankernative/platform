@@ -69,12 +69,18 @@ experimental component; normal UI bundles do not install it.
 
 ## Provisioning and deterministic adapters
 
-The canonical lock expects an independently reviewed package tree at
-`.ui-dependencies/vanilla`; installed bytes are excluded from Git. Use explicit
-UI install/restore before building, verify the captured package against the lock,
-and configure separate compiler/renderer approval. This unreleased chart package
-must be obtained from matching reviewed UI source; no cold/hosted release is
-claimed and compilation never restores dependencies.
+The path-free schema-2 lock pins the reviewed package bundled with the Platform
+CLI. Run normal CLI setup or `cargo run --locked -p xtask -- bootstrap-ui` before
+building; ordinary compilation stays offline and never restores dependencies.
+The builder owns the installed package/tool paths and checks the exact locked
+closure. Do not put `.ui-dependencies/` or other package implementation inside
+the app. See the [lock upgrade procedure](../../docs/WEB.md#upgrading-an-app-ui-lock)
+when changing the bundled package pin.
+
+Request-time execution still requires an independently approved
+`DAY2_PRESENTATION_PIN_JSON`, even though the distribution includes the chart
+worker and its ABI contract. Build-provider installation is not execution
+authority. No deployment or production qualification is implied.
 
 `ui/app.js` wires browser adapters only. `ui/chart-navigation.js` receives DOM,
 network, parsing, cancellation and timer ports explicitly; its route/generation

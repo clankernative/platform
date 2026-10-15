@@ -25,17 +25,19 @@ variables {
 override_data {
   target = data.kubernetes_config_map_v1.platform_contract
   values = { data = {
-    APP_DOMAIN                   = "example.test.example.com"
-    APP_NAMESPACE                = "app-example"
-    IAP_JWT_AUDIENCE             = "/projects/123456789012/global/backendServices/987654321"
-    REQUIRED_SERVICE_LABEL_KEY   = "day2.dev/app"
-    REQUIRED_SERVICE_LABEL_VALUE = "example_app"
-    SERVICE_ACCOUNT_NAME         = "runtime"
-    OAUTH_APP_PROJECT            = "example-tools"
-    OAUTH_APP_SERVICE_ACCOUNT    = "app-native@example-tools.iam.gserviceaccount.com"
-    OAUTH_APP_SECRET_IDS         = "[\"custody_verifier\",\"custody_encryption\",\"shell_attestation\"]"
-    OAUTH_SHELL_NAMESPACE        = "day2-security"
-    OAUTH_SHELL_CONTRACT         = "security-shell-contract"
+    APP_DOMAIN                           = "example.test.example.com"
+    APP_NAMESPACE                        = "app-example"
+    IAP_JWT_AUDIENCE                     = "/projects/123456789012/global/backendServices/987654321"
+    REQUIRED_SERVICE_LABEL_KEY           = "day2.dev/app"
+    REQUIRED_SERVICE_LABEL_VALUE         = "example_app"
+    SERVICE_ACCOUNT_NAME                 = "runtime"
+    OAUTH_APP_PROJECT                    = "example-tools"
+    OAUTH_APP_SERVICE_ACCOUNT            = "app-native@example-tools.iam.gserviceaccount.com"
+    OAUTH_APP_SERVICE_ACCOUNT_UID        = "100000000000000000007"
+    OAUTH_APP_SECRET_IDS                 = "[\"custody_verifier\",\"custody_encryption\",\"shell_attestation\"]"
+    OAUTH_APP_PROVIDER_CLIENT_SECRET_IDS = "[\"google_calendar\"]"
+    OAUTH_SHELL_NAMESPACE                = "day2-security"
+    OAUTH_SHELL_CONTRACT                 = "security-shell-contract"
   } }
 }
 
@@ -184,6 +186,111 @@ run "refuses_a_client_container_at_another_version" {
   expect_failures = [terraform_data.oauth_admission]
 }
 
+run "refuses_extra_provider_client_grants" {
+  command = plan
+  override_data {
+    target = data.kubernetes_config_map_v1.platform_contract
+    values = { data = {
+      APP_DOMAIN                           = "example.test.example.com"
+      APP_NAMESPACE                        = "app-example"
+      IAP_JWT_AUDIENCE                     = "/projects/123456789012/global/backendServices/987654321"
+      REQUIRED_SERVICE_LABEL_KEY           = "day2.dev/app"
+      REQUIRED_SERVICE_LABEL_VALUE         = "example_app"
+      SERVICE_ACCOUNT_NAME                 = "runtime"
+      OAUTH_APP_PROJECT                    = "example-tools"
+      OAUTH_APP_SERVICE_ACCOUNT            = "app-native@example-tools.iam.gserviceaccount.com"
+      OAUTH_APP_SERVICE_ACCOUNT_UID        = "100000000000000000007"
+      OAUTH_APP_SECRET_IDS                 = "[\"custody_verifier\",\"custody_encryption\",\"shell_attestation\"]"
+      OAUTH_APP_PROVIDER_CLIENT_SECRET_IDS = "[\"google_calendar\",\"google_reauth\"]"
+      OAUTH_SHELL_NAMESPACE                = "day2-security"
+      OAUTH_SHELL_CONTRACT                 = "security-shell-contract"
+    } }
+  }
+  expect_failures = [terraform_data.oauth_admission]
+}
+
+run "refuses_missing_provider_client_grants" {
+  command = plan
+  override_data {
+    target = data.kubernetes_config_map_v1.platform_contract
+    values = { data = {
+      APP_DOMAIN                    = "example.test.example.com"
+      APP_NAMESPACE                 = "app-example"
+      IAP_JWT_AUDIENCE              = "/projects/123456789012/global/backendServices/987654321"
+      REQUIRED_SERVICE_LABEL_KEY    = "day2.dev/app"
+      REQUIRED_SERVICE_LABEL_VALUE  = "example_app"
+      SERVICE_ACCOUNT_NAME          = "runtime"
+      OAUTH_APP_PROJECT             = "example-tools"
+      OAUTH_APP_SERVICE_ACCOUNT     = "app-native@example-tools.iam.gserviceaccount.com"
+      OAUTH_APP_SERVICE_ACCOUNT_UID = "100000000000000000007"
+      OAUTH_APP_SECRET_IDS          = "[\"custody_verifier\",\"custody_encryption\",\"shell_attestation\"]"
+      OAUTH_SHELL_NAMESPACE         = "day2-security"
+      OAUTH_SHELL_CONTRACT          = "security-shell-contract"
+    } }
+  }
+  expect_failures = [terraform_data.oauth_admission]
+}
+
+run "refuses_reauthentication_as_an_exact_provider_grant" {
+  command = plan
+  variables {
+    oauth_instance_json = jsonencode(merge(jsondecode(file("tests/oauth-instance.json")), {
+      control = merge(jsondecode(file("tests/oauth-instance.json")).control, {
+        secrets = merge(jsondecode(file("tests/oauth-instance.json")).control.secrets, {
+          calendar = { kind = "gcp_version", project_number = 123456789012, secret = "google_reauth", version = 9 }
+        })
+      })
+    }))
+  }
+  override_data {
+    target = data.kubernetes_config_map_v1.platform_contract
+    values = { data = {
+      APP_DOMAIN                           = "example.test.example.com"
+      APP_NAMESPACE                        = "app-example"
+      IAP_JWT_AUDIENCE                     = "/projects/123456789012/global/backendServices/987654321"
+      REQUIRED_SERVICE_LABEL_KEY           = "day2.dev/app"
+      REQUIRED_SERVICE_LABEL_VALUE         = "example_app"
+      SERVICE_ACCOUNT_NAME                 = "runtime"
+      OAUTH_APP_PROJECT                    = "example-tools"
+      OAUTH_APP_SERVICE_ACCOUNT            = "app-native@example-tools.iam.gserviceaccount.com"
+      OAUTH_APP_SERVICE_ACCOUNT_UID        = "100000000000000000007"
+      OAUTH_APP_SECRET_IDS                 = "[\"custody_verifier\",\"custody_encryption\",\"shell_attestation\"]"
+      OAUTH_APP_PROVIDER_CLIENT_SECRET_IDS = "[\"google_reauth\"]"
+      OAUTH_SHELL_NAMESPACE                = "day2-security"
+      OAUTH_SHELL_CONTRACT                 = "security-shell-contract"
+    } }
+  }
+  expect_failures = [terraform_data.oauth_admission]
+}
+
+run "refuses_a_provider_client_from_another_project" {
+  command = plan
+  variables {
+    oauth_instance_json = jsonencode(merge(jsondecode(file("tests/oauth-instance.json")), {
+      control = merge(jsondecode(file("tests/oauth-instance.json")).control, {
+        secrets = merge(jsondecode(file("tests/oauth-instance.json")).control.secrets, {
+          calendar = { kind = "gcp_version", project_number = 999999999999, secret = "google_calendar", version = 7 }
+        })
+      })
+    }))
+  }
+  expect_failures = [terraform_data.oauth_admission]
+}
+
+run "refuses_a_floating_provider_client_version" {
+  command = plan
+  variables {
+    oauth_instance_json = jsonencode(merge(jsondecode(file("tests/oauth-instance.json")), {
+      control = merge(jsondecode(file("tests/oauth-instance.json")).control, {
+        secrets = merge(jsondecode(file("tests/oauth-instance.json")).control.secrets, {
+          calendar = { kind = "gcp_version", project_number = 123456789012, secret = "google_calendar", version = "latest" }
+        })
+      })
+    }))
+  }
+  expect_failures = [terraform_data.oauth_admission]
+}
+
 run "refuses_a_floating_key_version" {
   command = plan
   variables {
@@ -246,6 +353,38 @@ run "refuses_foreign_current_authority_scope" {
   expect_failures = [terraform_data.oauth_admission]
 }
 
+run "refuses_recreated_epoch_reader_gsa" {
+  command = plan
+  variables {
+    oauth_instance_json = jsonencode(merge(jsondecode(file("tests/oauth-instance.json")), {
+      control = merge(jsondecode(file("tests/oauth-instance.json")).control, {
+        security_epochs = { app_epoch = merge(jsondecode(file("tests/oauth-instance.json")).control.security_epochs.app_epoch, {
+          provider = merge(jsondecode(file("tests/oauth-instance.json")).control.security_epochs.app_epoch.provider, {
+            iam_source = { kind = "gke_workload_identity_v1", service_account = "app-native@example-tools.iam.gserviceaccount.com", service_account_uid = "100000000000000000008" }
+          })
+        }) }
+      })
+    }))
+  }
+  expect_failures = [terraform_data.oauth_admission]
+}
+
+run "refuses_numeric_epoch_reader_gsa_uid" {
+  command = plan
+  variables {
+    oauth_instance_json = jsonencode(merge(jsondecode(file("tests/oauth-instance.json")), {
+      control = merge(jsondecode(file("tests/oauth-instance.json")).control, {
+        security_epochs = { app_epoch = merge(jsondecode(file("tests/oauth-instance.json")).control.security_epochs.app_epoch, {
+          provider = merge(jsondecode(file("tests/oauth-instance.json")).control.security_epochs.app_epoch.provider, {
+            iam_source = { kind = "gke_workload_identity_v1", service_account = "app-native@example-tools.iam.gserviceaccount.com", service_account_uid = 7 }
+          })
+        }) }
+      })
+    }))
+  }
+  expect_failures = [terraform_data.oauth_admission]
+}
+
 run "refuses_malformed_current_authority_uid" {
   command = plan
   variables {
@@ -290,20 +429,22 @@ run "release_management_refuses_oauth_runtime" {
   override_data {
     target = data.kubernetes_config_map_v1.platform_contract
     values = { data = {
-      APP_DOMAIN                   = "example.test.example.com"
-      APP_NAMESPACE                = "app-example"
-      IAP_JWT_AUDIENCE             = "/projects/123456789012/global/backendServices/987654321"
-      APP_CALL_ISSUER_AUDIENCE     = "/projects/123456789012/global/backendServices/2"
-      APP_CALL_RECEIVER_AUDIENCE   = "/projects/123456789012/global/backendServices/3"
-      APP_CALL_WORKLOAD_EMAIL      = "app-native@example-tools.iam.gserviceaccount.com"
-      REQUIRED_SERVICE_LABEL_KEY   = "day2.dev/app"
-      REQUIRED_SERVICE_LABEL_VALUE = "example_app"
-      SERVICE_ACCOUNT_NAME         = "runtime"
-      OAUTH_APP_PROJECT            = "example-tools"
-      OAUTH_APP_SERVICE_ACCOUNT    = "app-native@example-tools.iam.gserviceaccount.com"
-      OAUTH_APP_SECRET_IDS         = "[\"custody_verifier\",\"custody_encryption\",\"shell_attestation\"]"
-      OAUTH_SHELL_NAMESPACE        = "day2-security"
-      OAUTH_SHELL_CONTRACT         = "security-shell-contract"
+      APP_DOMAIN                           = "example.test.example.com"
+      APP_NAMESPACE                        = "app-example"
+      IAP_JWT_AUDIENCE                     = "/projects/123456789012/global/backendServices/987654321"
+      APP_CALL_ISSUER_AUDIENCE             = "/projects/123456789012/global/backendServices/2"
+      APP_CALL_RECEIVER_AUDIENCE           = "/projects/123456789012/global/backendServices/3"
+      APP_CALL_WORKLOAD_EMAIL              = "app-native@example-tools.iam.gserviceaccount.com"
+      REQUIRED_SERVICE_LABEL_KEY           = "day2.dev/app"
+      REQUIRED_SERVICE_LABEL_VALUE         = "example_app"
+      SERVICE_ACCOUNT_NAME                 = "runtime"
+      OAUTH_APP_PROJECT                    = "example-tools"
+      OAUTH_APP_SERVICE_ACCOUNT            = "app-native@example-tools.iam.gserviceaccount.com"
+      OAUTH_APP_SERVICE_ACCOUNT_UID        = "100000000000000000007"
+      OAUTH_APP_SECRET_IDS                 = "[\"custody_verifier\",\"custody_encryption\",\"shell_attestation\"]"
+      OAUTH_APP_PROVIDER_CLIENT_SECRET_IDS = "[\"google_calendar\"]"
+      OAUTH_SHELL_NAMESPACE                = "day2-security"
+      OAUTH_SHELL_CONTRACT                 = "security-shell-contract"
     } }
   }
   override_data {

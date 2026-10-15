@@ -3,9 +3,10 @@
 
 use crate::artifact::Artifact;
 use anyhow::{Context, Result, ensure};
+pub use day2_capabilities::oauth::ConnectionDeclaration;
 use day2_capabilities::{
     Name,
-    oauth::{AccountBindingPolicy, ConnectionDeclaration, ConnectionOwner, ConnectionRequirement},
+    oauth::{AccountBindingPolicy, ConnectionOwner, ConnectionRequirement},
 };
 use serde::Deserialize;
 use std::collections::BTreeSet;
@@ -30,6 +31,15 @@ struct Requirement {
 }
 
 pub fn decode(raw: &[u8], artifact: &Artifact) -> Result<Vec<ConnectionDeclaration>> {
+    decode_catalog(raw, &artifact.declarations)
+}
+
+/// Evaluate the pure declaration probe against the compiler's registration
+/// inventory before generating any executable connection client.
+pub fn decode_catalog(
+    raw: &[u8],
+    catalog: &crate::registry::Catalog,
+) -> Result<Vec<ConnectionDeclaration>> {
     ensure!(
         raw.len() <= 128 * 1024,
         "connection declaration byte budget"
@@ -58,11 +68,18 @@ pub fn decode(raw: &[u8], artifact: &Artifact) -> Result<Vec<ConnectionDeclarati
         });
     }
     declarations.sort_by(|a, b| a.registration.cmp(&b.registration));
-    validate(&declarations, artifact)?;
+    validate_catalog(&declarations, catalog)?;
     Ok(declarations)
 }
 
 pub fn validate(declarations: &[ConnectionDeclaration], artifact: &Artifact) -> Result<()> {
+    validate_catalog(declarations, &artifact.declarations)
+}
+
+pub fn validate_catalog(
+    declarations: &[ConnectionDeclaration],
+    catalog: &crate::registry::Catalog,
+) -> Result<()> {
     ensure!(
         declarations.len() <= 64,
         "connection requirement registration budget"
@@ -81,8 +98,7 @@ pub fn validate(declarations: &[ConnectionDeclaration], artifact: &Artifact) -> 
             logical_ids.insert(&requirement.logical_id),
             "duplicate logical connection requirement"
         );
-        let owner = artifact
-            .declarations
+        let owner = catalog
             .connections
             .get(name)
             .with_context(|| format!("unregistered connection requirement {name}"))?;
@@ -97,13 +113,7 @@ pub fn validate(declarations: &[ConnectionDeclaration], artifact: &Artifact) -> 
         validate_access(requirement)?;
     }
     ensure!(
-        registrations
-            == artifact
-                .declarations
-                .connections
-                .keys()
-                .map(String::as_str)
-                .collect(),
+        registrations == catalog.connections.keys().map(String::as_str).collect(),
         "connection declarations differ from checked App.definition registrations"
     );
     ensure!(
@@ -128,7 +138,7 @@ mod tests {
 
     fn artifact() -> Artifact {
         serde_json::from_value(json!({
-            "format":14,"roc_version":"test","worker_digest":"test","schema_digest":"test",
+            "format":14,"verification_limits":crate::artifact::VerificationLimits::QUALIFIED,"roc_version":"test","worker_digest":"test","schema_digest":"test",
             "sources":{},"admission":"local-spike-only",
             "schema":{"models":{},"inputs":{},"foreign_keys":[]},"operations":[],
             "declarations":{"commands":{},"queries":{},"connections":{"calendar":"current_human"}}

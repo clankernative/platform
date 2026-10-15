@@ -123,15 +123,17 @@ impl Granted {
             },
         )?;
         let contract = serde_json::from_value(json!({
-            "format":crate::artifact::CURRENT_FORMAT,"roc_version":"delegation-test",
+            "format":crate::artifact::CURRENT_FORMAT,"verification_limits":crate::artifact::VerificationLimits::QUALIFIED,"roc_version":"delegation-test",
             "worker_digest":"delegation-test","schema_digest":"delegation-test",
             "schema":{"models":{"items":{"fields":{"value":"text"}}},"inputs":{"input":{"fields":{}}},"foreign_keys":[]},
             "operations":[{"name":"ask","kind":"command","input_type":"input","output_type":""}],
             "sources":{},"admission":"local-spike-only","imports":imports}))?;
+        let inputs = crate::host_inputs::Inputs::default();
         let caller = Runtime {
             integrations: Arc::new(integration_host::Host::local(&path)?),
             app_calls: None,
             credentials: None,
+            connections: None,
             instance_path: path,
             app: "caller".into(),
             db: state.join("caller.sqlite"),
@@ -142,7 +144,8 @@ impl Granted {
                 artifact_directory,
                 contract,
             )),
-            host: Arc::new(crate::host::System),
+            host: Arc::new(crate::host::System(inputs.clone())),
+            inputs,
         };
         caller.initialize()?;
         Ok(Self {
@@ -453,16 +456,18 @@ impl Impersonating {
                 "authority":policy}}});
         fs::write(&path, serde_json::to_vec(&instance)?)?;
         let contract = serde_json::from_value(json!({
-            "format":crate::artifact::CURRENT_FORMAT,"roc_version":"support-test",
+            "format":crate::artifact::CURRENT_FORMAT,"verification_limits":crate::artifact::VerificationLimits::QUALIFIED,"roc_version":"support-test",
             "worker_digest":"support-test","schema_digest":"support-test",
             "schema":{"models":{"items":{"fields":{"value":"text"}}},
                 "inputs":{"input":{"fields":{}}},"foreign_keys":[]},
             "operations":[{"name":"look","kind":"command","input_type":"input","output_type":""}],
             "sources":{},"admission":"local-spike-only"}))?;
+        let inputs = crate::host_inputs::Inputs::default();
         let runtime = Runtime {
             integrations: Arc::new(integration_host::Host::local(&path)?),
             app_calls: None,
             credentials: None,
+            connections: None,
             instance_path: path,
             app: "support".into(),
             db: state.join("support.sqlite"),
@@ -473,7 +478,8 @@ impl Impersonating {
                 artifact_directory,
                 contract,
             )),
-            host: Arc::new(crate::host::System),
+            host: Arc::new(crate::host::System(inputs.clone())),
+            inputs,
         };
         runtime.initialize()?;
         Ok(Self {

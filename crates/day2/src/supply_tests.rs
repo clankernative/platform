@@ -42,11 +42,12 @@ fn runtime(directory: &Path) -> Result<Runtime> {
     fs::create_dir_all(&state)?;
     let db = state.join("app.sqlite");
     let contract = serde_json::from_value(json!({
-        "format":crate::artifact::CURRENT_FORMAT,"roc_version":"supply-test",
+        "format":crate::artifact::CURRENT_FORMAT,"verification_limits":crate::artifact::VerificationLimits::QUALIFIED,"roc_version":"supply-test",
         "worker_digest":"supply-test","schema_digest":"supply-test",
         "schema":{"models":{},"inputs":{},"foreign_keys":[]},
         "operations":[],"sources":{},"admission":"local-spike-only"
     }))?;
+    let inputs = crate::host_inputs::Inputs::default();
     Ok(Runtime {
         integrations: Arc::new(crate::integration_host::Host::simulated(
             &db,
@@ -54,6 +55,7 @@ fn runtime(directory: &Path) -> Result<Runtime> {
         )),
         app_calls: None,
         credentials: None,
+        connections: None,
         instance_path: directory.join("instance.json"),
         app: "app".into(),
         db,
@@ -64,7 +66,8 @@ fn runtime(directory: &Path) -> Result<Runtime> {
             artifact_directory,
             contract,
         )),
-        host: Arc::new(crate::host::System),
+        host: Arc::new(crate::host::System(inputs.clone())),
+        inputs,
     })
 }
 

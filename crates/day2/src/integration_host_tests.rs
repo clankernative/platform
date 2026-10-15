@@ -187,14 +187,16 @@ impl Fixture {
                 "resource_policies":[{"policy":{"id":"policy","revision":1},"operation":"run","bindings":{"resource":{"id":"resource","revision":1}}}]}}});
         fs::write(&path, serde_json::to_vec(&instance)?)?;
         let contract = serde_json::from_value(
-            json!({"format":crate::artifact::CURRENT_FORMAT,"roc_version":"host-test","worker_digest":"host-test",
+            json!({"format":crate::artifact::CURRENT_FORMAT,"verification_limits":crate::artifact::VerificationLimits::QUALIFIED,"roc_version":"host-test","worker_digest":"host-test",
             "schema_digest":"host-test","schema":{"models":{"items":{"fields":{"value":"text"}}},"inputs":{"input":{"fields":{}}},"foreign_keys":[]},
             "operations":[{"name":"run","kind":"command","input_type":"input","output_type":""}],"sources":{},"admission":"local-spike-only"}),
         )?;
+        let inputs = crate::host_inputs::Inputs::default();
         let runtime = Runtime {
             integrations: Arc::new(integration_host::Host::local(&path)?),
             app_calls: None,
             credentials: None,
+            connections: None,
             instance_path: path,
             app: "app".into(),
             db: state.join("app.sqlite"),
@@ -205,7 +207,8 @@ impl Fixture {
                 artifact_directory,
                 contract,
             )),
-            host: Arc::new(crate::host::System),
+            host: Arc::new(crate::host::System(inputs.clone())),
+            inputs,
         }
         .with_integrations(integration_host::Host::injected(
             Arc::new(Resolver),

@@ -10,11 +10,10 @@ use anyhow::{Context, Result, ensure};
 use day2_capabilities::resources::{
     Action, BudgetDefinition, BudgetScope, Limits, ResolvedGrant, ResourceTarget, TopicScope,
 };
-use hmac::{Hmac, Mac};
+use ring::hmac;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sha2::Sha256;
 use std::collections::BTreeSet;
 
 pub const BIND: &str = "resources.bind.v1";
@@ -269,17 +268,11 @@ fn issue(connection: &Connection, claims: Claims) -> Result<String> {
         [&claims.invocation],
         |row| row.get(0),
     )?;
-    let mut mac = Hmac::<Sha256>::new_from_slice(&seed).context("resource_handle_key")?;
+    let key = hmac::Key::new(hmac::HMAC_SHA256, &seed);
+    let mut mac = hmac::Context::with_key(&key);
     mac.update(b"day2-resource-handle-v1\0");
     mac.update(encoded.as_bytes());
-    let digest = mac.finalize().into_bytes();
-    let token = format!(
-        "resource_{}",
-        digest
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()
-    );
+    let token = format!("resource_{}", crate::hex(mac.sign().as_ref()));
     connection.execute(
         "INSERT OR IGNORE INTO day2_resource_handles VALUES(?1,?2,?3)",
         params![token, claims.invocation, encoded],
@@ -884,6 +877,9 @@ pub(crate) fn validate_cached(
             request,
             &observation.instruction,
         );
+    }
+    if crate::oauth::usage::observation(&observation.instruction.model) {
+        return crate::oauth::usage::validate_cached(connection, runtime, request, observation);
     }
     if observation.instruction.model == crate::audit::HISTORY {
         // A recorded history page carries no resource. What must still hold is

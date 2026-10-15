@@ -31,15 +31,29 @@ pub(crate) fn validate_schema(shape: &Type, depth: usize, nodes: &mut usize) -> 
             ensure!(
                 matches!(
                     **value,
-                    Type::String | Type::Integer | Type::Unsigned(_) | Type::Boolean
+                    Type::String
+                        | Type::Integer
+                        | Type::Unsigned(_)
+                        | Type::Boolean
+                        | Type::OptionalText
+                        | Type::OptionalInteger
+                        | Type::OptionalUnsigned(_)
                 ) || matches!(&**value, Type::List(item)
-                    if matches!(**item, Type::String | Type::Integer | Type::Unsigned(_) | Type::Boolean)),
+                    if matches!(**item,
+                        Type::String | Type::Integer | Type::Unsigned(_) | Type::Boolean
+                            | Type::OptionalText | Type::OptionalInteger | Type::OptionalUnsigned(_))),
                 "map values admit one level: a scalar or a list of scalars"
             );
             validate_schema(value, depth + 1, nodes)?
         }
         Type::Set => {}
-        Type::String | Type::Integer | Type::Unsigned(_) | Type::Boolean | Type::OptionalText => {}
+        Type::String
+        | Type::Integer
+        | Type::Unsigned(_)
+        | Type::Boolean
+        | Type::OptionalText
+        | Type::OptionalInteger
+        | Type::OptionalUnsigned(_) => {}
         _ => bail!("structured inputs require builtin scalars, structural records or lists"),
     }
     Ok(())
@@ -157,6 +171,14 @@ pub(crate) fn validate_at(
             Kind::OptionalText.valid(value),
             "invalid optional input text"
         ),
+        Type::OptionalInteger => ensure!(
+            Kind::OptionalInteger.valid(value),
+            "invalid optional input integer"
+        ),
+        Type::OptionalUnsigned(width) => ensure!(
+            Kind::OptionalUnsigned(*width).valid(value),
+            "invalid optional unsigned input"
+        ),
         _ => bail!("unsupported structured input shape"),
     }
     Ok(())
@@ -185,6 +207,7 @@ pub(crate) fn example(shape: &Type) -> Value {
         ),
         Type::List(_) => json!([]),
         Type::Integer | Type::Unsigned(_) => json!(0),
+        Type::OptionalInteger | Type::OptionalUnsigned(_) => json!("None"),
         Type::Boolean => json!(false),
         Type::OptionalText => json!("None"),
         _ => json!("example"),
@@ -272,6 +295,67 @@ mod tests {
         let many_lists = Type::List(Box::new(Type::List(Box::new(Type::Integer))));
         assert!(validate_value(&many_lists, &json!(vec![vec![0; 100]; 100])).is_err());
         Ok(())
+    }
+
+    #[test]
+    fn nested_optional_numeric_inputs_keep_the_tagged_union_contract() -> Result<()> {
+        let shape = Type::Record(BTreeMap::from([
+            ("signed".into(), Type::OptionalInteger),
+            (
+                "unsigned".into(),
+                Type::OptionalUnsigned(day2_contracts::numeric::Unsigned::U64),
+            ),
+        ]));
+        validate_value(
+            &shape,
+            &json!({"signed":"None","unsigned":{"Some":u64::MAX}}),
+        )?;
+        validate_value(&shape, &json!({"signed":{"Some":0},"unsigned":"None"}))?;
+        for value in [
+            json!({"signed":null,"unsigned":"None"}),
+            json!({"signed":{"Some":1,"extra":true},"unsigned":"None"}),
+            json!({"signed":"None","unsigned":{"Some":-1}}),
+        ] {
+            assert!(validate_value(&shape, &value).is_err());
+        }
+        assert_eq!(
+            json_schema(&shape)["properties"]["signed"]["oneOf"][0]["const"],
+            "None"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn optional_unsigned_widths_enforce_maximum_and_reject_null_shapes() {
+        for width in [
+            day2_contracts::numeric::Unsigned::U8,
+            day2_contracts::numeric::Unsigned::U16,
+            day2_contracts::numeric::Unsigned::U32,
+            day2_contracts::numeric::Unsigned::U64,
+        ] {
+            let kind = Kind::OptionalUnsigned(width);
+            assert!(kind.valid(&json!({"Some": width.maximum()})));
+            if width.maximum() < u64::MAX {
+                assert!(!kind.valid(&json!({"Some": width.maximum() + 1})));
+            }
+            assert!(!kind.valid(&json!({"Some": -1})));
+            assert!(!kind.valid(&Value::Null));
+        }
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn optional_numeric_codecs_accept_every_signed_i64(value in proptest::prelude::any::<i64>()) {
+            let encoded = json!({"Some": value});
+            proptest::prop_assert!(Kind::OptionalInteger.valid(&encoded));
+        }
+
+        #[test]
+        fn optional_u64_codec_preserves_the_complete_unsigned_domain(value in proptest::prelude::any::<u64>()) {
+            let encoded = json!({"Some": value});
+            proptest::prop_assert!(Kind::OptionalUnsigned(day2_contracts::numeric::Unsigned::U64)
+                .valid(&encoded));
+        }
     }
 
     #[test]

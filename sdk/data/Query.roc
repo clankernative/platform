@@ -30,6 +30,10 @@ Query(a) :: { transaction : Tx(a) }.{
 	collect : Selection(a), U64 -> Query(List(Model.Entity(a)))
 	collect = |selection, maximum_rows| { transaction: Tx.collect(selection, maximum_rows) }
 
+	# Count every visible match without materializing rows or changing state.
+	count : Selection(a) -> Query(U64)
+	count = |selection| { transaction: Tx.count(selection) }
+
 	# A missing row is data; multiple visible matches are a host failure.
 	find : Selection(a) -> Query([Some(Model.Entity(a)), None])
 	find = |selection| { transaction: Tx.find(selection) }

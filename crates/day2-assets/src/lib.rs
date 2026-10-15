@@ -4,8 +4,8 @@
 use anyhow::{Context, Result, bail, ensure};
 use day2_contracts::names::identifier;
 use image::{ImageFormat, ImageReader};
+use ring::digest::{SHA256, digest as hash};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs,
@@ -383,6 +383,19 @@ fn roc_module_profile(catalog: &Catalog, admission: bool) -> Result<String> {
     Ok(code)
 }
 
+#[test]
+fn asset_digest_matches_sha256_known_answer() {
+    assert_eq!(
+        digest(b"abc"),
+        "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+}
+
 fn digest(bytes: &[u8]) -> String {
-    format!("sha256:{:x}", Sha256::digest(bytes))
+    let hex: String = hash(&SHA256, bytes)
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("sha256:{hex}")
 }

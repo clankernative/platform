@@ -129,6 +129,67 @@ backends retain IAP. This is deployment composition, not live qualification:
 Those adapters, separated shell transport and a deployed consumer canary remain
 required before claiming this channel ready for an installation.
 
+## External epoch protocol kernel
+
+The private `security_epoch` module implements the first-bootstrap wire and
+state kernel for the selected Firestore Native database. It creates epoch 1,
+a permanent bootstrap sentinel and an exact-operation receipt in one conditional
+commit. First-holder activation is a distinct stage with its own consuming
+permit: both records use exact provider `updateTime` conditions and the
+activation receipt is create-only. No delete, advance, restore, takeover or
+existing-database adoption operation is exposed.
+
+Canonical requests exclude derived after-record hashes. A domain-separated
+request digest determines both records; the immutable receipt then commits the
+request and those derived records. This avoids a recursive hash definition.
+A historical create receipt cannot stand in for an activation receipt.
+
+The native SQLite adapter permanently accepts one request per authority/stage.
+A candidate remains accepted after refusal, process exit or unknown send.
+Dispatch first commits `may_have_been_sent`. Recovery validates the same request
+against a coherent external snapshot; absence can arm only that request for a
+separately authorized conditional retry. It never frees the candidate slot.
+The parser rejects partial, extra, duplicate or mismatched documents/fields,
+and requests fresh read-only transactions with bounded cleanup and a shared
+five-second acquisition budget. Provider timestamps are version tokens, never
+host wall-clock authority.
+
+This is source and adapter conformance, not a serving readiness implementation.
+`CurrentBootstrapExecution` has no production constructor and cannot be cloned,
+serialized or moved between threads. Only test builds can construct its fixture.
+Actual current GKE identity, immutable GSA token binding, native code/process and
+continuous clock evidence, qualified shared outside-backup control storage,
+original-fresh-file observation and the first app's own holder proof are still
+required. There is no live transport installation, app startup initialization,
+SDK endpoint or cloud action in this slice. Data read from records, configuration
+or a local marker cannot manufacture a current proof.
+
+## Initial bootstrap selection and observations
+
+Every `EpochIam` selects both the GSA email and mandatory `service_account_uid`,
+a canonical decimal string. A deleted and recreated account changes the complete
+binding revision even when its email is reused. The scoped counter identity
+still belongs to the immutable authority database and app scope. Native token
+minting must use the immutable UID target; selecting that target is DATA. The
+app-edge contract exports the actual managed GSA UID, and day2-app refuses a
+different selected UID even when the email matches.
+
+`control.security_bootstraps` holds explicit operator-owned initial intents.
+Each pins the exact epoch-store revision and scope, distinct controller and app
+GKE roles, the same database for permanent control-intent slots, immutable native
+runtime manifests, and the fresh volume/schema/marker-format selections. The
+schema excludes generated seeds, holders, operation IDs, actual marker hashes,
+deadlines and readiness flags. No intent means no initial bootstrap request.
+App backups discard these intents rather than making them available to restore.
+
+The private bounded Firestore reader returns an opaque `EpochObservation` that
+retains its original before-I/O clock domain and deadline, clamped to the lesser
+of five seconds and the selected lease. It cannot be cloned, serialized or moved
+between threads. Extracting its snapshot discards acquisition state and returns
+historical DATA. A controlled-port observation still grants no current physical
+resource, role or execution authority. The production context factory and live
+port remain unavailable until their actual native producers are qualified.
+
 ## Private per-app state
 
 `day2::managed_credentials` owns a host-only token/envelope format and SQLite

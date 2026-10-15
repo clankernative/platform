@@ -204,7 +204,7 @@ fn native_generated_numeric_codecs_roundtrip_boundaries_and_reject_negative_valu
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()?;
-    let temporary = tempfile::tempdir_in(root.join("artifacts"))?;
+    let temporary = crate::support::compiler::stage(&root)?;
     let stage = temporary.path();
     fs::create_dir(stage.join("sdk"))?;
     fs::create_dir(stage.join("app"))?;

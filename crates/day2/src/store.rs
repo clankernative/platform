@@ -11,11 +11,11 @@ use crate::{
     worker::Worker,
 };
 use anyhow::{Context as _, Result, bail, ensure};
+use ring::digest::{SHA256, digest};
 use rusqlite::{
     Connection, OptionalExtension, Transaction, params, params_from_iter, types::Value as SqlValue,
 };
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -39,6 +39,10 @@ mod integration_host_tests;
 #[cfg(test)]
 #[path = "read_coverage_tests.rs"]
 mod read_coverage_tests;
+
+#[cfg(test)]
+#[path = "runtime_input_replay_tests.rs"]
+mod input_replay_tests;
 
 #[cfg(test)]
 #[path = "supply_tests.rs"]
@@ -550,6 +554,7 @@ pub struct Runtime {
     integrations: Arc<crate::integration_host::Host>,
     app_calls: Option<Arc<dyn crate::delegation::AppCallPort>>,
     pub(crate) credentials: Option<Arc<dyn crate::managed_credentials::issuance::Authority>>,
+    pub(crate) connections: Option<Arc<dyn crate::oauth::usage::Authority>>,
     instance_path: PathBuf,
     app: String,
     db: PathBuf,
@@ -559,6 +564,7 @@ pub struct Runtime {
     hosted_domain: Option<String>,
     artifact: Arc<LoadedArtifact>,
     host: Arc<dyn crate::host::Host>,
+    inputs: crate::host_inputs::Inputs,
 }
 
 pub(crate) fn open(path: &Path) -> Result<Connection> {
@@ -597,17 +603,20 @@ impl Runtime {
         artifact: LoadedArtifact,
     ) -> Result<Self> {
         let instance = Instance::load(&instance_path)?;
+        let inputs = crate::host_inputs::Inputs::default();
         Ok(Self {
             integrations: Arc::new(crate::integration_host::Host::local(&instance_path)?),
             app_calls: None,
             credentials: None,
+            connections: None,
             scope: instance.scope(&app)?,
             hosted_domain: instance.identity.map(|identity| identity.hosted_domain),
             instance_path,
             app,
             db,
             artifact: Arc::new(artifact),
-            host: Arc::new(crate::host::System),
+            host: Arc::new(crate::host::System(inputs.clone())),
+            inputs,
         })
     }
 
@@ -660,8 +669,24 @@ impl Runtime {
         &self.artifact
     }
 
-    pub(crate) fn with_host(mut self, host: Arc<dyn crate::host::Host>) -> Self {
+    pub(crate) fn with_host(
+        mut self,
+        host: Arc<dyn crate::host::Host>,
+        clock: Arc<dyn crate::host_inputs::Clock>,
+    ) -> Self {
         self.host = host;
+        self.inputs.clock = clock;
+        self
+    }
+
+    pub(crate) fn inputs(&self) -> &crate::host_inputs::Inputs {
+        &self.inputs
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_inputs(mut self, inputs: crate::host_inputs::Inputs) -> Self {
+        self.host = Arc::new(crate::host::System(inputs.clone()));
+        self.inputs = inputs;
         self
     }
 
@@ -779,17 +804,20 @@ impl Runtime {
                     .with_context(|| format!("invalid_endpoint_connection: {name}"))?;
             }
         }
+        let inputs = crate::host_inputs::Inputs::default();
         let runtime = Self {
             integrations: Arc::new(crate::integration_host::Host::local(&instance_path)?),
             app_calls: None,
             credentials: None,
+            connections: None,
             scope: instance.scope(app)?,
             hosted_domain: instance.hosted_domain().map(str::to_owned),
             instance_path,
             app: app.to_string(),
             db,
             artifact: Arc::new(artifact),
-            host: Arc::new(crate::host::System),
+            host: Arc::new(crate::host::System(inputs.clone())),
+            inputs,
         };
         Ok(runtime)
     }
@@ -847,6 +875,14 @@ impl Runtime {
             crate::managed_credentials::store::replace_empty_version_1_unit(db)?;
             crate::managed_credentials::store::install_schema(db)?;
             crate::managed_credentials::issuance::install(db)?;
+            if !self
+                .artifact()
+                .contract()
+                .connection_declarations
+                .is_empty()
+            {
+                crate::oauth::usage::install(db)?;
+            }
             // Newly installed peers are admitted under the same cumulative
             // counter before the writer may publish their initialized shape.
             crate::managed_credentials::store::install_schema(db)
@@ -1806,8 +1842,12 @@ impl Runtime {
                                 &self.scope,
                                 request,
                                 &instruction,
-                                policy,
-                                operation,
+                                EffectContext {
+                                    scope: &self.scope,
+                                    policy,
+                                    operation,
+                                    entropy: self.inputs.entropy.as_ref(),
+                                },
                             )
                         }
                     })();
@@ -1908,10 +1948,9 @@ impl Runtime {
         self.snapshot(SnapshotScope::Retained)
     }
 
-    /// Complete live application state, matching ordinary query visibility.
-    /// App-owned checks receive Entities, which deliberately expose no deletion flag.
-    pub fn application_snapshot(&self) -> Result<Value> {
-        self.snapshot(SnapshotScope::Live)
+    /// Complete live model state for ordinary app properties, from one bounded read transaction.
+    pub fn application_snapshot(&self) -> Result<LivePropertySnapshot> {
+        Ok(LivePropertySnapshot(self.snapshot(SnapshotScope::Live)?))
     }
 
     /// Operation generators and checks can explicitly inspect either lifecycle scope.
@@ -1921,8 +1960,36 @@ impl Runtime {
         let snapshot = connection.transaction()?;
         self.check_binding(&snapshot)?;
         let schema = &self.artifact.contract().schema;
-        let live = read_model_snapshot(&snapshot, schema, SnapshotScope::Live)?;
-        let deleted = read_model_snapshot(&snapshot, schema, SnapshotScope::Deleted)?;
+        let limits = &self.artifact.contract().verification_limits;
+        let live = read_model_snapshot_bounded(
+            &snapshot,
+            schema,
+            SnapshotScope::Live,
+            limits.rows_per_model,
+            limits.total_facts,
+            limits.snapshot_bytes,
+        )?;
+        let deleted = read_model_snapshot_bounded(
+            &snapshot,
+            schema,
+            SnapshotScope::Deleted,
+            limits.rows_per_model,
+            limits.total_facts,
+            limits.snapshot_bytes,
+        )?;
+        let facts = snapshot_fact_count(&live)?.saturating_add(snapshot_fact_count(&deleted)?);
+        ensure!(
+            facts <= limits.total_facts,
+            "verification_total_fact_budget"
+        );
+        let combined = serde_json::to_vec(&json!({
+            "live": live.to_string(),
+            "deleted": deleted.to_string()
+        }))?;
+        ensure!(
+            combined.len() <= limits.snapshot_bytes,
+            "verification_snapshot_byte_budget"
+        );
         for rollup in &schema.rollups {
             ensure!(
                 rollup.mismatches(&snapshot)? == 0,
@@ -1938,7 +2005,20 @@ impl Runtime {
         let mut connection = open(&self.db)?;
         let snapshot = connection.transaction()?;
         self.check_binding(&snapshot)?;
-        let models = read_model_snapshot(&snapshot, &self.artifact.contract().schema, scope)?;
+        let limits = &self.artifact.contract().verification_limits;
+        let models = read_model_snapshot_bounded(
+            &snapshot,
+            &self.artifact.contract().schema,
+            scope,
+            limits.rows_per_model,
+            limits.total_facts,
+            limits.snapshot_bytes,
+        )?;
+        let encoded = serde_json::to_vec(&models)?;
+        ensure!(
+            encoded.len() <= limits.snapshot_bytes,
+            "verification_snapshot_byte_budget"
+        );
         for rollup in &self.artifact.contract().schema.rollups {
             ensure!(
                 rollup.mismatches(&snapshot)? == 0,
@@ -2139,6 +2219,25 @@ fn read_row(row: &rusqlite::Row<'_>, record: &Record) -> rusqlite::Result<Row> {
                     .map_err(|_| rusqlite::Error::InvalidQuery)?;
                 json!(u64::from_be_bytes(bytes))
             }
+            Kind::OptionalUnsigned(day2_contracts::numeric::Unsigned::U64) => {
+                match row.get::<_, Option<Vec<u8>>>(index + 3)? {
+                    Some(bytes) => {
+                        let bytes: [u8; 8] = bytes
+                            .try_into()
+                            .map_err(|_| rusqlite::Error::InvalidQuery)?;
+                        json!({"Some": u64::from_be_bytes(bytes)})
+                    }
+                    None => json!("None"),
+                }
+            }
+            Kind::OptionalInteger => match row.get::<_, Option<i64>>(index + 3)? {
+                Some(value) => json!({"Some": value}),
+                None => json!("None"),
+            },
+            Kind::OptionalUnsigned(_) => match row.get::<_, Option<i64>>(index + 3)? {
+                Some(value) => json!({"Some": value}),
+                None => json!("None"),
+            },
             Kind::Integer | Kind::Unsigned(_) | Kind::RowVersion | Kind::Reference { .. } => {
                 json!(row.get::<_, i64>(index + 3)?)
             }
@@ -2224,6 +2323,17 @@ pub(crate) fn get(connection: &Connection, model: &str, record: &Record, id: Id)
     get_optional(connection, model, record, id)?.context(crate::error::Failure::NotFound)
 }
 
+/// A complete live snapshot captured by Runtime for ordinary property checks.
+/// Its private representation prevents callers from labeling retained JSON as live.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LivePropertySnapshot(Value);
+
+impl LivePropertySnapshot {
+    pub fn as_value(&self) -> &Value {
+        &self.0
+    }
+}
+
 #[derive(Clone, Copy)]
 enum SnapshotScope {
     Retained,
@@ -2231,29 +2341,69 @@ enum SnapshotScope {
     Deleted,
 }
 
+fn snapshot_fact_count(snapshot: &Value) -> Result<usize> {
+    snapshot
+        .as_object()
+        .context("snapshot must be an object")?
+        .values()
+        .try_fold(0usize, |total, rows| {
+            Ok(total.saturating_add(
+                rows.as_array()
+                    .context("snapshot table must be an array")?
+                    .len(),
+            ))
+        })
+}
+
+#[cfg(test)]
 fn read_model_snapshot(
     connection: &Connection,
     schema: &Schema,
     scope: SnapshotScope,
 ) -> Result<Value> {
-    let limit = crate::properties::MAX_ROWS_PER_MODEL;
+    read_model_snapshot_bounded(connection, schema, scope, 256, usize::MAX, usize::MAX)
+}
+
+fn read_model_snapshot_bounded(
+    connection: &Connection,
+    schema: &Schema,
+    scope: SnapshotScope,
+    row_limit: usize,
+    fact_limit: usize,
+    byte_limit: usize,
+) -> Result<Value> {
     let predicate = match scope {
         SnapshotScope::Retained => "",
         SnapshotScope::Live => " WHERE deleted_at=0",
         SnapshotScope::Deleted => " WHERE deleted_at!=0",
     };
     let mut models = serde_json::Map::new();
+    let mut total_facts = 0usize;
+    let mut serialized_rows = 2usize;
     for (name, record) in &schema.models {
         let sql = format!(
             "SELECT {} FROM \"{name}\"{predicate} ORDER BY id LIMIT {}",
             projection(record),
-            limit + 1,
+            row_limit.saturating_add(1),
         );
         let mut statement = connection.prepare(&sql)?;
-        let rows = statement
-            .query_map([], |row| read_row(row, record))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        ensure!(rows.len() <= limit, "inspection_limit");
+        let mut rows = Vec::new();
+        let mut cursor = statement.query([])?;
+        while let Some(row) = cursor.next()? {
+            let row = read_row(row, record)?;
+            serialized_rows = serialized_rows.saturating_add(serde_json::to_vec(&row)?.len() + 1);
+            ensure!(
+                serialized_rows <= byte_limit,
+                "verification_snapshot_byte_budget"
+            );
+            rows.push(row);
+        }
+        ensure!(
+            rows.len() <= row_limit,
+            "verification_rows_per_model_budget"
+        );
+        total_facts = total_facts.saturating_add(rows.len());
+        ensure!(total_facts <= fact_limit, "verification_total_fact_budget");
         models.insert(name.clone(), serde_json::to_value(rows)?);
     }
     Ok(Value::Object(models))
@@ -2515,6 +2665,26 @@ fn sql_value(kind: &Kind, value: &Value) -> Result<SqlValue> {
                 .to_be_bytes()
                 .to_vec(),
         ),
+        Kind::OptionalUnsigned(day2_contracts::numeric::Unsigned::U64) => {
+            if value == "None" {
+                SqlValue::Null
+            } else {
+                SqlValue::Blob(
+                    value["Some"]
+                        .as_u64()
+                        .context("invalid_optional_unsigned")?
+                        .to_be_bytes()
+                        .to_vec(),
+                )
+            }
+        }
+        Kind::OptionalInteger | Kind::OptionalUnsigned(_) => {
+            if value == "None" {
+                SqlValue::Null
+            } else {
+                SqlValue::Integer(value["Some"].as_i64().context("invalid_optional_integer")?)
+            }
+        }
         Kind::Integer | Kind::Unsigned(_) | Kind::RowVersion | Kind::Reference { .. } => {
             SqlValue::Integer(
                 value
@@ -2645,8 +2815,22 @@ fn selection_predicate(
         values.push(SqlValue::Text(pattern.to_string()));
         "LIKE"
     } else {
+        let operator = match node.kind.as_str() {
+            "equal" => "IS",
+            "at_least" | "at_most" => {
+                ensure!(
+                    matches!(
+                        kind,
+                        Some(Kind::Integer | Kind::Unsigned(_) | Kind::RowVersion)
+                    ) || kind.is_none() && matches!(node.field.as_str(), "version" | "created_at"),
+                    "invalid_selection_operator_type"
+                );
+                if node.kind == "at_least" { ">=" } else { "<=" }
+            }
+            _ => bail!("unsupported_selection_operator"),
+        };
         values.push(selection_value(schema, model, &node.field, &value)?);
-        "IS"
+        operator
     };
     Ok(format!("\"{}\" {operator} ?{}", node.field, values.len()))
 }
@@ -2736,18 +2920,21 @@ pub(crate) fn encode_selection_cursor(
     connection: &Connection,
     cursor: &SelectionCursor,
     now: i64,
+    entropy: &dyn crate::host_inputs::Entropy,
 ) -> Result<String> {
     let boundary = serde_json::to_string(cursor)?;
     ensure!(boundary.len() <= 8192, "selection_cursor_limit");
-    let boundary_key = format!("{:x}", Sha256::digest(boundary.as_bytes()));
-    collect_selection_cursors(connection, now)?;
+    let boundary_key = crate::digest_hex(boundary.as_bytes());
     let expires_at = now
         .checked_add(SELECTION_CURSOR_TTL)
         .context("invalid_cursor_clock")?;
     let existing: Option<(String, String)> = connection
         .query_row(
-            "SELECT token,boundary FROM day2_selection_cursors WHERE boundary_key=?1",
-            [&boundary_key],
+            "SELECT token,boundary FROM day2_selection_cursors AS c WHERE boundary_key=?1
+             AND (expires_at>?2 OR EXISTS
+               (SELECT 1 FROM day2_selection_cursor_pins AS p JOIN day2_invocations AS i ON i.id=p.invocation
+                WHERE p.token=c.token AND i.status='pending'))",
+            params![boundary_key, now],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
@@ -2756,6 +2943,7 @@ pub(crate) fn encode_selection_cursor(
             persisted == boundary && valid_selection_cursor(&token),
             "invalid_persisted_selection_cursor"
         );
+        collect_selection_cursors(connection, now)?;
         connection.execute(
             "UPDATE day2_selection_cursors SET expires_at=MAX(expires_at,?1) WHERE token=?2",
             params![expires_at, token],
@@ -2763,15 +2951,24 @@ pub(crate) fn encode_selection_cursor(
         return Ok(token);
     }
     let count: i64 =
-        connection.query_row("SELECT COUNT(*) FROM day2_selection_cursors", [], |row| {
-            row.get(0)
-        })?;
+        connection.query_row(
+            "SELECT COUNT(*) FROM day2_selection_cursors AS c WHERE expires_at>?1 OR EXISTS
+               (SELECT 1 FROM day2_selection_cursor_pins AS p JOIN day2_invocations AS i ON i.id=p.invocation
+                WHERE p.token=c.token AND i.status='pending')",
+            [now],
+            |row| row.get(0),
+        )?;
     ensure!(
         count < SELECTION_CURSOR_CAPACITY,
         "selection_cursor_capacity"
     );
     let mut bytes = [0_u8; 32];
-    getrandom::fill(&mut bytes).map_err(|_| anyhow::anyhow!("selection_cursor_entropy"))?;
+    // Stage entropy before maintenance: failure cannot delete expired evidence
+    // or completed pins. Reuse above never draws secret bytes.
+    entropy
+        .fill(&mut bytes)
+        .map_err(|_| anyhow::anyhow!("selection_cursor_entropy"))?;
+    collect_selection_cursors(connection, now)?;
     let token = format!(
         "sel1_{}",
         bytes
@@ -2807,10 +3004,53 @@ pub(crate) fn decode_selection_cursor(
 }
 
 struct SelectionContext<'a> {
+    entropy: &'a dyn crate::host_inputs::Entropy,
     invocation: &'a str,
     actor: &'a str,
     operation: &'a str,
     now: i64,
+}
+
+fn count_rows(
+    connection: &Connection,
+    schema: &Schema,
+    model: &str,
+    data: &str,
+    row_filter: RowFilter,
+) -> Result<String> {
+    let plan = SelectionPlan::parse(data, false)?;
+    ensure!(plan.after.is_empty(), "invalid_count_bounds");
+    let mut ordered = std::collections::BTreeSet::new();
+    for order in &plan.orders {
+        ensure!(order.model == model, "selection_model_mismatch");
+        selection_field(schema, model, &order.field)?;
+        ensure!(ordered.insert(&order.field), "duplicate_selection_order");
+    }
+    let mut values = Vec::new();
+    let mut predicates = vec![selection_predicate(
+        schema,
+        model,
+        &plan.predicate,
+        &mut values,
+    )?];
+    match plan.deleted.as_str() {
+        "include" => {}
+        "only" => predicates.push("\"deleted_at\" != 0".into()),
+        _ => predicates.push("\"deleted_at\" = 0".into()),
+    }
+    if let RowFilter::Owner { field, actor } = row_filter {
+        values.push(SqlValue::Text(actor));
+        predicates.push(format!("\"{field}\" IS ?{}", values.len()));
+    }
+    let count: i64 = connection.query_row(
+        &format!(
+            "SELECT count(*) FROM \"{model}\" WHERE {}",
+            predicates.join(" AND ")
+        ),
+        params_from_iter(values),
+        |row| row.get(0),
+    )?;
+    Ok(serde_json::to_string(&u64::try_from(count)?)?)
 }
 
 fn select_rows(
@@ -2842,18 +3082,15 @@ fn select_rows(
             descending: false,
         });
     }
-    let binding = format!(
-        "{:x}",
-        Sha256::digest(serde_json::to_vec(&(
-            "day2.selection.v1",
-            schema.hash()?,
-            model,
-            &plan.predicate,
-            &orders,
-            context.actor,
-            context.operation,
-        ))?)
-    );
+    let binding = crate::digest_hex(&serde_json::to_vec(&(
+        "day2.selection.v1",
+        schema.hash()?,
+        model,
+        &plan.predicate,
+        &orders,
+        context.actor,
+        context.operation,
+    ))?);
     let mut values = Vec::new();
     let mut predicates = vec![selection_predicate(
         schema,
@@ -2945,6 +3182,7 @@ fn select_rows(
             connection,
             &SelectionCursor { binding, values },
             context.now,
+            context.entropy,
         )?;
         pin_selection_cursor(connection, &token, context.invocation)?;
         token
@@ -3038,6 +3276,11 @@ mod selection_tests {
                 Kind::Unsigned(day2_contracts::numeric::Unsigned::U64),
             ),
             ("description".into(), Kind::OptionalText),
+            ("from_timestamp".into(), Kind::OptionalInteger),
+            (
+                "cleared_count".into(),
+                Kind::OptionalUnsigned(day2_contracts::numeric::Unsigned::U64),
+            ),
             ("unindexed".into(), Kind::Text),
         ]);
         let schema = Schema {
@@ -3082,6 +3325,197 @@ mod selection_tests {
         Ok((connection, schema))
     }
 
+    #[test]
+    fn optional_numeric_sql_roundtrips_null_zero_and_full_u64_precision() -> Result<()> {
+        let (connection, schema) = fixture()?;
+        let record = &schema.models["links"];
+        let none =
+            serde_json::from_str::<Value>(&get(&connection, "links", record, 1.into())?.data)?;
+        assert_eq!(none["from_timestamp"], "None");
+        assert_eq!(none["cleared_count"], "None");
+        connection.execute(
+            "UPDATE links SET from_timestamp=?1, cleared_count=?2 WHERE id=1",
+            params![
+                sql_value(&Kind::OptionalInteger, &json!({"Some": 0}))?,
+                sql_value(
+                    &Kind::OptionalUnsigned(day2_contracts::numeric::Unsigned::U64),
+                    &json!({"Some": u64::MAX})
+                )?,
+            ],
+        )?;
+        let some =
+            serde_json::from_str::<Value>(&get(&connection, "links", record, 1.into())?.data)?;
+        assert_eq!(some["from_timestamp"], json!({"Some": 0}));
+        assert_eq!(some["cleared_count"], json!({"Some": u64::MAX}));
+        connection.execute(
+            "UPDATE links SET from_timestamp=?1, cleared_count=?2 WHERE id=1",
+            params![
+                sql_value(&Kind::OptionalInteger, &json!("None"))?,
+                sql_value(
+                    &Kind::OptionalUnsigned(day2_contracts::numeric::Unsigned::U64),
+                    &json!("None")
+                )?,
+            ],
+        )?;
+        let cleared =
+            serde_json::from_str::<Value>(&get(&connection, "links", record, 1.into())?.data)?;
+        assert_eq!(cleared["from_timestamp"], "None");
+        assert_eq!(cleared["cleared_count"], "None");
+        Ok(())
+    }
+
+    #[test]
+    fn counts_cover_the_complete_visible_set_and_deletion_scope() -> Result<()> {
+        let (connection, schema) = fixture()?;
+        let predicate = group("all", vec![]);
+        let data = plan(&predicate, &[("name", true)], "", 1);
+        assert_eq!(
+            count_rows(&connection, &schema, "links", &data, RowFilter::All)?,
+            "250"
+        );
+        let own = RowFilter::Owner {
+            field: "owner".into(),
+            actor: "alice".into(),
+        };
+        assert_eq!(
+            count_rows(&connection, &schema, "links", &data, own.clone())?,
+            "125"
+        );
+        connection.execute("UPDATE links SET deleted_at=500 WHERE id=2", [])?;
+        assert_eq!(
+            count_rows(&connection, &schema, "links", &data, own.clone())?,
+            "124"
+        );
+        let mut plan: Value = serde_json::from_str(&data)?;
+        plan["deleted"] = json!("only");
+        assert_eq!(
+            count_rows(
+                &connection,
+                &schema,
+                "links",
+                &plan.to_string(),
+                own.clone()
+            )?,
+            "1"
+        );
+        plan["deleted"] = json!("include");
+        assert_eq!(
+            count_rows(&connection, &schema, "links", &plan.to_string(), own)?,
+            "125"
+        );
+        assert_eq!(
+            count_rows(
+                &connection,
+                &schema,
+                "links",
+                &plan.to_string(),
+                RowFilter::All
+            )?,
+            "250"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn numeric_ranges_are_inclusive_and_preserve_unsigned_order() -> Result<()> {
+        let (connection, schema) = fixture()?;
+        connection.execute("UPDATE links SET created_at=id", [])?;
+        let range = group(
+            "all",
+            vec![
+                leaf("created_at", "at_least", json!(9)),
+                leaf("created_at", "at_most", json!(12)),
+            ],
+        );
+        let data = plan(&range, &[], "", 100);
+        assert_eq!(
+            count_rows(&connection, &schema, "links", &data, RowFilter::All)?,
+            "4"
+        );
+        let page = select(&connection, &schema, &data, false, false)?;
+        assert_eq!(page["items"].as_array().context("range page")?.len(), 4);
+        let range = group(
+            "all",
+            vec![
+                leaf("visits", "at_least", json!(u64::MAX)),
+                leaf("visits", "at_most", json!(u64::MAX)),
+            ],
+        );
+        assert_eq!(
+            count_rows(
+                &connection,
+                &schema,
+                "links",
+                &plan(&range, &[], "", 1),
+                RowFilter::All
+            )?,
+            "19"
+        );
+        let inverted = group(
+            "all",
+            vec![
+                leaf("created_at", "at_least", json!(12)),
+                leaf("created_at", "at_most", json!(9)),
+            ],
+        );
+        assert_eq!(
+            count_rows(
+                &connection,
+                &schema,
+                "links",
+                &plan(&inverted, &[], "", 1),
+                RowFilter::All
+            )?,
+            "0"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn counts_and_ranges_reject_untyped_unindexed_and_cursor_inputs() -> Result<()> {
+        let (connection, schema) = fixture()?;
+        for predicate in [
+            leaf("name", "at_least", json!("item")),
+            leaf("active", "at_most", json!(true)),
+            leaf("unindexed", "equal", json!("hidden")),
+            leaf("visits", "at_least", json!(-1)),
+            leaf("id", "at_least", json!(1)),
+            leaf("created_at", "at_least", json!("9")),
+        ] {
+            assert!(
+                count_rows(
+                    &connection,
+                    &schema,
+                    "links",
+                    &plan(&predicate, &[], "", 1),
+                    RowFilter::All
+                )
+                .is_err()
+            );
+        }
+        let data = plan(
+            &group("all", vec![]),
+            &[],
+            &format!("sel1_{}", "0".repeat(64)),
+            1,
+        );
+        assert!(count_rows(&connection, &schema, "links", &data, RowFilter::All).is_err());
+        let mut data: Value =
+            serde_json::from_str(&plan(&group("all", vec![]), &[("name", false)], "", 1))?;
+        data["orders"][0]["model"] = json!("foreign_model");
+        assert!(
+            count_rows(
+                &connection,
+                &schema,
+                "links",
+                &data.to_string(),
+                RowFilter::All
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
     fn leaf(field: &str, kind: &str, value: Value) -> String {
         json!({"kind":kind,"model":"links","field":field,"value":value.to_string(),"children":[]})
             .to_string()
@@ -3117,12 +3551,122 @@ mod selection_tests {
                 RowFilter::All
             },
             SelectionContext {
+                entropy: &crate::host_inputs::SecureEntropy,
                 invocation: "",
                 actor: "alice",
                 operation: "lookup",
                 now: 100,
             },
         )?)?)
+    }
+
+    #[test]
+    fn bounded_snapshot_capture_accepts_exact_row_and_fact_limits() -> Result<()> {
+        let (connection, schema) = fixture()?;
+        assert!(
+            read_model_snapshot_bounded(
+                &connection,
+                &schema,
+                SnapshotScope::Retained,
+                250,
+                250,
+                usize::MAX
+            )
+            .is_ok()
+        );
+        assert!(
+            read_model_snapshot_bounded(
+                &connection,
+                &schema,
+                SnapshotScope::Retained,
+                249,
+                250,
+                usize::MAX
+            )
+            .is_err()
+        );
+        assert!(
+            read_model_snapshot_bounded(
+                &connection,
+                &schema,
+                SnapshotScope::Retained,
+                250,
+                249,
+                usize::MAX
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn qualified_snapshot_capture_retains_ten_thousand_rows_and_refuses_overflow() -> Result<()> {
+        let (mut connection, schema) = fixture()?;
+        let limits = crate::artifact::VerificationLimits::QUALIFIED;
+        let transaction = connection.transaction()?;
+        {
+            let mut insert = transaction.prepare(
+                "INSERT INTO links(id,version,created_at,name,owner,active,visits,description,unindexed) \
+                 SELECT ?1,version,created_at,name,owner,active,visits,description,unindexed FROM links WHERE id=1",
+            )?;
+            for id in 251..=limits.rows_per_model {
+                insert.execute([id as i64])?;
+            }
+        }
+        transaction.execute("UPDATE links SET deleted_at=500 WHERE id>9000", [])?;
+        transaction.commit()?;
+
+        let snapshot = connection.transaction()?;
+        let capture = |scope| {
+            read_model_snapshot_bounded(
+                &snapshot,
+                &schema,
+                scope,
+                limits.rows_per_model,
+                limits.total_facts,
+                limits.snapshot_bytes,
+            )
+        };
+        let retained = capture(SnapshotScope::Retained)?;
+        assert_eq!(
+            retained["links"].as_array().context("retained rows")?.len(),
+            10_000
+        );
+        assert_eq!(
+            capture(SnapshotScope::Live)?["links"]
+                .as_array()
+                .context("live rows")?
+                .len(),
+            9_000
+        );
+        assert_eq!(
+            capture(SnapshotScope::Deleted)?["links"]
+                .as_array()
+                .context("deleted rows")?
+                .len(),
+            1_000
+        );
+        snapshot.commit()?;
+
+        connection.execute(
+            "INSERT INTO links(id,version,created_at,name,owner,active,visits,description,unindexed) \
+             SELECT 10001,version,created_at,name,owner,active,visits,description,unindexed FROM links WHERE id=1",
+            [],
+        )?;
+        assert_eq!(
+            read_model_snapshot_bounded(
+                &connection,
+                &schema,
+                SnapshotScope::Retained,
+                limits.rows_per_model,
+                limits.total_facts,
+                limits.snapshot_bytes,
+            )
+            .unwrap_err()
+            .to_string(),
+            "verification_rows_per_model_budget",
+        );
+        Ok(())
     }
 
     #[test]
@@ -3187,7 +3731,7 @@ mod selection_tests {
                 read_model_snapshot(&connection, &schema, scope)
                     .unwrap_err()
                     .to_string(),
-                "inspection_limit"
+                "verification_rows_per_model_budget"
             );
         }
         connection.execute("UPDATE links SET deleted_at=500 WHERE id>250", [])?;
@@ -3195,7 +3739,7 @@ mod selection_tests {
             read_model_snapshot(&connection, &schema, SnapshotScope::Retained)
                 .unwrap_err()
                 .to_string(),
-            "inspection_limit"
+            "verification_rows_per_model_budget"
         );
         assert_eq!(
             read_model_snapshot(&connection, &schema, SnapshotScope::Live)?["links"]
@@ -3209,7 +3753,7 @@ mod selection_tests {
             read_model_snapshot(&connection, &schema, SnapshotScope::Deleted)
                 .unwrap_err()
                 .to_string(),
-            "inspection_limit"
+            "verification_rows_per_model_budget"
         );
         assert!(
             read_model_snapshot(&connection, &schema, SnapshotScope::Live)?["links"]
@@ -3358,6 +3902,328 @@ mod selection_tests {
         Ok(())
     }
 
+    struct CursorEntropy {
+        seed: u8,
+        draws: AtomicUsize,
+        fail: bool,
+    }
+
+    impl crate::host_inputs::Entropy for CursorEntropy {
+        fn fill(&self, bytes: &mut [u8]) -> Result<()> {
+            ensure!(!self.fail, "injected_entropy_failure");
+            let draw = self.draws.fetch_add(1, Ordering::Relaxed);
+            bytes.fill(self.seed.wrapping_add(draw as u8));
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+    #[serde(deny_unknown_fields)]
+    pub(super) struct CursorInputs {
+        seed: u8,
+        now: i64,
+        pages: usize,
+        page_size: i64,
+        actor: String,
+        operation: String,
+    }
+
+    #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+    pub(super) enum CursorAction {
+        Page,
+    }
+
+    #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+    #[serde(deny_unknown_fields)]
+    struct CursorItem {
+        id: i64,
+        version: i64,
+        created_at: i64,
+        data: String,
+    }
+
+    #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+    #[serde(deny_unknown_fields)]
+    struct CursorPage {
+        items: Vec<CursorItem>,
+        has_more: bool,
+        next_after: String,
+    }
+
+    #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+    #[serde(deny_unknown_fields)]
+    struct CursorRow {
+        token: String,
+        boundary_key: String,
+        boundary: String,
+        expires_at: i64,
+    }
+
+    #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+    #[serde(deny_unknown_fields)]
+    pub(super) struct CursorObservation {
+        page: CursorPage,
+        cursors: Vec<CursorRow>,
+        entropy_draws: usize,
+    }
+
+    pub(super) type CursorHistory =
+        input_replay_tests::History<CursorInputs, CursorAction, CursorObservation>;
+
+    pub(super) fn cursor_history(seed: u8) -> CursorHistory {
+        CursorHistory::new(
+            CursorInputs {
+                seed,
+                now: 100,
+                pages: 3,
+                page_size: 3,
+                actor: "alice".into(),
+                operation: "lookup".into(),
+            },
+            vec![CursorAction::Page; 3],
+        )
+    }
+
+    pub(super) fn validate_cursor_history(history: &CursorHistory) -> Result<()> {
+        history.validate()?;
+        ensure!(
+            history.inputs.seed < 8
+                && history.inputs == cursor_history(history.inputs.seed).inputs
+                && history.actions == vec![CursorAction::Page; 3],
+            "unsupported cursor input history fixture"
+        );
+        for observed in &history.observations {
+            if let input_replay_tests::Recorded::Ok(observed) = observed {
+                ensure!(
+                    observed.page.items.len() <= 100 && observed.cursors.len() <= 16,
+                    "cursor history observation budget"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn expected_cursor_observation(inputs: &CursorInputs, pages: usize) -> CursorObservation {
+        // Domain fixtures and literal binding hashes, not the SQL selection or
+        // cursor codec, determine the expected rows and complete cursor state.
+        let boundary_keys = [
+            "c9fc221dad193757618d2f6448f304744f33dbfffe4aabd31c2872f7f88dc89b",
+            "370829b3508826056a6ed02f9786fb3e8781f5a20396eb16dd95876e58a08dce",
+            "478f9242e8accc18f4bf529cc7ac3434c2755aaeaee447052c146f0e358e8f21",
+        ];
+        let token = |page: usize| {
+            format!(
+                "sel1_{}",
+                format!("{:02x}", inputs.seed + page as u8).repeat(32)
+            )
+        };
+        let items = ((pages - 1) * 3 + 1..=pages * 3).map(|number| {
+            let number = number as i64;
+            CursorItem {
+                id: number,
+                version: number % 7 + 1,
+                created_at: 0,
+                data: json!({
+                    "active":number % 3 != 0,
+                    "cleared_count":"None",
+                    "description":if number % 2 == 0 { json!({"Some":"even"}) } else { json!("None") },
+                    "from_timestamp":"None",
+                    "name":format!("item{number:03}"),
+                    "owner":if number % 2 == 0 { "alice" } else { "bob" },
+                    "unindexed":"hidden",
+                    "visits":u64::MAX - number as u64 % 13
+                }).to_string(),
+            }
+        }).collect();
+        let cursors = (0..pages).map(|page| CursorRow {
+            token: token(page),
+            boundary_key: boundary_keys[page].into(),
+            boundary: format!("{{\"binding\":\"0dade3d99475737bf91344de8a924552f95cf35ee8c85e72a10049f06228cac8\",\"values\":[{}]}}", (page + 1) * 3),
+            expires_at: 86_500,
+        }).collect();
+        CursorObservation {
+            page: CursorPage {
+                items,
+                has_more: true,
+                next_after: token(pages - 1),
+            },
+            cursors,
+            entropy_draws: pages,
+        }
+    }
+
+    struct CursorWorld {
+        connection: Connection,
+        schema: Schema,
+        entropy: CursorEntropy,
+        after: String,
+    }
+
+    fn cursor_observation(
+        world: &mut CursorWorld,
+        inputs: &CursorInputs,
+        _action: &CursorAction,
+    ) -> Result<CursorObservation> {
+        let data = plan(
+            &group("all", vec![]),
+            &[("id", false)],
+            &world.after,
+            inputs.page_size,
+        );
+        let page: CursorPage = serde_json::from_str(&select_rows(
+            &world.connection,
+            &world.schema,
+            "links",
+            &data,
+            false,
+            RowFilter::All,
+            SelectionContext {
+                entropy: &world.entropy,
+                invocation: "",
+                actor: &inputs.actor,
+                operation: &inputs.operation,
+                now: inputs.now,
+            },
+        )?)?;
+        world.after = page.next_after.clone();
+        let cursors = world.connection.prepare("SELECT token,boundary_key,boundary,expires_at FROM day2_selection_cursors ORDER BY token")?
+            .query_map([], |row| Ok(CursorRow { token: row.get(0)?, boundary_key: row.get(1)?, boundary: row.get(2)?, expires_at: row.get(3)? }))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(CursorObservation {
+            page,
+            cursors,
+            entropy_draws: world.entropy.draws.load(Ordering::Relaxed),
+        })
+    }
+
+    pub(super) fn check_cursor_history(
+        saved: &CursorHistory,
+        path: Option<&Path>,
+    ) -> Result<CursorHistory> {
+        use input_replay_tests::{Case, checkpoint};
+        validate_cursor_history(saved)?;
+        let mut observed = CursorHistory::new(saved.inputs.clone(), saved.actions.clone());
+        if let Some(path) = path {
+            checkpoint(path, Case::Cursors(observed.clone()))?;
+        }
+        let (connection, schema) = match input_replay_tests::capture(fixture) {
+            Ok(world) => world,
+            Err(error) => {
+                observed.fixture_failed(&error);
+                if let Some(path) = path {
+                    checkpoint(path, Case::Cursors(observed.clone()))?;
+                }
+                return Err(error);
+            }
+        };
+        ensure!(
+            saved.fixture_error.is_none(),
+            "saved cursor fixture failure did not recur"
+        );
+        let mut world = CursorWorld {
+            connection,
+            schema,
+            entropy: CursorEntropy {
+                seed: saved.inputs.seed,
+                draws: AtomicUsize::new(0),
+                fail: false,
+            },
+            after: String::new(),
+        };
+        for (step, action) in saved.actions.iter().enumerate() {
+            let check = observed.observe(
+                input_replay_tests::capture(|| {
+                    cursor_observation(&mut world, &saved.inputs, action)
+                }),
+                &expected_cursor_observation(&saved.inputs, step + 1),
+            );
+            if let Some(path) = path {
+                checkpoint(path, Case::Cursors(observed.clone()))?;
+            }
+            observed.compare_saved(saved, step)?;
+            check?;
+        }
+        ensure!(
+            saved.failure.is_none(),
+            "saved cursor failure did not recur"
+        );
+        Ok(observed)
+    }
+
+    #[test]
+    fn fresh_cursor_traces_replay_bounded_seeded_inputs_against_literal_rows() -> Result<()> {
+        let root = Path::new("/tmp/dst-platform-input-composition");
+        fs::create_dir_all(root)?;
+        let evidence = tempfile::Builder::new()
+            .prefix("cursor-traces-")
+            .tempdir_in(root)?
+            .keep();
+        for seed in 0..8_u8 {
+            let mut traces = Vec::new();
+            for run in 0..2 {
+                let path = evidence.join(format!("seed-{seed}-replay-{run}.json"));
+                eprintln!(
+                    "Runtime input replay: {}",
+                    input_replay_tests::command(&path)
+                );
+                let observed = check_cursor_history(&cursor_history(seed), Some(&path))
+                    .with_context(|| input_replay_tests::command(&path))?;
+                input_replay_tests::replay(&path)?;
+                traces.push(observed.observations);
+            }
+            assert_eq!(traces[0], traces[1]);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn cursor_entropy_failure_preserves_maintenance_and_valid_reuse_never_draws() -> Result<()> {
+        let (connection, _) = fixture()?;
+        let entropy = CursorEntropy {
+            seed: 42,
+            draws: AtomicUsize::new(0),
+            fail: false,
+        };
+        let failed = CursorEntropy {
+            seed: 0,
+            draws: AtomicUsize::new(0),
+            fail: true,
+        };
+        let cursor = SelectionCursor {
+            binding: "first".into(),
+            values: vec![json!(1)],
+        };
+        let token = encode_selection_cursor(&connection, &cursor, 100, &entropy)?;
+        assert_eq!(
+            encode_selection_cursor(&connection, &cursor, 101, &failed)?,
+            token
+        );
+        assert_eq!(entropy.draws.load(Ordering::Relaxed), 1);
+        assert_eq!(failed.draws.load(Ordering::Relaxed), 0);
+        connection.execute("INSERT INTO day2_invocations(id,operation,actor,input,artifact,now,status) VALUES('completed','lookup','alice','{}','fixture',100,'success')", [])?;
+        connection.execute(
+            "INSERT INTO day2_selection_cursor_pins(token,invocation) VALUES(?1,'completed')",
+            [&token],
+        )?;
+        let snapshot = || -> Result<Value> {
+            let cursors = connection.prepare("SELECT token,boundary_key,boundary,expires_at FROM day2_selection_cursors ORDER BY token")?
+                .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, i64>(3)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let pins = connection.prepare("SELECT token,invocation FROM day2_selection_cursor_pins ORDER BY token,invocation")?
+                .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(json!({"cursors":cursors,"pins":pins}))
+        };
+        let before = snapshot()?;
+        let error =
+            encode_selection_cursor(&connection, &cursor, 101 + SELECTION_CURSOR_TTL, &failed)
+                .unwrap_err();
+        assert_eq!(error.to_string(), "selection_cursor_entropy");
+        assert_eq!(snapshot()?, before);
+        assert!(decode_selection_cursor(&connection, &token, 101 + SELECTION_CURSOR_TTL).is_err());
+        Ok(())
+    }
+
     #[test]
     fn cursor_handles_hide_boundaries_reuse_evidence_and_expire() -> Result<()> {
         let (connection, schema) = fixture()?;
@@ -3396,8 +4262,12 @@ mod selection_tests {
             crate::error::classify(&expired),
             crate::error::Failure::InvalidCursor
         );
-        let replacement =
-            encode_selection_cursor(&connection, &boundary, 100 + SELECTION_CURSOR_TTL)?;
+        let replacement = encode_selection_cursor(
+            &connection,
+            &boundary,
+            100 + SELECTION_CURSOR_TTL,
+            &crate::host_inputs::SecureEntropy,
+        )?;
         assert_ne!(token, replacement);
         assert!(
             decode_selection_cursor(&connection, token, 100).is_err(),
@@ -3420,28 +4290,46 @@ mod selection_tests {
             binding: "private-plan".into(),
             values: vec![json!("private-field")],
         };
-        let existing = encode_selection_cursor(&connection, &cursor, 100)?;
+        let existing = encode_selection_cursor(
+            &connection,
+            &cursor,
+            100,
+            &crate::host_inputs::SecureEntropy,
+        )?;
         connection.execute(
             "WITH RECURSIVE ids(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM ids WHERE n<?1)
              INSERT INTO day2_selection_cursors SELECT 'sel1_' || printf('%064x',n), 'filler_' || n, '{}', 100000 FROM ids",
             [SELECTION_CURSOR_CAPACITY - 1],
         )?;
         assert_eq!(
-            encode_selection_cursor(&connection, &cursor, 101)?,
+            encode_selection_cursor(
+                &connection,
+                &cursor,
+                101,
+                &crate::host_inputs::SecureEntropy,
+            )?,
             existing
         );
         let other = SelectionCursor {
             binding: "another-plan".into(),
             values: vec![json!("private-field")],
         };
-        let error = encode_selection_cursor(&connection, &other, 101).unwrap_err();
+        let error =
+            encode_selection_cursor(&connection, &other, 101, &crate::host_inputs::SecureEntropy)
+                .unwrap_err();
         assert_eq!(error.to_string(), "selection_cursor_capacity");
         assert_eq!(
             decode_selection_cursor(&connection, &existing, 101)?.binding,
             cursor.binding
         );
         assert!(
-            encode_selection_cursor(&connection, &other, 100000).is_ok(),
+            encode_selection_cursor(
+                &connection,
+                &other,
+                100000,
+                &crate::host_inputs::SecureEntropy,
+            )
+            .is_ok(),
             "expired handles release capacity"
         );
         assert!(
@@ -3451,7 +4339,8 @@ mod selection_tests {
                     binding: "too-large".into(),
                     values: vec![json!("x".repeat(8192))]
                 },
-                100000
+                100000,
+                &crate::host_inputs::SecureEntropy,
             )
             .is_err()
         );
@@ -3478,6 +4367,7 @@ mod selection_tests {
                 false,
                 RowFilter::All,
                 SelectionContext {
+                    entropy: &crate::host_inputs::SecureEntropy,
                     invocation,
                     actor: "alice",
                     operation: "lookup",
@@ -3545,6 +4435,7 @@ mod selection_tests {
                 false,
                 RowFilter::All,
                 SelectionContext {
+                    entropy: &crate::host_inputs::SecureEntropy,
                     invocation: "",
                     actor: "alice",
                     operation: "lookup",
@@ -3617,6 +4508,7 @@ mod selection_tests {
             false,
             RowFilter::All,
             SelectionContext {
+                entropy: &crate::host_inputs::SecureEntropy,
                 invocation: "fresh",
                 actor: "alice",
                 operation: "lookup",
@@ -3840,6 +4732,14 @@ mod selection_tests {
     }
 }
 
+/// Invocation-owned authority and entropy for a database effect.
+pub(crate) struct EffectContext<'a> {
+    pub(crate) scope: &'a str,
+    pub(crate) policy: &'a Policy,
+    pub(crate) operation: &'a str,
+    pub(crate) entropy: &'a dyn crate::host_inputs::Entropy,
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct StorageContract<'a> {
     pub schema: &'a Schema,
@@ -3852,9 +4752,15 @@ pub(crate) fn effect(
     scope: &str,
     request: &Request,
     instruction: &Instruction,
-    policy: &Policy,
-    operation: &str,
+    context: EffectContext<'_>,
 ) -> Result<String> {
+    let EffectContext {
+        scope: context_scope,
+        policy,
+        operation,
+        entropy,
+    } = context;
+    ensure!(context_scope == scope, "effect_scope_mismatch");
     let Step::Database(instruction) = instruction.decode()? else {
         bail!("unsupported_database_effect");
     };
@@ -3869,7 +4775,10 @@ pub(crate) fn effect(
         ensure!(
             matches!(
                 instruction,
-                Database::Get { .. } | Database::Select { .. } | Database::Page { .. }
+                Database::Get { .. }
+                    | Database::Select { .. }
+                    | Database::Page { .. }
+                    | Database::Count { .. }
             ),
             "rollup_is_read_only"
         );
@@ -3894,6 +4803,7 @@ pub(crate) fn effect(
             )?;
             Ok(serde_json::to_string(&row)?)
         }
+        Database::Count { data, .. } => count_rows(connection, schema, model, data, row_filter),
         Database::Select { data, find, .. } => select_rows(
             connection,
             schema,
@@ -3902,6 +4812,7 @@ pub(crate) fn effect(
             find,
             row_filter,
             SelectionContext {
+                entropy,
                 invocation: &request.context.invocation_id,
                 actor: &request.context.actor,
                 operation,
@@ -4039,13 +4950,18 @@ pub(crate) fn effect(
                             )?,
                         )?
                     } else {
-                        let hash = Sha256::digest(serde_json::to_vec(&(
-                            scope,
-                            &request.context.invocation_id,
-                            request.observations.len(),
-                            model,
-                        ))?);
-                        Id::Legacy((i64::from_be_bytes(hash[..8].try_into()?) & i64::MAX).max(1))
+                        let hash = digest(
+                            &SHA256,
+                            &serde_json::to_vec(&(
+                                scope,
+                                &request.context.invocation_id,
+                                request.observations.len(),
+                                model,
+                            ))?,
+                        );
+                        Id::Legacy(
+                            (i64::from_be_bytes(hash.as_ref()[..8].try_into()?) & i64::MAX).max(1),
+                        )
                     };
                     let mut parameters = vec![
                         id.sql(record.identity.as_ref())?,
@@ -4290,8 +5206,12 @@ mod rollup_read_tests {
             "test",
             &request,
             &instruction,
-            &policy,
-            "lookup",
+            EffectContext {
+                scope: "test",
+                policy: &policy,
+                operation: "lookup",
+                entropy: &crate::host_inputs::SecureEntropy,
+            },
         )?)?;
         assert_eq!(first["items"].as_array().unwrap().len(), 1);
         let data: Value = serde_json::from_str(first["items"][0]["data"].as_str().unwrap())?;
@@ -4310,8 +5230,12 @@ mod rollup_read_tests {
             "test",
             &request,
             &instruction,
-            &policy,
-            "lookup",
+            EffectContext {
+                scope: "test",
+                policy: &policy,
+                operation: "lookup",
+                entropy: &crate::host_inputs::SecureEntropy,
+            },
         )?)?;
         let data: Value = serde_json::from_str(second["items"][0]["data"].as_str().unwrap())?;
         assert_eq!(data["amount"], 8);
@@ -4332,8 +5256,12 @@ mod rollup_read_tests {
                 "test",
                 &request,
                 &write,
-                &policy,
-                "lookup"
+                EffectContext {
+                    scope: "test",
+                    policy: &policy,
+                    operation: "lookup",
+                    entropy: &crate::host_inputs::SecureEntropy,
+                },
             )
             .unwrap_err()
             .to_string()
@@ -4351,8 +5279,12 @@ mod rollup_read_tests {
                 "test",
                 &request,
                 &instruction,
-                &denied,
-                "lookup"
+                EffectContext {
+                    scope: "test",
+                    policy: &denied,
+                    operation: "lookup",
+                    entropy: &crate::host_inputs::SecureEntropy,
+                },
             )
             .is_err()
         );
@@ -4367,8 +5299,12 @@ mod rollup_read_tests {
                 "test",
                 &request,
                 &instruction,
-                &policy,
-                "lookup"
+                EffectContext {
+                    scope: "test",
+                    policy: &policy,
+                    operation: "lookup",
+                    entropy: &crate::host_inputs::SecureEntropy,
+                },
             )
             .unwrap_err()
             .to_string()

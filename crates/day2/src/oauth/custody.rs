@@ -11,9 +11,9 @@ use anyhow::{Result, ensure};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use day2_capabilities::oauth::ProviderCallbackRef;
 use day2_capabilities::{BindingRef, Digest};
+use ring::digest::{SHA256, digest};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
 
 #[derive(Clone, Copy, Serialize)]
 enum MaterialPurpose {
@@ -35,6 +35,8 @@ struct MaterialIdentity<'a> {
     callback: &'a ProviderCallbackRef,
     custody: &'a BindingRef,
     account: Option<&'a str>,
+    reference: &'a str,
+    token_version: Option<i64>,
 }
 
 fn identity<'a>(
@@ -54,6 +56,13 @@ fn identity<'a>(
         callback: &binding.callback,
         custody: &binding.custody,
         account,
+        reference: match purpose {
+            MaterialPurpose::AuthorizationCode => &binding.code_ref,
+            MaterialPurpose::PkceVerifier => &binding.verifier_ref,
+            MaterialPurpose::ConnectionTokens => &binding.token_slot_ref,
+            MaterialPurpose::ExternalApprovalIdentity => &intent.attempt,
+        },
+        token_version: None,
     }
 }
 
@@ -63,6 +72,37 @@ fn aad(key: &KeyLease, identity: &MaterialIdentity<'_>) -> Result<Vec<u8>> {
         identity,
         &key.encryption_version,
     ))?)
+}
+
+/// One authenticated reference for every material version, including activation.
+/// The activation binding is an immutable anchor, never the current vault head.
+pub(super) fn token_reference(binding: &ExchangeBinding, version: i64) -> Result<String> {
+    ensure!(version > 0, "invalid OAuth material version");
+    Ok(Digest::of(&(
+        "oauth-private-token-material-v2",
+        &binding.token_slot_ref,
+        version,
+    ))?
+    .as_str()
+    .to_owned())
+}
+
+fn token_identity<'a>(
+    intent: &'a ConnectIntent,
+    binding: &'a ExchangeBinding,
+    account: &'a str,
+    reference: &'a str,
+    version: i64,
+) -> MaterialIdentity<'a> {
+    let mut material = identity(
+        MaterialPurpose::ConnectionTokens,
+        intent,
+        binding,
+        Some(account),
+    );
+    material.reference = reference;
+    material.token_version = Some(version);
+    material
 }
 
 struct EncryptedMaterial {
@@ -99,7 +139,7 @@ pub(super) fn pkce_challenge(verifier: &str) -> Result<String> {
                 .all(|byte| { byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) }),
         "invalid private PKCE verifier"
     );
-    Ok(URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes())))
+    Ok(URL_SAFE_NO_PAD.encode(digest(&SHA256, verifier.as_bytes()).as_ref()))
 }
 
 pub(super) struct PreparedCode {
@@ -352,7 +392,8 @@ pub(super) struct PreparedTokenMaterial {
 struct TokenBundle {
     access_token: String,
     refresh_token: Option<String>,
-    expires_in: u64,
+    issued_at: i64,
+    expires_at: i64,
 }
 
 pub(super) fn prepare_tokens(
@@ -361,22 +402,22 @@ pub(super) fn prepare_tokens(
     account: &str,
     binding: &ExchangeBinding,
     tokens: ValidatedTokenResponse,
+    issued_at: i64,
 ) -> Result<PreparedTokenMaterial> {
     let (access_token, refresh_token, expires_in) = tokens.into_private_tokens();
     let bundle = TokenBundle {
         access_token,
         refresh_token,
-        expires_in,
+        issued_at,
+        expires_at: issued_at
+            .checked_add(i64::try_from(expires_in)?)
+            .ok_or_else(|| anyhow::anyhow!("OAuth token expiry overflow"))?,
     };
     let mut plaintext = serde_json::to_vec(&bundle)?;
+    let reference = token_reference(binding, 1)?;
     let material = encrypt(
         key,
-        &identity(
-            MaterialPurpose::ConnectionTokens,
-            intent,
-            binding,
-            Some(account),
-        ),
+        &token_identity(intent, binding, account, &reference, 1),
         &plaintext,
     );
     plaintext.fill(0);
@@ -384,7 +425,7 @@ pub(super) fn prepare_tokens(
         slot: intent.slot.clone(),
         generation: intent.proposed_generation,
         account: account.to_owned(),
-        reference: binding.token_slot_ref.clone(),
+        reference,
         material: material?,
     })
 }
@@ -405,6 +446,252 @@ pub(super) fn publish_tokens(tx: &Transaction<'_>, prepared: PreparedTokenMateri
             prepared.material.ciphertext,
         ],
     )?;
+    Ok(())
+}
+
+pub(super) struct AccessToken {
+    value: String,
+    pub expires_at: i64,
+}
+
+impl AccessToken {
+    pub(super) fn authorization(&self) -> Result<reqwest::header::HeaderValue> {
+        let mut header = reqwest::header::HeaderValue::from_str(&format!("Bearer {}", self.value))?;
+        header.set_sensitive(true);
+        Ok(header)
+    }
+}
+
+fn load_bundle(
+    db: &Connection,
+    key: &KeyLease,
+    intent: &ConnectIntent,
+    binding: &ExchangeBinding,
+    account: &str,
+    token_version: i64,
+) -> Result<TokenBundle> {
+    let reference = token_reference(binding, token_version)?;
+    let (digest, version, nonce, ciphertext): (String, String, Vec<u8>, Vec<u8>) = db.query_row(
+        "SELECT identity_digest,key_version,nonce,ciphertext FROM oauth_private_tokens
+         WHERE reference=?1 AND slot=?2 AND generation=?3 AND account=?4",
+        params![reference, intent.slot, intent.proposed_generation, account],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    )?;
+    let expected = token_identity(intent, binding, account, &reference, token_version);
+    ensure!(
+        digest == Digest::of(&("oauth-private-material-identity-v1", &expected))?.as_str()
+            && version == key.encryption_version
+            && ciphertext.len() <= 32 * 1024 + 16,
+        "OAuth token identity or exact key version changed"
+    );
+    let nonce = nonce
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("invalid OAuth token nonce"))?;
+    let mut bytes = key.open_oauth(&aad(key, &expected)?, nonce, &ciphertext)?;
+    let parsed = crate::json::decode::<TokenBundle>(&bytes);
+    bytes.fill(0);
+    let bundle = parsed.map_err(|_| anyhow::anyhow!("invalid private OAuth token material"))?;
+    ensure!(
+        bundle.issued_at >= 0
+            && bundle.expires_at > bundle.issued_at
+            && bundle
+                .expires_at
+                .checked_sub(bundle.issued_at)
+                .is_some_and(|duration| duration <= 86_400 * 366),
+        "invalid OAuth token expiry"
+    );
+    ensure!(
+        !bundle.access_token.is_empty() && bundle.access_token.len() <= 8192,
+        "invalid private OAuth access token"
+    );
+    Ok(bundle)
+}
+
+pub(super) fn load_access(
+    db: &Connection,
+    key: &KeyLease,
+    intent: &ConnectIntent,
+    binding: &ExchangeBinding,
+    account: &str,
+    token_version: i64,
+    now: i64,
+) -> Result<Option<AccessToken>> {
+    let bundle = load_bundle(db, key, intent, binding, account, token_version)?;
+    let active: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM oauth_connection_slots WHERE slot=?1 AND generation=?2 AND token_version=?3
+         AND security_epoch=?4 AND profile=?5 AND account=?6 AND status='active')",
+        params![intent.slot, intent.proposed_generation, token_version, intent.expected_epoch, intent.profile, account],
+        |row| row.get(0),
+    )?;
+    if !active {
+        return Ok(None);
+    }
+    if now < bundle.issued_at || now >= bundle.expires_at {
+        refuse_access(
+            db,
+            &intent.slot,
+            intent.proposed_generation,
+            token_version,
+            intent.expected_epoch,
+            &intent.profile,
+            account,
+        )?;
+        return Ok(None);
+    }
+    Ok(Some(AccessToken {
+        value: bundle.access_token,
+        expires_at: bundle.expires_at,
+    }))
+}
+
+/// Material for the private refresh adapter. This does not authorize a send;
+/// the durable consuming permit and current invocation authority are separate.
+pub(super) struct RefreshSource {
+    token: String,
+    pub issued_at: i64,
+    pub expires_at: i64,
+}
+
+impl RefreshSource {
+    pub(super) fn token(&self) -> &str {
+        &self.token
+    }
+}
+
+pub(super) fn load_refresh(
+    db: &Connection,
+    key: &KeyLease,
+    intent: &ConnectIntent,
+    binding: &ExchangeBinding,
+    account: &str,
+    version: i64,
+    now: i64,
+) -> Result<Option<RefreshSource>> {
+    let active: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM oauth_connection_slots WHERE slot=?1 AND generation=?2 AND token_version=?3
+         AND security_epoch=?4 AND profile=?5 AND account=?6 AND status='active')",
+        params![intent.slot, intent.proposed_generation, version, intent.expected_epoch, intent.profile, account],
+        |row| row.get(0),
+    )?;
+    if !active {
+        return Ok(None);
+    }
+    let bundle = match load_bundle(db, key, intent, binding, account, version) {
+        Ok(bundle) => bundle,
+        Err(_) => {
+            refuse_access(
+                db,
+                &intent.slot,
+                intent.proposed_generation,
+                version,
+                intent.expected_epoch,
+                &intent.profile,
+                account,
+            )?;
+            return Ok(None);
+        }
+    };
+    if now < bundle.issued_at {
+        refuse_access(
+            db,
+            &intent.slot,
+            intent.proposed_generation,
+            version,
+            intent.expected_epoch,
+            &intent.profile,
+            account,
+        )?;
+        return Ok(None);
+    }
+    let Some(token) = bundle.refresh_token else {
+        return Ok(None);
+    };
+    ensure!(
+        !token.is_empty()
+            && token.len() <= 8192
+            && token.bytes().all(|byte| byte.is_ascii_graphic()),
+        "invalid private OAuth refresh token"
+    );
+    Ok(Some(RefreshSource {
+        token,
+        issued_at: bundle.issued_at,
+        expires_at: bundle.expires_at,
+    }))
+}
+
+/// Called only with a verified private refresh response, before the publication
+/// transaction. Every version uses the same reference and AAD construction.
+pub(super) fn prepare_replacement_tokens(
+    key: &KeyLease,
+    intent: &ConnectIntent,
+    binding: &ExchangeBinding,
+    account: &str,
+    version: i64,
+    tokens: ValidatedTokenResponse,
+    issued_at: i64,
+) -> Result<PreparedTokenMaterial> {
+    ensure!(
+        version > 1 && issued_at >= 0,
+        "invalid OAuth replacement version or time"
+    );
+    let (access_token, refresh_token, expires_in) = tokens.into_private_tokens();
+    let bundle = TokenBundle {
+        access_token,
+        refresh_token,
+        issued_at,
+        expires_at: issued_at
+            .checked_add(i64::try_from(expires_in)?)
+            .ok_or_else(|| anyhow::anyhow!("OAuth replacement expiry overflow"))?,
+    };
+    let reference = token_reference(binding, version)?;
+    let mut plaintext = serde_json::to_vec(&bundle)?;
+    let material = encrypt(
+        key,
+        &token_identity(intent, binding, account, &reference, version),
+        &plaintext,
+    );
+    plaintext.fill(0);
+    Ok(PreparedTokenMaterial {
+        slot: intent.slot.clone(),
+        generation: intent.proposed_generation,
+        account: account.to_owned(),
+        reference,
+        material: material?,
+    })
+}
+
+/// Replace only the authenticated base material; the caller commits this with
+/// the head version and durable attempt receipt in one SQLite transaction.
+pub(super) fn replace_tokens(
+    tx: &Transaction<'_>,
+    prepared: PreparedTokenMaterial,
+    base_reference: &str,
+) -> Result<()> {
+    let changed = tx.execute(
+        "UPDATE oauth_private_tokens SET reference=?1,identity_digest=?2,key_version=?3,nonce=?4,ciphertext=?5
+         WHERE slot=?6 AND generation=?7 AND account=?8 AND reference=?9",
+        params![prepared.reference, prepared.material.identity_digest.as_str(), prepared.material.key_version,
+            prepared.material.nonce.as_slice(), prepared.material.ciphertext, prepared.slot, prepared.generation, prepared.account, base_reference],
+    )?;
+    ensure!(changed == 1, "OAuth replacement base material changed");
+    super::effects::refresh_boundary(super::effects::RefreshBoundary::MaterialWritten);
+    Ok(())
+}
+
+/// Refuse only the captured exact material generation/version/epoch. A later
+/// wall-clock rewind cannot revive an expiry or rollback already observed.
+pub(super) fn refuse_access(
+    db: &Connection,
+    slot: &str,
+    generation: i64,
+    token_version: i64,
+    security_epoch: i64,
+    profile: &str,
+    account: &str,
+) -> Result<()> {
+    db.execute("UPDATE oauth_connection_slots SET status='reauth_required' WHERE slot=?1 AND generation=?2
+        AND token_version=?3 AND security_epoch=?4 AND profile=?5 AND account=?6 AND status='active'",
+        params![slot,generation,token_version,security_epoch,profile,account])?;
     Ok(())
 }
 
@@ -431,6 +718,11 @@ impl PreparedExternalQuarantine {
     }
 }
 
+pub(super) struct QuarantineTiming {
+    pub issued_at: i64,
+    pub observed_at: i64,
+}
+
 pub(super) fn prepare_external_quarantine(
     key: &KeyLease,
     intent: &ConnectIntent,
@@ -438,8 +730,12 @@ pub(super) fn prepare_external_quarantine(
     observed: &ProviderAccount,
     binding: &ExchangeBinding,
     tokens: ValidatedTokenResponse,
-    now: i64,
+    timing: QuarantineTiming,
 ) -> Result<PreparedExternalQuarantine> {
+    let QuarantineTiming {
+        issued_at,
+        observed_at: now,
+    } = timing;
     let (account, scope_evidence) = account_scope;
     ensure!(
         now >= 0 && now < intent.expires_at,
@@ -477,7 +773,7 @@ pub(super) fn prepare_external_quarantine(
     Ok(PreparedExternalQuarantine {
         attempt: intent.attempt.clone(),
         scope_evidence: scope_evidence.to_owned(),
-        token: prepare_tokens(key, intent, account, binding, tokens)?,
+        token: prepare_tokens(key, intent, account, binding, tokens, issued_at)?,
         identity: identity?,
         challenge,
         quarantined_at: now,
@@ -642,14 +938,10 @@ pub(super) fn commit_external_quarantine(
         pending.challenge == *challenge,
         "external approval challenge changed"
     );
-    let expected = identity(
-        MaterialPurpose::ConnectionTokens,
-        intent,
-        binding,
-        Some(account),
-    );
+    let reference = token_reference(binding, 1)?;
+    let expected = token_identity(intent, binding, account, &reference, 1);
     ensure!(
-        row.token_reference == binding.token_slot_ref
+        row.token_reference == reference
             && row.token_identity_digest
                 == Digest::of(&("oauth-private-material-identity-v1", &expected))?.as_str()
             && row.token_key_version == key.encryption_version,
@@ -748,7 +1040,7 @@ fn install_schema_in(db: &Connection) -> Result<()> {
             identity_nonce BLOB NOT NULL,
             identity_ciphertext BLOB NOT NULL
         );";
-    super::schema::install_current(db, "oauth_custody_schema_version", 3, ddl, &[
+    super::schema::install_current(db, "oauth_custody_schema_version", 5, ddl, &[
         super::schema::Invariant { table: "oauth_private_verifiers", predicate:
             "length(reference) > 0 AND length(attempt) > 0 AND length(identity_digest) > 0 AND length(key_version) > 0 AND
              typeof(nonce) = 'blob' AND length(nonce) = 12 AND typeof(ciphertext) = 'blob' AND length(ciphertext) BETWEEN 16 AND 32784" },
@@ -773,8 +1065,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn pkce_challenge_matches_rfc7636_appendix_b() -> Result<()> {
+        assert_eq!(
+            pkce_challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk")?,
+            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn custody_schema_reopens_current_and_refuses_other_versions() {
-        for version in [1, 2, 99] {
+        for version in [1, 2, 3, 4, 99] {
             let db = Connection::open_in_memory().unwrap();
             super::super::connect::install_schema(&db).unwrap();
             super::super::connect::install_schema(&db).unwrap();

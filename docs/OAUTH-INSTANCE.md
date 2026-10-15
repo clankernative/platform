@@ -390,9 +390,30 @@ are needed to derive it; no placeholder ID establishes a real registration.
 
 [`fixtures/oauth-calendar-canary`](../fixtures/oauth-calendar-canary/README.md)
 provides a complete, minimal registration target. It declares company-account
-Calendar event reads and exposes only an intent-inspection query. Its native
-build and SQLite/setup checks are part of the full verification campaign; they
-do not perform the Google sandbox campaign or Calendar business dispatch.
+Calendar event reads and exposes an intent query and a bounded event query.
+Generated `Connections.calendar.resolve` returns a requirement-specific opaque
+Use for `Connections.calendar.list_events`. Uses cannot enter persistent models
+or public API codecs; provider tokens remain in private host custody.
+
+Reads require a durable verified human origin and current native authority. They
+use the exact currently published token material and admit one GET, at most 100 events and a window
+of at most 31 days. Any provider continuation returns `CapacityDeferred` without
+another request. The canary's native build, setup and compiled runtime/custody
+tests are part of full verification, with host-only simulated readiness and HTTP.
+For the reviewed Google reusable profile, resolution privately refreshes when
+the access token has at most 60 seconds remaining. The host consumes a durable
+single-flight dispatch permit, verifies the unchanged account and exact scopes,
+then commits encrypted replacement material, head version and attempt receipt
+together. Tokens, credentials and refresh operations remain unavailable to apps.
+An ambiguous send is not retried; recovery observes a committed replacement or
+requires reconnection. Existing expiry, material and clock refusals are never
+cleared by refresh. The latest publication clock and exact material reference
+remain pinned through the transaction that issues the Use. Local conformance
+includes version 2/3 reads and process-exit recovery at the actual private
+dispatch and publication boundaries; these use native simulation ports.
+Live Google registration, Calendar writes and qualified
+clock/workload authority remain separate. See the canary README for byte/time
+limits and the precise scope of persistent clock refusal.
 
 The fact source starts empty. A current verified human must first match the
 pending attempt's owner and the app database's immutable IAP subject binding.
@@ -739,4 +760,6 @@ This layer provides the guarded shell entrypoint; it does not deploy a live work
 create a Google web client, establish
 complete installation readiness or enable OAuth on an installation. Live registration
 qualification requires the real client and deployed canary callback. Calendar
-business dispatch and the connect/use/refresh canary remain follow-up work.
+read dispatch is available through the sealed client when current native
+authority and authenticated current token material are available. The live
+connect/use/refresh canary and Calendar writes remain follow-up work.

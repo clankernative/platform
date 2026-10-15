@@ -28,7 +28,7 @@ fn external_provider_matches_expected_outputs() {
         .iter()
         .map(|(path, bytes)| (format!("app/ui/{path}"), sha(bytes)))
         .collect::<BTreeMap<_, _>>();
-    expand_with_pin(&fixture.join("app"), captured.path(), &mut hashes, &pin).unwrap();
+    expand_with_pin(captured.path(), &mut hashes, &pin, &fixture.join("package")).unwrap();
     for (path, html) in &expected.data.templates {
         assert_eq!(
             checked(&captured.path().join("ui"), path).unwrap(),

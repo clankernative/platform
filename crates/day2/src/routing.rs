@@ -88,7 +88,13 @@ impl Catalog {
             for (field, kind) in &input.fields {
                 day2_contracts::names::identifier(field)?;
                 ensure!(
-                    !matches!(kind, Kind::OptionalText | Kind::InputShape { .. }),
+                    !matches!(
+                        kind,
+                        Kind::OptionalText
+                            | Kind::OptionalInteger
+                            | Kind::OptionalUnsigned(_)
+                            | Kind::InputShape { .. }
+                    ),
                     "optional and structured route fields are not supported"
                 );
             }
@@ -107,7 +113,11 @@ impl Catalog {
                     ensure!(
                         !matches!(
                             kind,
-                            Kind::WebUrl | Kind::OptionalText | Kind::InputShape { .. }
+                            Kind::WebUrl
+                                | Kind::OptionalText
+                                | Kind::OptionalInteger
+                                | Kind::OptionalUnsigned(_)
+                                | Kind::InputShape { .. }
                         ),
                         "route path parameter requires a scalar segment codec: {name}"
                     );
@@ -538,7 +548,10 @@ fn encode_field(kind: &Kind, value: &Value) -> Result<String> {
         | Kind::ModelReference { .. }
         | Kind::IdCursor
         | Kind::Cursor => Ok(value.as_str().context("route string")?.into()),
-        Kind::OptionalText | Kind::InputShape { .. } => {
+        Kind::OptionalText
+        | Kind::OptionalInteger
+        | Kind::OptionalUnsigned(_)
+        | Kind::InputShape { .. } => {
             bail!("optional and structured route fields are not supported")
         }
     }

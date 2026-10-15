@@ -35,7 +35,7 @@ of the candidate checkout and required check results.
 
 The queue automates integration checks; it does not shorten individual jobs.
 PR checks, candidate checks and post-merge main checks still run. Starting with
-one candidate build limits simultaneous queue work on the hosted macOS fleet.
+one candidate build limits simultaneous native preparation and runtime work.
 Do not treat cache hits or passing PR checks as a substitute for candidate checks.
 
 References: [GitHub merge queue configuration](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue),

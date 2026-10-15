@@ -14,6 +14,7 @@ pub mod authority_state;
 pub mod automation;
 pub mod branding;
 pub mod budget;
+pub mod build_dependencies;
 pub mod capabilities;
 pub mod carta;
 pub mod compatibility;
@@ -30,6 +31,7 @@ mod error;
 mod execution;
 mod host;
 pub mod host_inputs;
+mod host_loop;
 pub mod iap;
 pub mod iap_workload;
 pub mod identity;
@@ -53,6 +55,7 @@ mod release_binding;
 #[allow(dead_code)]
 mod oauth;
 pub use oauth::declaration as connection_declaration;
+pub mod connection_codegen;
 pub mod openapi;
 pub mod operation_catalog;
 pub mod operation_contract;
@@ -77,9 +80,13 @@ pub mod schedules;
 pub mod schema;
 pub mod sdk;
 pub mod security_admission;
+// Private external-epoch protocol; live enrollment producers remain unqualified.
+#[allow(dead_code)]
+mod security_epoch;
 pub mod simulation;
 pub mod simulations;
 pub mod store;
+pub mod ui_lock;
 pub(crate) mod ui_values;
 pub mod web;
 mod web_api;
@@ -92,11 +99,43 @@ pub mod web_templates;
 pub mod worker;
 pub mod write_queue;
 
-use sha2::{Digest, Sha256};
+use ring::digest::{SHA256, digest as hash};
 
 pub fn digest(bytes: &[u8]) -> String {
-    format!("sha256:{:x}", Sha256::digest(bytes))
+    format!("sha256:{}", digest_hex(bytes))
 }
+pub(crate) fn digest_hex(bytes: &[u8]) -> String {
+    hex(hash(&SHA256, bytes).as_ref())
+}
+
+pub(crate) fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[cfg(test)]
+mod digest_tests {
+    #[test]
+    fn sha256_formats_match_known_answers() {
+        for (bytes, expected) in [
+            (
+                b"".as_slice(),
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            ),
+            (
+                b"abc".as_slice(),
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            ),
+        ] {
+            assert_eq!(super::digest_hex(bytes), expected);
+            assert_eq!(super::digest(bytes), format!("sha256:{expected}"));
+            assert_eq!(
+                day2_capabilities::Digest::new(bytes).as_str(),
+                super::digest(bytes)
+            );
+        }
+    }
+}
+
 mod codegen;
 
 mod structural_proofs;

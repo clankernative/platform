@@ -103,7 +103,7 @@ fn optional_text_output_reflection_and_wire_contract_are_exact() -> Result<()> {
         ),
         (
             "tags",
-            json!([{"name":"None","payload":[]}, {"name":"Some","payload":[1]}]),
+            json!([{"name":"None","payload":[]}, {"name":"Some","payload":[2]}]),
         ),
         (
             "tags",
@@ -145,6 +145,57 @@ fn box_references(document: &mut Value) {
     for entry in table["entries"].as_array_mut().unwrap() {
         entry["type_id"] = json!(entry["type_id"].as_u64().unwrap() + (2 * count) as u64);
     }
+}
+
+#[test]
+fn optional_numeric_outputs_reflect_validate_and_project_exact_roc_shapes() -> Result<()> {
+    let mut document = metadata();
+    document[0]["types"].as_array_mut().unwrap().push(node(
+        "unsigned",
+        "U64",
+        json!([]),
+        0,
+        json!([]),
+        0,
+    ));
+    for payload in [1, 16] {
+        let mut optional = node("union", "NoneOrSome", json!([]), 0, json!([]), 0);
+        optional["tags"] =
+            json!([{"name":"None","payload":[]},{"name":"Some","payload":[payload]}]);
+        document[0]["types"].as_array_mut().unwrap().push(optional);
+    }
+    document[0]["types"][3]["fields"]
+        .as_array_mut()
+        .unwrap()
+        .extend([
+            json!({"name":"from_timestamp","type_id":17}),
+            json!({"name":"cleared_count","type_id":18}),
+        ]);
+    let outputs = catalog(&document)?;
+    let Type::CollectionPage(item) = &outputs["links"].shape else {
+        panic!("page")
+    };
+    let Type::Record(fields) = item.as_ref() else {
+        panic!("row")
+    };
+    assert_eq!(fields["from_timestamp"], Type::OptionalInteger);
+    assert_eq!(
+        fields["cleared_count"],
+        Type::OptionalUnsigned(day2_contracts::numeric::Unsigned::U64)
+    );
+    assert!(output_schema::roc_module(&outputs)?.contains("from_timestamp : [None, Some(I64)]"));
+    let row = |timestamp: Value, count: Value| json!({"title":"x","version":1,"archived":false,"from_timestamp":timestamp,"cleared_count":count});
+    outputs["links"].shape.validate_value(&json!({"items":[row(json!("None"), json!({"Some":u64::MAX}))],"has_more":false,"next_after":"1"}))?;
+    outputs["links"].shape.validate_value(&json!({"items":[row(json!({"Some":i64::MIN}), json!({"Some":0}))],"has_more":false,"next_after":"1"}))?;
+    for value in [
+        json!({"items":[row(Value::Null, json!("None"))],"has_more":false,"next_after":"1"}),
+        json!({"items":[row(json!({"Some":u64::MAX}), json!("None"))],"has_more":false,"next_after":"1"}),
+        json!({"items":[row(json!("None"), json!({"Some":-1}))],"has_more":false,"next_after":"1"}),
+        json!({"items":[row(json!({"Some":0,"extra":1}), json!("None"))],"has_more":false,"next_after":"1"}),
+    ] {
+        assert!(outputs["links"].shape.validate_value(&value).is_err());
+    }
+    Ok(())
 }
 
 #[test]

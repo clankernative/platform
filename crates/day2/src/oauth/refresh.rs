@@ -1,0 +1,603 @@
+//! Private, demand-driven Google refresh. The worker can request a connection;
+//! only this host path chooses current custody and consumes a durable send permit.
+use super::{custody, effects, google, store, usage};
+use anyhow::{Context as _, Result, ensure};
+use day2_capabilities::{BindingRef, Digest};
+use rusqlite::Connection;
+use std::{io::Read as _, time::Duration};
+
+const RENEW_SECONDS: i64 = 60;
+const BUDGET: Duration = Duration::from_secs(10);
+const MAX_RESPONSE: usize = 64 * 1024;
+
+/// A native producer observed a rewind even if a subsequent clock read has
+/// already recovered. Generic secret/network failures do not carry this fact.
+#[derive(Debug)]
+pub(super) struct ClockRefusal;
+
+impl std::fmt::Display for ClockRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("OAuth refresh clock fence refused")
+    }
+}
+
+impl std::error::Error for ClockRefusal {}
+
+/// Carries the freshest observed clock and exact current material all the way
+/// into the transaction that mints the immutable Use.
+pub(crate) struct Resolution {
+    problem: Option<&'static str>,
+    fence: Option<MaterialFence>,
+    clock: i64,
+}
+
+struct MaterialFence {
+    expected: store::RefreshEligibility,
+    reference: String,
+}
+
+impl Resolution {
+    fn unavailable(problem: &'static str) -> Self {
+        Self {
+            problem: Some(problem),
+            fence: None,
+            clock: 0,
+        }
+    }
+
+    fn ready(context: &usage::RefreshContext, version: i64, clock: i64) -> Result<Self> {
+        let mut expected = context.eligibility().clone();
+        expected.base_version = version;
+        Ok(Self {
+            problem: None,
+            clock,
+            fence: Some(MaterialFence {
+                expected,
+                reference: custody::token_reference(context.binding(), version)?,
+            }),
+        })
+    }
+
+    pub(super) fn problem(&self) -> Option<&'static str> {
+        self.problem
+    }
+
+    /// The caller commits even a refused result so an observed rewind cannot
+    /// disappear when the product decision subsequently fails.
+    pub(super) fn validate(&self, db: &Connection, now: i64) -> Result<bool> {
+        if now < self.clock {
+            if let Some(fence) = &self.fence {
+                let expected = &fence.expected;
+                custody::refuse_access(
+                    db,
+                    &expected.slot,
+                    expected.generation,
+                    expected.base_version,
+                    expected.security_epoch,
+                    &expected.profile,
+                    &expected.account,
+                )?;
+            }
+            return Ok(false);
+        }
+        let Some(fence) = &self.fence else {
+            return Ok(true);
+        };
+        let expected = &fence.expected;
+        Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM oauth_connection_slots s JOIN oauth_private_tokens t
+            ON t.slot=s.slot AND t.generation=s.generation AND t.account=s.account
+            WHERE s.slot=?1 AND s.generation=?2 AND s.token_version=?3 AND s.security_epoch=?4
+            AND s.profile=?5 AND s.account=?6 AND s.affinity=?7 AND s.status='active' AND t.reference=?8)",
+            rusqlite::params![expected.slot, expected.generation, expected.base_version, expected.security_epoch,
+                expected.profile, expected.account, expected.affinity, fence.reference], |row| row.get(0))?)
+    }
+}
+
+/// Produced only by the selected native secret reader. No Debug, Clone,
+/// serialization or application-visible secret access is available.
+pub(crate) struct ClientCredential {
+    client: String,
+    secret: String,
+    reference: BindingRef,
+    checked_at: i64,
+}
+
+impl ClientCredential {
+    pub(super) fn new(
+        client: String,
+        secret: String,
+        reference: BindingRef,
+        checked_at: i64,
+    ) -> Result<Self> {
+        ensure!(checked_at >= 0, "invalid OAuth refresh credential clock");
+        ensure!(
+            !client.is_empty()
+                && client.len() <= 512
+                && client.bytes().all(|b| b.is_ascii_graphic()),
+            "invalid OAuth refresh client"
+        );
+        ensure!(
+            !secret.is_empty()
+                && secret.len() <= 8192
+                && secret.bytes().all(|b| b.is_ascii_graphic()),
+            "invalid OAuth refresh credential"
+        );
+        Ok(Self {
+            client,
+            secret,
+            reference,
+            checked_at,
+        })
+    }
+}
+
+/// Its constructor remains in this module, after response/account verification.
+/// Kernel callers cannot choose another slot, material or replacement version.
+pub(crate) struct PreparedReplacement {
+    attempt: String,
+    next: i64,
+    receipt: String,
+    base_reference: String,
+    material: custody::PreparedTokenMaterial,
+}
+
+impl PreparedReplacement {
+    pub(super) fn into_parts(
+        self,
+    ) -> (String, i64, String, String, custody::PreparedTokenMaterial) {
+        (
+            self.attempt,
+            self.next,
+            self.receipt,
+            self.base_reference,
+            self.material,
+        )
+    }
+}
+
+fn clock_refusal(db: &Connection, context: &usage::RefreshContext) -> Result<()> {
+    let expected = context.eligibility();
+    custody::refuse_access(
+        db,
+        &expected.slot,
+        expected.generation,
+        expected.base_version,
+        expected.security_epoch,
+        &expected.profile,
+        &expected.account,
+    )
+}
+
+/// Called before resolve publishes its immutable invocation-affine Use. An
+/// already committed expiry/clock refusal is never cleared by refresh.
+pub(super) fn ensure_current(
+    runtime: &crate::store::Runtime,
+    request: &crate::protocol::Request,
+    registration: &str,
+    subject: &str,
+    selection: &usage::Selection,
+    started_at: i64,
+) -> Result<Resolution> {
+    let authority = runtime
+        .connections
+        .as_deref()
+        .context("OAuth refresh authority missing")?;
+    let mut db = crate::store::open(runtime.db())?;
+    let snapshot = db.transaction()?;
+    let context = usage::refresh_context(
+        &snapshot,
+        runtime,
+        request,
+        registration,
+        subject,
+        selection,
+        started_at,
+    );
+    snapshot.commit()?;
+    let context = match context {
+        Ok(Some(context)) => context,
+        Ok(None) => {
+            return Ok(Resolution {
+                problem: None,
+                fence: None,
+                clock: started_at,
+            });
+        }
+        Err(_) => return Ok(Resolution::unavailable("ReauthRequired")),
+    };
+    let local_matches =
+        |db: &rusqlite::Transaction<'_>, current: &usage::Selection, at: i64| -> Result<bool> {
+            Ok(
+                usage::refresh_context(db, runtime, request, registration, subject, current, at)?
+                    .is_some_and(|current| current.pin() == context.pin()),
+            )
+        };
+    let selected = selection.identity()?;
+    let Some(key) = authority.custody(
+        runtime.app(),
+        registration,
+        &request.context.actor,
+        &selected,
+        started_at,
+    )?
+    else {
+        return Ok(Resolution::unavailable("BindingUnavailable"));
+    };
+    let now = effects::wall_time()?;
+    if now < started_at {
+        clock_refusal(&db, &context)?;
+        return Ok(Resolution::unavailable("ReauthRequired"));
+    }
+    let snapshot = crate::write_queue::immediate(&mut db)?;
+    ensure!(
+        local_matches(&snapshot, selection, now)?,
+        "refresh authority changed during key retrieval"
+    );
+    let expected = context.eligibility();
+    let source = custody::load_refresh(
+        &snapshot,
+        &key,
+        context.intent(),
+        context.binding(),
+        &expected.account,
+        expected.base_version,
+        now,
+    )?;
+    snapshot.commit()?;
+    let Some(source) = source else {
+        return Ok(Resolution::unavailable("ReauthRequired"));
+    };
+    let unresolved: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM oauth_refresh_attempts WHERE slot=?1 AND generation=?2 AND base_version=?3
+         AND state IN ('may_have_been_sent','uncertain'))",
+        rusqlite::params![expected.slot, expected.generation, expected.base_version], |row| row.get(0),
+    )?;
+    if unresolved {
+        return Ok(Resolution::unavailable("ReauthRequired"));
+    }
+    if source.expires_at > now.saturating_add(RENEW_SECONDS) {
+        return Resolution::ready(&context, expected.base_version, now);
+    }
+    ensure!(
+        selection.requirement.capability == google::CAPABILITY
+            && super::catalog::Adapter::selected(&selection.reviewed)?
+                == super::catalog::Adapter::GoogleCalendar,
+        "product refresh adapter unavailable"
+    );
+    let client = authority.refresh_client(
+        runtime.app(),
+        registration,
+        &request.context.actor,
+        &selected,
+        now,
+    );
+    let client = match client {
+        Err(error) if error.downcast_ref::<ClockRefusal>().is_some() => {
+            clock_refusal(&db, &context)?;
+            return Ok(Resolution::unavailable("ReauthRequired"));
+        }
+        Err(error) => return Err(error),
+        Ok(None) => return Ok(Resolution::unavailable("BindingUnavailable")),
+        Ok(Some(client)) => client,
+    };
+    ensure!(
+        client.reference == selection.instance.registration.client_credential,
+        "refresh credential binding changed"
+    );
+    let dispatch_at = effects::wall_time()?;
+    if dispatch_at < now || dispatch_at < source.issued_at || dispatch_at < client.checked_at {
+        clock_refusal(&db, &context)?;
+        return Ok(Resolution::unavailable("ReauthRequired"));
+    }
+    let next = expected
+        .base_version
+        .checked_add(1)
+        .context("OAuth material version overflow")?;
+    let attempt = Digest::of(&("oauth-product-refresh-attempt-v1", expected))?
+        .as_str()
+        .to_owned();
+    let mut permit = None;
+    let mut checked_dispatch = dispatch_at;
+    let admitted = authority.with_current(
+        runtime.app(),
+        registration,
+        &request.context.actor,
+        dispatch_at,
+        &mut |current| {
+            if current.identity()? != selected {
+                return Ok(false);
+            }
+            let snapshot = db.transaction()?;
+            let eligible = local_matches(&snapshot, current, dispatch_at)?;
+            snapshot.commit()?;
+            if !eligible {
+                return Ok(false);
+            }
+            // Reclaiming an unsent Ready attempt is safe; the durable CAS still
+            // returns at most one process-local permit across processes/restarts.
+            store::claim_refresh(&mut db, &attempt, expected)?;
+            permit = store::authorize_checked_dispatch(&mut db, &attempt, |tx| {
+                let at = effects::wall_time()?;
+                if at < dispatch_at {
+                    return Err(ClockRefusal.into());
+                }
+                checked_dispatch = at;
+                local_matches(tx, current, at)
+            })?;
+            Ok(permit.is_some())
+        },
+    );
+    let admitted = match admitted {
+        Ok(admitted) => admitted,
+        Err(error) => {
+            if error.downcast_ref::<ClockRefusal>().is_some()
+                || effects::wall_time()? < checked_dispatch
+            {
+                clock_refusal(&db, &context)?;
+                return Ok(Resolution::unavailable("ReauthRequired"));
+            }
+            return Err(error);
+        }
+    };
+    let sent_at = effects::wall_time()?;
+    if sent_at < checked_dispatch {
+        clock_refusal(&db, &context)?;
+        store::mark_uncertain(&db, &attempt)?;
+        return Ok(Resolution::unavailable("ReauthRequired"));
+    }
+    if !admitted {
+        return Ok(Resolution::unavailable("CapacityDeferred"));
+    }
+    let permit = permit.context("refresh dispatch permit missing")?;
+    let monotonic = effects::Instant::now();
+    let mut last_clock = sent_at;
+    let mut clock_failed = false;
+    let result = permit.send(
+        |bound| -> Result<Option<super::profiles::ValidatedTokenResponse>> {
+            ensure!(bound == expected, "refresh dispatch material changed");
+            let wire = Wire::new()?;
+            let response = wire
+                .client
+                .post(google::TOKEN)
+                .form(&[
+                    ("grant_type", "refresh_token"),
+                    ("refresh_token", source.token()),
+                    ("client_id", client.client.as_str()),
+                    ("client_secret", client.secret.as_str()),
+                ])
+                .send()
+                .map_err(|_| anyhow::anyhow!("OAuth refresh response unavailable; do not retry"))?;
+            let status = response.status().as_u16();
+            let bytes = body(response)?;
+            if status == 400 {
+                #[derive(serde::Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Rejection {
+                    error: String,
+                    error_description: Option<String>,
+                }
+                let rejection: Rejection = crate::json::decode(&bytes)
+                    .map_err(|_| anyhow::anyhow!("invalid OAuth refresh rejection"))?;
+                ensure!(
+                    rejection.error == "invalid_grant"
+                        && rejection
+                            .error_description
+                            .as_ref()
+                            .is_none_or(|text| text.len() <= 4096),
+                    "unclassified OAuth refresh rejection"
+                );
+                return Ok(None);
+            }
+            ensure!(status == 200, "unclassified OAuth refresh response");
+            let tokens = google::refresh_tokens(
+                &bytes,
+                &selection.reviewed,
+                &selection.permission,
+                source.token(),
+            )?;
+            let expiry = dispatch_at
+                .checked_add(i64::try_from(tokens.lifetime())?)
+                .context("OAuth refresh expiry overflow")?;
+            let at = effects::wall_time()?;
+            if at < last_clock || at >= expiry {
+                clock_failed = true;
+                anyhow::bail!("OAuth refresh response clock fence changed");
+            }
+            last_clock = at;
+            let current = authority
+                .current(runtime.app(), registration, &request.context.actor, at)?
+                .context("OAuth refresh readiness unavailable")?;
+            ensure!(
+                current.identity()? == selected,
+                "OAuth refresh selection changed before account read"
+            );
+            let at = effects::wall_time()?;
+            if at < last_clock || at >= expiry {
+                clock_failed = true;
+                anyhow::bail!("OAuth refresh account dispatch clock fence changed");
+            }
+            last_clock = at;
+            let snapshot = db.transaction()?;
+            ensure!(
+                local_matches(&snapshot, &current, at)?,
+                "OAuth refresh authority changed before account read"
+            );
+            snapshot.commit()?;
+            ensure!(
+                monotonic.elapsed() <= BUDGET,
+                "OAuth refresh account dispatch elapsed budget exceeded"
+            );
+            let mut authorization = reqwest::header::HeaderValue::from_str(&format!(
+                "Bearer {}",
+                tokens.refresh_access()
+            ))?;
+            authorization.set_sensitive(true);
+            let response = wire
+                .client
+                .get(google::USERINFO)
+                .header(reqwest::header::AUTHORIZATION, authorization)
+                .send()
+                .map_err(|_| anyhow::anyhow!("OAuth refresh account unavailable; do not retry"))?;
+            ensure!(
+                response.status().as_u16() == 200,
+                "OAuth refresh account refused"
+            );
+            let observed = google::observe_account(&body(response)?)?;
+            ensure!(
+                super::account::provider_account_digest(&observed)?.as_str() == expected.account,
+                "OAuth refreshed account changed"
+            );
+            ensure!(
+                monotonic.elapsed() <= BUDGET,
+                "OAuth refresh elapsed budget exceeded"
+            );
+            Ok(Some(tokens))
+        },
+    );
+    let tokens = match result {
+        Ok(Some(tokens)) => tokens,
+        Ok(None) => {
+            store::mark_definitive_rejection(&mut db, &attempt)?;
+            return Ok(Resolution::unavailable("ReauthRequired"));
+        }
+        Err(_) => {
+            if clock_failed {
+                clock_refusal(&db, &context)?;
+            }
+            store::mark_uncertain(&db, &attempt)?;
+            return Ok(Resolution::unavailable("ReauthRequired"));
+        }
+    };
+    // Lifetime begins at the earliest dispatch fence, never at settlement.
+    let expires_at = dispatch_at
+        .checked_add(i64::try_from(tokens.lifetime())?)
+        .context("OAuth refresh expiry overflow")?;
+    let observed_at = effects::wall_time()?;
+    if observed_at < last_clock || observed_at >= expires_at || monotonic.elapsed() > BUDGET {
+        clock_refusal(&db, &context)?;
+        store::mark_uncertain(&db, &attempt)?;
+        return Ok(Resolution::unavailable("ReauthRequired"));
+    }
+    let material = custody::prepare_replacement_tokens(
+        &key,
+        context.intent(),
+        context.binding(),
+        &expected.account,
+        next,
+        tokens,
+        dispatch_at,
+    )?;
+    let base_reference = custody::token_reference(context.binding(), expected.base_version)?;
+    let next_reference = custody::token_reference(context.binding(), next)?;
+    let receipt = Digest::of(&(
+        "oauth-product-refresh-committed-v1",
+        &attempt,
+        context.pin(),
+        next,
+        &base_reference,
+        &next_reference,
+    ))?
+    .as_str()
+    .to_owned();
+    let mut prepared = Some(PreparedReplacement {
+        attempt: attempt.clone(),
+        next,
+        receipt,
+        base_reference,
+        material,
+    });
+    let mut freshest = observed_at;
+    let mut publication_clock_refused = false;
+    let publication = authority.with_current(
+        runtime.app(),
+        registration,
+        &request.context.actor,
+        observed_at,
+        &mut |current| {
+            if current.identity()? != selected {
+                return Ok(false);
+            }
+            Ok(store::publish_replacement(
+                &mut db,
+                prepared
+                    .take()
+                    .context("refresh settlement already consumed")?,
+                |tx| {
+                    let at = effects::wall_time()?;
+                    if at < observed_at || at >= expires_at {
+                        publication_clock_refused = true;
+                        return Err(ClockRefusal.into());
+                    }
+                    ensure!(
+                        monotonic.elapsed() <= BUDGET,
+                        "refresh publication elapsed fence changed"
+                    );
+                    freshest = at;
+                    local_matches(tx, current, at)
+                },
+            )?
+            .is_some())
+        },
+    );
+    match publication {
+        Ok(true) => Resolution::ready(&context, next, freshest),
+        _ => {
+            if publication_clock_refused {
+                clock_refusal(&db, &context)?;
+                store::mark_uncertain(&db, &attempt)?;
+            } else {
+                store::mark_uncertain(&db, &attempt)?;
+                let at = effects::wall_time()?;
+                if at < freshest || at >= expires_at {
+                    clock_refusal(&db, &context)?;
+                }
+            }
+            Ok(Resolution::unavailable("ReauthRequired"))
+        }
+    }
+}
+
+struct Wire {
+    client: effects::Client,
+}
+
+impl Wire {
+    fn new() -> Result<Self> {
+        Ok(Self {
+            client: effects::Client::builder()
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
+                .retry(reqwest::retry::never())
+                .connect_timeout(Duration::from_secs(3))
+                .timeout(Duration::from_secs(4))
+                .build()?,
+        })
+    }
+}
+
+fn body(response: effects::Response) -> Result<Vec<u8>> {
+    ensure!(
+        response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|value| value.split(';').next() == Some("application/json")),
+        "invalid OAuth refresh content type"
+    );
+    ensure!(
+        response
+            .content_length()
+            .is_none_or(|n| n <= MAX_RESPONSE as u64),
+        "OAuth refresh response too large"
+    );
+    let mut bytes = Vec::new();
+    response
+        .take(MAX_RESPONSE as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| anyhow::anyhow!("OAuth refresh body unavailable; do not retry"))?;
+    ensure!(
+        bytes.len() <= MAX_RESPONSE,
+        "OAuth refresh response too large"
+    );
+    Ok(bytes)
+}

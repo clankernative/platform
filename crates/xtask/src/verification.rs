@@ -13,7 +13,103 @@ use std::{
 
 mod shards;
 
-const CACHE_FORMAT: u32 = 1;
+const CACHE_FORMAT: u32 = 2;
+
+/// Atomic setup for the hosted Linux compiler domain. The instance workflow
+/// supplies the private cgroup; neither an app nor a cache may select quotas,
+/// mount paths or a weaker compiler policy.
+pub(super) fn linux_context(root: &Path) -> Result<()> {
+    ensure!(
+        std::env::consts::OS == "linux" && std::env::consts::ARCH == "x86_64",
+        "native Linux x86_64 CI context required"
+    );
+    ensure!(
+        std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true"),
+        "hosted CI setup only"
+    );
+    let cgroup = fs::read_to_string("/proc/self/cgroup")?;
+    let memory = fs::read_to_string("/sys/fs/cgroup/memory.max")?;
+    validate_linux_context(&cgroup, &memory)?;
+    let root = root.canonicalize()?;
+    // The generated output directory also contains this checked-in ABI seed.
+    // Preserve its exact checkout bytes and permissions across the tmpfs mount;
+    // fresh source checks and the reviewed generator still admit it normally.
+    let abi = root.join("crates/worker/generated/roc_platform_abi.rs");
+    let abi_metadata: fs::Metadata = fs::symlink_metadata(&abi)?;
+    ensure!(
+        abi_metadata.is_file() && abi_metadata.len() <= 1024 * 1024,
+        "bounded regular checked-in worker ABI seed required"
+    );
+    let abi_seed = fs::read(&abi)?;
+    for (relative, bytes) in [
+        ("artifacts", 1024_u64 * 1024 * 1024),
+        ("crates/worker/generated", 64_u64 * 1024 * 1024),
+    ] {
+        let path = root.join(relative);
+        fs::create_dir_all(&path)?;
+        ensure!(
+            path.canonicalize()? == path && fs::symlink_metadata(&path)?.is_dir(),
+            "CI compiler output must be a regular owned directory"
+        );
+        let mounts = fs::read_to_string("/proc/self/mountinfo")?;
+        ensure!(
+            !mounts
+                .lines()
+                .any(|line| line.split_whitespace().nth(4) == path.to_str()),
+            "CI output mount already exists; setup must precede cache/transport restoration"
+        );
+        run_with_budget(
+            &root,
+            Command::new("/usr/bin/mount")
+                .args(["-t", "tmpfs", "-o"])
+                .arg(format!("rw,exec,nosuid,nodev,size={bytes}"))
+                .arg("day2-ci-output")
+                .arg(&path),
+            Duration::from_secs(30),
+        )?;
+    }
+    fs::write(&abi, &abi_seed)?;
+    fs::set_permissions(&abi, abi_metadata.permissions())?;
+    ensure!(
+        fs::read(&abi)? == abi_seed,
+        "worker ABI seed changed across bounded output setup"
+    );
+    let run = std::env::var("GITHUB_RUN_ID")?;
+    let attempt = std::env::var("GITHUB_RUN_ATTEMPT")?;
+    ensure!(
+        run.parse::<u64>().is_ok_and(|value| value > 0)
+            && attempt.parse::<u64>().is_ok_and(|value| value > 0),
+        "actual hosted context identity required"
+    );
+    let evidence = json!({"run":run,"attempt":attempt,"host":"linux","architecture":"x86_64",
+        "workspace":root,"cgroup":cgroup,"memory_max":memory.trim(),
+        "checkout_abi_seed":{"path":"crates/worker/generated/roc_platform_abi.rs",
+            "digest":day2::digest(&abi_seed),"bytes":abi_seed.len()},
+        "mountinfo":fs::read_to_string("/proc/self/mountinfo")?,
+        "compiler_policy":"unchanged mandatory native cgroup/tmpfs/Landlock/seccomp admission"});
+    fs::write(
+        "/tmp/day2-ci-linux-context.json",
+        serde_json::to_vec_pretty(&evidence)?,
+    )?;
+    println!("Established private Linux compiler context; native confinement remains mandatory");
+    Ok(())
+}
+
+fn validate_linux_context(cgroup: &str, memory: &str) -> Result<()> {
+    ensure!(
+        cgroup.trim() == "0::/",
+        "private cgroup v2 namespace required"
+    );
+    let memory: u64 = memory
+        .trim()
+        .parse()
+        .context("finite Linux CI memory quota required")?;
+    ensure!(
+        (1..=6 * 1024_u64 * 1024 * 1024).contains(&memory),
+        "Linux compiler cgroup exceeds6GiB"
+    );
+    Ok(())
+}
 
 // Every test campaign in the full gate selects the same Cargo packages and
 // targets. Only libtest filters change: selecting a narrower Cargo test target
@@ -55,6 +151,9 @@ const PARALLEL_RUNTIME_TESTS: &[&str] = &[
     "guards::checked_compiler_rejects_wrong_models_forged_values_and_unavailable_io",
     "credential_metadata::native_compiler_preserves_family_types_and_seals_host_read_constructors",
     "connection_declarations::native_connection_declarations_require_nominal_access_and_account_policy",
+    "connection_use::native_connection_use_is_nominal_and_private_in_both_profiles",
+    "connection_use::native_reflected_use_cannot_enter_nested_public_codecs",
+    "connection_use::native_calendar_preparation_frames_bound_escaped_and_accumulated_results",
     "numeric::native_generated_numeric_codecs_roundtrip_boundaries_and_reject_negative_values",
     "schema::native_structured_inputs_reflect_and_roundtrip_without_flattening_records",
 ];
@@ -65,15 +164,24 @@ struct VerificationCache {
     format: u32,
     scope: String,
     snapshot: String,
-    fixtures: BTreeMap<String, String>,
+    compiler: Option<shards::BuildIdentity>,
+    fixtures: BTreeMap<String, FixtureCacheEntry>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct FixtureCacheEntry {
+    artifact: String,
+    snapshot: String,
 }
 
 impl VerificationCache {
-    fn empty(scope: &str, snapshot: &str) -> Self {
+    fn empty(scope: &str, snapshot: &str, compiler: Option<shards::BuildIdentity>) -> Self {
         Self {
             format: CACHE_FORMAT,
             scope: scope.into(),
             snapshot: snapshot.into(),
+            compiler,
             fixtures: BTreeMap::new(),
         }
     }
@@ -167,11 +275,12 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
     let mut fixtures: BTreeMap<String, PathBuf> = BTreeMap::new();
     let mut passed = BTreeSet::new();
     let mut executed_binaries = BTreeSet::new();
+    let mut mac_campaigns = BTreeMap::new();
     let mut simulation = None;
     let mut simulation_started = None;
     let mut timings = Timings::new();
     let mut cache = load_cache(root, scope, &snapshot)?;
-    let prepared = if recipe.starts_with("verify-shard-") || recipe == "verify-compose" {
+    let mut prepared = if recipe.starts_with("verify-shard-") || recipe == "verify-compose" {
         let prepared = shards::load(root, &snapshot)?;
         fixtures = shards::fixtures(root, &prepared)?;
         Some(prepared)
@@ -235,6 +344,9 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
             } else {
                 tests(root, &campaign.suite, &fixtures, budget)?;
             }
+            if recipe == "verify-mac" {
+                mac_campaigns.insert(campaign.suite.clone(), executed_binaries.clone());
+            }
             ensure_stable(root, recipe, &snapshot)?;
             let step = format!("test-{}", campaign.suite);
             ensure!(passed.insert(step.clone()), "duplicate verification effect");
@@ -255,6 +367,47 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
                 ensure!(parameters.is_empty(), "test build accepts no overrides");
                 shards::build(root, &snapshot)?;
                 "test-binaries".into()
+            }
+            "verify-mac-prepared" => {
+                ensure!(
+                    recipe == "verify-mac" && parameters.is_empty(),
+                    "closed native Mac preparation required"
+                );
+                prepared = Some(shards::mac::prepare(
+                    root,
+                    &snapshot,
+                    &fixtures,
+                    &passed,
+                    &timings.steps_ms,
+                )?);
+                return Ok(json!({}));
+            }
+            "verify-mac-native" => {
+                ensure!(
+                    recipe == "verify-mac" && parameters.is_empty(),
+                    "closed native Mac cases required"
+                );
+                shards::mac::focused(
+                    root,
+                    prepared.as_ref().context("Mac preparation required")?,
+                    &fixtures,
+                )?;
+                "test-mac-native".into()
+            }
+            "verify-mac-receipt" => {
+                ensure!(
+                    recipe == "verify-mac" && parameters.is_empty(),
+                    "closed native Mac receipt required"
+                );
+                ensure_stable(root, recipe, &snapshot)?;
+                shards::mac::finish(
+                    root,
+                    prepared.take().context("Mac preparation required")?,
+                    &passed,
+                    &timings.steps_ms,
+                    &mac_campaigns,
+                )?;
+                return Ok(json!({}));
             }
             "verify-test-docs" => {
                 ensure!(parameters.is_empty(), "doc tests accept no overrides");
@@ -360,26 +513,51 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
             "verify-build" => {
                 let fixture = value("fixture")?;
                 ensure!(!fixtures.contains_key(fixture), "duplicate fixture");
-                let cached = cache
+                let build = fixture_build(root, fixture, &fixtures)?;
+                let cached: Result<Option<PathBuf>> = cache
                     .fixtures
                     .get(fixture)
-                    .map_or(Ok(None), |artifact| cached_fixture(root, artifact));
+                    .filter(|entry| {
+                        cache.compiler.is_some()
+                            && reusable_fixture_snapshot(
+                                build.imports.is_some(),
+                                &entry.snapshot,
+                                &snapshot,
+                            )
+                    })
+                    .map_or(Ok(None), |entry| {
+                        let artifact = cached_fixture(root, &entry.artifact)?;
+                        if let Some(artifact) = &artifact {
+                            build_native::admit_cached_fixture(
+                                root,
+                                &build.app,
+                                build.overrides.as_deref(),
+                                build.imports.as_ref(),
+                                artifact,
+                            )?;
+                        }
+                        Ok(artifact)
+                    });
                 let artifact = match cached {
                     Ok(Some(artifact)) => {
                         println!("Reusing verified {fixture} fixture: {}", artifact.display());
                         artifact
                     }
-                    Ok(None) => build_fixture(root, fixture, &fixtures)?,
+                    Ok(None) => build.build(root)?,
                     Err(error) => {
                         eprintln!("Ignoring invalid cached {fixture} fixture: {error:#}");
-                        build_fixture(root, fixture, &fixtures)?
+                        build.build(root)?
                     }
                 };
                 let loaded = day2::artifact::LoadedArtifact::load(&artifact)
                     .context("verification fixture artifact admission")?;
-                cache
-                    .fixtures
-                    .insert(fixture.into(), loaded.id().to_owned());
+                cache.fixtures.insert(
+                    fixture.into(),
+                    FixtureCacheEntry {
+                        artifact: loaded.id().to_owned(),
+                        snapshot: snapshot.clone(),
+                    },
+                );
                 save_cache(root, &cache)?;
                 fixtures.insert(fixture.into(), artifact);
                 format!("build-{fixture}")
@@ -410,13 +588,56 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
     Ok(())
 }
 
+struct FixtureBuild {
+    app: PathBuf,
+    overrides: Option<PathBuf>,
+    imports: Option<BuildImportContext>,
+    _inputs: Option<tempfile::TempDir>,
+}
+
+impl FixtureBuild {
+    fn plain(root: &Path, app: &str) -> Result<Self> {
+        Ok(Self {
+            app: root.join(app),
+            overrides: None,
+            imports: None,
+            _inputs: None,
+        })
+    }
+
+    fn overlay(root: &Path, app: &str, overrides: &str) -> Result<Self> {
+        Ok(Self {
+            overrides: Some(root.join(overrides)),
+            ..Self::plain(root, app)?
+        })
+    }
+
+    fn build(&self, root: &Path) -> Result<PathBuf> {
+        build_recipe(
+            root,
+            &self.app,
+            self.overrides.as_deref(),
+            None,
+            self.imports.as_ref(),
+        )
+    }
+}
+
 fn build_fixture(
     root: &Path,
     fixture: &str,
     fixtures: &BTreeMap<String, PathBuf>,
 ) -> Result<PathBuf> {
+    fixture_build(root, fixture, fixtures)?.build(root)
+}
+
+fn fixture_build(
+    root: &Path,
+    fixture: &str,
+    fixtures: &BTreeMap<String, PathBuf>,
+) -> Result<FixtureBuild> {
     match fixture {
-        "app-ownership" => build(root, &root.join("examples/app-ownership")),
+        "app-ownership" => FixtureBuild::plain(root, "examples/app-ownership"),
         "notifications" => {
             let peer = fixtures
                 .get("app-ownership")
@@ -435,15 +656,14 @@ fn build_fixture(
                 &lock,
                 serde_json::to_vec(&catalog.pin(&["app_ownership.check".into()])?)?,
             )?;
-            build_recipe(
-                root,
-                &root.join("examples/notifications"),
-                None,
-                None,
-                Some(&BuildImportContext { instance, lock }),
-            )
+            Ok(FixtureBuild {
+                app: root.join("examples/notifications"),
+                overrides: None,
+                imports: Some(BuildImportContext { instance, lock }),
+                _inputs: Some(inputs),
+            })
         }
-        "stock-ledger" => build(root, &root.join("fixtures/stock-ledger")),
+        "stock-ledger" => FixtureBuild::plain(root, "fixtures/stock-ledger"),
         "request-desk" => {
             let peer = fixtures
                 .get("stock-ledger")
@@ -465,41 +685,39 @@ fn build_fixture(
                     "stock_ledger.reserve".into(),
                 ])?)?,
             )?;
-            build_recipe(
-                root,
-                &root.join("fixtures/request-desk"),
-                None,
-                None,
-                Some(&BuildImportContext { instance, lock }),
-            )
+            Ok(FixtureBuild {
+                app: root.join("fixtures/request-desk"),
+                overrides: None,
+                imports: Some(BuildImportContext { instance, lock }),
+                _inputs: Some(inputs),
+            })
         }
-        "reports" => build(root, &root.join("examples/reports")),
-        "reports-probe" => build_with_overrides(
+        "reports" => FixtureBuild::plain(root, "examples/reports"),
+        "reports-probe" => FixtureBuild::overlay(
             root,
-            &root.join("examples/reports"),
-            Some(&root.join("fixtures/command-target-adversaries")),
+            "examples/reports",
+            "fixtures/command-target-adversaries",
         ),
-        "http" => build_with_overrides(
+        "http" => FixtureBuild::overlay(
             root,
-            &root.join("fixtures/row-authority-web-conformance"),
-            Some(&root.join("fixtures/http-conformance")),
+            "fixtures/row-authority-web-conformance",
+            "fixtures/http-conformance",
         ),
-        "relational" => build(root, &root.join("fixtures/relational-conformance")),
-        "lifecycle" => build(root, &root.join("fixtures/lifecycle-conformance")),
-        "collection" => build(root, &root.join("fixtures/collection-conformance")),
+        "relational" => FixtureBuild::plain(root, "fixtures/relational-conformance"),
+        "lifecycle" => FixtureBuild::plain(root, "fixtures/lifecycle-conformance"),
+        "collection" => FixtureBuild::plain(root, "fixtures/collection-conformance"),
         "credential-metadata" => {
-            build(root, &root.join("fixtures/credential-metadata-conformance"))
+            FixtureBuild::plain(root, "fixtures/credential-metadata-conformance")
         }
-        "connection-declaration" => build(
+        "connection-declaration" => {
+            FixtureBuild::plain(root, "fixtures/connection-declaration-conformance")
+        }
+        "oauth-calendar" => FixtureBuild::plain(root, "fixtures/oauth-calendar-canary"),
+        "oauth-gitlab" => FixtureBuild::plain(root, "fixtures/oauth-gitlab-canary"),
+        "delegation-peer" => FixtureBuild::overlay(
             root,
-            &root.join("fixtures/connection-declaration-conformance"),
-        ),
-        "oauth-calendar" => build(root, &root.join("fixtures/oauth-calendar-canary")),
-        "oauth-gitlab" => build(root, &root.join("fixtures/oauth-gitlab-canary")),
-        "delegation-peer" => build_with_overrides(
-            root,
-            &root.join("fixtures/delegation-conformance"),
-            Some(&root.join("fixtures/delegation-peer")),
+            "fixtures/delegation-conformance",
+            "fixtures/delegation-peer",
         ),
         "delegation" => {
             let peer = fixtures
@@ -522,19 +740,29 @@ fn build_fixture(
                     &catalog.pin(&["peer_identity.who".into(), "peer_identity.record".into()])?,
                 )?,
             )?;
-            build_recipe(
-                root,
-                &root.join("fixtures/delegation-conformance"),
-                None,
-                None,
-                Some(&BuildImportContext { instance, lock }),
-            )
+            Ok(FixtureBuild {
+                app: root.join("fixtures/delegation-conformance"),
+                overrides: None,
+                imports: Some(BuildImportContext { instance, lock }),
+                _inputs: Some(inputs),
+            })
         }
-        "redirect" => build(root, &root.join("fixtures/redirect-conformance")),
-        "relational-next" => build_migration_fixture(root),
-        "owned" => build(root, &root.join("fixtures/row-authority-web-conformance")),
-        "repeated-field" => build(root, &root.join("fixtures/repeated-field-conformance")),
-        "owned-probe" => build_row_authority_adversaries(root),
+        "redirect" => FixtureBuild::plain(root, "fixtures/redirect-conformance"),
+        "relational-next" => FixtureBuild::overlay(
+            root,
+            "fixtures/relational-conformance",
+            "fixtures/migration-add-optional-text",
+        ),
+        "owned" => FixtureBuild::plain(root, "fixtures/row-authority-web-conformance"),
+        "repeated-field" => FixtureBuild::plain(root, "fixtures/repeated-field-conformance"),
+        "verification-actors" => {
+            FixtureBuild::plain(root, "fixtures/verification-actor-conformance")
+        }
+        "owned-probe" => FixtureBuild::overlay(
+            root,
+            "fixtures/row-authority-web-conformance",
+            "fixtures/row-authority-adversaries",
+        ),
         _ => bail!("unknown fixture"),
     }
 }
@@ -582,6 +810,7 @@ fn recipe_scope(recipe: &str) -> Result<&'static str> {
         | "verify-prepare"
         | "verify-prepare-join"
         | "verify-compose"
+        | "verify-mac"
         | "verify-prepare-part-inputs"
         | "verify-prepare-part-tests" => Ok("all"),
         shard
@@ -597,7 +826,38 @@ fn recipe_scope(recipe: &str) -> Result<&'static str> {
 }
 
 fn verification_snapshot(root: &Path, recipe: &str) -> Result<String> {
+    verification_snapshot_for(root, recipe, std::env::consts::OS, std::env::consts::ARCH)
+}
+
+fn verification_source_identity(root: &Path, recipe: &str) -> Result<String> {
+    Ok(digest(&serde_json::to_vec(&verification_sources(
+        root, recipe,
+    )?)?))
+}
+
+fn verification_snapshot_for(
+    root: &Path,
+    recipe: &str,
+    host: &str,
+    architecture: &str,
+) -> Result<String> {
+    Ok(digest(&serde_json::to_vec(&json!({
+        "recipe":recipe,
+        "host":host,
+        "architecture":architecture,
+        "sources":verification_sources(root, recipe)?,
+    }))?))
+}
+
+fn verification_sources(root: &Path, recipe: &str) -> Result<BTreeMap<String, String>> {
     let mut hashes = build_native::platform_sources(root)?;
+    for pin in [
+        ".github/workflows/ci.yml",
+        ".github/temporal.sha256",
+        ".github/temporal-linux.sha256",
+    ] {
+        hashes.insert(pin.into(), digest(&fs::read(root.join(pin))?));
+    }
     let mut sources = vec![
         ("sdk", root.join("sdk")),
         ("cli", root.join("cli")),
@@ -612,12 +872,7 @@ fn verification_snapshot(root: &Path, recipe: &str) -> Result<String> {
     for (label, directory) in sources {
         hash_verification_tree(&directory, &directory, label, &mut hashes)?;
     }
-    Ok(digest(&serde_json::to_vec(&json!({
-        "recipe":recipe,
-        "host":std::env::consts::OS,
-        "architecture":std::env::consts::ARCH,
-        "sources":hashes,
-    }))?))
+    Ok(hashes)
 }
 
 fn hash_verification_tree(
@@ -690,24 +945,106 @@ fn cache_path(root: &Path, scope: &str) -> PathBuf {
     root.join(format!("artifacts/{scope}-verification-cache.json"))
 }
 
+fn reusable_fixture_snapshot(imports: bool, retained: &str, current: &str) -> bool {
+    // Imported fixtures carry a selected peer's disposable verification oracle.
+    // Keep their original whole-snapshot requirement; unrelated standalone
+    // outputs are admitted independently through the ordinary source capture.
+    !imports || retained == current
+}
+
+fn fixture_compiler_sources(root: &Path) -> Result<BTreeMap<String, String>> {
+    let root = root.canonicalize()?;
+    let mut sources = build_native::platform_sources(&root)?;
+    let dependency_file = fs::read_to_string(root.join("target/debug/xtask.d"))?;
+    let dependencies = compiler_dependency_paths(&dependency_file)?;
+    ensure!(
+        dependencies.contains(&root.join("crates/xtask/src/main.rs"))
+            && dependencies.contains(&root.join("crates/day2/src/development.rs")),
+        "compiler dep-info does not close the fixture adapter"
+    );
+    let executable = std::env::current_exe()?.canonicalize()?;
+    ensure!(
+        executable == root.join("target/debug/xtask").canonicalize()?,
+        "ordinary fixture compiler adapter executable required"
+    );
+    sources.insert("compiler/xtask".into(), digest(&fs::read(executable)?));
+    for path in dependencies {
+        ensure!(path.is_absolute(), "absolute compiler dependency required");
+        if let Ok(relative) = path.strip_prefix(&root) {
+            let metadata = fs::symlink_metadata(&path)?;
+            ensure!(
+                metadata.is_file() && !metadata.file_type().is_symlink(),
+                "compiler dependency must be regular"
+            );
+            ensure!(
+                path.canonicalize()?.starts_with(&root),
+                "compiler dependency escaped workspace"
+            );
+            sources.insert(
+                format!("compiler-inputs/{}", relative.to_string_lossy()),
+                digest(&fs::read(path)?),
+            );
+        }
+    }
+    Ok(sources)
+}
+
+fn compiler_dependency_paths(contents: &str) -> Result<Vec<PathBuf>> {
+    // Cargo's normal unescaped single-line dep-info is authoritative for embedded
+    // non-Rust inputs too. Unsupported escaping disables reuse, never full builds.
+    let line = contents
+        .lines()
+        .next()
+        .context("compiler dep-info missing")?;
+    let (target, dependencies) = line
+        .split_once(": ")
+        .context("compiler dep-info target missing")?;
+    ensure!(
+        !line.contains(['\\', '\r']) && Path::new(target).is_absolute(),
+        "unsupported compiler dep-info encoding"
+    );
+    let paths: Vec<_> = dependencies.split_whitespace().map(PathBuf::from).collect();
+    ensure!(!paths.is_empty(), "compiler dep-info dependencies missing");
+    Ok(paths)
+}
+
+fn fixture_compiler_identity(root: &Path) -> Result<shards::BuildIdentity> {
+    let sources = fixture_compiler_sources(root)?;
+    shards::build_identity(root, &digest(&serde_json::to_vec(&sources)?))
+}
+
 fn load_cache(root: &Path, scope: &str, snapshot: &str) -> Result<VerificationCache> {
+    let compiler = match fixture_compiler_identity(root) {
+        Ok(identity) => Some(identity),
+        Err(error) => {
+            eprintln!(
+                "Fixture output reuse unavailable; ordinary builds remain selected: {error:#}"
+            );
+            None
+        }
+    };
     let path = cache_path(root, scope);
     let Ok(bytes) = fs::read(&path) else {
-        return Ok(VerificationCache::empty(scope, snapshot));
+        return Ok(VerificationCache::empty(scope, snapshot, compiler));
     };
-    let cache: VerificationCache = match day2::json::decode(&bytes) {
+    let mut cache: VerificationCache = match day2::json::decode(&bytes) {
         Ok(cache) => cache,
         Err(error) => {
             eprintln!(
                 "Ignoring invalid verification cache {}: {error:#}",
                 path.display()
             );
-            return Ok(VerificationCache::empty(scope, snapshot));
+            return Ok(VerificationCache::empty(scope, snapshot, compiler));
         }
     };
-    if cache.format != CACHE_FORMAT || cache.scope != scope || cache.snapshot != snapshot {
-        return Ok(VerificationCache::empty(scope, snapshot));
+    if cache.format != CACHE_FORMAT
+        || cache.scope != scope
+        || compiler.is_none()
+        || cache.compiler != compiler
+    {
+        return Ok(VerificationCache::empty(scope, snapshot, compiler));
     }
+    cache.snapshot = snapshot.into();
     Ok(cache)
 }
 
@@ -722,6 +1059,14 @@ fn save_cache(root: &Path, cache: &VerificationCache) -> Result<()> {
 }
 
 fn cached_fixture(root: &Path, artifact: &str) -> Result<Option<PathBuf>> {
+    ensure!(
+        artifact.len() == 71
+            && artifact.starts_with("sha256:")
+            && artifact[7..]
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "cached artifact must be a canonical SHA-256 identity"
+    );
     let directory = root
         .join("artifacts")
         .join(artifact.trim_start_matches("sha256:"));
@@ -793,27 +1138,17 @@ fn test_command(suite: &str) -> Result<Command> {
     // Each crate links its integration tests into one binary. A module filter
     // after `--` selects the tests of what used to be a separate test target.
     let (arguments, modules): (&[&str], &[&str]) = match suite {
-        "libraries" => (
-            &["--workspace", "--exclude", "day2-roc-worker", "--lib"],
-            &[],
-        ),
+        "libraries" => (&["--workspace", "--lib"], &[]),
         // The compile-fail checks drive the Roc compiler for about a minute;
         // workspace-runtime and libraries keep them in the full gates.
         "fast-libraries" => (
-            &[
-                "--workspace",
-                "--exclude",
-                "day2-roc-worker",
-                "--exclude",
-                "day2-cli-checks",
-                "--lib",
-            ],
+            &["--workspace", "--exclude", "day2-cli-checks", "--lib"],
             &[],
         ),
         "linux-sandbox" => (&["-p", "day2-sandbox", "--test", "isolation"], &[]),
         "linux-worker" => (
             &["-p", "day2", "--test", "day2_integration"],
-            &["linux_worker::"],
+            &["linux_worker::", "property_worker::"],
         ),
         "linux-delegation" => (
             &["-p", "day2-control", "--test", "control_integration"],
@@ -851,6 +1186,7 @@ fn test_command(suite: &str) -> Result<Command> {
                 "authority::",
                 "instance_capabilities::",
                 "linux_worker::",
+                "property_worker::",
                 "numeric::",
                 "output_schema::",
                 "page_sdk::",
@@ -1035,6 +1371,26 @@ fn configure_tests(
             command.args(["--skip", test]);
         }
     }
+    if !fixtures.contains_key("oauth-calendar") {
+        command.args([
+            "--skip",
+            "oauth::usage::tests::compiled_calendar_runtime_uses_real_custody_and_fences_dispatch_and_completion",
+        ]);
+        command.args([
+            "--skip",
+            "oauth::usage::refresh_tests::compiled_calendar_refresh_publishes_versions_and_fences_failure_recovery",
+        ]);
+        command.args([
+            "--skip",
+            "oauth::usage::refresh_tests::compiled_refresh_crash_recovery_uses_sealed_dispatch_and_publication",
+        ]);
+    }
+    if !fixtures.contains_key("verification-actors") {
+        command.args([
+            "--skip",
+            "app_contract::admitted_failure_principals_are_atomic_replayable_and_simulation_only",
+        ]);
+    }
     if !fixtures.contains_key("oauth-calendar") && fixtures.contains_key("credential-metadata") {
         command.args([
             "--skip",
@@ -1070,6 +1426,10 @@ fn configure_tests(
         ("owned", "DAY2_TEST_OWNED_ARTIFACT"),
         ("owned-probe", "DAY2_TEST_OWNED_PROBE_ARTIFACT"),
         ("repeated-field", "DAY2_TEST_REPEATED_FIELD_ARTIFACT"),
+        (
+            "verification-actors",
+            "DAY2_TEST_VERIFICATION_ACTORS_ARTIFACT",
+        ),
     ] {
         command.env_remove(variable);
         if let Some(path) = fixtures.get(fixture) {
@@ -1085,57 +1445,7 @@ fn configure_tests(
 /// Production worker lookup and confinement are unchanged.
 #[cfg(target_os = "linux")]
 fn prepare_linux_test_installation(root: &Path) -> Result<()> {
-    let output = Command::new("cargo")
-        .args([
-            "build",
-            "--locked",
-            "-p",
-            "day2-sandbox",
-            "--bins",
-            "--message-format=json",
-        ])
-        .current_dir(root)
-        .stderr(std::process::Stdio::inherit())
-        .output()?;
-    ensure!(output.status.success(), "build Linux test launchers");
-    let mut installed = BTreeSet::new();
-    for line in output.stdout.split(|byte| *byte == b'\n') {
-        if line.is_empty() {
-            continue;
-        }
-        let artifact: serde_json::Value = serde_json::from_slice(line)?;
-        if artifact["reason"] != "compiler-artifact" {
-            continue;
-        }
-        let Some(name @ ("day2-sandbox" | "day2-sandbox-probe")) =
-            artifact["target"]["name"].as_str()
-        else {
-            continue;
-        };
-        let executable = Path::new(
-            artifact["executable"]
-                .as_str()
-                .context("Linux test launcher executable missing")?,
-        );
-        let directory = executable
-            .parent()
-            .context("Linux test launcher directory")?
-            .join("deps");
-        ensure!(
-            fs::symlink_metadata(&directory)?.file_type().is_dir(),
-            "regular Cargo test directory required"
-        );
-        install_cli_file(executable, directory.join(name))?;
-        ensure!(
-            installed.insert(name.to_owned()),
-            "duplicate Linux test launcher"
-        );
-    }
-    ensure!(
-        installed.len() == 2,
-        "complete Linux test installation required"
-    );
-    Ok(())
+    shards::prepare_linux_installation(root)
 }
 
 fn receipt(
@@ -1176,6 +1486,7 @@ fn receipt(
         let reports = artifact("reports")?;
         let reports_probe = artifact("reports-probe")?;
         let repeated_field = artifact("repeated-field")?;
+        let verification_actors = artifact("verification-actors")?;
         let artifact_id =
             |path: &Path| format!("sha256:{}", path.file_name().unwrap().to_string_lossy());
         let mut report = serde_json::json!({
@@ -1226,6 +1537,10 @@ fn receipt(
         report.insert(
             "repeated_field".into(),
             serde_json::Value::String(artifact_id(&repeated_field)),
+        );
+        report.insert(
+            "verification_actors".into(),
+            serde_json::Value::String(artifact_id(&verification_actors)),
         );
         report.insert(
             "input_snapshot".into(),
@@ -1316,6 +1631,7 @@ fn required_steps(scope: &str) -> Result<&'static [&'static str]> {
             "build-redirect",
             "build-relational",
             "build-lifecycle",
+            "build-verification-actors",
             "build-collection",
             "build-relational-next",
             "test-isolated-build",
@@ -1328,6 +1644,87 @@ fn required_steps(scope: &str) -> Result<&'static [&'static str]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ui_dependency_pin_changes_native_host_snapshots_and_missing_pin_is_refused() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path();
+        for name in [
+            "Cargo.toml",
+            "Cargo.lock",
+            "architecture-rules.json",
+            "architecture-boundaries.json",
+            "architecture-proofs.json",
+            "architecture/clippy.toml",
+            "rust-toolchain.toml",
+            "toolchain.json",
+            ".dockerignore",
+            "build-dependencies/clanker-ui.json",
+            ".github/workflows/ci.yml",
+            ".github/temporal.sha256",
+            ".github/temporal-linux.sha256",
+        ] {
+            let path = root.join(name);
+            fs::create_dir_all(path.parent().context("snapshot fixture parent")?)?;
+            fs::write(path, b"approved input")?;
+        }
+        for name in [
+            "crates",
+            "tools",
+            "vendor",
+            "assets",
+            "ops",
+            "infra",
+            "deploy",
+            "toolchains",
+            "sdk",
+            "cli",
+            "fixtures",
+            "examples/app-ownership",
+            "examples/notifications",
+            "examples/reports",
+        ] {
+            fs::create_dir_all(root.join(name))?;
+        }
+        let pin = root.join("build-dependencies/clanker-ui.json");
+        let snapshots = || -> Result<Vec<String>> {
+            [("linux", "x86_64"), ("macos", "aarch64")]
+                .into_iter()
+                .map(|(host, architecture)| {
+                    verification_snapshot_for(root, "verify", host, architecture)
+                })
+                .collect()
+        };
+        let approved = snapshots()?;
+        fs::write(&pin, b"changed dependency pin")?;
+        let changed = snapshots()?;
+        assert!(
+            approved
+                .iter()
+                .zip(changed)
+                .all(|(before, after)| *before != after)
+        );
+        fs::remove_file(&pin)?;
+        assert!(snapshots().is_err());
+        fs::write(&pin, b"approved input")?;
+        assert_eq!(approved, snapshots()?);
+        Ok(())
+    }
+
+    #[test]
+    fn linux_context_requires_private_finite_native_compiler_limits() -> Result<()> {
+        validate_linux_context("0::/\n", "6442450944\n")?;
+        for (group, memory) in [
+            ("0::/host/job", "6442450944"),
+            ("0::/", "max"),
+            ("0::/", "0"),
+            ("0::/", "6442450945"),
+            ("0::/", "-1"),
+        ] {
+            assert!(validate_linux_context(group, memory).is_err());
+        }
+        Ok(())
+    }
 
     #[test]
     fn full_gate_filters_keep_the_same_cargo_package_and_target_graph() -> Result<()> {
@@ -1445,6 +1842,7 @@ mod tests {
             "build-redirect",
             "build-relational",
             "build-lifecycle",
+            "build-verification-actors",
             "build-collection",
             "build-relational-next",
             "build-http",
@@ -1517,7 +1915,8 @@ mod tests {
     }
 
     #[test]
-    fn full_receipt_requires_and_pins_lifecycle_and_redirect_artifacts() -> Result<()> {
+    fn full_receipt_requires_and_pins_lifecycle_redirect_and_verification_actor_artifacts()
+    -> Result<()> {
         let directory = tempfile::tempdir()?;
         fs::create_dir_all(directory.path().join("artifacts"))?;
         let required = required_steps("all")?;
@@ -1532,10 +1931,15 @@ mod tests {
             .collect();
         let redirect = "d".repeat(64);
         let lifecycle = "e".repeat(64);
+        let verification_actors = "f".repeat(64);
         fixtures.insert("redirect".into(), PathBuf::from(&redirect));
         fixtures.insert("lifecycle".into(), PathBuf::from(&lifecycle));
+        fixtures.insert(
+            "verification-actors".into(),
+            PathBuf::from(&verification_actors),
+        );
         let path = directory.path().join("artifacts/verification.json");
-        for name in ["redirect", "lifecycle"] {
+        for name in ["redirect", "lifecycle", "verification-actors"] {
             let mut missing = fixtures.clone();
             missing.remove(name);
             let error = receipt(
@@ -1566,6 +1970,10 @@ mod tests {
         let report: serde_json::Value = serde_json::from_slice(&fs::read(path)?)?;
         assert_eq!(report["redirect"], format!("sha256:{redirect}"));
         assert_eq!(report["lifecycle"], format!("sha256:{lifecycle}"));
+        assert_eq!(
+            report["verification_actors"],
+            format!("sha256:{verification_actors}")
+        );
         Ok(())
     }
 
@@ -1601,6 +2009,56 @@ mod tests {
         assert_eq!(report["input_snapshot"], "snapshot");
         assert_eq!(report["timings_ms"]["total"], 66);
         assert_eq!(report["timings_ms"]["steps"]["lint"], 22);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod fixture_cache_tests {
+    use super::*;
+
+    #[test]
+    fn imported_fixture_oracles_keep_whole_snapshot_admission() {
+        assert!(reusable_fixture_snapshot(false, "old", "current"));
+        assert!(reusable_fixture_snapshot(true, "current", "current"));
+        assert!(!reusable_fixture_snapshot(true, "old", "current"));
+    }
+
+    #[test]
+    fn compiler_dep_info_preserves_embedded_fixture_inputs_and_rejects_unknown_encoding()
+    -> Result<()> {
+        let paths = compiler_dependency_paths(
+            "/work/platform/target/debug/xtask: /work/platform/crates/xtask/src/main.rs /work/platform/fixtures/authority-policies/reports.json\n",
+        )?;
+        assert!(paths.contains(&PathBuf::from(
+            "/work/platform/fixtures/authority-policies/reports.json"
+        )));
+        for contents in [
+            "",
+            "missing target",
+            "/xtask: ",
+            "relative: /input",
+            "/xtask: /escaped\\ input",
+            "/xtask: /first \\\n/second",
+        ] {
+            assert!(compiler_dependency_paths(contents).is_err(), "{contents:?}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn cache_artifact_identity_cannot_select_paths_or_noncanonical_digests() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        for artifact in [
+            "../worker",
+            "sha256:../worker",
+            "sha256:abc",
+            "worker",
+            "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        ] {
+            assert!(cached_fixture(root.path(), artifact).is_err());
+        }
+        assert!(cached_fixture(root.path(), &digest(b"missing artifact"))?.is_none());
         Ok(())
     }
 }

@@ -568,7 +568,7 @@ mod tests {
                 .collect(),
         };
         let source: crate::artifact::Artifact = serde_json::from_value(json!({
-            "format":12,"roc_version":"test","worker_digest":"test",
+            "format":12,"verification_limits":crate::artifact::VerificationLimits::QUALIFIED,"roc_version":"test","worker_digest":"test",
             "schema_digest":schema.hash()?, "schema":schema,"identities":registry,
             "operations":[],"sources":{},"admission":"local-spike-only"
         }))?;
@@ -873,7 +873,7 @@ mod tests {
                         format,
                         identities: &crate::identity::Registry|
          -> Result<crate::artifact::Artifact> {
-            let value = json!({"format":format,"roc_version":"test","worker_digest":"test", "schema_digest":schema.hash()?,
+            let value = json!({"format":format,"verification_limits":crate::artifact::VerificationLimits::QUALIFIED,"roc_version":"test","worker_digest":"test", "schema_digest":schema.hash()?,
                 "schema":schema,"identities":identities,"operations":[],"sources":{},"admission":"local-spike-only"});
             Ok(serde_json::from_value(value)?)
         };
@@ -1071,7 +1071,7 @@ mod tests {
         ];
         let artifact = |schema: &crate::schema::Schema| -> Result<crate::artifact::Artifact> {
             Ok(serde_json::from_value(
-                json!({"format":10,"roc_version":"test","worker_digest":"test",
+                json!({"format":10,"verification_limits":crate::artifact::VerificationLimits::QUALIFIED,"roc_version":"test","worker_digest":"test",
                 "schema_digest":schema.hash()?, "schema":schema,"operations":[],"sources":{},"admission":"local-spike-only"}),
             )?)
         };

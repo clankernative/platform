@@ -191,9 +191,13 @@ impl ArtifactShellSigner {
         selected: QualifiedConnections,
         tokens: Arc<dyn AccessTokenSource>,
     ) -> Result<Self> {
-        let keys = Self::keys(&selected, tokens)?;
+        let keys = Self::keys(&selected, tokens.clone())?;
         Ok(Self {
-            state: RwLock::new(AuthorityState { selected, keys }),
+            state: RwLock::new(AuthorityState {
+                selected,
+                keys,
+                tokens: Some(tokens),
+            }),
         })
     }
 
@@ -218,12 +222,16 @@ impl ArtifactShellSigner {
         selected: QualifiedConnections,
         tokens: Arc<dyn AccessTokenSource>,
     ) -> Result<()> {
-        let keys = Self::keys(&selected, tokens)?;
+        let keys = Self::keys(&selected, tokens.clone())?;
         *self
             .state
             .write()
             .map_err(|_| anyhow::anyhow!("OAuth shell selection lock poisoned"))? =
-            AuthorityState { selected, keys };
+            AuthorityState {
+                selected,
+                keys,
+                tokens: Some(tokens),
+            };
         Ok(())
     }
 
@@ -1033,6 +1041,7 @@ pub(crate) mod live;
 struct AuthorityState {
     selected: QualifiedConnections,
     keys: Option<Arc<dyn ApprovalKeyProvider>>,
+    tokens: Option<Arc<dyn AccessTokenSource>>,
 }
 
 pub(crate) struct ArtifactApprovalAuthority {
@@ -1046,9 +1055,13 @@ impl ArtifactApprovalAuthority {
         readiness: Arc<dyn OutboundReadiness>,
         tokens: Arc<dyn AccessTokenSource>,
     ) -> Result<Self> {
-        let keys = Self::gcp_keys(&selected, tokens)?;
+        let keys = Self::gcp_keys(&selected, tokens.clone())?;
         Ok(Self {
-            state: RwLock::new(AuthorityState { selected, keys }),
+            state: RwLock::new(AuthorityState {
+                selected,
+                keys,
+                tokens: Some(tokens),
+            }),
             readiness,
         })
     }
@@ -1063,6 +1076,7 @@ impl ArtifactApprovalAuthority {
             state: RwLock::new(AuthorityState {
                 selected,
                 keys: Some(keys),
+                tokens: None,
             }),
             readiness,
         }
@@ -1086,12 +1100,15 @@ impl ArtifactApprovalAuthority {
         selected: QualifiedConnections,
         tokens: Arc<dyn AccessTokenSource>,
     ) -> Result<()> {
-        let keys = Self::gcp_keys(&selected, tokens)?;
+        let keys = Self::gcp_keys(&selected, tokens.clone())?;
         *self
             .state
             .write()
-            .map_err(|_| anyhow::anyhow!("OAuth selection lock poisoned"))? =
-            AuthorityState { selected, keys };
+            .map_err(|_| anyhow::anyhow!("OAuth selection lock poisoned"))? = AuthorityState {
+            selected,
+            keys,
+            tokens: Some(tokens),
+        };
         Ok(())
     }
 
@@ -1287,6 +1304,275 @@ impl ApprovalAuthority for ArtifactApprovalAuthority {
             return Ok(false);
         };
         commit(terms)
+    }
+}
+
+impl ArtifactApprovalAuthority {
+    fn use_selection(
+        &self,
+        state: &AuthorityState,
+        app: &str,
+        registration: &str,
+        owner: &str,
+        now: i64,
+    ) -> Result<Option<super::usage::Selection>> {
+        let selected = &state.selected;
+        if let Some(runtime) = &selected.instance.oauth_runtime {
+            ensure!(
+                self.readiness.selected_runtime()? == Some(Digest::of(runtime)?),
+                "OAuth live runtime selection changed"
+            );
+        }
+        let Some(candidate) = selected
+            .entries
+            .get(&(app.to_owned(), registration.to_owned()))
+        else {
+            return Ok(None);
+        };
+        ensure!(
+            candidate.requirement.owner == day2_capabilities::oauth::ConnectionOwner::CurrentHuman,
+            "product use requires a current-human connection"
+        );
+        let slot = ConnectionSlotKey {
+            installation: candidate.binding.namespace.installation.clone(),
+            environment: candidate.binding.namespace.environment.clone(),
+            app: candidate.binding.namespace.app.clone(),
+            requirement: candidate.requirement.logical_id.clone(),
+            owner: SlotOwner::Human {
+                subject: owner.to_owned(),
+            },
+        };
+        let Some(instance) = self.readiness.current(&candidate.binding, &slot, now)? else {
+            return Ok(None);
+        };
+        let (account, policy, observed_owner) = match &instance.account {
+            profiles::AccountBindingEvidence::MappedHuman { mapping, owner, .. } => {
+                (mapping, AccountBindingPolicy::MappedHuman, owner)
+            }
+            profiles::AccountBindingEvidence::ExplicitExternal {
+                approval, owner, ..
+            } => (
+                approval,
+                AccountBindingPolicy::ExplicitExternalAccount,
+                owner,
+            ),
+            profiles::AccountBindingEvidence::Installation { .. } => {
+                anyhow::bail!("human connection returned installation account evidence")
+            }
+        };
+        ensure!(
+            instance.instance == instance_identity(&selected.instance)?
+                && instance.binding_namespace == binding_namespace(&candidate.binding)?
+                && instance.registration.registration == candidate.binding.registration
+                && candidate
+                    .client_credential
+                    .as_ref()
+                    .is_none_or(|credential| *credential == instance.registration.client_credential)
+                && instance.shell.origin == candidate.binding.security_shell
+                && instance.custody == candidate.binding.custody
+                && instance.product_return == candidate.binding.product_return
+                && *account == candidate.binding.account_binding
+                && policy == candidate.requirement.account_policy
+                && observed_owner == owner,
+            "OAuth product readiness differs from selected binding"
+        );
+        Ok(Some(super::usage::Selection {
+            requirement: candidate.requirement.clone(),
+            permission: candidate.permission.clone(),
+            reviewed: candidate.reviewed.clone(),
+            binding: candidate.binding.clone(),
+            instance,
+            slot: slot.id(&candidate.requirement)?,
+        }))
+    }
+}
+
+impl super::usage::Authority for ArtifactApprovalAuthority {
+    fn with_current(
+        &self,
+        app: &str,
+        registration: &str,
+        owner: &str,
+        now: i64,
+        commit: &mut dyn FnMut(&super::usage::Selection) -> Result<bool>,
+    ) -> Result<bool> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| anyhow::anyhow!("OAuth selection lock poisoned"))?;
+        let Some(selection) = self.use_selection(&state, app, registration, owner, now)? else {
+            return Ok(false);
+        };
+        // Selection replacement cannot race the local dispatch/publication CAS.
+        commit(&selection)
+    }
+
+    fn refresh_client(
+        &self,
+        app: &str,
+        registration: &str,
+        owner: &str,
+        expected: &Digest,
+        now: i64,
+    ) -> Result<Option<super::refresh::ClientCredential>> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| anyhow::anyhow!("OAuth selection lock poisoned"))?;
+        let Some(selection) = self.use_selection(&state, app, registration, owner, now)? else {
+            return Ok(None);
+        };
+        ensure!(
+            selection.identity()? == *expected,
+            "OAuth refresh client selection changed"
+        );
+        let instance = &state.selected.instance;
+        let selected = &state.selected.entries[&(app.to_owned(), registration.to_owned())];
+        let client = instance
+            .oauth_clients
+            .as_ref()
+            .context("OAuth clients missing")?
+            .registrations
+            .get(&selected.binding.registration.id)
+            .context("OAuth refresh client missing")?
+            .client();
+        ensure!(
+            matches!(
+                client,
+                day2_capabilities::oauth::ProviderClient::Google { .. }
+            ),
+            "OAuth product refresh adapter unavailable"
+        );
+        let control = instance
+            .control
+            .as_ref()
+            .context("OAuth secret catalog missing")?;
+        let version = gcp_version(
+            control
+                .secrets
+                .get(client.credential())
+                .context("OAuth refresh secret missing")?,
+        );
+        let reference = super::clients::provider_credential_reference(
+            &instance_identity(instance)?,
+            &client,
+            &version,
+        )?;
+        ensure!(
+            reference == selection.instance.registration.client_credential,
+            "OAuth refresh credential differs from current registration"
+        );
+        let reader = super::approval_keys::GcpSecretReader::new(
+            state
+                .tokens
+                .as_ref()
+                .context("OAuth refresh secret transport missing")?
+                .clone(),
+        )?;
+        let mut bytes = reader.load(&version)?;
+        let secret = std::str::from_utf8(&bytes)
+            .map(str::to_owned)
+            .map_err(|_| anyhow::anyhow!("invalid OAuth client credential"));
+        bytes.fill(0);
+        let secret = secret?;
+        let at = super::effects::wall_time()?;
+        if at < now {
+            return Err(super::refresh::ClockRefusal.into());
+        }
+        let current = self.use_selection(&state, app, registration, owner, at);
+        let completed_at = super::effects::wall_time()?;
+        if completed_at < at {
+            return Err(super::refresh::ClockRefusal.into());
+        }
+        let Some(current) = current? else {
+            return Ok(None);
+        };
+        ensure!(
+            current.identity()? == *expected,
+            "OAuth refresh readiness changed during secret retrieval"
+        );
+        Ok(Some(super::refresh::ClientCredential::new(
+            client.client_id().to_owned(),
+            secret,
+            reference,
+            completed_at,
+        )?))
+    }
+
+    fn current(
+        &self,
+        app: &str,
+        registration: &str,
+        owner: &str,
+        now: i64,
+    ) -> Result<Option<super::usage::Selection>> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| anyhow::anyhow!("OAuth selection lock poisoned"))?;
+        self.use_selection(&state, app, registration, owner, now)
+    }
+
+    fn custody(
+        &self,
+        app: &str,
+        registration: &str,
+        owner: &str,
+        expected: &Digest,
+        now: i64,
+    ) -> Result<Option<crate::managed_credentials::crypto::KeyLease>> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| anyhow::anyhow!("OAuth selection lock poisoned"))?;
+        let started = super::effects::Instant::now();
+        let Some(selection) = self.use_selection(&state, app, registration, owner, now)? else {
+            return Ok(None);
+        };
+        ensure!(
+            selection.identity()? == *expected,
+            "OAuth prepared use selection changed"
+        );
+        let candidate = &state.selected.entries[&(app.to_owned(), registration.to_owned())];
+        let keys = state
+            .keys
+            .as_ref()
+            .context("OAuth custody key provider missing")?;
+        let load = |reference: &ApprovalKeyRef, purpose| -> Result<[u8; 32]> {
+            let key = keys.load(reference, purpose)?;
+            ensure!(
+                key.binding == reference.binding
+                    && key.version == reference.version
+                    && key.purpose == purpose,
+                "OAuth custody key identity mismatch"
+            );
+            Ok(key.bytes)
+        };
+        let verifier = load(
+            &candidate.custody_verifier,
+            ApprovalKeyPurpose::CustodyVerifier,
+        )?;
+        let encryption = load(
+            &candidate.custody_encryption,
+            ApprovalKeyPurpose::CustodyEncryption,
+        )?;
+        let key = crate::managed_credentials::crypto::KeyLease::new(
+            &verifier,
+            &encryption,
+            candidate.custody_verifier.version.clone(),
+            candidate.custody_encryption.version.clone(),
+        )?;
+        let at = now
+            .checked_add(i64::try_from(started.elapsed().as_secs())?)
+            .context("OAuth use clock overflow")?;
+        let Some(current) = self.use_selection(&state, app, registration, owner, at)? else {
+            return Ok(None);
+        };
+        ensure!(
+            current.identity()? == *expected,
+            "OAuth product readiness changed during key retrieval"
+        );
+        Ok(Some(key))
     }
 }
 
@@ -1518,12 +1804,17 @@ pub(super) mod tests {
                     AND token_version=1 AND security_epoch=1 AND profile=?2 AND account=?3 AND affinity=?4 AND status='active'",
                     rusqlite::params![self.slot,intent.profile,self.expected_account.as_str(),affinity.as_str()],|row| row.get(0))?;
                 ensure!(exact == 1, "replay wrong OAuth slot/affinity/owner link");
+                let material_reference = Digest::of(&(
+                    "oauth-private-token-material-v2",
+                    &self.exchange.token_slot_ref,
+                    1i64,
+                ))?;
                 let (identity, key, nonce, ciphertext): (String, String, Vec<u8>, Vec<u8>) = db
                     .query_row(
                     "SELECT identity_digest,key_version,nonce,ciphertext FROM oauth_private_tokens
                      WHERE reference=?1 AND slot=?2 AND generation=1 AND account=?3",
                     rusqlite::params![
-                        self.exchange.token_slot_ref,
+                        material_reference.as_str(),
                         self.slot,
                         self.expected_account.as_str()
                     ],
@@ -1543,6 +1834,8 @@ pub(super) mod tests {
                     callback: &'a ProviderCallbackRef,
                     custody: &'a BindingRef,
                     account: Option<&'a str>,
+                    reference: &'a str,
+                    token_version: Option<i64>,
                 }
                 let expected = TokenIdentity {
                     purpose: "ConnectionTokens",
@@ -1555,6 +1848,8 @@ pub(super) mod tests {
                     callback: &self.exchange.callback,
                     custody: &self.exchange.custody,
                     account: Some(self.expected_account.as_str()),
+                    reference: material_reference.as_str(),
+                    token_version: Some(1),
                 };
                 ensure!(
                     identity
@@ -1571,7 +1866,8 @@ pub(super) mod tests {
                 plaintext.fill(0);
                 ensure!(
                     token
-                        == json!({"access_token":"private-replay-provider-token","refresh_token":"private-replay-provider-refresh-token","expires_in":3600}),
+                        == json!({"access_token":"private-replay-provider-token","refresh_token":"private-replay-provider-refresh-token",
+                            "issued_at":999,"expires_at":4599}),
                     "replay published wrong original provider token"
                 );
             }
@@ -1781,6 +2077,7 @@ pub(super) mod tests {
             state: RwLock::new(AuthorityState {
                 selected: facts.qualify()?,
                 keys: Some(shell_keys),
+                tokens: None,
             }),
         });
         let registry = Arc::new(
@@ -2907,7 +3204,8 @@ pub(super) mod tests {
             "app@company-tools.iam.gserviceaccount.com",
         )?;
         let mut artifact: Artifact = serde_json::from_value(json!({
-            "format":14,"namespace":"workspace","roc_version":"test","worker_digest":"test","schema_digest":"test",
+            "format":crate::artifact::CURRENT_FORMAT,"verification_limits":crate::artifact::VerificationLimits::QUALIFIED,
+            "namespace":"workspace","roc_version":"test","worker_digest":"test","schema_digest":"test",
             "sources":{},"admission":"local-spike-only","schema":{"models":{},"inputs":{},"foreign_keys":[]},
             "operations":[],"declarations":{"commands":{},"queries":{},"connections":{"calendar":"current_human"}}
         }))?;
@@ -3667,6 +3965,7 @@ pub(super) mod tests {
                 state: RwLock::new(AuthorityState {
                     selected,
                     keys: Some(keys.clone()),
+                    tokens: None,
                 }),
             };
             let session = Digest::of(&"fresh shell session")?;
@@ -3794,6 +4093,7 @@ pub(super) mod tests {
                 state: RwLock::new(AuthorityState {
                     selected: expiry_selected,
                     keys: Some(delayed.clone()),
+                    tokens: None,
                 }),
             };
             assert!(expiring.attest(&original_view, &fresh, 6).is_err());

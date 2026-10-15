@@ -20,7 +20,7 @@ ChartErrors :: [].{
 		verification: |_| Api.failed_command(
 			Commands.update_sample,
 			|snapshot, _seed| {
-				state = Data.snapshot(snapshot)?
+				state = Data.verification_snapshot(snapshot)?.live
 				row = state.chart_samples.first().map_err(|_| "seed a sample before verifying sample edits")?
 				expected = RowVersion.from_u64(row.version.to_u64() + 1).map_err(|_| "invalid expected version")?
 				Ok({

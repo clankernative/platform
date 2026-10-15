@@ -93,7 +93,7 @@ UpdateSample :: [].{
 
 	verify_input : Str, U64 -> Try(UpdateSampleTypes.Input, Str)
 	verify_input = |snapshot, _seed| {
-		state = Data.snapshot(snapshot)?
+		state = Data.verification_snapshot(snapshot)?.live
 		row = state.chart_samples.first().map_err(|_| "sample update verification requires seeded data")?
 		Ok({
 			sample_time: row.value.time,
@@ -105,8 +105,8 @@ UpdateSample :: [].{
 
 	verify_result : Str, UpdateSampleTypes.Output, Str -> Try(Bool, Str)
 	verify_result = |before, saved, after| {
-		old = Data.snapshot(before)?
-		next = Data.snapshot(after)?
+		old = Data.verification_snapshot(before)?.live
+		next = Data.verification_snapshot(after)?.live
 		original = old.chart_samples.find_first(|row| row.value.time == saved.time)
 			.map_err(|_| "sample missing before update")?
 		updated = next.chart_samples.find_first(|row| row.value.time == saved.time)

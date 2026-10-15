@@ -118,6 +118,7 @@ impl Pair {
             runtimes: BTreeMap::new(),
             secrets: BTreeMap::new(),
             security_epochs: BTreeMap::new(),
+            security_bootstraps: BTreeMap::new(),
         });
         fs::write(&path, serde_json::to_vec(&instance)?)?;
         self.caller = Runtime::load(&path, "caller")?;

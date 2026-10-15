@@ -1,10 +1,12 @@
 import Capability
 import Simulation
+import UiDependency
 
 # Platform regression policy, shared by xtask and operator CLI commands.
 Verify :: [].{
 	cli! : (Str => Try(Str, Str)) => Try(Str, Str)
 	cli! = |host!| {
+		_ = UiDependency.install!(host!)?
 		_ = Capability.call!("cli-native", "{}", host!)?
 		for operation in ["check", "test", "build"] {
 			_ = Capability.call!("cli-roc", Json.to_str({ operation: operation }), host!)?
@@ -58,6 +60,7 @@ Verify :: [].{
 			"redirect",
 			"relational",
 			"lifecycle",
+			"verification-actors",
 			"relational-next",
 			"collection",
 			"owned",
@@ -137,6 +140,27 @@ Verify :: [].{
 			_ => Err("unknown verification shard")
 		}?
 		Capability.call!("verify-shard-receipt", Json.to_str({ shard: shard }), host!)
+	}
+
+	# Only native Mac obligations stay here. Portable workspace campaigns run on Linux.
+	mac! : (Str => Try(Str, Str)) => Try(Str, Str)
+	mac! = |host!| {
+		_ = Capability.call!("verify-cli", "{}", host!)?
+		for fixture in ["reports", "reports-probe", "relational", "oauth-calendar"] {
+			_ = Capability.call!("verify-build", Json.to_str({ fixture: fixture }), host!)?
+		}
+		_ = Capability.call!("verify-test-build", "{}", host!)?
+		_ = Capability.call!("verify-mac-prepared", "{}", host!)?
+		_ = Capability.call!("verify-mac-native", "{}", host!)?
+		for suite in ["isolated-build", "installation-build"] {
+			_ =
+				Capability.call!(
+					"verify-prebuilt-tests",
+					Json.to_str({ suite: suite, budget_seconds: 1800.U64 }),
+					host!,
+				)?
+		}
+		Capability.call!("verify-mac-receipt", "{}", host!)
 	}
 
 	compose! : (Str => Try(Str, Str)) => Try(Str, Str)

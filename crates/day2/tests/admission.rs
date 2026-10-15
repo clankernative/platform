@@ -12,7 +12,7 @@ fn authored_factory_calls_are_rejected_by_the_pinned_compiler_not_a_text_filter(
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()?;
-    let temporary = tempfile::tempdir_in(root.join("artifacts"))?;
+    let temporary = crate::support::compiler::stage(&root)?;
     let stage = temporary.path().join("executable");
     fs::create_dir_all(stage.join("app"))?;
     fs::create_dir_all(stage.join("sdk"))?;

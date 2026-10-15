@@ -84,8 +84,8 @@ AppendSample :: [].{
 
 	verify_result : Str, AppendSampleTypes.Output, Str -> Try(Bool, Str)
 	verify_result = |before, saved, after| {
-		old = Data.snapshot(before)?
-		next = Data.snapshot(after)?
+		old = Data.verification_snapshot(before)?.live
+		next = Data.verification_snapshot(after)?.live
 		row = next.chart_samples.find_first(|candidate| candidate.value.time == saved.time)
 			.map_err(|_| "created sample missing")?
 		Ok(

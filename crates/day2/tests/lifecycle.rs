@@ -142,12 +142,12 @@ fn admitted_lifecycle_preserves_values_visibility_receipts_and_replay() -> Resul
         world.check()?;
     }
     let live = world.runtime.application_snapshot()?;
-    assert_eq!(live["parents"].as_array().unwrap().len(), 1);
-    assert!(live["children"].as_array().unwrap().is_empty());
+    assert_eq!(live.as_value()["parents"].as_array().unwrap().len(), 1);
+    assert!(live.as_value()["children"].as_array().unwrap().is_empty());
     let verification = world.runtime.verification_snapshot()?;
     assert_eq!(
         serde_json::from_str::<Value>(verification["live"].as_str().unwrap())?,
-        live
+        live.as_value().clone()
     );
     let deleted: Value = serde_json::from_str(verification["deleted"].as_str().unwrap())?;
     assert_eq!(deleted["parents"][0]["id"], created["spare_parent_id"]);

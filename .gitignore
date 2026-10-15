@@ -1,9 +1,9 @@
 /target/
-/openspec/
 /sdk/targets/
 /artifacts/
 /.cache/
 /.toolchains/
+/cli/build-dependencies/
 
 # Company configuration and local runtime data belong in a separate private repo.
 /.local/

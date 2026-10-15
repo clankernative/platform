@@ -812,9 +812,14 @@ resource "kubernetes_config_map_v1" "platform_contract" {
 
   data = merge(local.contract_data, local.app_call_contract, local.oauth_runtime_contract)
 
-  depends_on = [google_iap_web_backend_service_iam_binding.app_access, google_service_account_iam_member.app_call_workload, google_project_iam_member.oauth_edge_reads, google_secret_manager_secret_iam_member.oauth_keys]
+  depends_on = [google_iap_web_backend_service_iam_binding.app_access, google_service_account_iam_member.app_call_workload, google_project_iam_member.oauth_edge_reads, google_secret_manager_secret_iam_member.oauth_keys, google_secret_manager_secret_iam_member.oauth_provider_clients]
 
   lifecycle {
+    precondition {
+      condition     = local.oauth_roles_valid
+      error_message = "OAuth runtime and its authoritative native client/key roles must be selected together."
+    }
+
     precondition {
       condition = var.oauth_runtime == null ? true : try(
         var.security_shell_contract != null && local.backend_service_resolved &&
@@ -823,10 +828,11 @@ resource "kubernetes_config_map_v1" "platform_contract" {
         toset(jsondecode(local.oauth_shell_contract["OAUTH_SHELL_SECRET_IDS"])) != toset([]) &&
         length(setintersection(var.oauth_runtime.custody_secret_ids, toset(jsondecode(local.oauth_shell_contract["OAUTH_SHELL_SECRET_IDS"])))) == 0 &&
         length(setsubtract(var.oauth_runtime.attestation_secret_ids, toset(jsondecode(local.oauth_shell_contract["OAUTH_SHELL_SECRET_IDS"])))) == 0 &&
+        length(setsubtract(local.oauth_provider_client_ids, toset(jsondecode(local.oauth_shell_contract["OAUTH_SHELL_SECRET_IDS"])))) == 0 &&
         length(setintersection(var.runtime_secret_ids, toset(jsondecode(local.oauth_shell_contract["OAUTH_SHELL_SECRET_IDS"])))) == 0 &&
         split("/", local.oauth_shell_contract["IAP_JWT_AUDIENCE"])[2] == var.project_number,
       false)
-      error_message = "OAuth requires the resolved same-project shell, one app/app-call identity distinct from the shell, custody containers absent from shell IAM, and shared attestation containers only. CSI grants may not expose shell client or attestation containers."
+      error_message = "OAuth requires the resolved same-project shell, one app/app-call identity distinct from the shell, app-only custody and selected shared provider-client/attestation containers. CSI grants may not expose shell secrets."
     }
   }
 }

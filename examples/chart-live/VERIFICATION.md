@@ -4,7 +4,10 @@ Experimental source support. Component/browser acceptance, full application
 deterministic simulation testing (DST), full Platform verification and release
 qualification are separate; none is implied by a local demo.
 
-## Evidence and scope
+## Historical evidence and scope
+
+The records below predate the current-main reconciliation. The PR's latest
+validation report identifies the tested candidate and current checks.
 
 | Boundary | Evidence | Scope |
 | --- | --- | --- |
@@ -19,7 +22,7 @@ Unit schedules have no real sleeps/network. Failures identify seed/step; real
 adapters run separately. Worker and host budgets are unchanged. App/server data
 is not component-local state, and editable forms stay outside live regions.
 
-## Current cleanup checks
+## Historical cleanup checks
 
 Full UI Rust tests and workspace/all-target Clippy pass. Scoped Platform
 presentation/template/projection/route/resource tests, Day2 all-target Clippy,
@@ -38,13 +41,15 @@ These are focused source/adapter checks, not a substitute for the gates below.
 - HTTP range/reset/empty, owner isolation/version conflicts and authority/session
   revocation during slow render; login-consumption regression with the separately
   built HTTP-conformance artifact.
-- Full frozen-source Platform verification and full application DST.
-  Linux formatter setup is Mac-only and its HTTP compiler requires a private
-  cgroup-v2 namespace. Mac full verification still needs local OpenTofu
-  configuration. No guard has been relaxed to bypass these gates.
-- Cold package/worker provisioning and release acquisition. The example excludes
-  installed `.ui-dependencies/` bytes from Git; the canonical lock requires
-  matching independently captured inputs. Existing UI bundles omit the worker.
+- Full application DST and the current candidate's frozen-source Platform gate.
+  Use the repository's pinned toolchain and verification recipes; hosted portable
+  Linux and focused Mac validation have separate receipts. Historical local
+  environment failures are not evidence that the current candidate passed.
+  No guard may be relaxed to bypass these gates.
+- Deployment/release qualification remains separate. The example now uses the
+  Platform's managed schema-2 package lock; the distribution includes the chart
+  worker and ABI contract. Request-time execution still needs separate operator
+  approval. App-local dependency copies are not supported.
 
 Private receipts, historical task/artifact logs, login/session material and
 screenshots remain outside repositories. Existing local demo servers are not

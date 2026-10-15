@@ -25,7 +25,7 @@ use std::{
     process::Command,
 };
 
-use crate::{ADDRESS_SPACE_BYTES, CPU_SECONDS, OPEN_FILES};
+use crate::{OPEN_FILES, profile_for_limits};
 
 fn runtime_files() -> Result<BTreeSet<PathBuf>> {
     let (triplet, loader) = match std::env::consts::ARCH {
@@ -215,7 +215,7 @@ fn syscall_filter() -> Result<BpfProgram> {
     .try_into()?)
 }
 
-pub fn launch(worker: &Path, parent: u32) -> Result<()> {
+pub fn launch(worker: &Path, parent: u32, memory_bytes: u64, cpu_seconds: u64) -> Result<()> {
     ensure!(
         parent >= 1 && parent <= i32::MAX as u32,
         "invalid supervisor identity"
@@ -224,6 +224,7 @@ pub fn launch(worker: &Path, parent: u32) -> Result<()> {
         getppid().as_raw() == parent as i32,
         "supervisor exited before sandbox setup"
     );
+    let profile = profile_for_limits(memory_bytes, cpu_seconds)?;
     prctl::set_pdeathsig(Some(Signal::SIGKILL))?;
     ensure!(
         getppid().as_raw() == parent as i32,
@@ -245,8 +246,8 @@ pub fn launch(worker: &Path, parent: u32) -> Result<()> {
     prctl::set_no_new_privs()?;
     prctl::set_dumpable(false)?;
     for (resource, maximum) in [
-        (Resource::RLIMIT_AS, ADDRESS_SPACE_BYTES),
-        (Resource::RLIMIT_CPU, CPU_SECONDS),
+        (Resource::RLIMIT_AS, memory_bytes),
+        (Resource::RLIMIT_CPU, cpu_seconds),
         (Resource::RLIMIT_NOFILE, OPEN_FILES),
         (Resource::RLIMIT_NPROC, 0),
         (Resource::RLIMIT_CORE, 0),
@@ -281,7 +282,11 @@ pub fn launch(worker: &Path, parent: u32) -> Result<()> {
     seccompiler::apply_filter(&filter).context("enforce worker syscall filter")?;
     // Exec is needed for this handoff. Landlock limits later re-exec to this worker
     // and the approved loader; no syscall permits creating another process/thread.
-    let error = Command::new(&worker)
+    let mut command = Command::new(&worker);
+    if let Some(argument) = profile.worker_argument() {
+        command.arg(argument);
+    }
+    let error = command
         .env_clear()
         .env("LANG", "C")
         .env("LC_ALL", "C")

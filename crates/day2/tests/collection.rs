@@ -419,7 +419,7 @@ fn compiler_keeps_collect_read_only_and_rejects_transaction_composition() -> Res
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()?;
-    let directory = tempfile::tempdir_in(root.join("artifacts"))?;
+    let directory = crate::support::compiler::stage(&root)?;
     let stage = directory.path();
     fs::create_dir(stage.join("app"))?;
     day2::sdk::stage(&root.join("sdk"), &stage.join("sdk"))?;

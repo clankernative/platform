@@ -32,9 +32,45 @@ macro_rules! assert_secret_references {
 }
 
 const _: () = {
+    assert_consuming!(crate::security_epoch::EpochObservation);
+    assert_not_impl!(crate::security_epoch::EpochObservation, std::fmt::Debug);
+    assert_not_impl!(crate::security_epoch::EpochObservation, Send);
+    assert_not_impl!(crate::security_epoch::EpochObservation, Sync);
+    assert_consuming!(crate::security_epoch::journal::CurrentBootstrapExecution);
+    assert_consuming!(crate::security_epoch::journal::InitialEpochCreatePermit);
+    assert_consuming!(crate::security_epoch::journal::InitialFirstHolderActivationPermit);
+    assert_not_impl!(
+        crate::security_epoch::journal::CurrentBootstrapExecution,
+        std::fmt::Debug
+    );
+    assert_not_impl!(
+        crate::security_epoch::journal::InitialEpochCreatePermit,
+        std::fmt::Debug
+    );
+    assert_not_impl!(
+        crate::security_epoch::journal::InitialFirstHolderActivationPermit,
+        std::fmt::Debug
+    );
+    assert_not_impl!(
+        crate::security_epoch::journal::CurrentBootstrapExecution,
+        Send
+    );
+    assert_not_impl!(
+        crate::security_epoch::journal::CurrentBootstrapExecution,
+        Sync
+    );
     assert_consuming!(crate::execution::DispatchPermit);
     assert_consuming!(crate::oauth::exchange::ExchangeDispatchPermit);
     assert_consuming!(crate::oauth::store::RefreshDispatchPermit);
+    assert_consuming!(crate::oauth::refresh::ClientCredential);
+    assert_consuming!(crate::oauth::refresh::PreparedReplacement);
+    assert_consuming!(crate::oauth::refresh::Resolution);
+    assert_not_impl!(crate::oauth::refresh::ClientCredential, std::fmt::Debug);
+    assert_not_impl!(crate::oauth::refresh::PreparedReplacement, std::fmt::Debug);
+    assert_not_impl!(crate::oauth::refresh::Resolution, std::fmt::Debug);
+    assert_secret_references!(crate::oauth::refresh::ClientCredential);
+    assert_secret_references!(crate::oauth::refresh::PreparedReplacement);
+    assert_secret_references!(crate::oauth::refresh::Resolution);
     assert_consuming!(crate::managed_credentials::store::HumanRevealPermit);
     assert_consuming!(crate::managed_credentials::store::PendingReveal);
     assert_not_impl!(

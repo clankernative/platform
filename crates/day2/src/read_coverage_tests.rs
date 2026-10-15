@@ -68,7 +68,7 @@ impl Fixture {
         )?;
         let model = json!({"fields":{"owner":"text","status":"text"}});
         let contract = serde_json::from_value(json!({
-            "format":crate::artifact::CURRENT_FORMAT,"roc_version":"host-test","worker_digest":"host-test",
+            "format":crate::artifact::CURRENT_FORMAT,"verification_limits":crate::artifact::VerificationLimits::QUALIFIED,"roc_version":"host-test","worker_digest":"host-test",
             "schema_digest":"host-test","schema":{"models":{"items":model,"fences":model},
                 "inputs":{"input":{"fields":{}}},"foreign_keys":[]},
             "operations":operations,"sources":{
@@ -81,10 +81,12 @@ impl Fixture {
             "app_contract":{"operations":operation_contracts,"presentation":{"stylesheet":"","script":""},
                 "identities":"","invariants":{},"domains":{},"errors":{}}
         }))?;
+        let inputs = crate::host_inputs::Inputs::default();
         let runtime = Runtime {
             integrations: Arc::new(crate::integration_host::Host::local(&instance_path)?),
             app_calls: None,
             credentials: None,
+            connections: None,
             instance_path,
             app: "app".into(),
             db: state.join("app.sqlite"),
@@ -95,7 +97,8 @@ impl Fixture {
                 artifact_directory,
                 contract,
             )),
-            host: Arc::new(crate::host::System),
+            host: Arc::new(crate::host::System(inputs.clone())),
+            inputs,
         };
         runtime.initialize()?;
         let db = open(runtime.db())?;
@@ -199,6 +202,408 @@ impl Fixture {
         );
         self.assert_unmodified_business()
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn runtime_input_clones_survive_nested_async_and_blocking_boundaries_without_leakage()
+-> Result<()> {
+    use crate::host_inputs::{
+        Entropy, Inputs,
+        simulation::{SeededEntropy, VirtualClock},
+    };
+    use std::sync::Mutex;
+    let left = Fixture::new()?;
+    let right = Fixture::new()?;
+    let left_clock = Arc::new(VirtualClock(Mutex::new((
+        Duration::from_secs(11),
+        Duration::from_secs(3),
+    ))));
+    let right_clock = Arc::new(VirtualClock(Mutex::new((
+        Duration::from_secs(22),
+        Duration::from_secs(4),
+    ))));
+    let left = left.runtime.clone().with_inputs(Inputs {
+        entropy: Arc::new(SeededEntropy::new(10)),
+        clock: left_clock.clone(),
+        ..Inputs::default()
+    });
+    let right = right.runtime.clone().with_inputs(Inputs {
+        entropy: Arc::new(SeededEntropy::new(20)),
+        clock: right_clock.clone(),
+        ..Inputs::default()
+    });
+    let sample = |runtime: &Runtime| -> Result<(i64, Duration, [u8; 32])> {
+        let mut secret = [0; 32];
+        runtime.inputs().entropy.fill(&mut secret)?;
+        Ok((runtime.host().now_ms()?, runtime.host().monotonic(), secret))
+    };
+    let first = sample(&left)?;
+    let nested = sample(&right)?;
+    let left_task = left.clone();
+    let right_task = right.clone();
+    let (after, other) = tokio::try_join!(
+        tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            tokio::task::spawn_blocking(move || sample(&left_task)).await
+        }),
+        tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            tokio::task::spawn_blocking(move || sample(&right_task)).await
+        }),
+    )?;
+    let after = after??;
+    let other = other??;
+    assert_eq!((first.0, first.1), (11000, Duration::from_secs(3)));
+    assert_eq!((after.0, after.1), (first.0, first.1));
+    assert_eq!((nested.0, nested.1), (22000, Duration::from_secs(4)));
+    assert_eq!((other.0, other.1), (nested.0, nested.1));
+    for (seed, observed) in [(10, [first.2, after.2]), (20, [nested.2, other.2])] {
+        let reference = SeededEntropy::new(seed);
+        for bytes in observed {
+            let mut expected = [0; 32];
+            reference.fill(&mut expected)?;
+            assert_eq!(bytes, expected);
+        }
+    }
+    right_clock.0.lock().unwrap().0 = Duration::from_secs(99);
+    assert_eq!(right.host().now_ms()?, 99000);
+    assert_eq!(left.host().now_ms()?, 11000);
+    Ok(())
+}
+
+#[tokio::test]
+async fn local_server_refuses_host_only_contract_before_drawing_runtime_secret_entropy()
+-> Result<()> {
+    use crate::host_inputs::{Entropy, Inputs};
+    struct RefusingEntropy(AtomicUsize);
+    impl Entropy for RefusingEntropy {
+        fn fill(&self, _: &mut [u8]) -> Result<()> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            bail!("injected_secret_entropy_failure")
+        }
+    }
+    let fixture = Fixture::new()?;
+    let entropy = Arc::new(RefusingEntropy(AtomicUsize::new(0)));
+    let runtime = fixture.runtime.clone().with_inputs(Inputs {
+        entropy: entropy.clone(),
+        ..Inputs::default()
+    });
+    // This fixture intentionally proves host guards, not native Roc admission.
+    // Do not make it serve by weakening the complete application contract guard.
+    let error = crate::web::LocalServer::bind(runtime.clone(), "alice", 0)
+        .await
+        .err()
+        .context("host-only contract unexpectedly admitted")?;
+    assert_eq!(
+        error.to_string(),
+        "every persistent model requires a verification obligation"
+    );
+    assert_eq!(entropy.0.load(Ordering::Relaxed), 0);
+    let count: i64 =
+        open(runtime.db())?
+            .query_row("SELECT count(*) FROM day2_web_secret", [], |row| row.get(0))?;
+    assert_eq!(count, 0);
+    Ok(())
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(super) struct IdInputs {
+    seed: [u8; 32],
+    initial_wall_ms: i64,
+    scope: String,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub(super) enum IdAction {
+    Accept { invocation: String },
+    SetWall { milliseconds: i64 },
+    Elapse { nanoseconds: u64 },
+    Deadline {},
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct GeneratedId {
+    invocation: String,
+    uuid: [u8; 16],
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct IdValues {
+    scope: String,
+    seeds: Vec<(String, [u8; 32])>,
+    ids: Vec<GeneratedId>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(super) struct IdObservation {
+    values: IdValues,
+    alternate_scope_seeds: [[u8; 32]; 2],
+    wall_ms: i64,
+    input_wall_ms: i64,
+    monotonic_ns: u64,
+    input_monotonic_ns: u64,
+    deadline: Option<String>,
+}
+
+pub(super) type IdHistory = input_replay_tests::History<IdInputs, IdAction, IdObservation>;
+
+pub(super) fn id_history(reverse: bool) -> IdHistory {
+    let order = if reverse {
+        ["two", "one"]
+    } else {
+        ["one", "two"]
+    };
+    let mut actions: Vec<_> = order
+        .into_iter()
+        .map(|id| IdAction::Accept {
+            invocation: id.into(),
+        })
+        .collect();
+    actions.extend([
+        IdAction::SetWall { milliseconds: 9000 },
+        IdAction::Deadline {},
+        IdAction::Elapse {
+            nanoseconds: 15_000_000_000,
+        },
+        IdAction::Deadline {},
+    ]);
+    IdHistory::new(
+        IdInputs {
+            seed: [42; 32],
+            initial_wall_ms: 7000,
+            scope: "coverage/test/app".into(),
+        },
+        actions,
+    )
+}
+
+pub(super) fn validate_id_history(history: &IdHistory) -> Result<()> {
+    history.validate()?;
+    let forward = id_history(false);
+    let reverse = id_history(true);
+    ensure!(
+        history.inputs == forward.inputs
+            && (history.actions == forward.actions || history.actions == reverse.actions),
+        "unsupported ID input history fixture"
+    );
+    for observed in &history.observations {
+        if let input_replay_tests::Recorded::Ok(observed) = observed {
+            ensure!(
+                observed.values.seeds.len() <= 16
+                    && observed.values.ids.len() <= 16
+                    && observed.values.scope.len() <= 128,
+                "ID history observation budget"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn literal_id_values() -> Result<IdValues> {
+    // Literal expectations are independent of Host::entropy and ID generation.
+    Ok(serde_json::from_value(json!({
+        "scope":"coverage/test/app",
+        "seeds":[
+            ["one",[172,232,180,6,8,50,101,155,93,92,54,125,208,132,94,166,192,171,150,28,138,127,77,234,201,198,34,131,111,35,109,82]],
+            ["two",[143,133,157,107,178,196,226,181,217,127,121,125,97,93,10,98,99,71,29,167,165,139,164,246,95,11,173,140,150,168,144,96]]
+        ],
+        "ids":[
+            {"invocation":"one","uuid":[0,0,0,0,27,88,113,50,135,74,140,2,218,23,234,188]},
+            {"invocation":"two","uuid":[0,0,0,0,27,88,120,218,187,89,177,131,129,0,240,175]}
+        ]
+    }))?)
+}
+
+fn literal_alternate_seeds() -> [[u8; 32]; 2] {
+    [
+        [
+            151, 61, 222, 67, 140, 211, 132, 139, 205, 19, 53, 98, 75, 7, 194, 66, 41, 14, 254, 81,
+            53, 248, 68, 57, 133, 126, 107, 208, 205, 174, 88, 28,
+        ],
+        [
+            139, 154, 45, 152, 141, 34, 195, 75, 171, 233, 191, 208, 147, 91, 221, 183, 189, 96,
+            74, 124, 127, 246, 231, 186, 120, 35, 8, 216, 87, 109, 61, 23,
+        ],
+    ]
+}
+
+fn expected_id_observation(inputs: &IdInputs, prefix: &[IdAction]) -> Result<IdObservation> {
+    let mut values = literal_id_values()?;
+    let accepted: Vec<_> = prefix
+        .iter()
+        .filter_map(|action| match action {
+            IdAction::Accept { invocation } => Some(invocation),
+            _ => None,
+        })
+        .collect();
+    values.seeds.retain(|(id, _)| accepted.contains(&id));
+    values.ids.retain(|row| accepted.contains(&&row.invocation));
+    let mut wall_ms = inputs.initial_wall_ms;
+    let mut monotonic_ns = 0;
+    for action in prefix {
+        match action {
+            IdAction::SetWall { milliseconds } => wall_ms = *milliseconds,
+            IdAction::Elapse { nanoseconds } => monotonic_ns += *nanoseconds,
+            _ => {}
+        }
+    }
+    let deadline = matches!(prefix.last(), Some(IdAction::Deadline { .. })).then(|| {
+        if monotonic_ns >= 15_000_000_000 {
+            "TransactionDeadline"
+        } else {
+            "Passed"
+        }
+        .into()
+    });
+    Ok(IdObservation {
+        values,
+        alternate_scope_seeds: literal_alternate_seeds(),
+        wall_ms,
+        input_wall_ms: wall_ms,
+        monotonic_ns,
+        input_monotonic_ns: monotonic_ns,
+        deadline,
+    })
+}
+
+fn id_observation(
+    simulation: &crate::simulation::Simulation,
+    action: &IdAction,
+) -> Result<IdObservation> {
+    let runtime = simulation.runtime();
+    let mut deadline = None;
+    match action {
+        IdAction::Accept { invocation } => {
+            runtime.accept("guarded_read", "alice", invocation, &json!({}), 7)?;
+        }
+        IdAction::SetWall { milliseconds } => simulation.set_time(*milliseconds)?,
+        IdAction::Elapse { nanoseconds } => {
+            simulation.advance_monotonic(Duration::from_nanos(*nanoseconds))?
+        }
+        IdAction::Deadline { .. } => {
+            deadline = Some(
+                match runtime.host().deadline(Phase::Decide, Duration::ZERO) {
+                    Ok(()) => "Passed".into(),
+                    Err(error) => format!("{:?}", classify(&error)),
+                },
+            );
+        }
+    }
+    let db = open(runtime.db())?;
+    let rows = db.prepare("SELECT s.invocation,s.seed,i.now FROM day2_id_seeds AS s JOIN day2_invocations AS i ON i.id=s.invocation ORDER BY s.invocation")?
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?, row.get::<_, i64>(2)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut seeds = Vec::new();
+    let mut ids = Vec::new();
+    for (invocation, seed, now) in rows {
+        let seed: [u8; 32] = seed.as_slice().try_into()?;
+        ids.push(GeneratedId {
+            invocation: invocation.clone(),
+            uuid: crate::identity::generate(
+                &seed,
+                now.checked_mul(1000)
+                    .context("ID history clock")?
+                    .try_into()?,
+                "items",
+                0,
+            )?,
+        });
+        seeds.push((invocation, seed));
+    }
+    Ok(IdObservation {
+        values: IdValues {
+            scope: runtime.scope().into(),
+            seeds,
+            ids,
+        },
+        alternate_scope_seeds: [
+            runtime.host().entropy("different/scope/app", "one")?,
+            runtime.host().entropy("different/scope/app", "two")?,
+        ],
+        wall_ms: runtime.host().now_ms()?,
+        input_wall_ms: runtime.inputs().clock.wall_time()?.as_millis().try_into()?,
+        monotonic_ns: runtime.host().monotonic().as_nanos().try_into()?,
+        input_monotonic_ns: runtime.inputs().clock.monotonic().as_nanos().try_into()?,
+        deadline,
+    })
+}
+
+pub(super) fn check_id_history(saved: &IdHistory, path: Option<&Path>) -> Result<IdHistory> {
+    use input_replay_tests::{Case, checkpoint};
+    validate_id_history(saved)?;
+    let mut observed = IdHistory::new(saved.inputs.clone(), saved.actions.clone());
+    if let Some(path) = path {
+        checkpoint(path, Case::Ids(observed.clone()))?;
+    }
+    let setup = input_replay_tests::capture(|| {
+        let fixture = Fixture::new()?;
+        ensure!(
+            fixture.runtime.scope() == saved.inputs.scope,
+            "ID fixture scope mismatch"
+        );
+        let simulation = crate::simulation::Simulation::with_scripted_providers(
+            fixture.runtime.clone(),
+            saved.inputs.seed,
+            saved.inputs.initial_wall_ms,
+        )?;
+        Ok((fixture, simulation))
+    });
+    let (_fixture, simulation) = match setup {
+        Ok(world) => world,
+        Err(error) => {
+            observed.fixture_failed(&error);
+            if let Some(path) = path {
+                checkpoint(path, Case::Ids(observed.clone()))?;
+            }
+            return Err(error);
+        }
+    };
+    ensure!(
+        saved.fixture_error.is_none(),
+        "saved ID fixture failure did not recur"
+    );
+    for (step, action) in saved.actions.iter().enumerate() {
+        let check = observed.observe(
+            input_replay_tests::capture(|| id_observation(&simulation, action)),
+            &expected_id_observation(&saved.inputs, &saved.actions[..=step])?,
+        );
+        if let Some(path) = path {
+            checkpoint(path, Case::Ids(observed.clone()))?;
+        }
+        observed.compare_saved(saved, step)?;
+        check?;
+    }
+    ensure!(saved.failure.is_none(), "saved ID failure did not recur");
+    Ok(observed)
+}
+
+#[test]
+fn fresh_runtime_id_seeds_are_scope_stable_and_simulation_clock_is_composed() -> Result<()> {
+    let root = Path::new("/tmp/dst-platform-input-composition");
+    fs::create_dir_all(root)?;
+    let evidence = tempfile::Builder::new()
+        .prefix("id-traces-")
+        .tempdir_in(root)?
+        .keep();
+    let mut final_observations = Vec::new();
+    for reverse in [false, true] {
+        let path = evidence.join(format!("replay-{}.json", usize::from(reverse)));
+        eprintln!(
+            "Runtime input replay: {}",
+            input_replay_tests::command(&path)
+        );
+        let observed = check_id_history(&id_history(reverse), Some(&path))
+            .with_context(|| input_replay_tests::command(&path))?;
+        input_replay_tests::replay(&path)?;
+        final_observations.push(observed.observations.last().cloned());
+    }
+    assert_eq!(final_observations[0], final_observations[1]);
+    Ok(())
 }
 
 fn fence_grant<'a>(document: &'a mut AuthorityDocument, operation: &str) -> &'a mut ModelGrant {
@@ -487,8 +892,12 @@ fn required_all_rows_denies_child_request_and_rolls_back_prior_parent_write() ->
             fixture.runtime.scope(),
             &origin,
             &update,
-            active.policy()?,
-            "plain_write",
+            EffectContext {
+                scope: fixture.runtime.scope(),
+                policy: active.policy()?,
+                operation: "plain_write",
+                entropy: &crate::host_inputs::SecureEntropy,
+            },
         )?;
         origin.observations.push(Observation {
             instruction: update,
