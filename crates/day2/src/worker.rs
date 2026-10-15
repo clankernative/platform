@@ -658,8 +658,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn natural_exit_keeps_original_status_separate_from_requested_cleanup() {
-        let mut worker = super::Worker::spawn(std::process::Command::new("/usr/bin/false"))
-            .unwrap();
+        let mut worker =
+            super::Worker::spawn(std::process::Command::new("/usr/bin/false")).unwrap();
         // This controlled child has already exited before the exchange. The
         // production exchange still performs its unchanged try-wait/kill/wait.
         assert_eq!(worker.child.wait().unwrap().code(), Some(1));
@@ -726,10 +726,12 @@ mod tests {
     #[test]
     fn cleanup_faults_and_maximal_evidence_remain_bounded_and_redacted() {
         for errno in [Some(5), None] {
-            let fault = || errno.map_or_else(
-                || std::io::Error::other("PRIVATE_TERMINATION_ERROR"),
-                std::io::Error::from_raw_os_error,
-            );
+            let fault = || {
+                errno.map_or_else(
+                    || std::io::Error::other("PRIVATE_TERMINATION_ERROR"),
+                    std::io::Error::from_raw_os_error,
+                )
+            };
             let after = super::TerminationEvidence::observe(Err(fault()), Err(fault()));
             assert!(after.kill_requested);
             assert_eq!(after.kill_failed, 1);
@@ -739,8 +741,7 @@ mod tests {
             assert!(after.code.is_none() && after.signal.is_none());
             let mut stages = snapshot(&StageProgress::new());
             stages.child_after_termination = Some(after);
-            let error = anyhow::Error::new(crate::error::Failure::WorkerCrashed)
-                .context(stages);
+            let error = anyhow::Error::new(crate::error::Failure::WorkerCrashed).context(stages);
             let diagnostic = crate::error::diagnostic(&error);
             assert_eq!(diagnostic["failure"], "worker_crashed");
             assert!(!diagnostic.to_string().contains("PRIVATE"));
