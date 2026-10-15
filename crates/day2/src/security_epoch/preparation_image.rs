@@ -446,6 +446,7 @@ mod tests {
         .unwrap();
         let contract: crate::artifact::Artifact = serde_json::from_value(serde_json::json!({
             "format":crate::artifact::CURRENT_FORMAT,"roc_version":"image-test",
+            "verification_limits":crate::artifact::VerificationLimits::QUALIFIED,
             "worker_digest":"image-test","schema_digest":"image-test",
             "schema":{"models":{"items":{"fields":{"value":"text"}}},"inputs":{},"foreign_keys":[]},
             "operations":[],"sources":{},"admission":"local-spike-only"
