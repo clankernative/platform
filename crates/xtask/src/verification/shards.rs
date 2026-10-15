@@ -153,10 +153,16 @@ fn write_cargo_failure_manifest(
     diagnostic_codes: &BTreeSet<String>,
 ) -> Result<()> {
     let retained = output.map(|bytes| &bytes[..bytes.len().min(CARGO_FAILURE_CAPTURE_BYTES)]);
+    let (evidence_identity, identity_status) = match cargo_failure_identity(root) {
+        Ok(identity) => (Some(identity), "bound"),
+        Err(_) => (None, "unavailable"),
+    };
     let metadata = json!({
         "format":1,
         "stage":stage,
-        "identity":identity(root).ok(),
+        "identity":evidence_identity,
+        "identity_status":identity_status,
+        "diagnostic_only_not_a_preparation_or_runtime_receipt":true,
         "log_pointer":{"job":std::env::var("GITHUB_JOB").ok(),"stage":stage,"channel":"Actions Cargo outcome metadata"},
         "cargo_process":process,
         "capture_problem":problem,
@@ -171,6 +177,11 @@ fn write_cargo_failure_manifest(
     });
     fs::write(directory.join("manifest.json"), serde_json::to_vec_pretty(&metadata)?)?;
     Ok(())
+}
+
+fn cargo_failure_identity(root: &Path) -> Result<Identity> {
+    let snapshot = super::verification_snapshot(root, "verify")?;
+    identity(root, &snapshot)
 }
 
 fn report_cargo_capture(
@@ -1588,6 +1599,9 @@ mod tests {
         assert!(String::from_utf8_lossy(&raw).contains("PRIVATE-CARGO-CONTROL-INVALID-OUTPUT"));
         assert_eq!(manifest["cargo_process"]["code"], 2);
         assert_eq!(manifest["complete"], true);
+        assert_eq!(manifest["identity_status"], "unavailable");
+        assert!(manifest["identity"].is_null());
+        assert_eq!(manifest["diagnostic_only_not_a_preparation_or_runtime_receipt"], true);
         assert!(!manifest.to_string().contains("PRIVATE-CARGO"));
         #[cfg(unix)]
         {
@@ -1715,6 +1729,25 @@ mod tests {
         let messages = report_cargo_capture(root.path(), "tests", outcome, Ok(serde_json::to_vec(&message)?))?;
         assert_eq!(messages, vec![message]);
         assert_eq!(fs::read_dir(root.path().join("artifacts"))?.count(), 0);
+        // Hosted controls also exercise the genuine source/run/snapshot path.
+        // Local unit runs without hosted run identity do not fabricate one.
+        if let (Ok(run), Ok(attempt)) = (
+            std::env::var("GITHUB_RUN_ID"),
+            std::env::var("GITHUB_RUN_ATTEMPT"),
+        ) {
+            let source_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent().context("crates directory")?
+                .parent().context("workspace directory")?;
+            let binding = cargo_failure_identity(source_root)?;
+            assert_eq!(binding.run, run);
+            assert_eq!(binding.attempt, attempt);
+            assert_eq!(binding.snapshot, super::super::verification_snapshot(source_root, "verify")?);
+            assert_eq!(binding.source_identity, super::super::verification_source_identity(source_root, "verify")?);
+            assert_eq!(binding.workspace, source_root.canonicalize()?);
+            assert_eq!(binding.workflow, day2::automation::source_digest());
+            assert_eq!(binding.checkout.len(), 40);
+            assert_eq!(binding.tree.len(), 40);
+        }
         Ok(())
     }
 
