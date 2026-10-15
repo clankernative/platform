@@ -142,11 +142,15 @@ fn actual_peer_process_exit_refuses_retained_pidfd_and_preserves_trace() {
     assert_eq!(observed.peer.process, child_process);
     child.0.kill().unwrap();
     let status = child.0.wait().unwrap();
-    let refused = observed.check(&mut interval).is_err();
+    let refusal_reason = observed
+        .check(&mut interval)
+        .err()
+        .map(|error| error.to_string());
+    let refused = refusal_reason.as_deref() == Some("native_connection_peer_exited_or_unknown");
     let acquisition_refused = interval.remaining().is_err();
     let trace = serde_json::json!({"kind":"actual connection-peer process exit; no role/provider/P3 qualification",
         "observed_connection_creator":child_process,"exit":status.to_string(),"retained_pidfd_refused":refused,
-        "original_acquisition_refused":acquisition_refused});
+        "original_acquisition_refused":acquisition_refused,"refusal_reason":refusal_reason});
     let mut output = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
