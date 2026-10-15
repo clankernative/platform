@@ -25,7 +25,7 @@ use std::{
     process::Command,
 };
 
-use crate::{OPEN_FILES, profile_for_limits};
+use crate::{OPEN_FILES, RefusalStage, mark_refusal_stage, profile_for_limits};
 
 fn runtime_files() -> Result<BTreeSet<PathBuf>> {
     let (triplet, loader) = match std::env::consts::ARCH {
@@ -216,6 +216,7 @@ fn syscall_filter() -> Result<BpfProgram> {
 }
 
 pub fn launch(worker: &Path, parent: u32, memory_bytes: u64, cpu_seconds: u64) -> Result<()> {
+    mark_refusal_stage(RefusalStage::ParentIdentity);
     ensure!(
         parent >= 1 && parent <= i32::MAX as u32,
         "invalid supervisor identity"
@@ -224,26 +225,39 @@ pub fn launch(worker: &Path, parent: u32, memory_bytes: u64, cpu_seconds: u64) -
         getppid().as_raw() == parent as i32,
         "supervisor exited before sandbox setup"
     );
+    mark_refusal_stage(RefusalStage::Profile);
     let profile = profile_for_limits(memory_bytes, cpu_seconds)?;
+    mark_refusal_stage(RefusalStage::ParentDeathSignal);
     prctl::set_pdeathsig(Some(Signal::SIGKILL))?;
+    mark_refusal_stage(RefusalStage::ParentRecheck);
     ensure!(
         getppid().as_raw() == parent as i32,
         "supervisor exited during sandbox setup"
     );
+    mark_refusal_stage(RefusalStage::ResolveWorker);
     let worker = worker.canonicalize().context("resolve worker")?;
+    mark_refusal_stage(RefusalStage::WorkerMetadata);
     let metadata = fs::metadata(&worker)?;
+    mark_refusal_stage(RefusalStage::WorkerMode);
     ensure!(metadata.is_file(), "worker must be a regular executable");
     let mode = metadata.permissions().mode();
     ensure!(
         mode & 0o111 != 0 && mode & 0o6022 == 0,
         "unsafe worker executable permissions"
     );
+    mark_refusal_stage(RefusalStage::RuntimeLibraries);
     let dependencies = runtime_files()?;
+    mark_refusal_stage(RefusalStage::CompileFilter);
     let filter = syscall_filter()?;
+    mark_refusal_stage(RefusalStage::StandardDescriptors);
     validate_standard_descriptors()?;
+    mark_refusal_stage(RefusalStage::CloseDescriptors);
     close_inherited_descriptors()?;
+    mark_refusal_stage(RefusalStage::WorkingDirectory);
     std::env::set_current_dir("/")?;
+    mark_refusal_stage(RefusalStage::NoNewPrivileges);
     prctl::set_no_new_privs()?;
+    mark_refusal_stage(RefusalStage::Dumpable);
     prctl::set_dumpable(false)?;
     for (resource, maximum) in [
         (Resource::RLIMIT_AS, memory_bytes),
@@ -253,17 +267,29 @@ pub fn launch(worker: &Path, parent: u32, memory_bytes: u64, cpu_seconds: u64) -
         (Resource::RLIMIT_CORE, 0),
         (Resource::RLIMIT_FSIZE, 0),
     ] {
+        mark_refusal_stage(match resource {
+            Resource::RLIMIT_AS => RefusalStage::AddressSpaceLimit,
+            Resource::RLIMIT_CPU => RefusalStage::CpuLimit,
+            Resource::RLIMIT_NOFILE => RefusalStage::FileDescriptorLimit,
+            Resource::RLIMIT_NPROC => RefusalStage::ProcessLimit,
+            Resource::RLIMIT_CORE => RefusalStage::CoreLimit,
+            Resource::RLIMIT_FSIZE => RefusalStage::FileSizeLimit,
+            _ => unreachable!(),
+        });
         setrlimit(resource, maximum, maximum)?;
     }
+    mark_refusal_stage(RefusalStage::CreateLandlock);
     let mut ruleset = Ruleset::default()
         .set_compatibility(CompatLevel::HardRequirement)
         .handle_access(AccessFs::from_all(ABI::V3))?
         .create()?;
+    mark_refusal_stage(RefusalStage::WorkerRule);
     ruleset = ruleset.add_rule(PathBeneath::new(
         PathFd::new(&worker)?,
         AccessFs::ReadFile | AccessFs::Execute,
     ))?;
     for dependency in dependencies {
+        mark_refusal_stage(RefusalStage::RuntimeRule);
         let access = if dependency
             .file_name()
             .is_some_and(|name| name.to_string_lossy().starts_with("ld-linux-"))
@@ -274,11 +300,13 @@ pub fn launch(worker: &Path, parent: u32, memory_bytes: u64, cpu_seconds: u64) -
         };
         ruleset = ruleset.add_rule(PathBeneath::new(PathFd::new(dependency)?, access))?;
     }
+    mark_refusal_stage(RefusalStage::EnforceLandlock);
     let status = ruleset.restrict_self()?;
     ensure!(
         status.ruleset == RulesetStatus::FullyEnforced && status.no_new_privs,
         "Linux filesystem isolation was not fully enforced"
     );
+    mark_refusal_stage(RefusalStage::EnforceSeccomp);
     seccompiler::apply_filter(&filter).context("enforce worker syscall filter")?;
     // Exec is needed for this handoff. Landlock limits later re-exec to this worker
     // and the approved loader; no syscall permits creating another process/thread.
@@ -286,6 +314,7 @@ pub fn launch(worker: &Path, parent: u32, memory_bytes: u64, cpu_seconds: u64) -
     if let Some(argument) = profile.worker_argument() {
         command.arg(argument);
     }
+    mark_refusal_stage(RefusalStage::ExecuteWorker);
     let error = command
         .env_clear()
         .env("LANG", "C")

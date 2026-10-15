@@ -106,12 +106,20 @@ fn hard_cpu_limit_terminates_nontermination() -> anyhow::Result<()> {
 fn unexpected_arguments_and_parent_identity_fail_before_execution() -> anyhow::Result<()> {
     let probe = Path::new(env!("CARGO_BIN_EXE_day2-sandbox-probe"));
     let output = launcher(probe).arg("extra-policy").output()?;
-    anyhow::ensure!(output.status.code() == Some(77) && output.stdout.is_empty());
+    anyhow::ensure!(output.status.code() == Some(77));
+    let report = day2_sandbox::RefusalReport::parse(output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout))
+        .ok_or_else(|| anyhow::anyhow!("missing numeric refusal"))?;
+    anyhow::ensure!(report.stage == day2_sandbox::RefusalStage::Arguments as u8);
     let output = Command::new(env!("CARGO_BIN_EXE_day2-sandbox"))
         .arg(probe)
         .arg("0")
+        .arg(day2_sandbox::ADDRESS_SPACE_BYTES.to_string())
+        .arg(day2_sandbox::CPU_SECONDS.to_string())
         .output()?;
-    anyhow::ensure!(output.status.code() == Some(77) && output.stdout.is_empty());
+    anyhow::ensure!(output.status.code() == Some(77));
+    let report = day2_sandbox::RefusalReport::parse(output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout))
+        .ok_or_else(|| anyhow::anyhow!("missing numeric refusal"))?;
+    anyhow::ensure!(report.stage == day2_sandbox::RefusalStage::ParentIdentity as u8);
     Ok(())
 }
 
@@ -125,11 +133,40 @@ fn regular_file_stdio_and_mutable_worker_fail_before_execution() -> anyhow::Resu
         .output()?;
     anyhow::ensure!(output.status.code() == Some(77));
     anyhow::ensure!(std::fs::read(&output_file)?.is_empty());
+    let report = day2_sandbox::RefusalReport::parse(output.stderr.strip_suffix(b"\n").unwrap_or(&output.stderr))
+        .ok_or_else(|| anyhow::anyhow!("missing numeric descriptor refusal"))?;
+    anyhow::ensure!(report.stage == day2_sandbox::RefusalStage::StandardDescriptors as u8);
     let worker = directory.path().join("mutable-worker");
     std::fs::copy(env!("CARGO_BIN_EXE_day2-sandbox-probe"), &worker)?;
     std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o777))?;
     let output = launcher(&worker).output()?;
-    anyhow::ensure!(output.status.code() == Some(77) && output.stdout.is_empty());
+    anyhow::ensure!(output.status.code() == Some(77));
+    let report = day2_sandbox::RefusalReport::parse(output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout))
+        .ok_or_else(|| anyhow::anyhow!("missing numeric refusal"))?;
+    anyhow::ensure!(report.stage == day2_sandbox::RefusalStage::WorkerMode as u8);
+    Ok(())
+}
+
+#[test]
+fn missing_worker_and_unreviewed_profile_report_distinct_refusals() -> anyhow::Result<()> {
+    let missing = tempfile::tempdir()?;
+    let output = launcher(&missing.path().join("PRIVATE_MISSING_WORKER")).output()?;
+    anyhow::ensure!(output.status.code() == Some(77));
+    let report = day2_sandbox::RefusalReport::parse(output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout))
+        .ok_or_else(|| anyhow::anyhow!("missing numeric refusal"))?;
+    anyhow::ensure!(report.stage == day2_sandbox::RefusalStage::ResolveWorker as u8 && report.errno == Some(2));
+    anyhow::ensure!(!String::from_utf8_lossy(&output.stdout).contains("PRIVATE"));
+    let output = Command::new(env!("CARGO_BIN_EXE_day2-sandbox"))
+        .arg(env!("CARGO_BIN_EXE_day2-sandbox-probe"))
+        .arg(std::process::id().to_string())
+        .arg("1")
+        .arg("1")
+        .stdout(Stdio::piped())
+        .output()?;
+    anyhow::ensure!(output.status.code() == Some(77));
+    let report = day2_sandbox::RefusalReport::parse(output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout))
+        .ok_or_else(|| anyhow::anyhow!("missing numeric refusal"))?;
+    anyhow::ensure!(report.stage == day2_sandbox::RefusalStage::Profile as u8 && report.errno.is_none());
     Ok(())
 }
 

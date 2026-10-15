@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 fn run() -> anyhow::Result<()> {
+    day2_sandbox::mark_refusal_stage(day2_sandbox::RefusalStage::Arguments);
     let mut args = std::env::args_os().skip(1);
     let worker = args
         .next()
@@ -35,7 +36,15 @@ fn main() -> std::process::ExitCode {
     match run() {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("day2 sandbox refused launch: {error:#}");
+            let report = day2_sandbox::RefusalReport::from_error(&error);
+            if day2_sandbox::refusal_stdout_is_pipe() {
+                // A short pipe record is not a nonblocking-write guarantee.
+                // The supervisor's existing exchange timeout/kill/wait remains
+                // mandatory, including when a peer stops draining this pipe.
+                println!("{report}");
+            } else {
+                eprintln!("{report}");
+            }
             std::process::ExitCode::from(77)
         }
     }

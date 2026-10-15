@@ -70,6 +70,8 @@ impl StageProgress {
             child_before_termination: Some(self.child.snapshot()),
             #[cfg(target_os = "macos")]
             child_after_termination_drain: None,
+            #[cfg(target_os = "linux")]
+            child_reported_launcher: None,
             requests_enqueued: self.requests_enqueued.load(Ordering::Acquire),
             writer_entered: self.writer_entered.load(Ordering::Acquire),
             writer_dequeued: self.writer_dequeued.load(Ordering::Acquire),
@@ -108,6 +110,8 @@ pub(crate) struct StageEvidence {
     child_before_termination: Option<child_milestones::Snapshot>,
     #[cfg(target_os = "macos")]
     child_after_termination_drain: Option<mac_lifetime::Final>,
+    #[cfg(target_os = "linux")]
+    child_reported_launcher: Option<LauncherRefusal>,
     requests_enqueued: u32,
     writer_entered: u8,
     writer_dequeued: u32,
@@ -142,6 +146,10 @@ impl std::fmt::Display for StageEvidence {
             self.try_wait_failed,
             self.try_wait_errno,
         )?;
+        #[cfg(target_os = "linux")]
+        if let Some(report) = self.child_reported_launcher {
+            write!(formatter, " child-reported-launcher[{report}]")?;
+        }
         #[cfg(target_os = "macos")]
         {
             formatter.write_str(" first-child-before[")?;
@@ -198,6 +206,22 @@ fn exit_evidence(observed: std::io::Result<Option<ExitStatus>>) -> ExitEvidence 
 impl std::fmt::Display for ExitEvidence {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("isolated worker exchange failed")
+    }
+}
+
+/// TEMP diagnostic protocol: a child report is a lead, never authenticated cause
+/// or an admission decision. Even a forged report rejects the exchange.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+struct LauncherRefusal {
+    stage: u8,
+    errno: Option<i32>,
+}
+
+#[cfg(target_os = "linux")]
+impl std::fmt::Display for LauncherRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "stage={} errno={:?}", self.stage, self.errno)
     }
 }
 
@@ -445,6 +469,11 @@ impl Worker {
                 #[cfg(not(target_os = "macos"))]
                 let evidence = exit_evidence(self.child.try_wait());
                 let stages = self.progress.snapshot(&evidence);
+                #[cfg(target_os = "linux")]
+                let stages = StageEvidence {
+                    child_reported_launcher: error.downcast_ref::<LauncherRefusal>().copied(),
+                    ..stages
+                };
                 self.terminate();
                 #[cfg(target_os = "macos")]
                 let stages = StageEvidence {
@@ -472,14 +501,21 @@ impl Worker {
             .try_send(input.to_vec())
             .context("worker request backlog")?;
         increment(&self.progress.requests_enqueued);
-        self.responses()
+        let frame = self.responses()
             .as_ref()
             .context("closed worker")?
             .recv_timeout(timeout)
             .map_err(|error| match error {
                 mpsc::RecvTimeoutError::Timeout => crate::error::Failure::WorkerTimeout,
                 mpsc::RecvTimeoutError::Disconnected => crate::error::Failure::WorkerCrashed,
-            })?
+            })??;
+        #[cfg(target_os = "linux")]
+        if let Some(report) = day2_sandbox::RefusalReport::parse(&frame) {
+            return Err(anyhow::Error::new(crate::error::Failure::WorkerCrashed).context(
+                LauncherRefusal { stage: report.stage, errno: report.errno },
+            ));
+        }
+        Ok(frame)
     }
 
     fn terminate(&mut self) {
@@ -623,6 +659,32 @@ mod tests {
             try_wait_failed: 0,
             try_wait_errno: None,
         })
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn child_reported_refusal_is_numeric_and_never_accepted_as_a_response() {
+        // Keep producing forged reports so the bounded reader channel backs up.
+        // The existing timeout/drop/kill/wait path must still drain and reap it.
+        let mut command = std::process::Command::new("/usr/bin/yes");
+        command.arg("day2-launch-refusal-v1 stage=6 errno=2");
+        let mut worker = super::Worker::spawn(command, MAX_FRAME).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while worker.progress.reader_frames_completed.load(Ordering::Acquire) < 2 {
+            assert!(std::time::Instant::now() < deadline, "child never produced reports");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let started = std::time::Instant::now();
+        let error = worker.exchange(b"PRIVATE_REQUEST").unwrap_err();
+        assert_eq!(crate::error::classify(&error), crate::error::Failure::WorkerCrashed);
+        let diagnostic = crate::error::diagnostic(&error);
+        let report = &diagnostic["worker_stage"]["child_reported_launcher"];
+        assert_eq!(report["stage"], 6);
+        assert_eq!(report["errno"], 2);
+        assert!(!diagnostic.to_string().contains("PRIVATE"));
+        assert!(worker.reader.is_none() && worker.writer.is_none());
+        assert!(worker.child.try_wait().unwrap().is_some());
+        assert!(started.elapsed() < std::time::Duration::from_secs(4));
     }
 
     #[test]
