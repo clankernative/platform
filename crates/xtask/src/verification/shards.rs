@@ -1391,13 +1391,13 @@ mod tests {
             &sample_identity(),
         )?;
         assert_eq!(complete.passed, preparation_steps()?);
-        assert_eq!(complete.fixtures.len(), 21);
-        assert!(complete.fixtures.contains_key("lifecycle"));
-        let mut without_lifecycle = sample_part("inputs")?;
-        without_lifecycle.fixtures.remove("lifecycle");
-        assert!(
-            combine_parts(without_lifecycle, sample_part("tests")?, &sample_identity()).is_err()
-        );
+        assert_eq!(complete.fixtures.len(), 22);
+        for fixture in ["lifecycle", "verification-actors"] {
+            assert!(complete.fixtures.contains_key(fixture));
+            let mut incomplete = sample_part("inputs")?;
+            incomplete.fixtures.remove(fixture);
+            assert!(combine_parts(incomplete, sample_part("tests")?, &sample_identity()).is_err());
+        }
         for field in [
             "checkout",
             "tree",
@@ -1844,9 +1844,10 @@ mod tests {
                 .iter()
                 .filter(|step| step.starts_with("build-"))
                 .count(),
-            21
+            22
         );
         assert!(steps.contains("build-lifecycle"));
+        assert!(steps.contains("build-verification-actors"));
         assert!(!steps.contains("test-workspace-runtime"));
         assert!(!steps.contains("control-simulation"));
         assert!(steps.contains("test-binaries") && steps.contains("test-docs"));
