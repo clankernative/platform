@@ -95,13 +95,21 @@ impl RefusalReport {
         if !(1..=RefusalStage::ExecuteWorker as u8).contains(&stage) {
             return None;
         }
-        Some(Self { stage, errno: (errno != 0).then_some(errno) })
+        Some(Self {
+            stage,
+            errno: (errno != 0).then_some(errno),
+        })
     }
 }
 
 impl std::fmt::Display for RefusalReport {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "day2-launch-refusal-v1 stage={} errno={}", self.stage, self.errno.unwrap_or(0))
+        write!(
+            formatter,
+            "day2-launch-refusal-v1 stage={} errno={}",
+            self.stage,
+            self.errno.unwrap_or(0)
+        )
     }
 }
 
@@ -109,9 +117,8 @@ impl std::fmt::Display for RefusalReport {
 #[cfg(target_os = "linux")]
 pub fn refusal_stdout_is_pipe() -> bool {
     use nix::sys::stat::{SFlag, fstat};
-    fstat(std::io::stdout()).is_ok_and(|stat| {
-        SFlag::from_bits_truncate(stat.st_mode) & SFlag::S_IFMT == SFlag::S_IFIFO
-    })
+    fstat(std::io::stdout())
+        .is_ok_and(|stat| SFlag::from_bits_truncate(stat.st_mode) & SFlag::S_IFMT == SFlag::S_IFIFO)
 }
 
 #[cfg(not(target_os = "linux"))]

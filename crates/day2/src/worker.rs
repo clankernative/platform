@@ -501,7 +501,8 @@ impl Worker {
             .try_send(input.to_vec())
             .context("worker request backlog")?;
         increment(&self.progress.requests_enqueued);
-        let frame = self.responses()
+        let frame = self
+            .responses()
             .as_ref()
             .context("closed worker")?
             .recv_timeout(timeout)
@@ -511,9 +512,12 @@ impl Worker {
             })??;
         #[cfg(target_os = "linux")]
         if let Some(report) = day2_sandbox::RefusalReport::parse(&frame) {
-            return Err(anyhow::Error::new(crate::error::Failure::WorkerCrashed).context(
-                LauncherRefusal { stage: report.stage, errno: report.errno },
-            ));
+            return Err(
+                anyhow::Error::new(crate::error::Failure::WorkerCrashed).context(LauncherRefusal {
+                    stage: report.stage,
+                    errno: report.errno,
+                }),
+            );
         }
         Ok(frame)
     }
@@ -670,13 +674,24 @@ mod tests {
         command.arg("day2-launch-refusal-v1 stage=6 errno=2");
         let mut worker = super::Worker::spawn(command, MAX_FRAME).unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
-        while worker.progress.reader_frames_completed.load(Ordering::Acquire) < 2 {
-            assert!(std::time::Instant::now() < deadline, "child never produced reports");
+        while worker
+            .progress
+            .reader_frames_completed
+            .load(Ordering::Acquire)
+            < 2
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "child never produced reports"
+            );
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         let started = std::time::Instant::now();
         let error = worker.exchange(b"PRIVATE_REQUEST").unwrap_err();
-        assert_eq!(crate::error::classify(&error), crate::error::Failure::WorkerCrashed);
+        assert_eq!(
+            crate::error::classify(&error),
+            crate::error::Failure::WorkerCrashed
+        );
         let diagnostic = crate::error::diagnostic(&error);
         let report = &diagnostic["worker_stage"]["child_reported_launcher"];
         assert_eq!(report["stage"], 6);
