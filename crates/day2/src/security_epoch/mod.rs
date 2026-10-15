@@ -15,6 +15,7 @@ pub(crate) mod journal;
 mod kernel;
 mod namespace_protocol;
 mod native_clock;
+mod native_connection_peer;
 mod native_identity;
 mod native_namespace;
 mod runtime_profile;
@@ -25,6 +26,7 @@ pub(crate) use authenticated_reads::AuthenticatedReads;
 pub(crate) use credential_material::CredentialMaterial;
 pub(crate) use firestore::EpochObservation;
 pub(crate) use native_clock::NativeAcquisition;
+pub(crate) use native_connection_peer::NativeConnectionPeerObservation;
 pub(crate) use native_identity::NativeProcessObservation;
 pub(crate) use native_namespace::NativeNamespaceObservation;
 

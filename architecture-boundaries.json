@@ -187,6 +187,19 @@
           "local_path": null
         },
         {
+          "name": "nix",
+          "kind": "normal",
+          "target": "cfg(target_os = \"linux\")",
+          "rename": null,
+          "features": [
+            "poll",
+            "socket"
+          ],
+          "default_features": false,
+          "optional": false,
+          "local_path": null
+        },
+        {
           "name": "oxc_allocator",
           "kind": "normal",
           "target": null,
