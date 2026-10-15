@@ -5,7 +5,7 @@ use super::*;
 
 #[test]
 fn kernel_process_visibility_preserves_zero_as_data_and_refuses_negative_pid() {
-    assert_eq!(process_visibility(0).unwrap(), PeerProcessData::NotVisible);
+    assert_eq!(process_visibility(0).unwrap(), PeerProcessData::NotVisible {});
     assert_eq!(
         process_visibility(7).unwrap(),
         PeerProcessData::Visible {
@@ -19,7 +19,7 @@ fn kernel_process_visibility_preserves_zero_as_data_and_refuses_negative_pid() {
 #[test]
 fn visibility_codec_requires_explicit_nonzero_or_not_visible_data() {
     let data = ConnectionPeerData {
-        process: PeerProcessData::NotVisible,
+        process: PeerProcessData::NotVisible {},
         user: 1,
         group: 2,
     };
@@ -47,6 +47,61 @@ fn visibility_codec_requires_explicit_nonzero_or_not_visible_data() {
             .is_err()
         );
     }
+}
+
+#[test]
+fn visibility_decoders_reject_arrays_and_duplicate_or_unknown_fields() {
+    for raw in [
+        "[]",
+        r#"["not_visible"]"#,
+        r#"["visible",7]"#,
+        "null",
+        "7",
+        "{}",
+        r#"{"visibility":"visible"}"#,
+        r#"{"visibility":"not_visible","unknown":0}"#,
+        r#"{"visibility":"not_visible","process":7}"#,
+    ] {
+        assert!(serde_json::from_str::<PeerProcessData>(raw).is_err());
+        let value: serde_json::Value = serde_json::from_str(raw).unwrap();
+        assert!(serde_json::from_value::<PeerProcessData>(value.clone()).is_err());
+        let nested = format!(r#"{{"process":{raw},"user":1,"group":2}}"#);
+        assert!(serde_json::from_str::<ConnectionPeerData>(&nested).is_err());
+        assert!(
+            serde_json::from_value::<ConnectionPeerData>(
+                serde_json::json!({"process":value,"user":1,"group":2})
+            )
+            .is_err()
+        );
+    }
+    // Raw inputs retain duplicates; Value would discard them before decoding.
+    for raw in [
+        r#"{"visibility":"not_visible","visibility":"not_visible"}"#,
+        r#"{"visibility":"visible","process":7,"process":8}"#,
+    ] {
+        assert!(serde_json::from_str::<PeerProcessData>(raw).is_err());
+        let nested = format!(r#"{{"process":{raw},"user":1,"group":2}}"#);
+        assert!(serde_json::from_str::<ConnectionPeerData>(&nested).is_err());
+    }
+    for raw in [
+        r#"[{"visibility":"not_visible"},1,2]"#,
+        r#"{"process":{"visibility":"not_visible"},"user":1}"#,
+        r#"{"process":{"visibility":"not_visible"},"user":1,"group":2,"unknown":0}"#,
+    ] {
+        assert!(serde_json::from_str::<ConnectionPeerData>(raw).is_err());
+        let value: serde_json::Value = serde_json::from_str(raw).unwrap();
+        assert!(serde_json::from_value::<ConnectionPeerData>(value).is_err());
+    }
+    for raw in [
+        r#"{"process":{"visibility":"not_visible"},"process":{"visibility":"not_visible"},"user":1,"group":2}"#,
+        r#"{"process":{"visibility":"not_visible"},"user":1,"user":2,"group":2}"#,
+    ] {
+        assert!(serde_json::from_str::<ConnectionPeerData>(raw).is_err());
+    }
+    let visible = serde_json::json!({"process":{"visibility":"visible","process":7},"user":1,"group":2});
+    let data = serde_json::from_value::<ConnectionPeerData>(visible.clone()).unwrap();
+    assert_eq!(data.process, process_visibility(7).unwrap());
+    assert_eq!(serde_json::to_value(data).unwrap(), visible);
 }
 
 #[cfg(not(target_os = "linux"))]

@@ -6,24 +6,90 @@
 use super::native_clock::NativeAcquisition;
 use anyhow::{Result, ensure};
 use day2_capabilities::Digest;
-use serde::{Deserialize, Serialize};
-use std::{fs::File, marker::PhantomData, num::NonZeroU32, rc::Rc, thread::ThreadId};
+use serde::{
+    Deserialize, Deserializer, Serialize,
+    de::{MapAccess, Visitor, value::MapAccessDeserializer},
+};
+use std::{fmt, fs::File, marker::PhantomData, num::NonZeroU32, rc::Rc, thread::ThreadId};
 
 /// Numeric visibility in the receiver's PID namespace, not process authority.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "visibility", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum PeerProcessData {
     Visible { process: NonZeroU32 },
-    NotVisible,
+    NotVisible {},
+}
+
+impl<'de> Deserialize<'de> for PeerProcessData {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(tag = "visibility", rename_all = "snake_case", deny_unknown_fields)]
+        enum Wire {
+            Visible { process: NonZeroU32 },
+            NotVisible {},
+        }
+        struct MapOnly;
+        impl<'de> Visitor<'de> for MapOnly {
+            type Value = PeerProcessData;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a connection-peer PID visibility map")
+            }
+
+            fn visit_map<M: MapAccess<'de>>(
+                self,
+                map: M,
+            ) -> std::result::Result<Self::Value, M::Error> {
+                Ok(match Wire::deserialize(MapAccessDeserializer::new(map))? {
+                    Wire::Visible { process } => PeerProcessData::Visible { process },
+                    Wire::NotVisible {} => PeerProcessData::NotVisible {},
+                })
+            }
+        }
+        deserializer.deserialize_map(MapOnly)
+    }
 }
 
 /// Historical connection-creator DATA, never current credentials or permission.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ConnectionPeerData {
     pub process: PeerProcessData,
     pub user: u32,
     pub group: u32,
+}
+
+impl<'de> Deserialize<'de> for ConnectionPeerData {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            process: PeerProcessData,
+            user: u32,
+            group: u32,
+        }
+        struct MapOnly;
+        impl<'de> Visitor<'de> for MapOnly {
+            type Value = ConnectionPeerData;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a connection-peer data map")
+            }
+
+            fn visit_map<M: MapAccess<'de>>(
+                self,
+                map: M,
+            ) -> std::result::Result<Self::Value, M::Error> {
+                let wire = Wire::deserialize(MapAccessDeserializer::new(map))?;
+                Ok(ConnectionPeerData {
+                    process: wire.process,
+                    user: wire.user,
+                    group: wire.group,
+                })
+            }
+        }
+        deserializer.deserialize_map(MapOnly)
+    }
 }
 
 pub(crate) struct NativeConnectionPeerObservation {
@@ -156,7 +222,7 @@ fn process_visibility(process: i32) -> Result<PeerProcessData> {
     );
     Ok(match NonZeroU32::new(process.try_into()?) {
         Some(process) => PeerProcessData::Visible { process },
-        None => PeerProcessData::NotVisible,
+        None => PeerProcessData::NotVisible {},
     })
 }
 
