@@ -113,7 +113,7 @@ fn example_step_generated_is_typed_and_has_an_explicit_wire_tag() -> Result<()> 
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()?;
-    let stage = tempfile::tempdir()?;
+    let stage = crate::support::compiler::stage(&root)?;
     day2::sdk::stage(&root.join("sdk"), &stage.path().join("sdk"))?;
     fs::write(stage.path().join("sdk/main.roc"), day2::sdk::app_platform())?;
     fs::write(
