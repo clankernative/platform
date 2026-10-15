@@ -58,7 +58,8 @@ impl NativeProcessObservation {
                     size == identity.2 && file_identity(&executable)? == identity,
                     "epoch_native_executable_changed"
                 );
-                let code: Digest = format!("sha256:{}", crate::hex(hash.finish().as_ref())).try_into()?;
+                let code: Digest =
+                    format!("sha256:{}", crate::hex(hash.finish().as_ref())).try_into()?;
                 ensure!(
                     code == *expected_executable,
                     "epoch_native_executable_pin_mismatch"
