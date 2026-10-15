@@ -29,7 +29,7 @@ impl NativeProcessObservation {
         let result = (|| {
             #[cfg(target_os = "linux")]
             {
-                use sha2::{Digest as _, Sha256};
+                use ring::digest::{Context, SHA256};
                 use std::{fs::File, io::Read};
                 let origin = acquisition.sample()?.domain;
                 let process = std::process::id();
@@ -39,7 +39,7 @@ impl NativeProcessObservation {
                     identity.2 > 0 && identity.2 <= 512 * 1024 * 1024,
                     "epoch_native_executable_bound"
                 );
-                let mut hash = Sha256::new();
+                let mut hash = Context::new(&SHA256);
                 let mut buffer = [0_u8; 65_536];
                 let mut size = 0_u64;
                 loop {
@@ -58,7 +58,7 @@ impl NativeProcessObservation {
                     size == identity.2 && file_identity(&executable)? == identity,
                     "epoch_native_executable_changed"
                 );
-                let code: Digest = format!("sha256:{:x}", hash.finalize()).try_into()?;
+                let code: Digest = format!("sha256:{}", crate::hex(hash.finish().as_ref())).try_into()?;
                 ensure!(
                     code == *expected_executable,
                     "epoch_native_executable_pin_mismatch"
