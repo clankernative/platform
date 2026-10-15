@@ -728,16 +728,42 @@ jobs:
             target/debug/xtask.d
           if-no-files-found: error
           retention-days: 3
+      - name: Require the reviewed formatted source to stay unchanged
+        run: git diff --exit-code
       - name: Require the exact current native, dependency and proof admission
         run: target/debug/xtask architecture-check
       - name: Require complete strict workspace and all-targets lint
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
-      - name: Run real sandbox, compiler-driver and fixed-report controls
-        run: cargo test --locked -p day2-sandbox --lib --bins --test isolation -- --nocapture
-      - name: Run all current worker controls including a backlogged forged report
-        run: cargo test --locked -p day2 --lib worker::tests -- --nocapture
-      - name: Require the existing operator privacy control
-        run: cargo test --locked -p day2 --lib error::tests::operator_diagnostics_retain_codes_without_context_or_payloads -- --exact --nocapture
+      - name: Run complete ordinary native preparation once
+        id: startup_prepare
+        run: cargo run --locked -p xtask -- verify-prepare
+      - name: Retain current preparation evidence before runtime
+        if: ${{ always() && steps.startup_context.outcome == 'success' && steps.startup_prepare.outcome != 'skipped' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: day2-startup-runtime-preparation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            /tmp/day2-ci-linux-context.json
+            artifacts/ci-prepared.json
+            artifacts/ci-test-binaries.json
+            artifacts/ci-test-build-cache.json
+            artifacts/all-verification-cache.json
+            artifacts/*/artifact.json
+            target/debug/xtask.d
+          if-no-files-found: error
+          retention-days: 3
+      - name: Run the complete current parallel runtime campaign once
+        id: startup_parallel
+        if: ${{ success() && steps.startup_prepare.outcome == 'success' }}
+        run: target/debug/xtask verify-shard parallel-runtime
+      - name: Require and retain the actual successful runtime receipt
+        if: ${{ always() && steps.startup_parallel.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: day2-startup-runtime-result-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/ci-results/parallel-runtime.json
+          if-no-files-found: error
+          retention-days: 3
 
   infrastructure:
     runs-on: ubuntu-24.04
