@@ -7,13 +7,21 @@ use super::native_clock::NativeAcquisition;
 use anyhow::{Result, ensure};
 use day2_capabilities::Digest;
 use serde::{Deserialize, Serialize};
-use std::{fs::File, marker::PhantomData, rc::Rc, thread::ThreadId};
+use std::{fs::File, marker::PhantomData, num::NonZeroU32, rc::Rc, thread::ThreadId};
+
+/// Numeric visibility in the receiver's PID namespace, not process authority.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "visibility", rename_all = "snake_case", deny_unknown_fields)]
+pub(super) enum PeerProcessData {
+    Visible { process: NonZeroU32 },
+    NotVisible,
+}
 
 /// Historical connection-creator DATA, never current credentials or permission.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ConnectionPeerData {
-    pub process: u32,
+    pub process: PeerProcessData,
     pub user: u32,
     pub group: u32,
 }
@@ -130,15 +138,25 @@ fn credentials(socket: &File, acquisition: &mut NativeAcquisition) -> Result<Con
     acquisition.remaining()?;
     let peer = nix::sys::socket::getsockopt(socket, nix::sys::socket::sockopt::PeerCredentials)?;
     acquisition.remaining()?;
-    let process: u32 = peer.pid().try_into()?;
     ensure!(
-        process != 0 && peer.uid() != u32::MAX && peer.gid() != u32::MAX,
+        peer.uid() != u32::MAX && peer.gid() != u32::MAX,
         "native_connection_peer_credentials_unavailable"
     );
     Ok(ConnectionPeerData {
-        process,
+        process: process_visibility(peer.pid())?,
         user: peer.uid(),
         group: peer.gid(),
+    })
+}
+
+fn process_visibility(process: i32) -> Result<PeerProcessData> {
+    ensure!(
+        process >= 0,
+        "native_connection_peer_credentials_unavailable"
+    );
+    Ok(match NonZeroU32::new(process.try_into()?) {
+        Some(process) => PeerProcessData::Visible { process },
+        None => PeerProcessData::NotVisible,
     })
 }
 

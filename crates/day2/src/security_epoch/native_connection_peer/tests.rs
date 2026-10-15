@@ -3,6 +3,52 @@
 
 use super::*;
 
+#[test]
+fn kernel_process_visibility_preserves_zero_as_data_and_refuses_negative_pid() {
+    assert_eq!(process_visibility(0).unwrap(), PeerProcessData::NotVisible);
+    assert_eq!(
+        process_visibility(7).unwrap(),
+        PeerProcessData::Visible {
+            process: NonZeroU32::new(7).unwrap(),
+        }
+    );
+    assert!(process_visibility(-1).is_err());
+    assert!(process_visibility(i32::MIN).is_err());
+}
+
+#[test]
+fn visibility_codec_requires_explicit_nonzero_or_not_visible_data() {
+    let data = ConnectionPeerData {
+        process: PeerProcessData::NotVisible,
+        user: 1,
+        group: 2,
+    };
+    let encoded = serde_json::to_value(&data).unwrap();
+    assert_eq!(
+        encoded,
+        serde_json::json!({"process":{"visibility":"not_visible"},"user":1,"group":2})
+    );
+    assert_eq!(
+        serde_json::from_value::<ConnectionPeerData>(encoded).unwrap(),
+        data
+    );
+    for process in [
+        serde_json::json!({"visibility":"visible","process":0}),
+        serde_json::json!({"visibility":"visible","process":-1}),
+        serde_json::json!({"visibility":"not_visible","process":7}),
+        serde_json::json!({"visibility":"unknown"}),
+        serde_json::json!(7),
+        serde_json::Value::Null,
+    ] {
+        assert!(
+            serde_json::from_value::<ConnectionPeerData>(
+                serde_json::json!({"process":process,"user":1,"group":2})
+            )
+            .is_err()
+        );
+    }
+}
+
 #[cfg(not(target_os = "linux"))]
 #[test]
 fn unsupported_connection_peer_refuses_original_acquisition() {
@@ -34,7 +80,12 @@ fn actual_kernel_peer_descriptor_observes_connection_creator_only() {
     let mut observed =
         NativeConnectionPeerObservation::observe(file(socket), &mut interval).unwrap();
     observed.check(&mut interval).unwrap();
-    assert_eq!(observed.into_data().process, std::process::id());
+    assert_eq!(
+        observed.into_data().process,
+        PeerProcessData::Visible {
+            process: NonZeroU32::new(std::process::id()).unwrap(),
+        }
+    );
     // No message was attributed and no role/runtime/storage capability exists.
 }
 
@@ -139,7 +190,12 @@ fn actual_peer_process_exit_refuses_retained_pidfd_and_preserves_trace() {
     };
     let mut observed =
         NativeConnectionPeerObservation::observe(file(socket), &mut interval).unwrap();
-    assert_eq!(observed.peer.process, child_process);
+    assert_eq!(
+        observed.peer.process,
+        PeerProcessData::Visible {
+            process: NonZeroU32::new(child_process).unwrap(),
+        }
+    );
     child.0.kill().unwrap();
     let status = child.0.wait().unwrap();
     let refusal_reason = observed
