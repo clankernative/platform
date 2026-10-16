@@ -895,14 +895,10 @@ jobs:
         run: cargo -V
       - name: Retain the locked current Cargo graph
         run: cargo metadata --locked --offline --format-version=1 > /tmp/day2-comparison-cargo-metadata.json
-      - name: Build the ordinary Cargo driver and three auxiliaries once for inventory
-        run: cargo build --locked -p xtask -p day2-sandbox --bins --message-format=json > /tmp/day2-comparison-cargo-programs.jsonl
+      - name: Compile the complete default target set of the three selected Cargo packages once
+        run: cargo build --locked -p day2 -p xtask -p day2-sandbox --all-targets --message-format=json > /tmp/day2-comparison-cargo-alltargets.jsonl
         env:
-          CARGO_TARGET_DIR: /tmp/day2-comparison-cargo-target
-      - name: Compile the existing Cargo Reports harness without executing it
-        run: cargo test --locked -p day2 --test day2_integration --no-run --message-format=json > /tmp/day2-comparison-cargo-integration.jsonl
-        env:
-          CARGO_TARGET_DIR: /tmp/day2-comparison-cargo-target
+          CARGO_TARGET_DIR: /tmp/day2-comparison-cargo-alltargets-target
       - name: Fetch the pinned Bazel executable
         run: gh release download 9.3.0 --repo bazelbuild/bazel --pattern bazel-9.3.0-linux-x86_64 --dir /tmp/day2-bazel-tools
         env:
@@ -911,14 +907,14 @@ jobs:
         run: sha256sum --check --ignore-missing "$GITHUB_WORKSPACE/.github/bazel-experiment.sha256"
         working-directory: /tmp/day2-bazel-tools
       - run: chmod 755 /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64
-      - name: Retain the current five-program Bazel action graph without building it
-        run: /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64 --output_user_root=/tmp/day2-bazel-Cargo-equivalence aquery --include_param_files --output=jsonproto 'deps(set(//crates/xtask:xtask //crates/day2:day2_integration //crates/day2-sandbox:day2-sandbox //crates/day2-sandbox:day2-compiler-sandbox //crates/day2-sandbox:day2-sandbox-probe))' > /tmp/day2-bazel-action-graph.json
+      - name: Retain every source-derived matching Bazel executable action without building it
+        run: /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64 --output_user_root=/tmp/day2-bazel-Cargo-alltargets-alignment aquery --include_param_files --output=jsonproto 'deps(set(//crates/day2:unit_lib //crates/day2:day2 //crates/day2:unit_day2 //crates/day2:day2-health //crates/day2:unit_day2_health //crates/day2:day2-inspect //crates/day2:unit_day2_inspect //crates/day2:day2-package //crates/day2:unit_day2_package //crates/day2:day2-security-shell //crates/day2:unit_day2_security_shell //crates/day2:sandbox_probe //crates/day2:unit_sandbox_probe //crates/day2:day2_integration //crates/day2-sandbox:unit_lib //crates/day2-sandbox:day2-compiler-sandbox //crates/day2-sandbox:unit_day2_compiler_sandbox //crates/day2-sandbox:day2-sandbox //crates/day2-sandbox:unit_day2_sandbox //crates/day2-sandbox:day2-sandbox-probe //crates/day2-sandbox:unit_day2_sandbox_probe //crates/day2-sandbox:isolation //crates/xtask:xtask //crates/xtask:unit_xtask))' > /tmp/day2-bazel-action-graph.json
       - name: Require the Cargo lockfile to remain unchanged
         run: git diff --exit-code -- Cargo.lock
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: ${{ always() }}
         with:
-          name: day2-Cargo-Bazel-graph-inventory-${{ github.run_id }}-${{ github.run_attempt }}
+          name: day2-Cargo-Bazel-aligned-graph-inventory-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             /tmp/day2-ci-linux-context.json
             /tmp/day2-format.patch
@@ -927,8 +923,7 @@ jobs:
             /tmp/day2-architecture-proofs.json
             /tmp/day2-bazel-action-graph.json
             /tmp/day2-comparison-cargo-metadata.json
-            /tmp/day2-comparison-cargo-programs.jsonl
-            /tmp/day2-comparison-cargo-integration.jsonl
+            /tmp/day2-comparison-cargo-alltargets.jsonl
             MODULE.bazel.lock
             Cargo.lock
             target/debug/xtask.d

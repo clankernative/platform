@@ -41,3 +41,58 @@ platform_rust_binary(
     compile_data = [],
     own_library = ":lib",
 )
+
+# Measurement-only parity with the selected Cargo all-targets graph.
+platform_rust_test(
+    name = "unit_lib",
+    crate_name = "day2_sandbox",
+    crate_root = "src/lib.rs",
+    srcs = glob(["src/**/*.rs"]),
+    compile_data = [],
+    internal_deps = [],
+)
+
+platform_rust_test(
+    name = "unit_day2_compiler_sandbox",
+    crate_name = "day2_compiler_sandbox",
+    crate_root = "src/bin/day2-compiler-sandbox.rs",
+    srcs = glob(["src/**/*.rs"]),
+    compile_data = [],
+    internal_deps = [],
+    own_library = ":lib",
+)
+
+platform_rust_test(
+    name = "unit_day2_sandbox",
+    crate_name = "day2_sandbox",
+    crate_root = "src/main.rs",
+    srcs = glob(["src/**/*.rs"]),
+    compile_data = [],
+    internal_deps = [],
+    own_library = ":lib",
+)
+
+platform_rust_test(
+    name = "unit_day2_sandbox_probe",
+    crate_name = "day2_sandbox_probe",
+    crate_root = "src/bin/day2-sandbox-probe.rs",
+    srcs = glob(["src/**/*.rs"]),
+    compile_data = [],
+    internal_deps = [],
+    own_library = ":lib",
+)
+
+platform_rust_test(
+    name = "isolation",
+    crate_name = "isolation",
+    crate_root = "tests/isolation.rs",
+    srcs = glob(["tests/**/*.rs"]),
+    compile_data = [],
+    internal_deps = [],
+    own_library = ":lib",
+    data = [":day2-sandbox", ":day2-sandbox-probe"],
+    rustc_env = {
+        "CARGO_BIN_EXE_day2-sandbox": "$(execpath :day2-sandbox)",
+        "CARGO_BIN_EXE_day2-sandbox-probe": "$(execpath :day2-sandbox-probe)",
+    },
+)

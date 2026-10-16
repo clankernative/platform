@@ -27,3 +27,30 @@ platform_rust_binary(
 
 
 exports_files(["Cargo.toml"])
+
+# Measurement-only parity with the selected Cargo all-targets graph.
+EXPERIMENT_ALL_TARGETS_COMPILE_DATA = [
+            "//:.github/workflows/ci.yml",
+            "//crates/day2:tests/command_atomicity.rs",
+            "//:architecture/clippy.toml",
+            "//crates/day2-control:src/release.rs",
+            "//crates/day2:src/structural_proofs.rs",
+            "src/architecture.rs",
+            "//:fixtures/authority-policies/reports.json",
+            "//:rust-toolchain.toml",
+            "//:toolchain.json",
+            "//:toolchains/linux-aarch64.json",
+            "//:toolchains/linux-x86_64.json",
+            "//:tools/roc-compiler/glue-layouts.patch"
+    ]
+
+EXPERIMENT_ALL_TARGETS_INTERNAL_DEPS = ["//crates/day2-assets:lib", "//crates/day2-contracts:lib", "//crates/day2:lib", "//crates/day2-control:lib", "//crates/day2-ops:lib"]
+
+platform_rust_test(
+    name = "unit_xtask",
+    crate_name = "xtask",
+    crate_root = "src/main.rs",
+    srcs = glob(["src/**/*.rs"]),
+    compile_data = EXPERIMENT_ALL_TARGETS_COMPILE_DATA,
+    internal_deps = EXPERIMENT_ALL_TARGETS_INTERNAL_DEPS,
+)
