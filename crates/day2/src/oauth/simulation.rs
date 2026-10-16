@@ -798,6 +798,7 @@ pub(super) fn registration_codes(target: &registration::Target) -> Result<regist
         let query = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("state", &state)
             .append_pair("code", value)
+            .append_pair("iss", &target.reviewed().issuer_url)
             .finish();
         authorization.complete(query.as_bytes(), &human)
     };
