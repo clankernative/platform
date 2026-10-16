@@ -80,3 +80,19 @@ bazel aquery --include_param_files --output=jsonproto 'deps(set(//crates/xtask:x
 The diagnostic workflow selection edits are temporary and must never be merged.
 The source and generated lock/action metadata are retained before any later
 integration or benchmark allocation.
+
+## Reports adapter preflight
+
+The next measurement-branch adapter uses `ops/BazelExperiment.roc` to call the
+ordinary Reports build recipe and then run the current source-derived
+`command_atomicity` cases. Its fixed installer copies the newly built driver,
+integration executable, and three Linux launchers into regular workspace files.
+It records executable hashes, modes, and the exact hosted run/source identity.
+It never treats Cargo dep-info as a Bazel compiler identity or caches runtime
+results. The native worker archive still uses the ordinary Cargo build.
+
+The first adapter gate only collects formatter/native-access facts and runs
+strict Clippy plus the complete case-catalog control module. New native sites
+require explicit review before an architecture-admitted Reports runtime gate.
+This preliminary gate does not install the bundle, build Reports, execute its
+runtime cases, or establish Cargo feature equivalence or a timing comparison.

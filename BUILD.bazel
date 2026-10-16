@@ -33,6 +33,7 @@ exports_files([
     "ops/Authority.roc",
     "ops/Backup.roc",
     "ops/Build.roc",
+    "ops/BazelExperiment.roc",
     "ops/Capability.roc",
     "ops/Check.roc",
     "ops/Ci.roc",

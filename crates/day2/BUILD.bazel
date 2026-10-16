@@ -115,6 +115,7 @@ platform_rust_library(
             "//:ops/Authority.roc",
             "//:ops/Backup.roc",
             "//:ops/Build.roc",
+            "//:ops/BazelExperiment.roc",
             "//:ops/Capability.roc",
             "//:ops/Check.roc",
             "//:ops/Ci.roc",
@@ -261,6 +262,7 @@ platform_rust_binary(
             "//:ops/Authority.roc",
             "//:ops/Backup.roc",
             "//:ops/Build.roc",
+            "//:ops/BazelExperiment.roc",
             "//:ops/Capability.roc",
             "//:ops/Check.roc",
             "//:ops/Ci.roc",
@@ -408,6 +410,7 @@ platform_rust_binary(
             "//:ops/Authority.roc",
             "//:ops/Backup.roc",
             "//:ops/Build.roc",
+            "//:ops/BazelExperiment.roc",
             "//:ops/Capability.roc",
             "//:ops/Check.roc",
             "//:ops/Ci.roc",
@@ -473,3 +476,5 @@ exports_files(["src/structural_proofs.rs"])
 exports_files(["Cargo.toml"])
 
 exports_files(["tests/command_simulation.rs"])
+
+exports_files(["tests/command_atomicity.rs"])

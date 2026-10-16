@@ -410,6 +410,7 @@
     "crates/worker/src/first_request.rs",
     "crates/worker/src/lib.rs",
     "crates/xtask/src/app_contracts.rs",
+    "crates/xtask/src/bazel_experiment.rs",
     "crates/xtask/src/architecture.rs",
     "crates/xtask/src/architecture_dependencies.rs",
     "crates/xtask/src/architecture_kernel.rs",

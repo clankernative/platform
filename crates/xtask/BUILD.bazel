@@ -8,6 +8,7 @@ platform_rust_binary(
     crate_root = "src/main.rs",
     srcs = glob(["src/**/*.rs"]),
     compile_data = [
+            "//crates/day2:tests/command_atomicity.rs",
             "//:architecture/clippy.toml",
             "//crates/day2-control:src/release.rs",
             "//crates/day2:src/structural_proofs.rs",

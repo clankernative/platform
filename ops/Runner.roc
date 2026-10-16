@@ -22,6 +22,7 @@ import ops.Release
 import ops.GkeRelease
 import ops.SecretRetirement
 import ops.UiDependency
+import ops.BazelExperiment
 
 # Only the native supervisor launches this executable. Its stdout is a bounded
 # request/response pipe, never a terminal or an app-accessible effect channel.
@@ -48,6 +49,7 @@ run! = |args| match args {
 		LocalDev.session!(options, call!)
 	}
 	["build-recipe"] => Build.recipe!(call!)
+	["bazel-reports"] => BazelExperiment.reports!(call!)
 	["build-delegation"] => Delegation.build!(call!)
 	["build-delegation-business"] => Delegation.business!(call!)
 	["exercise", example, count] => Check.exercise!(example, U64.from_str(count).map_err(|_| "invalid count")?, call!)

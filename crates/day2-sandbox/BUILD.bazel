@@ -14,3 +14,30 @@ platform_rust_library(
 
 
 exports_files(["Cargo.toml"])
+
+platform_rust_binary(
+    name = "day2-sandbox",
+    crate_name = "day2_sandbox",
+    crate_root = "src/main.rs",
+    srcs = glob(["src/**/*.rs"]),
+    compile_data = [],
+    own_library = ":lib",
+)
+
+platform_rust_binary(
+    name = "day2-compiler-sandbox",
+    crate_name = "day2_compiler_sandbox",
+    crate_root = "src/bin/day2-compiler-sandbox.rs",
+    srcs = glob(["src/**/*.rs"]),
+    compile_data = [],
+    own_library = ":lib",
+)
+
+platform_rust_binary(
+    name = "day2-sandbox-probe",
+    crate_name = "day2_sandbox_probe",
+    crate_root = "src/bin/day2-sandbox-probe.rs",
+    srcs = glob(["src/**/*.rs"]),
+    compile_data = [],
+    own_library = ":lib",
+)
