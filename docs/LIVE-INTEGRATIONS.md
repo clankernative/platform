@@ -64,6 +64,12 @@ establish an account-wide zero-retention guarantee; provider account data contro
 remain a separate deployment requirement. See the [Responses API](https://developers.openai.com/api/reference/typescript/resources/responses/methods/create)
 and [data controls](https://platform.openai.com/docs/models/default-usage-policies-by-endpoint).
 
+## Workspace Directory hierarchy reads
+
+`workspace_directory.hierarchy.v1` reads and validates the complete organizational-unit hierarchy without looking up the current user or claiming a membership path. Its capture reports both publication time and original source capture/expiry; reusing cached hierarchy facts never renews their source TTL. Cold hierarchy reads request only the organizational-unit OAuth scope. The separate membership capture remains fail-closed on user lookup and requests both user and hierarchy scopes.
+
+Home owns membership-cache validity, ancestry decisions and reconciliation. The platform supplies bounded, customer/connection/actor-bound hierarchy facts; operators own real identity and provider grants. Disposable Home verification selects a synthetic Workspace Directory read grant, narrowed by its explicit operation policy. Production loading never infers that authority. Home's real identity and cache/reconciliation integration remain unfinished.
+
 ## Credentials and transport
 
 This illustrative `Instance.resources` catalog allows the `reports` app to post

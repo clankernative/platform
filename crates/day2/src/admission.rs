@@ -116,7 +116,7 @@ const SEALED: &[(&str, &str, &str)] = &[
     (
         "WorkspaceDirectory.roc",
         "",
-        "7e3f807674d5b887100aedd0c752ec5209933f14e26759542844ebdd478da53d",
+        "d5984457bf3d3485496f62983948c7be153654ddab1a69a852dfcac5090bd26d",
     ),
     (
         "Linear.roc",

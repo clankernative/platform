@@ -169,6 +169,8 @@ pub struct OpenAiWorld {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceDirectoryWorld {
+    /// Provider tenant independent of whether any user lookup is configured.
+    pub customer_id: String,
     pub users: BTreeMap<String, Value>,
     pub hierarchy: Value,
     pub hierarchy_captured_at: i64,
@@ -812,20 +814,20 @@ fn read_world<W: serde::de::DeserializeOwned>(
 pub(crate) fn workspace_directory_responses(
     database: &Path,
     scope: &str,
+    customer_id: &str,
     actor: &str,
-) -> Result<(Value, Value, i64)> {
+) -> Result<(Option<Value>, Value, i64)> {
     let path =
         database.with_file_name(crate::simulations::simulation(Provider::WorkspaceDirectory));
     ensure!(path.is_file(), "simulated_provider_unconfigured");
     let connection =
         rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let state: World<WorkspaceDirectoryWorld> = read_world(&connection, scope)?;
-    let user = state
-        .world
-        .users
-        .get(actor)
-        .cloned()
-        .context("simulated_directory_user_unconfigured")?;
+    ensure!(
+        state.world.customer_id == customer_id,
+        "workspace_directory_customer_mismatch"
+    );
+    let user = state.world.users.get(actor).cloned();
     Ok((
         user,
         state.world.hierarchy,

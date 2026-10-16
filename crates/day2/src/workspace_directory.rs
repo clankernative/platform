@@ -32,6 +32,12 @@ const IAM_ORIGIN: &str = "https://iamcredentials.googleapis.com";
 const OAUTH_ORIGIN: &str = "https://oauth2.googleapis.com";
 const GOOGLE_TOKEN_ENDPOINT: &str = "https://oauth2.googleapis.com/token";
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CaptureMode {
+    Membership,
+    Hierarchy,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AuthenticationPlan {
     DirectServiceAccount {
@@ -71,8 +77,11 @@ impl AuthenticationPlan {
         })
     }
 
-    pub fn scopes(&self) -> [&'static str; 2] {
-        [USER_READ_SCOPE, ORG_UNIT_READ_SCOPE]
+    pub fn scopes(&self, mode: CaptureMode) -> Vec<&'static str> {
+        match mode {
+            CaptureMode::Membership => vec![USER_READ_SCOPE, ORG_UNIT_READ_SCOPE],
+            CaptureMode::Hierarchy => vec![ORG_UNIT_READ_SCOPE],
+        }
     }
 
     pub fn fixed_origins(&self) -> [&'static str; 3] {
@@ -117,6 +126,21 @@ pub fn collect_complete(
     input: CaptureInput,
     port: &mut dyn DirectoryReadPort,
 ) -> Result<CompleteCapture> {
+    collect_capture(input, port, CaptureMode::Membership)
+}
+
+pub fn collect_hierarchy(
+    input: CaptureInput,
+    port: &mut dyn DirectoryReadPort,
+) -> Result<CompleteCapture> {
+    collect_capture(input, port, CaptureMode::Hierarchy)
+}
+
+fn collect_capture(
+    input: CaptureInput,
+    port: &mut dyn DirectoryReadPort,
+    mode: CaptureMode,
+) -> Result<CompleteCapture> {
     ensure!(
         input.captured_at >= 0
             && !input.customer_id.is_empty()
@@ -127,10 +151,16 @@ pub fn collect_complete(
             && input.actor.len() <= 320,
         "workspace_directory_capture_identity_invalid"
     );
-    let user_path = port
-        .user_org_unit_path(&input.actor)
-        .map_err(|_| anyhow::anyhow!("workspace_directory_user_lookup_failed"))?;
-    validate_path(&user_path)?;
+    let user_path = match mode {
+        CaptureMode::Membership => {
+            let path = port
+                .user_org_unit_path(&input.actor)
+                .map_err(|_| anyhow::anyhow!("workspace_directory_user_lookup_failed"))?;
+            validate_path(&path)?;
+            Some(path)
+        }
+        CaptureMode::Hierarchy => None,
+    };
     let result = port
         .list_org_units()
         .map_err(|_| anyhow::anyhow!("workspace_directory_hierarchy_lookup_failed"))?;
@@ -143,11 +173,15 @@ pub fn collect_complete(
         "workspace_directory_capture_too_large"
     );
     ensure!(
-        result.hierarchy_captured_at <= input.captured_at
+        result.hierarchy_captured_at >= 0
+            && result.hierarchy_captured_at <= input.captured_at
             && input.captured_at - result.hierarchy_captured_at < SOURCE_TTL_SECONDS,
         "workspace_directory_hierarchy_cache_expired"
     );
-    let units = validate_complete(result.units, &user_path)?;
+    let units = match user_path.as_deref() {
+        Some(path) => validate_complete(result.units, path)?,
+        None => validate_hierarchy(result.units)?,
+    };
     let id = crate::digest(&serde_json::to_vec(&(
         "workspace-directory-capture-v1",
         &input.customer_id,
@@ -171,6 +205,8 @@ pub fn collect_complete(
             user_path,
             org_unit_count: u64::try_from(units.len())?,
             captured_at: input.captured_at,
+            source_captured_at: result.hierarchy_captured_at,
+            expires_at,
         },
         units,
         expires_at,
@@ -227,9 +263,12 @@ pub struct Capture {
     pub id: String,
     pub customer_id: String,
     pub actor: String,
-    pub user_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_path: Option<String>,
     pub org_unit_count: u64,
     pub captured_at: i64,
+    pub source_captured_at: i64,
+    pub expires_at: i64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -316,6 +355,15 @@ pub fn parse_user_path(bytes: &[u8], expected_customer: &str) -> Result<String> 
 /// Validate the complete source hierarchy before it can be made visible.
 pub fn validate_complete(units: Vec<OrgUnit>, user_path: &str) -> Result<Vec<OrgUnit>> {
     validate_path(user_path)?;
+    let units = validate_hierarchy(units)?;
+    ensure!(
+        units.iter().any(|unit| unit.path == user_path),
+        "workspace_directory_user_scope_missing"
+    );
+    Ok(units)
+}
+
+pub fn validate_hierarchy(units: Vec<OrgUnit>) -> Result<Vec<OrgUnit>> {
     ensure!(
         !units.is_empty() && units.len() <= MAX_ORG_UNITS,
         "workspace_directory_org_unit_count_invalid"
@@ -345,10 +393,6 @@ pub fn validate_complete(units: Vec<OrgUnit>, user_path: &str) -> Result<Vec<Org
             "workspace_directory_parent_fields_conflict"
         );
     }
-    ensure!(
-        paths.contains(user_path),
-        "workspace_directory_user_scope_missing"
-    );
     for unit in &units {
         match (&unit.parent_id, &unit.parent_path) {
             (Some(id), Some(path)) => {
@@ -395,16 +439,21 @@ fn publish_with_limit(
     ensure!(
         capture.metadata.id.len() == 71
             && capture.metadata.id.starts_with("sha256:")
+            && capture.metadata.source_captured_at >= 0
+            && capture.metadata.source_captured_at <= capture.metadata.captured_at
             && capture.expires_at > capture.metadata.captured_at
-            && capture.expires_at
-                <= capture
-                    .metadata
-                    .captured_at
-                    .checked_add(SOURCE_TTL_SECONDS)
-                    .context("workspace_directory_expiry_overflow")?,
+            && capture.metadata.expires_at == capture.expires_at
+            && capture
+                .metadata
+                .source_captured_at
+                .checked_add(SOURCE_TTL_SECONDS)
+                == Some(capture.expires_at),
         "workspace_directory_capture_metadata_invalid"
     );
-    let verified = validate_complete(capture.units.clone(), &capture.metadata.user_path)?;
+    let verified = match capture.metadata.user_path.as_deref() {
+        Some(path) => validate_complete(capture.units.clone(), path)?,
+        None => validate_hierarchy(capture.units.clone())?,
+    };
     ensure!(
         verified == capture.units,
         "workspace_directory_capture_order_invalid"
@@ -437,7 +486,7 @@ fn initialize_store(connection: &Connection) -> Result<()> {
             customer_id TEXT NOT NULL,
             connection_id TEXT NOT NULL,
             actor TEXT NOT NULL,
-            user_path TEXT NOT NULL,
+            user_path TEXT,
             org_unit_count INTEGER NOT NULL,
             captured_at INTEGER NOT NULL,
             expires_at INTEGER NOT NULL
@@ -482,7 +531,7 @@ fn insert_capture(connection: &Connection, capture: &CompleteCapture) -> Result<
             )?;
         }
     } else {
-        let old: (String, String, String, String, i64, i64, i64) = connection.query_row(
+        let old: (String, String, String, Option<String>, i64, i64, i64) = connection.query_row(
             "SELECT customer_id,connection_id,actor,user_path,org_unit_count,captured_at,expires_at FROM workspace_directory_captures WHERE id=?1",
             [&capture.metadata.id],
             |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?)),
@@ -715,6 +764,7 @@ impl NativeDirectoryPort {
         customer_id: &str,
         now: i64,
         cached_hierarchy: Option<(Vec<OrgUnit>, i64)>,
+        mode: CaptureMode,
     ) -> Result<Self> {
         let client = reqwest::blocking::Client::builder()
             .no_proxy()
@@ -732,6 +782,7 @@ impl NativeDirectoryPort {
             reqwest::Url::parse(METADATA_ORIGIN)?,
             reqwest::Url::parse(IAM_ORIGIN)?,
             reqwest::Url::parse(&format!("{OAUTH_ORIGIN}/token"))?,
+            mode,
         )?;
         Ok(Self {
             client,
@@ -749,6 +800,7 @@ impl NativeDirectoryPort {
         customer_id: &str,
         now: i64,
         cached_hierarchy: Option<(Vec<OrgUnit>, i64)>,
+        mode: CaptureMode,
         origins: [&str; 4],
     ) -> Result<Self> {
         let [directory_origin, metadata_origin, iam_origin, oauth_origin] = origins;
@@ -784,6 +836,7 @@ impl NativeDirectoryPort {
             metadata_origin,
             iam_origin,
             oauth_endpoint,
+            mode,
         )?;
         Ok(Self {
             client,
@@ -858,6 +911,7 @@ fn acquire_access_token(
     metadata_origin: reqwest::Url,
     iam_origin: reqwest::Url,
     oauth_endpoint: reqwest::Url,
+    mode: CaptureMode,
 ) -> Result<String> {
     let metadata_url =
         metadata_origin.join("/computeMetadata/v1/instance/service-accounts/default/token")?;
@@ -911,7 +965,7 @@ fn acquire_access_token(
                 "generateAccessToken"
             }
         ));
-    let scopes = [USER_READ_SCOPE, ORG_UNIT_READ_SCOPE];
+    let scopes = plan.scopes(mode);
     let payload = if let Some(subject) = delegated_admin {
         let claims = serde_json::json!({"iss":account,"sub":subject,"aud":GOOGLE_TOKEN_ENDPOINT,"iat":now,"exp":now.checked_add(300).ok_or_else(|| anyhow::anyhow!("workspace_directory_authentication_failed"))?,"scope":scopes.join(" ")});
         serde_json::json!({"payload":serde_json::to_string(&claims)?})
@@ -1048,12 +1102,37 @@ impl DirectoryReadPort for NativeDirectoryPort {
     }
 }
 
-/// Offline provider fixture built from Google Directory's real wire shapes and
-/// parsed by the same DTOs as the live adapter.
+/// Already captured source facts; this port has no provider or user lookup.
+pub struct CachedHierarchyPort {
+    units: Vec<OrgUnit>,
+    captured_at: i64,
+}
+
+impl CachedHierarchyPort {
+    pub fn new(units: Vec<OrgUnit>, captured_at: i64) -> Self {
+        Self { units, captured_at }
+    }
+}
+
+impl DirectoryReadPort for CachedHierarchyPort {
+    fn user_org_unit_path(&mut self, _actor: &str) -> Result<String> {
+        anyhow::bail!("workspace_directory_user_lookup_unavailable")
+    }
+
+    fn list_org_units(&mut self) -> Result<ProviderPage> {
+        Ok(ProviderPage {
+            units: self.units.clone(),
+            response_bytes: 0,
+            hierarchy_captured_at: self.captured_at,
+        })
+    }
+}
+
+/// Offline Google wire shapes parsed by the same DTOs as the live adapter.
 pub struct SimulatedDirectoryPort {
     customer_id: String,
     actor: String,
-    user_response: serde_json::Value,
+    user_response: Option<serde_json::Value>,
     hierarchy_response: serde_json::Value,
     hierarchy_captured_at: i64,
 }
@@ -1067,7 +1146,39 @@ impl SimulatedDirectoryPort {
         _now: i64,
     ) -> Result<Self> {
         let (user_response, hierarchy_response, hierarchy_captured_at) =
-            crate::integrations::simulated::workspace_directory_responses(database, scope, actor)?;
+            crate::integrations::simulated::workspace_directory_responses(
+                database,
+                scope,
+                customer_id,
+                actor,
+            )?;
+        ensure!(
+            user_response.is_some(),
+            "simulated_directory_user_unconfigured"
+        );
+        Ok(Self {
+            customer_id: customer_id.into(),
+            actor: actor.into(),
+            user_response,
+            hierarchy_response,
+            hierarchy_captured_at,
+        })
+    }
+
+    pub fn new_hierarchy(
+        database: &std::path::Path,
+        scope: &str,
+        customer_id: &str,
+        actor: &str,
+        _now: i64,
+    ) -> Result<Self> {
+        let (user_response, hierarchy_response, hierarchy_captured_at) =
+            crate::integrations::simulated::workspace_directory_responses(
+                database,
+                scope,
+                customer_id,
+                actor,
+            )?;
         Ok(Self {
             customer_id: customer_id.into(),
             actor: actor.into(),
@@ -1081,7 +1192,11 @@ impl SimulatedDirectoryPort {
 impl DirectoryReadPort for SimulatedDirectoryPort {
     fn user_org_unit_path(&mut self, actor: &str) -> Result<String> {
         ensure!(actor == self.actor, "workspace_directory_actor_mismatch");
-        let bytes = serde_json::to_vec(&self.user_response)?;
+        let response = self
+            .user_response
+            .as_ref()
+            .context("simulated_directory_user_unconfigured")?;
+        let bytes = serde_json::to_vec(response)?;
         parse_user_path(&bytes, &self.customer_id)
     }
 
@@ -1301,6 +1416,140 @@ mod tests {
     }
 
     #[test]
+    fn capture_identity_is_validated_before_any_provider_read() -> Result<()> {
+        for mode in [CaptureMode::Membership, CaptureMode::Hierarchy] {
+            let mut missing_actor = capture_input("");
+            missing_actor.customer_id.clear();
+            let mut negative_time = capture_input("alice@example.test");
+            negative_time.captured_at = -1;
+            let mut long_connection = capture_input("alice@example.test");
+            long_connection.connection_id = "x".repeat(129);
+            for input in [missing_actor, negative_time, long_connection] {
+                let mut port = FixturePort {
+                    pages: vec![],
+                    fail_after: None,
+                    calls: 0,
+                };
+                assert_eq!(
+                    collect_capture(input, &mut port, mode)
+                        .unwrap_err()
+                        .to_string(),
+                    "workspace_directory_capture_identity_invalid"
+                );
+                assert_eq!(port.calls, 0);
+            }
+        }
+        assert!(capture_at(fixture(), 100, -1).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn publication_rejects_disagreeing_public_source_freshness_before_writes() -> Result<()> {
+        let complete = capture_at(fixture(), 100, 100)?;
+        let mut wrong_source = complete.clone();
+        wrong_source.metadata.source_captured_at = 101;
+        let mut wrong_public_expiry = complete.clone();
+        wrong_public_expiry.metadata.expires_at += 1;
+        let mut wrong_store_expiry = complete.clone();
+        wrong_store_expiry.expires_at += 1;
+        for capture in [wrong_source, wrong_public_expiry, wrong_store_expiry] {
+            let mut db = Connection::open_in_memory()?;
+            assert_eq!(
+                publish(&mut db, &capture).unwrap_err().to_string(),
+                "workspace_directory_capture_metadata_invalid"
+            );
+            let tables: i64 = db.query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='workspace_directory_captures'",
+                [], |row| row.get(0),
+            )?;
+            assert_eq!(tables, 0);
+        }
+        Ok(())
+    }
+
+    struct HierarchyOnlyPort {
+        units: Vec<OrgUnit>,
+        source_time: i64,
+        user_calls: usize,
+    }
+
+    impl DirectoryReadPort for HierarchyOnlyPort {
+        fn user_org_unit_path(&mut self, _actor: &str) -> Result<String> {
+            self.user_calls += 1;
+            anyhow::bail!("user endpoint unavailable")
+        }
+
+        fn list_org_units(&mut self) -> Result<ProviderPage> {
+            Ok(ProviderPage {
+                units: self.units.clone(),
+                response_bytes: 256,
+                hierarchy_captured_at: self.source_time,
+            })
+        }
+    }
+
+    #[test]
+    fn hierarchy_capture_reuses_source_without_user_lookup_or_ttl_renewal() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let mut db = open_store(&directory.path().join("directory.sqlite"))?;
+        let mut source = HierarchyOnlyPort {
+            units: fixture(),
+            source_time: 100,
+            user_calls: 0,
+        };
+        let first = collect_hierarchy(capture_input("alice@example.test"), &mut source)?;
+        assert_eq!(source.user_calls, 0);
+        assert_eq!(first.metadata.user_path, None);
+        assert_eq!(first.metadata.source_captured_at, 100);
+        assert_eq!(first.metadata.expires_at, 1000);
+        let wire = serde_json::to_value(&first.metadata)?;
+        assert!(wire.get("user_path").is_none());
+        publish(&mut db, &first)?;
+
+        for now in [200, 300, 999] {
+            let (units, source_time) =
+                cached_hierarchy(&db, "customer-1", "directory-connection/1", now)?
+                    .context("cached source hierarchy")?;
+            let mut reused_port = HierarchyOnlyPort {
+                units,
+                source_time,
+                user_calls: 0,
+            };
+            let reused = collect_hierarchy(
+                CaptureInput {
+                    captured_at: now,
+                    ..capture_input("alice@example.test")
+                },
+                &mut reused_port,
+            )?;
+            assert_eq!(reused_port.user_calls, 0);
+            assert_eq!(reused.metadata.captured_at, now);
+            assert_eq!(reused.metadata.source_captured_at, 100);
+            assert_eq!(reused.metadata.expires_at, 1000);
+            publish(&mut db, &reused)?;
+        }
+        assert!(cached_hierarchy(&db, "other-customer", "directory-connection/1", 300)?.is_none());
+        assert!(cached_hierarchy(&db, "customer-1", "other-connection", 300)?.is_none());
+        assert!(cached_hierarchy(&db, "customer-1", "directory-connection/1", 1000)?.is_none());
+        let membership_failure = collect_complete(
+            CaptureInput {
+                captured_at: 300,
+                ..capture_input("alice@example.test")
+            },
+            &mut HierarchyOnlyPort {
+                units: fixture(),
+                source_time: 100,
+                user_calls: 0,
+            },
+        );
+        assert_eq!(
+            membership_failure.unwrap_err().to_string(),
+            "workspace_directory_user_lookup_failed"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn fresh_cache_and_repeated_reuse_preserve_source_expiry() -> Result<()> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("directory.sqlite");
@@ -1428,7 +1677,7 @@ mod tests {
         };
         let capture = collect_complete(capture_input("alice@example.test"), &mut port)?;
         assert_eq!(capture.metadata.org_unit_count, 2);
-        assert_eq!(capture.metadata.user_path, "/Engineering");
+        assert_eq!(capture.metadata.user_path.as_deref(), Some("/Engineering"));
         assert_eq!(capture.expires_at, 100 + SOURCE_TTL_SECONDS);
         assert_eq!(capture.units, validate_complete(fixture(), "/Engineering")?);
         assert_eq!(port.calls, 2);
@@ -1690,12 +1939,13 @@ mod tests {
                 "customer-1",
                 100,
                 cached_hierarchy(&db, "customer-1", "directory-connection/1", 100)?,
+                CaptureMode::Membership,
                 [origin.as_str(); 4],
             )?;
             let capture = collect_complete(capture_input("alice@example.test"), &mut port);
             server.join().expect("fixture server panicked")?;
             let capture = capture?;
-            assert_eq!(capture.metadata.user_path, "/Engineering");
+            assert_eq!(capture.metadata.user_path.as_deref(), Some("/Engineering"));
             assert_eq!(capture.units.len(), 2);
             publish(&mut db, &capture)?;
             assert!(
@@ -1715,6 +1965,77 @@ mod tests {
     }
 
     #[test]
+    fn delegated_hierarchy_transport_requests_only_org_unit_scope_and_never_users() -> Result<()> {
+        use std::{net::TcpListener, thread};
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        let origin = format!("http://{}", listener.local_addr()?);
+        let server = thread::spawn(move || -> Result<()> {
+            for _ in 0..4 {
+                let (mut stream, _) = listener.accept()?;
+                let request = http_request(&mut stream)?;
+                let (body, metadata) = if request.starts_with("GET /computeMetadata/") {
+                    (
+                        r#"{"access_token":"metadata-token","token_type":"Bearer"}"#.to_owned(),
+                        true,
+                    )
+                } else if request.contains(":signJwt ") {
+                    let input: serde_json::Value = serde_json::from_str(
+                        request
+                            .split_once("\r\n\r\n")
+                            .context("IAM body missing")?
+                            .1,
+                    )?;
+                    let claims_text = input["payload"].as_str().context("claims missing")?;
+                    let claims: serde_json::Value = serde_json::from_str(claims_text)?;
+                    ensure!(
+                        claims["scope"] == ORG_UNIT_READ_SCOPE,
+                        "hierarchy requested user scope"
+                    );
+                    let header = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                        .encode(br#"{"alg":"RS256","kid":"fixture-key"}"#);
+                    let payload =
+                        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(claims_text);
+                    let signature =
+                        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([7u8; 64]);
+                    (serde_json::json!({"keyId":"fixture-key","signedJwt":format!("{header}.{payload}.{signature}")}).to_string(), false)
+                } else if request.starts_with("POST /token ") {
+                    (r#"{"access_token":"directory-token","token_type":"Bearer","expires_in":3600}"#.to_owned(), false)
+                } else if request.contains("/customer/customer-1/orgunits?") {
+                    ensure!(
+                        request.contains("Bearer directory-token"),
+                        "hierarchy token missing"
+                    );
+                    (r#"{"organizationUnits":[{"orgUnitId":"root","name":"Root","orgUnitPath":"/","parentOrgUnitId":null,"parentOrgUnitPath":null}]}"#.to_owned(), false)
+                } else {
+                    anyhow::bail!(
+                        "unexpected request, including forbidden users lookup: {}",
+                        request.lines().next().unwrap_or("missing")
+                    )
+                };
+                fixture_response(&mut stream, &body, metadata)?;
+            }
+            Ok(())
+        });
+        let plan = AuthenticationPlan::DomainWideDelegation {
+            service_account: "directory-reader@company.iam.gserviceaccount.com".into(),
+            delegated_admin: "admin@example.test".into(),
+        };
+        let mut port = NativeDirectoryPort::transport_fixture(
+            plan,
+            "customer-1",
+            100,
+            None,
+            CaptureMode::Hierarchy,
+            [origin.as_str(); 4],
+        )?;
+        let capture = collect_hierarchy(capture_input("alice@example.test"), &mut port)?;
+        server.join().expect("fixture server panicked")?;
+        assert_eq!(capture.metadata.user_path, None);
+        assert_eq!(capture.units.len(), 1);
+        Ok(())
+    }
+
+    #[test]
     fn auth_plans_pin_scopes_and_fixed_origins_without_mounted_secret_refs() -> Result<()> {
         use day2_capabilities::integrations::{LiveConnection, WorkspaceDirectoryAuth};
         let direct = LiveConnection::WorkspaceDirectory {
@@ -1724,7 +2045,11 @@ mod tests {
         direct.validate()?;
         assert!(direct.credential_ref().is_none());
         let plan = AuthenticationPlan::from_connection(&direct)?;
-        assert_eq!(plan.scopes(), [USER_READ_SCOPE, ORG_UNIT_READ_SCOPE]);
+        assert_eq!(
+            plan.scopes(CaptureMode::Membership),
+            [USER_READ_SCOPE, ORG_UNIT_READ_SCOPE]
+        );
+        assert_eq!(plan.scopes(CaptureMode::Hierarchy), [ORG_UNIT_READ_SCOPE]);
         assert_eq!(
             plan.fixed_origins(),
             [DIRECTORY_ORIGIN, IAM_ORIGIN, OAUTH_ORIGIN]

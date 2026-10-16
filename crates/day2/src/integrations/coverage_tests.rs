@@ -141,7 +141,9 @@ fn demonstration(action: Action) -> Demonstration {
         // behind. Pending here rather than silently absent, and it shrinks when
         // the delegation harness can stand up a second application.
         | Action::DelegateQuery | Action::DelegateSend | Action::DelegateStatus => Demonstration::PendingAdapterSeam,
-        Action::WorkspaceDirectoryCapture | Action::WorkspaceDirectoryPage => Demonstration::NativeAdapterRead,
+        Action::WorkspaceDirectoryCapture
+        | Action::WorkspaceDirectoryHierarchy
+        | Action::WorkspaceDirectoryPage => Demonstration::NativeAdapterRead,
     }
 }
 
@@ -474,6 +476,7 @@ fn fixture(variant: Variant) -> SimulatedFixture {
             max_input_tokens: input_ceiling,
         },
         workspace_directory: crate::integrations::simulated::WorkspaceDirectoryWorld {
+            customer_id: "Ccoverage".into(),
             users: BTreeMap::from([(
                 "directory-reader@coverage.test".into(),
                 json!({"customerId":"Ccoverage","orgUnitPath":directory_path,
@@ -784,7 +787,9 @@ fn observe_native_directory(action: Action, variant: Variant) -> Result<Observed
     ensure!(
         matches!(
             action,
-            Action::WorkspaceDirectoryCapture | Action::WorkspaceDirectoryPage
+            Action::WorkspaceDirectoryCapture
+                | Action::WorkspaceDirectoryHierarchy
+                | Action::WorkspaceDirectoryPage
         ),
         "not a Workspace Directory native read"
     );
@@ -806,12 +811,19 @@ fn observe_native_directory(action: Action, variant: Variant) -> Result<Observed
         actor: "directory-reader@coverage.test".into(),
         captured_at,
     };
-    let complete = crate::workspace_directory::collect_complete(input, &mut port)?;
+    let complete = if action == Action::WorkspaceDirectoryHierarchy {
+        crate::workspace_directory::collect_hierarchy(input, &mut port)?
+    } else {
+        crate::workspace_directory::collect_complete(input, &mut port)?
+    };
     let capture_id = complete.metadata.id.clone();
     let store_path = database.with_file_name("workspace_directory.sqlite");
     let mut store = crate::workspace_directory::open_store(&store_path)?;
     crate::workspace_directory::publish(&mut store, &complete)?;
-    let result = if action == Action::WorkspaceDirectoryCapture {
+    let result = if matches!(
+        action,
+        Action::WorkspaceDirectoryCapture | Action::WorkspaceDirectoryHierarchy
+    ) {
         serde_json::to_string(&complete.metadata)?
     } else {
         serde_json::to_string(&crate::workspace_directory::page_for_grant(
@@ -947,25 +959,34 @@ fn workspace_directory_native_read_rejects_wrong_scope_actor_customer_and_world(
         )
         .is_err()
     );
-    let mut wrong_customer = crate::workspace_directory::SimulatedDirectoryPort::new(
-        &database,
-        SCOPE,
-        "Cother",
-        "directory-reader@coverage.test",
-        1_700_000_001,
-    )?;
-    assert!(
-        crate::workspace_directory::collect_complete(
-            crate::workspace_directory::CaptureInput {
-                customer_id: "Cother".into(),
-                connection_id: "coverage-connection@1".into(),
-                actor: "directory-reader@coverage.test".into(),
-                captured_at: 1_700_000_001,
-            },
-            &mut wrong_customer,
-        )
-        .is_err()
-    );
+    for constructor in [
+        crate::workspace_directory::SimulatedDirectoryPort::new,
+        crate::workspace_directory::SimulatedDirectoryPort::new_hierarchy,
+    ] {
+        assert_eq!(
+            constructor(
+                &database,
+                SCOPE,
+                "Cother",
+                "directory-reader@coverage.test",
+                1_700_000_001
+            )
+            .err()
+            .context("wrong-customer fixture must reject")?
+            .to_string(),
+            "workspace_directory_customer_mismatch"
+        );
+        assert!(
+            constructor(
+                &database,
+                "another-app",
+                "Ccoverage",
+                "directory-reader@coverage.test",
+                1_700_000_001
+            )
+            .is_err()
+        );
+    }
 
     let provider_path =
         database.with_file_name(crate::simulations::simulation(Provider::WorkspaceDirectory));

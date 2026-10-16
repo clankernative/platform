@@ -121,6 +121,33 @@ fn native_workspace_directory_pages_decode_through_public_sdk() -> Result<()> {
     let units = day2::workspace_directory::parse_org_unit_response(br#"{"organizationUnits":[{"orgUnitId":"root","name":"Root","orgUnitPath":"/"},{"orgUnitId":"eng","name":"Engineering","orgUnitPath":"/Engineering","parentOrgUnitId":"root","parentOrgUnitPath":"/"}]}"#)?;
     let page = serde_json::to_string(&day2::workspace_directory::page(&units, 0)?)?;
     let empty = serde_json::to_string(&day2::workspace_directory::page(&units, 2)?)?;
+    struct NativeFixturePort(Vec<day2::workspace_directory::OrgUnit>);
+    impl day2::workspace_directory::DirectoryReadPort for NativeFixturePort {
+        fn user_org_unit_path(&mut self, _actor: &str) -> Result<String> {
+            Ok("/Engineering".into())
+        }
+        fn list_org_units(&mut self) -> Result<day2::workspace_directory::ProviderPage> {
+            Ok(day2::workspace_directory::ProviderPage {
+                units: self.0.clone(),
+                response_bytes: 256,
+                hierarchy_captured_at: 100,
+            })
+        }
+    }
+    let input = day2::workspace_directory::CaptureInput {
+        customer_id: "customer-1".into(),
+        connection_id: "directory-connection/1".into(),
+        actor: "alice@example.test".into(),
+        captured_at: 200,
+    };
+    let membership = day2::workspace_directory::collect_complete(
+        input.clone(),
+        &mut NativeFixturePort(units.clone()),
+    )?;
+    let hierarchy =
+        day2::workspace_directory::collect_hierarchy(input, &mut NativeFixturePort(units))?;
+    let membership_json = serde_json::to_string(&membership.metadata)?;
+    let hierarchy_json = serde_json::to_string(&hierarchy.metadata)?;
     let source = r#"app [step] { pf: platform "../sdk/main.roc" }
 import pf.WorkspaceDirectory
 import pf.Resource
@@ -137,6 +164,34 @@ read_page = |raw, offset| {
         other => other
     }
 }
+read_membership = |raw, resource_json| {
+    program = Resource.decode(resource_json)
+        .and_then(WorkspaceDirectory.capture_with)
+        .program()
+    match Tx.evaluate(program, []) {
+        Pending(request) => Tx.evaluate(program, [{instruction: request.instruction, result: raw, error: ""}])
+        other => other
+    }
+}
+read_hierarchy = |raw, resource_json| {
+    program = Resource.decode(resource_json)
+        .and_then(WorkspaceDirectory.capture_hierarchy_with)
+        .program()
+    match Tx.evaluate(program, []) {
+        Pending(request) => Tx.evaluate(program, [{instruction: request.instruction, result: raw, error: ""}])
+        other => other
+    }
+}
+requested_hierarchy_action = |resource_json| {
+    program = Resource.decode(resource_json)
+        .and_then(WorkspaceDirectory.capture_hierarchy_with)
+        .program()
+    match Tx.evaluate(program, []) {
+        Pending(request) => request.instruction.model == HIERARCHY_CAPABILITY
+        _ => Bool.False
+    }
+}
+expect requested_hierarchy_action("{\"token\":\"fixture-handle\"}")
 expect match read_page(PAGE_JSON, 0) {
     Done(result) => result.consumed == 1 and result.value.done and result.value.next == 2
         and result.value.items.len() == 2
@@ -148,9 +203,26 @@ expect match read_page(EMPTY_JSON, 2) {
     Done(result) => result.consumed == 1 and result.value.done and result.value.next == 2 and result.value.items.is_empty()
     _ => Bool.False
 }
+expect match read_membership(MEMBERSHIP_JSON, "{\"token\":\"fixture-handle\"}") {
+    Done(result) => result.consumed == 1 and result.value.user_path == "/Engineering"
+        and result.value.source_captured_at == 100 and result.value.expires_at == 1000
+    _ => Bool.False
+}
+expect match read_hierarchy(HIERARCHY_JSON, "{\"token\":\"fixture-handle\"}") {
+    Done(result) => result.consumed == 1 and result.value.customer_id == "customer-1"
+        and result.value.actor == "alice@example.test" and result.value.source_captured_at == 100
+        and result.value.expires_at == 1000
+    _ => Bool.False
+}
 "#
         .replace("PAGE_JSON", &serde_json::to_string(&page)?)
-        .replace("EMPTY_JSON", &serde_json::to_string(&empty)?);
+        .replace("EMPTY_JSON", &serde_json::to_string(&empty)?)
+        .replace("MEMBERSHIP_JSON", &serde_json::to_string(&membership_json)?)
+        .replace("HIERARCHY_JSON", &serde_json::to_string(&hierarchy_json)?)
+        .replace(
+            "HIERARCHY_CAPABILITY",
+            &serde_json::to_string(&day2_capabilities::registry::Action::WorkspaceDirectoryHierarchy.capability())?,
+        );
     fs::write(stage.join("app/main.roc"), source)?;
     let output = crate::support::compiler::output(
         day2::sandbox::compiler(
@@ -168,8 +240,9 @@ expect match read_page(EMPTY_JSON, 2) {
         String::from_utf8_lossy(&output.stderr)
     );
     ensure!(
-        output.status.success() && diagnostics.contains("All (2) tests passed"),
-        "native Directory pages: {diagnostics}"
+        output.status.success() && diagnostics.contains("All (5) tests passed"),
+        "native Directory contracts ({}): {diagnostics}",
+        output.status
     );
     Ok(())
 }

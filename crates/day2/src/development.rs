@@ -610,6 +610,15 @@ pub fn create(artifact_path: &Path, directory: &Path, policy: Option<Policy>) ->
     create_for(artifact_path, directory, policy, ACTOR)
 }
 
+/// An explicit Home-only disposable fixture, never inferred production authority.
+/// Default local policy allows all read names, so observations cannot select it.
+fn home_reads_workspace_directory(policy: &Policy) -> bool {
+    policy
+        .operations
+        .keys()
+        .any(|name| name.starts_with("home."))
+}
+
 /// Whether this artifact is the work-compliance queue.
 ///
 /// Keyed on the operation namespace rather than on declared capabilities,
@@ -1002,6 +1011,27 @@ pub fn people_resource_fixture(
     day2_capabilities::resources::Catalog,
     Vec<day2_capabilities::resources::Attachment>,
 )> {
+    use day2_capabilities::resources::Provider;
+    provider_resource_fixture(
+        app,
+        policy,
+        &[
+            Provider::SyntheticGoogleDirectory,
+            Provider::WorkspaceDirectory,
+            Provider::SyntheticLinear,
+            Provider::SyntheticOperatorAlerts,
+        ],
+    )
+}
+
+fn provider_resource_fixture(
+    app: &str,
+    policy: &Policy,
+    selected: &[day2_capabilities::resources::Provider],
+) -> Result<(
+    day2_capabilities::resources::Catalog,
+    Vec<day2_capabilities::resources::Attachment>,
+)> {
     use day2_capabilities::resources::*;
     let (mut catalog, mut attachments) = local_resource_fixture(app, policy, None, None)?;
     let families = [
@@ -1041,6 +1071,7 @@ pub fn people_resource_fixture(
             },
             vec![
                 Action::WorkspaceDirectoryCapture,
+                Action::WorkspaceDirectoryHierarchy,
                 Action::WorkspaceDirectoryPage,
             ],
         ),
@@ -1071,7 +1102,10 @@ pub fn people_resource_fixture(
         }
         let mut slots = BTreeMap::new();
         let mut bindings = BTreeMap::new();
-        for (name, provider, target, actions) in &families {
+        for (name, provider, target, actions) in families
+            .iter()
+            .filter(|(_, provider, ..)| selected.contains(provider))
+        {
             let actions: BTreeSet<_> = actions
                 .iter()
                 .copied()
@@ -1295,6 +1329,15 @@ fn resource_fixture_for_artifact_with_imports(
         catalog.policies.extend(work.policies);
         catalog.budgets.extend(work.budgets);
         attachments.extend(work_attachments);
+    }
+    if home_reads_workspace_directory(policy) {
+        let (directory, directory_attachments) =
+            provider_resource_fixture(app, policy, &[Provider::WorkspaceDirectory])?;
+        catalog.connections.extend(directory.connections);
+        catalog.resources.extend(directory.resources);
+        catalog.policies.extend(directory.policies);
+        catalog.budgets.extend(directory.budgets);
+        attachments.extend(directory_attachments);
     }
     if crate::people_providers::uses_synthetic_fixture(artifact) {
         let (people, people_attachments) = people_resource_fixture(app, policy)?;
@@ -1660,6 +1703,97 @@ mod people_resource_tests {
         assert!(!writers.contains("freetool-denied-synthetic"));
         assert!(writers.contains("freetool-conflicting-synthetic"));
         assert!(!readers.contains("freetool-denied-synthetic"));
+    }
+
+    #[test]
+    fn home_workspace_directory_fixture_is_selected_and_narrowed_by_policy() -> Result<()> {
+        use day2_capabilities::resources::Action;
+        let directory = tempfile::tempdir()?;
+        let contract = serde_json::from_value(serde_json::json!({
+            "format": crate::artifact::CURRENT_FORMAT,
+            "verification_limits": crate::artifact::VerificationLimits::QUALIFIED,
+            "roc_version": "home-directory-fixture-test",
+            "worker_digest": "home-directory-fixture-test",
+            "schema_digest": "home-directory-fixture-test",
+            "schema": {"models": {}, "inputs": {}, "foreign_keys": []},
+            "operations": [
+                {"name":"home.directory","kind":"query","input_type":"input","output_type":"output"},
+                {"name":"other.directory","kind":"query","input_type":"input","output_type":"output"}
+            ],
+            "sources": {}, "admission": "local-spike-only"
+        }))?;
+        let artifact = LoadedArtifact::from_contract_for_tests(
+            "home-directory-fixture-test".into(),
+            directory.path().to_path_buf(),
+            contract,
+        );
+        let operation = |actors: &[&str], observations: &[&str]| OperationPolicy {
+            actors: actors.iter().map(|actor| (*actor).into()).collect(),
+            mode: Mode::Read,
+            models: BTreeMap::new(),
+            commands: BTreeSet::new(),
+            observations: observations.iter().map(|name| (*name).into()).collect(),
+            effects: BTreeSet::new(),
+        };
+        let selected = Policy {
+            version: 1,
+            admins: BTreeSet::new(),
+            delegations: BTreeMap::new(),
+            constraints: BTreeMap::new(),
+            operations: BTreeMap::from([
+                (
+                    "home.directory".into(),
+                    operation(
+                        &["home-reader@synthetic.example"],
+                        &["workspace_directory.hierarchy.v1"],
+                    ),
+                ),
+                (
+                    "other.directory".into(),
+                    operation(&["other-reader@synthetic.example"], &[]),
+                ),
+            ]),
+        };
+        assert!(home_reads_workspace_directory(&selected));
+        let (catalog, attachments) =
+            resource_fixture_for_artifact_with_imports("home", &artifact, &selected, &[])?;
+        let resolved = catalog.resolve("home", &attachments, 1)?;
+        assert_eq!(resolved.operations.len(), 1);
+        let grant = &resolved.operations["home.directory"]["workspace_directory"];
+        assert_eq!(
+            grant.actions,
+            BTreeSet::from([Action::WorkspaceDirectoryHierarchy])
+        );
+        assert!(grant.actors.contains("home-reader@synthetic.example"));
+        assert!(!grant.actors.contains("other-reader@synthetic.example"));
+        assert!(catalog.connections.contains_key("workspace_directory"));
+        assert!(
+            !selected.operations["home.directory"]
+                .effects
+                .iter()
+                .any(|name| name.starts_with("google_directory.") || name.starts_with("linear."))
+        );
+
+        let unrelated = Policy {
+            operations: BTreeMap::from([(
+                "other.directory".into(),
+                operation(
+                    &["other-reader@synthetic.example"],
+                    &["workspace_directory.hierarchy.v1"],
+                ),
+            )]),
+            ..selected
+        };
+        assert!(!home_reads_workspace_directory(&unrelated));
+        let (unrelated_catalog, unrelated_attachments) =
+            resource_fixture_for_artifact_with_imports("other", &artifact, &unrelated, &[])?;
+        assert!(
+            !unrelated_catalog
+                .connections
+                .contains_key("workspace_directory")
+        );
+        assert!(unrelated_attachments.is_empty());
+        Ok(())
     }
 
     #[test]
@@ -2453,6 +2587,7 @@ fn disposable_provider_worlds(
             max_input_tokens: 100_000,
         },
         workspace_directory: crate::integrations::simulated::WorkspaceDirectoryWorld {
+            customer_id: "synthetic-customer-1".into(),
             users: BTreeMap::from([(
                 actor.into(),
                 json!({
