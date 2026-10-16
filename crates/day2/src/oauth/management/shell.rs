@@ -153,7 +153,7 @@ impl Shell {
                 self.sessions.lock().map_err(|_| anyhow::anyhow!("OAuth management session unavailable"))?.insert(key.as_str().into(), session);
                 Ok(redirect(&location))
             }
-            Reply::Completed { status } => clear_cookie(page(html! { (DOCTYPE) html { body { main { h1 { "Connection action completed" } p { (status) } } } })),
+            Reply::Completed { status } => clear_cookie(page(html! { (DOCTYPE) html { body { main { h1 { "Connection action completed" } p { (status) } } } } })),
             Reply::Pending { .. } => anyhow::bail!("OAuth management confirmation response refused"),
         }
     }
@@ -185,7 +185,7 @@ impl Shell {
         let view = &session.view;
         let Reply::Completed { status } = self.remote.management(&view.app, Call::Callback { id: id.into(), query: query.into(), session: digest }, headers)?
         else { anyhow::bail!("OAuth callback settlement response refused"); };
-        Ok(Some(clear_cookie(page(html! { (DOCTYPE) html { body { main { h1 { "Connection action completed" } p { (status) } } } }))?))
+        Ok(Some(clear_cookie(page(html! { (DOCTYPE) html { body { main { h1 { "Connection action completed" } p { (status) } } } } }))?))
     }
 }
 
