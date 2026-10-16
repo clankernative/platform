@@ -57,6 +57,7 @@ Verify :: [].{
 			"request-desk",
 			"app-ownership",
 			"notifications",
+			"chart-live",
 			"redirect",
 			"relational",
 			"lifecycle",
@@ -71,6 +72,7 @@ Verify :: [].{
 		] {
 			_ = Capability.call!("verify-build", Json.to_str({ fixture: fixture }), host!)?
 		}
+		_ = Capability.call!("verify-browser", "{}", host!)?
 		_ = Capability.call!("verify-lint", "{}", host!)?
 		Ok("{}")
 	}

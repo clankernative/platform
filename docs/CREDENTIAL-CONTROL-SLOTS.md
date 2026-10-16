@@ -53,6 +53,21 @@ cannot supply these capabilities. Native original-file preparation and app
 runtime/channel qualification remain separate work. Controlled context-loss
 fixtures do not establish actual FD-loss or durability qualification.
 
+### Unchanged initial-file continuity
+
+The original creator can recheck the bound layout, same retained descriptor and
+anchor, fixed leaf, complete bytes, and original acquisition budget. Every read
+has checks before and after it. A handled failure permanently refuses the owner
+and acquisition while retaining the original file, anchor and proposal; restoring
+the path or bytes, or supplying another interval, cannot clear that refusal.
+
+This check returns unit. It produces no stored permission, role or P3 witness.
+It checks the unchanged initial image before later application writes: a valid
+SQLite write deliberately makes this check refuse. It is not a general check of
+serving database integrity. Sampled checks do not eliminate concurrent changes,
+qualify provider durability or establish a hard OS I/O deadline. The production
+storage issuer and current bootstrap execution factory remain unavailable.
+
 ## Conformance evidence
 
 The independent SQLite provider oracle implements only create-only and exact

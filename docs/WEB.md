@@ -8,6 +8,19 @@ The current Links proof of concept uses ordinary app-owned HTML/Jinja templates,
 CSS and native browser modules. Roc supplies typed query data and business
 commands, not a page-building DSL. See [UI-POC.md](UI-POC.md) for the file map.
 
+## Experimental request-time presentations
+
+An opt-in `ui_scene` call transforms current authorized query data through an
+independently approved bounded renderer, returning typed scene records for
+ordinary escaped templates. Declarations do not approve executable bytes;
+build-time UI assembly never runs on requests. Apps without declarations are
+unchanged.
+
+[RUNTIME-PRESENTATIONS.md](RUNTIME-PRESENTATIONS.md) defines the ABI, operator
+pin, ports, limits and failure behavior.
+[Chart Live verification](../examples/chart-live/VERIFICATION.md) separates
+deterministic simulations, real adapters, builds and remaining browser/full gates.
+
 ## Live queries over SSE
 
 SSE is the platform transport for live frontend updates. A live page subscribes
@@ -617,7 +630,13 @@ declares the GoLinks shape and is exercised end to end at the edge by
 
 The required `App.definition.presentation` explicitly names stylesheet and script
 entries under `ui/`; empty strings mean absent. Modules can import other
-local admitted `.js` modules with relative paths. A Rust Oxc parser rejects bare,
+local admitted `.js` modules with relative paths. The one host import
+`/assets/platform/navigation.js` exposes `canonicalPageURL` and
+`createPageNavigation` from embedded platform bytes. It owns named-route query
+serialization and live-stream replacement; apps supply view-specific response
+checks and UI feedback. Its admitted regions exclude forms and editable controls
+so command drafts survive navigation. Other absolute imports remain forbidden.
+A Rust Oxc parser rejects bare,
 remote, computed, escaping and missing module imports; no npm, Node server or
 app build scripts run. The complete source graph and resource hashes are bound
 to the app artifact and verified again on load/serve. HTML templates and their

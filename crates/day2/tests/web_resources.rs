@@ -409,3 +409,25 @@ fn woff2_file_and_pack_budgets_are_preserved() -> Result<()> {
     assert!(web_resources::package(&source, &directory.path().join("pack-budget")).is_err());
     Ok(())
 }
+
+#[test]
+fn platform_navigation_is_a_closed_host_import() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let source = directory.path().join("ui");
+    write(
+        &source,
+        "app.js",
+        "import {createPageNavigation} from '/assets/platform/navigation.js';",
+    )?;
+    let catalog = web_resources::package(&source, &directory.path().join("out"))?;
+    web_resources::validate_blobs(&directory.path().join("out"), &catalog)?;
+    for path in [
+        "/assets/platform/other.js",
+        "/assets/platform/navigation.js?override=1",
+        "https://example.com/assets/platform/navigation.js",
+    ] {
+        write(&source, "app.js", &format!("import '{path}';"))?;
+        assert!(web_resources::package(&source, &directory.path().join("out")).is_err());
+    }
+    Ok(())
+}

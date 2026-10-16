@@ -181,7 +181,7 @@ const SEALED: &[(&str, &str, &str)] = &[
     (
         "Api.roc",
         "",
-        "69640a58be02b4d1768042d5d962de75e9c40c85fa47271363de122bd0cca101",
+        "8772d3906775f231f0231649beeeb865d6197f6aab1df8ebf8d6790762366f6e",
     ),
     (
         "Effects.roc",

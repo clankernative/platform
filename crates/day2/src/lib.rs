@@ -64,6 +64,7 @@ pub mod output_schema;
 pub mod packaging;
 pub mod people_providers;
 mod preparation;
+pub mod presentation;
 pub mod properties;
 pub mod protocol;
 pub mod redirects;
@@ -139,3 +140,6 @@ mod digest_tests {
 mod codegen;
 
 mod structural_proofs;
+
+#[cfg(test)]
+mod chart_live_tests;
