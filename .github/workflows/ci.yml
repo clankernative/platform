@@ -794,7 +794,8 @@ jobs:
       # It neither runs architecture-check nor installs/builds/runs Reports.
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Exercise the whole source-derived experiment case control module
-        run: cargo test --locked -p xtask --bin xtask bazel_experiment::tests:: -- --nocapture
+        run: |
+          cargo test --locked -p xtask --bin xtask bazel_experiment::tests:: -- --nocapture
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: ${{ always() }}
         with:
