@@ -1435,6 +1435,7 @@ mod tests {
                             query = url::form_urlencoded::Serializer::new(String::new())
                                 .append_pair("state", &state)
                                 .append_pair("code", "private-provider-code")
+                                .append_pair("iss", crate::oauth::google::ISSUER)
                                 .finish();
                         }
                         if expected {
