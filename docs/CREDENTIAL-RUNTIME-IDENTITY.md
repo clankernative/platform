@@ -6,9 +6,11 @@ This slice adds the first native observation primitive and bounded response code
 
 ## Retained native observation
 
-`NativeNamespaceObservation` retains the actual proc root, kernel self-task directory, task stat/status files, time namespace offsets file, and six namespace descriptors. Acquisition starts under the existing original Linux BOOTTIME deadline. Every fixed open is bracketed by checks against that same acquisition.
+`NativeNamespaceObservation` retains the actual proc root, kernel self-process and self-task directories, task stat/status files, time namespace offsets file, and six namespace descriptors. Acquisition starts under the existing original Linux BOOTTIME deadline. Every fixed open is bracketed by checks against that same acquisition.
 
-Revalidation checks the actual process and Rust thread, original acquisition domain, a freshly opened fixed `/proc/thread-self` path, exact proc device/inode/mount ID, full task identity, retained and freshly opened namespace identities, and complete unchanged zero time offsets. Missing procfs/nsfs support, mount ID, namespace, bounds or current facts refuses the observation and acquisition permanently.
+Linux exposes `timens_offsets` in the process (TGID) directory, not the per-thread directory. The observation reads it through the retained fixed `/proc/self` directory. Before and after each offsets read, the process time and time-for-children namespace descriptors must both match the current thread's retained time namespace. This equality does not prove membership in the node's initial namespace.
+
+Revalidation checks the actual process and Rust thread, original acquisition domain, freshly opened fixed `/proc/self` and `/proc/thread-self` paths, exact proc device/inode/mount ID, full task identity, retained and freshly opened namespace identities, the process/thread time namespace join, and complete unchanged zero time offsets. Missing procfs/nsfs support, mount ID, namespace, bounds or current facts refuses the observation and acquisition permanently.
 
 The owning handle cannot clone, serialize, send between threads or be reconstructed from its serializable data. Consuming it into `NamespaceFacts` discards the descriptors and produces historical data.
 

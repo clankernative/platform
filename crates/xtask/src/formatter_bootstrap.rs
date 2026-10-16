@@ -642,6 +642,14 @@ fn publish(binary: &Path, destination: &Path, expected: &str) -> Result<()> {
     Ok(())
 }
 
+fn supported_formatter_pair(compiler: &str, formatter: &str) -> bool {
+    compiler == formatter
+        || matches!(
+            (compiler, formatter),
+            ("nightly-2026-10-13-b17d287", "nightly-2026-09-12-220fd47")
+        )
+}
+
 fn checked_pin(root: &Path) -> Result<Pin> {
     let tools = root.join("tools/roc-formatter");
     let pin_path = root.join(pin_path()?);
@@ -660,8 +668,8 @@ fn checked_pin(root: &Path) -> Result<Pin> {
     );
     let original = super::native_toolchain::load(root)?;
     ensure!(
-        original.semantic_version(root)? == pin.roc_version,
-        "formatter must retain the semantic compiler version"
+        supported_formatter_pair(original.semantic_version(root)?, &pin.roc_version),
+        "unsupported reviewed compiler/formatter pair"
     );
     original.verified_compiler(root)?;
     let patch = tools.join("associated-method-spacing.patch");
@@ -889,6 +897,16 @@ pub fn build_candidate(root: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compiler_upgrade_retains_only_the_reviewed_formatter_pair() {
+        let previous = "nightly-2026-09-12-220fd47";
+        let current = "nightly-2026-10-13-b17d287";
+        assert!(supported_formatter_pair(previous, previous));
+        assert!(supported_formatter_pair(current, previous));
+        assert!(!supported_formatter_pair(current, "unreviewed-formatter"));
+        assert!(!supported_formatter_pair("unreviewed-compiler", previous));
+    }
 
     fn pin() -> Pin {
         let version = "nightly-2026-09-05-b195f5b";

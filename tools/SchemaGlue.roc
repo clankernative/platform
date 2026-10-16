@@ -1,8 +1,9 @@
 app [make_glue] { pf: platform glue }
 
-import pf.Types exposing [Types]
-import pf.File exposing [File]
-import pf.TypeInfo exposing [TypeInfo]
+import pf.Types
+import pf.File
+import pf.TypeInfo
+import pf.ProvidesEntry
 
 Node : {
 	kind : Str,
@@ -28,7 +29,10 @@ node = |info| {
 				.keep_if(|field| !field.is_padding)
 				.map(|field| { name: field.name, type_id: field.type_id }),
 		}
-		RocFunction(fn) => { ..empty, kind: "function", args: fn.args, ret: fn.ret }
+		RocErasedCallable(signature) => match signature {
+			Known(fn) => { ..empty, kind: "function", args: fn.args, ret: fn.ret }
+			Opaque => empty
+		}
 		RocList(item) => { ..empty, kind: "list", item }
 		RocBox(item) => { ..empty, kind: "box", item }
 		RocTagUnion(union) => {
@@ -49,13 +53,32 @@ node = |info| {
 	}
 }
 
+document : List(ProvidesEntry),
+List(Node),
+List({ symbol : Str, type_id : U64 }) -> {
+	entries : List({ symbol : Str, type_id : U64 }),
+	types : List(Node),
+}
+document = |pending, nodes, entries| match pending {
+	[] => { entries, types: nodes }
+	[entry, .. as rest] => match entry.exported {
+		ProvidedData(type_id) => document(rest, nodes, entries.append({ symbol: entry.ffi_symbol, type_id }))
+		ProvidedProcedure(fn) => {
+			# Preserve the checked-metadata contract while adapting the compiler's
+			# procedure export, which no longer occupies a type-table entry.
+			function : Node
+			function = { kind: "function", name: "", item: 0, fields: [], args: fn.args, ret: fn.ret, tags: [] }
+			document(
+				rest,
+				nodes.append(function),
+				entries.append({ symbol: entry.ffi_symbol, type_id: nodes.len() }),
+			)
+		}
+	}
+}
+
 make_glue : List(Types) -> Try(List(File), Str)
 make_glue = |types| {
-	documents = types.map(
-		|table| {
-			entries: table.provides_entries.map(|entry| { symbol: entry.ffi_symbol, type_id: entry.type_id }),
-			types: table.types.map(node),
-		},
-	)
+	documents = types.map(|table| document(table.provides_entries, table.types.map(node), []))
 	Ok([{ name: "checked-types.json", content: Json.to_str(documents) }])
 }

@@ -1002,6 +1002,8 @@ fn hybrid_qualification_keeps_workspace_directory_offline_through_admitted_capab
 
     fn fixture_runtime(
         with_world: bool,
+        with_user: bool,
+        allow_hierarchy: bool,
         response_limit: u64,
     ) -> Result<(tempfile::TempDir, Runtime)> {
         let directory = tempfile::tempdir()?;
@@ -1017,15 +1019,19 @@ fn hybrid_qualification_keeps_workspace_directory_offline_through_admitted_capab
         let target = serde_json::to_value(ResourceTarget::WorkspaceDirectory {
             customer_id: CUSTOMER.into(),
         })?;
-        let action = Action::WorkspaceDirectoryCapture;
+        let mut actions = vec![Action::WorkspaceDirectoryCapture];
+        if allow_hierarchy {
+            actions.push(Action::WorkspaceDirectoryHierarchy);
+        }
+        let observations: Vec<_> = actions.iter().map(|action| action.capability()).collect();
         let policy = json!({"version":1,"admins":[],"operations":{"run":{"actors":[ACTOR],
-            "mode":{"kind":"read"},"models":{},"observations":[action.capability()],"effects":[]}}});
+            "mode":{"kind":"read"},"models":{},"observations":observations,"effects":[]}}});
         let catalog = json!({"version":1,
             "connections":{"directory":{"revision":1,"provider":"workspace_directory","live":live}},
             "resources":{"directory":{"revision":1,"connection":{"id":"directory","revision":1},"target":target}},
             "policies":{"directory_read":{"revision":1,"owner":"it","actors":[ACTOR],"allowed_apps":["app"],"max_duration_seconds":null,
                 "slots":{"directory":{"kind":"workspace_directory","allowed_resources":[{"id":"directory","revision":1}],
-                    "actions":[action],"limits":{"max_request_bytes":32768,"max_response_bytes":response_limit,"max_calls_per_invocation":5},
+                    "actions":actions,"limits":{"max_request_bytes":32768,"max_response_bytes":response_limit,"max_calls_per_invocation":5},
                     "budgets":[{"id":"directory_budget","revision":1}]}}}},
             "budgets":{"directory_budget":{"revision":1,"scope":"app","period_seconds":3600,
                 "limits":{"calls":100,"bytes":10000000,"concurrency":1}}}});
@@ -1074,15 +1080,19 @@ fn hybrid_qualification_keeps_workspace_directory_offline_through_admitted_capab
         runtime.initialize()?;
         let world = if with_world {
             crate::integrations::simulated::WorkspaceDirectoryWorld {
-                users: BTreeMap::from([(
-                    ACTOR.into(),
-                    json!({"customerId":CUSTOMER,
-                    "orgUnitPath":"/Engineering","primaryEmail":ACTOR,"kind":"admin#directory#user"}),
-                )]),
+                customer_id: CUSTOMER.into(),
+                users: if with_user {
+                    BTreeMap::from([(
+                        ACTOR.into(),
+                        json!({"customerId":CUSTOMER,
+                        "orgUnitPath":"/Engineering","primaryEmail":ACTOR,"kind":"admin#directory#user"}),
+                    )])
+                } else {
+                    BTreeMap::new()
+                },
                 hierarchy: json!({"kind":"admin#directory#orgUnits","organizationUnits":[
                     {"orgUnitId":"root","name":"Root","orgUnitPath":"/","parentOrgUnitId":null,"parentOrgUnitPath":null},
                     {"orgUnitId":"engineering","name":"Engineering","orgUnitPath":"/Engineering","parentOrgUnitId":"root","parentOrgUnitPath":"/"}]}),
-                hierarchy_captured_at: NOW,
             }
         } else {
             Default::default()
@@ -1109,11 +1119,23 @@ fn hybrid_qualification_keeps_workspace_directory_offline_through_admitted_capab
                 ..Default::default()
             },
         )?;
+        if !with_world {
+            let world_path = runtime.db().with_file_name(crate::simulations::simulation(
+                day2_capabilities::resources::Provider::WorkspaceDirectory,
+            ));
+            fs::remove_file(world_path)?;
+        }
         Ok((directory, runtime))
     }
 
-    fn admitted_capture(runtime: &Runtime, invocation: &str) -> Result<String> {
-        runtime.accept("run", ACTOR, invocation, &json!({}), NOW)?;
+    fn admitted_capture(
+        runtime: &Runtime,
+        invocation: &str,
+        capability_name: &str,
+        now: i64,
+        expect_cache_hit: bool,
+    ) -> Result<String> {
+        runtime.accept("run", ACTOR, invocation, &json!({}), now)?;
         let mut connection = open(runtime.db())?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let request = Request {
@@ -1142,7 +1164,7 @@ fn hybrid_qualification_keeps_workspace_directory_offline_through_admitted_capab
         let active = authority_state::current(&tx)?;
         let instruction = Instruction {
             kind: "observe".into(),
-            model: "workspace_directory.capture.v1".into(),
+            model: capability_name.into(),
             data: json!({"handle":handle}).to_string(),
             ..Default::default()
         };
@@ -1154,6 +1176,7 @@ fn hybrid_qualification_keeps_workspace_directory_offline_through_admitted_capab
             active.policy()?,
             "ob_hybrid_directory",
         )?;
+        crate::resources::record_use(&tx, invocation, capability.resource())?;
         let reservation = crate::resources::reserve_in(
             &tx,
             runtime,
@@ -1165,14 +1188,23 @@ fn hybrid_qualification_keeps_workspace_directory_offline_through_admitted_capab
         )?;
         tx.commit()?;
         let outcome = crate::capabilities::observe(runtime, capability, "hybrid-directory-test");
-        assert_eq!(
-            outcome.usage.response_bytes,
-            crate::workspace_directory::MAX_CAPTURE_RESPONSE_BYTES
-        );
-        assert_eq!(
-            outcome.usage.request_bytes,
-            crate::workspace_directory::MAX_CAPTURE_REQUEST_BYTES
-        );
+        if expect_cache_hit {
+            assert_eq!(outcome.usage.calls, 0);
+            assert_eq!(outcome.usage.request_bytes, 0);
+            assert_eq!(outcome.usage.response_bytes, 0);
+            assert!(!outcome.usage.dispatched);
+        } else {
+            assert!(outcome.usage.calls > 0);
+            assert_eq!(
+                outcome.usage.response_bytes,
+                crate::workspace_directory::MAX_CAPTURE_RESPONSE_BYTES
+            );
+            assert_eq!(
+                outcome.usage.request_bytes,
+                crate::workspace_directory::MAX_CAPTURE_REQUEST_BYTES
+            );
+            assert!(outcome.usage.dispatched);
+        }
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         crate::resources::settle_in(&tx, &reservation, outcome.usage)?;
         tx.commit()?;
@@ -1180,52 +1212,280 @@ fn hybrid_qualification_keeps_workspace_directory_offline_through_admitted_capab
     }
 
     let response_limit = crate::workspace_directory::MAX_RESPONSE_BYTES as u64;
-    let (_directory, runtime) = fixture_runtime(true, response_limit)?;
+    let (_directory, runtime) = fixture_runtime(true, true, true, response_limit)?;
     assert!(
         !runtime.integrations().is_simulated(),
         "delegation semantics changed"
     );
     assert!(runtime.integrations().uses_simulated_providers());
-    let capture: Value = serde_json::from_str(&admitted_capture(&runtime, "seeded")?)?;
+    let capture: Value = serde_json::from_str(&admitted_capture(
+        &runtime,
+        "seeded",
+        "workspace_directory.capture.v1",
+        NOW,
+        false,
+    )?)?;
     assert_eq!(capture["customer_id"], CUSTOMER);
     assert_eq!(capture["actor"], ACTOR);
     assert_eq!(capture["user_path"], "/Engineering");
     assert_eq!(capture["org_unit_count"], 2);
-    admitted_capture(&runtime, "second")?;
-    let exhausted = admitted_capture(&runtime, "budget-exhausted")
-        .unwrap_err()
-        .to_string();
+    admitted_capture(
+        &runtime,
+        "second",
+        "workspace_directory.capture.v1",
+        NOW,
+        false,
+    )?;
+    let exhausted = admitted_capture(
+        &runtime,
+        "budget-exhausted",
+        "workspace_directory.capture.v1",
+        NOW,
+        false,
+    )
+    .unwrap_err()
+    .to_string();
     assert!(
         exhausted.starts_with("budget_exhausted:") && exhausted.ends_with(":bytes"),
         "{exhausted}"
     );
 
-    let (_directory, runtime) = fixture_runtime(false, response_limit)?;
-    assert_eq!(
-        admitted_capture(&runtime, "missing-world")
-            .unwrap_err()
-            .to_string(),
-        "simulated_directory_user_unconfigured",
-        "a missing fixture must fail closed instead of falling back to native credentials or HTTP"
-    );
-    assert_eq!(
-        admitted_capture(&runtime, "second-failure")
-            .unwrap_err()
-            .to_string(),
-        "simulated_directory_user_unconfigured"
-    );
-    let exhausted = admitted_capture(&runtime, "failure-budget-exhausted")
+    // Cache plans reserve and consume no provider traffic, even after another
+    // full provider envelope no longer fits. They still record current authority.
+    admitted_capture(
+        &runtime,
+        "cached-with-spent-budget",
+        "workspace_directory.hierarchy.v1",
+        NOW,
+        true,
+    )?;
+    assert!(
+        admitted_capture(
+            &runtime,
+            "cold-with-spent-budget",
+            "workspace_directory.hierarchy.v1",
+            NOW + crate::workspace_directory::SOURCE_TTL_SECONDS,
+            false
+        )
         .unwrap_err()
-        .to_string();
+        .to_string()
+        .starts_with("budget_exhausted:")
+    );
+
+    let mut replay_traces = Vec::new();
+    for replay in 0..2 {
+        let (_directory, runtime) = fixture_runtime(true, true, true, response_limit)?;
+        use crate::integrations::simulated::{
+            ScheduledFault, SimulatedFault, schedule_faults, update_workspace_directory,
+        };
+        schedule_faults(
+            runtime.db(),
+            SCOPE,
+            day2_capabilities::resources::Provider::WorkspaceDirectory
+                .world()
+                .unwrap(),
+            vec![ScheduledFault {
+                endpoint: String::new(),
+                remaining: 1,
+                fault: SimulatedFault::Denied,
+            }],
+        )?;
+        assert_eq!(
+            admitted_capture(
+                &runtime,
+                "denied-cold",
+                "workspace_directory.hierarchy.v1",
+                NOW,
+                false
+            )
+            .unwrap_err()
+            .to_string(),
+            "workspace_directory_hierarchy_lookup_failed",
+            "replay {replay}"
+        );
+        let recovered: Value = serde_json::from_str(&admitted_capture(
+            &runtime,
+            "recovered",
+            "workspace_directory.hierarchy.v1",
+            NOW + 1,
+            false,
+        )?)?;
+        assert_eq!(recovered["source_captured_at"], NOW + 1);
+        let cached: Value = serde_json::from_str(&admitted_capture(
+            &runtime,
+            "recovered-cache",
+            "workspace_directory.hierarchy.v1",
+            NOW + 2,
+            true,
+        )?)?;
+        let world = update_workspace_directory(runtime.db(), SCOPE, |world| {
+            assert!(world.faults.is_empty());
+            assert_eq!(world.calls.len(), 2, "cache must not call the provider");
+            Ok(serde_json::to_value(world)?)
+        })?;
+        replay_traces.push(json!({"recovered":recovered,"cached":cached,"world":world}));
+    }
+    assert_eq!(replay_traces[0], replay_traces[1]);
+
+    let (_directory, runtime) = fixture_runtime(true, false, true, response_limit)?;
+    admitted_capture(
+        &runtime,
+        "before-expiry",
+        "workspace_directory.hierarchy.v1",
+        NOW,
+        false,
+    )?;
+    let refreshed: Value = serde_json::from_str(&admitted_capture(
+        &runtime,
+        "at-expiry",
+        "workspace_directory.hierarchy.v1",
+        NOW + 900,
+        false,
+    )?)?;
+    assert_eq!(refreshed["source_captured_at"], NOW + 900);
+    assert_eq!(refreshed["expires_at"], NOW + 1800);
+
+    let (_directory, runtime) = fixture_runtime(true, false, true, response_limit)?;
+    let cold: Value = serde_json::from_str(&admitted_capture(
+        &runtime,
+        "hierarchy-cold",
+        "workspace_directory.hierarchy.v1",
+        NOW,
+        false,
+    )?)?;
+    assert_eq!(cold["customer_id"], CUSTOMER);
+    assert_eq!(cold["actor"], ACTOR);
+    assert_eq!(cold["org_unit_count"], 2);
+    assert!(cold.get("user_path").is_none());
+    assert_eq!(cold["source_captured_at"], NOW);
+    assert_eq!(
+        cold["expires_at"],
+        NOW + crate::workspace_directory::SOURCE_TTL_SECONDS
+    );
+    for (invocation, now) in [("hierarchy-hit-1", NOW + 1), ("hierarchy-hit-2", NOW + 899)] {
+        let reused: Value = serde_json::from_str(&admitted_capture(
+            &runtime,
+            invocation,
+            "workspace_directory.hierarchy.v1",
+            now,
+            true,
+        )?)?;
+        assert_eq!(reused["captured_at"], now);
+        assert_eq!(reused["source_captured_at"], NOW);
+        assert_eq!(
+            reused["expires_at"],
+            NOW + crate::workspace_directory::SOURCE_TTL_SECONDS
+        );
+        assert!(reused.get("user_path").is_none());
+    }
+    assert_eq!(
+        admitted_capture(
+            &runtime,
+            "membership-user-outage",
+            "workspace_directory.capture.v1",
+            NOW + 2,
+            false,
+        )
+        .unwrap_err()
+        .to_string(),
+        "workspace_directory_user_lookup_failed",
+        "a cached hierarchy must not establish membership during user lookup outage"
+    );
+    let (_directory, runtime) = fixture_runtime(false, true, true, response_limit)?;
+    assert_eq!(
+        admitted_capture(
+            &runtime,
+            "hierarchy-missing-world",
+            "workspace_directory.hierarchy.v1",
+            NOW,
+            false
+        )
+        .unwrap_err()
+        .to_string(),
+        "simulated_provider_unconfigured",
+        "missing simulated world must not fall through to live HTTP"
+    );
+    assert_eq!(
+        admitted_capture(
+            &runtime,
+            "missing-world-second-failure",
+            "workspace_directory.hierarchy.v1",
+            NOW,
+            false
+        )
+        .unwrap_err()
+        .to_string(),
+        "simulated_provider_unconfigured"
+    );
+    let exhausted = admitted_capture(
+        &runtime,
+        "failure-budget-exhausted",
+        "workspace_directory.hierarchy.v1",
+        NOW,
+        false,
+    )
+    .unwrap_err()
+    .to_string();
     assert!(
         exhausted.starts_with("budget_exhausted:") && exhausted.ends_with(":bytes"),
         "{exhausted}"
     );
-    let (_directory, runtime) = fixture_runtime(true, response_limit - 1)?;
+    let (_directory, runtime) = fixture_runtime(true, true, false, response_limit)?;
+    let mut simulated = crate::workspace_directory::SimulatedDirectoryPort::new(
+        runtime.db(),
+        SCOPE,
+        CUSTOMER,
+        ACTOR,
+        NOW,
+    )?;
+    let cached = crate::workspace_directory::collect_hierarchy(
+        crate::workspace_directory::CaptureInput {
+            customer_id: CUSTOMER.into(),
+            connection_id: "directory@1".into(),
+            actor: ACTOR.into(),
+            captured_at: NOW,
+        },
+        &mut simulated,
+    )?;
+    let cache_path = runtime.db().with_file_name("workspace_directory.sqlite");
+    let mut cache = crate::workspace_directory::open_store(&cache_path)?;
+    crate::workspace_directory::publish(&mut cache, &cached)?;
     assert_eq!(
-        admitted_capture(&runtime, "insufficient-response-allowance")
-            .unwrap_err()
-            .to_string(),
+        admitted_capture(
+            &runtime,
+            "denied-hierarchy-action-with-cache",
+            "workspace_directory.hierarchy.v1",
+            NOW,
+            false,
+        )
+        .unwrap_err()
+        .to_string(),
+        crate::error::Failure::CapabilityForbidden.to_string(),
+        "a cached result must not bypass the operation's narrowed action grant"
+    );
+    assert!(
+        runtime
+            .accept(
+                "run",
+                "ungranted@coverage.test",
+                "denied-actor",
+                &json!({}),
+                NOW
+            )
+            .is_err()
+    );
+
+    let (_directory, runtime) = fixture_runtime(true, true, true, response_limit - 1)?;
+    assert_eq!(
+        admitted_capture(
+            &runtime,
+            "insufficient-response-allowance",
+            "workspace_directory.capture.v1",
+            NOW,
+            false,
+        )
+        .unwrap_err()
+        .to_string(),
         crate::error::Failure::ResourceForbidden.to_string()
     );
     Ok(())

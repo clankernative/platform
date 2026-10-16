@@ -142,6 +142,7 @@ fn sources(root: &Path) -> Result<Vec<PathBuf>> {
         root.join("examples/reports"),
         root.join("examples/app-ownership"),
         root.join("examples/notifications"),
+        root.join("examples/chart-live"),
     ];
     for source in roots {
         collect(&source, 0, &mut entries, &mut files)
@@ -223,6 +224,7 @@ mod tests {
             "platform/examples/reports",
             "platform/examples/app-ownership",
             "platform/examples/notifications",
+            "platform/examples/chart-live",
         ] {
             fs::create_dir_all(directory.path().join(path))?;
         }
@@ -266,6 +268,7 @@ mod tests {
         let workspace = workspace()?;
         let selected = [
             "platform/examples/app-ownership/App.roc",
+            "platform/examples/chart-live/queries/chart/ChartQuery.roc",
             "platform/examples/notifications/App.roc",
             "platform/examples/reports/commands/analyze/AnalyzeReport.roc",
             "platform/examples/reports/storage/Models.roc",

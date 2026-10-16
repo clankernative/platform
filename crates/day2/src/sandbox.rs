@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, ensure};
+pub use day2_sandbox::CompilerCache;
 use std::{fs, path::Path, process::Command};
 
 pub fn quoted_path(path: &Path) -> Result<String> {
@@ -12,7 +13,29 @@ pub fn quoted_path(path: &Path) -> Result<String> {
 }
 
 pub fn compiler(root: &Path, stage: &Path, roc: &Path) -> Result<Command> {
-    for name in ["home", "cache", "tmp"] {
+    compiler_scoped(root, stage, roc, day2_sandbox::CompilerCache::General)
+}
+
+pub fn glue_compiler(
+    root: &Path,
+    stage: &Path,
+    roc: &Path,
+    cache: day2_sandbox::CompilerCache,
+) -> Result<Command> {
+    ensure!(
+        cache != day2_sandbox::CompilerCache::General,
+        "glue requires a generator-scoped cache"
+    );
+    compiler_scoped(root, stage, roc, cache)
+}
+
+fn compiler_scoped(
+    root: &Path,
+    stage: &Path,
+    roc: &Path,
+    cache: day2_sandbox::CompilerCache,
+) -> Result<Command> {
+    for name in ["home", cache.directory(), "tmp"] {
         fs::create_dir_all(stage.join(name))?;
     }
     fs::create_dir_all(root.join("crates/worker/generated"))?;
@@ -32,6 +55,7 @@ pub fn compiler(root: &Path, stage: &Path, roc: &Path) -> Result<Command> {
             .arg(stage)
             .arg(roc)
             .arg(std::process::id().to_string())
+            .arg(cache.name())
             .arg("--");
         return Ok(command);
     }
@@ -79,8 +103,8 @@ pub fn compiler(root: &Path, stage: &Path, roc: &Path) -> Result<Command> {
         .env("LC_ALL", "C")
         .env("HOME", stage.join("home"))
         .env("TMPDIR", stage.join("tmp"))
-        .env("ROC_CACHE_DIR", stage.join("cache"))
-        .env("XDG_CACHE_HOME", stage.join("cache"));
+        .env("ROC_CACHE_DIR", stage.join(cache.directory()))
+        .env("XDG_CACHE_HOME", stage.join(cache.directory()));
     Ok(command)
 }
 

@@ -1,8 +1,13 @@
 # Historical Roc reflection backport
 
-The selected macOS application compiler is the unmodified official September 12
+The selected application compiler is the unmodified official October 13
 release in [the platform pin](../../toolchain.json). Use `xtask bootstrap` to
-install it. Linux has a separate pin and ABI generator.
+install it. Linux archives have separate target pins; all three targets use the
+matching upstream `vendor/RustGlue.roc` ABI generator.
+
+The separately reviewed formatter remains on September 12. Bootstrap admits the
+explicit October 13 compiler / September 12 formatter pair and still verifies
+both binary identities and the formatter's source/patch provenance.
 
 This directory preserves an earlier reflection backport for interpreting older
 artifacts. The [patch](glue-layouts.patch) applies to Roc commit
