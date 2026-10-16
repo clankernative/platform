@@ -83,6 +83,71 @@ impl std::fmt::Display for DeclaredPageRejection {
     }
 }
 impl std::error::Error for DeclaredPageRejection {}
+
+fn accepted_page_acknowledgement(
+    status: StatusCode,
+    invocation: &str,
+    operation: &str,
+    rejection: &DeclaredPageRejection,
+    reload: &str,
+) -> Markup {
+    let message = match status {
+        StatusCode::OK => "Saved. The page could not be refreshed.",
+        StatusCode::ACCEPTED => {
+            "Accepted. This is still finishing; the page could not be refreshed."
+        }
+        _ => unreachable!("only accepted commands receive a fallback acknowledgement"),
+    };
+    html! { main id="day2-main"
+        data-day2-invocation=(invocation)
+        data-day2-operation=(operation)
+        data-day2-status=(if status == StatusCode::ACCEPTED { "pending" } else { "success" }) {
+        div id="day2-command-status" {
+            div class="notice" role="status" {
+                p { (message) }
+                p { (rejection.description) " " (rejection.recovery) }
+                p { a href=(reload) { "Reload page" } " before making another change." }
+                p { "Receipt: " code { @for character in invocation.chars() { (character) wbr; } } }
+            }
+        }
+    } }
+}
+
+fn page_content_or_acknowledgement(
+    rendered: Result<Markup>,
+    status: StatusCode,
+    invocation: &str,
+    operation: &str,
+    reload: &str,
+) -> Result<Markup> {
+    match rendered {
+        Ok(content) => Ok(content),
+        Err(error) if matches!(status, StatusCode::OK | StatusCode::ACCEPTED) => {
+            match error.downcast::<DeclaredPageRejection>() {
+                Ok(rejection) => Ok(accepted_page_acknowledgement(
+                    status, invocation, operation, &rejection, reload,
+                )),
+                Err(error) => Err(error),
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn command_headers(
+    mut response: Response,
+    invocation: &str,
+    status: StatusCode,
+) -> Result<Response> {
+    response
+        .headers_mut()
+        .insert("x-day2-invocation", invocation.parse()?);
+    response
+        .headers_mut()
+        .insert("x-day2-command-status", status.as_str().parse()?);
+    Ok(response)
+}
+
 struct Host {
     entropy: Arc<dyn Entropy>,
     clock: Arc<dyn Clock>,
@@ -1899,7 +1964,7 @@ impl Host {
             .get("datastar-request")
             .is_some_and(|value| value == "true");
         let accepted = matches!(status, StatusCode::OK | StatusCode::ACCEPTED);
-        let mut response = if accepted && !datastar {
+        let response = if accepted && !datastar {
             redirect(&view::page_url(
                 &self.runtime,
                 &ticket.page,
@@ -1908,7 +1973,7 @@ impl Host {
         } else {
             // A rendering failure after commit is ambiguous only to the browser.
             // The unchanged signed ticket always identifies the durable receipt.
-            let content = self.page(
+            let rendered = self.page(
                 &ticket.page,
                 &ticket.page_input,
                 session,
@@ -1924,6 +1989,13 @@ impl Host {
                     bound: &ticket.bound,
                     fields: &fields,
                 }),
+            );
+            let content = page_content_or_acknowledgement(
+                rendered,
+                status,
+                &id,
+                &ticket.operation,
+                &view::page_url(&self.runtime, &ticket.page, &ticket.page_input)?,
             )?;
             if datastar {
                 if self.runtime.artifact().page(&ticket.page)?.live {
@@ -1935,13 +2007,7 @@ impl Host {
                 self.app_response(status, &ticket.page, &ticket.page_input, session, content)?
             }
         };
-        response
-            .headers_mut()
-            .insert("x-day2-invocation", id.parse()?);
-        response
-            .headers_mut()
-            .insert("x-day2-command-status", status.as_str().parse()?);
-        Ok(response)
+        command_headers(response, &id, status)
     }
     fn audit(&self, raw: &str, session: &Session) -> Result<Response> {
         self.runtime.authorize_audit(&session.actor)?;
@@ -2297,6 +2363,91 @@ mod declared_page_rejection_tests {
         assert!(!body.contains("database connection details"));
         assert!(body.contains("Retry commands with the same idempotency key."));
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn accepted_command_page_rejection_returns_receipt_acknowledgement() -> Result<()> {
+        let rejection = DeclaredPageRejection {
+            code: "app:freetool.space_page_denied".into(),
+            description: "<Access & membership denied>".into(),
+            recovery: "Choose \"another\" space & retry.".into(),
+        };
+        for (status, state, phrase) in [
+            (StatusCode::OK, "success", "Saved."),
+            (StatusCode::ACCEPTED, "pending", "Accepted."),
+        ] {
+            let content = page_content_or_acknowledgement(
+                Err(anyhow::Error::new(DeclaredPageRejection {
+                    code: rejection.code.clone(),
+                    description: rejection.description.clone(),
+                    recovery: rejection.recovery.clone(),
+                })),
+                status,
+                "web-original-ticket-nonce",
+                "freetool.space_update",
+                "/spaces/example/settings?tab=details&view=current",
+            )?;
+            let markup = content.into_string();
+            assert!(markup.contains("data-day2-invocation=\"web-original-ticket-nonce\""));
+            assert!(markup.contains("data-day2-operation=\"freetool.space_update\""));
+            assert!(markup.contains(&format!("data-day2-status=\"{state}\"")));
+            assert!(markup.contains(phrase));
+            assert!(markup.contains("&lt;Access &amp; membership denied&gt;"));
+            assert!(markup.contains("Choose &quot;another&quot; space &amp; retry."));
+            let document = scraper::Html::parse_fragment(&markup);
+            let text = document.root_element().text().collect::<String>();
+            assert!(text.contains("Reload page before making another change."));
+            assert!(text.contains("Receipt: web-original-ticket-nonce"));
+            assert!(markup.contains("<wbr>"));
+            assert!(
+                markup.contains("href=\"/spaces/example/settings?tab=details&amp;view=current\"")
+            );
+            assert!(!markup.contains("<form") && !markup.contains("_ticket"));
+
+            let response = command_headers(
+                patch(html! { (maud::PreEscaped(markup)) }),
+                "web-original-ticket-nonce",
+                status,
+            )?;
+            assert_eq!(
+                response.headers()["x-day2-invocation"],
+                "web-original-ticket-nonce"
+            );
+            assert_eq!(response.headers()["x-day2-command-status"], status.as_str());
+            let body = String::from_utf8(to_bytes(response.into_body(), 4096).await?.to_vec())?;
+            assert!(body.contains(&format!("data-day2-status=\"{state}\"")));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn acknowledgement_fallback_does_not_convert_rejected_or_operational_errors() {
+        let declared = || {
+            anyhow::Error::new(DeclaredPageRejection {
+                code: "app:freetool.space_page_denied".into(),
+                description: "Denied".into(),
+                recovery: "Reload".into(),
+            })
+        };
+        let rejected = page_content_or_acknowledgement(
+            Err(declared()),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "receipt",
+            "operation",
+            "/",
+        )
+        .unwrap_err();
+        assert!(rejected.downcast_ref::<DeclaredPageRejection>().is_some());
+
+        let operational = page_content_or_acknowledgement(
+            Err(anyhow::anyhow!("rendering database failure")),
+            StatusCode::OK,
+            "receipt",
+            "operation",
+            "/",
+        )
+        .unwrap_err();
+        assert_eq!(operational.to_string(), "rendering database failure");
     }
 
     #[test]

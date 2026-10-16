@@ -138,6 +138,134 @@ fn admitted_page_business_rejection_is_an_escaped_http_422() -> Result<()> {
 }
 
 #[test]
+fn admitted_committed_form_keeps_receipt_when_page_refresh_is_rejected() -> Result<()> {
+    let Some(artifact) = std::env::var_os("DAY2_TEST_FREETOOL_ARTIFACT").map(PathBuf::from) else {
+        eprintln!("set DAY2_TEST_FREETOOL_ARTIFACT to run the committed-form receipt test");
+        return Ok(());
+    };
+    let actor = "developer";
+    let verification: Value =
+        serde_json::from_slice(&fs::read(artifact.join("verification.json"))?)?;
+    let mut authority = verification["traces"][0]["guard"]["policy"].clone();
+    authority["admins"] = json!([actor]);
+    for grant in authority["operations"]
+        .as_object_mut()
+        .context("admitted operation policy")?
+        .values_mut()
+    {
+        grant["actors"] = json!([actor]);
+        grant["observations"] = json!([]);
+        grant["effects"] = json!([]);
+    }
+    let directory = tempfile::tempdir()?;
+    let instance_path = directory.path().join("instance.json");
+    fs::write(
+        &instance_path,
+        serde_json::to_vec(&json!({
+            "installation":"freetool_receipt_test", "environment":"test",
+            "apps":{"freetool":{"artifact":artifact,"readers":[actor],"writers":[actor],"authority":authority}}
+        }))?,
+    )?;
+    let runtime = Runtime::load(&instance_path, "freetool")?;
+    runtime.initialize()?;
+    let invoke = |operation: &str, id: &str, input: Value| -> Result<Value> {
+        let outcome = runtime.invoke(operation, actor, id, &input, 100, Fault::None)?;
+        assert_eq!(outcome.status, "success", "{}", outcome.error);
+        Ok(outcome.result)
+    };
+    invoke(
+        "freetool.bootstrap_administrator",
+        "receipt-bootstrap",
+        json!({"email":"admin@example.com","name":"Synthetic admin"}),
+    )?;
+    let moderator = invoke(
+        "freetool.invite_user",
+        "receipt-moderator",
+        json!({"email":"moderator@example.com"}),
+    )?;
+    let space = invoke(
+        "freetool.create_space",
+        "receipt-space",
+        json!({"name":"Before commit","moderator":moderator["id"],"members":[]}),
+    )?;
+    let db = rusqlite::Connection::open(runtime.db())?;
+    // Inject domain-access loss after the write in this disposable database.
+    // The normal signed HTTP path still performs all native admission checks.
+    db.execute_batch("CREATE TRIGGER revoke_after_rename AFTER UPDATE OF name ON spaces
+        WHEN NEW.name = 'After commit'
+        BEGIN UPDATE administrators SET deleted_at=1,version=version+1 WHERE actor='developer'; END")?;
+    let server = Server::start(runtime.clone(), actor, 0)?;
+    let client = server.client()?;
+    let path = format!(
+        "/spaces/{}/settings",
+        space["id"].as_str().context("space reference")?
+    );
+    let page = client.get(format!("{}{path}", server.origin)).send()?;
+    assert_eq!(page.status(), StatusCode::OK);
+    let mut fields = selected_form(&page.text()?, "form[data-command='freetool.rename_space']")?;
+    fields.insert("name".into(), "After commit".into());
+    let submit = || -> Result<Response> {
+        Ok(client
+            .post(format!("{}/actions", server.origin))
+            .header("Origin", &server.origin)
+            .header("Datastar-Request", "true")
+            .form(&fields)
+            .send()?)
+    };
+    let response = submit()?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["x-day2-command-status"], "200");
+    assert!(
+        response.headers()["content-type"]
+            .to_str()?
+            .starts_with("text/event-stream")
+    );
+    let receipt = response
+        .headers()
+        .get("x-day2-invocation")
+        .context("committed receipt")?
+        .to_str()?
+        .to_owned();
+    let patch = response.text()?;
+    assert!(patch.contains("Saved.") && patch.contains("Reload page"));
+    assert!(patch.contains(&receipt) && !patch.contains("_ticket"));
+    let (recorded, outcome): (String, String) = db.query_row(
+        "SELECT id,outcome FROM day2_invocations WHERE operation='freetool.rename_space'",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    assert_eq!(receipt, recorded);
+    assert_eq!(
+        serde_json::from_str::<Value>(&outcome)?["status"],
+        "success"
+    );
+    assert_eq!(
+        db.query_row("SELECT name FROM spaces", [], |row| row.get::<_, String>(0))?,
+        "After commit"
+    );
+    let repeated = submit()?;
+    assert_eq!(repeated.status(), StatusCode::OK);
+    assert_eq!(repeated.headers()["x-day2-invocation"], receipt.as_str());
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM day2_invocations WHERE operation='freetool.rename_space'",
+            [],
+            |row| row.get::<_, i64>(0)
+        )?,
+        1
+    );
+    // The follow-up query really is denied; this is not a successful refresh.
+    assert_eq!(
+        client
+            .get(format!("{}{path}", server.origin))
+            .send()?
+            .status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    Ok(())
+}
+
+#[test]
 fn openapi_docs_and_json_queries_share_the_admitted_contract() -> Result<()> {
     let world = World::new()?;
     world.seed("api-docs-seed")?;
