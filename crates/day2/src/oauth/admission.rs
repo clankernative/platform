@@ -3777,11 +3777,8 @@ pub(super) mod tests {
             "models":{"entries":{"fields":{"note":"text"}}},
             "inputs":{"input":{"fields":{}}},"foreign_keys":[]
         }))?;
-        let artifact = LoadedArtifact::from_contract_for_tests(
-            original.id().into(),
-            artifact_path,
-            contract,
-        );
+        let artifact =
+            LoadedArtifact::from_contract_for_tests(original.id().into(), artifact_path, contract);
         fixture
             .artifacts
             .insert("workspace".into(), artifact.clone());
