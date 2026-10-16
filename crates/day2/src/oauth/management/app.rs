@@ -141,6 +141,7 @@ impl Manager {
         crate::oauth::connect::identifier(registration)?;
         let mut db = store::open(self.runtime.db())?;
         iap::bind_subject(&db, identity, now)?;
+        self.authority_in(&db, identity)?;
         let selection = self.selection(registration, identity, now)?;
         let suffix = effects::random()?;
         let challenge = Digest::new(effects::random()?.as_bytes());
