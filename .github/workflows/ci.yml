@@ -789,7 +789,7 @@ jobs:
     defaults:
       run:
         shell: bash
-    timeout-minutes: 30
+    timeout-minutes: 90
     env:
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
@@ -884,6 +884,47 @@ jobs:
             Cargo.lock
             target/debug/xtask.d
             target/debug/day2-workflows.json
+          if-no-files-found: error
+          retention-days: 14
+
+      # One Reports feasibility slice; no platform full gate or benchmark.
+      - name: Fetch the pinned Bazel executable
+        run: gh release download 9.3.0 --repo bazelbuild/bazel --pattern bazel-9.3.0-linux-x86_64 --dir /tmp/day2-bazel-tools
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Verify the exact Bazel release asset
+        run: sha256sum --check --ignore-missing "$GITHUB_WORKSPACE/.github/bazel-experiment.sha256"
+        working-directory: /tmp/day2-bazel-tools
+      - run: chmod 755 /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64
+      - name: Build the actual Reports driver, integration harness and three Linux auxiliaries once
+        run: /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64 --output_user_root=/tmp/day2-bazel-Reports-feasibility build --build_event_json_file=/tmp/day2-bazel-build-events.json //crates/xtask:xtask //crates/day2:day2_integration //crates/day2-sandbox:day2-sandbox //crates/day2-sandbox:day2-compiler-sandbox //crates/day2-sandbox:day2-sandbox-probe
+      - name: Retain the actual five-program action graph and compiler arguments
+        run: /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64 --output_user_root=/tmp/day2-bazel-Reports-feasibility aquery --include_param_files --output=jsonproto 'deps(set(//crates/xtask:xtask //crates/day2:day2_integration //crates/day2-sandbox:day2-sandbox //crates/day2-sandbox:day2-compiler-sandbox //crates/day2-sandbox:day2-sandbox-probe))' > /tmp/day2-bazel-action-graph.json
+      - name: Install and verify only the fixed five current Bazel programs
+        run: bazel-bin/crates/xtask/xtask experiment-bazel-install
+      - name: Build Reports through the ordinary Roc recipe and execute every selected exact case freshly
+        run: target/debug/xtask experiment-bazel-reports
+      - name: Require the Cargo lockfile to remain unchanged
+        run: git diff --exit-code -- Cargo.lock
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ always() }}
+        with:
+          name: day2-bazel-Reports-feasibility-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            /tmp/day2-ci-linux-context.json
+            /tmp/day2-format.patch
+            /tmp/day2-architecture-inventory.json
+            /tmp/day2-architecture-dependencies.json
+            /tmp/day2-architecture-proofs.json
+            /tmp/day2-bazel-build-events.json
+            /tmp/day2-bazel-action-graph.json
+            MODULE.bazel.lock
+            Cargo.lock
+            target/debug/xtask.d
+            target/debug/day2-workflows.json
+            artifacts/bazel-programs.json
+            artifacts/bazel-reports-runtime.json
+            artifacts/**/artifact.json
           if-no-files-found: error
           retention-days: 14
 
