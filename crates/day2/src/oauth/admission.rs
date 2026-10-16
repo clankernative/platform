@@ -4329,6 +4329,13 @@ pub(super) mod tests {
                 5,
                 session.clone(),
             )?;
+            // Keep the actual signed proof's wall-clock observation independent
+            // of isolated positive witnesses and the unavailable producer check.
+            let intent = super::super::fresh_auth::FreshIntent::approval(&view, &identity)?;
+            let (authenticator, headers, callback) =
+                super::super::shell_oidc::fixture_login(&identity, intent, 5, 5, 5)?;
+            let identity = authenticator.identify(&headers, 5)?;
+            let future_clock = authenticator.complete(&callback, &identity, 5)?;
             // A refused original lifetime is terminal. Keep this negative control's
             // proof separate from the retirement and post-key-load controls below.
             let future_entry = super::super::security_shell::ShellSession::approval_fixture(
@@ -4338,6 +4345,10 @@ pub(super) mod tests {
                 session.clone(),
             )?;
             clock.advance(1);
+            future_clock.require_current(6)?;
+            assert!(7 < future_clock.deadline()?);
+            assert!(future_clock.require_current(7).is_err());
+            assert!(future_clock.require_current(6).is_err());
             let proof = signer.attest(&view, &fresh, 6)?;
             assert_eq!(proof.preview, Some(view.digest()?));
             assert_eq!(keys.0.load(Ordering::SeqCst), 1);
