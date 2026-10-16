@@ -147,6 +147,7 @@ const PARALLEL_RUNTIME_TESTS: &[&str] = &[
     "app_inference::resource_handles_and_issuance_context_cannot_be_forged_or_broadened",
     "app_inference::omissions_stale_references_and_forged_factories_fail_compilation",
     "app_contract::native_error_cases_preserve_typed_command_query_inputs_and_singleton_authoring",
+    "app_contract::native_workspace_directory_pages_decode_through_public_sdk",
     "app_contract::native_required_all_rows_builders_preserve_typed_definitions",
     "guards::checked_compiler_rejects_wrong_models_forged_values_and_unavailable_io",
     "credential_metadata::native_compiler_preserves_family_types_and_seals_host_read_constructors",
@@ -363,6 +364,21 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
         };
         let started = Instant::now();
         let key = match request.action.as_str() {
+            "verify-browser" => {
+                ensure!(parameters.is_empty(), "browser checks accept no overrides");
+                run_with_budget(
+                    root,
+                    Command::new("node").arg("--version"),
+                    Duration::from_secs(10),
+                )?;
+                run_with_budget(
+                    root,
+                    Command::new("node")
+                        .args(["--test", "crates/day2/tests/chart_live_navigation.test.mjs"]),
+                    Duration::from_secs(60),
+                )?;
+                "browser-navigation".into()
+            }
             "verify-test-build" => {
                 ensure!(parameters.is_empty(), "test build accepts no overrides");
                 shards::build(root, &snapshot)?;
@@ -638,6 +654,7 @@ fn fixture_build(
 ) -> Result<FixtureBuild> {
     match fixture {
         "app-ownership" => FixtureBuild::plain(root, "examples/app-ownership"),
+        "chart-live" => FixtureBuild::plain(root, "examples/chart-live"),
         "notifications" => {
             let peer = fixtures
                 .get("app-ownership")
@@ -865,6 +882,7 @@ fn verification_sources(root: &Path, recipe: &str) -> Result<BTreeMap<String, St
         ("infra-config", root.join("infra")),
         ("apps/app-ownership", root.join("examples/app-ownership")),
         ("apps/notifications", root.join("examples/notifications")),
+        ("apps/chart-live", root.join("examples/chart-live")),
     ];
     if ["verify-fast", "verify-reports", "verify"].contains(&recipe) {
         sources.push(("apps/reports", root.join("examples/reports")));
@@ -1327,6 +1345,15 @@ fn configure_tests(
         }
     }
     command.env("DAY2_TEST_TOFU_CONFIG", root.join(".cache/tofu.json"));
+    if !fixtures.contains_key("chart-live") {
+        for test in [
+            "web::presentation_delivery_tests::http_delivery_rechecks_revocation_after_render",
+            "chart_live_tests::native_chart_ranges_use_the_dispatch_actor_and_reject_circular_oracles",
+            "chart_live_tests::native_chart_update_oracle_requires_exact_fields_version_and_unchanged_other_rows",
+        ] {
+            command.args(["--skip", test]);
+        }
+    }
     if suite == "fast-libraries" {
         command.args([
             "--skip",
@@ -1415,6 +1442,7 @@ fn configure_tests(
         ("redirect", "DAY2_TEST_REDIRECT_ARTIFACT"),
         ("app-ownership", "DAY2_TEST_APP_OWNERSHIP_ARTIFACT"),
         ("notifications", "DAY2_TEST_NOTIFICATIONS_ARTIFACT"),
+        ("chart-live", "DAY2_TEST_CHART_LIVE_ARTIFACT"),
         (
             "connection-declaration",
             "DAY2_TEST_CONNECTION_DECLARATION_ARTIFACT",
@@ -1477,6 +1505,7 @@ fn receipt(
         let oauth_gitlab = artifact("oauth-gitlab")?;
         let app_ownership = artifact("app-ownership")?;
         let notifications = artifact("notifications")?;
+        let chart_live = artifact("chart-live")?;
         let baseline = artifact("relational")?;
         let lifecycle = artifact("lifecycle")?;
         let collection = artifact("collection")?;
@@ -1499,6 +1528,7 @@ fn receipt(
             "oauth_calendar":artifact_id(&oauth_calendar),
             "oauth_gitlab":artifact_id(&oauth_gitlab),
             "app_ownership":artifact_id(&app_ownership), "notifications":artifact_id(&notifications),
+            "chart_live":artifact_id(&chart_live),
             "collection":artifact_id(&collection),
             "owned":artifact_id(&owned), "owned_probe":artifact_id(&owned_probe),
             "reports":artifact_id(&reports), "reports_probe":artifact_id(&reports_probe),
@@ -1628,6 +1658,8 @@ fn required_steps(scope: &str) -> Result<&'static [&'static str]> {
             "build-request-desk",
             "build-app-ownership",
             "build-notifications",
+            "build-chart-live",
+            "browser-navigation",
             "build-redirect",
             "build-relational",
             "build-lifecycle",
@@ -1682,6 +1714,7 @@ mod tests {
             "fixtures",
             "examples/app-ownership",
             "examples/notifications",
+            "examples/chart-live",
             "examples/reports",
         ] {
             fs::create_dir_all(root.join(name))?;
@@ -1704,6 +1737,24 @@ mod tests {
                 .zip(changed)
                 .all(|(before, after)| *before != after)
         );
+        fs::write(&pin, b"approved input")?;
+        for relative in [
+            "examples/chart-live/App.roc",
+            "examples/chart-live/ui/app.js",
+            "crates/day2/tests/navigation.test.mjs",
+        ] {
+            let path = root.join(relative);
+            fs::create_dir_all(path.parent().unwrap())?;
+            fs::write(&path, b"changed verification input")?;
+            assert!(
+                approved
+                    .iter()
+                    .zip(snapshots()?)
+                    .all(|(before, after)| *before != after),
+                "{relative}"
+            );
+            fs::remove_file(path)?;
+        }
         fs::remove_file(&pin)?;
         assert!(snapshots().is_err());
         fs::write(&pin, b"approved input")?;
@@ -1849,6 +1900,8 @@ mod tests {
             "build-reports-probe",
             "build-owned-probe",
             "build-repeated-field",
+            "build-chart-live",
+            "browser-navigation",
             "test-workspace-runtime",
             "test-parallel-runtime",
         ] {

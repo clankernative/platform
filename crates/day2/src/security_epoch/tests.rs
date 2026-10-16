@@ -1,7 +1,7 @@
 //! Native protocol conformance, with an independently conditional SQLite provider
 //! model. No Google requests or serving-build execution context is available.
 use super::{
-    firestore::{self, Names, Port, Response, Sample},
+    firestore::{self, EpochReply, Names, Port, Sample},
     journal::{CurrentBootstrapExecution, Journal, Purpose},
     kernel::*,
 };
@@ -15,7 +15,7 @@ use std::{
     time::Duration,
 };
 
-fn selection() -> EpochStore {
+pub(super) fn selection() -> EpochStore {
     serde_json::from_value(json!({
         "scope":{"installation":"company","environment":"canary","app":"calendar"},
         "provider":{"kind":"firestore_native_v1","project":"project-seven","project_number":7,
@@ -25,7 +25,41 @@ fn selection() -> EpochStore {
     })).unwrap()
 }
 
-fn create() -> Request {
+#[test]
+fn native_read_budget_keeps_time_spent_before_database_io() {
+    let mut provider = Provider::new();
+    let domain = Digest::new(b"controller-process-clock");
+    provider.tick = Duration::from_millis(104_900);
+    let mut budget = firestore::Budget::from_native_origin(
+        Sample {
+            domain: domain.clone(),
+            elapsed: provider.tick,
+        },
+        Duration::from_secs(100),
+        Duration::from_secs(105),
+    )
+    .unwrap();
+    assert_eq!(
+        budget.remaining(&mut provider).unwrap(),
+        Duration::from_millis(100)
+    );
+    provider.tick = Duration::from_secs(105);
+    assert!(budget.remaining(&mut provider).is_err());
+    assert!(provider.calls.is_empty());
+    assert!(
+        firestore::Budget::from_native_origin(
+            Sample {
+                domain,
+                elapsed: Duration::from_secs(106)
+            },
+            Duration::from_secs(100),
+            Duration::from_secs(105)
+        )
+        .is_err()
+    );
+}
+
+pub(super) fn create() -> Request {
     let selected = selection();
     Request::CreateInitialAuthority {
         bootstrap: Bootstrap {
@@ -95,7 +129,7 @@ enum Fault {
     ExitAfterCommit,
 }
 
-struct Provider {
+pub(super) struct Provider {
     db: Connection,
     fault: Fault,
     tick: Duration,
@@ -113,7 +147,7 @@ impl Provider {
         Self::from_db(Connection::open(path).unwrap())
     }
 
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self::from_db(Connection::open_in_memory().unwrap())
     }
 
@@ -130,12 +164,20 @@ impl Provider {
     }
 
     fn read(&mut self, request: &Request) -> Result<Snapshot> {
+        Ok(self.observe(request)?.into_data())
+    }
+
+    pub(super) fn observe(&mut self, request: &Request) -> Result<firestore::EpochObservation> {
         let active = match request {
             Request::CompleteInitialFirstActivation { operation, .. } => Some(operation),
             _ => None,
         };
         let names = Names::new(&selection(), request.bootstrap(), active)?;
-        Ok(firestore::read(self, &names)?.into_data())
+        firestore::read(self, &names)
+    }
+
+    pub(super) fn set_slot_fixture_time(&mut self, elapsed: Duration) {
+        self.tick = elapsed;
     }
 
     fn sends(&self) -> i64 {
@@ -267,7 +309,7 @@ impl Port for Provider {
         body: &[u8],
         timeout: Duration,
         max_bytes: usize,
-    ) -> Result<Response> {
+    ) -> Result<EpochReply> {
         ensure!(url.starts_with("https://firestore.googleapis.com/v1/projects/project-seven/databases/security/documents:"),"fixed selected endpoint");
         ensure!(
             body.len() <= 65_536
@@ -295,7 +337,7 @@ impl Port for Provider {
         } else {
             bail!("unknown endpoint");
         };
-        Ok(Response {
+        Ok(EpochReply {
             status: 200,
             body: bytes,
         })

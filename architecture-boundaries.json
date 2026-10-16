@@ -99,7 +99,7 @@
         {
           "name": "day2-sandbox",
           "kind": "normal",
-          "target": "cfg(target_os = \"linux\")",
+          "target": null,
           "rename": null,
           "features": [],
           "default_features": true,
@@ -181,6 +181,19 @@
             "multi_template",
             "serde",
             "unstable_machinery"
+          ],
+          "default_features": false,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "nix",
+          "kind": "normal",
+          "target": "cfg(target_os = \"linux\")",
+          "rename": null,
+          "features": [
+            "poll",
+            "socket"
           ],
           "default_features": false,
           "optional": false,
@@ -312,7 +325,8 @@
           "features": [
             "bundled",
             "hooks",
-            "limits"
+            "limits",
+            "serialize"
           ],
           "default_features": true,
           "optional": false,
@@ -324,7 +338,8 @@
           "target": null,
           "rename": null,
           "features": [
-            "fs"
+            "fs",
+            "time"
           ],
           "default_features": true,
           "optional": false,
@@ -458,56 +473,66 @@
           "default_features": true,
           "optional": false,
           "local_path": null
+        },
+        {
+          "name": "zeroize",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
         }
       ],
       "production_targets": [
         {
-          "name": "day2",
           "kind": [
             "bin"
           ],
+          "name": "day2",
           "source": "crates/day2/src/main.rs"
         },
         {
-          "name": "day2",
           "kind": [
             "lib"
           ],
+          "name": "day2",
           "source": "crates/day2/src/lib.rs"
         },
         {
-          "name": "day2-health",
           "kind": [
             "bin"
           ],
+          "name": "day2-health",
           "source": "crates/day2/src/bin/day2-health.rs"
         },
         {
-          "name": "day2-inspect",
           "kind": [
             "bin"
           ],
+          "name": "day2-inspect",
           "source": "crates/day2/src/bin/day2-inspect.rs"
         },
         {
-          "name": "day2-package",
           "kind": [
             "bin"
           ],
+          "name": "day2-package",
           "source": "crates/day2/src/bin/day2-package.rs"
         },
         {
-          "name": "day2-security-shell",
           "kind": [
             "bin"
           ],
+          "name": "day2-security-shell",
           "source": "crates/day2/src/bin/day2-security-shell.rs"
         },
         {
-          "name": "sandbox_probe",
           "kind": [
             "bin"
           ],
+          "name": "sandbox_probe",
           "source": "crates/day2/src/bin/sandbox_probe.rs"
         }
       ]

@@ -77,7 +77,7 @@ ListEvents :: [].{
 	})
 
 	empty : Str -> Output
-	empty = |status| { status, events: CollectionPage.empty }
+	empty = |status| { status, events: CollectionPage.empty({}) }
 
 	problem : Connection.Problem -> Str
 	problem = |value| match value {

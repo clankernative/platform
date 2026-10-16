@@ -454,6 +454,7 @@ fn the_simulation_emits_no_field_the_provider_does_not() -> Result<()> {
                 model: "model-parity".into(),
                 max_input_tokens: 10,
             },
+            workspace_directory: Default::default(),
         },
     )?;
     // Capture what the simulation puts on the wire by replaying its own reply

@@ -20,6 +20,25 @@ pub const ACTOR: &str = "developer";
 pub const DEFAULT_SEED: u64 = 0xDA72_2026;
 pub const DEFAULT_CASES: u64 = 16;
 const MAX_STEPS: usize = 128;
+const VERIFICATION_TIME: i64 = 1_700_000_000;
+
+/// Non-interactive invocation and provider-fixture time. Verification uses a
+/// repeatable epoch; local serving uses the runtime clock for fresh providers.
+/// Interactive credential confirmations always use the runtime clock.
+#[derive(Clone, Copy)]
+pub enum CampaignTime {
+    Verification,
+    Local,
+}
+
+impl CampaignTime {
+    fn start(self, runtime: &Runtime) -> Result<i64> {
+        match self {
+            Self::Verification => Ok(VERIFICATION_TIME),
+            Self::Local => Ok(runtime.host().now_ms()?.div_euclid(1000)),
+        }
+    }
+}
 
 /// A selected callee's checked example, used only by disposable verification.
 /// The target and schema pin also authorize the caller's simulated read.
@@ -136,6 +155,33 @@ fn exchange(artifact: &LoadedArtifact, request: &str) -> Result<Vec<u8>> {
     Worker::start(&executable)?.exchange(request.as_bytes())
 }
 
+struct VerificationInvocation<'a> {
+    actor: &'a str,
+    input: &'a str,
+    seed: u64,
+}
+
+fn verification_snapshot_context(
+    snapshot: &Value,
+    invocation: &VerificationInvocation<'_>,
+) -> Result<String> {
+    let mut snapshot = snapshot.clone();
+    let fields = snapshot
+        .as_object_mut()
+        .context("verification snapshot object required")?;
+    ensure!(!invocation.actor.is_empty(), "verification actor required");
+    fields.insert(
+        "verification".into(),
+        json!({"actor": invocation.actor, "input": invocation.input}),
+    );
+    let encoded = snapshot.to_string();
+    ensure!(
+        encoded.len() <= crate::artifact::VerificationLimits::QUALIFIED.snapshot_bytes,
+        "verification_snapshot_byte_budget"
+    );
+    Ok(encoded)
+}
+
 fn verification(
     artifact: &LoadedArtifact,
     action: &str,
@@ -143,11 +189,11 @@ fn verification(
     snapshot: &Value,
     before: &Value,
     output: &Value,
-    seed: u64,
+    invocation: VerificationInvocation<'_>,
 ) -> Result<String> {
     let request = format!(
         "verify:{}",
-        json!({ "action": action, "operation": operation, "snapshot": snapshot.to_string(), "before": before.to_string(), "output": output.to_string(), "seed": seed })
+        json!({ "action": action, "operation": operation, "snapshot": verification_snapshot_context(snapshot, &invocation)?, "before": verification_snapshot_context(before, &invocation)?, "output": output.to_string(), "seed": invocation.seed })
     );
     verification_reply(operation, action, || {
         properties::exchange_verification(artifact, request.as_bytes())
@@ -1243,6 +1289,17 @@ pub fn people_resource_fixture(
             ],
         ),
         (
+            "workspace_directory",
+            Provider::WorkspaceDirectory,
+            ResourceTarget::WorkspaceDirectory {
+                customer_id: "synthetic-customer-1".into(),
+            },
+            vec![
+                Action::WorkspaceDirectoryCapture,
+                Action::WorkspaceDirectoryPage,
+            ],
+        ),
+        (
             "linear",
             Provider::SyntheticLinear,
             ResourceTarget::LinearOrganization {
@@ -1291,7 +1348,12 @@ pub fn people_resource_fixture(
             catalog.connections.insert(
                 (*name).into(),
                 ConnectionDefinition {
-                    live: None,
+                    live: (*provider == Provider::WorkspaceDirectory).then(|| {
+                        day2_capabilities::integrations::LiveConnection::WorkspaceDirectory {
+                            service_account: "directory-reader@company.iam.gserviceaccount.com".into(),
+                            auth: day2_capabilities::integrations::WorkspaceDirectoryAuth::DirectServiceAccount,
+                        }
+                    }),
                     revision: 1,
                     provider: *provider,
                 },
@@ -1311,8 +1373,16 @@ pub fn people_resource_fixture(
                     allowed_resources: BTreeSet::from([resource.clone()]),
                     actions,
                     limits: Limits {
-                        max_request_bytes: 16_384,
-                        max_response_bytes: 16_384,
+                        max_request_bytes: if *provider == Provider::WorkspaceDirectory {
+                            crate::workspace_directory::MAX_CAPTURE_REQUEST_BYTES
+                        } else {
+                            16_384
+                        },
+                        max_response_bytes: if *provider == Provider::WorkspaceDirectory {
+                            crate::workspace_directory::MAX_RESPONSE_BYTES as u64
+                        } else {
+                            16_384
+                        },
                         max_calls_per_invocation: 256,
                     },
                     budgets: Vec::new(),
@@ -1694,6 +1764,28 @@ mod people_resource_tests {
     use super::*;
 
     #[test]
+    fn verification_context_comes_from_the_dispatched_case_and_preserves_snapshot_bounds()
+    -> Result<()> {
+        let state =
+            json!({"live":"{}","deleted":"{}","verification":{"actor":"forged","input":"forged"}});
+        let invocation = VerificationInvocation {
+            actor: "alice",
+            input: "{\"start\":1}",
+            seed: 7,
+        };
+        let encoded: Value =
+            serde_json::from_str(&verification_snapshot_context(&state, &invocation)?)?;
+        assert_eq!(encoded["live"], state["live"]);
+        assert_eq!(encoded["deleted"], state["deleted"]);
+        assert_eq!(
+            encoded["verification"],
+            json!({"actor":"alice","input":"{\"start\":1}"})
+        );
+        assert!(verification_snapshot_context(&json!({"live":"x".repeat(crate::artifact::VerificationLimits::QUALIFIED.snapshot_bytes)}), &invocation).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn failure_principal_override_is_simulation_only_and_defaults_are_unchanged() -> Result<()> {
         let target = crate::operation_metadata::Target {
             operation: "invite_user".into(),
@@ -1911,6 +2003,57 @@ mod people_resource_tests {
         assert!(catalog.resolve("different-app", &attachments, 1).is_err());
         Ok(())
     }
+
+    #[test]
+    fn local_provider_fixture_seeds_selected_directory_actor_and_complete_hierarchy() -> Result<()>
+    {
+        let policy = Policy {
+            version: 1,
+            admins: BTreeSet::new(),
+            delegations: Default::default(),
+            constraints: BTreeMap::new(),
+            operations: BTreeMap::from([(
+                "directory".into(),
+                OperationPolicy {
+                    actors: BTreeSet::from(["selected@synthetic.example".into()]),
+                    mode: Mode::Read,
+                    models: BTreeMap::new(),
+                    commands: BTreeSet::new(),
+                    observations: BTreeSet::from([
+                        "workspace_directory.capture.v1".into(),
+                        "workspace_directory.page.v1".into(),
+                    ]),
+                    effects: BTreeSet::new(),
+                },
+            )]),
+        };
+        let (catalog, attachments) = people_resource_fixture("fixture", &policy)?;
+        let resolved = catalog.resolve("fixture", &attachments, 1)?;
+        let grant = &resolved.operations["directory"]["workspace_directory"];
+        assert_eq!(
+            grant.limits.max_request_bytes,
+            crate::workspace_directory::MAX_CAPTURE_REQUEST_BYTES
+        );
+        assert_eq!(
+            grant.limits.max_response_bytes,
+            crate::workspace_directory::MAX_RESPONSE_BYTES as u64
+        );
+        let fixture = disposable_provider_worlds("selected@synthetic.example", 1_700_000_000);
+        assert_eq!(fixture.workspace_directory.users.len(), 1);
+        let user = &fixture.workspace_directory.users["selected@synthetic.example"];
+        assert_eq!(user["customerId"], "synthetic-customer-1");
+        assert_eq!(user["orgUnitPath"], "/Engineering");
+        let units = crate::workspace_directory::parse_org_unit_response(&serde_json::to_vec(
+            &fixture.workspace_directory.hierarchy,
+        )?)?;
+        let units = crate::workspace_directory::validate_complete(units, "/Engineering")?;
+        assert_eq!(units.len(), 2);
+        assert_eq!(
+            fixture.workspace_directory.hierarchy_captured_at,
+            1_700_000_000
+        );
+        Ok(())
+    }
 }
 
 pub fn create_for(
@@ -1936,7 +2079,7 @@ fn create_for_with_imports(
         "credential artifacts require explicit verification selection or an admitted installation"
     );
     let instance = instance_for_artifact(&artifact_path, &artifact, policy, actor, imports)?;
-    create_selected_instance(instance, directory, imports)
+    create_selected_instance(instance, directory, imports, actor, CampaignTime::Local)
 }
 
 /// Explicit disposable verification setup. Complete desired selections pass
@@ -1976,7 +2119,13 @@ fn create_verification_for_with_imports(
         });
         credential_verification_selection(&mut instance, &artifact)?;
     }
-    create_selected_instance(instance, directory, imports)
+    create_selected_instance(
+        instance,
+        directory,
+        imports,
+        actor,
+        CampaignTime::Verification,
+    )
 }
 
 /// Desired disposable test data only. The caller must admit the complete
@@ -2104,6 +2253,8 @@ fn create_selected_instance(
     instance: Instance,
     directory: &Path,
     imports: &[ImportedQueryFixture],
+    actor: &str,
+    time: CampaignTime,
 ) -> Result<Runtime> {
     use std::{io::Write, os::unix::fs::PermissionsExt};
     let instance = Instance::from_bytes(&serde_json::to_vec(&instance)?)?;
@@ -2131,7 +2282,8 @@ fn create_selected_instance(
     // differs. Synthetic providers are unaffected: they never reach this host.
     let database = runtime.db().to_path_buf();
     let scope = runtime.scope().to_owned();
-    let mut worlds = disposable_provider_worlds();
+    let captured_at = time.start(&runtime)?;
+    let mut worlds = disposable_provider_worlds(actor, captured_at);
     for import in imports {
         if import.kind != crate::operation_contract::Kind::Query {
             continue;
@@ -2471,7 +2623,10 @@ pub fn repin_credential_verification_data(
 /// with a due date and an owner, one with neither, so a compliance policy that
 /// looks for missing owners and missing due dates has both cases present rather
 /// than only the healthy one.
-fn disposable_provider_worlds() -> crate::integrations::simulated::SimulatedFixture {
+fn disposable_provider_worlds(
+    actor: &str,
+    captured_at: i64,
+) -> crate::integrations::simulated::SimulatedFixture {
     use crate::integrations::simulated::*;
     let issue = |id: &str, identifier: &str, owner: &str, due: i64, view: &str| LinearIssue {
         id: id.into(),
@@ -2574,6 +2729,21 @@ fn disposable_provider_worlds() -> crate::integrations::simulated::SimulatedFixt
             model: "model-synthetic".into(),
             max_input_tokens: 100_000,
         },
+        workspace_directory: crate::integrations::simulated::WorkspaceDirectoryWorld {
+            users: BTreeMap::from([(
+                actor.into(),
+                json!({
+                    "customerId":"synthetic-customer-1",
+                    "orgUnitPath":"/Engineering",
+                    "primaryEmail":actor,
+                    "kind":"admin#directory#user"
+                }),
+            )]),
+            hierarchy: json!({"kind":"admin#directory#orgUnits","organizationUnits":[
+                {"orgUnitId":"root","name":"Root","orgUnitPath":"/","parentOrgUnitId":null,"parentOrgUnitPath":null},
+                {"orgUnitId":"engineering","name":"Engineering","orgUnitPath":"/Engineering","parentOrgUnitId":"root","parentOrgUnitPath":"/"}]}),
+            hierarchy_captured_at: captured_at,
+        },
     }
 }
 
@@ -2601,6 +2771,7 @@ pub struct Campaign {
     pub evidence: Evidence,
     example: Option<String>,
     actor: String,
+    provider_clock: i64,
     include_examples: bool,
     catalog: Option<Vec<Example>>,
     selected: BTreeSet<String>,
@@ -2629,8 +2800,14 @@ struct Active {
 }
 
 impl Campaign {
-    pub fn new(runtime: Runtime, example: Option<&str>, seed: u64, count: u64) -> Result<Self> {
-        Self::for_actor(runtime, example, seed, count, "developer", true)
+    pub fn new(
+        runtime: Runtime,
+        example: Option<&str>,
+        seed: u64,
+        count: u64,
+        time: CampaignTime,
+    ) -> Result<Self> {
+        Self::for_actor(runtime, example, seed, count, "developer", true, time)
     }
 
     pub fn for_actor(
@@ -2640,6 +2817,7 @@ impl Campaign {
         count: u64,
         actor: &str,
         include_examples: bool,
+        time: CampaignTime,
     ) -> Result<Self> {
         ensure!(count <= 100, "generator count budget");
         // Campaigns explicitly provide shared synthetic capability worlds. This
@@ -2647,6 +2825,7 @@ impl Campaign {
         crate::carta::seed_verification_if_unconfigured(&runtime)?;
         crate::people_providers::seed_verification_if_unconfigured(&runtime)?;
         let runtime = crate::managed_credentials::verification::install(runtime)?;
+        let provider_clock = time.start(&runtime)?;
         Ok(Self {
             evidence: Evidence {
                 format: 1,
@@ -2666,6 +2845,7 @@ impl Campaign {
             runtime,
             example: example.map(str::to_owned),
             actor: actor.into(),
+            provider_clock,
             include_examples,
             catalog: None,
             selected: BTreeSet::new(),
@@ -2841,7 +3021,11 @@ impl Campaign {
                             snapshot,
                             &json!({}),
                             &Value::Null,
-                            seed,
+                            VerificationInvocation {
+                                actor: &self.actor,
+                                input: "",
+                                seed,
+                            },
                         )
                     },
                 )?;
@@ -2879,7 +3063,11 @@ impl Campaign {
                         &self.runtime.verification_snapshot()?,
                         &json!({}),
                         &Value::Null,
-                        sample.seed.parse()?,
+                        VerificationInvocation {
+                            actor: &self.actor,
+                            input: "",
+                            seed: sample.seed.parse()?,
+                        },
                     )?;
                 }
                 self.prepared = true;
@@ -2934,7 +3122,7 @@ impl Campaign {
                 let now = if interactive {
                     self.runtime.host().now_ms()?.div_euclid(1000)
                 } else {
-                    1_700_000_000 + index as i64
+                    self.provider_clock + index as i64
                 };
                 let input: Value = serde_json::from_str(&input_text)?;
                 if interactive {
@@ -3013,7 +3201,11 @@ impl Campaign {
                         &active.application_after,
                         &active.application_initial,
                         &active.outcome.result,
-                        seed,
+                        VerificationInvocation {
+                            actor: &self.actor,
+                            input: active.step.input().context("command input required")?,
+                            seed,
+                        },
                     )?;
                     if active.obligation {
                         *self
@@ -3043,6 +3235,12 @@ impl Campaign {
                             for index in 0..self.evidence.requested_cases_per_generator {
                                 let before = self.runtime.inspect()?;
                                 let application_before = self.runtime.verification_snapshot()?;
+                                let verification_actor = failure_verification_actor(
+                                    error,
+                                    target,
+                                    &self.actor,
+                                    self.runtime.integrations().is_simulated(),
+                                )?;
                                 let input = verification(
                                     self.runtime.artifact(),
                                     "error-input",
@@ -3050,16 +3248,18 @@ impl Campaign {
                                     &application_before,
                                     &json!({}),
                                     &Value::Null,
-                                    self.evidence.seed.parse::<u64>()?.wrapping_add(index),
+                                    VerificationInvocation {
+                                        actor: verification_actor,
+                                        input: "",
+                                        seed: self
+                                            .evidence
+                                            .seed
+                                            .parse::<u64>()?
+                                            .wrapping_add(index),
+                                    },
                                 )?;
                                 let input: Value = serde_json::from_str(&input)?;
                                 let id = format!("failure-{}", self.evidence.error_traces.len());
-                                let verification_actor = failure_verification_actor(
-                                    error,
-                                    target,
-                                    &self.actor,
-                                    self.runtime.integrations().is_simulated(),
-                                )?;
                                 // These typed, admitted cases have the same access
                                 // to internal workers as ordinary generated checks.
                                 self.runtime.accept_route(
@@ -3340,7 +3540,13 @@ pub fn exercise(
     seed: u64,
     count: u64,
 ) -> Result<Evidence> {
-    let mut campaign = Campaign::new(runtime.clone(), example_name, seed, count)?;
+    let mut campaign = Campaign::new(
+        runtime.clone(),
+        example_name,
+        seed,
+        count,
+        CampaignTime::Local,
+    )?;
     let outcome = crate::automation::run(
         &crate::automation::runner()?,
         &["exercise", example_name.unwrap_or(""), &count.to_string()],
@@ -3389,6 +3595,7 @@ pub fn verify_with_runner_imports(
         None,
         seed,
         count,
+        CampaignTime::Verification,
     )?;
     let outcome =
         crate::automation::run(runner, &["exercise", "", &count.to_string()], |request| {

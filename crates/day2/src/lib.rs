@@ -64,6 +64,7 @@ pub mod output_schema;
 pub mod packaging;
 pub mod people_providers;
 mod preparation;
+pub mod presentation;
 pub mod properties;
 pub mod protocol;
 pub mod redirects;
@@ -96,6 +97,7 @@ pub mod web_resources;
 mod web_security;
 pub mod web_templates;
 pub mod worker;
+pub mod workspace_directory;
 pub mod write_queue;
 
 use ring::digest::{SHA256, digest as hash};
@@ -138,3 +140,6 @@ mod digest_tests {
 mod codegen;
 
 mod structural_proofs;
+
+#[cfg(test)]
+mod chart_live_tests;
