@@ -29,6 +29,16 @@ use std::{
 
 const COOKIE: &str = "__Host-day2_oauth_management";
 
+/// Borrowed HTTP data only. Authentication and session ownership are checked by
+/// the shell independently; constructing this does not authorize a callback.
+pub(in crate::oauth) struct CallbackRequest<'a> {
+    pub method: &'a Method,
+    pub path: &'a str,
+    pub query: Option<&'a str>,
+    pub headers: &'a HeaderMap,
+    pub body: &'a [u8],
+}
+
 #[derive(PartialEq, Eq)]
 enum Stage {
     Confirm,
@@ -318,14 +328,11 @@ impl Shell {
     /// product state is refused here and cannot fall through to qualification.
     pub(in crate::oauth) fn provider_callback(
         &self,
-        method: &Method,
-        path: &str,
-        query: Option<&str>,
-        headers: &HeaderMap,
-        body: &[u8],
+        request: CallbackRequest<'_>,
         identity: &iap::Verified,
         now: i64,
     ) -> Result<Option<Response>> {
+        let CallbackRequest { method, path, query, headers, body } = request;
         if !path.starts_with("/_day2/oauth/callback/") {
             return Ok(None);
         }
@@ -610,11 +617,7 @@ mod tests {
                 assert!(
                     shell
                         .provider_callback(
-                            &Method::GET,
-                            &path,
-                            Some(&query),
-                            &headers,
-                            &[],
+                            CallbackRequest { method: &Method::GET, path: &path, query: Some(&query), headers: &headers, body: &[] },
                             &identity,
                             104
                         )
@@ -634,11 +637,7 @@ mod tests {
                         start.wait();
                         shell
                             .provider_callback(
-                                &Method::GET,
-                                &path,
-                                Some(&query),
-                                &headers,
-                                &[],
+                                CallbackRequest { method: &Method::GET, path: &path, query: Some(&query), headers: &headers, body: &[] },
                                 &identity,
                                 104,
                             )
@@ -654,11 +653,7 @@ mod tests {
             assert!(
                 shell
                     .provider_callback(
-                        &Method::GET,
-                        &path,
-                        Some(&query),
-                        &headers,
-                        &[],
+                        CallbackRequest { method: &Method::GET, path: &path, query: Some(&query), headers: &headers, body: &[] },
                         &identity,
                         104
                     )
@@ -695,11 +690,7 @@ mod tests {
             assert!(
                 shell
                     .provider_callback(
-                        &Method::GET,
-                        "/_day2/oauth/callback/registration",
-                        query,
-                        &headers,
-                        &[],
+                        CallbackRequest { method: &Method::GET, path: "/_day2/oauth/callback/registration", query, headers: &headers, body: &[] },
                         &identity,
                         104
                     )?
@@ -714,11 +705,7 @@ mod tests {
             assert!(
                 shell
                     .provider_callback(
-                        &Method::GET,
-                        "/_day2/oauth/callback/registration",
-                        Some(query),
-                        &headers,
-                        &[],
+                        CallbackRequest { method: &Method::GET, path: "/_day2/oauth/callback/registration", query: Some(query), headers: &headers, body: &[] },
                         &identity,
                         104
                     )

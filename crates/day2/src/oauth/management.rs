@@ -214,7 +214,7 @@ impl Attestation {
             "OAuth management confirmation refused"
         );
         let mut mac = [0u8; 32];
-        for (index, pair) in self.mac.as_bytes().chunks_exact(2).enumerate() {
+        for (index, pair) in self.mac.as_bytes().as_chunks::<2>().0.iter().enumerate() {
             let digit = |value: u8| {
                 if value <= b'9' {
                     value - b'0'
