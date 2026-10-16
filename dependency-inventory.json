@@ -1835,6 +1835,16 @@
     "version": "2.8.3"
   },
   {
+    "license": "MIT",
+    "name": "memoffset",
+    "notices": [
+      "LICENSE"
+    ],
+    "repository": "https://github.com/Gilnaa/memoffset",
+    "source": "registry+https://github.com/rust-lang/crates.io-index",
+    "version": "0.9.1"
+  },
+  {
     "license": "Apache-2.0",
     "name": "miette",
     "notices": [

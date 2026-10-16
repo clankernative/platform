@@ -1,15 +1,19 @@
-//! Exact-operation acceptance and dispatch fencing in real SQLite. Production
-//! placement in a qualified shared control store is deliberately not wired.
-//! An app backup/local marker is never a substitute for that outside authority.
+//! Opaque initial execution context and consuming counter-dispatch boundary.
+//! Production dispatch requires a shared-slot known claim. The local SQLite
+//! journal is retained solely as a controlled test fixture.
+#[cfg(test)]
+use super::{firestore, kernel::Outcome};
 use super::{
-    firestore::{self, Budget, Port, Sample},
-    kernel::{self, Outcome, Request, Snapshot},
+    firestore::{Budget, Port, Sample},
+    kernel::{self, Request, Snapshot},
 };
 use anyhow::{Result, ensure};
 use day2_capabilities::{Digest, security_epoch::EpochStore};
+#[cfg(test)]
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::{marker::PhantomData, rc::Rc, time::Duration};
 
+#[cfg(test)]
 const SCHEMA: &str = "CREATE TABLE external_epoch_operations (
     authority TEXT NOT NULL,
     stage TEXT NOT NULL CHECK(stage IN ('create','activate')),
@@ -23,6 +27,7 @@ const SCHEMA: &str = "CREATE TABLE external_epoch_operations (
     CHECK((state = 'observed') = (receipt_json IS NOT NULL))
 )";
 
+#[cfg(test)]
 pub(super) struct Journal<'a> {
     db: &'a mut Connection,
 }
@@ -34,7 +39,7 @@ fn stage(request: &Request) -> &'static str {
     }
 }
 
-fn snapshot_digest(snapshot: &Snapshot) -> Result<Digest> {
+pub(super) fn snapshot_digest(snapshot: &Snapshot) -> Result<Digest> {
     fn value<T: serde::Serialize>(
         value: &Option<kernel::Versioned<T>>,
     ) -> Option<(&T, &kernel::UpdateTime)> {
@@ -59,7 +64,8 @@ pub(super) enum Purpose {
 
 /// No production constructor exists. A future constructor must acquire the
 /// actual current role/code/process/governance/clock/holder/marker observations
-/// together. A token, desired policy, parsed snapshot, journal row or test fixture
+/// together, retain the original CreatorFD/P3 owner, and recheck it before every
+/// initial mutation. A token, desired policy, parsed snapshot, journal row or test fixture
 /// cannot construct this in a serving build. It is process and thread local.
 pub(crate) struct CurrentBootstrapExecution {
     selection: Digest,
@@ -70,11 +76,12 @@ pub(crate) struct CurrentBootstrapExecution {
     domain: Digest,
     floor: Duration,
     deadline: Duration,
+    valid: bool,
     local: PhantomData<Rc<()>>,
 }
 
 impl CurrentBootstrapExecution {
-    fn check(
+    pub(super) fn check(
         &mut self,
         selection: &EpochStore,
         request: &Request,
@@ -82,31 +89,45 @@ impl CurrentBootstrapExecution {
         purpose: Purpose,
         port: &mut impl Port,
     ) -> Result<()> {
-        ensure!(
-            self.selection == Digest::of(selection)?
-                && self.request == request.digest()?
-                && self.snapshot == snapshot_digest(snapshot)?
-                && self.stage == stage(request)
-                && self.purpose == purpose,
-            "security_epoch_execution_context_mismatch"
-        );
-        self.sample(port)?;
-        Ok(())
+        ensure!(self.valid, "security_epoch_execution_context_refused");
+        let result = (|| {
+            ensure!(
+                self.selection == Digest::of(selection)?
+                    && self.request == request.digest()?
+                    && self.snapshot == snapshot_digest(snapshot)?
+                    && self.stage == stage(request)
+                    && self.purpose == purpose,
+                "security_epoch_execution_context_mismatch"
+            );
+            self.sample(port)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            self.valid = false;
+        }
+        result
     }
 
     fn sample(&mut self, port: &mut impl Port) -> Result<Sample> {
-        let sample = port.sample()?;
-        ensure!(
-            sample.domain == self.domain
-                && sample.elapsed >= self.floor
-                && sample.elapsed < self.deadline,
-            "security_epoch_execution_context_expired_or_changed"
-        );
-        self.floor = sample.elapsed;
-        Ok(sample)
+        ensure!(self.valid, "security_epoch_execution_context_refused");
+        let result = (|| {
+            let sample = port.sample()?;
+            ensure!(
+                sample.domain == self.domain
+                    && sample.elapsed >= self.floor
+                    && sample.elapsed < self.deadline,
+                "security_epoch_execution_context_expired_or_changed"
+            );
+            self.floor = sample.elapsed;
+            Ok(sample)
+        })();
+        if result.is_err() {
+            self.valid = false;
+        }
+        result
     }
 
-    fn budget(&mut self, port: &mut impl Port) -> Result<Budget> {
+    pub(super) fn budget(&mut self, port: &mut impl Port) -> Result<Budget> {
         Budget::for_context(self.sample(port)?, self.deadline)
     }
 
@@ -132,26 +153,38 @@ impl CurrentBootstrapExecution {
                     selection.max_lease_seconds.min(5),
                 )))
                 .ok_or_else(|| anyhow::anyhow!("fixture clock overflow"))?,
+            valid: true,
             local: PhantomData,
         })
     }
+
+    #[cfg(test)]
+    pub(super) fn lose_original_creator_fixture(&mut self) {
+        // Controlled invalidation, not a producer or native file-loss proof.
+        self.valid = false;
+    }
 }
 
-pub(crate) struct InitialEpochCreatePermit {
+#[cfg(test)]
+pub(super) struct InitialEpochCreatePermit {
     request: Request,
     context: CurrentBootstrapExecution,
 }
 
-pub(crate) struct InitialFirstHolderActivationPermit {
+#[cfg(test)]
+pub(super) struct InitialFirstHolderActivationPermit {
     request: Request,
     context: CurrentBootstrapExecution,
 }
 
-/// The provider write boundary consumes one of the two already journal-fenced
-/// stage handles. Historical Request/Budget values cannot invoke it directly.
+/// Serving builds accept only the shared known claim. The two local fixture
+/// variants exist exclusively in tests of the underlying counter kernel.
 pub(super) enum AuthorizedDispatch {
+    #[cfg(test)]
     Create(InitialEpochCreatePermit),
+    #[cfg(test)]
     Activate(InitialFirstHolderActivationPermit),
+    Shared(Box<super::control_slot_io::KnownClaim>),
 }
 
 impl AuthorizedDispatch {
@@ -160,30 +193,49 @@ impl AuthorizedDispatch {
         selection: &EpochStore,
         port: &mut impl Port,
     ) -> Result<(Request, Budget)> {
-        let (request, mut context) = match self {
-            Self::Create(permit) => (permit.request, permit.context),
-            Self::Activate(permit) => (permit.request, permit.context),
-        };
-        ensure!(
-            context.selection == Digest::of(selection)?,
-            "security_epoch_execution_selection_changed"
-        );
-        Ok((request, context.budget(port)?))
+        match self {
+            Self::Shared(claim) => (*claim).prepare(selection, port),
+            #[cfg(test)]
+            Self::Create(permit) => {
+                fixture_dispatch(permit.request, permit.context, selection, port)
+            }
+            #[cfg(test)]
+            Self::Activate(permit) => {
+                fixture_dispatch(permit.request, permit.context, selection, port)
+            }
+        }
     }
 }
 
+#[cfg(test)]
+fn fixture_dispatch(
+    request: Request,
+    mut context: CurrentBootstrapExecution,
+    selection: &EpochStore,
+    port: &mut impl Port,
+) -> Result<(Request, Budget)> {
+    ensure!(
+        context.selection == Digest::of(selection)?,
+        "security_epoch_execution_selection_changed"
+    );
+    Ok((request, context.budget(port)?))
+}
+
+#[cfg(test)]
 impl InitialEpochCreatePermit {
     pub(super) fn send(self, selection: &EpochStore, port: &mut impl Port) -> Result<()> {
         firestore::commit(port, selection, AuthorizedDispatch::Create(self))
     }
 }
 
+#[cfg(test)]
 impl InitialFirstHolderActivationPermit {
     pub(super) fn send(self, selection: &EpochStore, port: &mut impl Port) -> Result<()> {
         firestore::commit(port, selection, AuthorizedDispatch::Activate(self))
     }
 }
 
+#[cfg(test)]
 impl<'a> Journal<'a> {
     pub(super) fn create(db: &'a mut Connection) -> Result<Self> {
         // Fresh schema only. No adoption, ALTER, migration or fallback schema.
