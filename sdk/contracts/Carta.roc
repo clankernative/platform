@@ -9,7 +9,16 @@ import Context
 Carta :: [].{
 	OptionalText : [Some(Str), None]
 
-	Snapshot : { id : Str, issuer_id : Str }
+	Snapshot : {
+		id : Str,
+		issuer_id : Str,
+		record_count : U64,
+		stakeholder_count : U64,
+		grant_count : U64,
+		vesting_event_count : U64,
+		exercise_count : U64,
+		source_profile : Str,
+	}
 
 	Stakeholder : {
 		id : Str,

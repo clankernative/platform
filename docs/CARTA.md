@@ -3,13 +3,17 @@
 [`pf.Carta`](../sdk/contracts/Carta.roc) exposes two typed read operations:
 
 ```roc
-Carta.begin : {} -> Observe(Carta.Snapshot)
-Carta.next : Str, U64 -> Observe(Carta.ReadResult)
+Carta.begin : Context -> Observe(Carta.Snapshot)
+Carta.next : Context, Str, U64 -> Observe(Carta.ReadResult)
 ```
 
-`begin({})` returns `{id, issuer_id}` for the runtime's selected capture.
-`next(snapshot.id, 0)` reads its first record. Increment the ordinal only after
-successfully applying that record; `Done` occurs exactly at the record count.
+`begin(context)` returns the selected capture's `id`, `issuer_id`, record and
+per-kind counts, and explicit `source_profile` (`"synthetic"`). Counts include
+every source record, including duplicates. `next(context, snapshot.id, 0)` reads
+its first record. Increment the ordinal only after successfully applying that
+record; `Done` occurs exactly at the record count. Counts and provenance are
+required capture fields, persisted with the immutable capture and included in
+its identity; no legacy-shape fallback or store migration is provided.
 Larger cursors, unknown snapshots and snapshots belonging to another runtime
 scope fail. Selecting a newer capture preserves previously issued identities.
 
@@ -42,10 +46,11 @@ Snapshots and record rows reject update, delete and replacement insert.
 
 The capability names are `carta.snapshot.v1` and `carta.record.v1`, both in the
 operation's observation grants. There is no Carta application write capability.
-Host authorization supplies the runtime scope; callers cannot substitute it in
-the payload. Existing actor, operation, phase and current-authority checks apply.
-These flat grants permit an admitted operation to read that runtime's captures;
-the broader typed resource and connection design remains proposed.
+The SDK binds the context's typed Carta resource; explicit `begin_with` and
+`next_with` variants accept that admitted resource directly. Host authorization
+supplies the runtime scope and selected issuer; callers cannot substitute them
+in the payload. Existing actor, operation, phase, resource-policy and
+current-authority checks apply.
 
 Native backups include the reviewed local provider databases with individual
 digests and SQLite integrity checks; restore retains the Carta captures and the
