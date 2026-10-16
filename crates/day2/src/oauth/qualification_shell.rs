@@ -1205,7 +1205,7 @@ mod tests {
                     let state = canaries.state.lock().unwrap();
                     let pending = state.pending.get(&key).context("pending disappeared")?;
                     let Stage::Authorization(authorization) = &pending.stage else { anyhow::bail!("pending stage changed"); };
-                    let authorization = super::super::registration::tests::authorization_snapshot(authorization)?;
+                    let authorization = crate::oauth::registration::tests::authorization_snapshot(authorization)?;
                     let value = serde_json::json!({
                         "routing_generation":state.generation,"generation":pending.generation,
                         "email":pending.identity.email,"subject":pending.identity.subject,
