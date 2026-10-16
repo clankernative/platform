@@ -235,6 +235,17 @@ jobs:
       - run: cargo run --locked -p xtask -- bootstrap-formatter /tmp/day2-tools/roc-fmt-day2-x86_64-unknown-linux-gnu
       - run: cargo run --locked -p xtask -- configure-tofu
       - run: cargo run --locked -p xtask -- verify-prepare-part ${{ matrix.part }}
+        id: native_preparation
+      - name: Retain current compiler failure metadata without private stdout
+        if: ${{ failure() && steps.native_preparation.outcome == 'failure' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: day2-compiler-failure-${{ matrix.part }}-${{ github.run_id }}-${{ github.run_attempt }}
+          # stdout.bin is a private, job-local spool; it is never uploaded.
+          path: artifacts/ci-compiler-failure-*/manifest.json
+          # A preparation failure outside Cargo may have no compiler capture.
+          if-no-files-found: warn
+          retention-days: 3
       - name: Retain fixture compiler input identity and inventory
         if: ${{ matrix.part == 'inputs' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -349,6 +360,15 @@ jobs:
       - run: cargo run --locked -p xtask -- bootstrap-formatter /tmp/day2-tools/roc-fmt-day2-aarch64-apple-darwin
       - run: cargo run --locked -p xtask -- configure-tofu
       - run: cargo run --locked -p xtask -- verify-mac
+        id: native_preparation
+      - name: Retain current Mac compiler failure metadata without private stdout
+        if: ${{ failure() && steps.native_preparation.outcome == 'failure' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: day2-compiler-failure-mac-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/ci-compiler-failure-*/manifest.json
+          if-no-files-found: warn
+          retention-days: 3
       - name: Retain real Mac native preparation, exact cases and both build campaigns
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
