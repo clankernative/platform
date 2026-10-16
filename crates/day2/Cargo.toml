@@ -9,6 +9,7 @@ autotests = false
 [dependencies]
 day2-assets = { path = "../day2-assets" }
 day2-contracts = { path = "../day2-contracts" }
+day2-sandbox = { path = "../day2-sandbox" }
 unicode-segmentation = "=1.13.3"
 day2-capabilities = { path = "../day2-capabilities" }
 anyhow = "1.0"
@@ -47,7 +48,6 @@ ego-tree = "=0.10.0"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-day2-sandbox = { path = "../day2-sandbox" }
 nix = { version = "=0.31.3", default-features = false, features = ["socket", "poll"] }
 
 [dev-dependencies]

@@ -511,8 +511,9 @@ decode_operations = |nodes, inputs, outputs, version, done| match nodes {
 		}
 		kind = node.get("kind")?.string()?
 		if kind == "completion" and version >= 9 {
-			if output_name != Absent {
-				return Err(BadJson("private completions cannot declare outputs"))
+			match output_name {
+				Absent => {}
+				Present(_) => return Err(BadJson("private completions cannot declare outputs"))
 			}
 			return decode_operations(rest, inputs, outputs, version, done)
 		}

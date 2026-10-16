@@ -76,7 +76,11 @@ PreviewNotification :: [].{
 	example =
 		|
 			_,
-		| Ok({ input: sample, output: { valid: Bool.True, message: "Build: passed", findings: CollectionPage.empty } })
+		|
+			Ok({
+				input: sample,
+				output: { valid: Bool.True, message: "Build: passed", findings: CollectionPage.empty({}) },
+			})
 
 	sample : PreviewNotificationTypes.Input
 	sample =

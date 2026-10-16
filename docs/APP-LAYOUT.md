@@ -68,6 +68,14 @@ shape; there is no application-wide descriptions or checks inventory. Substantia
 verification can live under `verification/` and be explicitly passed by the
 operation. Model invariants span parent commands, child commands and completion.
 
+Operation generators and checks receive complete bounded verification snapshots.
+`Api.verification_context(snapshot)` reads the host-supplied caller and encoded
+dispatched input. Generators receive an empty input; checks read the actual input
+from the before snapshot. Derive expected ownership and updates from this context
+and the prior state, never from an actor or range returned by the handler. Context
+is verification data, not application authority. Checks still compare complete
+live/deleted snapshots and must preserve unrelated rows and fields.
+
 Internal commands use the same layout, required contract and verification as
 public commands. `Api.internal(...)` excludes them from public routes; generated
 `Commands` handles allow atomic requests from other commands. Preparation and
