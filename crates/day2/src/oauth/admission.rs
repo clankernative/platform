@@ -4318,8 +4318,13 @@ pub(super) mod tests {
                 google,
                 session.clone(),
                 5,
-            ).err().context("actual signed timestamps constructed an approval session")?;
-            assert!(format!("{rejected:#}").contains("OAuth post-pending authentication producer unavailable"));
+            )
+            .err()
+            .context("actual signed timestamps constructed an approval session")?;
+            assert!(
+                format!("{rejected:#}")
+                    .contains("OAuth post-pending authentication producer unavailable")
+            );
             assert_eq!(keys.0.load(Ordering::SeqCst), 0);
             // The original selected-presentation and post-key-load lifetime
             // oracles use explicitly isolated proof ownership and synthetic keys.

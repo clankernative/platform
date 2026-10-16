@@ -447,7 +447,13 @@ impl ShellApprovalKeyLease {
         authenticated_at: i64,
         confirmed_at: i64,
     ) -> Result<FreshExternalApproval> {
-        self.attest_inner(&pending.claim(), None, session, authenticated_at, confirmed_at)
+        self.attest_inner(
+            &pending.claim(),
+            None,
+            session,
+            authenticated_at,
+            confirmed_at,
+        )
     }
 
     pub(crate) fn attest_view(
