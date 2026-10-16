@@ -275,6 +275,20 @@ jobs:
             artifacts/ci-test-binaries.json
           if-no-files-found: error
           retention-days: 14
+      # Archive only this file so tar records executable bytes, not Cargo's
+      # hard link to a hashed deps/xtask-* member in the larger preparation tar.
+      - name: Archive the current run verifier only
+        if: ${{ matrix.part == 'inputs' }}
+        run: tar -czf /tmp/day2-linux-verifier.tgz -C "$GITHUB_WORKSPACE" target/debug/xtask
+      - name: Retain the current run verifier only
+        if: ${{ matrix.part == 'inputs' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: day2-linux-verifier-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/day2-linux-verifier.tgz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
       # Each lane transports only its reviewed outputs. The test lane cannot
       # overwrite fixture caches, CLI distribution or generated worker sources.
       - name: Archive fixture and check preparation
@@ -511,13 +525,13 @@ jobs:
       - run: cargo fetch --locked
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: day2-preparation-inputs-${{ github.run_id }}-${{ github.run_attempt }}
-          path: /tmp/day2-preparation-inputs
+          name: day2-linux-verifier-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/day2-linux-verifier
       # Bootstrap only the verifier from this run's successful preparation.
       # Do not restore artifacts or generated worker files before their bounded
       # mounts exist; the context check must see the original checkout ABI seed.
       - name: Restore the current run verifier only
-        run: tar -xzf /tmp/day2-preparation-inputs/day2-preparation.tgz -C "$GITHUB_WORKSPACE/.." platform/target/debug/xtask
+        run: tar -xzf /tmp/day2-linux-verifier/day2-linux-verifier.tgz -C "$GITHUB_WORKSPACE" target/debug/xtask
       - name: Establish the mandatory bounded native Linux compiler context
         id: linux_context
         run: target/debug/xtask verify-linux-context
@@ -529,6 +543,10 @@ jobs:
           path: /tmp/day2-ci-linux-context.json
           if-no-files-found: error
           retention-days: 14
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: day2-preparation-inputs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/day2-preparation-inputs
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: day2-preparation-tests-${{ github.run_id }}-${{ github.run_attempt }}
@@ -607,10 +625,10 @@ jobs:
       - run: cargo fetch --locked
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: day2-verify-${{ github.run_id }}-${{ github.run_attempt }}
-          path: /tmp/day2-verification
+          name: day2-linux-verifier-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/day2-linux-verifier
       - name: Restore the current run verifier only
-        run: tar -xzf /tmp/day2-verification/day2-verification.tgz -C "$GITHUB_WORKSPACE/.." platform/target/debug/xtask
+        run: tar -xzf /tmp/day2-linux-verifier/day2-linux-verifier.tgz -C "$GITHUB_WORKSPACE" target/debug/xtask
       - name: Establish the mandatory bounded native Linux compiler context
         id: linux_context
         run: target/debug/xtask verify-linux-context
@@ -622,6 +640,10 @@ jobs:
           path: /tmp/day2-ci-linux-context.json
           if-no-files-found: error
           retention-days: 14
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: day2-verify-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/day2-verification
       - run: tar -xzf /tmp/day2-verification/day2-verification.tgz -C "$GITHUB_WORKSPACE/.."
       - run: target/debug/xtask configure-tofu
       - run: target/debug/xtask verify-shard ${{ matrix.shard }}
@@ -690,10 +712,10 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
         with:
-          name: day2-verify-${{ github.run_id }}-${{ github.run_attempt }}
-          path: /tmp/day2-verification
+          name: day2-linux-verifier-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/day2-linux-verifier
       - name: Restore the current run verifier only
-        run: tar -xzf /tmp/day2-verification/day2-verification.tgz -C "$GITHUB_WORKSPACE/.." platform/target/debug/xtask
+        run: tar -xzf /tmp/day2-linux-verifier/day2-linux-verifier.tgz -C "$GITHUB_WORKSPACE" target/debug/xtask
         if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
       - name: Establish the mandatory bounded native Linux compiler context
         id: linux_context
@@ -707,6 +729,11 @@ jobs:
           path: /tmp/day2-ci-linux-context.json
           if-no-files-found: error
           retention-days: 14
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
+        with:
+          name: day2-verify-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/day2-verification
       - run: tar -xzf /tmp/day2-verification/day2-verification.tgz -C "$GITHUB_WORKSPACE/.."
         if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
