@@ -940,18 +940,6 @@
           "local_path": null
         },
         {
-          "name": "serde-saphyr",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
-          "features": [
-            "deserialize"
-          ],
-          "default_features": false,
-          "optional": false,
-          "local_path": null
-        },
-        {
           "name": "serde_json",
           "kind": "normal",
           "target": null,
