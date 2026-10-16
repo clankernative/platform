@@ -1061,7 +1061,8 @@ mod tests {
             let mut query = url::form_urlencoded::Serializer::new(String::new());
             query
                 .append_pair("state", &state)
-                .append_pair("code", "private-provider-code");
+                .append_pair("code", "private-provider-code")
+                .append_pair("iss", crate::oauth::google::ISSUER);
             Ok((view, session, query.finish()))
         }
     }
@@ -1161,13 +1162,20 @@ mod tests {
         let fixture = Fixture::new(false)?;
         effects::scope(fixture.port.clone(), || -> Result<()> {
             let (view, session, query) = fixture.connect()?;
+            let with_issuer = |issuer: Option<&str>, denied: bool| {
+                let mut changed = url::form_urlencoded::Serializer::new(String::new());
+                for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
+                    if key == "iss" { continue; }
+                    if denied && key == "code" { changed.append_pair("error", "access_denied"); }
+                    else { changed.append_pair(&key, &value); }
+                }
+                if let Some(issuer) = issuer { changed.append_pair("iss", issuer); }
+                changed.finish()
+            };
+            let before = crate::oauth::simulation::snapshot(&store::open(fixture.manager.runtime.db())?)?;
             for (query, browser) in [
                 (query.clone(), Digest::new(b"other-browser")),
                 (format!("{query}&state=duplicate"), session.clone()),
-                (
-                    format!("{query}&iss=https%3A%2F%2Fattacker.example"),
-                    session.clone(),
-                ),
             ] {
                 assert!(
                     fixture
@@ -1175,6 +1183,20 @@ mod tests {
                         .callback(&view.id, &query, &browser, &fixture.identity, 102)
                         .is_err()
                 );
+                assert_eq!(crate::oauth::simulation::snapshot(&store::open(fixture.manager.runtime.db())?)?, before);
+            }
+            for denied in [false, true] {
+                let valid = with_issuer(Some(crate::oauth::google::ISSUER), denied);
+                for invalid in [
+                    with_issuer(None, denied),
+                    with_issuer(Some(""), denied),
+                    with_issuer(Some("https://attacker.example"), denied),
+                    format!("{valid}&iss={}", crate::oauth::google::ISSUER),
+                ] {
+                    assert!(fixture.manager.callback(&view.id, &invalid, &session, &fixture.identity, 102).is_err());
+                    assert_eq!(crate::oauth::simulation::snapshot(&store::open(fixture.manager.runtime.db())?)?, before);
+                    assert_eq!(fixture.port.posts.load(SeqCst), 0);
+                }
             }
             assert_eq!(fixture.port.posts.load(SeqCst), 0);
             fixture

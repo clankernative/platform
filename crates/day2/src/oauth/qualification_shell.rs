@@ -341,6 +341,7 @@ impl Canaries {
         headers: &HeaderMap,
         identity: &iap::Verified,
         now: i64,
+        callback_query: Option<&str>,
     ) -> Result<(String, Pending)> {
         let token = cookie_token(headers)?;
         let key = Digest::new(token.as_bytes()).as_str().to_owned();
@@ -348,6 +349,13 @@ impl Canaries {
             .state
             .lock()
             .map_err(|_| anyhow::anyhow!("registration routing unavailable"))?;
+        let pending = state
+            .pending
+            .get(&key)
+            .context("canary session expired or replayed")?;
+        if let (Some(query), Stage::Authorization(authorization)) = (callback_query, &pending.stage) {
+            authorization.validate_required_issuer(query.as_bytes())?;
+        }
         let pending = state
             .pending
             .remove(&key)
@@ -388,7 +396,7 @@ impl Canaries {
         identity: &iap::Verified,
         now: i64,
     ) -> Result<Response> {
-        let (key, mut pending) = self.take(headers, identity, now)?;
+        let (key, mut pending) = self.take(headers, identity, now, None)?;
         ensure!(
             pending.target.registration.as_str() == id,
             "canary registration changed"
@@ -419,7 +427,7 @@ impl Canaries {
         identity: &iap::Verified,
         now: i64,
     ) -> Result<Response> {
-        let (key, mut pending) = self.take(headers, identity, now)?;
+        let (key, mut pending) = self.take(headers, identity, now, Some(query))?;
         ensure!(
             url::Url::parse(&pending.target.callback_url)?.path() == path,
             "canary callback selection changed"
@@ -1155,6 +1163,81 @@ mod tests {
         }
         assert!(server.requests.lock().unwrap().is_empty());
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn issuer_refusals_preserve_qualification_until_its_valid_code_or_denial() -> Result<()> {
+        struct NoCampaign(Arc<AtomicUsize>);
+        impl Campaign for NoCampaign {
+            fn run(&self, _: Target, _: Codes) -> Result<Receipt> {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                anyhow::bail!("issuer validation must not run a provider campaign")
+            }
+        }
+        let world = crate::oauth::simulation::World::new(78156);
+        effects::scope_async(world.clone(), async {
+            for denied in [false, true] {
+                let fixture = fixture()?;
+                let calls = Arc::new(AtomicUsize::new(0));
+                let readiness = Arc::new(ProviderReadiness::new(Arc::new(Facts(fixture.evidence))));
+                let canaries = Canaries::at(
+                    "https://security.example.com", vec![fixture.target],
+                    Arc::new(NoCampaign(calls.clone())), readiness,
+                )?;
+                let now = effects::wall_time()?;
+                let (headers, location) = begin(&canaries, now).await?;
+                let (path, query) = callback(&location, "private-code")?;
+                let with_issuer = |issuer: Option<&str>| {
+                    let mut changed = url::form_urlencoded::Serializer::new(String::new());
+                    for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
+                        if key == "iss" { continue; }
+                        if denied && key == "code" { changed.append_pair("error", "access_denied"); }
+                        else { changed.append_pair(&key, &value); }
+                    }
+                    if let Some(issuer) = issuer { changed.append_pair("iss", issuer); }
+                    changed.finish()
+                };
+                let key = Digest::new(cookie_token(&headers)?.as_bytes()).as_str().to_owned();
+                // Hash private state/verifier values; retain every pending
+                // field and both original monotonic observations in the oracle.
+                let snapshot = || -> Result<_> {
+                    let state = canaries.state.lock().unwrap();
+                    let pending = state.pending.get(&key).context("pending disappeared")?;
+                    let Stage::Authorization(authorization) = &pending.stage else { anyhow::bail!("pending stage changed"); };
+                    let authorization = super::super::registration::tests::authorization_snapshot(authorization)?;
+                    let value = serde_json::json!({
+                        "routing_generation":state.generation,"generation":pending.generation,
+                        "email":pending.identity.email,"subject":pending.identity.subject,
+                        "target":pending.target.setup_description()?,"session":pending.session,"started_at":pending.started_at,
+                        "reject_pkce_empty":pending.reject_pkce.is_none(),"reject_credential_empty":pending.reject_credential.is_none(),
+                        "authorization":authorization.0
+                    });
+                    Ok((Digest::of(&value)?, pending.started, authorization.1))
+                };
+                let before = snapshot()?;
+                let valid = with_issuer(Some(google::ISSUER));
+                for invalid in [
+                    with_issuer(None), with_issuer(Some("")), with_issuer(Some("https://attacker.example")),
+                    format!("{valid}&iss={}", google::ISSUER),
+                ] {
+                    assert!(canaries.dispatch(&Method::GET, &path, Some(&invalid), &headers, &[], &identity(), now).is_err());
+                    assert_eq!(snapshot()?, before);
+                    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+                    assert!(world.requests().is_empty());
+                }
+                let response = canaries.dispatch(&Method::GET, &path, Some(&valid), &headers, &[], &identity(), now);
+                if denied {
+                    assert!(response.is_err());
+                    assert!(!canaries.state.lock().unwrap().pending.contains_key(&key));
+                } else {
+                    assert_eq!(response?.status(), StatusCode::SEE_OTHER);
+                    assert_ne!(snapshot()?, before);
+                }
+                assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+                assert!(world.requests().is_empty());
+            }
+            Ok(())
+        }).await
     }
 
     #[tokio::test]

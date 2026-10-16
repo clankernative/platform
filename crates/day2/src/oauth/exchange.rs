@@ -451,10 +451,7 @@ pub(crate) fn handle_qualified_callback(
     let parameters = if input.reviewed.issuer_url == super::google::ISSUER
         && input.reviewed.token_endpoint == super::google::TOKEN
     {
-        super::protocol::CallbackParameters {
-            require_issuer: false,
-            allowed_extras: super::catalog::Adapter::GoogleCalendar.callback_extras(),
-        }
+        super::catalog::Adapter::GoogleCalendar.callback_parameters()
     } else {
         super::protocol::CallbackParameters {
             require_issuer: true,

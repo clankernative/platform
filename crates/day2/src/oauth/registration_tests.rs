@@ -1056,23 +1056,59 @@ fn authorization_derives_s256_and_accepts_only_its_fresh_session_and_state() -> 
         assert_eq!(code.code, CODE_CANARY);
         assert!(code.purpose == purpose);
     }
-    for attack in 0..5 {
+    for attack in 0..8 {
         let (mut authorization, _) =
             Authorization::begin(&target, Purpose::Positive, human.clone())?;
-        let mut query = format!("state={}&code={CODE_CANARY}", authorization.state);
+        let base = format!("state={}&code={CODE_CANARY}", authorization.state);
+        let mut query = format!("{base}&iss={}", google::ISSUER);
         let session = if attack == 0 {
             Digest::of(&"different-shell-session")?
         } else {
             human.clone()
         };
         match attack {
-            1 => query = format!("state=wrong&code={CODE_CANARY}"),
-            2 => query.push_str("&iss=https%3A%2F%2Fattacker.example"),
+            1 => query = format!("state=wrong&code={CODE_CANARY}&iss={}", google::ISSUER),
+            2 => query = format!("{base}&iss=https%3A%2F%2Fattacker.example"),
             3 => query.push_str("&state=duplicate"),
             4 => authorization.started = Instant::now() - Duration::from_secs(VALID_SECONDS as u64),
+            5 => query = base,
+            6 => query = format!("{base}&iss="),
+            7 => query.push_str(&format!("&iss={}", google::ISSUER)),
             _ => {}
         }
         assert!(authorization.complete(query.as_bytes(), &session).is_err());
     }
+    Ok(())
+}
+
+pub(in crate::oauth) fn authorization_snapshot(authorization: &Authorization) -> Result<(Digest, Instant)> {
+    let purpose = match authorization.purpose { Purpose::Positive => "positive", Purpose::RejectPkce => "pkce", Purpose::RejectCredential => "credential" };
+    let adapter = match authorization.adapter { catalog::Adapter::GoogleCalendar => "google", catalog::Adapter::GitlabProjects => "gitlab" };
+    Ok((Digest::of(&json!({
+        "state":Digest::new(authorization.state.as_bytes()),
+        "verifier":Digest::new(authorization.verifier.as_bytes()),
+        "target":authorization.target,"purpose":purpose,"session":authorization.session,
+        "issuer":authorization.issuer,"adapter":adapter
+    }))?, authorization.started))
+}
+
+#[test]
+fn gitlab_qualification_keeps_optional_issuer_but_rejects_a_supplied_wrong_issuer() -> Result<()> {
+    let target = gitlab_target()?;
+    let session = Digest::new(b"gitlab-shell-session");
+    for issuer in [None, Some(target.reviewed.issuer_url.as_str())] {
+        let (authorization, _) = Authorization::begin(&target, Purpose::Positive, session.clone())?;
+        let mut query = url::form_urlencoded::Serializer::new(String::new());
+        query.append_pair("state", &authorization.state).append_pair("code", CODE_CANARY);
+        if let Some(issuer) = issuer { query.append_pair("iss", issuer); }
+        let query = query.finish();
+        authorization.validate_required_issuer(query.as_bytes())?;
+        authorization.complete(query.as_bytes(), &session)?;
+    }
+    let (authorization, _) = Authorization::begin(&target, Purpose::Positive, session.clone())?;
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("state", &authorization.state).append_pair("code", CODE_CANARY)
+        .append_pair("iss", "https://attacker.example").finish();
+    assert!(authorization.complete(query.as_bytes(), &session).is_err());
     Ok(())
 }

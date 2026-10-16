@@ -760,6 +760,15 @@ blocks new and already-pending competing connects, survives attempt expiry and
 database reopen, and has no reset API. An unknown send therefore requires a
 disposable reset or independently resolved operator cleanup before reuse.
 
+Google advertises authorization-response issuer support in its
+[discovery document](https://accounts.google.com/.well-known/openid-configuration).
+Qualification and product callbacks therefore require one nonempty `iss` exactly
+equal to `https://accounts.google.com`, including provider denials. Missing,
+duplicate, empty or mismatched issuers are refused before the shell consumes the
+pending authorization. The reviewed Google callback extras remain allowed. This
+follows [RFC 9207](https://www.rfc-editor.org/rfc/rfc9207.html#section-2.4);
+other adapters retain their explicitly reviewed callback policies.
+
 Disconnect disables local use, increments its epoch, cancels outstanding local
 work and deletes private material atomically. Google revocation affects the
 account's grants for **all clients in the Google project**, including other
