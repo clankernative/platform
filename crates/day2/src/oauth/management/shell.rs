@@ -11,7 +11,7 @@ use std::{collections::HashMap, sync::{Arc, Mutex}};
 
 const COOKIE: &str = "__Host-day2_oauth_management";
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 enum Stage { Confirm, Provider { state: Digest } }
 
 struct Session {
