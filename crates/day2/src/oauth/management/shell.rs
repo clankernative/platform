@@ -119,7 +119,7 @@ impl Shell {
                         p { @match view.action { Action::Connect => "Connect", Action::Disconnect => "Disconnect" } " " (view.logical_id) }
                         p { (view.usage) } p { "Account: " (view.human) }
                         ul { @for scope in &view.scopes { li { (scope) } } }
-                        @if view.action == Action::Disconnect { p { "Local access will stop. Google revocation affects the entire client/account grant and requires operator cleanup; this action sends no provider revocation request." } }
+                        @if view.action == Action::Disconnect { p { "Local access will stop. Google revocation affects this account's grants for all clients in the Google project and requires operator assessment; this action sends no provider revocation request." } }
                         form method="post" {
                             input type="hidden" name="csrf" value=(session.csrf);
                             input type="hidden" name="challenge" value=(view.challenge.as_str());

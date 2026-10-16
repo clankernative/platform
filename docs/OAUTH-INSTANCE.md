@@ -761,9 +761,13 @@ disposable reset or independently resolved operator cleanup before reuse.
 
 Disconnect disables local use, increments its epoch, cancels outstanding local
 work and deletes private material atomically. Google revocation affects the
-whole client/account grant. This profile has no complete cross-app/installation
+account's grants for **all clients in the Google project**, including other
+clients used for reauthentication. See [Google's revocation contract](https://developers.google.com/identity/protocols/oauth2/web-server#tokenrevoke).
+This profile has no complete cross-app/installation
 holder inventory and therefore sends no automatic revocation request. It records
-`intervention_required` and reports provider cleanup as an operator action.
+`intervention_required` and reports provider cleanup as an operator assessment.
+Manual cleanup also requires that assessment; a client-level inventory is
+insufficient for the project-wide revocation domain.
 
 These checks do not establish an external nonrollback security epoch. Secured
 restore remains refused; this profile must not be used as restore, bootstrap or

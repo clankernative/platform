@@ -394,7 +394,8 @@ impl Manager {
             Ok(true)
         })?;
         ensure!(fenced, "OAuth disconnect not admitted");
-        // Google revokes the entire client/account grant. This app cannot prove
+        // Google revokes the account's grants for every client in the project.
+        // This app cannot prove
         // the cross-app/installation holder inventory, so no automatic send is
         // safe. Local use is fenced; an operator must resolve provider cleanup.
         Ok(Reply::Completed { status: "Disconnected locally. Google grant revocation requires operator cleanup; no revocation request was sent.".into() })
