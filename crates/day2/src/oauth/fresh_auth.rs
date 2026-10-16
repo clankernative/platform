@@ -298,6 +298,14 @@ impl VerifiedAuthTime {
         Self { google }
     }
 
+    pub(in crate::oauth) fn require_management_authentication(&self) -> Result<()> {
+        ensure!(
+            matches!(self.purpose(), FreshPurpose::OAuthConnect | FreshPurpose::OAuthDisconnect),
+            "OAuth management original purpose required"
+        );
+        self.google.require_post_pending_authentication()
+    }
+
     pub(in crate::oauth) fn purpose(&self) -> FreshPurpose {
         self.google.intent().purpose()
     }

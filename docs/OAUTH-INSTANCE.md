@@ -742,6 +742,19 @@ are required before connect or disconnect. An existing IAP login or provider
 consent click does not establish fresh authentication. The original five-minute
 deadline is never renewed by a redirect, confirmation, exchange or restart.
 
+Product connect and disconnect currently refuse at the native attestation
+factory: no qualified producer proves a human authentication event after the
+original pending request. Google signature, nonce and identity validation remain
+necessary, but signed `auth_time` compared with our local wall clock does not
+supply that causal proof. `max_age`, consent, token issue time and a timestamp
+skew allowance cannot replace it. See [Google's authentication-time contract](https://developers.google.com/identity/siwg/security-bundle#authentication_time).
+Enabling Google's session-age claim alone cannot enable product actions. Only
+explicit isolated test witnesses exercise successful management transitions;
+actual signed-token conformance inputs remain refused by this gate. Shared
+credential consumers retain their separate behavior and are not qualified by
+these management tests. A real admitted producer and new complete qualification
+are required before the live connect/read/refresh/disconnect campaign.
+
 The initial execution profile is Google Calendar with a mapped current human
 and an empty slot. Other reviewed provider metadata stays admitted; this UI
 refuses unsupported execution. Replacement, reconnecting a disabled slot and

@@ -210,6 +210,18 @@ impl Reauthenticated {
         self.authenticated_at
     }
 
+    /// Signed timestamps alone do not establish authentication after the local
+    /// pending request. No production causal producer is admitted yet.
+    pub(in crate::oauth) fn require_post_pending_authentication(&self) -> Result<()> {
+        #[cfg(test)]
+        if self.isolated_fixture {
+            // Only the explicit per-proof isolated fixture constructor sets it;
+            // real signed Google parser fixtures leave this false.
+            return Ok(());
+        }
+        anyhow::bail!("OAuth post-pending authentication producer unavailable")
+    }
+
     pub(in crate::oauth) fn deadline(&self) -> Result<i64> {
         let deadline = self
             .authenticated_at

@@ -169,6 +169,7 @@ impl Attestation {
         version: String,
         now: i64,
     ) -> Result<Self> {
+        proof.require_management_authentication()?;
         view.validate(identity, now)?;
         proof.require_intent(
             &super::fresh_auth::FreshIntent::management(view, identity)?,
