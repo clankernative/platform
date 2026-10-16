@@ -210,7 +210,7 @@ impl Fixture {
         )
         .unwrap();
         shell
-            .attest_view(
+            .attest_fixture_view(
                 &view.claim,
                 view.digest().unwrap(),
                 Digest::of(&"fresh-session").unwrap(),

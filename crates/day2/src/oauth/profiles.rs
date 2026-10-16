@@ -900,7 +900,7 @@ pub(super) mod tests {
         shell: &ShellApprovalKeyLease,
     ) -> FreshExternalApproval {
         shell
-            .attest(
+            .attest_fixture(
                 pending,
                 Digest::of(&"fresh-security-session").unwrap(),
                 5,
@@ -1712,7 +1712,7 @@ pub(super) mod tests {
                 .is_err()
         );
         let stale = shell
-            .attest(
+            .attest_fixture(
                 &pending,
                 Digest::of(&"fresh-security-session").unwrap(),
                 3,
@@ -1723,7 +1723,7 @@ pub(super) mod tests {
             external::approve_external(&mut db, fixture.input(), &key, &shell, stale, 5).is_err()
         );
         let reused_session = shell
-            .attest(&pending, fixture.binding.session().clone(), 5, 5)
+            .attest_fixture(&pending, fixture.binding.session().clone(), 5, 5)
             .unwrap();
         assert!(
             external::approve_external(&mut db, fixture.input(), &key, &shell, reused_session, 5)

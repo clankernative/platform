@@ -395,13 +395,7 @@ impl super::shell_transport::ApprovalSigner for ArtifactShellSigner {
             view.claim.security_origin.clone(),
             view.claim.approval.clone(),
         )?
-        .attest_view(
-            &view.claim,
-            view.digest()?,
-            session.digest(),
-            authenticated_at,
-            now,
-        )
+        .attest_view(view, session, now)
     }
 }
 
@@ -4316,26 +4310,32 @@ pub(super) mod tests {
                 super::super::shell_oidc::fixture_login(&identity, intent, 5, 5, 5)?;
             let identity = authenticator.identify(&headers, 5)?;
             let google = authenticator.complete(&callback, &identity, 5)?;
-            let fresh = super::super::security_shell::ShellSession::approval_signed_fixture(
+            google.require_current(5)?;
+            assert_eq!(google.authenticated_at(), 5);
+            let rejected = super::super::security_shell::ShellSession::approval_signed_fixture(
                 &view,
                 &identity,
                 google,
                 session.clone(),
                 5,
+            ).err().context("actual signed timestamps constructed an approval session")?;
+            assert!(format!("{rejected:#}").contains("OAuth post-pending authentication producer unavailable"));
+            assert_eq!(keys.0.load(Ordering::SeqCst), 0);
+            // The original selected-presentation and post-key-load lifetime
+            // oracles use explicitly isolated proof ownership and synthetic keys.
+            let fresh = super::super::security_shell::ShellSession::approval_fixture(
+                &view,
+                &identity,
+                5,
+                session.clone(),
             )?;
             // A refused original lifetime is terminal. Keep this negative control's
             // proof separate from the retirement and post-key-load controls below.
-            let intent = super::super::fresh_auth::FreshIntent::approval(&view, &identity)?;
-            let (authenticator, headers, callback) =
-                super::super::shell_oidc::fixture_login(&identity, intent, 5, 5, 5)?;
-            let identity = authenticator.identify(&headers, 5)?;
-            let google = authenticator.complete(&callback, &identity, 5)?;
-            let future_entry = super::super::security_shell::ShellSession::approval_signed_fixture(
+            let future_entry = super::super::security_shell::ShellSession::approval_fixture(
                 &view,
                 &identity,
-                google,
-                session.clone(),
                 5,
+                session.clone(),
             )?;
             clock.advance(1);
             let proof = signer.attest(&view, &fresh, 6)?;

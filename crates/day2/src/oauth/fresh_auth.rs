@@ -365,7 +365,8 @@ impl VerifiedAuthTime {
         view: &ApprovalView,
         identity: &iap::Verified,
     ) -> Result<()> {
-        self.require_intent(&FreshIntent::approval(view, identity)?, identity)
+        self.require_intent(&FreshIntent::approval(view, identity)?, identity)?;
+        self.google.require_post_pending_authentication()
     }
 }
 

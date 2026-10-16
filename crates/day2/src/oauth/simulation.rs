@@ -449,7 +449,7 @@ fn run(program: &Program) -> Result<Trace> {
                             input_fixture.intent.owner = "other_human".into();
                         }
                         let proof =
-                            shell.attest(&pending, Digest::of(&"fresh_session")?, now, now)?;
+                            shell.attest_fixture(&pending, Digest::of(&"fresh_session")?, now, now)?;
                         external::approve_external(
                             &mut db,
                             input_fixture.input(),
