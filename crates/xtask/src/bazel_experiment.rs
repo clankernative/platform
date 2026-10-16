@@ -80,12 +80,10 @@ pub(super) fn install(root: &Path) -> Result<()> {
 fn case_names(source: &str) -> Result<BTreeSet<String>> {
     let mut cases = BTreeSet::new();
     for item in syn::parse_file(source)?.items {
-        if let syn::Item::Fn(function) = item {
-            if function.attrs.iter().any(|attribute| attribute.path().is_ident("test")) {
-                ensure!(!function.attrs.iter().any(|attribute| attribute.path().is_ident("ignore") || attribute.path().is_ident("cfg")), "unignored unconditional experiment case required");
-                ensure!(cases.insert(format!("command_atomicity::{}", function.sig.ident)), "duplicate experiment case");
-            }
-        }
+        let syn::Item::Fn(function) = item else { continue; };
+        if !function.attrs.iter().any(|attribute| attribute.path().is_ident("test")) { continue; }
+        ensure!(!function.attrs.iter().any(|attribute| attribute.path().is_ident("ignore") || attribute.path().is_ident("cfg")), "unignored unconditional experiment case required");
+        ensure!(cases.insert(format!("command_atomicity::{}", function.sig.ident)), "duplicate experiment case");
     }
     ensure!(!cases.is_empty(), "nonempty experiment case inventory required");
     Ok(cases)
