@@ -625,7 +625,8 @@ mod tests {
             }
             let query = format!("state={state}&code=private-code");
             // The barrier releases two actual dispatchers against the same
-            // session. A lost receiver result must never give the loser a send.
+            // session. Even a refused bearer acquisition has only one winner;
+            // the loser must not acquire a second private transport credential.
             let start = std::sync::Barrier::new(3);
             std::thread::scope(|threads| {
                 let run = || {
