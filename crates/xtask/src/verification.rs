@@ -1762,6 +1762,247 @@ mod tests {
         Ok(())
     }
 
+    fn ci_job(name: &str) -> String {
+        include_str!("../../../.github/workflows/ci.yml")
+            .split_once(&format!("\n  {name}:\n"))
+            .expect("CI job exists")
+            .1
+            .lines()
+            .take_while(|line| !line.starts_with("  ") || line.starts_with("   "))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn ci_step<'a>(job: &'a str, name: &str) -> &'a str {
+        job.split_once(&format!("      - name: {name}\n"))
+            .expect("CI step exists")
+            .1
+            .split("\n      - ")
+            .next()
+            .unwrap()
+    }
+
+    #[test]
+    fn linux_consumers_bootstrap_only_the_same_run_verifier_before_output_mounts() {
+        let producer = ci_job("verify-prepare-parts");
+        let prepared = producer
+            .find("      - run: cargo run --locked -p xtask -- verify-prepare-part ${{ matrix.part }}\n")
+            .expect("fresh native preparation precedes verifier transport");
+        let archived = producer
+            .find("      - name: Archive the current run verifier only\n")
+            .unwrap();
+        let retained = producer
+            .find("      - name: Retain the current run verifier only\n")
+            .unwrap();
+        assert!(prepared < archived && archived < retained);
+        let archive = ci_step(&producer, "Archive the current run verifier only");
+        assert!(archive.contains("if: ${{ matrix.part == 'inputs' }}"));
+        assert!(archive.contains(
+            "run: tar -czf /tmp/day2-linux-verifier.tgz -C \"$GITHUB_WORKSPACE\" target/debug/xtask"
+        ));
+        let upload = ci_step(&producer, "Retain the current run verifier only");
+        assert!(upload.contains("if: ${{ matrix.part == 'inputs' }}"));
+        assert!(
+            upload.contains(
+                "name: day2-linux-verifier-${{ github.run_id }}-${{ github.run_attempt }}"
+            )
+        );
+        assert!(upload.contains("path: /tmp/day2-linux-verifier.tgz"));
+        assert!(upload.contains("if-no-files-found: error"));
+        for (name, archive) in [
+            ("verify-prepare", "preparation-inputs/day2-preparation"),
+            ("verify-shards", "verification/day2-verification"),
+            ("verify", "verification/day2-verification"),
+        ] {
+            let job = ci_job(name);
+            let download = job
+                .find("name: day2-linux-verifier-${{ github.run_id }}-${{ github.run_attempt }}")
+                .expect("authenticated current run/attempt archive");
+            let bootstrap = ci_step(&job, "Restore the current run verifier only");
+            assert!(bootstrap.contains(
+                "run: tar -xzf /tmp/day2-linux-verifier/day2-linux-verifier.tgz -C \"$GITHUB_WORKSPACE\" target/debug/xtask"
+            ));
+            let bootstrap_at = job
+                .find("      - name: Restore the current run verifier only\n")
+                .unwrap();
+            let context = ci_step(
+                &job,
+                "Establish the mandatory bounded native Linux compiler context",
+            );
+            assert!(context.contains("run: target/debug/xtask verify-linux-context"));
+            assert!(!job.contains("cargo run --locked -p xtask -- verify-linux-context"));
+            let context_at = job
+                .find(
+                    "      - name: Establish the mandatory bounded native Linux compiler context\n",
+                )
+                .unwrap();
+            let restore = job
+                .find(&format!(
+                    "run: tar -xzf /tmp/day2-{archive}.tgz -C \"$GITHUB_WORKSPACE/..\"\n"
+                ))
+                .expect("full restoration still required after context setup");
+            assert!(
+                download < bootstrap_at && bootstrap_at < context_at && context_at < restore,
+                "{name}"
+            );
+            if name == "verify" {
+                let skip_reused = "if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}";
+                assert!(bootstrap.contains(skip_reused));
+                assert!(context.contains(skip_reused));
+            }
+        }
+    }
+
+    #[test]
+    fn single_file_verifier_archive_materializes_cargo_hard_links_without_restoring_outputs()
+    -> Result<()> {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let scratch = tempfile::tempdir()?;
+        let source = scratch.path().join("source");
+        let destination = scratch.path().join("destination");
+        let verifier = "target/debug/xtask";
+        let hashed = "target/debug/deps/xtask-82a2d84eb585bdf5";
+        let abi = "crates/worker/generated/roc_platform_abi.rs";
+        fs::create_dir_all(source.join("target/debug/deps"))?;
+        fs::create_dir_all(source.join("artifacts"))?;
+        fs::create_dir_all(destination.join("crates/worker/generated"))?;
+        fs::write(source.join(hashed), b"current-run-verifier")?;
+        fs::set_permissions(source.join(hashed), fs::Permissions::from_mode(0o755))?;
+        fs::hard_link(source.join(hashed), source.join(verifier))?;
+        assert_eq!(fs::metadata(source.join(verifier))?.nlink(), 2);
+        fs::write(source.join("artifacts/must-not-restore"), b"output")?;
+        fs::write(destination.join(abi), b"original-checkout-abi")?;
+
+        let full = scratch.path().join("preparation.tgz");
+        assert!(
+            Command::new("tar")
+                .env("COPYFILE_DISABLE", "1")
+                .arg("-czf")
+                .arg(&full)
+                .arg("-C")
+                .arg(&source)
+                .args([hashed, verifier, "artifacts"])
+                .status()?
+                .success()
+        );
+        let mut full = tar::Archive::new(flate2::read::GzDecoder::new(fs::File::open(full)?));
+        let linked = full
+            .entries()?
+            .find_map(|entry| {
+                let entry = entry.ok()?;
+                (entry.path().ok()?.as_ref() == Path::new(verifier))
+                    .then(|| entry.header().entry_type())
+            })
+            .context("Cargo verifier archive entry")?;
+        assert!(
+            linked.is_hard_link(),
+            "fixture must reproduce Cargo's tar hard link"
+        );
+
+        let single = scratch.path().join("day2-linux-verifier.tgz");
+        assert!(
+            Command::new("tar")
+                .env("COPYFILE_DISABLE", "1")
+                .arg("-czf")
+                .arg(&single)
+                .arg("-C")
+                .arg(&source)
+                .arg(verifier)
+                .status()?
+                .success()
+        );
+        let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(fs::File::open(&single)?));
+        let entries = archive.entries()?.collect::<std::io::Result<Vec<_>>>()?;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path()?.as_ref(), Path::new(verifier));
+        assert!(entries[0].header().entry_type().is_file());
+        assert!(
+            Command::new("tar")
+                .env("COPYFILE_DISABLE", "1")
+                .arg("-xzf")
+                .arg(&single)
+                .arg("-C")
+                .arg(&destination)
+                .arg(verifier)
+                .status()?
+                .success()
+        );
+        assert_eq!(
+            fs::read(destination.join(verifier))?,
+            b"current-run-verifier"
+        );
+        assert_ne!(
+            fs::metadata(destination.join(verifier))?
+                .permissions()
+                .mode()
+                & 0o111,
+            0
+        );
+        assert!(!destination.join(hashed).exists());
+        assert!(!destination.join("artifacts").exists());
+        assert_eq!(fs::read(destination.join(abi))?, b"original-checkout-abi");
+        Ok(())
+    }
+
+    #[test]
+    fn mac_intermediate_cache_warms_cargo_without_replacing_executable_admission_or_tests() {
+        let job = ci_job("verify-mac-compatibility");
+        let restore = ci_step(&job, "Restore compatible Cargo intermediates");
+        let save = ci_step(&job, "Save compatible Cargo intermediates");
+        let paths = |step: &str| {
+            step.split_once("          path: |\n")
+                .unwrap()
+                .1
+                .lines()
+                .take_while(|line| line.starts_with("            "))
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            paths(restore),
+            vec![
+                "target/debug/.fingerprint",
+                "target/debug/build",
+                "target/debug/deps/*.rlib",
+                "target/debug/deps/*.rmeta",
+                "target/debug/deps/*.d",
+                "target/debug/deps/*.dylib",
+            ]
+        );
+        assert_eq!(paths(restore), paths(save));
+        let (key, fallback) = restore.split_once("          restore-keys: |\n").unwrap();
+        for binding in [
+            "runner.os",
+            "runner.arch",
+            "Cargo.toml",
+            "Cargo.lock",
+            "rust-toolchain.toml",
+            ".cargo/**",
+        ] {
+            assert!(key.contains(binding) && fallback.contains(binding));
+        }
+        assert!(key.contains("github.sha") && !fallback.contains("github.sha"));
+        assert!(save.contains("key: ${{ steps.cargo_intermediates.outputs.cache-primary-key }}"));
+        assert!(save.contains("if: ${{ steps.cargo_intermediates.outputs.cache-hit != 'true' }}"));
+        let warm = job
+            .find("      - name: Restore compatible Cargo intermediates\n")
+            .unwrap();
+        let exact = job
+            .find("      - name: Restore completed test executables\n")
+            .unwrap();
+        let source = job
+            .find("      - run: cargo run --locked -p xtask -- source-check\n")
+            .unwrap();
+        let verify = job.find("      - run: cargo run --locked -p xtask -- verify-mac\n        id: native_preparation").unwrap();
+        let saved = job
+            .find("      - name: Save compatible Cargo intermediates\n")
+            .unwrap();
+        assert!(warm < exact && exact < source && source < verify && verify < saved);
+    }
+
     #[test]
     fn linux_context_requires_private_finite_native_compiler_limits() -> Result<()> {
         validate_linux_context("0::/\n", "6442450944\n")?;
