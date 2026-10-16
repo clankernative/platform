@@ -3822,17 +3822,39 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn google_signed_timestamps_do_not_authorize_management_without_a_causal_producer() -> Result<()> {
-        use super::super::{fresh_auth::{FreshIntent, VerifiedAuthTime}, management::{Action, Attestation, app::{Call, Reply, Manager}}, security_shell::FreshAuthenticator, shell_oidc};
+    fn google_signed_timestamps_do_not_authorize_management_without_a_causal_producer() -> Result<()>
+    {
+        use super::super::{
+            fresh_auth::{FreshIntent, VerifiedAuthTime},
+            management::{
+                Action, Attestation,
+                app::{Call, Manager, Reply},
+            },
+            security_shell::FreshAuthenticator,
+            shell_oidc,
+        };
         let directory = tempfile::tempdir()?;
         let (runtime, authority, signer) = management_fixture(directory.path())?;
         let database = runtime.db().to_path_buf();
         let clock = super::super::simulation::World::new(77662);
         clock.advance(95);
         super::super::effects::scope(clock.clone(), || -> Result<()> {
-            let identity = crate::iap::Verified { email: "alice@example.com".into(), subject: "accounts.google.com:alice".into() };
+            let identity = crate::iap::Verified {
+                email: "alice@example.com".into(),
+                subject: "accounts.google.com:alice".into(),
+            };
             let manager = Manager::new(runtime, authority);
-            let Reply::Pending { view } = manager.dispatch(Call::Capture { registration: "calendar".into(), operation: Action::Connect }, &identity, 100)? else { anyhow::bail!("native capture did not return pending"); };
+            let Reply::Pending { view } = manager.dispatch(
+                Call::Capture {
+                    registration: "calendar".into(),
+                    operation: Action::Connect,
+                },
+                &identity,
+                100,
+            )?
+            else {
+                anyhow::bail!("native capture did not return pending");
+            };
             let view = *view;
             let intent = FreshIntent::management(&view, &identity)?;
             // Independent real-event assignment: authentication precedes pending,
@@ -3846,10 +3868,12 @@ pub(super) mod tests {
             let auth_time = (authenticated_ms + issuer_offset_ms) / 1000;
             let issued_at = (issued_ms + issuer_offset_ms) / 1000;
             assert_eq!((auth_time, issued_at), (103, 104));
-            let (authenticator, headers, callback) = shell_oidc::fixture_login(&identity, intent.clone(), 100, auth_time, issued_at)?;
+            let (authenticator, headers, callback) =
+                shell_oidc::fixture_login(&identity, intent.clone(), 100, auth_time, issued_at)?;
             clock.advance(4);
             let verified = authenticator.identify(&headers, 104)?;
-            let actual = VerifiedAuthTime::from_google(authenticator.complete(&callback, &verified, 104)?);
+            let actual =
+                VerifiedAuthTime::from_google(authenticator.complete(&callback, &verified, 104)?);
             actual.require_intent(&intent, &identity)?;
             actual.require_current(104)?;
             assert_eq!(actual.authenticated_at(), 103);
@@ -3863,17 +3887,36 @@ pub(super) mod tests {
             let refused = signer.attest_management(&view, &actual, &identity, session.clone(), 104);
             assert!(refused.is_err_and(|e| e.to_string().contains("producer unavailable")));
             assert_eq!(keys.calls.load(Ordering::SeqCst), 0);
-            let refused = Attestation::sign(&view, &actual, &identity, session.clone(), &[11; 32], "11".into(), 104);
+            let refused = Attestation::sign(
+                &view,
+                &actual,
+                &identity,
+                session.clone(),
+                &[11; 32],
+                "11".into(),
+                104,
+            );
             assert!(refused.is_err_and(|e| e.to_string().contains("producer unavailable")));
-            assert_eq!(super::super::simulation::snapshot(&crate::store::open(&database)?)?, before);
+            assert_eq!(
+                super::super::simulation::snapshot(&crate::store::open(&database)?)?,
+                before
+            );
             assert!(clock.requests().is_empty());
             // A separate, explicitly isolated per-proof witness keeps native
             // conformance tests meaningful. It is absent from production builds.
-            let isolated = VerifiedAuthTime::from_google(shell_oidc::Reauthenticated::fixture(intent, identity.email.clone(), identity.subject.clone(), 103));
+            let isolated = VerifiedAuthTime::from_google(shell_oidc::Reauthenticated::fixture(
+                intent,
+                identity.email.clone(),
+                identity.subject.clone(),
+                103,
+            ));
             let accepted = signer.attest_management(&view, &isolated, &identity, session, 104)?;
             accepted.verify(&view, &identity, &[11; 32], "11", 104)?;
             assert_eq!(keys.calls.load(Ordering::SeqCst), 1);
-            assert_eq!(super::super::simulation::snapshot(&crate::store::open(&database)?)?, before);
+            assert_eq!(
+                super::super::simulation::snapshot(&crate::store::open(&database)?)?,
+                before
+            );
             assert!(clock.requests().is_empty());
             Ok(())
         })
