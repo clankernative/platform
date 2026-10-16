@@ -631,7 +631,7 @@ impl Session {
             self.current()?
         };
         if let Some(current) = previous {
-            self.active = Some(Runtime::load(&current.instance, "app")?);
+            self.active = Some(day2::development::reopen_for(&current.instance)?);
             return Ok(json!({"fresh":false}));
         }
         self.candidate = Some(day2::development::create_for(
@@ -817,7 +817,7 @@ impl Session {
             &expected,
             "local-development-activation",
         )?;
-        self.candidate = Some(Runtime::load(&instance, "app")?);
+        self.candidate = Some(day2::development::reopen_for(&instance)?);
         self.checked = false;
         self.event(
             "migration-checked",
@@ -843,7 +843,8 @@ impl Session {
             .context("loopback origin")?
             .1
             .parse()?;
-        let info = json!({"state":"ready","running":true,"source":self.options.source,"directory":self.directory,"actor":self.options.actor,"port":self.port,"origin":server.origin,"login_url":server.login_url,"instance":runtime.instance_path(),"artifact":runtime.artifact().id(),"watch":self.options.watch=="on","log":self.directory.join("events.jsonl"),"config":self.directory.join("config.json")});
+        let simulated_providers = day2::development::uses_simulated_providers(&runtime);
+        let info = json!({"state":"ready","running":true,"source":self.options.source,"directory":self.directory,"actor":self.options.actor,"port":self.port,"origin":server.origin,"login_url":server.login_url,"instance":runtime.instance_path(),"artifact":runtime.artifact().id(),"watch":self.options.watch=="on","simulated_providers":simulated_providers,"log":self.directory.join("events.jsonl"),"config":self.directory.join("config.json")});
         let (shutdown, mut closing) = tokio::sync::watch::channel(false);
         let server = executor.spawn(server.serve(async move {
             let _ = closing.changed().await;
