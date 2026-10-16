@@ -460,7 +460,7 @@ platform_rust_test(
             "//:fixtures/authority-policies/reports.json"
     ],
     own_library = ":lib",
-    internal_deps = ["//crates/day2-capabilities:lib"],
+    internal_deps = ["//crates/day2-assets:lib", "//crates/day2-contracts:lib", "//crates/day2-capabilities:lib"],
     linux_deps = ["//crates/day2-sandbox:lib"],
     data = [":day2", ":sandbox_probe"],
     rustc_env = {
