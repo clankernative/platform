@@ -74,7 +74,7 @@ The isolated diagnostic builds these concrete targets:
 
 ```
 bazel build //crates/xtask:xtask //crates/day2:day2_integration
-bazel aquery --output=jsonproto //crates/xtask:xtask //crates/day2:day2_integration
+bazel aquery --include_param_files --output=jsonproto 'deps(set(//crates/xtask:xtask //crates/day2:day2_integration))'
 ```
 
 The diagnostic workflow selection edits are temporary and must never be merged.
