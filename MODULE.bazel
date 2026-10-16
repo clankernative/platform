@@ -1,6 +1,7 @@
 module(name = "day2_bazel_experiment", version = "0.0.0")
 
 bazel_dep(name = "rules_rust", version = "0.74.0")
+bazel_dep(name = "platforms", version = "1.1.0")
 
 rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
 rust.toolchain(
