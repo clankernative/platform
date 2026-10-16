@@ -1,0 +1,10 @@
+# Isolated feasibility experiment. No remote service or cached runtime results.
+startup --host_jvm_args=-Xmx768m
+build --jobs=2
+build --local_resources=cpu=2
+build --local_resources=memory=4096
+build --compilation_mode=fastbuild
+build --verbose_failures
+build --show_timestamps
+build --announce_rc
+test --cache_test_results=no

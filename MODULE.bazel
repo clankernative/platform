@@ -1,0 +1,39 @@
+module(name = "day2_bazel_experiment", version = "0.0.0")
+
+bazel_dep(name = "rules_rust", version = "0.74.0")
+
+rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
+rust.toolchain(
+    edition = "2024",
+    versions = ["1.98.1"],
+    extra_target_triples = [],
+    opt_level = {"fastbuild": "2", "dbg": "2", "opt": "2"},
+    extra_rustc_flags = ["-Cdebuginfo=0", "-Cdebug-assertions=on", "-Coverflow-checks=on"],
+    extra_exec_rustc_flags = ["-Cdebuginfo=0", "-Cdebug-assertions=on", "-Coverflow-checks=on"],
+)
+use_repo(rust, "rust_toolchains")
+register_toolchains("@rust_toolchains//:all")
+
+crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
+crate.from_cargo(
+    name = "crates",
+    cargo_lockfile = "//:Cargo.lock",
+    manifests = [
+            "//:Cargo.toml",
+            "//:crates/worker/Cargo.toml",
+            "//crates/xtask:Cargo.toml",
+            "//crates/day2:Cargo.toml",
+            "//crates/day2-assets:Cargo.toml",
+            "//crates/day2-contracts:Cargo.toml",
+            "//crates/day2-control:Cargo.toml",
+            "//crates/day2-kernel:Cargo.toml",
+            "//crates/day2-capabilities:Cargo.toml",
+            "//crates/durable-temporal:Cargo.toml",
+            "//crates/day2-ops:Cargo.toml",
+            "//crates/day2-sandbox:Cargo.toml",
+            "//:cli/checks/Cargo.toml"
+    ],
+    supported_platform_triples = ["x86_64-unknown-linux-gnu", "aarch64-apple-darwin"],
+    skip_cargo_lockfile_overwrite = True,
+)
+use_repo(crate, "crates")

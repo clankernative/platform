@@ -647,7 +647,7 @@ jobs:
     defaults:
       run:
         shell: bash
-    timeout-minutes: 360
+    timeout-minutes: 90
     env:
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
@@ -693,6 +693,7 @@ jobs:
       - run: cargo fetch --locked
       - run: cargo run --locked -p xtask -- notices
       - run: git diff --exit-code -- THIRD-PARTY-NOTICES.txt dependency-inventory.json
+      - run: cargo run --locked -p xtask -- verify-linux-context
       - run: cargo run --locked -p xtask -- bootstrap
       - run: gh release download roc-formatter-linux-2026-09-12 --repo clankernative/platform --pattern roc-fmt-day2-x86_64-unknown-linux-gnu --dir /tmp/day2-tools
         env:
@@ -716,6 +717,36 @@ jobs:
             target/debug/xtask.d
           if-no-files-found: error
           retention-days: 3
+
+      - name: Require empty formatter output and exact current architecture policy
+        run: git diff --exit-code
+      - run: target/debug/xtask architecture-check
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Fetch the pinned Bazel executable
+        run: gh release download 9.3.0 --repo bazelbuild/bazel --pattern bazel-9.3.0-linux-x86_64 --dir /tmp/day2-bazel-tools
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Verify the exact Bazel release asset
+        run: sha256sum --check --ignore-missing "$GITHUB_WORKSPACE/.github/bazel-experiment.sha256"
+        working-directory: /tmp/day2-bazel-tools
+      - run: chmod 755 /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64
+      - name: Build the actual Rust driver and complete integration executable
+        run: /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64 --output_user_root=/tmp/day2-bazel-experiment build --build_event_json_file=/tmp/day2-bazel-build-events.json //crates/xtask:xtask //crates/day2:day2_integration
+      - name: Retain the actual action graph and compiler arguments
+        run: /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64 --output_user_root=/tmp/day2-bazel-experiment aquery --output=jsonproto //crates/xtask:xtask //crates/day2:day2_integration > /tmp/day2-bazel-action-graph.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ always() }}
+        with:
+          name: day2-bazel-rust-feasibility-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            /tmp/day2-ci-linux-context.json
+            /tmp/day2-bazel-build-events.json
+            /tmp/day2-bazel-action-graph.json
+            MODULE.bazel.lock
+            Cargo.lock
+            target/debug/xtask.d
+          if-no-files-found: error
+          retention-days: 14
 
   infrastructure:
     runs-on: ubuntu-24.04

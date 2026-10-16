@@ -1,0 +1,16 @@
+load("//experiments/bazel:rust.bzl", "platform_rust_library", "platform_rust_binary", "platform_rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+platform_rust_library(
+    name = "lib",
+    crate_name = "day2_contracts",
+    crate_root = "src/lib.rs",
+    srcs = glob(["src/**/*.rs"]),
+    compile_data = [],
+    internal_deps = [],
+    linux_deps = [],
+)
+
+
+exports_files(["Cargo.toml"])
