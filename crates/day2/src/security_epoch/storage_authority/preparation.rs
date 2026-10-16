@@ -69,7 +69,7 @@ impl ReviewedFileLayout {
 
 /// Immutable selection/proposal DATA retained on success and on every refusal.
 /// Its fields are private; it grants no permission and cannot adopt an owner.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 struct OriginalFileProposal {
     selection: Digest,
     store: EpochStore,
@@ -122,6 +122,79 @@ pub(crate) struct OriginalCreatorFd {
     proposal: OriginalFileProposal,
     file: File,
     identity: FileIdentity,
+}
+
+impl OriginalCreatorFd {
+    /// Checks only unchanged initial-file continuity under the ORIGINAL budget.
+    /// A later SQLite write deliberately refuses this check. Returning unit is
+    /// not a reusable witness, current-role permission or P3 acknowledgment.
+    pub(super) fn check_unchanged_initial_file(
+        &mut self,
+        plan: &ReviewedFileLayout,
+        acquisition: &mut NativeAcquisition,
+    ) -> Result<()> {
+        let result = (|| {
+            self.authority.check_current(acquisition)?;
+            ensure!(
+                self.proposal == plan.proposal
+                    && self.proposal.selection == *self.authority.selection.digest()
+                    && self.proposal.store == *self.authority.selection.store()
+                    && self.proposal.core == *self.authority.selection.seed()
+                    && self.proposal.marker == self.proposal.core.marker()?
+                    && self.proposal.length == plan.image.bytes().len()
+                    && (100..=MAX_IMAGE_BYTES).contains(&self.proposal.length)
+                    && self.proposal.image == Digest::new(plan.image.bytes()),
+                "original_file_continuity_layout"
+            );
+            #[cfg(not(target_os = "linux"))]
+            anyhow::bail!("original_file_platform_unsupported");
+            #[cfg(target_os = "linux")]
+            {
+                let mut readback = vec![0_u8; self.proposal.length];
+                let mut offset = 0;
+                while offset < readback.len() {
+                    check_file_identity(
+                        &mut self.authority,
+                        &self.file,
+                        &self.identity,
+                        self.proposal.length,
+                        acquisition,
+                    )?;
+                    let end = (offset + IO_CHUNK_BYTES).min(readback.len());
+                    let read =
+                        rustix::io::pread(&self.file, &mut readback[offset..end], offset as u64)?;
+                    ensure!(
+                        read > 0 && read <= end - offset,
+                        "original_file_read_progress"
+                    );
+                    offset += read;
+                    check_file_identity(
+                        &mut self.authority,
+                        &self.file,
+                        &self.identity,
+                        self.proposal.length,
+                        acquisition,
+                    )?;
+                }
+                ensure!(
+                    readback == plan.image.bytes(),
+                    "original_file_continuity_bytes"
+                );
+                check_file_identity(
+                    &mut self.authority,
+                    &self.file,
+                    &self.identity,
+                    self.proposal.length,
+                    acquisition,
+                )
+            }
+        })();
+        if result.is_err() {
+            // Keep the same FD, anchor and proposal even after a failed check.
+            self.authority.refuse_preparation(acquisition);
+        }
+        result
+    }
 }
 
 #[derive(PartialEq, Eq)]
@@ -258,7 +331,7 @@ impl PreparationCoordinator {
                 .file
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("original_file_owner_missing"))?;
-            self.identity = Some(self.observe_file(file, 0)?);
+            self.identity = Some(observe_file(&self.authority, file, 0)?);
             self.check_file(0, acquisition)?;
 
             self.phase = PreparationPhase::Write;
@@ -326,92 +399,116 @@ impl PreparationCoordinator {
             .ok_or_else(|| anyhow::anyhow!("original_file_owner_missing"))
     }
 
-    fn observe_file(&self, file: &File, expected_length: usize) -> Result<FileIdentity> {
-        #[cfg(not(target_os = "linux"))]
-        {
-            let _ = (file, expected_length);
-            anyhow::bail!("original_file_platform_unsupported")
-        }
-        #[cfg(target_os = "linux")]
-        {
-            use rustix::fs::{AtFlags, FileType, StatxFlags};
-            let mask = StatxFlags::TYPE
-                | StatxFlags::MODE
-                | StatxFlags::NLINK
-                | StatxFlags::UID
-                | StatxFlags::INO
-                | StatxFlags::SIZE
-                | StatxFlags::MNT_ID;
-            let observed = rustix::fs::statx(file, "", AtFlags::EMPTY_PATH, mask)?;
-            let directory = rustix::fs::statx(
-                &self.authority.directory,
-                "",
-                AtFlags::EMPTY_PATH,
-                StatxFlags::UID,
-            )?;
-            ensure!(
-                observed.stx_mask & mask.bits() == mask.bits()
-                    && directory.stx_mask & StatxFlags::UID.bits() != 0
-                    && FileType::from_raw_mode(u32::from(observed.stx_mode))
-                        == FileType::RegularFile
-                    && observed.stx_mode & 0o7777 == 0o600
-                    && observed.stx_uid == directory.stx_uid
-                    && observed.stx_nlink == 1
-                    && observed.stx_ino != 0
-                    && observed.stx_size == expected_length as u64
-                    && observed.stx_dev_major == self.authority.identity.device_major
-                    && observed.stx_dev_minor == self.authority.identity.device_minor
-                    && observed.stx_mnt_id == self.authority.identity.mount,
-                "original_file_identity_required"
-            );
-            Ok(FileIdentity {
-                device_major: observed.stx_dev_major,
-                device_minor: observed.stx_dev_minor,
-                inode: observed.stx_ino,
-                mount: observed.stx_mnt_id,
-                uid: observed.stx_uid,
-            })
-        }
-    }
-
     fn check_file(
         &mut self,
         expected_length: usize,
         acquisition: &mut NativeAcquisition,
     ) -> Result<()> {
-        #[cfg(not(target_os = "linux"))]
-        {
-            let _ = (expected_length, acquisition);
-            anyhow::bail!("original_file_platform_unsupported")
-        }
-        #[cfg(target_os = "linux")]
-        {
-            use rustix::fs::{AtFlags, StatxFlags};
-            self.authority.check_current(acquisition)?;
-            let observed = self.observe_file(self.file_ref()?, expected_length)?;
-            ensure!(
-                self.identity.as_ref() == Some(&observed),
-                "original_file_identity_changed"
-            );
-            // Join the fixed leaf to the SAME anchor without opening or adopting it.
-            // The issuer must separately qualify the physical volume/anchor root.
-            let mask = StatxFlags::INO | StatxFlags::MNT_ID;
-            let named = rustix::fs::statx(
-                &self.authority.directory,
-                INITIAL_FILE,
-                AtFlags::SYMLINK_NOFOLLOW,
-                mask,
-            )?;
-            ensure!(
-                named.stx_mask & mask.bits() == mask.bits()
-                    && named.stx_ino == observed.inode
-                    && named.stx_mnt_id == observed.mount
-                    && named.stx_dev_major == observed.device_major
-                    && named.stx_dev_minor == observed.device_minor,
-                "original_file_leaf_changed"
-            );
-            self.authority.check_current(acquisition)
-        }
+        let file = self
+            .file
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("original_file_owner_missing"))?;
+        let identity = self
+            .identity
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("original_file_identity_missing"))?;
+        check_file_identity(
+            &mut self.authority,
+            file,
+            identity,
+            expected_length,
+            acquisition,
+        )
+    }
+}
+
+fn observe_file(
+    authority: &NativeStorageCreationAuthority,
+    file: &File,
+    expected_length: usize,
+) -> Result<FileIdentity> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (authority, file, expected_length);
+        anyhow::bail!("original_file_platform_unsupported")
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use rustix::fs::{AtFlags, FileType, StatxFlags};
+        let mask = StatxFlags::TYPE
+            | StatxFlags::MODE
+            | StatxFlags::NLINK
+            | StatxFlags::UID
+            | StatxFlags::INO
+            | StatxFlags::SIZE
+            | StatxFlags::MNT_ID;
+        let observed = rustix::fs::statx(file, "", AtFlags::EMPTY_PATH, mask)?;
+        let directory = rustix::fs::statx(
+            &authority.directory,
+            "",
+            AtFlags::EMPTY_PATH,
+            StatxFlags::UID,
+        )?;
+        ensure!(
+            observed.stx_mask & mask.bits() == mask.bits()
+                && directory.stx_mask & StatxFlags::UID.bits() != 0
+                && FileType::from_raw_mode(u32::from(observed.stx_mode)) == FileType::RegularFile
+                && observed.stx_mode & 0o7777 == 0o600
+                && observed.stx_uid == directory.stx_uid
+                && observed.stx_nlink == 1
+                && observed.stx_ino != 0
+                && observed.stx_size == expected_length as u64
+                && observed.stx_dev_major == authority.identity.device_major
+                && observed.stx_dev_minor == authority.identity.device_minor
+                && observed.stx_mnt_id == authority.identity.mount,
+            "original_file_identity_required"
+        );
+        Ok(FileIdentity {
+            device_major: observed.stx_dev_major,
+            device_minor: observed.stx_dev_minor,
+            inode: observed.stx_ino,
+            mount: observed.stx_mnt_id,
+            uid: observed.stx_uid,
+        })
+    }
+}
+
+fn check_file_identity(
+    authority: &mut NativeStorageCreationAuthority,
+    file: &File,
+    identity: &FileIdentity,
+    expected_length: usize,
+    acquisition: &mut NativeAcquisition,
+) -> Result<()> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (authority, file, identity, expected_length, acquisition);
+        anyhow::bail!("original_file_platform_unsupported")
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use rustix::fs::{AtFlags, StatxFlags};
+        authority.check_current(acquisition)?;
+        let observed = observe_file(authority, file, expected_length)?;
+        ensure!(identity == &observed, "original_file_identity_changed");
+        // Join the fixed leaf to the SAME anchor without opening or adopting it.
+        // The issuer must separately qualify the physical volume/anchor root.
+        let mask = StatxFlags::INO | StatxFlags::MNT_ID;
+        let named = rustix::fs::statx(
+            &authority.directory,
+            INITIAL_FILE,
+            AtFlags::SYMLINK_NOFOLLOW,
+            mask,
+        )?;
+        ensure!(
+            named.stx_mask & mask.bits() == mask.bits()
+                && named.stx_ino == observed.inode
+                && named.stx_mnt_id == observed.mount
+                && named.stx_dev_major == observed.device_major
+                && named.stx_dev_minor == observed.device_minor,
+            "original_file_leaf_changed"
+        );
+        authority.check_current(acquisition)
     }
 }
 
