@@ -70,9 +70,30 @@ pub struct Operation {
     pub errors: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required_all_rows: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub observations: Vec<String>,
 }
 
 impl Operation {
+    fn validate_observations(&self) -> Result<()> {
+        ensure!(
+            self.observations.len() <= crate::capabilities::READS.len(),
+            "observation requirement budget"
+        );
+        let mut seen = BTreeSet::new();
+        for capability in &self.observations {
+            ensure!(
+                crate::capabilities::READS.contains(&capability.as_str()),
+                "unknown observation requirement: {capability}"
+            );
+            ensure!(
+                seen.insert(capability),
+                "duplicate observation requirement: {capability}"
+            );
+        }
+        Ok(())
+    }
+
     fn validate_required_all_rows(&self, schema: &Schema) -> Result<()> {
         ensure!(
             self.required_all_rows.len() <= 64,
@@ -485,6 +506,7 @@ impl Definition {
                 "internal command cannot be a cross-app export: {name}"
             );
             definition.validate_required_all_rows(&artifact.schema)?;
+            definition.validate_observations()?;
         }
         for (path, media) in [
             (&self.presentation.stylesheet, "text/css; charset=utf-8"),
@@ -979,7 +1001,7 @@ pub fn modules(
                 &crate::operation_catalog::output_schema(&output.shape),
                 "contract.outputs",
             );
-            source.push_str(&format!("    contract_{name} : AppContract.Product -> Try(Api.Metadata, Str)\n    contract_{name} = |product| {{\n        contract = product.operations.{name}.contract()\n        example = (contract.example)({{}})?\n        request_example = Inputs.{}.encode(example.input)\n        _ = Inputs.{}.decode(request_example)?\n        {execution}\n        Ok({{ intent: {{ target: Api.{}({handle}.{name}), title: contract.title, usage: contract.usage, inputs: {inputs}, outputs: {out}, input_sources: contract.input_sources, follow_ups: contract.follow_ups }}, request_example, response_example: Outputs.{}.encode(example.output), deprecated: contract.deprecated, execution: execution_metadata, credential_access: product.operations.{name}.credential_access(), required_all_rows: product.operations.{name}.required_all_rows(), export_version: product.operations.{name}.export_version() }})\n    }}\n", operation.input, operation.input, if kind == "command" { "write" } else { "read" }, operation.output));
+            source.push_str(&format!("    contract_{name} : AppContract.Product -> Try(Api.Metadata, Str)\n    contract_{name} = |product| {{\n        contract = product.operations.{name}.contract()\n        example = (contract.example)({{}})?\n        request_example = Inputs.{}.encode(example.input)\n        _ = Inputs.{}.decode(request_example)?\n        {execution}\n        Ok({{ intent: {{ target: Api.{}({handle}.{name}), title: contract.title, usage: contract.usage, inputs: {inputs}, outputs: {out}, input_sources: contract.input_sources, follow_ups: contract.follow_ups }}, request_example, response_example: Outputs.{}.encode(example.output), deprecated: contract.deprecated, execution: execution_metadata, credential_access: product.operations.{name}.credential_access(), required_all_rows: product.operations.{name}.required_all_rows(), observations: product.operations.{name}.observations(), export_version: product.operations.{name}.export_version() }})\n    }}\n", operation.input, operation.input, if kind == "command" { "write" } else { "read" }, operation.output));
         }
         bindings.insert(kind, bound.join(", "));
     }
@@ -1585,6 +1607,26 @@ mod selector_tests {
     use super::*;
 
     #[test]
+    fn directory_observation_requirements_reject_unknown_writes_and_duplicates() -> Result<()> {
+        let (_, _, contracts) = shared_failure_fixture()?;
+        let mut operation = contracts["create"].clone();
+        operation.observations = vec![
+            "workspace_directory.hierarchy.v1".into(),
+            "workspace_directory.page.v1".into(),
+        ];
+        operation.validate_observations()?;
+        for requirements in [
+            vec!["unknown.read.v1".into()],
+            vec![crate::capabilities::WRITES[0].into()],
+            vec!["workspace_directory.hierarchy.v1".into(); 2],
+        ] {
+            operation.observations = requirements;
+            assert!(operation.validate_observations().is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
     fn required_all_rows_metadata_defaults_empty_and_preserves_existing_wire() -> Result<()> {
         let (_, _, contracts) = shared_failure_fixture()?;
         for operation in contracts.values() {
@@ -1658,6 +1700,9 @@ mod selector_tests {
                     })
                     .context("operation read requirements missing")?;
                 assert!(metadata.contains("errors: contract.errors.map(|failure| failure.code())"));
+                assert!(metadata.contains(&format!(
+                    "observations: product.operations.{operation}.observations()"
+                )));
             }
         }
         Ok(())

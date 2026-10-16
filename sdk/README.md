@@ -57,6 +57,15 @@ activation remains valid, and ordinary filtered operations remain available.
 The requirements also appear in generated docs and OpenAPI. See the
 [application contract guide](../docs/APP-CONTRACT.md) for inheritance and paging.
 
+Chain `.observes("workspace_directory.hierarchy.v1")` onto a command or query
+definition to declare a read dependency for disposable verification. Declare
+`workspace_directory.page.v1` when paging the capture, or
+`workspace_directory.capture.v1` when establishing membership. Build verification
+and local development derive synthetic Directory bindings from these declarations,
+independent of operation names. Admission checks capability names and rejects
+writes and duplicates. Production grants remain operator-owned. See
+[Directory reads](../docs/LIVE-INTEGRATIONS.md#workspace-directory-hierarchy-reads).
+
 All SDK execution values describe pure computation. Rust interprets database and
 command requests, enforces current company policy, and owns auditing and effects.
 Company-specific source, CI, identity and secret providers are host capabilities,

@@ -20,6 +20,18 @@ WorkspaceDirectory :: [].{
 		user_path : Str,
 		org_unit_count : U64,
 		captured_at : I64,
+		source_captured_at : I64,
+		expires_at : I64,
+	}
+
+	HierarchyCapture : {
+		id : Str,
+		customer_id : Str,
+		actor : Str,
+		org_unit_count : U64,
+		captured_at : I64,
+		source_captured_at : I64,
+		expires_at : I64,
 	}
 
 	Page : { items : List(OrgUnit), next : U64, done : Bool }
@@ -36,6 +48,21 @@ WorkspaceDirectory :: [].{
 			parsed : Try(Capture, _)
 			parsed = Json.parse(raw)
 			Observe.from_host(parsed.map_err(|_| "invalid_workspace_directory_capture"))
+		},
+	)
+
+	capture_hierarchy : Context -> Observe(HierarchyCapture)
+	capture_hierarchy = |context| Resource.bind(context, "workspace_directory").and_then(capture_hierarchy_with)
+
+	capture_hierarchy_with : Resource -> Observe(HierarchyCapture)
+	capture_hierarchy_with = |resource| Observe.capability(
+		"workspace_directory.hierarchy.v1",
+		Json.to_str({ handle: Resource.token(resource) }),
+	).and_then(
+		|raw| {
+			parsed : Try(HierarchyCapture, _)
+			parsed = Json.parse(raw)
+			Observe.from_host(parsed.map_err(|_| "invalid_workspace_directory_hierarchy"))
 		},
 	)
 

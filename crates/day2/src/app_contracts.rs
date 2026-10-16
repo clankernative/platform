@@ -1057,6 +1057,7 @@ mod tests {
             credential_access: Default::default(),
             errors: Vec::new(),
             required_all_rows: Vec::new(),
+            observations: Vec::new(),
         };
         let mut command_intent = intent;
         command_intent.target.operation = "gallery.save".into();
@@ -1071,6 +1072,7 @@ mod tests {
             credential_access: Default::default(),
             errors: vec!["gallery:invalid_item".into()],
             required_all_rows: Vec::new(),
+            observations: Vec::new(),
         };
         let error = crate::app_contract::Failure {
             code: "gallery:invalid_item".into(),

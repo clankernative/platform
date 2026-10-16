@@ -626,7 +626,9 @@ pub(crate) fn record_use(
         params![resource.handle,resource.grant.resource.id,resource.grant.policy.id],|row|row.get(0),
     )?;
     ensure!(
-        resource.planned_calls > 0
+        // A validated local cache plan consumes no provider calls. Local work
+        // remains bounded by the host's observation/transaction budgets.
+        (resource.planned_calls > 0 || resource.action == Action::WorkspaceDirectoryHierarchy)
             && u64::try_from(count)?
                 .checked_add(resource.planned_calls)
                 .is_some_and(|total| total <= resource.grant.limits.max_calls_per_invocation),
