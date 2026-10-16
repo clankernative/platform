@@ -411,6 +411,9 @@ fn authorize_checked(
         params![input.intent.attempt, now],
     )?;
     ensure!(changed == 1, "qualified exchange dispatch fence lost");
+    if let Some(guard) = guard {
+        guard.commit_dispatch(&tx)?;
+    }
     tx.commit()?;
     Ok(Some(ExchangeDispatchPermit {
         intent: stored_intent,

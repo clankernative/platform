@@ -754,6 +754,10 @@ current shell key, registration, account mapping, active business authority and
 slot again. It commits the dispatch fence before one code exchange and publishes
 encrypted tokens only with the final local checks in the same transaction.
 Unknown exchange outcomes never trigger an automatic retry or become readiness.
+A slot dispatch barrier is committed with the one-time exchange permit. It
+blocks new and already-pending competing connects, survives attempt expiry and
+database reopen, and has no reset API. An unknown send therefore requires a
+disposable reset or independently resolved operator cleanup before reuse.
 
 Disconnect disables local use, increments its epoch, cancels outstanding local
 work and deletes private material atomically. Google revocation affects the

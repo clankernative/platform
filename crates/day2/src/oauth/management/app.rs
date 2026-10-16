@@ -37,6 +37,10 @@ pub(in crate::oauth) fn install(db: &Connection) -> Result<()> {
              session TEXT,
              CHECK(json_extract(view,'$.id')=id AND json_extract(view,'$.expires_at')=expires_at),
              CHECK((state='pending')=(session IS NULL))
+         );
+         CREATE TABLE IF NOT EXISTS oauth_management_dispatch_slots(
+             slot TEXT PRIMARY KEY,
+             attempt TEXT NOT NULL UNIQUE REFERENCES oauth_management_intents(id)
          );",
         &[crate::oauth::schema::Invariant { table: "oauth_management_intents", predicate:
             "length(id) BETWEEN 20 AND 128 AND length(view) BETWEEN 1 AND 16384 AND json_valid(view)
@@ -44,7 +48,12 @@ pub(in crate::oauth) fn install(db: &Connection) -> Result<()> {
              AND state IN ('pending','authorized','completed','intervention_required')
              AND (state='pending')=(session IS NULL)
              AND json_extract(view,'$.id')=id AND json_extract(view,'$.expires_at')=expires_at
-             AND (session IS NULL OR length(session)=71)" }])
+             AND (session IS NULL OR length(session)=71)" },
+          crate::oauth::schema::Invariant { table: "oauth_management_dispatch_slots", predicate:
+            "length(slot)=71 AND length(attempt) BETWEEN 20 AND 128
+             AND EXISTS(SELECT 1 FROM oauth_management_intents i WHERE i.id=attempt
+                 AND i.state IN ('authorized','completed','intervention_required')
+                 AND json_extract(i.view,'$.slot')=slot)" }])
 }
 
 pub(crate) struct Manager {
@@ -134,6 +143,16 @@ impl Manager {
         ensure!(self.authority_in(db, identity)? == view.authority
             && Self::fence(db, &view.slot)? == view.fence,
             "OAuth management authority or slot changed");
+        if view.action == Action::Connect {
+            Self::unclaimed(db, &view.slot, Some(&view.id))?;
+        }
+        Ok(())
+    }
+
+    fn unclaimed(db: &Connection, slot: &Digest, own: Option<&str>) -> Result<()> {
+        let available: bool = db.query_row("SELECT NOT EXISTS(SELECT 1 FROM oauth_management_dispatch_slots
+            WHERE slot=?1 AND (?2 IS NULL OR attempt<>?2))", params![slot.as_str(), own], |row| row.get(0))?;
+        ensure!(available, "OAuth slot has a dispatched connection; disposable reset or operator cleanup required");
         Ok(())
     }
 
@@ -148,6 +167,7 @@ impl Manager {
         let captured_at = effects::wall_time()?;
         ensure!(captured_at >= now, "OAuth management clock moved backwards");
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if action == Action::Connect { Self::unclaimed(&tx, &selection.slot, None)?; }
         tx.execute("DELETE FROM oauth_management_intents WHERE state='pending' AND expires_at<=?1", [captured_at])?;
         let count: i64 = tx.query_row("SELECT count(*) FROM oauth_management_intents", [], |row| row.get(0))?;
         ensure!(count < 1024, "OAuth management capacity reached");
@@ -425,7 +445,20 @@ impl FinishGuard<'_> {
         let finished = effects::wall_time()?;
         ensure!(finished >= now, "OAuth initial dispatch clock moved backwards");
         let db = store::open(self.manager.runtime.db())?;
-        self.check(&db, finished)
+        self.check(&db, finished)?;
+        self.require_dispatched(&db)
+    }
+
+    pub(in crate::oauth) fn commit_dispatch(&self, db: &Connection) -> Result<()> {
+        db.execute("INSERT INTO oauth_management_dispatch_slots(slot,attempt) VALUES(?1,?2)",
+            params![self.view.slot.as_str(), self.view.id])?;
+        Ok(())
+    }
+
+    fn require_dispatched(&self, db: &Connection) -> Result<()> {
+        ensure!(db.query_row("SELECT EXISTS(SELECT 1 FROM oauth_management_dispatch_slots WHERE slot=?1 AND attempt=?2)",
+            params![self.view.slot.as_str(), self.view.id], |row| row.get::<_, bool>(0))?, "OAuth dispatch barrier absent");
+        Ok(())
     }
     pub(in crate::oauth) fn check(&self, db: &Connection, now: i64) -> Result<()> {
         let (stored, state, session) = self.manager.load(db, &self.view.id, self.identity, now)?;
@@ -435,6 +468,7 @@ impl FinishGuard<'_> {
     }
 
     pub(in crate::oauth) fn complete(&self, db: &Connection) -> Result<()> {
+        self.require_dispatched(db)?;
         ensure!(db.execute("UPDATE oauth_management_intents SET state='completed' WHERE id=?1 AND state='authorized'",
             [&self.view.id])? == 1, "OAuth callback already completed");
         Ok(())
@@ -445,7 +479,7 @@ impl FinishGuard<'_> {
 mod tests {
     use super::*;
     use crate::oauth::{effects, fresh_auth::{FreshIntent, VerifiedAuthTime}, shell_oidc};
-    use std::{path::PathBuf, sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering::SeqCst}, time::Duration};
+    use std::{path::PathBuf, sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering::SeqCst}, time::Duration};
     use serde_json::json;
     use base64::{Engine as _, engine::general_purpose::STANDARD};
 
@@ -457,6 +491,7 @@ mod tests {
         revokes: AtomicUsize,
         revoke_authority: Option<PathBuf>,
         expire_after_account: bool,
+        lose_token_reply: AtomicBool,
         scope: String,
     }
 
@@ -478,6 +513,7 @@ mod tests {
                 }
                 ("POST", crate::oauth::google::TOKEN) => {
                     self.posts.fetch_add(1, SeqCst);
+                    if self.lose_token_reply.load(SeqCst) { anyhow::bail!("fixture token reply lost after dispatch"); }
                     assert_eq!(request.timeout(), Some(&Duration::from_secs(10)));
                     let fields = crate::web_security::fields(request.body().and_then(|b| b.as_bytes()).context("token form missing")?)?;
                     assert_eq!(fields["code"], "private-provider-code");
@@ -528,6 +564,7 @@ mod tests {
                 accounts: AtomicUsize::new(0), revokes: AtomicUsize::new(0),
                 revoke_authority: revoke_authority.then(|| runtime.db().to_path_buf()),
                 expire_after_account: false,
+                lose_token_reply: AtomicBool::new(false),
                 scope: "openid email https://www.googleapis.com/auth/calendar.events.readonly".into(),
             });
             Ok(Self { _directory: directory, manager: Manager::new(runtime, authority), signer,
@@ -656,6 +693,33 @@ mod tests {
             let db = store::open(fixture.manager.runtime.db())?;
             assert_eq!(db.query_row("SELECT count(*) FROM oauth_private_tokens", [], |r| r.get::<_, i64>(0))?, 0);
             assert!(Manager::fence(&db, &view.slot)?.is_none());
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn lost_exchange_fences_new_and_already_authorized_connects_across_expiry_and_reopen() -> Result<()> {
+        let fixture = Fixture::new(false)?;
+        effects::scope(fixture.port.clone(), || -> Result<()> {
+            let (a, session_a, query_a) = fixture.connect()?;
+            let (b, session_b, query_b) = fixture.connect()?;
+            fixture.port.lose_token_reply.store(true, SeqCst);
+            let now = fixture.port.now.load(SeqCst);
+            assert!(matches!(fixture.manager.callback(&a.id, &query_a, &session_a, &fixture.identity, now)?,
+                Reply::Completed { status } if status.contains("outcome unknown")));
+            assert_eq!(fixture.port.posts.load(SeqCst), 1);
+            assert!(fixture.manager.capture("calendar", Action::Connect, &fixture.identity, now).is_err());
+            assert!(fixture.manager.callback(&b.id, &query_b, &session_b, &fixture.identity, now).is_err());
+            let mut reopened = store::open(fixture.manager.runtime.db())?;
+            assert_eq!(reopened.query_row("SELECT attempt FROM oauth_management_dispatch_slots WHERE slot=?1",
+                [a.slot.as_str()], |row| row.get::<_, String>(0))?, a.id);
+            fixture.port.now.store(a.expires_at, SeqCst);
+            assert!(crate::oauth::connect::expire(&mut reopened, &a.id, a.expires_at, |_| Ok(()))?);
+            drop(reopened);
+            assert!(fixture.manager.capture("calendar", Action::Connect, &fixture.identity, a.expires_at).is_err());
+            assert!(fixture.manager.callback(&b.id, &query_b, &session_b, &fixture.identity, a.expires_at).is_err());
+            assert_eq!(fixture.port.posts.load(SeqCst), 1);
+            assert_eq!(fixture.port.accounts.load(SeqCst), 0);
             Ok(())
         })
     }
