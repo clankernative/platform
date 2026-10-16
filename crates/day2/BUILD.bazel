@@ -14,6 +14,7 @@ platform_rust_library(
             "//:assets/api-docs.js",
             "//:assets/datastar-1.0.1.js",
             "//:assets/forms.js",
+            "//:assets/navigation.js",
             "//:assets/icons/arrow-up-right.svg",
             "//:assets/icons/history.svg",
             "//:assets/icons/link.svg",
@@ -144,8 +145,7 @@ platform_rust_library(
             "//:toolchains/linux-x86_64.json",
             "//:tools/app-platform.roc"
     ],
-    internal_deps = ["//crates/day2-assets:lib", "//crates/day2-contracts:lib", "//crates/day2-capabilities:lib"],
-    linux_deps = ["//crates/day2-sandbox:lib"],
+    internal_deps = ["//crates/day2-assets:lib", "//crates/day2-contracts:lib", "//crates/day2-capabilities:lib", "//crates/day2-sandbox:lib"],
 )
 
 platform_rust_binary(
@@ -160,6 +160,7 @@ platform_rust_binary(
             "//:assets/api-docs.js",
             "//:assets/datastar-1.0.1.js",
             "//:assets/forms.js",
+            "//:assets/navigation.js",
             "//:assets/icons/arrow-up-right.svg",
             "//:assets/icons/history.svg",
             "//:assets/icons/link.svg",
@@ -290,8 +291,7 @@ platform_rust_binary(
             "//:toolchains/linux-x86_64.json",
             "//:tools/app-platform.roc"
     ],
-    internal_deps = ["//crates/day2-assets:lib", "//crates/day2-contracts:lib", "//crates/day2-capabilities:lib"],
-    linux_deps = ["//crates/day2-sandbox:lib"],
+    internal_deps = ["//crates/day2-assets:lib", "//crates/day2-contracts:lib", "//crates/day2-capabilities:lib", "//crates/day2-sandbox:lib"],
     own_library = ":lib",
 )
 
@@ -307,6 +307,7 @@ platform_rust_binary(
             "//:assets/api-docs.js",
             "//:assets/datastar-1.0.1.js",
             "//:assets/forms.js",
+            "//:assets/navigation.js",
             "//:assets/icons/arrow-up-right.svg",
             "//:assets/icons/history.svg",
             "//:assets/icons/link.svg",
@@ -437,8 +438,7 @@ platform_rust_binary(
             "//:toolchains/linux-x86_64.json",
             "//:tools/app-platform.roc"
     ],
-    internal_deps = ["//crates/day2-assets:lib", "//crates/day2-contracts:lib", "//crates/day2-capabilities:lib"],
-    linux_deps = ["//crates/day2-sandbox:lib"],
+    internal_deps = ["//crates/day2-assets:lib", "//crates/day2-contracts:lib", "//crates/day2-capabilities:lib", "//crates/day2-sandbox:lib"],
     own_library = ":lib",
 )
 
@@ -460,8 +460,7 @@ platform_rust_test(
             "//:fixtures/authority-policies/reports.json"
     ],
     own_library = ":lib",
-    internal_deps = ["//crates/day2-assets:lib", "//crates/day2-contracts:lib", "//crates/day2-capabilities:lib"],
-    linux_deps = ["//crates/day2-sandbox:lib"],
+    internal_deps = ["//crates/day2-assets:lib", "//crates/day2-contracts:lib", "//crates/day2-capabilities:lib", "//crates/day2-sandbox:lib"],
     data = [":day2", ":sandbox_probe"],
     rustc_env = {
         "CARGO_BIN_EXE_day2": "$(execpath :day2)",

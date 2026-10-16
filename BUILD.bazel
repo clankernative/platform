@@ -8,6 +8,7 @@ exports_files([
     "assets/api-docs.js",
     "assets/datastar-1.0.1.js",
     "assets/forms.js",
+    "assets/navigation.js",
     "assets/icons/archive.svg",
     "assets/icons/arrow-up-right.svg",
     "assets/icons/history.svg",
