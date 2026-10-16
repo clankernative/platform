@@ -72,7 +72,7 @@ resource "kubernetes_manifest" "app_call_keys" {
     metadata   = { name = "${local.workload_name}-app-call-keys", namespace = var.namespace }
     spec = {
       provider   = "gke"
-      parameters = { secrets = yamlencode([for key, version in local.app_call_keys : { resourceName = version, path = key }]) }
+      parameters = { secrets = jsonencode([for key, version in local.app_call_keys : { resourceName = version, path = key }]) }
     }
   }
 }
