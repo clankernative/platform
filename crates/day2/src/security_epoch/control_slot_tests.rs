@@ -74,7 +74,7 @@ fn fixture() -> (EpochStore, LogicalCore) {
     )
 }
 
-fn policy(store: &EpochStore) -> InitialBootstrapPolicy {
+pub(super) fn policy(store: &EpochStore) -> InitialBootstrapPolicy {
     let epoch = json!({"id":"epoch","revision":Digest::of(store).unwrap()});
     let app = match &store.provider {
         day2_capabilities::security_epoch::EpochProvider::FirestoreNativeV1 {
