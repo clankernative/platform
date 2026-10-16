@@ -146,8 +146,8 @@ fn native_workspace_directory_pages_decode_through_public_sdk() -> Result<()> {
     )?;
     let hierarchy =
         day2::workspace_directory::collect_hierarchy(input, &mut NativeFixturePort(units))?;
-    let membership_json = serde_json::to_string(&membership.metadata)?;
-    let hierarchy_json = serde_json::to_string(&hierarchy.metadata)?;
+    let membership_json = serde_json::to_string(membership.metadata())?;
+    let hierarchy_json = serde_json::to_string(hierarchy.metadata())?;
     let source = r#"app [step] { pf: platform "../sdk/main.roc" }
 import pf.WorkspaceDirectory
 import pf.Resource
@@ -550,6 +550,9 @@ command_program = command.command_program()
 query_program : Context, { path : Str } -> Tx({ count : U64 })
 query_program = query.query_program()
 expect command_base.required_all_rows().is_empty() and query_base.required_all_rows().is_empty()
+expect command_base.observations().is_empty() and query_base.observations().is_empty()
+expect command_base.observes("workspace_directory.capture.v1").observations() == ["workspace_directory.capture.v1"]
+expect query_base.observes("workspace_directory.hierarchy.v1").observes("workspace_directory.page.v1").observations() == ["workspace_directory.hierarchy.v1", "workspace_directory.page.v1"]
 expect command.required_all_rows() == ["rows", "logs"] and query.required_all_rows() == ["logs", "rows"]
 expect (command.contract().example)({}) == Ok({input: {reason: "example"}, output: {accepted: Bool.True}}) and (command.verification().input)("{}", 1) == Ok({reason: "generated"})
 expect (query.contract().example)({}) == Ok({input: {path: "/root"}, output: {count: 5}}) and (query.verification().input)("{}", 1) == Ok({path: "/generated"})
@@ -575,7 +578,7 @@ expect query_base.credentials(Credential.metadata_access(Credential.client_famil
         String::from_utf8_lossy(&output.stderr)
     );
     ensure!(
-        output.status.success() && diagnostics.contains("All (10) tests passed"),
+        output.status.success() && diagnostics.contains("All (13) tests passed"),
         "native read requirements: {diagnostics}"
     );
     Ok(())

@@ -1093,7 +1093,6 @@ fn hybrid_qualification_keeps_workspace_directory_offline_through_admitted_capab
                 hierarchy: json!({"kind":"admin#directory#orgUnits","organizationUnits":[
                     {"orgUnitId":"root","name":"Root","orgUnitPath":"/","parentOrgUnitId":null,"parentOrgUnitPath":null},
                     {"orgUnitId":"engineering","name":"Engineering","orgUnitPath":"/Engineering","parentOrgUnitId":"root","parentOrgUnitPath":"/"}]}),
-                hierarchy_captured_at: NOW,
             }
         } else {
             Default::default()
@@ -1177,6 +1176,7 @@ fn hybrid_qualification_keeps_workspace_directory_offline_through_admitted_capab
             active.policy()?,
             "ob_hybrid_directory",
         )?;
+        crate::resources::record_use(&tx, invocation, capability.resource())?;
         let reservation = crate::resources::reserve_in(
             &tx,
             runtime,
@@ -1250,6 +1250,101 @@ fn hybrid_qualification_keeps_workspace_directory_offline_through_admitted_capab
         "{exhausted}"
     );
 
+    // Cache plans reserve and consume no provider traffic, even after another
+    // full provider envelope no longer fits. They still record current authority.
+    admitted_capture(
+        &runtime,
+        "cached-with-spent-budget",
+        "workspace_directory.hierarchy.v1",
+        NOW,
+        true,
+    )?;
+    assert!(
+        admitted_capture(
+            &runtime,
+            "cold-with-spent-budget",
+            "workspace_directory.hierarchy.v1",
+            NOW + crate::workspace_directory::SOURCE_TTL_SECONDS,
+            false
+        )
+        .unwrap_err()
+        .to_string()
+        .starts_with("budget_exhausted:")
+    );
+
+    let mut replay_traces = Vec::new();
+    for replay in 0..2 {
+        let (_directory, runtime) = fixture_runtime(true, true, true, response_limit)?;
+        use crate::integrations::simulated::{
+            ScheduledFault, SimulatedFault, schedule_faults, update_workspace_directory,
+        };
+        schedule_faults(
+            runtime.db(),
+            SCOPE,
+            day2_capabilities::resources::Provider::WorkspaceDirectory
+                .world()
+                .unwrap(),
+            vec![ScheduledFault {
+                endpoint: String::new(),
+                remaining: 1,
+                fault: SimulatedFault::Denied,
+            }],
+        )?;
+        assert_eq!(
+            admitted_capture(
+                &runtime,
+                "denied-cold",
+                "workspace_directory.hierarchy.v1",
+                NOW,
+                false
+            )
+            .unwrap_err()
+            .to_string(),
+            "workspace_directory_hierarchy_lookup_failed",
+            "replay {replay}"
+        );
+        let recovered: Value = serde_json::from_str(&admitted_capture(
+            &runtime,
+            "recovered",
+            "workspace_directory.hierarchy.v1",
+            NOW + 1,
+            false,
+        )?)?;
+        assert_eq!(recovered["source_captured_at"], NOW + 1);
+        let cached: Value = serde_json::from_str(&admitted_capture(
+            &runtime,
+            "recovered-cache",
+            "workspace_directory.hierarchy.v1",
+            NOW + 2,
+            true,
+        )?)?;
+        let world = update_workspace_directory(runtime.db(), SCOPE, |world| {
+            assert!(world.faults.is_empty());
+            assert_eq!(world.calls.len(), 2, "cache must not call the provider");
+            Ok(serde_json::to_value(world)?)
+        })?;
+        replay_traces.push(json!({"recovered":recovered,"cached":cached,"world":world}));
+    }
+    assert_eq!(replay_traces[0], replay_traces[1]);
+
+    let (_directory, runtime) = fixture_runtime(true, false, true, response_limit)?;
+    admitted_capture(
+        &runtime,
+        "before-expiry",
+        "workspace_directory.hierarchy.v1",
+        NOW,
+        false,
+    )?;
+    let refreshed: Value = serde_json::from_str(&admitted_capture(
+        &runtime,
+        "at-expiry",
+        "workspace_directory.hierarchy.v1",
+        NOW + 900,
+        false,
+    )?)?;
+    assert_eq!(refreshed["source_captured_at"], NOW + 900);
+    assert_eq!(refreshed["expires_at"], NOW + 1800);
+
     let (_directory, runtime) = fixture_runtime(true, false, true, response_limit)?;
     let cold: Value = serde_json::from_str(&admitted_capture(
         &runtime,
@@ -1293,7 +1388,7 @@ fn hybrid_qualification_keeps_workspace_directory_offline_through_admitted_capab
         )
         .unwrap_err()
         .to_string(),
-        "simulated_directory_user_unconfigured",
+        "workspace_directory_user_lookup_failed",
         "a cached hierarchy must not establish membership during user lookup outage"
     );
     let (_directory, runtime) = fixture_runtime(false, true, true, response_limit)?;
@@ -1336,7 +1431,7 @@ fn hybrid_qualification_keeps_workspace_directory_offline_through_admitted_capab
         "{exhausted}"
     );
     let (_directory, runtime) = fixture_runtime(true, true, false, response_limit)?;
-    let mut simulated = crate::workspace_directory::SimulatedDirectoryPort::new_hierarchy(
+    let mut simulated = crate::workspace_directory::SimulatedDirectoryPort::new(
         runtime.db(),
         SCOPE,
         CUSTOMER,

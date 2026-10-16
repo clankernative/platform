@@ -387,6 +387,28 @@ pub fn local_policy_for(artifact: &LoadedArtifact, actor: &str) -> Result<Policy
                 observations: crate::capabilities::READS
                     .iter()
                     .copied()
+                    // Directory fixtures require a declared read dependency.
+                    // The other pre-existing local read defaults are unchanged.
+                    .filter(|name| {
+                        !day2_capabilities::resources::Action::ALL
+                            .iter()
+                            .any(|action| {
+                                action.provider()
+                                    == day2_capabilities::resources::Provider::WorkspaceDirectory
+                                    && action.capability() == *name
+                            })
+                    })
+                    .chain(
+                        artifact
+                            .contract()
+                            .app_contract
+                            .as_ref()
+                            .and_then(|definition| definition.operations.get(&operation.name))
+                            .into_iter()
+                            .flat_map(|definition| {
+                                definition.observations.iter().map(String::as_str)
+                            }),
+                    )
                     .chain([
                         crate::audit::HISTORY,
                         crate::connection_codegen::RESOLVE,
@@ -610,13 +632,19 @@ pub fn create(artifact_path: &Path, directory: &Path, policy: Option<Policy>) ->
     create_for(artifact_path, directory, policy, ACTOR)
 }
 
-/// An explicit Home-only disposable fixture, never inferred production authority.
-/// Default local policy allows all read names, so observations cannot select it.
-fn home_reads_workspace_directory(policy: &Policy) -> bool {
-    policy
-        .operations
-        .keys()
-        .any(|name| name.starts_with("home."))
+/// Explicit read permissions select a provider fixture for any app namespace.
+/// This is used only by disposable setup, never production authority loading.
+fn reads_provider(policy: &Policy, provider: day2_capabilities::resources::Provider) -> bool {
+    day2_capabilities::resources::Action::ALL
+        .iter()
+        .any(|action| {
+            action.provider() == provider
+                && !action.is_write()
+                && policy
+                    .operations
+                    .values()
+                    .any(|operation| operation.observations.contains(action.capability()))
+        })
 }
 
 /// Whether this artifact is the work-compliance queue.
@@ -1330,7 +1358,7 @@ fn resource_fixture_for_artifact_with_imports(
         catalog.budgets.extend(work.budgets);
         attachments.extend(work_attachments);
     }
-    if home_reads_workspace_directory(policy) {
+    if reads_provider(policy, Provider::WorkspaceDirectory) {
         let (directory, directory_attachments) =
             provider_resource_fixture(app, policy, &[Provider::WorkspaceDirectory])?;
         catalog.connections.extend(directory.connections);
@@ -1706,7 +1734,7 @@ mod people_resource_tests {
     }
 
     #[test]
-    fn home_workspace_directory_fixture_is_selected_and_narrowed_by_policy() -> Result<()> {
+    fn workspace_directory_fixture_is_selected_by_policy_independent_of_app_name() -> Result<()> {
         use day2_capabilities::resources::Action;
         let directory = tempfile::tempdir()?;
         let contract = serde_json::from_value(serde_json::json!({
@@ -1754,7 +1782,10 @@ mod people_resource_tests {
                 ),
             ]),
         };
-        assert!(home_reads_workspace_directory(&selected));
+        assert!(reads_provider(
+            &selected,
+            day2_capabilities::resources::Provider::WorkspaceDirectory
+        ));
         let (catalog, attachments) =
             resource_fixture_for_artifact_with_imports("home", &artifact, &selected, &[])?;
         let resolved = catalog.resolve("home", &attachments, 1)?;
@@ -1784,15 +1815,77 @@ mod people_resource_tests {
             )]),
             ..selected
         };
-        assert!(!home_reads_workspace_directory(&unrelated));
+        assert!(reads_provider(
+            &unrelated,
+            day2_capabilities::resources::Provider::WorkspaceDirectory
+        ));
         let (unrelated_catalog, unrelated_attachments) =
             resource_fixture_for_artifact_with_imports("other", &artifact, &unrelated, &[])?;
         assert!(
-            !unrelated_catalog
+            unrelated_catalog
                 .connections
                 .contains_key("workspace_directory")
         );
-        assert!(unrelated_attachments.is_empty());
+        let unrelated_resolved = unrelated_catalog.resolve("other", &unrelated_attachments, 1)?;
+        assert_eq!(
+            unrelated_resolved.operations["other.directory"]["workspace_directory"].actions,
+            BTreeSet::from([Action::WorkspaceDirectoryHierarchy])
+        );
+        let default_policy = local_policy_for(&artifact, "developer")?;
+        assert!(!reads_provider(
+            &default_policy,
+            day2_capabilities::resources::Provider::WorkspaceDirectory
+        ));
+        let (default_catalog, _) =
+            resource_fixture_for_artifact_with_imports("home", &artifact, &default_policy, &[])?;
+        assert!(
+            !default_catalog
+                .connections
+                .contains_key("workspace_directory")
+        );
+        // Mandatory build verification and local-dev both derive their policy
+        // from this artifact metadata, with no caller-supplied policy.
+        for name in ["home.directory", "other.directory"] {
+            let mut contract = artifact.contract().clone();
+            contract.app_contract = Some(serde_json::from_value(serde_json::json!({
+                "operations": {name: {
+                    "intent": {"target":{"operation":name,"input_type":"input","output_type":"output"},
+                        "title":"Directory", "usage":{"purpose":"Browse", "use_when":[], "avoid_when":[], "preconditions":[], "effects":[], "result":"Hierarchy"},
+                        "inputs":[], "outputs":[], "input_sources":[], "follow_ups":[]},
+                    "request_example":"{}", "response_example":"{}", "deprecated":false,
+                    "execution":{"model":"","id_field":"","version_field":"","effects":[]},
+                    "errors":[], "observations":["workspace_directory.hierarchy.v1", "workspace_directory.page.v1"]
+                }},
+                "presentation":{"stylesheet":"","script":""}, "identities":"",
+                "invariants":{}, "domains":{}, "errors":{}
+            }))?);
+            let declared = LoadedArtifact::from_contract_for_tests(
+                "declared-directory".into(),
+                directory.path().to_path_buf(),
+                contract,
+            );
+            let generated = local_policy_for(&declared, "developer")?;
+            let (catalog, attachments) =
+                resource_fixture_for_artifact("renamed-app", &declared, &generated)?;
+            let resolved = catalog.resolve("renamed-app", &attachments, 1)?;
+            for operation in ["home.directory", "other.directory"] {
+                let binding = resolved
+                    .operations
+                    .get(operation)
+                    .and_then(|slots| slots.get("workspace_directory"));
+                if operation == name {
+                    assert_eq!(
+                        binding.context("declared Directory binding")?.actions,
+                        BTreeSet::from([
+                            Action::WorkspaceDirectoryHierarchy,
+                            Action::WorkspaceDirectoryPage
+                        ])
+                    );
+                } else {
+                    assert!(binding.is_none());
+                }
+            }
+        }
         Ok(())
     }
 
@@ -1895,7 +1988,7 @@ mod people_resource_tests {
             grant.limits.max_response_bytes,
             crate::workspace_directory::MAX_RESPONSE_BYTES as u64
         );
-        let fixture = disposable_provider_worlds("selected@synthetic.example", 1_700_000_000);
+        let fixture = disposable_provider_worlds("selected@synthetic.example");
         assert_eq!(fixture.workspace_directory.users.len(), 1);
         let user = &fixture.workspace_directory.users["selected@synthetic.example"];
         assert_eq!(user["customerId"], "synthetic-customer-1");
@@ -1905,10 +1998,6 @@ mod people_resource_tests {
         )?)?;
         let units = crate::workspace_directory::validate_complete(units, "/Engineering")?;
         assert_eq!(units.len(), 2);
-        assert_eq!(
-            fixture.workspace_directory.hierarchy_captured_at,
-            1_700_000_000
-        );
         Ok(())
     }
 }
@@ -1936,7 +2025,7 @@ fn create_for_with_imports(
         "credential artifacts require explicit verification selection or an admitted installation"
     );
     let instance = instance_for_artifact(&artifact_path, &artifact, policy, actor, imports)?;
-    create_selected_instance(instance, directory, imports, actor, CampaignTime::Local)
+    create_selected_instance(instance, directory, imports, actor)
 }
 
 /// Explicit disposable verification setup. Complete desired selections pass
@@ -1976,13 +2065,7 @@ fn create_verification_for_with_imports(
         });
         credential_verification_selection(&mut instance, &artifact)?;
     }
-    create_selected_instance(
-        instance,
-        directory,
-        imports,
-        actor,
-        CampaignTime::Verification,
-    )
+    create_selected_instance(instance, directory, imports, actor)
 }
 
 /// Desired disposable test data only. The caller must admit the complete
@@ -2111,7 +2194,6 @@ fn create_selected_instance(
     directory: &Path,
     imports: &[ImportedQueryFixture],
     actor: &str,
-    time: CampaignTime,
 ) -> Result<Runtime> {
     use std::{io::Write, os::unix::fs::PermissionsExt};
     let instance = Instance::from_bytes(&serde_json::to_vec(&instance)?)?;
@@ -2139,8 +2221,7 @@ fn create_selected_instance(
     // differs. Synthetic providers are unaffected: they never reach this host.
     let database = runtime.db().to_path_buf();
     let scope = runtime.scope().to_owned();
-    let captured_at = time.start(&runtime)?;
-    let mut worlds = disposable_provider_worlds(actor, captured_at);
+    let mut worlds = disposable_provider_worlds(actor);
     for import in imports {
         if import.kind != crate::operation_contract::Kind::Query {
             continue;
@@ -2480,10 +2561,7 @@ pub fn repin_credential_verification_data(
 /// with a due date and an owner, one with neither, so a compliance policy that
 /// looks for missing owners and missing due dates has both cases present rather
 /// than only the healthy one.
-fn disposable_provider_worlds(
-    actor: &str,
-    captured_at: i64,
-) -> crate::integrations::simulated::SimulatedFixture {
+fn disposable_provider_worlds(actor: &str) -> crate::integrations::simulated::SimulatedFixture {
     use crate::integrations::simulated::*;
     let issue = |id: &str, identifier: &str, owner: &str, due: i64, view: &str| LinearIssue {
         id: id.into(),
@@ -2600,7 +2678,6 @@ fn disposable_provider_worlds(
             hierarchy: json!({"kind":"admin#directory#orgUnits","organizationUnits":[
                 {"orgUnitId":"root","name":"Root","orgUnitPath":"/","parentOrgUnitId":null,"parentOrgUnitPath":null},
                 {"orgUnitId":"engineering","name":"Engineering","orgUnitPath":"/Engineering","parentOrgUnitId":"root","parentOrgUnitPath":"/"}]}),
-            hierarchy_captured_at: captured_at,
         },
     }
 }

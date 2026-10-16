@@ -114,10 +114,110 @@ pub struct ProviderPage {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompleteCapture {
-    pub metadata: Capture,
-    pub connection_id: String,
-    pub units: Vec<OrgUnit>,
-    pub expires_at: i64,
+    metadata: Capture,
+    connection_id: String,
+    units: Vec<OrgUnit>,
+}
+
+impl CompleteCapture {
+    pub fn metadata(&self) -> &Capture {
+        &self.metadata
+    }
+}
+
+/// Authorization freezes the local/provider decision before reserving traffic.
+/// A cached plan holds validated facts and cannot fall through to network I/O.
+pub(crate) struct CapturePlan(CaptureSource);
+
+enum CaptureSource {
+    Cached(CompleteCapture),
+    Fetch {
+        input: CaptureInput,
+        mode: CaptureMode,
+        hierarchy: Option<(Vec<OrgUnit>, i64)>,
+    },
+}
+
+impl CapturePlan {
+    pub(crate) fn prepare(
+        path: &std::path::Path,
+        input: CaptureInput,
+        mode: CaptureMode,
+    ) -> Result<Self> {
+        validate_capture_input(&input)?;
+        let hierarchy = if path.exists() {
+            let mut db =
+                Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            let snapshot = db.transaction()?;
+            cached_hierarchy(
+                &snapshot,
+                &input.customer_id,
+                &input.connection_id,
+                input.captured_at,
+            )?
+        } else {
+            None
+        };
+        if let (CaptureMode::Hierarchy, Some((units, source_time))) = (mode, &hierarchy) {
+            let mut port = CachedHierarchyPort::new(units.clone(), *source_time);
+            return Ok(Self(CaptureSource::Cached(collect_hierarchy(
+                input, &mut port,
+            )?)));
+        }
+        Ok(Self(CaptureSource::Fetch {
+            input,
+            mode,
+            hierarchy,
+        }))
+    }
+
+    pub(crate) fn is_cached(&self) -> bool {
+        matches!(self.0, CaptureSource::Cached(_))
+    }
+
+    pub(crate) fn collect(
+        &self,
+        provider: impl FnOnce(&CaptureInput, CaptureMode) -> Result<Box<dyn DirectoryReadPort>>,
+    ) -> Result<CompleteCapture> {
+        match &self.0 {
+            CaptureSource::Cached(capture) => Ok(capture.clone()),
+            CaptureSource::Fetch {
+                input,
+                mode,
+                hierarchy,
+            } => {
+                let mut provider = provider(input, *mode)?;
+                let mut port = HierarchyCachePort {
+                    provider: provider.as_mut(),
+                    hierarchy: hierarchy.clone(),
+                };
+                collect_capture(input.clone(), &mut port, *mode)
+            }
+        }
+    }
+}
+
+/// Cache policy is shared by every provider adapter, including simulation.
+struct HierarchyCachePort<'a> {
+    provider: &'a mut dyn DirectoryReadPort,
+    hierarchy: Option<(Vec<OrgUnit>, i64)>,
+}
+
+impl DirectoryReadPort for HierarchyCachePort<'_> {
+    fn user_org_unit_path(&mut self, actor: &str) -> Result<String> {
+        self.provider.user_org_unit_path(actor)
+    }
+
+    fn list_org_units(&mut self) -> Result<ProviderPage> {
+        match self.hierarchy.take() {
+            Some((units, hierarchy_captured_at)) => Ok(ProviderPage {
+                units,
+                response_bytes: 0,
+                hierarchy_captured_at,
+            }),
+            None => self.provider.list_org_units(),
+        }
+    }
 }
 
 /// Deterministic read pipeline. It rejects oversized or incomplete responses;
@@ -141,26 +241,18 @@ fn collect_capture(
     port: &mut dyn DirectoryReadPort,
     mode: CaptureMode,
 ) -> Result<CompleteCapture> {
-    ensure!(
-        input.captured_at >= 0
-            && !input.customer_id.is_empty()
-            && input.customer_id.len() <= 256
-            && !input.connection_id.is_empty()
-            && input.connection_id.len() <= 128
-            && !input.actor.is_empty()
-            && input.actor.len() <= 320,
-        "workspace_directory_capture_identity_invalid"
-    );
-    let user_path = match mode {
+    validate_capture_input(&input)?;
+    let kind = match mode {
         CaptureMode::Membership => {
-            let path = port
+            let user_path = port
                 .user_org_unit_path(&input.actor)
                 .map_err(|_| anyhow::anyhow!("workspace_directory_user_lookup_failed"))?;
-            validate_path(&path)?;
-            Some(path)
+            validate_path(&user_path)?;
+            CaptureKind::Membership { user_path }
         }
-        CaptureMode::Hierarchy => None,
+        CaptureMode::Hierarchy => CaptureKind::Hierarchy {},
     };
+    let user_path = kind.user_path();
     let result = port
         .list_org_units()
         .map_err(|_| anyhow::anyhow!("workspace_directory_hierarchy_lookup_failed"))?;
@@ -178,7 +270,7 @@ fn collect_capture(
             && input.captured_at - result.hierarchy_captured_at < SOURCE_TTL_SECONDS,
         "workspace_directory_hierarchy_cache_expired"
     );
-    let units = match user_path.as_deref() {
+    let units = match user_path {
         Some(path) => validate_complete(result.units, path)?,
         None => validate_hierarchy(result.units)?,
     };
@@ -202,15 +294,28 @@ fn collect_capture(
             id,
             customer_id: input.customer_id,
             actor: input.actor,
-            user_path,
+            kind,
             org_unit_count: u64::try_from(units.len())?,
             captured_at: input.captured_at,
             source_captured_at: result.hierarchy_captured_at,
             expires_at,
         },
         units,
-        expires_at,
     })
+}
+
+fn validate_capture_input(input: &CaptureInput) -> Result<()> {
+    ensure!(
+        input.captured_at >= 0
+            && !input.customer_id.is_empty()
+            && input.customer_id.len() <= 256
+            && !input.connection_id.is_empty()
+            && input.connection_id.len() <= 128
+            && !input.actor.is_empty()
+            && input.actor.len() <= 320,
+        "workspace_directory_capture_identity_invalid"
+    );
+    Ok(())
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -257,18 +362,39 @@ mod optional_text {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct Capture {
     pub id: String,
     pub customer_id: String,
     pub actor: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub user_path: Option<String>,
+    #[serde(flatten)]
+    kind: CaptureKind,
     pub org_unit_count: u64,
     pub captured_at: i64,
     pub source_captured_at: i64,
     pub expires_at: i64,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(untagged)]
+enum CaptureKind {
+    Membership { user_path: String },
+    Hierarchy {},
+}
+
+impl CaptureKind {
+    fn user_path(&self) -> Option<&str> {
+        match self {
+            Self::Membership { user_path } => Some(user_path),
+            Self::Hierarchy {} => None,
+        }
+    }
+}
+
+impl Capture {
+    pub fn user_path(&self) -> Option<&str> {
+        self.kind.user_path()
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -441,16 +567,15 @@ fn publish_with_limit(
             && capture.metadata.id.starts_with("sha256:")
             && capture.metadata.source_captured_at >= 0
             && capture.metadata.source_captured_at <= capture.metadata.captured_at
-            && capture.expires_at > capture.metadata.captured_at
-            && capture.metadata.expires_at == capture.expires_at
+            && capture.metadata.expires_at > capture.metadata.captured_at
             && capture
                 .metadata
                 .source_captured_at
                 .checked_add(SOURCE_TTL_SECONDS)
-                == Some(capture.expires_at),
+                == Some(capture.metadata.expires_at),
         "workspace_directory_capture_metadata_invalid"
     );
-    let verified = match capture.metadata.user_path.as_deref() {
+    let verified = match capture.metadata.user_path() {
         Some(path) => validate_complete(capture.units.clone(), path)?,
         None => validate_hierarchy(capture.units.clone())?,
     };
@@ -513,10 +638,10 @@ fn insert_capture(connection: &Connection, capture: &CompleteCapture) -> Result<
             capture.metadata.customer_id,
             capture.connection_id,
             capture.metadata.actor,
-            capture.metadata.user_path,
+            capture.metadata.user_path(),
             i64::try_from(capture.metadata.org_unit_count)?,
             capture.metadata.captured_at,
-            capture.expires_at,
+            capture.metadata.expires_at,
         ],
     )?;
     if inserted == 1 {
@@ -541,10 +666,10 @@ fn insert_capture(connection: &Connection, capture: &CompleteCapture) -> Result<
                 capture.metadata.customer_id.clone(),
                 capture.connection_id.clone(),
                 capture.metadata.actor.clone(),
-                capture.metadata.user_path.clone(),
+                capture.metadata.user_path().map(str::to_owned),
                 i64::try_from(capture.metadata.org_unit_count)?,
                 capture.metadata.captured_at,
-                capture.expires_at,
+                capture.metadata.expires_at,
             ),
             "workspace_directory_capture_id_conflict"
         );
@@ -754,7 +879,6 @@ pub struct NativeDirectoryPort {
     directory_origin: reqwest::Url,
     customer_id: String,
     now: i64,
-    cached_hierarchy: Option<(Vec<OrgUnit>, i64)>,
     access_token: String,
 }
 
@@ -763,7 +887,6 @@ impl NativeDirectoryPort {
         plan: AuthenticationPlan,
         customer_id: &str,
         now: i64,
-        cached_hierarchy: Option<(Vec<OrgUnit>, i64)>,
         mode: CaptureMode,
     ) -> Result<Self> {
         let client = reqwest::blocking::Client::builder()
@@ -789,7 +912,6 @@ impl NativeDirectoryPort {
             directory_origin: reqwest::Url::parse(&format!("{DIRECTORY_ORIGIN}/"))?,
             customer_id: customer_id.into(),
             now,
-            cached_hierarchy,
             access_token,
         })
     }
@@ -799,7 +921,6 @@ impl NativeDirectoryPort {
         plan: AuthenticationPlan,
         customer_id: &str,
         now: i64,
-        cached_hierarchy: Option<(Vec<OrgUnit>, i64)>,
         mode: CaptureMode,
         origins: [&str; 4],
     ) -> Result<Self> {
@@ -843,7 +964,6 @@ impl NativeDirectoryPort {
             directory_origin,
             customer_id: customer_id.into(),
             now,
-            cached_hierarchy,
             access_token,
         })
     }
@@ -1068,13 +1188,6 @@ impl DirectoryReadPort for NativeDirectoryPort {
     }
 
     fn list_org_units(&mut self) -> Result<ProviderPage> {
-        if let Some((units, hierarchy_captured_at)) = self.cached_hierarchy.take() {
-            return Ok(ProviderPage {
-                units,
-                response_bytes: 0,
-                hierarchy_captured_at,
-            });
-        }
         let mut url = self.directory_origin.clone();
         url.path_segments_mut()
             .map_err(|_| anyhow::anyhow!("workspace_directory_request_invalid"))?
@@ -1130,11 +1243,11 @@ impl DirectoryReadPort for CachedHierarchyPort {
 
 /// Offline Google wire shapes parsed by the same DTOs as the live adapter.
 pub struct SimulatedDirectoryPort {
+    database: std::path::PathBuf,
+    scope: String,
     customer_id: String,
     actor: String,
-    user_response: Option<serde_json::Value>,
-    hierarchy_response: serde_json::Value,
-    hierarchy_captured_at: i64,
+    now: i64,
 }
 
 impl SimulatedDirectoryPort {
@@ -1143,48 +1256,15 @@ impl SimulatedDirectoryPort {
         scope: &str,
         customer_id: &str,
         actor: &str,
-        _now: i64,
+        now: i64,
     ) -> Result<Self> {
-        let (user_response, hierarchy_response, hierarchy_captured_at) =
-            crate::integrations::simulated::workspace_directory_responses(
-                database,
-                scope,
-                customer_id,
-                actor,
-            )?;
-        ensure!(
-            user_response.is_some(),
-            "simulated_directory_user_unconfigured"
-        );
+        crate::integrations::simulated::workspace_directory_check(database, scope, customer_id)?;
         Ok(Self {
+            database: database.into(),
+            scope: scope.into(),
             customer_id: customer_id.into(),
             actor: actor.into(),
-            user_response,
-            hierarchy_response,
-            hierarchy_captured_at,
-        })
-    }
-
-    pub fn new_hierarchy(
-        database: &std::path::Path,
-        scope: &str,
-        customer_id: &str,
-        actor: &str,
-        _now: i64,
-    ) -> Result<Self> {
-        let (user_response, hierarchy_response, hierarchy_captured_at) =
-            crate::integrations::simulated::workspace_directory_responses(
-                database,
-                scope,
-                customer_id,
-                actor,
-            )?;
-        Ok(Self {
-            customer_id: customer_id.into(),
-            actor: actor.into(),
-            user_response,
-            hierarchy_response,
-            hierarchy_captured_at,
+            now,
         })
     }
 }
@@ -1192,21 +1272,27 @@ impl SimulatedDirectoryPort {
 impl DirectoryReadPort for SimulatedDirectoryPort {
     fn user_org_unit_path(&mut self, actor: &str) -> Result<String> {
         ensure!(actor == self.actor, "workspace_directory_actor_mismatch");
-        let response = self
-            .user_response
-            .as_ref()
-            .context("simulated_directory_user_unconfigured")?;
-        let bytes = serde_json::to_vec(response)?;
+        let bytes = crate::integrations::simulated::workspace_directory_read(
+            &self.database,
+            &self.scope,
+            &self.customer_id,
+            crate::integrations::simulated::DirectoryRead::User(actor),
+        )?;
         parse_user_path(&bytes, &self.customer_id)
     }
 
     fn list_org_units(&mut self) -> Result<ProviderPage> {
-        let bytes = serde_json::to_vec(&self.hierarchy_response)?;
+        let bytes = crate::integrations::simulated::workspace_directory_read(
+            &self.database,
+            &self.scope,
+            &self.customer_id,
+            crate::integrations::simulated::DirectoryRead::Hierarchy,
+        )?;
         let response_bytes = bytes.len();
         Ok(ProviderPage {
             units: parse_org_unit_response(&bytes)?,
             response_bytes,
-            hierarchy_captured_at: self.hierarchy_captured_at,
+            hierarchy_captured_at: self.now,
         })
     }
 }
@@ -1450,9 +1536,7 @@ mod tests {
         wrong_source.metadata.source_captured_at = 101;
         let mut wrong_public_expiry = complete.clone();
         wrong_public_expiry.metadata.expires_at += 1;
-        let mut wrong_store_expiry = complete.clone();
-        wrong_store_expiry.expires_at += 1;
-        for capture in [wrong_source, wrong_public_expiry, wrong_store_expiry] {
+        for capture in [wrong_source, wrong_public_expiry] {
             let mut db = Connection::open_in_memory()?;
             assert_eq!(
                 publish(&mut db, &capture).unwrap_err().to_string(),
@@ -1499,7 +1583,7 @@ mod tests {
         };
         let first = collect_hierarchy(capture_input("alice@example.test"), &mut source)?;
         assert_eq!(source.user_calls, 0);
-        assert_eq!(first.metadata.user_path, None);
+        assert_eq!(first.metadata.user_path(), None);
         assert_eq!(first.metadata.source_captured_at, 100);
         assert_eq!(first.metadata.expires_at, 1000);
         let wire = serde_json::to_value(&first.metadata)?;
@@ -1568,7 +1652,7 @@ mod tests {
                     .context("live source cache")?;
             assert_eq!(source_time, 100);
             let reused = capture_at(units, now, source_time)?;
-            assert_eq!(reused.expires_at, 1000);
+            assert_eq!(reused.metadata.expires_at, 1000);
             publish(&mut db, &reused)?;
             assert!(
                 page_for_grant(
@@ -1606,6 +1690,30 @@ mod tests {
             capture_at(fixture(), 300, 100)?.metadata.id,
             capture_at(fixture(), 300, 300)?.metadata.id
         );
+        Ok(())
+    }
+
+    #[test]
+    fn cached_plan_cannot_fall_through_after_cache_store_disappears() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("directory.sqlite");
+        let mut store = open_store(&path)?;
+        publish(&mut store, &capture_at(fixture(), 100, 100)?)?;
+        let plan = CapturePlan::prepare(
+            &path,
+            CaptureInput {
+                captured_at: 200,
+                ..capture_input("alice@example.test")
+            },
+            CaptureMode::Hierarchy,
+        )?;
+        assert!(plan.is_cached());
+        drop(store);
+        std::fs::remove_file(&path)?;
+        let capture = plan.collect(|_, _| anyhow::bail!("unbudgeted provider fallback"))?;
+        assert_eq!(capture.metadata.source_captured_at, 100);
+        assert_eq!(capture.metadata.expires_at, 1000);
+        assert_eq!(capture.metadata.user_path(), None);
         Ok(())
     }
 
@@ -1677,8 +1785,8 @@ mod tests {
         };
         let capture = collect_complete(capture_input("alice@example.test"), &mut port)?;
         assert_eq!(capture.metadata.org_unit_count, 2);
-        assert_eq!(capture.metadata.user_path.as_deref(), Some("/Engineering"));
-        assert_eq!(capture.expires_at, 100 + SOURCE_TTL_SECONDS);
+        assert_eq!(capture.metadata.user_path(), Some("/Engineering"));
+        assert_eq!(capture.metadata.expires_at, 100 + SOURCE_TTL_SECONDS);
         assert_eq!(capture.units, validate_complete(fixture(), "/Engineering")?);
         assert_eq!(port.calls, 2);
 
@@ -1934,18 +2042,23 @@ mod tests {
             if cached {
                 publish(&mut db, &capture_at(fixture(), 100, 100)?)?;
             }
-            let mut port = NativeDirectoryPort::transport_fixture(
-                plan,
-                "customer-1",
-                100,
-                cached_hierarchy(&db, "customer-1", "directory-connection/1", 100)?,
+            let capture_plan = CapturePlan::prepare(
+                &directory.path().join("directory.sqlite"),
+                capture_input("alice@example.test"),
                 CaptureMode::Membership,
-                [origin.as_str(); 4],
             )?;
-            let capture = collect_complete(capture_input("alice@example.test"), &mut port);
+            let capture = capture_plan.collect(|_, mode| {
+                Ok(Box::new(NativeDirectoryPort::transport_fixture(
+                    plan,
+                    "customer-1",
+                    100,
+                    mode,
+                    [origin.as_str(); 4],
+                )?))
+            });
             server.join().expect("fixture server panicked")?;
             let capture = capture?;
-            assert_eq!(capture.metadata.user_path.as_deref(), Some("/Engineering"));
+            assert_eq!(capture.metadata.user_path(), Some("/Engineering"));
             assert_eq!(capture.units.len(), 2);
             publish(&mut db, &capture)?;
             assert!(
@@ -2024,13 +2137,12 @@ mod tests {
             plan,
             "customer-1",
             100,
-            None,
             CaptureMode::Hierarchy,
             [origin.as_str(); 4],
         )?;
         let capture = collect_hierarchy(capture_input("alice@example.test"), &mut port)?;
         server.join().expect("fixture server panicked")?;
-        assert_eq!(capture.metadata.user_path, None);
+        assert_eq!(capture.metadata.user_path(), None);
         assert_eq!(capture.units.len(), 1);
         Ok(())
     }

@@ -487,7 +487,6 @@ fn fixture(variant: Variant) -> SimulatedFixture {
                 {"orgUnitId":directory_unit,"name":if variant == Variant::A {"Engineering"} else {"Research"},
                     "orgUnitPath":directory_path,"parentOrgUnitId":"root","parentOrgUnitPath":"/"}
             ]}),
-            hierarchy_captured_at: 1_700_000_000,
         },
     }
 }
@@ -783,6 +782,139 @@ fn observe(action: Action, variant: Variant) -> Result<Observed> {
 /// saboteur below can feed it a rigged observation and assert it is rejected.
 /// A gate that cannot be shown to fail is indistinguishable from one that has
 /// silently stopped checking — which is the failure Phase 4 exists to prevent.
+fn directory_capture(
+    database: &std::path::Path,
+    now: i64,
+    mode: crate::workspace_directory::CaptureMode,
+) -> Result<Value> {
+    use crate::workspace_directory::*;
+    let cache = database.with_file_name("workspace_directory.sqlite");
+    let plan = CapturePlan::prepare(
+        &cache,
+        CaptureInput {
+            customer_id: "Ccoverage".into(),
+            connection_id: "coverage-connection@1".into(),
+            actor: "directory-reader@coverage.test".into(),
+            captured_at: now,
+        },
+        mode,
+    )?;
+    let complete = plan.collect(|input, _| {
+        Ok(Box::new(SimulatedDirectoryPort::new(
+            database,
+            SCOPE,
+            &input.customer_id,
+            &input.actor,
+            input.captured_at,
+        )?))
+    })?;
+    publish(&mut open_store(&cache)?, &complete)?;
+    Ok(serde_json::to_value(complete.metadata())?)
+}
+
+fn directory_replay(start: i64, fault: super::simulated::SimulatedFault) -> Result<Value> {
+    use super::simulated::{
+        DIRECTORY_HIERARCHY_ENDPOINT, DIRECTORY_USER_ENDPOINT, ScheduledFault, schedule_faults,
+        update_workspace_directory,
+    };
+    use crate::workspace_directory::CaptureMode::{Hierarchy, Membership};
+    let directory = tempfile::tempdir()?;
+    let database = directory.path().join("app.sqlite");
+    seed(&database, SCOPE, &fixture(Variant::A))?;
+    let cold = directory_capture(&database, start, Hierarchy)?;
+    assert_eq!(cold["source_captured_at"], start);
+    schedule_faults(
+        &database,
+        SCOPE,
+        Provider::WorkspaceDirectory.world().unwrap(),
+        vec![ScheduledFault {
+            endpoint: DIRECTORY_HIERARCHY_ENDPOINT.into(),
+            remaining: 1,
+            fault,
+        }],
+    )?;
+    let cached = directory_capture(&database, start + 899, Hierarchy)?;
+    assert_eq!(cached["source_captured_at"], start);
+    assert_eq!(cached["expires_at"], start + 900);
+    update_workspace_directory(&database, SCOPE, |world| {
+        assert_eq!(world.calls.len(), 1);
+        assert_eq!(
+            world.faults.len(),
+            1,
+            "cache must not consume a provider fault"
+        );
+        world.world.hierarchy["organizationUnits"][1]["name"] = json!("Renamed Engineering");
+        Ok(())
+    })?;
+    let failure = directory_capture(&database, start + 900, Hierarchy)
+        .unwrap_err()
+        .to_string();
+    assert_eq!(failure, "workspace_directory_hierarchy_lookup_failed");
+    let refreshed = directory_capture(&database, start + 901, Hierarchy)?;
+    assert_eq!(refreshed["source_captured_at"], start + 901);
+    assert_eq!(refreshed["expires_at"], start + 1801);
+    // Membership must read the user, while using exactly the same hierarchy
+    // cache policy as production. A hierarchy fault stays pending during it.
+    schedule_faults(
+        &database,
+        SCOPE,
+        Provider::WorkspaceDirectory.world().unwrap(),
+        vec![ScheduledFault {
+            endpoint: DIRECTORY_HIERARCHY_ENDPOINT.into(),
+            remaining: 1,
+            fault,
+        }],
+    )?;
+    let membership = directory_capture(&database, start + 902, Membership)?;
+    assert_eq!(membership["source_captured_at"], start + 901);
+    assert_eq!(membership["user_path"], "/Engineering");
+    let world = update_workspace_directory(&database, SCOPE, |world| {
+        assert_eq!(world.calls.len(), 4);
+        assert!(world.calls[3].starts_with(DIRECTORY_USER_ENDPOINT));
+        assert_eq!(world.faults.len(), 1);
+        Ok(serde_json::to_value(world)?)
+    })?;
+    // Reopening the on-disk adapter on every read preserves its evidence. A
+    // cache plan remains local even if the provider world disappears afterward.
+    std::fs::remove_file(database.with_file_name(Provider::WorkspaceDirectory.world().unwrap()))?;
+    let offline = directory_capture(&database, start + 903, Hierarchy)?;
+    assert_eq!(offline["source_captured_at"], start + 901);
+    Ok(
+        json!({"cold":cold,"cached":cached,"failure":failure,"refreshed":refreshed,"membership":membership,"offline":offline,"world":world}),
+    )
+}
+
+#[test]
+fn directory_all_transport_faults_replay_through_cache_and_recovery() -> Result<()> {
+    use super::simulated::SimulatedFault::*;
+    for fault in [
+        Denied,
+        RateLimited,
+        ServerError,
+        ConnectionLost,
+        Oversized,
+        NotJson,
+    ] {
+        assert_eq!(
+            directory_replay(1_700_000_000, fault)?,
+            directory_replay(1_700_000_000, fault)?
+        );
+    }
+    Ok(())
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::test_runner::Config::with_cases(24))]
+    #[test]
+    fn directory_fault_expiry_recovery_and_replay(start in 0_i64..2_000_000_000, fault_index in 0_usize..6) {
+        use super::simulated::SimulatedFault::*;
+        let fault = [Denied, RateLimited, ServerError, ConnectionLost, Oversized, NotJson][fault_index];
+        let first = directory_replay(start, fault).unwrap();
+        let replay = directory_replay(start, fault).unwrap();
+        proptest::prop_assert_eq!(first, replay);
+    }
+}
+
 fn observe_native_directory(action: Action, variant: Variant) -> Result<Observed> {
     ensure!(
         matches!(
@@ -816,7 +948,7 @@ fn observe_native_directory(action: Action, variant: Variant) -> Result<Observed
     } else {
         crate::workspace_directory::collect_complete(input, &mut port)?
     };
-    let capture_id = complete.metadata.id.clone();
+    let capture_id = complete.metadata().id.clone();
     let store_path = database.with_file_name("workspace_directory.sqlite");
     let mut store = crate::workspace_directory::open_store(&store_path)?;
     crate::workspace_directory::publish(&mut store, &complete)?;
@@ -824,7 +956,7 @@ fn observe_native_directory(action: Action, variant: Variant) -> Result<Observed
         action,
         Action::WorkspaceDirectoryCapture | Action::WorkspaceDirectoryHierarchy
     ) {
-        serde_json::to_string(&complete.metadata)?
+        serde_json::to_string(complete.metadata())?
     } else {
         serde_json::to_string(&crate::workspace_directory::page_for_grant(
             &store,
@@ -957,12 +1089,16 @@ fn workspace_directory_native_read_rejects_wrong_scope_actor_customer_and_world(
             "unseeded@coverage.test",
             1_700_000_001,
         )
+        .and_then(
+            |mut port| crate::workspace_directory::DirectoryReadPort::user_org_unit_path(
+                &mut port,
+                "unseeded@coverage.test"
+            )
+        )
         .is_err()
     );
-    for constructor in [
-        crate::workspace_directory::SimulatedDirectoryPort::new,
-        crate::workspace_directory::SimulatedDirectoryPort::new_hierarchy,
-    ] {
+    {
+        let constructor = crate::workspace_directory::SimulatedDirectoryPort::new;
         assert_eq!(
             constructor(
                 &database,
