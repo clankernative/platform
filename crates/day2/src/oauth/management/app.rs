@@ -306,7 +306,7 @@ impl Manager {
         view.validate(identity, at)?;
         let outcome = crate::oauth::exchange::handle_qualified_callback(&mut db, input(), crate::oauth::outbound::CallbackIngress {
             attempt: id, raw_query: query.as_bytes(), route: binding.callback(), session, issuer_binding: binding.issuer(),
-            code_ref: private.code_ref(), now: at,
+            code_ref: &private.code_ref, now: at,
         }, &key)?;
         match outcome {
             crate::oauth::outbound::CallbackOutcome::Denied { .. } => {
