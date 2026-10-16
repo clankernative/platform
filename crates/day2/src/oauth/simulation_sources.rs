@@ -286,7 +286,7 @@ fn ambient_macro_effects_and_namespace_aliases_cannot_bypass_the_guard() -> Resu
 #[test]
 fn every_oauth_module_uses_the_controlled_effect_boundary() -> Result<()> {
     let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/oauth");
-    let mut files = std::fs::read_dir(directory)?
+    let mut files = std::fs::read_dir(&directory)?
         .map(|entry| {
             entry?
                 .file_name()
