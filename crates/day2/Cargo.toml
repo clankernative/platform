@@ -15,7 +15,7 @@ day2-capabilities = { path = "../day2-capabilities" }
 anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-rusqlite = { version = "=0.40.2", features = ["bundled", "hooks", "limits"] }
+rusqlite = { version = "=0.40.2", features = ["bundled", "hooks", "limits", "serialize"] }
 tempfile = "3.27"
 rustix = { version = "=1.1.4", features = ["fs", "time"] }
 axum = "0.8.9"

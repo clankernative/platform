@@ -16,6 +16,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use maud::{Markup, html};
+use rusqlite::OptionalExtension;
 use serde_json::Value;
 use std::{
     collections::BTreeMap,
@@ -86,6 +87,7 @@ struct Host {
     cookie_name: String,
     secret: Vec<u8>,
     sign_in: SignIn,
+    presentation: Option<Arc<dyn crate::presentation::Port>>,
     capacity: Arc<Semaphore>,
     /// Issuance must make progress while the originating query holds its own
     /// request permit. Keep this separately bounded from browser admission.
@@ -104,6 +106,18 @@ pub struct LocalServer {
     host: Arc<Host>,
     pub origin: String,
     pub login_url: String,
+}
+
+enum PresentationSource {
+    Environment,
+    #[cfg(test)]
+    Test(Arc<dyn crate::presentation::Port>),
+}
+
+struct ListenerOptions {
+    concurrency: usize,
+    health_endpoints: bool,
+    presentation: PresentationSource,
 }
 
 pub(crate) struct Admission(Arc<AtomicBool>);
@@ -285,8 +299,11 @@ impl LocalServer {
             edge.authority().into(),
             edge.origin.clone(),
             SignIn::Edge(verifier),
-            concurrency,
-            true,
+            ListenerOptions {
+                concurrency,
+                health_endpoints: true,
+                presentation: PresentationSource::Environment,
+            },
         )
     }
 
@@ -316,8 +333,11 @@ impl LocalServer {
             authority,
             origin.clone(),
             SignIn::Link(Mutex::new(Some(grant))),
-            concurrency,
-            health_endpoints,
+            ListenerOptions {
+                concurrency,
+                health_endpoints,
+                presentation: PresentationSource::Environment,
+            },
         )?;
         server.login_url = format!("{origin}/login?token={token}");
         Ok(server)
@@ -329,8 +349,7 @@ impl LocalServer {
         authority: String,
         origin: String,
         sign_in: SignIn,
-        concurrency: usize,
-        health_endpoints: bool,
+        options: ListenerOptions,
     ) -> Result<Self> {
         runtime.artifact().require_current_api()?;
         let api = crate::openapi::Catalog::from_artifact(runtime.artifact().contract())?;
@@ -346,12 +365,22 @@ impl LocalServer {
         };
         let inputs = runtime.inputs().clone();
         let entropy = inputs.entropy.clone();
+        let declarations =
+            crate::web_templates::presentation_catalog(&runtime.artifact().contract().templates)?;
+        let presentation = match options.presentation {
+            PresentationSource::Environment => {
+                crate::presentation::load_environment(&declarations)?
+            }
+            #[cfg(test)]
+            PresentationSource::Test(port) => Some(port),
+        };
         let host = Arc::new(Host {
             entropy: entropy.clone(),
             clock: inputs.clock.clone(),
             live_ticks: inputs.live_ticks.clone(),
             oauth: None,
             credential_effects: crate::managed_credentials::effects::capture(),
+            presentation,
             api,
             routes: (runtime.artifact().contract().format >= 7)
                 .then(|| crate::routing::Catalog::from_artifact(runtime.artifact().contract()))
@@ -368,7 +397,7 @@ impl LocalServer {
             authority,
             origin: origin.clone(),
             sign_in,
-            capacity: Arc::new(Semaphore::new(concurrency)),
+            capacity: Arc::new(Semaphore::new(options.concurrency)),
             app_capacity: Arc::new(Semaphore::new(16)),
             app_issue_capacity: Arc::new(Semaphore::new(4)),
             app_execute_capacity: Arc::new(Semaphore::new(6)),
@@ -376,7 +405,7 @@ impl LocalServer {
             queued: std::sync::atomic::AtomicUsize::new(0),
             live_capacity: Arc::new(Semaphore::new(64)),
             admitting: Arc::new(AtomicBool::new(true)),
-            health_endpoints,
+            health_endpoints: options.health_endpoints,
         });
         Ok(Self {
             listener,
@@ -1494,8 +1523,8 @@ impl Host {
         response.headers_mut().insert(
             header::CONTENT_SECURITY_POLICY,
             format!(
-                "default-src 'none'; script-src 'unsafe-eval' {}/assets/platform/datastar-1.0.1.js {}/assets/platform/forms.js {}{}; script-src-attr 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' {};{} connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'; worker-src 'none'",
-                self.origin, self.origin, self.origin, self.appearance.resource_prefix(), image_sources, font_policy
+                "default-src 'none'; script-src 'unsafe-eval' {}/assets/platform/datastar-1.0.1.js {}/assets/platform/forms.js {}/assets/platform/navigation.js {}{}; script-src-attr 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' {};{} connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'; worker-src 'none'",
+                self.origin, self.origin, self.origin, self.origin, self.appearance.resource_prefix(), image_sources, font_policy
             ).parse()?,
         );
         Ok(response)
@@ -1509,6 +1538,16 @@ impl Host {
         notice: Option<Notice<'_>>,
         submitted: Option<view::Submitted<'_>>,
     ) -> Result<Markup> {
+        let page = self.runtime.artifact().page(name)?;
+        let presentation_authority = if self.presentation.is_some() {
+            Some(
+                self.runtime
+                    .authority_snapshot(&page.operation, &session.actor)?
+                    .stamp,
+            )
+        } else {
+            None
+        };
         // A completion can invalidate a prepared read between its observation
         // and validation. Retry only the page query with a fresh invocation;
         // the command and its durable receipt are never repeated here.
@@ -1536,7 +1575,6 @@ impl Host {
             now: at,
             submitted,
         };
-        let page = self.runtime.artifact().page(name)?;
         let content = if page.template.is_empty() {
             renderer.render(&outcome.result)?
         } else {
@@ -1556,26 +1594,54 @@ impl Host {
                 .map(|key| Ok((key.clone(), self.appearance.app_url(&self.runtime, key)?)))
                 .collect::<Result<BTreeMap<_, _>>>()?;
             let markup = if let Some(routes) = &self.routes {
-                crate::web_templates::render_routed(
-                    self.runtime.artifact().directory(),
-                    &self.runtime.artifact().contract().templates,
-                    &page.template,
-                    context,
-                    asset_urls,
-                    routes,
-                    &self.origin,
+                crate::web_templates::render_routed_with_presentations(
+                    crate::web_templates::RoutedRender {
+                        directory: self.runtime.artifact().directory(),
+                        catalog: &self.runtime.artifact().contract().templates,
+                        path: &page.template,
+                        context,
+                        asset_urls,
+                        routes,
+                        origin: &self.origin,
+                    },
+                    self.presentation.clone(),
                 )?
             } else {
-                crate::web_templates::render(
+                crate::web_templates::render_with_presentations(
                     self.runtime.artifact().directory(),
                     &self.runtime.artifact().contract().templates,
                     &page.template,
                     context,
                     asset_urls,
+                    self.presentation.clone(),
                 )?
             };
             crate::web_forms::bind(&renderer, &markup)?
         };
+        // Presentation execution may take seconds. Do not return a formerly
+        // authorized query after revocation or an A -> B -> A policy change.
+        if let Some(authority) = presentation_authority {
+            self.appearance.check_binding(&self.runtime)?;
+            let current = self
+                .runtime
+                .authority_snapshot(&page.operation, &session.actor)?
+                .stamp;
+            let db = open(self.runtime.db())?;
+            let current_session: Option<(String, i64)> = db
+                .query_row(
+                    "SELECT actor,expires FROM day2_web_sessions WHERE hash=?1",
+                    [&session.hash],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            validate_presentation_delivery(
+                &authority,
+                &current,
+                &session.actor,
+                current_session.as_ref(),
+                self.wall_seconds(),
+            )?;
+        }
         Ok(html! { main id="day2-main"
             data-day2-invocation=[notice.as_ref().map(|value| value.invocation)]
             data-day2-operation=[notice.as_ref().map(|value| value.operation)]
@@ -2056,6 +2122,26 @@ fn failure(error: &anyhow::Error) -> Response {
     error_page(status, message)
 }
 
+fn validate_presentation_delivery(
+    expected: &crate::authority_state::AuthorityStamp,
+    current: &crate::authority_state::AuthorityStamp,
+    actor: &str,
+    session: Option<&(String, i64)>,
+    wall: Result<i64>,
+) -> Result<()> {
+    ensure!(
+        current == expected,
+        crate::error::Failure::AuthorityPolicyChanged
+    );
+    ensure!(
+        session.is_some_and(|(session_actor, expires)| {
+            session_actor == actor && wall.as_ref().is_ok_and(|at| at < expires)
+        }),
+        crate::error::Failure::SignInRequired
+    );
+    Ok(())
+}
+
 fn fresh_page_query(
     entropy: &dyn Entropy,
     mut render: impl FnMut(&str) -> Result<crate::protocol::Outcome>,
@@ -2106,6 +2192,10 @@ fn patch(markup: Markup) -> Response {
     event.push('\n');
     ([(header::CONTENT_TYPE, "text/event-stream")], event).into_response()
 }
+
+#[cfg(test)]
+#[path = "presentation_delivery_tests.rs"]
+mod presentation_delivery_tests;
 
 #[cfg(test)]
 mod deployment_health_tests {

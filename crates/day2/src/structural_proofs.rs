@@ -39,6 +39,48 @@ const _: () = {
     );
     assert_not_impl!(crate::security_epoch::NativeConnectionPeerObservation, Send);
     assert_not_impl!(crate::security_epoch::NativeConnectionPeerObservation, Sync);
+    assert_consuming!(crate::security_epoch::PreparationCoordinator);
+    assert_not_impl!(
+        crate::security_epoch::PreparationCoordinator,
+        std::fmt::Debug
+    );
+    assert_not_impl!(crate::security_epoch::PreparationCoordinator, Send);
+    assert_not_impl!(crate::security_epoch::PreparationCoordinator, Sync);
+    assert_consuming!(crate::security_epoch::NativeOriginalPreparationOutcome);
+    assert_not_impl!(
+        crate::security_epoch::NativeOriginalPreparationOutcome,
+        std::fmt::Debug
+    );
+    assert_not_impl!(
+        crate::security_epoch::NativeOriginalPreparationOutcome,
+        Send
+    );
+    assert_not_impl!(
+        crate::security_epoch::NativeOriginalPreparationOutcome,
+        Sync
+    );
+    assert_consuming!(crate::security_epoch::OriginalCreatorFd);
+    assert_not_impl!(crate::security_epoch::OriginalCreatorFd, std::fmt::Debug);
+    assert_not_impl!(crate::security_epoch::OriginalCreatorFd, Send);
+    assert_not_impl!(crate::security_epoch::OriginalCreatorFd, Sync);
+    assert_consuming!(crate::security_epoch::BeforeAttemptRefusal);
+    assert_not_impl!(crate::security_epoch::BeforeAttemptRefusal, std::fmt::Debug);
+    assert_not_impl!(crate::security_epoch::BeforeAttemptRefusal, Send);
+    assert_not_impl!(crate::security_epoch::BeforeAttemptRefusal, Sync);
+    assert_consuming!(crate::security_epoch::RefusedOriginalPreparation);
+    assert_not_impl!(
+        crate::security_epoch::RefusedOriginalPreparation,
+        std::fmt::Debug
+    );
+    assert_not_impl!(crate::security_epoch::RefusedOriginalPreparation, Send);
+    assert_not_impl!(crate::security_epoch::RefusedOriginalPreparation, Sync);
+    assert_consuming!(crate::security_epoch::NativeStorageCreationAuthority);
+    assert_not_impl!(
+        crate::security_epoch::NativeStorageCreationAuthority,
+        std::fmt::Debug
+    );
+    assert_not_impl!(crate::security_epoch::NativeStorageCreationAuthority, Send);
+    assert_not_impl!(crate::security_epoch::NativeStorageCreationAuthority, Sync);
     assert_consuming!(crate::security_epoch::NativeNamespaceObservation);
     assert_not_impl!(
         crate::security_epoch::NativeNamespaceObservation,

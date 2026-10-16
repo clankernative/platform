@@ -4,7 +4,7 @@
 use super::{
     WORKSPACE_TEST_ARGUMENTS, cached_fixture, configure_tests, required_steps, test_command,
 };
-use crate::run_with_budget;
+use crate::{CommandStatusError, command_status_with_budget, run_with_budget};
 use anyhow::{Context, Result, ensure};
 use day2::digest;
 use serde::{Deserialize, Serialize};
@@ -22,6 +22,7 @@ const BINARIES: &str = "artifacts/ci-test-binaries.json";
 const BUILD_CACHE: &str = "artifacts/ci-test-build-cache.json";
 const PROGRAM_CACHE: &str = "artifacts/ci-test-programs";
 const RESULTS: &str = "artifacts/ci-results";
+const CARGO_FAILURE_CAPTURE_BYTES: usize = 16 * 1024 * 1024;
 const SHARDS: &[&str] = &[
     "workspace-day2",
     "workspace-control",
@@ -34,6 +35,369 @@ const SHARDS: &[&str] = &[
 
 pub(super) mod mac;
 pub(super) mod reuse;
+
+#[derive(Clone, Debug, Serialize)]
+struct CargoProcessOutcome {
+    category: &'static str,
+    code: Option<i32>,
+    signal: Option<i32>,
+    os_error: Option<i32>,
+}
+
+impl CargoProcessOutcome {
+    fn observed(
+        outcome: std::result::Result<std::process::ExitStatus, CommandStatusError>,
+    ) -> Self {
+        match outcome {
+            Ok(status) => {
+                #[cfg(unix)]
+                let signal = {
+                    use std::os::unix::process::ExitStatusExt;
+                    status.signal()
+                };
+                #[cfg(not(unix))]
+                let signal = None;
+                Self {
+                    category: if status.success() { "success" } else { "exit" },
+                    code: status.code(),
+                    signal,
+                    os_error: None,
+                }
+            }
+            Err(CommandStatusError::Spawn(error)) => Self {
+                category: "spawn",
+                code: None,
+                signal: None,
+                os_error: error.raw_os_error(),
+            },
+            Err(CommandStatusError::Wait(error)) => Self {
+                category: "wait",
+                code: None,
+                signal: None,
+                os_error: error.raw_os_error(),
+            },
+            Err(CommandStatusError::Timeout) => Self {
+                category: "timeout",
+                code: None,
+                signal: None,
+                os_error: None,
+            },
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct CargoCaptureProblem {
+    category: &'static str,
+    line: Option<usize>,
+    byte_offset: Option<usize>,
+    os_error: Option<i32>,
+}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum SccacheDiagnostic {
+    CompilerSignal { signal: u8 },
+    MissingCompilerStatus,
+}
+
+fn sccache_diagnostics(output: Option<&[u8]>) -> BTreeSet<SccacheDiagnostic> {
+    output
+        .into_iter()
+        .flat_map(|bytes| bytes.split(|byte| *byte == b'\n'))
+        .filter_map(|line| {
+            let line = std::str::from_utf8(line).ok()?;
+            let line = line.strip_suffix('\r').unwrap_or(line);
+            if line == "sccache: Missing compiler exit status!" {
+                return Some(SccacheDiagnostic::MissingCompilerStatus);
+            }
+            // sccache 0.18 emits these outside the compiler's JSON protocol.
+            // Export only the fixed classification and bounded signal, never text.
+            let signal = [
+                "sccache: Compile terminated by signal ",
+                "sccache: Compiler killed by signal ",
+            ]
+            .iter()
+            .find_map(|prefix| line.strip_prefix(prefix))?;
+            if signal.len() > 2 || !signal.as_bytes().iter().all(u8::is_ascii_digit) {
+                return None;
+            }
+            let signal = signal.parse::<u8>().ok()?;
+            (1..=64)
+                .contains(&signal)
+                .then_some(SccacheDiagnostic::CompilerSignal { signal })
+        })
+        .collect()
+}
+
+#[derive(Debug, Serialize)]
+struct CargoMemoryDiagnostics {
+    limit_bytes: Option<u64>,
+    peak_bytes: Option<u64>,
+    oom_events: Option<u64>,
+    oom_kills: Option<u64>,
+}
+
+fn cargo_memory_diagnostics(directory: &Path) -> Option<CargoMemoryDiagnostics> {
+    let number = |name: &str| {
+        fs::read_to_string(directory.join(name))
+            .ok()?
+            .trim()
+            .parse::<u64>()
+            .ok()
+    };
+    let events = fs::read_to_string(directory.join("memory.events")).ok();
+    let event = |name: &str| {
+        events.as_deref()?.lines().find_map(|line| {
+            let (key, value) = line.split_once(' ')?;
+            if key == name {
+                value.parse::<u64>().ok()
+            } else {
+                None
+            }
+        })
+    };
+    let memory = CargoMemoryDiagnostics {
+        limit_bytes: number("memory.max"),
+        peak_bytes: number("memory.peak"),
+        oom_events: event("oom"),
+        oom_kills: event("oom_kill"),
+    };
+    (memory.limit_bytes.is_some()
+        || memory.peak_bytes.is_some()
+        || memory.oom_events.is_some()
+        || memory.oom_kills.is_some())
+    .then_some(memory)
+}
+
+#[derive(Debug)]
+struct CargoReportingFailure {
+    stage: &'static str,
+    process: CargoProcessOutcome,
+    capture: Option<CargoCaptureProblem>,
+    retained: bool,
+}
+
+impl std::fmt::Display for CargoReportingFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "Cargo {} failed: primary={}, cargo_exit={:?}, signal={:?}, errno={:?}; capture={}; evidence_retained={}",
+            self.stage,
+            if self.process.category == "success" {
+                "capture"
+            } else {
+                self.process.category
+            },
+            self.process.code,
+            self.process.signal,
+            self.process.os_error,
+            self.capture
+                .as_ref()
+                .map_or("valid", |problem| problem.category),
+            self.retained,
+        )
+    }
+}
+
+impl std::error::Error for CargoReportingFailure {}
+
+fn retain_cargo_failure(
+    root: &Path,
+    stage: &'static str,
+    process: &CargoProcessOutcome,
+    problem: &Option<CargoCaptureProblem>,
+    output: Option<&[u8]>,
+) -> Result<PathBuf> {
+    use std::io::Write;
+    // The raw spool is local operator evidence, never an Actions upload input.
+    // Unix tempdirs otherwise use 0777 subject to umask. Make this directory
+    // owner-only at creation, before any raw bytes; NamedTempFile uses 0600.
+    let mut builder = tempfile::Builder::new();
+    builder.prefix("ci-compiler-failure-");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(fs::Permissions::from_mode(0o700));
+    }
+    let directory = builder.tempdir_in(root.join("artifacts"))?;
+    let mut spool = tempfile::NamedTempFile::new_in(directory.path())?;
+    let retained = output.map(|bytes| &bytes[..bytes.len().min(CARGO_FAILURE_CAPTURE_BYTES)]);
+    if let Some(bytes) = retained {
+        spool.write_all(bytes)?;
+    }
+    spool.persist(directory.path().join("stdout.bin"))?;
+    write_cargo_failure_manifest(
+        directory.path(),
+        root,
+        stage,
+        process,
+        problem,
+        output,
+        &BTreeSet::new(),
+    )?;
+    Ok(directory.keep())
+}
+
+fn write_cargo_failure_manifest(
+    directory: &Path,
+    root: &Path,
+    stage: &'static str,
+    process: &CargoProcessOutcome,
+    problem: &Option<CargoCaptureProblem>,
+    output: Option<&[u8]>,
+    diagnostic_codes: &BTreeSet<String>,
+) -> Result<()> {
+    let retained = output.map(|bytes| &bytes[..bytes.len().min(CARGO_FAILURE_CAPTURE_BYTES)]);
+    let (evidence_identity, identity_status) = match cargo_failure_identity(root) {
+        Ok(identity) => (Some(identity), "bound"),
+        Err(_) => (None, "unavailable"),
+    };
+    let metadata = json!({
+        "format":1,
+        "stage":stage,
+        "identity":evidence_identity,
+        "identity_status":identity_status,
+        "diagnostic_only_not_a_preparation_or_runtime_receipt":true,
+        "log_pointer":{"job":std::env::var("GITHUB_JOB").ok(),"stage":stage,"channel":"Actions Cargo outcome metadata"},
+        "cargo_process":process,
+        "capture_problem":problem,
+        "capture_bytes":output.map(<[u8]>::len),
+        "capture_digest":output.map(digest),
+        "retained_bytes":retained.map(<[u8]>::len),
+        "retained_digest":retained.map(digest),
+        "complete":output.is_some_and(|bytes| bytes.len() <= CARGO_FAILURE_CAPTURE_BYTES),
+        "rust_diagnostic_codes":diagnostic_codes,
+        "sccache_diagnostics":sccache_diagnostics(output),
+        // Job-wide absolute counters, not proof that Cargo itself was OOM-killed.
+        "cgroup_memory_at_failure":cargo_memory_diagnostics(Path::new("/sys/fs/cgroup")),
+        "raw_retention":"private job-workspace spool only; not durable after runner disposal",
+        "cleanup_signal_is_not_original_exit":true,
+    });
+    fs::write(
+        directory.join("manifest.json"),
+        serde_json::to_vec_pretty(&metadata)?,
+    )?;
+    Ok(())
+}
+
+fn cargo_failure_identity(root: &Path) -> Result<Identity> {
+    let snapshot = super::verification_snapshot(root, "verify")?;
+    identity(root, &snapshot)
+}
+
+fn report_cargo_capture(
+    root: &Path,
+    stage: &'static str,
+    process: CargoProcessOutcome,
+    output: std::io::Result<Vec<u8>>,
+) -> Result<Vec<serde_json::Value>> {
+    let (output, mut problem) = match output {
+        Ok(output) => (Some(output), None),
+        Err(error) => (
+            None,
+            Some(CargoCaptureProblem {
+                category: "read",
+                line: None,
+                byte_offset: None,
+                os_error: error.raw_os_error(),
+            }),
+        ),
+    };
+    let mut messages = Vec::new();
+    let mut offset = 0;
+    // Preserve failed-command evidence before any JSON decoding. A parser or
+    // evidence failure can add context, but cannot replace this process result.
+    let early_evidence = (process.category != "success")
+        .then(|| retain_cargo_failure(root, stage, &process, &problem, output.as_deref()));
+    if let Some(output) = &output {
+        for (index, line) in output.split(|byte| *byte == b'\n').enumerate() {
+            if !line.is_empty() {
+                match day2::json::decode::<serde_json::Value>(line) {
+                    Ok(value) => messages.push(value),
+                    Err(_) => {
+                        if problem.is_none() {
+                            problem = Some(CargoCaptureProblem {
+                                category: "json",
+                                line: Some(index + 1),
+                                byte_offset: Some(offset),
+                                os_error: None,
+                            });
+                        }
+                    }
+                }
+            }
+            offset += line.len() + 1;
+        }
+    }
+    if process.category != "success" || problem.is_some() {
+        let diagnostic_codes: BTreeSet<String> = messages
+            .iter()
+            .filter(|message| message["reason"] == "compiler-message")
+            .filter_map(|message| message["message"]["code"]["code"].as_str())
+            .filter(|code| {
+                code.len() == 5
+                    && code.starts_with('E')
+                    && code.as_bytes()[1..].iter().all(u8::is_ascii_digit)
+            })
+            .take(32)
+            .map(str::to_owned)
+            .collect();
+        let evidence = match early_evidence {
+            Some(result) => result,
+            None => retain_cargo_failure(root, stage, &process, &problem, output.as_deref()),
+        };
+        let retained = evidence
+            .and_then(|directory| {
+                write_cargo_failure_manifest(
+                    &directory,
+                    root,
+                    stage,
+                    &process,
+                    &problem,
+                    output.as_deref(),
+                    &diagnostic_codes,
+                )
+            })
+            .is_ok();
+        // Neither free-form compiler text nor malformed bytes enter the error.
+        // Registered-secret masking on the runner is not a private raw archive.
+        let failure = CargoReportingFailure {
+            stage,
+            process,
+            capture: problem,
+            retained,
+        };
+        eprintln!("{failure}");
+        eprintln!("Cargo diagnostic codes: {diagnostic_codes:?}");
+        eprintln!(
+            "Cargo sccache diagnostics: {:?}",
+            sccache_diagnostics(output.as_deref())
+        );
+        return Err(failure.into());
+    }
+    for message in &messages {
+        if message["reason"] == "compiler-message"
+            && let Some(rendered) = message["message"]["rendered"].as_str()
+        {
+            print!("{rendered}");
+        }
+    }
+    Ok(messages)
+}
+
+fn capture_cargo(
+    root: &Path,
+    stage: &'static str,
+    command: &mut Command,
+    budget: Duration,
+) -> Result<Vec<serde_json::Value>> {
+    let capture = tempfile::NamedTempFile::new_in(root.join("artifacts"))?;
+    command.stdout(capture.as_file().try_clone()?);
+    let process = CargoProcessOutcome::observed(command_status_with_budget(root, command, budget));
+    // Observe process status before reading or decoding its captured output.
+    report_cargo_capture(root, stage, process, fs::read(capture.path()))
+}
 
 #[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -430,33 +794,22 @@ fn build_auxiliaries(
         std::env::consts::OS == "linux",
         "native Linux launcher preparation required"
     );
-    let capture = tempfile::NamedTempFile::new_in(root.join("artifacts"))?;
-    run_with_budget(
+    let messages = capture_cargo(
         root,
-        Command::new("cargo")
-            .args([
-                "build",
-                "--locked",
-                "-p",
-                "day2-sandbox",
-                "--bins",
-                "--message-format=json-render-diagnostics",
-            ])
-            .stdout(capture.as_file().try_clone()?),
+        "auxiliaries",
+        Command::new("cargo").args([
+            "build",
+            "--locked",
+            "-p",
+            "day2-sandbox",
+            "--bins",
+            "--message-format=json-render-diagnostics",
+        ]),
         Duration::from_secs(12600),
     )?;
     let mut binaries = Vec::new();
     let mut finished = false;
-    for line in fs::read(capture.path())?
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-    {
-        let value: serde_json::Value = day2::json::decode(line)?;
-        if value["reason"] == "compiler-message"
-            && let Some(rendered) = value["message"]["rendered"].as_str()
-        {
-            print!("{rendered}");
-        }
+    for value in messages {
         if value["reason"] == "build-finished" {
             finished = value["success"] == true;
         }
@@ -673,9 +1026,9 @@ pub(super) fn build(root: &Path, snapshot: &str) -> Result<()> {
     }
     // Capture Cargo's authoritative executable inventory, including empty
     // binary harnesses. No package or target selection differs from `verify`.
-    let capture = tempfile::NamedTempFile::new_in(root.join("artifacts"))?;
-    let compilation = run_with_budget(
+    let messages = capture_cargo(
         root,
+        "tests",
         Command::new("cargo")
             .args([
                 "test",
@@ -683,33 +1036,15 @@ pub(super) fn build(root: &Path, snapshot: &str) -> Result<()> {
                 "--no-run",
                 "--message-format=json-render-diagnostics",
             ])
-            .args(WORKSPACE_TEST_ARGUMENTS)
-            .stdout(capture.as_file().try_clone()?),
+            .args(WORKSPACE_TEST_ARGUMENTS),
         Duration::from_secs(12600),
-    );
-    let output = fs::read(capture.path())?;
-    for line in output
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-    {
-        let message: serde_json::Value = day2::json::decode(line)?;
-        if message["reason"] == "compiler-message"
-            && let Some(rendered) = message["message"]["rendered"].as_str()
-        {
-            print!("{rendered}");
-        }
-    }
-    compilation?;
+    )?;
     let mut binaries = Vec::new();
     let mut programs = Vec::new();
     let mut observed = BTreeSet::new();
     let mut observed_programs = BTreeSet::new();
     let mut finished = false;
-    for line in output
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-    {
-        let message: serde_json::Value = day2::json::decode(line)?;
+    for message in messages {
         if message["reason"] == "build-finished" {
             finished = message["success"] == true;
         }
@@ -1336,6 +1671,398 @@ pub(super) fn join(
 mod tests {
     use super::*;
 
+    fn cargo_capture_root() -> Result<tempfile::TempDir> {
+        let root = tempfile::tempdir()?;
+        fs::create_dir(root.path().join("artifacts"))?;
+        Ok(root)
+    }
+
+    fn cargo_failure_manifest(root: &Path) -> Result<(PathBuf, serde_json::Value)> {
+        let entries = fs::read_dir(root.join("artifacts"))?.collect::<std::io::Result<Vec<_>>>()?;
+        let directories: Vec<_> = entries
+            .into_iter()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("ci-compiler-failure-")
+            })
+            .collect();
+        ensure!(directories.len() == 1, "one current failure spool required");
+        let directory = directories[0].path();
+        let manifest = day2::json::decode(&fs::read(directory.join("manifest.json"))?)?;
+        Ok((directory, manifest))
+    }
+
+    fn cargo_control_command(mode: &str) -> Result<Command> {
+        let mut command = Command::new(std::env::current_exe()?);
+        command
+            .args([
+                "--exact",
+                "verification::shards::tests::cargo_failure_child",
+                "--nocapture",
+            ])
+            .env("DAY2_CARGO_CAPTURE_CONTROL", mode);
+        Ok(command)
+    }
+
+    // Subprocess helper, not an independent semantic control. The real child
+    // exercises the same spawn/timeout/wait and stdout path as Cargo.
+    #[test]
+    fn cargo_failure_child() {
+        let Ok(mode) = std::env::var("DAY2_CARGO_CAPTURE_CONTROL") else {
+            return;
+        };
+        println!("PRIVATE-CARGO-CONTROL-INVALID-OUTPUT");
+        if mode == "timeout" {
+            std::thread::sleep(Duration::from_secs(10));
+        }
+        std::process::exit(if mode == "success" { 0 } else { 2 });
+    }
+
+    #[test]
+    fn cargo_nonzero_remains_primary_when_real_child_stdout_is_malformed() -> Result<()> {
+        let root = cargo_capture_root()?;
+        let error = capture_cargo(
+            root.path(),
+            "tests",
+            &mut cargo_control_command("failure")?,
+            Duration::from_secs(3),
+        )
+        .unwrap_err();
+        let failure = error
+            .downcast_ref::<CargoReportingFailure>()
+            .context("typed Cargo outcome")?;
+        assert_eq!(failure.process.category, "exit");
+        assert_eq!(failure.process.code, Some(2));
+        assert_eq!(failure.capture.as_ref().map(|p| p.category), Some("json"));
+        assert!(failure.retained);
+        assert!(!error.to_string().contains("PRIVATE-CARGO"));
+        let (directory, manifest) = cargo_failure_manifest(root.path())?;
+        let raw = fs::read(directory.join("stdout.bin"))?;
+        assert!(String::from_utf8_lossy(&raw).contains("PRIVATE-CARGO-CONTROL-INVALID-OUTPUT"));
+        assert_eq!(manifest["cargo_process"]["code"], 2);
+        assert_eq!(manifest["complete"], true);
+        assert_eq!(manifest["identity_status"], "unavailable");
+        assert!(manifest["identity"].is_null());
+        assert_eq!(
+            manifest["diagnostic_only_not_a_preparation_or_runtime_receipt"],
+            true
+        );
+        assert!(!manifest.to_string().contains("PRIVATE-CARGO"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(directory.join("stdout.bin"))?
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+            assert_eq!(fs::metadata(directory)?.permissions().mode() & 0o777, 0o700);
+        }
+        assert!(!root.path().join(PREPARED).exists());
+        assert!(!root.path().join(BINARIES).exists());
+        Ok(())
+    }
+
+    #[test]
+    fn cargo_success_with_real_malformed_output_cannot_be_admitted() -> Result<()> {
+        let root = cargo_capture_root()?;
+        let error = capture_cargo(
+            root.path(),
+            "auxiliaries",
+            &mut cargo_control_command("success")?,
+            Duration::from_secs(3),
+        )
+        .unwrap_err();
+        let failure = error
+            .downcast_ref::<CargoReportingFailure>()
+            .context("typed Cargo outcome")?;
+        assert_eq!(failure.process.category, "success");
+        assert_eq!(failure.process.code, Some(0));
+        assert_eq!(failure.capture.as_ref().map(|p| p.category), Some("json"));
+        assert!(error.to_string().contains("primary=capture"));
+        assert!(!root.path().join(PREPARED).exists());
+        Ok(())
+    }
+
+    #[test]
+    fn cargo_timeout_remains_primary_without_fabricating_an_original_signal() -> Result<()> {
+        let root = cargo_capture_root()?;
+        let started = Instant::now();
+        let error = capture_cargo(
+            root.path(),
+            "tests",
+            &mut cargo_control_command("timeout")?,
+            Duration::from_millis(100),
+        )
+        .unwrap_err();
+        let failure = error
+            .downcast_ref::<CargoReportingFailure>()
+            .context("typed Cargo outcome")?;
+        assert_eq!(failure.process.category, "timeout");
+        assert_eq!(failure.process.code, None);
+        assert_eq!(failure.process.signal, None);
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(!error.to_string().contains("PRIVATE-CARGO"));
+        Ok(())
+    }
+
+    #[test]
+    fn cargo_spawn_refusal_keeps_errno_without_exporting_the_command_path() -> Result<()> {
+        let root = cargo_capture_root()?;
+        let mut command = Command::new(root.path().join("PRIVATE-CARGO-NONEXISTENT-COMMAND"));
+        let error =
+            capture_cargo(root.path(), "tests", &mut command, Duration::from_secs(1)).unwrap_err();
+        let failure = error
+            .downcast_ref::<CargoReportingFailure>()
+            .context("typed Cargo outcome")?;
+        assert_eq!(failure.process.category, "spawn");
+        assert!(failure.process.os_error.is_some());
+        assert_eq!(failure.process.code, None);
+        assert!(!error.to_string().contains("PRIVATE-CARGO"));
+        Ok(())
+    }
+
+    fn failed_cargo_outcome() -> CargoProcessOutcome {
+        CargoProcessOutcome {
+            category: "exit",
+            code: Some(2),
+            signal: None,
+            os_error: None,
+        }
+    }
+
+    #[test]
+    fn sccache_diagnostics_allow_only_exact_wrapper_status_and_bounded_signals() {
+        let output = b"sccache: Compile terminated by signal 9\r\nsccache: Compiler killed by signal 15\nsccache: Missing compiler exit status!\nsccache: Compile terminated by signal 9\n";
+        assert_eq!(
+            sccache_diagnostics(Some(output)),
+            BTreeSet::from([
+                SccacheDiagnostic::CompilerSignal { signal: 9 },
+                SccacheDiagnostic::CompilerSignal { signal: 15 },
+                SccacheDiagnostic::MissingCompilerStatus,
+            ])
+        );
+        for output in [
+            b"sccache: Compile terminated by signal 0".as_slice(),
+            b"sccache: Compile terminated by signal 65".as_slice(),
+            b"sccache: Compile terminated by signal -9".as_slice(),
+            b"sccache: Compile terminated by signal 999999999999999999999".as_slice(),
+            b"sccache: Compile terminated by signal 9 PRIVATE-CARGO".as_slice(),
+            b"sccache: Missing compiler exit status! PRIVATE-CARGO".as_slice(),
+            b"PRIVATE-CARGO sccache: Compile terminated by signal 9".as_slice(),
+            b"sccache: Compile terminated by signal \xff".as_slice(),
+            b"{\"rendered\":\"sccache: Compile terminated by signal 9\"}".as_slice(),
+        ] {
+            assert!(sccache_diagnostics(Some(output)).is_empty());
+        }
+        assert!(sccache_diagnostics(None).is_empty());
+    }
+
+    #[test]
+    fn cargo_wrapper_signal_is_durable_without_replacing_status_or_admitting_output() -> Result<()>
+    {
+        for process in [
+            CargoProcessOutcome {
+                code: Some(101),
+                ..failed_cargo_outcome()
+            },
+            CargoProcessOutcome {
+                category: "success",
+                code: Some(0),
+                ..failed_cargo_outcome()
+            },
+        ] {
+            let root = cargo_capture_root()?;
+            let original_code = process.code;
+            let output = b"PRIVATE-CARGO-INVALID\nsccache: Compile terminated by signal 9\nsccache: Compile terminated by signal 15 PRIVATE-CARGO\n{\"reason\":\"build-finished\",\"success\":false}\n";
+            let error = report_cargo_capture(root.path(), "tests", process, Ok(output.to_vec()))
+                .unwrap_err();
+            let failure = error
+                .downcast_ref::<CargoReportingFailure>()
+                .context("typed Cargo outcome")?;
+            assert_eq!(failure.process.code, original_code);
+            assert_eq!(failure.process.signal, None);
+            assert!(failure.capture.is_some());
+            let (_, manifest) = cargo_failure_manifest(root.path())?;
+            assert_eq!(
+                manifest["sccache_diagnostics"],
+                json!([{"kind":"compiler_signal","signal":9}])
+            );
+            assert_eq!(manifest["cargo_process"]["code"], json!(original_code));
+            assert!(manifest["cargo_process"]["signal"].is_null());
+            assert!(!manifest.to_string().contains("PRIVATE-CARGO"));
+            assert!(!error.to_string().contains("PRIVATE-CARGO"));
+            assert!(!root.path().join(PREPARED).exists());
+            assert!(!root.path().join(BINARIES).exists());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn cargo_memory_diagnostics_are_optional_numeric_kernel_counters() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        assert!(cargo_memory_diagnostics(directory.path()).is_none());
+        fs::write(directory.path().join("memory.max"), "6442450944\n")?;
+        fs::write(directory.path().join("memory.peak"), "6442450944\n")?;
+        fs::write(
+            directory.path().join("memory.events"),
+            "low 0\noom 2\noom_kill 1\nPRIVATE-CARGO\n",
+        )?;
+        let memory =
+            cargo_memory_diagnostics(directory.path()).context("numeric memory evidence")?;
+        assert_eq!(memory.limit_bytes, Some(6442450944));
+        assert_eq!(memory.peak_bytes, Some(6442450944));
+        assert_eq!(memory.oom_events, Some(2));
+        assert_eq!(memory.oom_kills, Some(1));
+        assert!(!serde_json::to_string(&memory)?.contains("PRIVATE-CARGO"));
+        fs::write(directory.path().join("memory.max"), "max\n")?;
+        fs::write(directory.path().join("memory.peak"), "PRIVATE-CARGO\n")?;
+        fs::write(
+            directory.path().join("memory.events"),
+            "oom 1 PRIVATE-CARGO\noom_kill -1\n",
+        )?;
+        assert!(cargo_memory_diagnostics(directory.path()).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn cargo_later_valid_diagnostics_survive_an_earlier_malformed_record() -> Result<()> {
+        let root = cargo_capture_root()?;
+        let mut output = b"PRIVATE-CARGO-INVALID\n".to_vec();
+        output.extend(serde_json::to_vec(&json!({
+            "reason":"compiler-message",
+            "message":{"code":{"code":"E0308"},"rendered":"PRIVATE-CARGO-RENDERED"}
+        }))?);
+        let error = report_cargo_capture(root.path(), "tests", failed_cargo_outcome(), Ok(output))
+            .unwrap_err();
+        let failure = error
+            .downcast_ref::<CargoReportingFailure>()
+            .context("typed Cargo outcome")?;
+        assert_eq!(failure.process.code, Some(2));
+        assert_eq!(failure.capture.as_ref().and_then(|p| p.line), Some(1));
+        let (_, manifest) = cargo_failure_manifest(root.path())?;
+        assert_eq!(manifest["rust_diagnostic_codes"], json!(["E0308"]));
+        assert!(!manifest.to_string().contains("PRIVATE-CARGO"));
+        Ok(())
+    }
+
+    #[test]
+    fn cargo_valid_output_does_not_turn_a_failed_compile_into_success() -> Result<()> {
+        let root = cargo_capture_root()?;
+        let output = serde_json::to_vec(&json!({"reason":"build-finished","success":false}))?;
+        let error = report_cargo_capture(
+            root.path(),
+            "auxiliaries",
+            failed_cargo_outcome(),
+            Ok(output),
+        )
+        .unwrap_err();
+        let failure = error
+            .downcast_ref::<CargoReportingFailure>()
+            .context("typed Cargo outcome")?;
+        assert_eq!(failure.process.code, Some(2));
+        assert!(failure.capture.is_none());
+        assert!(failure.retained);
+        Ok(())
+    }
+
+    #[test]
+    fn cargo_evidence_write_and_capture_read_failures_stay_secondary() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        fs::write(root.path().join("artifacts"), b"not a directory")?;
+        for (output, category) in [
+            (Err(std::io::Error::from_raw_os_error(5)), "read"),
+            (Ok(b"PRIVATE-CARGO-INVALID".to_vec()), "json"),
+        ] {
+            let error = report_cargo_capture(root.path(), "tests", failed_cargo_outcome(), output)
+                .unwrap_err();
+            let failure = error
+                .downcast_ref::<CargoReportingFailure>()
+                .context("typed Cargo outcome")?;
+            assert_eq!(failure.process.code, Some(2));
+            assert_eq!(failure.capture.as_ref().map(|p| p.category), Some(category));
+            assert!(!failure.retained);
+            assert!(error.to_string().contains("primary=exit"));
+            assert!(!error.to_string().contains("PRIVATE-CARGO"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn cargo_failure_spool_is_bounded_and_explicitly_incomplete() -> Result<()> {
+        let root = cargo_capture_root()?;
+        let output = vec![b'x'; CARGO_FAILURE_CAPTURE_BYTES + 1];
+        let error = report_cargo_capture(root.path(), "tests", failed_cargo_outcome(), Ok(output))
+            .unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<CargoReportingFailure>()
+                .context("typed Cargo outcome")?
+                .retained
+        );
+        let (directory, manifest) = cargo_failure_manifest(root.path())?;
+        assert_eq!(manifest["capture_bytes"], CARGO_FAILURE_CAPTURE_BYTES + 1);
+        assert_eq!(manifest["retained_bytes"], CARGO_FAILURE_CAPTURE_BYTES);
+        assert_eq!(manifest["complete"], false);
+        assert_eq!(
+            fs::metadata(directory.join("stdout.bin"))?.len(),
+            CARGO_FAILURE_CAPTURE_BYTES as u64
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cargo_success_keeps_valid_messages_without_a_failure_spool() -> Result<()> {
+        let root = cargo_capture_root()?;
+        let message = json!({"reason":"build-finished","success":true});
+        let outcome = CargoProcessOutcome {
+            category: "success",
+            code: Some(0),
+            signal: None,
+            os_error: None,
+        };
+        let messages = report_cargo_capture(
+            root.path(),
+            "tests",
+            outcome,
+            Ok(serde_json::to_vec(&message)?),
+        )?;
+        assert_eq!(messages, vec![message]);
+        assert_eq!(fs::read_dir(root.path().join("artifacts"))?.count(), 0);
+        // Hosted controls also exercise the genuine source/run/snapshot path.
+        // Local unit runs without hosted run identity do not fabricate one.
+        if let (Ok(run), Ok(attempt)) = (
+            std::env::var("GITHUB_RUN_ID"),
+            std::env::var("GITHUB_RUN_ATTEMPT"),
+        ) {
+            let source_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .context("crates directory")?
+                .parent()
+                .context("workspace directory")?;
+            let binding = cargo_failure_identity(source_root)?;
+            assert_eq!(binding.run, run);
+            assert_eq!(binding.attempt, attempt);
+            assert_eq!(
+                binding.snapshot,
+                super::super::verification_snapshot(source_root, "verify")?
+            );
+            assert_eq!(
+                binding.source_identity,
+                super::super::verification_source_identity(source_root, "verify")?
+            );
+            assert_eq!(binding.workspace, source_root.canonicalize()?);
+            assert_eq!(binding.workflow, day2::automation::source_digest());
+            assert_eq!(binding.checkout.len(), 40);
+            assert_eq!(binding.tree.len(), 40);
+        }
+        Ok(())
+    }
+
     pub(super) fn sample_identity() -> Identity {
         Identity {
             checkout: "a".repeat(40),
@@ -1391,8 +2118,8 @@ mod tests {
             &sample_identity(),
         )?;
         assert_eq!(complete.passed, preparation_steps()?);
-        assert_eq!(complete.fixtures.len(), 22);
-        for fixture in ["lifecycle", "verification-actors"] {
+        assert_eq!(complete.fixtures.len(), 23);
+        for fixture in ["lifecycle", "verification-actors", "chart-live"] {
             assert!(complete.fixtures.contains_key(fixture));
             let mut incomplete = sample_part("inputs")?;
             incomplete.fixtures.remove(fixture);
@@ -1844,7 +2571,7 @@ mod tests {
                 .iter()
                 .filter(|step| step.starts_with("build-"))
                 .count(),
-            22
+            23
         );
         assert!(steps.contains("build-lifecycle"));
         assert!(steps.contains("build-verification-actors"));
