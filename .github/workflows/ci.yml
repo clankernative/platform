@@ -790,8 +790,13 @@ jobs:
           if-no-files-found: error
           retention-days: 3
 
-      # FACTS/control preflight only: new native sites are reviewed after closure.
-      # It neither runs architecture-check nor installs/builds/runs Reports.
+      # Strict adapter prerequisite only; no installer, Bazel or Reports runtime.
+      - name: Require empty formatter output
+        run: git diff --exit-code
+      - name: Require exact reviewed native sites, dependency roles and proofs
+        run: target/debug/xtask architecture-check
+      - name: Compile the actual current Roc operational runner
+        run: target/debug/xtask workflows
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Exercise the whole source-derived experiment case control module
         run: |
@@ -799,7 +804,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: ${{ always() }}
         with:
-          name: day2-bazel-reports-preflight-${{ github.run_id }}-${{ github.run_attempt }}
+          name: day2-bazel-reports-strict-preflight-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             /tmp/day2-ci-linux-context.json
             /tmp/day2-format.patch
@@ -808,6 +813,7 @@ jobs:
             /tmp/day2-architecture-proofs.json
             Cargo.lock
             target/debug/xtask.d
+            target/debug/day2-workflows.json
           if-no-files-found: error
           retention-days: 14
 

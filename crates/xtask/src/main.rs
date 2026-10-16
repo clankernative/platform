@@ -9,11 +9,11 @@ use std::{
 };
 
 mod app_contracts;
-mod bazel_experiment;
 mod architecture;
 mod architecture_dependencies;
 mod architecture_kernel;
 mod architecture_proofs;
+mod bazel_experiment;
 mod build_native;
 mod control_simulation;
 mod formatter_bootstrap;
@@ -1022,7 +1022,10 @@ fn main() -> Result<()> {
             workflows::build(&root)?;
         }
         "experiment-bazel-install" | "experiment-bazel-reports" => {
-            ensure!(args.next().is_none(), "Bazel experiment accepts no overrides");
+            ensure!(
+                args.next().is_none(),
+                "Bazel experiment accepts no overrides"
+            );
             if action == "experiment-bazel-install" {
                 bazel_experiment::install(&root)?;
             } else {
