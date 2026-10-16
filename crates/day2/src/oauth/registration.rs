@@ -509,7 +509,10 @@ impl Authorization {
             super::protocol::ParsedCallback::Code { issuer, .. }
             | super::protocol::ParsedCallback::Denied { issuer, .. } => issuer.as_deref(),
         };
-        ensure!(issuer == Some(self.issuer.as_str()), "Provider canary callback issuer mismatch");
+        ensure!(
+            issuer == Some(self.issuer.as_str()),
+            "Provider canary callback issuer mismatch"
+        );
         Ok(())
     }
 
@@ -519,10 +522,7 @@ impl Authorization {
                 && self.started.elapsed() < Duration::from_secs(VALID_SECONDS as u64),
             "Provider canary session expired or changed"
         );
-        let parsed = super::protocol::parse_callback(
-            query,
-            &self.adapter.callback_parameters(),
-        )?;
+        let parsed = super::protocol::parse_callback(query, &self.adapter.callback_parameters())?;
         let super::protocol::ParsedCallback::Code {
             code,
             state,

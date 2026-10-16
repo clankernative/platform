@@ -364,9 +364,14 @@ impl Shell {
         )?;
         let (state, issuer) = match &parsed {
             protocol::ParsedCallback::Code { state, issuer, .. }
-            | protocol::ParsedCallback::Denied { state, issuer, .. } => (state.as_str(), issuer.as_deref()),
+            | protocol::ParsedCallback::Denied { state, issuer, .. } => {
+                (state.as_str(), issuer.as_deref())
+            }
         };
-        ensure!(issuer == Some(crate::oauth::google::ISSUER), "OAuth callback issuer changed");
+        ensure!(
+            issuer == Some(crate::oauth::google::ISSUER),
+            "OAuth callback issuer changed"
+        );
         let Some(tail) = state.strip_prefix("product.") else {
             return Ok(None);
         };
@@ -557,9 +562,14 @@ mod tests {
     fn callback_query(state: &str, issuer: Option<&str>, denied: bool) -> String {
         let mut query = url::form_urlencoded::Serializer::new(String::new());
         query.append_pair("state", state);
-        if denied { query.append_pair("error", "access_denied"); }
-        else { query.append_pair("code", "private-code"); }
-        if let Some(issuer) = issuer { query.append_pair("iss", issuer); }
+        if denied {
+            query.append_pair("error", "access_denied");
+        } else {
+            query.append_pair("code", "private-code");
+        }
+        if let Some(issuer) = issuer {
+            query.append_pair("iss", issuer);
+        }
         query.finish()
     }
 
@@ -584,13 +594,14 @@ mod tests {
             let manager = crate::oauth::management::app::Manager::new(runtime, authority);
             let view = manager.capture("calendar", Action::Connect, &identity, 102)?;
             // Fixture times stay within the original pending interval.
-            let proof = Arc::new(
-                VerifiedAuthTime::from_google(crate::oauth::shell_oidc::Reauthenticated::fixture(
+            let proof = Arc::new(VerifiedAuthTime::from_google(
+                crate::oauth::shell_oidc::Reauthenticated::fixture(
                     FreshIntent::management(&view, &identity)?,
                     identity.email.clone(),
                     identity.subject.clone(),
                     103,
-                )));
+                ),
+            ));
             let state = format!("product.{}.{}", view.id, "r".repeat(43));
             let token = "t".repeat(43);
             let digest = Digest::new(token.as_bytes());
@@ -653,16 +664,39 @@ mod tests {
                     callback_query(&state, Some("https://attacker.example"), denied),
                     format!("{query}&iss={}", crate::oauth::google::ISSUER),
                 ] {
-                assert!(shell.provider_callback(CallbackRequest { method: &Method::GET, path: &path, query: Some(&invalid), headers: &headers, body: &[] }, &identity, 104).is_err());
-                let sessions = shell.sessions.lock().unwrap();
-                assert_eq!(sessions.len(), 1);
-                let retained = sessions.get(digest.as_str()).context("session disappeared")?;
-                assert_eq!(retained.view, view);
-                assert_eq!(retained.digest, digest);
-                assert_eq!(retained.csrf, "csrf");
-                assert!(Arc::ptr_eq(&retained.proof, &proof));
-                assert!(retained.stage == Stage::Provider { state: crate::oauth::connect::callback_state_hash(state.as_bytes())? });
-                assert_eq!(bearers.0.load(SeqCst), 0);
+                    assert!(
+                        shell
+                            .provider_callback(
+                                CallbackRequest {
+                                    method: &Method::GET,
+                                    path: &path,
+                                    query: Some(&invalid),
+                                    headers: &headers,
+                                    body: &[]
+                                },
+                                &identity,
+                                104
+                            )
+                            .is_err()
+                    );
+                    let sessions = shell.sessions.lock().unwrap();
+                    assert_eq!(sessions.len(), 1);
+                    let retained = sessions
+                        .get(digest.as_str())
+                        .context("session disappeared")?;
+                    assert_eq!(retained.view, view);
+                    assert_eq!(retained.digest, digest);
+                    assert_eq!(retained.csrf, "csrf");
+                    assert!(Arc::ptr_eq(&retained.proof, &proof));
+                    assert!(
+                        retained.stage
+                            == Stage::Provider {
+                                state: crate::oauth::connect::callback_state_hash(
+                                    state.as_bytes()
+                                )?
+                            }
+                    );
+                    assert_eq!(bearers.0.load(SeqCst), 0);
                 }
             }
             let query = callback_query(&state, Some(crate::oauth::google::ISSUER), false);

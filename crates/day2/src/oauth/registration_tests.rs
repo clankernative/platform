@@ -1081,15 +1081,27 @@ fn authorization_derives_s256_and_accepts_only_its_fresh_session_and_state() -> 
     Ok(())
 }
 
-pub(in crate::oauth) fn authorization_snapshot(authorization: &Authorization) -> Result<(Digest, Instant)> {
-    let purpose = match authorization.purpose { Purpose::Positive => "positive", Purpose::RejectPkce => "pkce", Purpose::RejectCredential => "credential" };
-    let adapter = match authorization.adapter { catalog::Adapter::GoogleCalendar => "google", catalog::Adapter::GitlabProjects => "gitlab" };
-    Ok((Digest::of(&json!({
-        "state":Digest::new(authorization.state.as_bytes()),
-        "verifier":Digest::new(authorization.verifier.as_bytes()),
-        "target":authorization.target,"purpose":purpose,"session":authorization.session,
-        "issuer":authorization.issuer,"adapter":adapter
-    }))?, authorization.started))
+pub(in crate::oauth) fn authorization_snapshot(
+    authorization: &Authorization,
+) -> Result<(Digest, Instant)> {
+    let purpose = match authorization.purpose {
+        Purpose::Positive => "positive",
+        Purpose::RejectPkce => "pkce",
+        Purpose::RejectCredential => "credential",
+    };
+    let adapter = match authorization.adapter {
+        catalog::Adapter::GoogleCalendar => "google",
+        catalog::Adapter::GitlabProjects => "gitlab",
+    };
+    Ok((
+        Digest::of(&json!({
+            "state":Digest::new(authorization.state.as_bytes()),
+            "verifier":Digest::new(authorization.verifier.as_bytes()),
+            "target":authorization.target,"purpose":purpose,"session":authorization.session,
+            "issuer":authorization.issuer,"adapter":adapter
+        }))?,
+        authorization.started,
+    ))
 }
 
 #[test]
@@ -1099,16 +1111,22 @@ fn gitlab_qualification_keeps_optional_issuer_but_rejects_a_supplied_wrong_issue
     for issuer in [None, Some(target.reviewed.issuer_url.as_str())] {
         let (authorization, _) = Authorization::begin(&target, Purpose::Positive, session.clone())?;
         let mut query = url::form_urlencoded::Serializer::new(String::new());
-        query.append_pair("state", &authorization.state).append_pair("code", CODE_CANARY);
-        if let Some(issuer) = issuer { query.append_pair("iss", issuer); }
+        query
+            .append_pair("state", &authorization.state)
+            .append_pair("code", CODE_CANARY);
+        if let Some(issuer) = issuer {
+            query.append_pair("iss", issuer);
+        }
         let query = query.finish();
         authorization.validate_required_issuer(query.as_bytes())?;
         authorization.complete(query.as_bytes(), &session)?;
     }
     let (authorization, _) = Authorization::begin(&target, Purpose::Positive, session.clone())?;
     let query = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("state", &authorization.state).append_pair("code", CODE_CANARY)
-        .append_pair("iss", "https://attacker.example").finish();
+        .append_pair("state", &authorization.state)
+        .append_pair("code", CODE_CANARY)
+        .append_pair("iss", "https://attacker.example")
+        .finish();
     assert!(authorization.complete(query.as_bytes(), &session).is_err());
     Ok(())
 }

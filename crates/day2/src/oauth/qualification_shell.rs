@@ -353,7 +353,8 @@ impl Canaries {
             .pending
             .get(&key)
             .context("canary session expired or replayed")?;
-        if let (Some(query), Stage::Authorization(authorization)) = (callback_query, &pending.stage) {
+        if let (Some(query), Stage::Authorization(authorization)) = (callback_query, &pending.stage)
+        {
             authorization.validate_required_issuer(query.as_bytes())?;
         }
         let pending = state
