@@ -3770,10 +3770,17 @@ pub(super) mod tests {
             .into();
         app.readers = BTreeSet::from(["alice@example.com".into()]);
         let original = &fixture.artifacts["workspace"];
+        let mut contract = original.contract().clone();
+        // The catalog fixture is intentionally abstract. Actual Runtime
+        // initialization requires a nonempty, valid product schema.
+        contract.schema = serde_json::from_value(json!({
+            "models":{"entries":{"fields":{"note":"text"}}},
+            "inputs":{"input":{"fields":{}}},"foreign_keys":[]
+        }))?;
         let artifact = LoadedArtifact::from_contract_for_tests(
             original.id().into(),
             artifact_path,
-            original.contract().clone(),
+            contract,
         );
         fixture
             .artifacts
