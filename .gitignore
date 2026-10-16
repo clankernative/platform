@@ -56,3 +56,6 @@ Thumbs.db
 .idea/
 .vscode/
 /infra/local.json
+
+# Isolated Bazel experiment output symlinks and local state.
+/bazel-*

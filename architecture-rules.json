@@ -414,6 +414,7 @@
     "crates/xtask/src/architecture_dependencies.rs",
     "crates/xtask/src/architecture_kernel.rs",
     "crates/xtask/src/architecture_proofs.rs",
+    "crates/xtask/src/bazel_experiment.rs",
     "crates/xtask/src/build_native.rs",
     "crates/xtask/src/control_simulation.rs",
     "crates/xtask/src/formatter_bootstrap.rs",
@@ -2291,6 +2292,177 @@
     {"source":"crates/day2/src/security_epoch/storage_authority/preparation.rs","kind":"filesystem","target":"rustix::fs::statx","context":"check_file_identity","fingerprint":"76f2e0bcdc2854704f9cc816a0832e634706f99cdfe549c84aeb8e37adbae7b4","count":1,"reason":"Owner: closed native storage/original-file preparation. Original interval and consuming retained owners; fixed exclusive leaf, bounded same-descriptor writes/sync/readback and exact selection/current checks. Production issuer remains absent; these operations establish no physical provider durability, P3 acknowledgment or current execution authority."},
     {"source":"crates/day2/src/security_epoch/storage_authority/preparation.rs","kind":"filesystem","target":"rustix::fs::statx","context":"observe_file","fingerprint":"2ece275f1cbd1ec4656b5a3fd69c51c2c20b4b2b845140029beab65253f72c51","count":1,"reason":"Owner: closed native storage/original-file preparation. Original interval and consuming retained owners; fixed exclusive leaf, bounded same-descriptor writes/sync/readback and exact selection/current checks. Production issuer remains absent; these operations establish no physical provider durability, P3 acknowledgment or current execution authority."},
     {"source":"crates/day2/src/security_epoch/storage_authority/preparation.rs","kind":"filesystem","target":"rustix::fs::statx","context":"observe_file","fingerprint":"3e32be2068181f4264bac61a212d52d3cccfee006f5193cb97ee80699585c1b0","count":1,"reason":"Owner: closed native storage/original-file preparation. Original interval and consuming retained owners; fixed exclusive leaf, bounded same-descriptor writes/sync/readback and exact selection/current checks. Production issuer remains absent; these operations establish no physical provider durability, P3 acknowledgment or current execution authority."},
-    {"source":"crates/day2/src/security_epoch/storage_authority/preparation.rs","kind":"filesystem","target":"rustix::io::pread","context":"OriginalCreatorFd::check_unchanged_initial_file","fingerprint":"0288af972ecfdf3eef232486b904dcf681e135ee9933010f6b9a3d43e9242ef6","count":1,"reason":"Owner: OriginalCreatorFd initial-file continuity within the original retained authority and acquisition. Read only the original held descriptor in at most64KiB chunks, within the reviewed initial-image bound, bracketed by original anchor/file/leaf identity checks; compare every initial byte. Any error poisons the owner and original acquisition without releasing the held descriptor or anchor. A later legitimate SQLite write deliberately refuses. Removal: retire this exact read with the unchanged-initial-image check. Limits: no reopen, renewal, reusable witness, current-role permission, P3 acknowledgment, physical durability or atomic filesystem snapshot; remaining-budget checks do not provide a hard OS read deadline."}
+    {"source":"crates/day2/src/security_epoch/storage_authority/preparation.rs","kind":"filesystem","target":"rustix::io::pread","context":"OriginalCreatorFd::check_unchanged_initial_file","fingerprint":"0288af972ecfdf3eef232486b904dcf681e135ee9933010f6b9a3d43e9242ef6","count":1,"reason":"Owner: OriginalCreatorFd initial-file continuity within the original retained authority and acquisition. Read only the original held descriptor in at most64KiB chunks, within the reviewed initial-image bound, bracketed by original anchor/file/leaf identity checks; compare every initial byte. Any error poisons the owner and original acquisition without releasing the held descriptor or anchor. A later legitimate SQLite write deliberately refuses. Removal: retire this exact read with the unchanged-initial-image check. Limits: no reopen, renewal, reusable witness, current-role permission, P3 acknowledgment, physical durability or atomic filesystem snapshot; remaining-budget checks do not provide a hard OS read deadline."},
+    {
+      "source": "crates/day2/src/automation.rs",
+      "kind": "source-indirection",
+      "target": "include_bytes",
+      "context": "SOURCES",
+      "fingerprint": "7f8c003ae52115d8a40e0a7267329f60f69bc8b4e6c50409151b5b3ac7ed7e09",
+      "count": 1,
+      "reason": "Owner: isolated Bazel/Roc representative experiment host adapter. Include the private measurement Roc recipe in the existing explicit workflow source identity; no runtime callback or filesystem path discovery. Removal: remove this exact site and allowance with the measurement adapter; never land this experimental policy in production."
+    },
+    {
+      "source": "crates/xtask/src/bazel_experiment.rs",
+      "kind": "clock",
+      "target": "std::time::Instant::elapsed",
+      "context": "remaining",
+      "fingerprint": "b44ad64f3704662de2c656619dfd2d9e516fe4ad2a3ebe1968c7fab1c418f596",
+      "count": 1,
+      "reason": "Owner: isolated Bazel/Roc representative experiment host adapter. Subtract elapsed monotonic time from the fixed600s selected-case budget; do not extend or reset deadlines. Removal: remove this exact site and allowance with the measurement adapter; never land this experimental policy in production."
+    },
+    {
+      "source": "crates/xtask/src/bazel_experiment.rs",
+      "kind": "clock",
+      "target": "std::time::Instant::elapsed",
+      "context": "reports",
+      "fingerprint": "99b62444ac7ed1d4b85d01f89f7f10215c790fac7c6d3701dd7f22a26ca78fb7",
+      "count": 1,
+      "reason": "Owner: isolated Bazel/Roc representative experiment host adapter. Record the elapsed duration of one freshly executed selected case, not a performance comparison or attribution. Removal: remove this exact site and allowance with the measurement adapter; never land this experimental policy in production."
+    },
+    {
+      "source": "crates/xtask/src/bazel_experiment.rs",
+      "kind": "clock",
+      "target": "std::time::Instant::now",
+      "context": "reports",
+      "fingerprint": "863d1e181799f539437c39e2ca0f6cb7dacc8f7c87bdf81fb69f792549e6a875",
+      "count": 2,
+      "reason": "Owner: isolated Bazel/Roc representative experiment host adapter. Two authored monotonic timestamps: one shared600s inventory/case budget origin and one per-case observation. No timeout or resource expansion. Removal: remove this exact site and allowance with the measurement adapter; never land this experimental policy in production."
+    },
+    {
+      "source": "crates/xtask/src/bazel_experiment.rs",
+      "kind": "environment",
+      "target": "std::env::current_exe",
+      "context": "reports",
+      "fingerprint": "9208f429432b76dfb4cae5194d9939538c17006903bec713bf78e2618694be80",
+      "count": 1,
+      "reason": "Owner: isolated Bazel/Roc representative experiment host adapter. Bind the actual driver pathname to the installed fixed target/debug/xtask; equality is not hostile-host executable authority. Removal: remove this exact site and allowance with the measurement adapter; never land this experimental policy in production."
+    },
+    {
+      "source": "crates/xtask/src/bazel_experiment.rs",
+      "kind": "environment",
+      "target": "std::env::var",
+      "context": "bundle",
+      "fingerprint": "0bc267e8c162a572ecf121c786c7bdf723fd8f64865ed3bfaa94a1bbf110ecfa",
+      "count": 1,
+      "reason": "Owner: isolated Bazel/Roc representative experiment host adapter. Read only checkout identity for this diagnostic bundle. Metadata does not replace independently authenticated GitHub/API/source evidence. Removal: remove this exact site and allowance with the measurement adapter; never land this experimental policy in production."
+    },
+    {
+      "source": "crates/xtask/src/bazel_experiment.rs",
+      "kind": "environment",
+      "target": "std::env::var",
+      "context": "bundle",
+      "fingerprint": "b357e6b53adfe94c6e8a12e4bd5e8d1ec9575a25bc6755f6911dcde7c9e91822",
+      "count": 1,
+      "reason": "Owner: isolated Bazel/Roc representative experiment host adapter. Read only current attempt identity; no inherited application environment or secret values are dumped or granted. Removal: remove this exact site and allowance with the measurement adapter; never land this experimental policy in production."
+    },
+    {
+      "source": "crates/xtask/src/bazel_experiment.rs",
+      "kind": "environment",
+      "target": "std::env::var",
+      "context": "bundle",
+      "fingerprint": "b7ddcf3db9925bd2c21ed23a647d9d486a4e71649583800457379007834ab13a",
+      "count": 1,
+      "reason": "Owner: isolated Bazel/Roc representative experiment host adapter. Read only current run identity; no prior-source receipt or pass is adopted. Removal: remove this exact site and allowance with the measurement adapter; never land this experimental policy in production."
+    },
+    {
+      "source": "crates/xtask/src/bazel_experiment.rs",
+      "kind": "filesystem",
+      "target": "std::fs::read",
+      "context": "inspect",
+      "fingerprint": "8a6ca5bcbb31f202b85a1e9b8c70b0e96cc901f5bdc3c0ac564b9683f9a5f311",
+      "count": 1,
+      "reason": "Owner: isolated Bazel/Roc representative experiment host adapter. Read a fixed trusted built/installed program after nonsymlink regular/executable/no-special-mode and256MiB metadata predicates; hash and basic ELF64LE x86_64 checks. Predicate plus read is not an adversarial race or memory bound; native admission remains independent. Removal: remove this exact site and allowance with the measurement adapter; never land this experimental policy in production."
+    },
+    {
+      "source": "crates/xtask/src/bazel_experiment.rs",
+      "kind": "filesystem",
+      "target": "std::fs::read",
+      "context": "reports",
+      "fingerprint": "549341d261eddfd7e29dc268ec916d023922400bd1c9988fa14984a78df1bd7c",
+      "count": 1,
+      "reason": "Owner: isolated Bazel/Roc representative experiment host adapter. Read only this run's fixed diagnostic installed-bundle manifest and require structural equality with re-inspected actual programs before execution; not production SIX/compiler proof. Removal: remove this exact site and allowance with the measurement adapter; never land this experimental policy in production."
+    },
+    {
+      "source": "crates/xtask/src/bazel_experiment.rs",
+      "kind": "filesystem",
+      "target": "std::fs::read_to_string",
+      "context": "list",
+      "fingerprint": "a375311c7774687e7ee080ed6b7c73fa9a4c348470a6cfb99651384f31ba3f37",
+      "count": 1,
+      "reason": "Owner: isolated Bazel/Roc representative experiment host adapter. Read only the host-created test-list temporary after existing bounded child wait and postwrite1MiB length predicate; exact source-derived name/existence and ignored status checks. This is not a hard producer-output or descendant bound. Removal: remove this exact site and allowance with the measurement adapter; never land this experimental policy in production."
+    },
+    {
+      "source": "crates/xtask/src/bazel_experiment.rs",
+      "kind": "filesystem",
+      "target": "std::fs::symlink_metadata",
+      "context": "inspect",
+      "fingerprint": "ede5683b5e392cb2ed2271e63fd1b8a3424cb84dfc0e600e59b6d5e939413b6e",
+      "count": 1,
+      "reason": "Owner: isolated Bazel/Roc representative experiment host adapter. Inspect fixed bundle file metadata without following final symlinks; regular/executable/size/header/hash checks are measurements, not a new hostile-code containment guarantee. Removal: remove this exact site and allowance with the measurement adapter; never land this experimental policy in production."
+    },
+    {
+      "source": "crates/xtask/src/bazel_experiment.rs",
+      "kind": "filesystem",
+      "target": "std::fs::write",
+      "context": "install",
+      "fingerprint": "c64375235f76c08138b3a16f6bae0dba5344af5bae5552110e6b0b3db34ade0f",
+      "count": 1,
+      "reason": "Owner: isolated Bazel/Roc representative experiment host adapter. Write only the fixed current diagnostic program bundle after existing fresh-inode copies and explicit built-vs-installed SHA/bytes/mode equality; never a cached runtime or production verification receipt. Removal: remove this exact site and allowance with the measurement adapter; never land this experimental policy in production."
+    },
+    {
+      "source": "crates/xtask/src/bazel_experiment.rs",
+      "kind": "filesystem",
+      "target": "std::fs::write",
+      "context": "reports",
+      "fingerprint": "99b104e93167474174fb8875a3f16c35674003f1a5d67249f28cc1b2fdd8e3a7",
+      "count": 1,
+      "reason": "Owner: isolated Bazel/Roc representative experiment host adapter. Write only the fixed diagnostic result after the complete nonempty source-derived selected set freshly passes under the ordinary Roc Reports build. No partial/pass reuse or full qualification claim. Removal: remove this exact site and allowance with the measurement adapter; never land this experimental policy in production."
+    },
+    {
+      "source": "crates/xtask/src/bazel_experiment.rs",
+      "kind": "filesystem",
+      "target": "std::path::Path::canonicalize",
+      "context": "install",
+      "fingerprint": "aba869e230b7c54a2411802bd558d81b9b7351fefa69b977fec70744dd3bfe4a",
+      "count": 1,
+      "reason": "Owner: isolated Bazel/Roc representative experiment host adapter. Resolve only one of five fixed trusted Bazel program outputs before normal fresh-inode installation. Application source symlink trees are never adopted; canonical paths do not lock inode continuity. Removal: remove this exact site and allowance with the measurement adapter; never land this experimental policy in production."
+    },
+    {
+      "source": "crates/xtask/src/bazel_experiment.rs",
+      "kind": "filesystem",
+      "target": "std::path::Path::canonicalize",
+      "context": "reports",
+      "fingerprint": "d282be0740f023b0305f20ca3630a2560a19d2fdafd4bd1a80c5edb63f2893cd",
+      "count": 1,
+      "reason": "Owner: isolated Bazel/Roc representative experiment host adapter. Resolve the fixed installed driver path for current_exe equality; bundle SHA/bytes/modes and independent native compiler/worker admission remain mandatory. Removal: remove this exact site and allowance with the measurement adapter; never land this experimental policy in production."
+    },
+    {
+      "source": "crates/xtask/src/bazel_experiment.rs",
+      "kind": "filesystem",
+      "target": "tempfile::NamedTempFile::new",
+      "context": "list",
+      "fingerprint": "91779e533556e4dff1ac534f11648a8a8ecfb5d6bb62c26aea1ef2ef406c4d7c",
+      "count": 1,
+      "reason": "Owner: isolated Bazel/Roc representative experiment host adapter. Create an owned temporary only for exact libtest listing; no raw private frames, environment or stderr persistence. Existing child timeout/kill/wait unchanged. Removal: remove this exact site and allowance with the measurement adapter; never land this experimental policy in production."
+    },
+    {
+      "source": "crates/xtask/src/bazel_experiment.rs",
+      "kind": "process",
+      "target": "std::process::Command::new",
+      "context": "harness",
+      "fingerprint": "a422e23c6bd83a6481788eb1363ccc2a6be79838665bdf1c183fcae02e14fd01",
+      "count": 1,
+      "reason": "Owner: isolated Bazel/Roc representative experiment host adapter. Construct only the fixed re-inspected regular integration harness command; exact known source-derived cases/ignored-status and existing run_with_budget gate execution. No arbitrary process callback or broadened application capability. Removal: remove this exact site and allowance with the measurement adapter; never land this experimental policy in production."
+    },
+    {
+      "source": "crates/xtask/src/bazel_experiment.rs",
+      "kind": "source-indirection",
+      "target": "include_str",
+      "context": "reports",
+      "fingerprint": "b415d0a0527edc2bbf90702fb301c2c5b7171b229108fecba1a4518c6d709126",
+      "count": 1,
+      "reason": "Owner: isolated Bazel/Roc representative experiment host adapter. Compile the exact existing Reports test module as catalog data, parse with syn, refuse empty/ignored/conditional/duplicate cases, and require exact harness existence before fresh execution. Not a second test catalog. Removal: remove this exact site and allowance with the measurement adapter; never land this experimental policy in production."
+    }
   ]
 }

@@ -3,6 +3,7 @@ package
 		Workflow,
 		LocalDev,
 		Build,
+		BazelExperiment,
 		Delegation,
 		Check,
 		Ci,

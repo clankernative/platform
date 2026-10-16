@@ -1,0 +1,29 @@
+load("//experiments/bazel:rust.bzl", "platform_rust_library", "platform_rust_binary", "platform_rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+platform_rust_binary(
+    name = "xtask",
+    crate_name = "xtask",
+    crate_root = "src/main.rs",
+    srcs = glob(["src/**/*.rs"]),
+    compile_data = [
+            "//:.github/workflows/ci.yml",
+            "//crates/day2:tests/command_atomicity.rs",
+            "//:architecture/clippy.toml",
+            "//crates/day2-control:src/release.rs",
+            "//crates/day2:src/structural_proofs.rs",
+            "src/architecture.rs",
+            "//:fixtures/authority-policies/reports.json",
+            "//:rust-toolchain.toml",
+            "//:toolchain.json",
+            "//:toolchains/linux-aarch64.json",
+            "//:toolchains/linux-x86_64.json",
+            "//:tools/roc-compiler/glue-layouts.patch"
+    ],
+    internal_deps = ["//crates/day2-assets:lib", "//crates/day2-contracts:lib", "//crates/day2:lib", "//crates/day2-control:lib", "//crates/day2-ops:lib"],
+    linux_deps = [],
+)
+
+
+exports_files(["Cargo.toml"])

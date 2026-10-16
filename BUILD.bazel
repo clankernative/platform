@@ -1,0 +1,78 @@
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    ".github/workflows/ci.yml",
+    "Cargo.lock",
+    "Cargo.toml",
+    "architecture/clippy.toml",
+    "assets/api-docs.css",
+    "assets/api-docs.js",
+    "assets/datastar-1.0.1.js",
+    "assets/forms.js",
+    "assets/navigation.js",
+    "assets/icons/archive.svg",
+    "assets/icons/arrow-up-right.svg",
+    "assets/icons/history.svg",
+    "assets/icons/link.svg",
+    "assets/icons/list-filter.svg",
+    "assets/icons/log-out.svg",
+    "assets/icons/shield-check.svg",
+    "assets/web.css",
+    "build-dependencies/clanker-ui.json",
+    "deploy/gke/k8s/maintenance-pod.yaml",
+    "deploy/gke/stacks/day2-app/tests/oauth-instance.json",
+    "deploy/gke/stacks/security-shell/tests/oauth-instance.json",
+    "fixtures/authority-policies/reports.json",
+    "fixtures/control-simulation/lost-publication.json",
+    "fixtures/control-simulation/release-readiness.json",
+    "fixtures/control-simulation/unknown-publication.json",
+    "fixtures/control-simulation/workflow-competition.json",
+    "fixtures/control-simulation/workflow-lost-ack.json",
+    "fixtures/control-simulation/workflow-secret-revision.json",
+    "infra/Stack.roc",
+    "infra/main.roc",
+    "ops/Authority.roc",
+    "ops/Backup.roc",
+    "ops/Build.roc",
+    "ops/BazelExperiment.roc",
+    "ops/Capability.roc",
+    "ops/Check.roc",
+    "ops/Ci.roc",
+    "ops/Delegation.roc",
+    "ops/GkeRelease.roc",
+    "ops/Infra.roc",
+    "ops/Linux.roc",
+    "ops/LocalDev.roc",
+    "ops/Maintain.roc",
+    "ops/OAuthRegistration.roc",
+    "ops/ProviderConformance.roc",
+    "ops/Provision.roc",
+    "ops/Release.roc",
+    "ops/Runner.roc",
+    "ops/SecretRetirement.roc",
+    "ops/Simulation.roc",
+    "ops/UiDependency.roc",
+    "ops/Verify.roc",
+    "ops/Workflow.roc",
+    "ops/main.roc",
+    "rust-toolchain.toml",
+    "sdk/contracts/Connection.roc",
+    "sdk/contracts/ConnectionAccess.roc",
+    "sdk/contracts/GitlabProjects.roc",
+    "sdk/contracts/GoogleCalendar.roc",
+    "toolchain.json",
+    "toolchains/linux-aarch64.json",
+    "toolchains/linux-x86_64.json",
+    "tools/app-platform.roc",
+    "tools/roc-compiler/glue-layouts.patch"
+])
+
+exports_files(["crates/worker/Cargo.toml"])
+
+exports_files(["cli/checks/Cargo.toml"])
+
+exports_files(["fixtures/authority-policies/owned-links.json"])
+
+exports_files(["fixtures/authority-policies/relational-conformance.json"])
+
+exports_files(["fixtures/authority-policies/repeated-field.json"])

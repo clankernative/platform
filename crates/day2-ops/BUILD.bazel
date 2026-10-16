@@ -1,0 +1,19 @@
+load("//experiments/bazel:rust.bzl", "platform_rust_library", "platform_rust_binary", "platform_rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+platform_rust_library(
+    name = "lib",
+    crate_name = "day2_ops",
+    crate_root = "src/lib.rs",
+    srcs = glob(["src/**/*.rs"]),
+    compile_data = [
+            "//:deploy/gke/k8s/maintenance-pod.yaml",
+            "//:deploy/gke/stacks/day2-app/tests/oauth-instance.json"
+    ],
+    internal_deps = ["//crates/day2-assets:lib", "//crates/day2-contracts:lib", "//crates/day2:lib", "//crates/day2-capabilities:lib"],
+    linux_deps = [],
+)
+
+
+exports_files(["Cargo.toml"])

@@ -1,0 +1,58 @@
+load("//experiments/bazel:rust.bzl", "platform_rust_library", "platform_rust_binary", "platform_rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+platform_rust_library(
+    name = "lib",
+    crate_name = "day2_control",
+    crate_root = "src/lib.rs",
+    srcs = glob(["src/**/*.rs"]),
+    compile_data = [
+            "//:Cargo.lock",
+            "//crates/day2-capabilities:src/lib.rs",
+            "Cargo.toml",
+            "src/build.rs",
+            "src/build/ui_assembly.rs",
+            "src/contracts.rs",
+            "src/engine.rs",
+            "src/gcp_secret_conformance.rs",
+            "src/journal.rs",
+            "src/kernel.rs",
+            "src/kubernetes_conformance.rs",
+            "src/provider_conformance.rs",
+            "src/provider_evidence.rs",
+            "src/qualified_release_build.rs",
+            "src/release.rs",
+            "src/release_execution.rs",
+            "src/release_recipe.rs",
+            "src/runtime_secret.rs",
+            "src/secret_retirement.rs",
+            "src/secret_retirement_recipe.rs",
+            "src/secrets.rs",
+            "src/simulation/coverage.rs",
+            "src/simulation/generation.rs",
+            "src/simulation/mod.rs",
+            "src/simulation/provider.rs",
+            "src/simulation/release_provider.rs",
+            "src/simulation/releases.rs",
+            "src/simulation/retirements.rs",
+            "src/simulation/shrink.rs",
+            "src/simulation/weak_provider.rs",
+            "src/simulation/workflows.rs",
+            "src/simulation_campaign.rs",
+            "src/source.rs",
+            "//crates/day2:src/json.rs",
+            "//:fixtures/control-simulation/lost-publication.json",
+            "//:fixtures/control-simulation/release-readiness.json",
+            "//:fixtures/control-simulation/unknown-publication.json",
+            "//:fixtures/control-simulation/workflow-competition.json",
+            "//:fixtures/control-simulation/workflow-lost-ack.json",
+            "//:fixtures/control-simulation/workflow-secret-revision.json"
+    ],
+    internal_deps = ["//crates/day2-contracts:lib", "//crates/day2:lib", "//crates/day2-capabilities:lib", "//crates/day2-kernel:lib", "//crates/durable-temporal:lib"],
+    linux_deps = [],
+)
+
+exports_files(["src/release.rs"])
+
+exports_files(["Cargo.toml"])
