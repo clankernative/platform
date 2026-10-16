@@ -1220,7 +1220,7 @@ fn hash_tree(root: &Path, directory: &Path, hashes: &mut BTreeMap<String, String
             hash_tree(root, &path, hashes)?;
         } else {
             let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("");
-            if ["rs", "roc", "toml"].contains(&extension)
+            if ["rs", "roc", "toml", "mjs"].contains(&extension)
                 || ["assets", "deploy", "toolchains", "build-dependencies"]
                     .iter()
                     .any(|directory| path.starts_with(root.join(directory)))

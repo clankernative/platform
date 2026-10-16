@@ -99,7 +99,7 @@
         {
           "name": "day2-sandbox",
           "kind": "normal",
-          "target": "cfg(target_os = \"linux\")",
+          "target": null,
           "rename": null,
           "features": [],
           "default_features": true,

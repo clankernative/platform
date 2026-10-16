@@ -633,11 +633,16 @@ pub fn execute(
             match request.action.as_str() {
                 "build-schema" => run(
                     root,
-                    day2::sandbox::compiler(root, stage, roc)?
-                        .arg("glue")
-                        .arg(root.join("tools/SchemaGlue.roc"))
-                        .arg(stage)
-                        .arg(stage.join("app/schema-platform.roc")),
+                    day2::sandbox::glue_compiler(
+                        root,
+                        stage,
+                        roc,
+                        day2::sandbox::CompilerCache::SchemaGlue,
+                    )?
+                    .arg("glue")
+                    .arg(root.join("tools/SchemaGlue.roc"))
+                    .arg(stage)
+                    .arg(stage.join("app/schema-platform.roc")),
                 )?,
                 "build-data" => {
                     ensure!(done.contains("build-schema"), "checked types required");
@@ -655,11 +660,16 @@ pub fn execute(
                     );
                     run(
                         root,
-                        day2::sandbox::compiler(root, stage, roc)?
-                            .arg("glue")
-                            .arg(root.join("tools/SchemaGlue.roc"))
-                            .arg(stage)
-                            .arg(stage.join("app/app-platform.roc")),
+                        day2::sandbox::glue_compiler(
+                            root,
+                            stage,
+                            roc,
+                            day2::sandbox::CompilerCache::SchemaGlue,
+                        )?
+                        .arg("glue")
+                        .arg(root.join("tools/SchemaGlue.roc"))
+                        .arg(stage)
+                        .arg(stage.join("app/app-platform.roc")),
                     )?;
                     if request.action == "build-app-check" {
                         let bound = bound.as_mut().context("bound app required")?;
@@ -756,14 +766,30 @@ pub fn execute(
                     // final native admission profiles below.
                     fs::write(stage.join("sdk/main.roc"), day2::sdk::app_platform())?;
                     fs::create_dir_all(root.join("crates/worker/generated"))?;
+                    let output = tempfile::tempdir_in(stage)?;
                     run(
                         root,
-                        day2::sandbox::compiler(root, stage, roc)?.args([
-                            "glue",
-                            prepared.rust_glue,
-                            "crates/worker/generated",
-                            "sdk/main.roc",
-                        ]),
+                        day2::sandbox::glue_compiler(
+                            root,
+                            stage,
+                            roc,
+                            day2::sandbox::CompilerCache::RustGlue,
+                        )?
+                        .arg("glue")
+                        .arg(prepared.rust_glue)
+                        .arg(output.path())
+                        .arg("sdk/main.roc"),
+                    )?;
+                    let generated = output.path().join("roc_platform_abi.rs");
+                    let metadata = fs::symlink_metadata(&generated)
+                        .context("Rust glue did not emit the required worker ABI")?;
+                    ensure!(
+                        metadata.is_file() && metadata.len() <= 2 * 1024 * 1024,
+                        "invalid generated worker ABI"
+                    );
+                    fs::write(
+                        root.join("crates/worker/generated/roc_platform_abi.rs"),
+                        fs::read(generated)?,
                     )?;
                 }
                 "build-host" => {

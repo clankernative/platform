@@ -175,6 +175,11 @@ jobs:
       - run: tar -xzf /tmp/day2-tools/temporal_cli_1.6.1_linux_amd64.tar.gz -C /tmp/day2-tools
       - name: Select the pinned Rust toolchain
         run: rustup show active-toolchain
+      - name: Install the browser test runtime
+        if: ${{ matrix.part == 'inputs' }}
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22.23.3'
       - name: Set up the Rust compiler cache
         uses: Mozilla-Actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
@@ -202,8 +207,11 @@ jobs:
           retention-days: 14
       # Cross-run build outputs have their own source-bound namespace. Native
       # guards re-admit them; no step or runtime receipt is selected by cache-hit.
+      # Split restore/save so hashFiles runs only before builds modify these trees,
+      # never in a post-job hook over generated files or sandbox-owned paths.
       - name: Restore completed fixture builds
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        id: fixture_cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         if: ${{ matrix.part == 'inputs' }}
         with:
           key: day2-fixtures-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', '.cargo/**', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**') }}-${{ hashFiles('cli/**', 'fixtures/**', 'examples/**') }}
@@ -213,7 +221,8 @@ jobs:
             artifacts/all-verification-cache.json
             artifacts/????????????????????????????????????????????????????????????????
       - name: Restore completed test executables
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        id: test_cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         if: ${{ matrix.part == 'tests' }}
         with:
           key: day2-test-outputs-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', '.cargo/**', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**', 'cli/**', 'fixtures/**', 'examples/**') }}
@@ -281,6 +290,26 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 3
+      - name: Save completed fixture builds
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        if: ${{ matrix.part == 'inputs' && steps.fixture_cache.outputs.cache-hit != 'true' }}
+        with:
+          key: ${{ steps.fixture_cache.outputs.cache-primary-key }}
+          path: |
+            artifacts/all-verification-cache.json
+            artifacts/????????????????????????????????????????????????????????????????
+      - name: Save completed test executables
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        if: ${{ matrix.part == 'tests' && steps.test_cache.outputs.cache-hit != 'true' }}
+        with:
+          key: ${{ steps.test_cache.outputs.cache-primary-key }}
+          path: |
+            artifacts/ci-test-build-cache.json
+            artifacts/ci-test-programs
+            target/debug/deps/*
+            !target/debug/deps/*.rlib
+            !target/debug/deps/*.rmeta
+            !target/debug/deps/*.d
 
   verify-mac-compatibility:
     # Reject known security failures before allocating compilation runners.
@@ -329,8 +358,10 @@ jobs:
           shared-key: ${{ hashFiles('Cargo.toml') }}-verify
       # Cross-run build outputs have their own source-bound namespace. Native
       # guards re-admit them; no step or runtime receipt is selected by cache-hit.
+      # Reuse the pre-build key when saving instead of rehashing generated trees.
       - name: Restore completed fixture builds
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        id: fixture_cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           key: day2-fixtures-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', '.cargo/**', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**') }}-${{ hashFiles('cli/**', 'fixtures/**', 'examples/**') }}
           restore-keys: |
@@ -339,7 +370,8 @@ jobs:
             artifacts/all-verification-cache.json
             artifacts/????????????????????????????????????????????????????????????????
       - name: Restore completed test executables
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        id: test_cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           key: day2-test-outputs-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', '.cargo/**', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**', 'cli/**', 'fixtures/**', 'examples/**') }}
           path: |
@@ -386,6 +418,26 @@ jobs:
             target/debug/xtask.d
           if-no-files-found: error
           retention-days: 14
+      - name: Save completed fixture builds
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        if: ${{ steps.fixture_cache.outputs.cache-hit != 'true' }}
+        with:
+          key: ${{ steps.fixture_cache.outputs.cache-primary-key }}
+          path: |
+            artifacts/all-verification-cache.json
+            artifacts/????????????????????????????????????????????????????????????????
+      - name: Save completed test executables
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        if: ${{ steps.test_cache.outputs.cache-hit != 'true' }}
+        with:
+          key: ${{ steps.test_cache.outputs.cache-primary-key }}
+          path: |
+            artifacts/ci-test-build-cache.json
+            artifacts/ci-test-programs
+            target/debug/deps/*
+            !target/debug/deps/*.rlib
+            !target/debug/deps/*.rmeta
+            !target/debug/deps/*.d
 
   verify-prepare:
     needs: [secrets, dependencies, verify-queue-receipt, verify-prepare-parts]
