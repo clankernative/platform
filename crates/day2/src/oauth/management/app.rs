@@ -1365,7 +1365,7 @@ mod tests {
                 random = random
                     .wrapping_mul(6364136223846793005)
                     .wrapping_add(1442695040888963407);
-                let operation = if index < 3 && seed % 4 == 0 {
+                let operation = if index < 3 && seed.is_multiple_of(4) {
                     index
                 } else {
                     ((random >> 32) % 6) as usize
