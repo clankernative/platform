@@ -332,7 +332,13 @@ impl Shell {
         identity: &iap::Verified,
         now: i64,
     ) -> Result<Option<Response>> {
-        let CallbackRequest { method, path, query, headers, body } = request;
+        let CallbackRequest {
+            method,
+            path,
+            query,
+            headers,
+            body,
+        } = request;
         if !path.starts_with("/_day2/oauth/callback/") {
             return Ok(None);
         }
@@ -617,7 +623,13 @@ mod tests {
                 assert!(
                     shell
                         .provider_callback(
-                            CallbackRequest { method: &Method::GET, path: &path, query: Some(&query), headers: &headers, body: &[] },
+                            CallbackRequest {
+                                method: &Method::GET,
+                                path: &path,
+                                query: Some(&query),
+                                headers: &headers,
+                                body: &[]
+                            },
                             &identity,
                             104
                         )
@@ -637,7 +649,13 @@ mod tests {
                         start.wait();
                         shell
                             .provider_callback(
-                                CallbackRequest { method: &Method::GET, path: &path, query: Some(&query), headers: &headers, body: &[] },
+                                CallbackRequest {
+                                    method: &Method::GET,
+                                    path: &path,
+                                    query: Some(&query),
+                                    headers: &headers,
+                                    body: &[],
+                                },
                                 &identity,
                                 104,
                             )
@@ -653,7 +671,13 @@ mod tests {
             assert!(
                 shell
                     .provider_callback(
-                        CallbackRequest { method: &Method::GET, path: &path, query: Some(&query), headers: &headers, body: &[] },
+                        CallbackRequest {
+                            method: &Method::GET,
+                            path: &path,
+                            query: Some(&query),
+                            headers: &headers,
+                            body: &[]
+                        },
                         &identity,
                         104
                     )
@@ -690,7 +714,13 @@ mod tests {
             assert!(
                 shell
                     .provider_callback(
-                        CallbackRequest { method: &Method::GET, path: "/_day2/oauth/callback/registration", query, headers: &headers, body: &[] },
+                        CallbackRequest {
+                            method: &Method::GET,
+                            path: "/_day2/oauth/callback/registration",
+                            query,
+                            headers: &headers,
+                            body: &[]
+                        },
                         &identity,
                         104
                     )?
@@ -705,7 +735,13 @@ mod tests {
             assert!(
                 shell
                     .provider_callback(
-                        CallbackRequest { method: &Method::GET, path: "/_day2/oauth/callback/registration", query: Some(query), headers: &headers, body: &[] },
+                        CallbackRequest {
+                            method: &Method::GET,
+                            path: "/_day2/oauth/callback/registration",
+                            query: Some(query),
+                            headers: &headers,
+                            body: &[]
+                        },
                         &identity,
                         104
                     )

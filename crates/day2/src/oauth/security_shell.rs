@@ -676,13 +676,17 @@ impl SecurityShell {
             })?;
         }
         if let Some(management) = &self.management {
-            if let Some(response) =
-                management.provider_callback(
-                    super::management::shell::CallbackRequest { method, path, query, headers, body },
-                    &identity,
-                    at,
-                )?
-            {
+            if let Some(response) = management.provider_callback(
+                super::management::shell::CallbackRequest {
+                    method,
+                    path,
+                    query,
+                    headers,
+                    body,
+                },
+                &identity,
+                at,
+            )? {
                 return Ok(response);
             }
             if let Some(tail) = path.strip_prefix(super::management::PREFIX) {
