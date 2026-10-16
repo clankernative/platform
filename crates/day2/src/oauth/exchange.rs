@@ -334,14 +334,18 @@ pub fn authorize_and_commit_qualified_exchange(
 }
 
 pub(in crate::oauth) fn authorize_managed_exchange(
-    db: &mut Connection, input: OutboundQualification<'_>, now: i64,
+    db: &mut Connection,
+    input: OutboundQualification<'_>,
+    now: i64,
     guard: &super::management::app::FinishGuard<'_>,
 ) -> Result<Option<ExchangeDispatchPermit>> {
     authorize_checked(db, input, now, Some(guard))
 }
 
 fn authorize_checked(
-    db: &mut Connection, input: OutboundQualification<'_>, now: i64,
+    db: &mut Connection,
+    input: OutboundQualification<'_>,
+    now: i64,
     guard: Option<&super::management::app::FinishGuard<'_>>,
 ) -> Result<Option<ExchangeDispatchPermit>> {
     let qualified = super::profiles::qualify_outbound_connect(
@@ -445,11 +449,17 @@ pub(crate) fn handle_qualified_callback(
     );
     let callback_code_ref = ingress.code_ref;
     let parameters = if input.reviewed.issuer_url == super::google::ISSUER
-        && input.reviewed.token_endpoint == super::google::TOKEN {
-        super::protocol::CallbackParameters { require_issuer: false,
-            allowed_extras: super::catalog::Adapter::GoogleCalendar.callback_extras() }
+        && input.reviewed.token_endpoint == super::google::TOKEN
+    {
+        super::protocol::CallbackParameters {
+            require_issuer: false,
+            allowed_extras: super::catalog::Adapter::GoogleCalendar.callback_extras(),
+        }
     } else {
-        super::protocol::CallbackParameters { require_issuer: true, allowed_extras: Default::default() }
+        super::protocol::CallbackParameters {
+            require_issuer: true,
+            allowed_extras: Default::default(),
+        }
     };
     super::outbound::handle_callback_profile(db, ingress, &parameters, |tx, code| {
         let binding = load_binding(tx, &qualified.intent().attempt)?
@@ -578,17 +588,36 @@ pub fn settle_mapped(
 }
 
 pub(in crate::oauth) fn settle_managed(
-    db: &mut Connection, prepared: PreparedMappedSettlement, current: OutboundQualification<'_>,
-    revision: &Digest, now: i64, guard: &super::management::app::FinishGuard<'_>,
+    db: &mut Connection,
+    prepared: PreparedMappedSettlement,
+    current: OutboundQualification<'_>,
+    revision: &Digest,
+    now: i64,
+    guard: &super::management::app::FinishGuard<'_>,
 ) -> Result<bool> {
-    let qualified = super::profiles::qualify_outbound_connect(current.intent, current.binding,
-        current.requirement, current.permission, current.reviewed, current.instance)?;
-    if prepared.verified.intent() != qualified.intent() || !prepared.binding.matches_current(&current)? {
+    let qualified = super::profiles::qualify_outbound_connect(
+        current.intent,
+        current.binding,
+        current.requirement,
+        current.permission,
+        current.reviewed,
+        current.instance,
+    )?;
+    if prepared.verified.intent() != qualified.intent()
+        || !prepared.binding.matches_current(&current)?
+    {
         return Ok(false);
     }
-    connect::activate_mapped_bound(db, &prepared.verified, &prepared.binding, revision, now, |tx| {
-        guard.check(tx, now)?;
-        custody::publish_tokens(tx, prepared.material)?;
-        guard.complete(tx)
-    })
+    connect::activate_mapped_bound(
+        db,
+        &prepared.verified,
+        &prepared.binding,
+        revision,
+        now,
+        |tx| {
+            guard.check(tx, now)?;
+            custody::publish_tokens(tx, prepared.material)?;
+            guard.complete(tx)
+        },
+    )
 }

@@ -307,14 +307,24 @@ pub(super) fn begin_managed(
 ) -> Result<bool> {
     let (intent, callback, exchange, verifier) = prepared.parts();
     callback.verify(intent)?;
-    begin_inner_checked(db, intent, Some(callback), Some((exchange, verifier)), now, Some(guard))
+    begin_inner_checked(
+        db,
+        intent,
+        Some(callback),
+        Some((exchange, verifier)),
+        now,
+        Some(guard),
+    )
 }
 
 fn begin_inner_checked(
     db: &mut Connection,
     intent: &ConnectIntent,
     binding: Option<&CallbackBinding>,
-    private: Option<(&super::exchange::ExchangeBinding, &super::custody::PreparedVerifier)>,
+    private: Option<(
+        &super::exchange::ExchangeBinding,
+        &super::custody::PreparedVerifier,
+    )>,
     now: i64,
     guard: Option<&super::management::app::StartGuard<'_>>,
 ) -> Result<bool> {
@@ -367,7 +377,9 @@ fn begin_inner_checked(
         super::exchange::store_binding(&tx, &intent.attempt, exchange)?;
         super::custody::publish_verifier(&tx, verifier)?;
     }
-    if inserted == 1 && let Some(guard) = guard {
+    if inserted == 1
+        && let Some(guard) = guard
+    {
         guard.commit(&tx)?;
     }
     tx.commit()?;

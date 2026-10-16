@@ -305,10 +305,18 @@ fn every_oauth_module_uses_the_controlled_effect_boundary() -> Result<()> {
         "OAuth source catalog changed; add effect guard and replay identity coverage"
     );
     let mut management = std::fs::read_dir(directory.join("management"))?
-        .map(|entry| entry?.file_name().into_string().map_err(|_| anyhow::anyhow!("non-UTF8 management source")))
+        .map(|entry| {
+            entry?
+                .file_name()
+                .into_string()
+                .map_err(|_| anyhow::anyhow!("non-UTF8 management source"))
+        })
         .collect::<Result<Vec<_>>>()?;
     management.sort();
-    ensure!(management == ["app.rs", "shell.rs"], "OAuth management source catalog changed");
+    ensure!(
+        management == ["app.rs", "shell.rs"],
+        "OAuth management source catalog changed"
+    );
     for &(name, source) in SOURCES {
         if matches!(
             name,

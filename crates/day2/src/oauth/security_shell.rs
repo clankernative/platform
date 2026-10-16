@@ -438,10 +438,20 @@ impl SecurityShell {
         let approvals = Arc::new(shell_transport::RemoteApprovals::from_instance(
             &instance, bearers,
         )?);
-        let mut shell = Self::with_transport(origin.clone(), approvals.clone(), signer.clone(), authenticator.clone())?;
-        Arc::get_mut(&mut shell).context("security shell already shared")?.management = Some(Arc::new(
-            super::management::shell::Shell::new(origin.trim_end_matches('/').into(), approvals.clone(), signer.clone(), authenticator),
-        ));
+        let mut shell = Self::with_transport(
+            origin.clone(),
+            approvals.clone(),
+            signer.clone(),
+            authenticator.clone(),
+        )?;
+        Arc::get_mut(&mut shell)
+            .context("security shell already shared")?
+            .management = Some(Arc::new(super::management::shell::Shell::new(
+            origin.trim_end_matches('/').into(),
+            approvals.clone(),
+            signer.clone(),
+            authenticator,
+        )));
         Ok((shell, signer, approvals))
     }
 
@@ -666,7 +676,9 @@ impl SecurityShell {
             })?;
         }
         if let Some(management) = &self.management {
-            if let Some(response) = management.provider_callback(method, path, query, headers, body, &identity, at)? {
+            if let Some(response) =
+                management.provider_callback(method, path, query, headers, body, &identity, at)?
+            {
                 return Ok(response);
             }
             if let Some(tail) = path.strip_prefix(super::management::PREFIX) {
@@ -906,8 +918,15 @@ impl SecurityShell {
         let proof =
             VerifiedAuthTime::from_google(self.authenticator.complete(query, identity, at)?);
         proof.require_current(at)?;
-        if matches!(proof.purpose(), FreshPurpose::OAuthConnect | FreshPurpose::OAuthDisconnect) {
-            return self.management.as_ref().context("OAuth management unavailable")?.reauthenticated(proof, headers, identity, at);
+        if matches!(
+            proof.purpose(),
+            FreshPurpose::OAuthConnect | FreshPurpose::OAuthDisconnect
+        ) {
+            return self
+                .management
+                .as_ref()
+                .context("OAuth management unavailable")?
+                .reauthenticated(proof, headers, identity, at);
         }
         if proof.purpose() == FreshPurpose::CredentialIntent {
             let registry = self

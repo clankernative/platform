@@ -304,8 +304,13 @@ pub(crate) struct AppApprovalReceiver {
 }
 
 impl AppApprovalReceiver {
-    pub(crate) fn with_management(mut self: Arc<Self>, manager: Arc<super::management::app::Manager>) -> Result<Arc<Self>> {
-        Arc::get_mut(&mut self).context("OAuth receiver already shared")?.management = Some(manager);
+    pub(crate) fn with_management(
+        mut self: Arc<Self>,
+        manager: Arc<super::management::app::Manager>,
+    ) -> Result<Arc<Self>> {
+        Arc::get_mut(&mut self)
+            .context("OAuth receiver already shared")?
+            .management = Some(manager);
         Ok(self)
     }
 
@@ -442,12 +447,23 @@ impl AppApprovalReceiver {
         self.workload.verify_workload(one_assertion(headers)?, at)?;
         let request: RequestBody = crate::json::decode(body)?;
         let response = match request {
-            RequestBody::Management { version, human_assertion, call } => {
+            RequestBody::Management {
+                version,
+                human_assertion,
+                call,
+            } => {
                 ensure!(version == VERSION, "unsupported OAuth private version");
                 let identity = self.human.verify(&human_assertion, at)?;
-                let reply = self.management.as_ref().context("OAuth management unavailable")?
+                let reply = self
+                    .management
+                    .as_ref()
+                    .context("OAuth management unavailable")?
                     .dispatch(*call, &identity, at)?;
-                ResponseBody::Management { version: VERSION, app: self.backend.app().into(), reply: Box::new(reply) }
+                ResponseBody::Management {
+                    version: VERSION,
+                    app: self.backend.app().into(),
+                    reply: Box::new(reply),
+                }
             }
             RequestBody::Registration {
                 version,
@@ -542,24 +558,48 @@ pub(crate) struct RemoteApprovals {
 
 impl RemoteApprovals {
     pub(in crate::oauth) fn management(
-        &self, app: &str, call: super::management::app::Call, headers: &HeaderMap,
+        &self,
+        app: &str,
+        call: super::management::app::Call,
+        headers: &HeaderMap,
     ) -> Result<super::management::app::Reply> {
-        let request = RequestBody::Management { version: VERSION, human_assertion: one_assertion(headers)?.into(), call: Box::new(call) };
-        let ResponseBody::Management { version, app: observed, reply } = self.send(app, &request, Instant::now() + Duration::from_secs(20))?
-        else { anyhow::bail!("invalid OAuth management response"); };
-        ensure!(version == VERSION && observed == app, "OAuth management receiver changed");
+        let request = RequestBody::Management {
+            version: VERSION,
+            human_assertion: one_assertion(headers)?.into(),
+            call: Box::new(call),
+        };
+        let ResponseBody::Management {
+            version,
+            app: observed,
+            reply,
+        } = self.send(app, &request, Instant::now() + Duration::from_secs(20))?
+        else {
+            anyhow::bail!("invalid OAuth management response");
+        };
+        ensure!(
+            version == VERSION && observed == app,
+            "OAuth management receiver changed"
+        );
         if let super::management::app::Reply::Pending { view } = reply.as_ref() {
             let target = self.targets.get(app).context("OAuth receiver missing")?;
             routed_attempt(&view.id, &target.route)?;
-            ensure!(view.app == app && view.app_origin == target.origin && view.shell_origin == self.shell_origin,
-                "OAuth management response origin changed");
+            ensure!(
+                view.app == app
+                    && view.app_origin == target.origin
+                    && view.shell_origin == self.shell_origin,
+                "OAuth management response origin changed"
+            );
         }
         Ok(*reply)
     }
 
     pub(in crate::oauth) fn management_owner(&self, id: &str) -> Result<&str> {
         attempt(id)?;
-        let (app, target) = self.targets.iter().find(|(_, target)| id.starts_with(&target.route)).context("OAuth management owner missing")?;
+        let (app, target) = self
+            .targets
+            .iter()
+            .find(|(_, target)| id.starts_with(&target.route))
+            .context("OAuth management owner missing")?;
         routed_attempt(id, &target.route)?;
         Ok(app)
     }

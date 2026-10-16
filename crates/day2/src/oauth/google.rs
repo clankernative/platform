@@ -177,7 +177,9 @@ pub(super) fn tokens(
 }
 
 pub(super) fn normalized_tokens(
-    raw: &[u8], context: super::catalog::TokenContext<'_>, refresh: bool,
+    raw: &[u8],
+    context: super::catalog::TokenContext<'_>,
+    refresh: bool,
 ) -> Result<(Vec<u8>, super::catalog::Tokens)> {
     let raw: GoogleTokens =
         crate::json::decode(raw).map_err(|_| anyhow::anyhow!("invalid Google token response"))?;
@@ -221,10 +223,13 @@ pub(super) fn normalized_tokens(
                     && token.bytes().all(|byte| byte.is_ascii_graphic())),
         "invalid Google token material"
     );
-    Ok((normalized, super::catalog::Tokens {
-        access: raw.access_token,
-        refresh: raw.refresh_token,
-    }))
+    Ok((
+        normalized,
+        super::catalog::Tokens {
+            access: raw.access_token,
+            refresh: raw.refresh_token,
+        },
+    ))
 }
 
 pub(super) fn account(raw: &[u8], subject: &str, tenant: &str) -> Result<()> {

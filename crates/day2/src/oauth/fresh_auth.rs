@@ -199,9 +199,7 @@ impl FreshIntent {
         let expected = match &self.context {
             Context::OAuth { shell_origin, .. }
             | Context::Credential { shell_origin, .. }
-            | Context::Management { shell_origin, .. } => {
-                shell_origin
-            }
+            | Context::Management { shell_origin, .. } => shell_origin,
         };
         ensure!(
             expected == &admitted_origin(origin)?,

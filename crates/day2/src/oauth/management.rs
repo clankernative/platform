@@ -64,7 +64,12 @@ pub(crate) struct View {
 
 impl View {
     pub(super) fn validate(&self, identity: &iap::Verified, now: i64) -> Result<()> {
-        for name in [&self.id, &self.registration, &self.logical_id, &self.binding_namespace] {
+        for name in [
+            &self.id,
+            &self.registration,
+            &self.logical_id,
+            &self.binding_namespace,
+        ] {
             super::connect::identifier(name)?;
         }
         day2_contracts::names::identifier(&self.app)?;
@@ -94,12 +99,20 @@ impl View {
         }
         super::shell_transport::origin(&self.app_origin)?;
         super::shell_transport::origin(&self.shell_origin)?;
-        ensure!(self.app_origin != self.shell_origin, "OAuth management origins collide");
+        ensure!(
+            self.app_origin != self.shell_origin,
+            "OAuth management origins collide"
+        );
         let callback = url::Url::parse(&self.callback_url)?;
-        ensure!(format!("{}/", callback.origin().ascii_serialization()) == self.shell_origin
-            && callback.path().starts_with("/_day2/oauth/callback/")
-            && callback.query().is_none() && callback.fragment().is_none()
-            && callback.username().is_empty() && callback.password().is_none(), "OAuth management callback refused");
+        ensure!(
+            format!("{}/", callback.origin().ascii_serialization()) == self.shell_origin
+                && callback.path().starts_with("/_day2/oauth/callback/")
+                && callback.query().is_none()
+                && callback.fragment().is_none()
+                && callback.username().is_empty()
+                && callback.password().is_none(),
+            "OAuth management callback refused"
+        );
         match (self.action, &self.fence) {
             (Action::Connect, None) => {}
             (Action::Disconnect, Some(fence)) => ensure!(
@@ -157,7 +170,10 @@ impl Attestation {
         now: i64,
     ) -> Result<Self> {
         view.validate(identity, now)?;
-        proof.require_intent(&super::fresh_auth::FreshIntent::management(view, identity)?, identity)?;
+        proof.require_intent(
+            &super::fresh_auth::FreshIntent::management(view, identity)?,
+            identity,
+        )?;
         proof.require_current(now)?;
         let mut value = Self {
             view: view.digest()?,
@@ -167,7 +183,9 @@ impl Attestation {
             key_version: version,
             mac: String::new(),
         };
-        value.mac = crate::hex(hmac::sign(&hmac::Key::new(hmac::HMAC_SHA256, key), &value.bytes()?).as_ref());
+        value.mac = crate::hex(
+            hmac::sign(&hmac::Key::new(hmac::HMAC_SHA256, key), &value.bytes()?).as_ref(),
+        );
         Ok(value)
     }
 
@@ -189,15 +207,28 @@ impl Attestation {
                 && now >= self.confirmed_at
                 && now - self.authenticated_at <= SECONDS
                 && self.mac.len() == 64
-                && self.mac.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+                && self
+                    .mac
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
             "OAuth management confirmation refused"
         );
         let mut mac = [0u8; 32];
         for (index, pair) in self.mac.as_bytes().chunks_exact(2).enumerate() {
-            let digit = |value: u8| if value <= b'9' { value - b'0' } else { value - b'a' + 10 };
+            let digit = |value: u8| {
+                if value <= b'9' {
+                    value - b'0'
+                } else {
+                    value - b'a' + 10
+                }
+            };
             mac[index] = digit(pair[0]) * 16 + digit(pair[1]);
         }
-        hmac::verify(&hmac::Key::new(hmac::HMAC_SHA256, key), &self.bytes()?, &mac)
-            .map_err(|_| anyhow::anyhow!("OAuth management signature refused"))
+        hmac::verify(
+            &hmac::Key::new(hmac::HMAC_SHA256, key),
+            &self.bytes()?,
+            &mac,
+        )
+        .map_err(|_| anyhow::anyhow!("OAuth management signature refused"))
     }
 }
