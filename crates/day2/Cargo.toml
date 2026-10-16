@@ -47,6 +47,9 @@ html5ever = "=0.35.0"
 ego-tree = "=0.10.0"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { version = "=0.31.3", default-features = false, features = ["socket", "poll"] }
+
 [dev-dependencies]
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp"] }
 # Keep in-process generators without optional subprocess or bit-set dependencies.

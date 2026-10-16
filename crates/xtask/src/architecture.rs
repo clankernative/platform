@@ -747,7 +747,11 @@ fn glob_names(prefix: &str) -> &'static [&'static str] {
         "std::path" => &["Path", "PathBuf", "Components", "Iter", "absolute"],
         "time" => &["OffsetDateTime", "UtcDateTime"],
         "rustix" => &["time", "fs"],
-        "rustix::fs" => &["open"],
+        "rustix::fs" => &["open", "openat", "fstatfs", "statx"],
+        "nix" => &["sys", "poll"],
+        "nix::sys" => &["socket"],
+        "nix::sys::socket" => &["getsockopt"],
+        "nix::poll" => &["poll"],
         "rustix::time" => &[
             "clock_gettime",
             "clock_gettime_dynamic",
@@ -1401,6 +1405,10 @@ fn canonical_import_namespace(target: &str) -> Option<DeclarationNamespace> {
                 | "rustix"
                 | "rustix::time"
                 | "rustix::fs"
+                | "nix"
+                | "nix::sys"
+                | "nix::sys::socket"
+                | "nix::poll"
         )
     {
         Some(DeclarationNamespace::Type)
@@ -4760,6 +4768,15 @@ fn ambient_binding(target: &str) -> bool {
                 | "std::path::absolute"
                 | "rustix::fs"
                 | "rustix::fs::open"
+                | "rustix::fs::openat"
+                | "rustix::fs::fstatfs"
+                | "rustix::fs::statx"
+                | "nix"
+                | "nix::sys"
+                | "nix::sys::socket"
+                | "nix::sys::socket::getsockopt"
+                | "nix::poll"
+                | "nix::poll::poll"
         )
 }
 
@@ -4899,13 +4916,21 @@ fn hazard(target: &str) -> Option<&'static str> {
     if target.starts_with("dotenv::") || target.starts_with("dotenvy::") {
         return Some("environment");
     }
+    if target == "nix::sys::socket::getsockopt" {
+        return Some("network");
+    }
+    if target == "nix::poll::poll" {
+        return Some("scheduling");
+    }
     if target.starts_with("std::fs::") || target.starts_with("tokio::fs::") {
         return Some("filesystem");
     }
-    if target == "rustix::fs::open"
-        || target.rsplit_once("::").is_some_and(|(owner, method)| {
-            owner == "std::path::Path" && path_filesystem_method(method)
-        })
+    if matches!(
+        target,
+        "rustix::fs::open" | "rustix::fs::openat" | "rustix::fs::fstatfs" | "rustix::fs::statx"
+    ) || target
+        .rsplit_once("::")
+        .is_some_and(|(owner, method)| owner == "std::path::Path" && path_filesystem_method(method))
     {
         return Some("filesystem");
     }
@@ -5426,6 +5451,181 @@ mod tests {
                 "{source}: {findings:?}"
             );
             assert_eq!(findings[0].count, 1, "{source}: {findings:?}");
+        }
+    }
+
+    #[test]
+    fn safe_connection_peer_socket_and_poll_effects_keep_exact_import_provenance() {
+        for (module, operation, kind) in [
+            ("nix::sys::socket", "getsockopt", "network"),
+            ("nix::poll", "poll", "scheduling"),
+        ] {
+            let target = format!("{module}::{operation}");
+            for source in [
+                format!("fn f() {{ {module}::{operation}(input, option); }}"),
+                format!(
+                    "use {module}::{operation} as observe; fn f() {{ observe(input, option); }}"
+                ),
+                format!(
+                    "use {module} as adapter; fn f() {{ adapter::{operation}(input, option); }}"
+                ),
+                format!("use {module}::*; fn f() {{ {operation}(input, option); }}"),
+            ] {
+                let findings = scan(&source);
+                let effects = findings
+                    .iter()
+                    .filter(|f| f.kind == kind)
+                    .collect::<Vec<_>>();
+                assert_eq!(effects.len(), 1, "{source}: {findings:?}");
+                assert_eq!(effects[0].target, target);
+                assert_eq!(effects[0].count, 1);
+                let globs = findings
+                    .iter()
+                    .filter(|f| f.kind == "effect-glob")
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    globs.len(),
+                    usize::from(source.contains("::*")),
+                    "{source}: {findings:?}"
+                );
+                assert_eq!(
+                    findings.len(),
+                    effects.len() + globs.len(),
+                    "{source}: {findings:?}"
+                );
+            }
+        }
+        for source in [
+            "fn f() { nix::poll::PollFlags::POLLIN; nix::poll::PollTimeout::ZERO; nix::sys::socket::SockType::Stream; }",
+            "mod local { pub fn poll() {} pub fn getsockopt() {} } fn f() { local::poll(); local::getsockopt(); }",
+        ] {
+            assert!(scan(source).is_empty(), "{source}");
+        }
+    }
+
+    #[test]
+    fn connection_peer_imports_preserve_separate_type_and_value_namespaces() {
+        for (module, suffix, target, kind) in [
+            (
+                "nix",
+                "sys::socket::getsockopt",
+                "nix::sys::socket::getsockopt",
+                "network",
+            ),
+            (
+                "nix::sys",
+                "socket::getsockopt",
+                "nix::sys::socket::getsockopt",
+                "network",
+            ),
+            (
+                "nix::sys::socket",
+                "getsockopt",
+                "nix::sys::socket::getsockopt",
+                "network",
+            ),
+            ("nix::poll", "poll", "nix::poll::poll", "scheduling"),
+        ] {
+            for source in [
+                format!(
+                    "use {module} as observe; fn observe() {{}} fn f() {{ observe(); observe::{suffix}(input, option); }}"
+                ),
+                format!(
+                    "fn observe() {{}} use {module} as observe; fn f() {{ observe(); observe::{suffix}(input, option); }}"
+                ),
+                format!(
+                    "use {module} as r#observe; fn f() {{ fn observe() {{}} observe(); r#observe::{suffix}(input, option); }}"
+                ),
+            ] {
+                let findings = scan(&source);
+                assert_eq!(findings.len(), 1, "{source}: {findings:?}");
+                assert_eq!(findings[0].target, target, "{source}: {findings:?}");
+                assert_eq!(findings[0].kind, kind, "{source}: {findings:?}");
+                assert_eq!(findings[0].count, 1, "{source}: {findings:?}");
+            }
+        }
+        for (target, kind) in [
+            ("nix::sys::socket::getsockopt", "network"),
+            ("nix::poll::poll", "scheduling"),
+        ] {
+            for source in [
+                format!(
+                    "use {target} as observe; type observe = (); fn f() {{ observe(input, option); }}"
+                ),
+                format!(
+                    "type observe = (); use {target} as observe; fn f() {{ observe(input, option); }}"
+                ),
+                format!(
+                    "use {target} as r#observe; fn f() {{ type observe = (); r#observe(input, option); }}"
+                ),
+            ] {
+                let findings = scan(&source);
+                assert_eq!(findings.len(), 1, "{source}: {findings:?}");
+                assert_eq!(findings[0].target, target, "{source}: {findings:?}");
+                assert_eq!(findings[0].kind, kind, "{source}: {findings:?}");
+                assert_eq!(findings[0].count, 1, "{source}: {findings:?}");
+            }
+        }
+        for source in [
+            "use nix::sys::socket as observe; fn f() { use opaque::Socket as observe; observe::getsockopt(input, option); }",
+            "use nix::poll as observe; fn f() { use opaque::Poll as observe; observe::poll(input, option); }",
+            "use nix::sys::socket::getsockopt as observe; fn f() { use opaque::Socket as observe; observe(input, option); }",
+            "use nix::poll::poll as observe; fn f() { use opaque::Poll as observe; observe(input, option); }",
+        ] {
+            let error = inventory(fixture(source).path()).unwrap_err().to_string();
+            assert!(
+                error.contains("unresolved parent ambient imports"),
+                "{source}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn rustix_descriptor_observations_are_effects_through_exact_alias_and_glob_forms() {
+        for operation in ["openat", "fstatfs", "statx"] {
+            let target = format!("rustix::fs::{operation}");
+            for source in [
+                format!("fn f() {{ rustix::fs::{operation}(fd, argument); }}"),
+                format!(
+                    "use rustix::fs::{operation} as observe; fn f() {{ observe(fd, argument); }}"
+                ),
+                format!("use rustix::fs as disk; fn f() {{ disk::{operation}(fd, argument); }}"),
+                format!("use rustix::fs::*; fn f() {{ {operation}(fd, argument); }}"),
+                format!("fn f() {{ r#rustix::r#fs::r#{operation}(fd, argument); }}"),
+            ] {
+                let findings = scan(&source);
+                let operations = findings
+                    .iter()
+                    .filter(|f| f.kind == "filesystem")
+                    .collect::<Vec<_>>();
+                assert_eq!(operations.len(), 1, "{source}: {findings:?}");
+                assert_eq!(operations[0].target, target, "{source}: {findings:?}");
+                assert_eq!(operations[0].count, 1);
+                let globs = findings
+                    .iter()
+                    .filter(|f| f.kind == "effect-glob")
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    globs.len(),
+                    usize::from(source.contains("::*")),
+                    "{source}: {findings:?}"
+                );
+                if let Some(glob) = globs.first() {
+                    assert_eq!(glob.target, "rustix::fs");
+                    assert_eq!(glob.count, 1);
+                }
+                assert_eq!(
+                    findings.len(),
+                    operations.len() + globs.len(),
+                    "{source}: {findings:?}"
+                );
+            }
+        }
+        for source in [
+            "fn f() { rustix::fs::Mode::empty(); rustix::fs::OFlags::RDONLY; }",
+            "mod local { pub mod fs { pub fn openat() {} pub fn fstatfs() {} pub fn statx() {} } } fn f() { local::fs::openat(); local::fs::fstatfs(); local::fs::statx(); }",
+        ] {
+            assert!(scan(source).is_empty(), "{source}");
         }
     }
 
