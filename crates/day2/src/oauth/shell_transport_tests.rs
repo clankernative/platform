@@ -1024,12 +1024,14 @@ fn mounted_management_authenticates_both_callers_and_lost_confirmation_is_not_re
     assert_eq!(view.human, identity.email);
     assert_eq!(view.subject, identity.subject);
     let pending = snapshot()?;
-    let fresh = VerifiedAuthTime::from_google(shell_oidc::Reauthenticated::fixture(
-        FreshIntent::management(&view, &identity)?, identity.email.clone(), identity.subject.clone(), 101,
-    ));
-    let proof = signer.attest_management(&view, &fresh, &identity, Digest::new(b"native-browser-session"), 102)?;
-    let confirm = encode(Call::Confirm { id: view.id.clone(), proof })?;
     port.at.store(102, Ordering::SeqCst);
+    let proof = effects::scope(port.clone(), || -> Result<_> {
+        let fresh = VerifiedAuthTime::from_google(shell_oidc::Reauthenticated::fixture(
+            FreshIntent::management(&view, &identity)?, identity.email.clone(), identity.subject.clone(), 101,
+        ));
+        signer.attest_management(&view, &fresh, &identity, Digest::new(b"native-browser-session"), 102)
+    })?;
+    let confirm = encode(Call::Confirm { id: view.id.clone(), proof })?;
     let mut forged: serde_json::Value = serde_json::from_slice(&confirm)?;
     forged["call"]["proof"]["session"] = json!(Digest::new(b"other-browser"));
     assert_eq!(invoke(assertions.headers(), serde_json::to_vec(&forged)?)?.0, StatusCode::FORBIDDEN);
@@ -1049,6 +1051,7 @@ fn mounted_management_authenticates_both_callers_and_lost_confirmation_is_not_re
     assert_eq!(invoke(assertions.headers(), confirm)?.0, StatusCode::FORBIDDEN);
     assert_eq!(snapshot()?, committed);
     let db = crate::store::open(&database)?;
+    assert_eq!(connect::state(&db, &view.id)?, Some(connect::ConnectState::AwaitingProviderAuthorization));
     assert_eq!(db.query_row("SELECT count(*) FROM oauth_connect_attempts", [], |row| row.get::<_, i64>(0))?, 1);
     assert_eq!(db.query_row("SELECT count(*) FROM oauth_connection_slots", [], |row| row.get::<_, i64>(0))?, 0);
     assert_eq!(port.sends.load(Ordering::SeqCst), 0);
