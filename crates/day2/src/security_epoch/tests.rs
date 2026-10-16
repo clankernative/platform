@@ -15,7 +15,7 @@ use std::{
     time::Duration,
 };
 
-fn selection() -> EpochStore {
+pub(super) fn selection() -> EpochStore {
     serde_json::from_value(json!({
         "scope":{"installation":"company","environment":"canary","app":"calendar"},
         "provider":{"kind":"firestore_native_v1","project":"project-seven","project_number":7,
@@ -59,7 +59,7 @@ fn native_read_budget_keeps_time_spent_before_database_io() {
     );
 }
 
-fn create() -> Request {
+pub(super) fn create() -> Request {
     let selected = selection();
     Request::CreateInitialAuthority {
         bootstrap: Bootstrap {
@@ -129,7 +129,7 @@ enum Fault {
     ExitAfterCommit,
 }
 
-struct Provider {
+pub(super) struct Provider {
     db: Connection,
     fault: Fault,
     tick: Duration,
@@ -147,7 +147,7 @@ impl Provider {
         Self::from_db(Connection::open(path).unwrap())
     }
 
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self::from_db(Connection::open_in_memory().unwrap())
     }
 
@@ -164,12 +164,20 @@ impl Provider {
     }
 
     fn read(&mut self, request: &Request) -> Result<Snapshot> {
+        Ok(self.observe(request)?.into_data())
+    }
+
+    pub(super) fn observe(&mut self, request: &Request) -> Result<firestore::EpochObservation> {
         let active = match request {
             Request::CompleteInitialFirstActivation { operation, .. } => Some(operation),
             _ => None,
         };
         let names = Names::new(&selection(), request.bootstrap(), active)?;
-        Ok(firestore::read(self, &names)?.into_data())
+        firestore::read(self, &names)
+    }
+
+    pub(super) fn set_slot_fixture_time(&mut self, elapsed: Duration) {
+        self.tick = elapsed;
     }
 
     fn sends(&self) -> i64 {
