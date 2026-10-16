@@ -69,8 +69,10 @@ pub(super) fn install(root: &Path) -> Result<()> {
     for (source, destination) in PROGRAMS {
         // Resolve only trusted Bazel program outputs, never application sources.
         let source = root.join(source).canonicalize()?;
-        inspect(root, source.to_str().context("experiment program path encoding")?)?;
+        let built = inspect(root, source.to_str().context("experiment program path encoding")?)?;
         super::install_cli_file(source, root.join(destination))?;
+        let installed = inspect(root, destination)?;
+        ensure!(built.digest == installed.digest && built.bytes == installed.bytes && built.permissions == installed.permissions, "copied experiment program differs");
     }
     let installed = bundle(root)?;
     fs::write(root.join("artifacts/bazel-programs.json"), serde_json::to_vec_pretty(&installed)?)?;
