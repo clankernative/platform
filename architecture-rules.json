@@ -309,6 +309,7 @@
     "crates/day2/src/security_epoch/native_connection_peer/tests.rs",
     "crates/day2/src/security_epoch/native_identity.rs",
     "crates/day2/src/security_epoch/native_namespace.rs",
+    "crates/day2/src/security_epoch/preparation_image.rs",
     "crates/day2/src/security_epoch/runtime_identity_tests.rs",
     "crates/day2/src/security_epoch/runtime_profile.rs",
     "crates/day2/src/security_epoch/seed_core.rs",
