@@ -1762,6 +1762,136 @@ mod tests {
         Ok(())
     }
 
+    fn ci_job(name: &str) -> String {
+        include_str!("../../../.github/workflows/ci.yml")
+            .split_once(&format!("\n  {name}:\n"))
+            .expect("CI job exists")
+            .1
+            .lines()
+            .take_while(|line| !line.starts_with("  ") || line.starts_with("   "))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn ci_step<'a>(job: &'a str, name: &str) -> &'a str {
+        job.split_once(&format!("      - name: {name}\n"))
+            .expect("CI step exists")
+            .1
+            .split("\n      - ")
+            .next()
+            .unwrap()
+    }
+
+    #[test]
+    fn linux_consumers_bootstrap_only_the_same_run_verifier_before_output_mounts() {
+        for (name, archive, producer) in [
+            (
+                "verify-prepare",
+                "preparation-inputs/day2-preparation",
+                "preparation-inputs",
+            ),
+            ("verify-shards", "verification/day2-verification", "verify"),
+            ("verify", "verification/day2-verification", "verify"),
+        ] {
+            let job = ci_job(name);
+            let download = job
+                .find(&format!(
+                    "name: day2-{producer}-${{{{ github.run_id }}}}-${{{{ github.run_attempt }}}}"
+                ))
+                .expect("authenticated current run/attempt archive");
+            let bootstrap = ci_step(&job, "Restore the current run verifier only");
+            assert!(bootstrap.contains(&format!(
+                "run: tar -xzf /tmp/day2-{archive}.tgz -C \"$GITHUB_WORKSPACE/..\" platform/target/debug/xtask"
+            )));
+            let bootstrap_at = job
+                .find("      - name: Restore the current run verifier only\n")
+                .unwrap();
+            let context = ci_step(
+                &job,
+                "Establish the mandatory bounded native Linux compiler context",
+            );
+            assert!(context.contains("run: target/debug/xtask verify-linux-context"));
+            assert!(!job.contains("cargo run --locked -p xtask -- verify-linux-context"));
+            let context_at = job
+                .find(
+                    "      - name: Establish the mandatory bounded native Linux compiler context\n",
+                )
+                .unwrap();
+            let restore = job
+                .find(&format!(
+                    "run: tar -xzf /tmp/day2-{archive}.tgz -C \"$GITHUB_WORKSPACE/..\"\n"
+                ))
+                .expect("full restoration still required after context setup");
+            assert!(
+                download < bootstrap_at && bootstrap_at < context_at && context_at < restore,
+                "{name}"
+            );
+            if name == "verify" {
+                let skip_reused = "if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}";
+                assert!(bootstrap.contains(skip_reused));
+                assert!(context.contains(skip_reused));
+            }
+        }
+    }
+
+    #[test]
+    fn mac_intermediate_cache_warms_cargo_without_replacing_executable_admission_or_tests() {
+        let job = ci_job("verify-mac-compatibility");
+        let restore = ci_step(&job, "Restore compatible Cargo intermediates");
+        let save = ci_step(&job, "Save compatible Cargo intermediates");
+        let paths = |step: &str| {
+            step.split_once("          path: |\n")
+                .unwrap()
+                .1
+                .lines()
+                .take_while(|line| line.starts_with("            "))
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            paths(restore),
+            vec![
+                "target/debug/.fingerprint",
+                "target/debug/build",
+                "target/debug/deps/*.rlib",
+                "target/debug/deps/*.rmeta",
+                "target/debug/deps/*.d",
+                "target/debug/deps/*.dylib",
+            ]
+        );
+        assert_eq!(paths(restore), paths(save));
+        let (key, fallback) = restore.split_once("          restore-keys: |\n").unwrap();
+        for binding in [
+            "runner.os",
+            "runner.arch",
+            "Cargo.toml",
+            "Cargo.lock",
+            "rust-toolchain.toml",
+            ".cargo/**",
+        ] {
+            assert!(key.contains(binding) && fallback.contains(binding));
+        }
+        assert!(key.contains("github.sha") && !fallback.contains("github.sha"));
+        assert!(save.contains("key: ${{ steps.cargo_intermediates.outputs.cache-primary-key }}"));
+        assert!(save.contains("if: ${{ steps.cargo_intermediates.outputs.cache-hit != 'true' }}"));
+        let warm = job
+            .find("      - name: Restore compatible Cargo intermediates\n")
+            .unwrap();
+        let exact = job
+            .find("      - name: Restore completed test executables\n")
+            .unwrap();
+        let source = job
+            .find("      - run: cargo run --locked -p xtask -- source-check\n")
+            .unwrap();
+        let verify = job.find("      - run: cargo run --locked -p xtask -- verify-mac\n        id: native_preparation").unwrap();
+        let saved = job
+            .find("      - name: Save compatible Cargo intermediates\n")
+            .unwrap();
+        assert!(warm < exact && exact < source && source < verify && verify < saved);
+    }
+
     #[test]
     fn linux_context_requires_private_finite_native_compiler_limits() -> Result<()> {
         validate_linux_context("0::/\n", "6442450944\n")?;
