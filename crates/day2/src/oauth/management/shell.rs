@@ -632,9 +632,17 @@ mod tests {
                 let run = || {
                     effects::scope(Arc::new(Port(AtomicU64::new(1))), || {
                         start.wait();
-                        shell.provider_callback(
-                            &Method::GET, &path, Some(&query), &headers, &[], &identity, 104,
-                        ).is_err()
+                        shell
+                            .provider_callback(
+                                &Method::GET,
+                                &path,
+                                Some(&query),
+                                &headers,
+                                &[],
+                                &identity,
+                                104,
+                            )
+                            .is_err()
                     })
                 };
                 let first = threads.spawn(run);
@@ -674,13 +682,48 @@ mod tests {
             signer,
             Arc::new(Auth),
         );
-        let identity = iap::Verified { email: "alice@example.com".into(), subject: "accounts.google.com:alice".into() };
+        let identity = iap::Verified {
+            email: "alice@example.com".into(),
+            subject: "accounts.google.com:alice".into(),
+        };
         let headers = HeaderMap::new();
-        for query in [None, Some("state=qualification&unexpected=private"), Some("state=qualification&state=other&code=%GG")] {
-            assert!(shell.provider_callback(&Method::GET, "/_day2/oauth/callback/registration", query, &headers, &[], &identity, 104)?.is_none());
+        for query in [
+            None,
+            Some("state=qualification&unexpected=private"),
+            Some("state=qualification&state=other&code=%GG"),
+        ] {
+            assert!(
+                shell
+                    .provider_callback(
+                        &Method::GET,
+                        "/_day2/oauth/callback/registration",
+                        query,
+                        &headers,
+                        &[],
+                        &identity,
+                        104
+                    )?
+                    .is_none()
+            );
         }
-        for query in ["state=qualification&state=product.bad&code=private", "st%61te=product.bad&code=%GG", "state=product.bad&unexpected=private"] {
-            assert!(shell.provider_callback(&Method::GET, "/_day2/oauth/callback/registration", Some(query), &headers, &[], &identity, 104).is_err());
+        for query in [
+            "state=qualification&state=product.bad&code=private",
+            "st%61te=product.bad&code=%GG",
+            "state=product.bad&unexpected=private",
+        ] {
+            assert!(
+                shell
+                    .provider_callback(
+                        &Method::GET,
+                        "/_day2/oauth/callback/registration",
+                        Some(query),
+                        &headers,
+                        &[],
+                        &identity,
+                        104
+                    )
+                    .is_err()
+            );
         }
         assert!(shell.sessions.lock().unwrap().is_empty());
         assert_eq!(bearers.0.load(SeqCst), 0);

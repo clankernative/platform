@@ -936,19 +936,37 @@ fn native_registration_crosses_authenticated_http_once_even_when_response_is_los
 }
 
 #[test]
-fn mounted_management_authenticates_both_callers_and_lost_confirmation_is_not_regranted() -> Result<()> {
+fn mounted_management_authenticates_both_callers_and_lost_confirmation_is_not_regranted()
+-> Result<()> {
     use crate::oauth::{
-        admission, fresh_auth::{FreshIntent, VerifiedAuthTime}, management::{Action, app::{Call, Manager, Reply as ManagementReply}},
+        admission,
+        fresh_auth::{FreshIntent, VerifiedAuthTime},
+        management::{
+            Action,
+            app::{Call, Manager, Reply as ManagementReply},
+        },
         shell_oidc, simulation,
     };
-    struct Port { at: AtomicI64, entropy: AtomicUsize, sends: AtomicUsize }
+    struct Port {
+        at: AtomicI64,
+        entropy: AtomicUsize,
+        sends: AtomicUsize,
+    }
     impl effects::Hooks for Port {
-        fn domain(&self) -> u64 { 97833 }
-        fn wall_time(&self) -> Result<i64> { Ok(self.at.load(Ordering::SeqCst)) }
-        fn monotonic(&self) -> Duration { Duration::from_secs(self.at.load(Ordering::SeqCst) as u64) }
+        fn domain(&self) -> u64 {
+            97833
+        }
+        fn wall_time(&self) -> Result<i64> {
+            Ok(self.at.load(Ordering::SeqCst))
+        }
+        fn monotonic(&self) -> Duration {
+            Duration::from_secs(self.at.load(Ordering::SeqCst) as u64)
+        }
         fn fill(&self, bytes: &mut [u8]) -> Result<()> {
             let value = self.entropy.fetch_add(1, Ordering::SeqCst);
-            for (index, byte) in bytes.iter_mut().enumerate() { *byte = value.wrapping_add(index) as u8; }
+            for (index, byte) in bytes.iter_mut().enumerate() {
+                *byte = value.wrapping_add(index) as u8;
+            }
             Ok(())
         }
         fn send(&self, _: reqwest::blocking::Request) -> Result<effects::Response> {
@@ -961,32 +979,60 @@ fn mounted_management_authenticates_both_callers_and_lost_confirmation_is_not_re
     let database = runtime.db().to_path_buf();
     let manager = Arc::new(Manager::new(runtime, authority));
     let assertions = Assertions::new();
-    let identity = iap::Verified { email: "alice@example.com".into(), subject: "accounts.google.com:alice".into() };
+    let identity = iap::Verified {
+        email: "alice@example.com".into(),
+        subject: "accounts.google.com:alice".into(),
+    };
     let claims = json!({"iss":"https://cloud.google.com/iap", "aud":SHELL_AUDIENCE,
         "email":identity.email,"sub":identity.subject,"hd":"example.com","iat":0,"exp":600});
-    let signed = format!("{}.{}", URL_SAFE_NO_PAD.encode(json!({"kid":"fixture","alg":"ES256"}).to_string()), URL_SAFE_NO_PAD.encode(claims.to_string()));
-    let signature = assertions.pair.sign(&SystemRandom::new(), signed.as_bytes()).unwrap();
+    let signed = format!(
+        "{}.{}",
+        URL_SAFE_NO_PAD.encode(json!({"kid":"fixture","alg":"ES256"}).to_string()),
+        URL_SAFE_NO_PAD.encode(claims.to_string())
+    );
+    let signature = assertions
+        .pair
+        .sign(&SystemRandom::new(), signed.as_bytes())
+        .unwrap();
     let human_assertion = format!("{signed}.{}", URL_SAFE_NO_PAD.encode(signature.as_ref()));
     let mut receiver = assertions.receiver(Arc::new(RegistrationOnly));
     receiver.route = route_prefix("installation", "production", "workspace")?;
     let receiver = Arc::new(receiver).with_management(manager)?;
-    let port = Arc::new(Port { at: AtomicI64::new(100), entropy: AtomicUsize::new(1), sends: AtomicUsize::new(0) });
-    let executor = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    let port = Arc::new(Port {
+        at: AtomicI64::new(100),
+        entropy: AtomicUsize::new(1),
+        sends: AtomicUsize::new(0),
+    });
+    let executor = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
     let invoke = |headers: HeaderMap, body: Vec<u8>| -> Result<(StatusCode, Vec<u8>)> {
         executor.block_on(effects::scope_async(port.clone(), async {
-            let mut request = Request::builder().method(Method::POST).uri(PATH)
+            let mut request = Request::builder()
+                .method(Method::POST)
+                .uri(PATH)
                 .body(axum::body::Body::from(body))?;
             *request.headers_mut() = headers;
             let response = receiver.clone().handle(request).await;
             assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
             let status = response.status();
-            Ok((status, to_bytes(response.into_body(), MAX_RESPONSE).await?.to_vec()))
+            Ok((
+                status,
+                to_bytes(response.into_body(), MAX_RESPONSE).await?.to_vec(),
+            ))
         }))
     };
-    let encode = |call| serde_json::to_vec(&RequestBody::Management {
-        version: VERSION, human_assertion: human_assertion.clone(), call: Box::new(call),
-    });
-    let capture = encode(Call::Capture { registration: "calendar".into(), operation: Action::Connect })?;
+    let encode = |call| {
+        serde_json::to_vec(&RequestBody::Management {
+            version: VERSION,
+            human_assertion: human_assertion.clone(),
+            call: Box::new(call),
+        })
+    };
+    let capture = encode(Call::Capture {
+        registration: "calendar".into(),
+        operation: Action::Connect,
+    })?;
     let snapshot = || simulation::snapshot(&crate::store::open(&database)?);
     let initial = snapshot()?;
     let mut no_workload = assertions.headers();
@@ -1000,7 +1046,8 @@ fn mounted_management_authenticates_both_callers_and_lost_confirmation_is_not_re
         assert_eq!(snapshot()?, initial);
     }
     let mut wrong_human: serde_json::Value = serde_json::from_slice(&capture)?;
-    wrong_human["human_assertion"] = json!(assertions.assertion(SHELL_AUDIENCE, MACHINE, "service-123"));
+    wrong_human["human_assertion"] =
+        json!(assertions.assertion(SHELL_AUDIENCE, MACHINE, "service-123"));
     let mut extra: serde_json::Value = serde_json::from_slice(&capture)?;
     extra["call"]["actor"] = json!("alice@example.com");
     let mut tampered: serde_json::Value = serde_json::from_slice(&capture)?;
@@ -1013,47 +1060,95 @@ fn mounted_management_authenticates_both_callers_and_lost_confirmation_is_not_re
     }
     let (status, body) = invoke(assertions.headers(), capture)?;
     assert_eq!(status, StatusCode::OK);
-    for forbidden in ["fixture-client-secret", "private-access-token", "private-refresh-token", "code_verifier"] {
+    for forbidden in [
+        "fixture-client-secret",
+        "private-access-token",
+        "private-refresh-token",
+        "code_verifier",
+    ] {
         assert!(!String::from_utf8_lossy(&body).contains(forbidden));
     }
-    let ResponseBody::Management { version: VERSION, app, reply } = crate::json::decode(&body)? else {
+    let ResponseBody::Management {
+        version: VERSION,
+        app,
+        reply,
+    } = crate::json::decode(&body)?
+    else {
         anyhow::bail!("mounted capture response changed");
     };
     assert_eq!(app, "workspace");
-    let ManagementReply::Pending { view } = *reply else { anyhow::bail!("mounted pending missing"); };
+    let ManagementReply::Pending { view } = *reply else {
+        anyhow::bail!("mounted pending missing");
+    };
     assert_eq!(view.human, identity.email);
     assert_eq!(view.subject, identity.subject);
     let pending = snapshot()?;
     port.at.store(102, Ordering::SeqCst);
     let proof = effects::scope(port.clone(), || -> Result<_> {
         let fresh = VerifiedAuthTime::from_google(shell_oidc::Reauthenticated::fixture(
-            FreshIntent::management(&view, &identity)?, identity.email.clone(), identity.subject.clone(), 101,
+            FreshIntent::management(&view, &identity)?,
+            identity.email.clone(),
+            identity.subject.clone(),
+            101,
         ));
-        signer.attest_management(&view, &fresh, &identity, Digest::new(b"native-browser-session"), 102)
+        signer.attest_management(
+            &view,
+            &fresh,
+            &identity,
+            Digest::new(b"native-browser-session"),
+            102,
+        )
     })?;
-    let confirm = encode(Call::Confirm { id: view.id.clone(), proof })?;
+    let confirm = encode(Call::Confirm {
+        id: view.id.clone(),
+        proof,
+    })?;
     let mut forged: serde_json::Value = serde_json::from_slice(&confirm)?;
     forged["call"]["proof"]["session"] = json!(Digest::new(b"other-browser"));
-    assert_eq!(invoke(assertions.headers(), serde_json::to_vec(&forged)?)?.0, StatusCode::FORBIDDEN);
+    assert_eq!(
+        invoke(assertions.headers(), serde_json::to_vec(&forged)?)?.0,
+        StatusCode::FORBIDDEN
+    );
     assert_eq!(snapshot()?, pending);
     // Discard the successful HTTP response, as a caller with a lost reply does.
     // The retry still traverses body admission, both JWT verifiers and SQLite.
     let (status, completed) = invoke(assertions.headers(), confirm.clone())?;
     assert_eq!(status, StatusCode::OK);
-    for forbidden in ["fixture-client-secret", "private-access-token", "private-refresh-token", "code_verifier"] {
+    for forbidden in [
+        "fixture-client-secret",
+        "private-access-token",
+        "private-refresh-token",
+        "code_verifier",
+    ] {
         assert!(!String::from_utf8_lossy(&completed).contains(forbidden));
     }
-    let ResponseBody::Management { reply, .. } = crate::json::decode(&completed)? else { anyhow::bail!("mounted confirmation response changed"); };
+    let ResponseBody::Management { reply, .. } = crate::json::decode(&completed)? else {
+        anyhow::bail!("mounted confirmation response changed");
+    };
     assert!(matches!(*reply, ManagementReply::Redirect { .. }));
     drop(completed);
     let committed = snapshot()?;
     assert_ne!(committed, pending);
-    assert_eq!(invoke(assertions.headers(), confirm)?.0, StatusCode::FORBIDDEN);
+    assert_eq!(
+        invoke(assertions.headers(), confirm)?.0,
+        StatusCode::FORBIDDEN
+    );
     assert_eq!(snapshot()?, committed);
     let db = crate::store::open(&database)?;
-    assert_eq!(connect::state(&db, &view.id)?, Some(connect::ConnectState::AwaitingProviderAuthorization));
-    assert_eq!(db.query_row("SELECT count(*) FROM oauth_connect_attempts", [], |row| row.get::<_, i64>(0))?, 1);
-    assert_eq!(db.query_row("SELECT count(*) FROM oauth_connection_slots", [], |row| row.get::<_, i64>(0))?, 0);
+    assert_eq!(
+        connect::state(&db, &view.id)?,
+        Some(connect::ConnectState::AwaitingProviderAuthorization)
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM oauth_connect_attempts", [], |row| row
+            .get::<_, i64>(0))?,
+        1
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM oauth_connection_slots", [], |row| row
+            .get::<_, i64>(0))?,
+        0
+    );
     assert_eq!(port.sends.load(Ordering::SeqCst), 0);
     Ok(())
 }
