@@ -11,6 +11,9 @@ use scraper::{ElementRef, Html, Node, Selector, node::Element};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
+const MAX_FORM_FIELDS: usize = crate::input_shape::MAX_FIELDS;
+const MAX_FORM_CONTROLS: usize = 128;
+
 fn selector(value: &str) -> Selector {
     Selector::parse(value).expect("static selector")
 }
@@ -498,12 +501,14 @@ pub(crate) fn controls(form: ElementRef<'_>) -> Result<Vec<Control>> {
         };
         // Repetition is a property of the declared field kind, not of the parser:
         // only a field the operation declares as a scalar list may appear twice.
-        // Schema-aware callers enforce that; here we only bound the control count.
+        // Schema-aware callers enforce that; bound field names and repeated
+        // controls independently so a bounded list can expose all its choices.
         names.insert(name.to_string());
         ensure!(
             ["input", "textarea", "select"].contains(&value.name())
                 && !name.starts_with('_')
-                && controls.len() < 32,
+                && names.len() <= MAX_FORM_FIELDS
+                && controls.len() < MAX_FORM_CONTROLS,
             "invalid_or_duplicate_form_field"
         );
         ensure!(
@@ -1140,6 +1145,56 @@ mod query_form_tests {
                 .unwrap()
                 .1,
             serde_json::json!({"term":"acme","archived":true,"page":1})
+        );
+    }
+
+    #[test]
+    fn named_control_budgets_distinguish_list_choices_from_field_names() {
+        let markup = |count: usize, distinct: bool| {
+            format!(
+                "<form>{}</form>",
+                (0..count)
+                    .map(|index| format!(
+                        "<input type='checkbox' name='{}' value='choice-{index}'>",
+                        if distinct {
+                            format!("field-{index}")
+                        } else {
+                            "choices".into()
+                        },
+                    ))
+                    .collect::<String>()
+            )
+        };
+        for (count, distinct, valid) in [
+            (100, false, true),
+            (MAX_FORM_CONTROLS, false, true),
+            (MAX_FORM_CONTROLS + 1, false, false),
+            (MAX_FORM_FIELDS, true, true),
+            (MAX_FORM_FIELDS + 1, true, false),
+        ] {
+            let document = Html::parse_fragment(&markup(count, distinct));
+            let form = document.select(&selector("form")).next().unwrap();
+            assert_eq!(controls(form).is_ok(), valid, "{count} distinct={distinct}");
+        }
+        let document = Html::parse_fragment(&markup(100, false));
+        let parsed = controls(document.select(&selector("form")).next().unwrap()).unwrap();
+        let list = Kind::InputShape {
+            shape: crate::output_schema::Type::List(Box::new(crate::output_schema::Type::String)),
+            roc_type: "List(Str)".into(),
+        };
+        let group = parsed.iter().collect::<Vec<_>>();
+        assert_eq!(
+            native_field(&group, &list)
+                .unwrap()
+                .unwrap()
+                .0
+                .choices
+                .len(),
+            100
+        );
+        assert!(
+            native_field(&group, &Kind::Text).is_err(),
+            "fanout never admits a scalar checkbox field"
         );
     }
 

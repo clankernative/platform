@@ -1347,6 +1347,108 @@ fn repeated_controls_decode_as_an_ordered_list_with_an_explicit_empty() -> Resul
 }
 
 #[test]
+fn native_list_checkbox_fanout_preserves_signed_choices_and_empty_selection() -> Result<()> {
+    let world = World::repeated_fields()?;
+    let server = Server::start(world.runtime.clone(), "alice", 0)?;
+    let client = server.client()?;
+    let empty_page = client
+        .get(format!("{}/native-controls", server.origin))
+        .send()?;
+    assert_eq!(empty_page.status(), StatusCode::OK);
+    assert_eq!(
+        claims(&selected_form(
+            &empty_page.text()?,
+            "#native-controls-form"
+        )?)?["bound"]["tags"],
+        json!([])
+    );
+    for index in 0..100 {
+        let result = world.runtime.invoke(
+            "things.tag",
+            "alice",
+            &format!("native-choice-{index}"),
+            &json!({
+                "name": format!("choice-{index:03}"), "tags": [],
+                "attributes": {"entries": []}, "groups": {"members": []}
+            }),
+            100,
+            Fault::None,
+        )?;
+        assert_eq!(result.status, "success", "{}", result.error);
+    }
+    let fresh = || -> Result<(BTreeMap<String, String>, Vec<String>)> {
+        let response = client
+            .get(format!("{}/native-controls", server.origin))
+            .send()?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let page = response.text()?;
+        let document = Html::parse_document(&page);
+        let choices = document
+            .select(&selector("input[type=checkbox][name=tags]"))
+            .map(|input| input.value().attr("value").unwrap().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(choices.len(), 100);
+        Ok((selected_form(&page, "#native-controls-form")?, choices))
+    };
+    let send =
+        |fields: &BTreeMap<String, String>, name: &str, tags: &[&str]| -> Result<StatusCode> {
+            let mut body = url::form_urlencoded::Serializer::new(String::new());
+            for (key, value) in [
+                ("_csrf", fields["_csrf"].as_str()),
+                ("_ticket", fields["_ticket"].as_str()),
+                ("name", name),
+                ("attributes.role", "reader"),
+                ("groups", "eng"),
+            ] {
+                body.append_pair(key, value);
+            }
+            for tag in tags {
+                body.append_pair("tags", tag);
+            }
+            Ok(client
+                .post(format!("{}/actions", server.origin))
+                .header("Origin", &server.origin)
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .body(body.finish())
+                .send()?
+                .status())
+        };
+    let (fields, _) = fresh()?;
+    assert_eq!(
+        send(&fields, "selected", &["choice-099", "choice-000"])?,
+        StatusCode::SEE_OTHER
+    );
+    let (fields, choices) = fresh()?;
+    assert_eq!(
+        send(
+            &fields,
+            "all",
+            &choices.iter().map(String::as_str).collect::<Vec<_>>()
+        )?,
+        StatusCode::SEE_OTHER
+    );
+    let (fields, _) = fresh()?;
+    assert_eq!(send(&fields, "empty", &[])?, StatusCode::SEE_OTHER);
+    let stored = |name: &str| -> Result<String> {
+        Ok(world.db()?.query_row(
+            "SELECT tags_joined FROM things WHERE name=?1",
+            [name],
+            |row| row.get(0),
+        )?)
+    };
+    assert_eq!(stored("selected")?, "choice-099,choice-000");
+    assert_eq!(stored("all")?, choices.join(","));
+    assert_eq!(stored("empty")?, "");
+    let (fields, _) = fresh()?;
+    assert_eq!(
+        send(&fields, "unoffered", &["not-offered"])?,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(world.count("things")?, 103);
+    Ok(())
+}
+
+#[test]
 fn keyed_and_unique_controls_decode_to_canonical_maps_and_sets() -> Result<()> {
     // A map carries its key in the control name, so one control is always one
     // complete entry and a half-populated pair cannot be expressed. A set repeats
