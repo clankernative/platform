@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 pub const ACTOR: &str = "developer";
@@ -21,6 +21,10 @@ pub const DEFAULT_SEED: u64 = 0xDA72_2026;
 pub const DEFAULT_CASES: u64 = 16;
 const MAX_STEPS: usize = 128;
 const VERIFICATION_TIME: i64 = 1_700_000_000;
+
+#[cfg(test)]
+#[path = "development/verification_failure_tests.rs"]
+mod verification_failure_tests;
 
 /// Non-interactive invocation and provider-fixture time. Verification uses a
 /// repeatable epoch; local serving uses the runtime clock for fresh providers.
@@ -161,6 +165,63 @@ struct VerificationInvocation<'a> {
     seed: u64,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum VerificationAction {
+    Input,
+    Check,
+    ErrorInput,
+}
+
+impl VerificationAction {
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "input" => Ok(Self::Input),
+            "check" => Ok(Self::Check),
+            "error-input" => Ok(Self::ErrorInput),
+            _ => bail!("unknown verification action"),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Input => "input",
+            Self::Check => "check",
+            Self::ErrorInput => "error-input",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum VerificationStage {
+    Callback,
+    GeneratedInput,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VerificationRequest {
+    action: VerificationAction,
+    operation: String,
+    snapshot: String,
+    before: String,
+    output: String,
+    seed: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VerificationFailure {
+    format: u32,
+    artifact: String,
+    request: VerificationRequest,
+    stage: VerificationStage,
+    responses: Vec<String>,
+    error: String,
+    generated_input: Option<String>,
+}
+
 fn verification_snapshot_context(
     snapshot: &Value,
     invocation: &VerificationInvocation<'_>,
@@ -182,6 +243,24 @@ fn verification_snapshot_context(
     Ok(encoded)
 }
 
+fn verification_request(
+    action: &str,
+    operation: &str,
+    snapshot: &Value,
+    before: &Value,
+    output: &Value,
+    invocation: &VerificationInvocation<'_>,
+) -> Result<VerificationRequest> {
+    Ok(VerificationRequest {
+        action: VerificationAction::parse(action)?,
+        operation: operation.into(),
+        snapshot: verification_snapshot_context(snapshot, invocation)?,
+        before: verification_snapshot_context(before, invocation)?,
+        output: output.to_string(),
+        seed: invocation.seed,
+    })
+}
+
 fn verification(
     artifact: &LoadedArtifact,
     action: &str,
@@ -191,12 +270,248 @@ fn verification(
     output: &Value,
     invocation: VerificationInvocation<'_>,
 ) -> Result<String> {
-    let request = format!(
-        "verify:{}",
-        json!({ "action": action, "operation": operation, "snapshot": verification_snapshot_context(snapshot, &invocation)?, "before": verification_snapshot_context(before, &invocation)?, "output": output.to_string(), "seed": invocation.seed })
+    let request = verification_request(action, operation, snapshot, before, output, &invocation)?;
+    verification_captured(artifact, request, None, VerificationStage::Callback)
+}
+
+fn verification_captured(
+    artifact: &LoadedArtifact,
+    request: VerificationRequest,
+    evidence_dir: Option<&Path>,
+    stage: VerificationStage,
+) -> Result<String> {
+    let frame = format!("verify:{}", serde_json::to_string(&request)?);
+    let (result, responses, generated_input) =
+        observe_verification(artifact, &request, stage, || {
+            properties::exchange_verification(artifact, frame.as_bytes())
+        });
+    if let (Err(error), Some(directory)) = (&result, evidence_dir) {
+        let path = save_verification_failure(
+            directory,
+            &VerificationFailure {
+                format: 1,
+                artifact: artifact.id().to_owned(),
+                request,
+                stage,
+                responses,
+                error: format!("{error:#}"),
+                generated_input,
+            },
+        )
+        .with_context(|| format!("{error:#}; could not retain verification evidence"))?;
+        let quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
+        let command = format!(
+            "cargo run --locked -p day2 -- replay-verification {} {}",
+            quote(&artifact.directory().to_string_lossy()),
+            quote(&path.to_string_lossy()),
+        );
+        bail!(
+            "{error:#}; verification evidence: {}; replay: {command}",
+            path.display()
+        );
+    }
+    result
+}
+
+fn observe_verification(
+    artifact: &LoadedArtifact,
+    request: &VerificationRequest,
+    stage: VerificationStage,
+    mut call: impl FnMut() -> Result<Vec<u8>>,
+) -> (Result<String>, Vec<String>, Option<String>) {
+    let mut responses = Vec::new();
+    let result = verification_reply(&request.operation, request.action.name(), || {
+        let bytes = call()?;
+        // The complete request reproduces output; fingerprints retain both
+        // observations without copying two potentially large worker replies.
+        responses.push(crate::digest(&bytes));
+        Ok(bytes)
+    });
+    let generated_input = if stage == VerificationStage::GeneratedInput {
+        result.as_ref().ok().cloned()
+    } else {
+        None
+    };
+    let result = result.and_then(|value| {
+        if stage == VerificationStage::GeneratedInput {
+            ensure!(
+                request.action == VerificationAction::Input,
+                "invalid generation stage"
+            );
+            validate_step(artifact, &request.operation, &value)?;
+        }
+        Ok(value)
+    });
+    (result, responses, generated_input)
+}
+
+fn validate_verification_request(
+    artifact: &LoadedArtifact,
+    request: &VerificationRequest,
+) -> Result<()> {
+    ensure!(
+        matches!(
+            request.action,
+            VerificationAction::Input | VerificationAction::Check
+        ),
+        "unsupported saved verification action"
     );
-    verification_reply(operation, action, || {
-        properties::exchange_verification(artifact, request.as_bytes())
+    let operation = artifact.route(&request.operation)?;
+    ensure!(
+        operation.name == request.operation
+            && matches!(operation.kind.as_str(), "command" | "query"),
+        "unregistered verification operation"
+    );
+    let mut context = None;
+    for snapshot in [&request.snapshot, &request.before] {
+        ensure!(
+            snapshot.len() <= artifact.contract().verification_limits.snapshot_bytes,
+            "verification snapshot byte budget"
+        );
+        let value: Value = serde_json::from_str(snapshot)?;
+        let verification = value
+            .get("verification")
+            .context("verification context missing")?;
+        ensure!(
+            verification["actor"]
+                .as_str()
+                .is_some_and(|actor| !actor.is_empty())
+                && verification["input"].is_string(),
+            "invalid verification context"
+        );
+        if let Some(previous) = &context {
+            ensure!(previous == verification, "verification contexts differ");
+        }
+        context = Some(verification.clone());
+    }
+    ensure!(
+        request.output.len() <= artifact.contract().verification_limits.snapshot_bytes,
+        "verification output byte budget"
+    );
+    let _: Value = serde_json::from_str(&request.output)?;
+    ensure!(
+        format!("verify:{}", serde_json::to_string(request)?).len()
+            < properties::MAX_PROPERTY_FRAME,
+        "verification request frame budget"
+    );
+    Ok(())
+}
+
+// A full admitted request and a returned invalid input, plus bounded diagnostics.
+// Worker, snapshot, heap and deadline limits are unchanged.
+const VERIFICATION_EVIDENCE_BYTES: usize = 2 * properties::MAX_PROPERTY_FRAME + 65_536;
+
+fn validate_verification_observation(failure: &VerificationFailure) -> Result<()> {
+    let metadata = serde_json::to_vec(&(
+        &failure.artifact,
+        failure.stage,
+        &failure.responses,
+        &failure.error,
+    ))?;
+    ensure!(
+        !failure.error.is_empty()
+            && metadata.len() <= 65_536
+            && failure.responses.len() <= 2
+            && failure.responses.iter().all(|hash| hash.len() == 71
+                && hash
+                    .strip_prefix("sha256:")
+                    .is_some_and(|hex| hex.bytes().all(|byte| byte.is_ascii_hexdigit()))),
+        "invalid verification observation"
+    );
+    ensure!(
+        failure.stage != VerificationStage::GeneratedInput
+            || failure.request.action == VerificationAction::Input,
+        "invalid generation stage"
+    );
+    if let Some(input) = &failure.generated_input {
+        ensure!(
+            failure.stage == VerificationStage::GeneratedInput
+                && failure.responses.len() == 2
+                && failure.responses[0] == failure.responses[1]
+                && serde_json::to_vec(input)?.len() < properties::MAX_PROPERTY_FRAME,
+            "invalid generated input observation"
+        );
+    }
+    Ok(())
+}
+
+fn save_verification_failure(directory: &Path, failure: &VerificationFailure) -> Result<PathBuf> {
+    use std::{io::Write, os::unix::fs::OpenOptionsExt};
+    validate_verification_observation(failure)?;
+    let path = directory.join("verification-failure.json");
+    fs::create_dir_all(directory)?;
+    let bytes = serde_json::to_vec(failure)?;
+    ensure!(
+        bytes.len() <= VERIFICATION_EVIDENCE_BYTES,
+        "verification evidence byte budget"
+    );
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .context("verification evidence already exists or unavailable")?;
+    file.write_all(&bytes)?;
+    Ok(path)
+}
+
+fn replay_verification_with(
+    artifact: &LoadedArtifact,
+    path: &Path,
+    mut call: impl FnMut(&[u8]) -> Result<Vec<u8>>,
+) -> Result<()> {
+    use std::{io::Read, os::unix::fs::OpenOptionsExt};
+    artifact.require_current_api()?;
+    let metadata = fs::symlink_metadata(path)?;
+    ensure!(
+        metadata.file_type().is_file() && metadata.len() <= VERIFICATION_EVIDENCE_BYTES as u64,
+        "verification evidence file type or byte budget"
+    );
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    ensure!(
+        metadata.is_file() && metadata.len() <= VERIFICATION_EVIDENCE_BYTES as u64,
+        "verification evidence file type or byte budget"
+    );
+    let mut bytes = Vec::new();
+    file.take(VERIFICATION_EVIDENCE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    ensure!(
+        bytes.len() <= VERIFICATION_EVIDENCE_BYTES,
+        "verification evidence byte budget"
+    );
+    let evidence: VerificationFailure =
+        serde_json::from_slice(&bytes).context("decode verification evidence")?;
+    ensure!(
+        evidence.format == 1 && evidence.artifact == artifact.id(),
+        "verification evidence identity mismatch"
+    );
+    validate_verification_observation(&evidence)?;
+    validate_verification_request(artifact, &evidence.request)?;
+    let frame = format!("verify:{}", serde_json::to_string(&evidence.request)?);
+    let (result, responses, generated_input) =
+        observe_verification(artifact, &evidence.request, evidence.stage, || {
+            call(frame.as_bytes())
+        });
+    let error = result
+        .err()
+        .context("verification failure did not reproduce")?;
+    ensure!(
+        format!("{error:#}") == evidence.error
+            && responses == evidence.responses
+            && generated_input == evidence.generated_input,
+        "verification replay diverged"
+    );
+    Ok(())
+}
+
+/// Re-evaluate saved pure callbacks and input validation, never commands or provider effects.
+pub fn replay_verification_file(artifact: &LoadedArtifact, path: &Path) -> Result<()> {
+    replay_verification_with(artifact, path, |frame| {
+        properties::exchange_verification(artifact, frame)
     })
 }
 
@@ -3014,18 +3329,23 @@ impl Campaign {
                     seed,
                     &snapshot,
                     |operation, snapshot, seed| {
-                        verification(
-                            self.runtime.artifact(),
+                        let request = verification_request(
                             "input",
                             operation,
                             snapshot,
                             &json!({}),
                             &Value::Null,
-                            VerificationInvocation {
+                            &VerificationInvocation {
                                 actor: &self.actor,
                                 input: "",
                                 seed,
                             },
+                        )?;
+                        verification_captured(
+                            self.runtime.artifact(),
+                            request,
+                            Some(&evidence_dir),
+                            VerificationStage::GeneratedInput,
                         )
                     },
                 )?;
@@ -3033,7 +3353,6 @@ impl Campaign {
                     resolved.kind == StepKind::Command,
                     "generated preparation is not a command"
                 );
-                validate_step(self.runtime.artifact(), &operation, &resolved.payload)?;
                 *self.queue.front_mut().context("missing example step")? = resolved.clone();
                 self.prepared_example = Some((operation, seed));
                 return Ok(serde_json::to_value(resolved)?);
@@ -3194,18 +3513,23 @@ impl Campaign {
             "dev-assert" => {
                 let active = self.active.as_mut().context("active operation required")?;
                 if let Some(seed) = active.verification_seed {
-                    verification(
-                        self.runtime.artifact(),
+                    let request = verification_request(
                         "check",
                         active.step.operation(),
                         &active.application_after,
                         &active.application_initial,
                         &active.outcome.result,
-                        VerificationInvocation {
+                        &VerificationInvocation {
                             actor: &self.actor,
                             input: active.step.input().context("command input required")?,
                             seed,
                         },
+                    )?;
+                    verification_captured(
+                        self.runtime.artifact(),
+                        request,
+                        Some(&evidence_dir),
+                        VerificationStage::Callback,
                     )?;
                     if active.obligation {
                         *self

@@ -58,8 +58,23 @@ The handle must name a command; a generated step grants no extra authority and
 accepts no arbitrary callback. It is not interpolation of earlier command results.
 
 Examples and generated commands go through the shared Roc check recipe, normal
-app transactions, durable commands, replay and property checks. Artifact-owned
-examples may include internal scheduled commands when the provider host is
+app transactions, durable commands, replay and property checks. When generated-example
+preparation (including typed-input validation) or a generated operation check fails,
+the campaign saves protected `verification-failure.json` in its evidence directory.
+It retains the exact request, seed, actor/input context, failure, returned invalid
+input when applicable, and fingerprints of both callback replies. Evidence can contain
+application data; keep it private. Replay it with:
+
+```console
+cargo run --locked -p day2 -- replay-verification 'ARTIFACT_DIRECTORY' 'EVIDENCE_DIRECTORY/verification-failure.json'
+```
+
+This re-evaluates only the artifact-bound pure callback and typed-input validation,
+checking the recorded failure and reply fingerprints without changing the saved file.
+It does not execute commands or invoke providers. Wrong artifacts, malformed contracts,
+nonregular files and oversized evidence are refused. A failure that no longer reproduces
+is reported as divergence, not a pass. Artifact-owned examples may include internal
+scheduled commands when the provider host is
 simulated; attempts to run those examples with live providers are refused. Internal
 commands remain unavailable through HTTP, CLI and MCP. Seeding happens once;
 restarts and rebuilds do not duplicate it. `--reset` selects a new managed instance
