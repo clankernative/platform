@@ -286,7 +286,7 @@ impl std::error::Error for Divergence {}
 
 /// Complete bounded reserved-table snapshots. Blobs are fingerprints, not
 /// exported encrypted material. Every row and every column participates.
-fn snapshot(db: &Connection) -> Result<serde_json::Value> {
+pub(in crate::oauth) fn snapshot(db: &Connection) -> Result<serde_json::Value> {
     let mut tables = db.prepare(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'oauth_%' ORDER BY name",
     )?;

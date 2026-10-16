@@ -86,6 +86,7 @@ impl Assertions {
 
     fn receiver(&self, backend: Arc<dyn AppApprovals>) -> AppApprovalReceiver {
         AppApprovalReceiver {
+            management: None,
             backend,
             registrations: None,
             authority: "app.example".into(),

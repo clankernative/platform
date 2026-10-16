@@ -731,6 +731,41 @@ shell-only retirement does not retract an app's already accepted five-minute lea
 Renewal and workload deployment remain runtime work. The real HTTP fixtures exercise the
 same native campaign and Roc recipe but cannot qualify a Google client.
 
+## Product connection management
+
+The dedicated security shell mounts `/oauth/connections/APP/REGISTRATION` for
+admitted selections. Its forms capture an immutable pending action at the owning
+app through the authenticated private transport. A signed nonce- and
+purpose-bound authentication after that capture and a same-origin confirmation
+are required before connect or disconnect. An existing IAP login or provider
+consent click does not establish fresh authentication. The original five-minute
+deadline is never renewed by a redirect, confirmation, exchange or restart.
+
+The initial execution profile is Google Calendar with a mapped current human
+and an empty slot. Other reviewed provider metadata stays admitted; this UI
+refuses unsupported execution. Replacement, reconnecting a disabled slot and
+adopting restored state are unavailable. A new disposable installation is
+required for another first-slot campaign.
+
+The callback keeps a dedicated Secure/HttpOnly/SameSite=Lax browser session so it
+can return from Google. Exact state, selected callback path, original purpose,
+human and session are checked before consuming it. The owning app verifies the
+current shell key, registration, account mapping, active business authority and
+slot again. It commits the dispatch fence before one code exchange and publishes
+encrypted tokens only with the final local checks in the same transaction.
+Unknown exchange outcomes never trigger an automatic retry or become readiness.
+
+Disconnect disables local use, increments its epoch, cancels outstanding local
+work and deletes private material atomically. Google revocation affects the
+whole client/account grant. This profile has no complete cross-app/installation
+holder inventory and therefore sends no automatic revocation request. It records
+`intervention_required` and reports provider cleanup as an operator action.
+
+These checks do not establish an external nonrollback security epoch. Secured
+restore remains refused; this profile must not be used as restore, bootstrap or
+enrollment evidence. Native tests, a qualified release, actual Google
+registration and the deployed live lifecycle remain separate gates.
+
 ## Remaining runtime work
 
 The dedicated shell launcher and deployment root are now available. The app
@@ -745,8 +780,8 @@ These declarations do not audit all effective inherited IAM privileges.
 Use the [installation IAM audit procedure](OAUTH-IAM-AUDIT.md) before reporting
 workload isolation; an API selection or successful secret read is not that evidence.
 
-The next runtime slice must qualify the actual deployed frontend/workload/secret
-policies and wire connect attempt creation.
+The live campaign must qualify the actual deployed frontend/workload/secret
+policies and the product connection-management path.
 Independent app facts and registration publication are now composed in the
 ordinary qualified edge launcher. The real Google web clients and
 their exact secret versions remain required; their instance contract and native

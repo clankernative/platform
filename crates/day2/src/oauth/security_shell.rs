@@ -247,6 +247,7 @@ pub(crate) struct SecurityShell {
     credentials: Option<Arc<credentials::Registry>>,
     canaries: Option<Arc<registration::shell::Canaries>>,
     guard: Option<Arc<dyn ShellGuard>>,
+    management: Option<Arc<super::management::shell::Shell>>,
 }
 
 pub(crate) struct RegistrationShell {
@@ -437,11 +438,11 @@ impl SecurityShell {
         let approvals = Arc::new(shell_transport::RemoteApprovals::from_instance(
             &instance, bearers,
         )?);
-        Ok((
-            Self::with_transport(origin, approvals.clone(), signer.clone(), authenticator)?,
-            signer,
-            approvals,
-        ))
+        let mut shell = Self::with_transport(origin.clone(), approvals.clone(), signer.clone(), authenticator.clone())?;
+        Arc::get_mut(&mut shell).context("security shell already shared")?.management = Some(Arc::new(
+            super::management::shell::Shell::new(origin.trim_end_matches('/').into(), approvals.clone(), signer.clone(), authenticator),
+        ));
+        Ok((shell, signer, approvals))
     }
 
     #[cfg(test)]
@@ -483,6 +484,7 @@ impl SecurityShell {
             credentials: None,
             canaries: None,
             guard: None,
+            management: None,
         }))
     }
 
@@ -662,6 +664,15 @@ impl SecurityShell {
                     error
                 }
             })?;
+        }
+        if let Some(management) = &self.management {
+            if let Some(response) = management.provider_callback(method, path, query, headers, body, &identity, at)? {
+                return Ok(response);
+            }
+            if let Some(tail) = path.strip_prefix(super::management::PREFIX) {
+                ensure!(query.is_none(), "OAuth management query refused");
+                return management.dispatch(method, tail, headers, body, &identity, at);
+            }
         }
         if registration::shell::reserved(path) {
             return self
@@ -895,6 +906,9 @@ impl SecurityShell {
         let proof =
             VerifiedAuthTime::from_google(self.authenticator.complete(query, identity, at)?);
         proof.require_current(at)?;
+        if matches!(proof.purpose(), FreshPurpose::OAuthConnect | FreshPurpose::OAuthDisconnect) {
+            return self.management.as_ref().context("OAuth management unavailable")?.reauthenticated(proof, headers, identity, at);
+        }
         if proof.purpose() == FreshPurpose::CredentialIntent {
             let registry = self
                 .credentials

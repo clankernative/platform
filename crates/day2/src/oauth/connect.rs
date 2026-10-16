@@ -236,6 +236,7 @@ fn install_schema_in(db: &Connection) -> Result<()> {
     )?;
     super::exchange::install_schema(db)?;
     super::custody::install_schema(db)?;
+    super::management::app::install(db)?;
     Ok(())
 }
 
@@ -295,6 +296,28 @@ fn begin_inner(
     )>,
     now: i64,
 ) -> Result<bool> {
+    begin_inner_checked(db, intent, binding, private, now, None)
+}
+
+pub(super) fn begin_managed(
+    db: &mut Connection,
+    prepared: super::exchange::PreparedAuthorization,
+    now: i64,
+    guard: &super::management::app::StartGuard<'_>,
+) -> Result<bool> {
+    let (intent, callback, exchange, verifier) = prepared.parts();
+    callback.verify(intent)?;
+    begin_inner_checked(db, intent, Some(callback), Some((exchange, verifier)), now, Some(guard))
+}
+
+fn begin_inner_checked(
+    db: &mut Connection,
+    intent: &ConnectIntent,
+    binding: Option<&CallbackBinding>,
+    private: Option<(&super::exchange::ExchangeBinding, &super::custody::PreparedVerifier)>,
+    now: i64,
+    guard: Option<&super::management::app::StartGuard<'_>>,
+) -> Result<bool> {
     validate(intent)?;
     ensure!(
         intent
@@ -304,6 +327,9 @@ fn begin_inner(
         "invalid connect attempt lifetime"
     );
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if let Some(guard) = guard {
+        guard.check(&tx, now)?;
+    }
     if !slot_matches(&tx, intent)? {
         return Ok(false);
     }
@@ -340,6 +366,9 @@ fn begin_inner(
     {
         super::exchange::store_binding(&tx, &intent.attempt, exchange)?;
         super::custody::publish_verifier(&tx, verifier)?;
+    }
+    if inserted == 1 && let Some(guard) = guard {
+        guard.commit(&tx)?;
     }
     tx.commit()?;
     Ok(inserted == 1)

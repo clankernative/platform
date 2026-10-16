@@ -187,6 +187,25 @@ pub(crate) struct ArtifactShellSigner {
 }
 
 impl ArtifactShellSigner {
+    pub(super) fn attest_management(
+        &self,
+        view: &super::management::View,
+        proof: &super::fresh_auth::VerifiedAuthTime,
+        identity: &crate::iap::Verified,
+        session: Digest,
+        now: i64,
+    ) -> Result<super::management::Attestation> {
+        let state = self.state.read().map_err(|_| anyhow::anyhow!("OAuth shell selection lock poisoned"))?;
+        let selected = management_selection(&state.selected, view)?;
+        let reference = &selected.shell_attestation;
+        let key = state.keys.as_ref().context("OAuth shell key provider missing")?
+            .load(reference, ApprovalKeyPurpose::ShellAttestation)?;
+        ensure!(key.binding == reference.binding && key.version == reference.version
+            && key.purpose == ApprovalKeyPurpose::ShellAttestation, "OAuth management key changed");
+        let at = proof.observe_current(now)?;
+        super::management::Attestation::sign(view, proof, identity, session, &key.bytes, key.version, at)
+    }
+
     pub(crate) fn with_gcp(
         selected: QualifiedConnections,
         tokens: Arc<dyn AccessTokenSource>,
@@ -371,6 +390,23 @@ pub(crate) struct QualifiedConnections {
     instance: Instance,
     entries: BTreeMap<(String, String), SelectedConnection>,
     key_bindings: Vec<GcpBinding>,
+}
+
+fn management_selection<'a>(
+    selected: &'a QualifiedConnections,
+    view: &super::management::View,
+) -> Result<&'a SelectedConnection> {
+    let candidate = selected.entries.get(&(view.app.clone(), view.registration.clone()))
+        .context("OAuth management requirement retired")?;
+    let (_, shell) = selected.instance.security_edge()?;
+    let edge = selected.instance.apps.get(&view.app).and_then(|app| app.edge.as_ref()).context("OAuth app edge missing")?;
+    ensure!(view.logical_id == candidate.requirement.logical_id
+        && view.usage == candidate.requirement.usage
+        && view.scopes == candidate.permission.action_scopes.values().flatten().cloned().collect()
+        && view.binding_namespace == binding_namespace(&candidate.binding)?
+        && view.shell_origin == format!("{}/", shell.origin)
+        && view.app_origin == format!("{}/", edge.origin), "OAuth management selection changed");
+    Ok(candidate)
 }
 
 impl QualifiedConnections {
@@ -1050,6 +1086,34 @@ pub(crate) struct ArtifactApprovalAuthority {
 }
 
 impl ArtifactApprovalAuthority {
+    pub(super) fn verify_management(
+        &self,
+        view: &super::management::View,
+        proof: &super::management::Attestation,
+        identity: &crate::iap::Verified,
+        now: i64,
+    ) -> Result<()> {
+        let state = self.state.read().map_err(|_| anyhow::anyhow!("OAuth selection lock poisoned"))?;
+        let selected = management_selection(&state.selected, view)?;
+        let reference = &selected.shell_attestation;
+        let key = state.keys.as_ref().context("OAuth selected key provider missing")?
+            .load(reference, ApprovalKeyPurpose::ShellAttestation)?;
+        ensure!(key.binding == reference.binding && key.version == reference.version
+            && key.purpose == ApprovalKeyPurpose::ShellAttestation, "OAuth management key changed");
+        let at = super::effects::wall_time()?;
+        ensure!(at >= now, "OAuth management clock moved backwards");
+        proof.verify(view, identity, &key.bytes, &key.version, at)
+    }
+
+    pub(super) fn management_client(&self, view: &super::management::View) -> Result<String> {
+        let state = self.state.read().map_err(|_| anyhow::anyhow!("OAuth selection lock poisoned"))?;
+        let selected = management_selection(&state.selected, view)?;
+        let client = state.selected.instance.oauth_clients.as_ref().context("OAuth clients missing")?
+            .registrations.get(&selected.binding.registration.id).context("OAuth client missing")?.client();
+        ensure!(matches!(client, day2_capabilities::oauth::ProviderClient::Google { .. }), "OAuth management adapter unavailable");
+        Ok(client.client_id().to_owned())
+    }
+
     pub(crate) fn with_gcp(
         selected: QualifiedConnections,
         readiness: Arc<dyn OutboundReadiness>,
@@ -3582,6 +3646,59 @@ pub(super) mod tests {
         fn access_token(&self) -> Result<String> {
             panic!("removed selection must not acquire a token")
         }
+    }
+
+    /// Real host storage and selected native adapter, with synthetic readiness
+    /// and keys only. The test effects port still handles the real wire parser.
+    pub(in crate::oauth) fn management_fixture(directory: &Path) -> Result<(
+        crate::store::Runtime, Arc<ArtifactApprovalAuthority>, Arc<ArtifactShellSigner>,
+    )> {
+        struct Host;
+        impl crate::host_inputs::Clock for Host {
+            fn wall_time(&self) -> Result<std::time::Duration> { Ok(std::time::Duration::from_secs(100)) }
+            fn monotonic(&self) -> std::time::Duration { std::time::Duration::ZERO }
+        }
+        impl crate::host::Host for Host {
+            fn entropy(&self, _: &str, _: &str) -> Result<[u8; 32]> { Ok([29; 32]) }
+            fn now_ms(&self) -> Result<i64> { Ok(100_000) }
+            fn worker_action(&self, _: crate::protocol::Phase, _: &crate::protocol::Request) -> Result<crate::host::WorkerAction> {
+                anyhow::bail!("unexpected fixture worker")
+            }
+            fn record_exchange(&self, _: crate::protocol::Phase, _: &crate::protocol::Request, _: &Result<crate::protocol::Response>) -> Result<()> {
+                anyhow::bail!("unexpected fixture exchange")
+            }
+            fn monotonic(&self) -> std::time::Duration { std::time::Duration::ZERO }
+        }
+        struct Tokens;
+        impl AccessTokenSource for Tokens {
+            fn access_token(&self) -> Result<String> { Ok("fixture-metadata-access".into()) }
+        }
+        let mut fixture = fixture(AccountBindingPolicy::MappedHuman)?;
+        let app = fixture.instance.apps.get_mut("workspace").unwrap();
+        let artifact_path = directory.join("artifact");
+        std::fs::create_dir(&artifact_path)?;
+        app.artifact = artifact_path.clone();
+        app.readers = BTreeSet::from(["alice@example.com".into()]);
+        let original = &fixture.artifacts["workspace"];
+        let artifact = LoadedArtifact::from_contract_for_tests(original.id().into(), artifact_path, original.contract().clone());
+        fixture.artifacts.insert("workspace".into(), artifact.clone());
+        if let profiles::AccountBindingEvidence::MappedHuman { owner, .. } = &mut fixture.evidence.account {
+            *owner = "alice@example.com".into();
+        }
+        let path = directory.join("instance.json");
+        std::fs::write(&path, serde_json::to_vec(&fixture.instance)?)?;
+        let host = Arc::new(Host);
+        let runtime = crate::store::Runtime::from_artifact_for_tests(path, "workspace".into(), directory.join("app.sqlite"), artifact)?.with_host(host.clone(), host);
+        runtime.initialize()?;
+        let keys: Arc<dyn ApprovalKeyProvider> = Arc::new(Keys::default());
+        let readiness = Arc::new(Readiness { runtime: Digest::of(fixture.instance.oauth_runtime.as_ref().unwrap())?,
+            current: RwLock::new(Some(fixture.evidence.clone())), calls: AtomicUsize::new(0) });
+        let authority = Arc::new(ArtifactApprovalAuthority::with_keys(fixture.qualify()?, readiness, keys.clone()));
+        authority.state.write().unwrap().tokens = Some(Arc::new(Tokens));
+        let signer = Arc::new(ArtifactShellSigner { state: RwLock::new(AuthorityState {
+            selected: fixture.qualify()?, keys: Some(keys), tokens: None,
+        }) });
+        Ok((runtime, authority, signer))
     }
 
     #[test]

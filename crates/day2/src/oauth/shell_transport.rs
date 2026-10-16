@@ -198,6 +198,11 @@ pub(crate) trait ApprovalSigner: Send + Sync {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 enum RequestBody {
+    Management {
+        version: u32,
+        human_assertion: String,
+        call: Box<super::management::app::Call>,
+    },
     Registration {
         version: u32,
         human_assertion: String,
@@ -220,6 +225,11 @@ enum RequestBody {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 enum ResponseBody {
+    Management {
+        version: u32,
+        app: String,
+        reply: Box<super::management::app::Reply>,
+    },
     Registration {
         version: u32,
         app: String,
@@ -290,9 +300,15 @@ pub(crate) struct AppApprovalReceiver {
     human: iap::Verifier,
     route: String,
     registrations: Option<Arc<dyn RegistrationSink>>,
+    management: Option<Arc<super::management::app::Manager>>,
 }
 
 impl AppApprovalReceiver {
+    pub(crate) fn with_management(mut self: Arc<Self>, manager: Arc<super::management::app::Manager>) -> Result<Arc<Self>> {
+        Arc::get_mut(&mut self).context("OAuth receiver already shared")?.management = Some(manager);
+        Ok(self)
+    }
+
     pub(crate) fn require_host(&self, app: &str, authority: &str) -> Result<()> {
         ensure!(
             self.backend.app() == app && self.authority == authority,
@@ -321,6 +337,7 @@ impl AppApprovalReceiver {
             authority: edge.authority().into(),
             route,
             registrations: None,
+            management: None,
             workload: iap::Verifier::for_workload(
                 &edge.iap_audience,
                 &transport.service_account,
@@ -425,6 +442,13 @@ impl AppApprovalReceiver {
         self.workload.verify_workload(one_assertion(headers)?, at)?;
         let request: RequestBody = crate::json::decode(body)?;
         let response = match request {
+            RequestBody::Management { version, human_assertion, call } => {
+                ensure!(version == VERSION, "unsupported OAuth private version");
+                let identity = self.human.verify(&human_assertion, at)?;
+                let reply = self.management.as_ref().context("OAuth management unavailable")?
+                    .dispatch(*call, &identity, at)?;
+                ResponseBody::Management { version: VERSION, app: self.backend.app().into(), reply: Box::new(reply) }
+            }
             RequestBody::Registration {
                 version,
                 human_assertion,
@@ -517,6 +541,29 @@ pub(crate) struct RemoteApprovals {
 }
 
 impl RemoteApprovals {
+    pub(in crate::oauth) fn management(
+        &self, app: &str, call: super::management::app::Call, headers: &HeaderMap,
+    ) -> Result<super::management::app::Reply> {
+        let request = RequestBody::Management { version: VERSION, human_assertion: one_assertion(headers)?.into(), call: Box::new(call) };
+        let ResponseBody::Management { version, app: observed, reply } = self.send(app, &request, Instant::now() + Duration::from_secs(20))?
+        else { anyhow::bail!("invalid OAuth management response"); };
+        ensure!(version == VERSION && observed == app, "OAuth management receiver changed");
+        if let super::management::app::Reply::Pending { view } = reply.as_ref() {
+            let target = self.targets.get(app).context("OAuth receiver missing")?;
+            routed_attempt(&view.id, &target.route)?;
+            ensure!(view.app == app && view.app_origin == target.origin && view.shell_origin == self.shell_origin,
+                "OAuth management response origin changed");
+        }
+        Ok(*reply)
+    }
+
+    pub(in crate::oauth) fn management_owner(&self, id: &str) -> Result<&str> {
+        attempt(id)?;
+        let (app, target) = self.targets.iter().find(|(_, target)| id.starts_with(&target.route)).context("OAuth management owner missing")?;
+        routed_attempt(id, &target.route)?;
+        Ok(app)
+    }
+
     pub(crate) fn from_instance(
         instance: &Instance,
         bearers: Arc<dyn PrivateBearerSource>,
@@ -755,7 +802,7 @@ impl ShellApprovals for RemoteApprovals {
     }
 }
 
-fn origin(value: &str) -> Result<()> {
+pub(super) fn origin(value: &str) -> Result<()> {
     let url = Url::parse(value)?;
     ensure!(
         value.len() <= 1024
