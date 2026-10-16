@@ -329,11 +329,22 @@ impl Shell {
         if !path.starts_with("/_day2/oauth/callback/") {
             return Ok(None);
         }
+        let Some(query) = query else {
+            return Ok(None);
+        };
+        ensure!(query.len() <= 8192, "OAuth callback query budget");
+        // This is routing data only. In particular, a malformed registration
+        // callback must still reach its own qualification-stage parser. Any
+        // product state (including a duplicate) selects the strict parser below.
+        if !url::form_urlencoded::parse(query.as_bytes())
+            .any(|(name, value)| name == "state" && value.starts_with("product."))
+        {
+            return Ok(None);
+        }
         ensure!(
             *method == Method::GET && body.is_empty(),
             "OAuth callback method refused"
         );
-        let query = query.context("OAuth callback missing")?;
         let parsed = protocol::parse_callback(
             query.as_bytes(),
             &protocol::CallbackParameters {
@@ -613,21 +624,24 @@ mod tests {
                 assert_eq!(bearers.0.load(SeqCst), 0);
             }
             let query = format!("state={state}&code=private-code");
-            // Both repeated invocations run the actual callback dispatcher. Only
-            // one reaches the receiver, including when its outcome is unknown.
-            assert!(
-                shell
-                    .provider_callback(
-                        &Method::GET,
-                        &path,
-                        Some(&query),
-                        &headers,
-                        &[],
-                        &identity,
-                        104
-                    )
-                    .is_err()
-            );
+            // The barrier releases two actual dispatchers against the same
+            // session. A lost receiver result must never give the loser a send.
+            let start = std::sync::Barrier::new(3);
+            std::thread::scope(|threads| {
+                let run = || {
+                    effects::scope(Arc::new(Port(AtomicU64::new(1))), || {
+                        start.wait();
+                        shell.provider_callback(
+                            &Method::GET, &path, Some(&query), &headers, &[], &identity, 104,
+                        ).is_err()
+                    })
+                };
+                let first = threads.spawn(run);
+                let second = threads.spawn(run);
+                start.wait();
+                assert!(first.join().unwrap());
+                assert!(second.join().unwrap());
+            });
             assert!(
                 shell
                     .provider_callback(
@@ -645,6 +659,31 @@ mod tests {
             assert!(shell.sessions.lock().unwrap().is_empty());
             Ok(())
         })
+    }
+
+    #[test]
+    fn nonproduct_callback_keeps_its_own_parser_and_product_duplicates_fail_closed() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let (_, _, signer) = admission::tests::management_fixture(directory.path())?;
+        let instance = crate::artifact::Instance::load(&directory.path().join("instance.json"))?;
+        let bearers = Arc::new(Bearers(AtomicUsize::new(0)));
+        let shell = Shell::new(
+            "https://security.example.com".into(),
+            Arc::new(RemoteApprovals::from_instance(&instance, bearers.clone())?),
+            signer,
+            Arc::new(Auth),
+        );
+        let identity = iap::Verified { email: "alice@example.com".into(), subject: "accounts.google.com:alice".into() };
+        let headers = HeaderMap::new();
+        for query in [None, Some("state=qualification&unexpected=private"), Some("state=qualification&state=other&code=%GG")] {
+            assert!(shell.provider_callback(&Method::GET, "/_day2/oauth/callback/registration", query, &headers, &[], &identity, 104)?.is_none());
+        }
+        for query in ["state=qualification&state=product.bad&code=private", "st%61te=product.bad&code=%GG", "state=product.bad&unexpected=private"] {
+            assert!(shell.provider_callback(&Method::GET, "/_day2/oauth/callback/registration", Some(query), &headers, &[], &identity, 104).is_err());
+        }
+        assert!(shell.sessions.lock().unwrap().is_empty());
+        assert_eq!(bearers.0.load(SeqCst), 0);
+        Ok(())
     }
 
     #[test]
