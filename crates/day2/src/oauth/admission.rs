@@ -3677,7 +3677,7 @@ pub(super) mod tests {
         let app = fixture.instance.apps.get_mut("workspace").unwrap();
         let artifact_path = directory.join("artifact");
         std::fs::create_dir(&artifact_path)?;
-        app.artifact = artifact_path.clone();
+        app.artifact = artifact_path.to_str().context("fixture artifact path")?.into();
         app.readers = BTreeSet::from(["alice@example.com".into()]);
         let original = &fixture.artifacts["workspace"];
         let artifact = LoadedArtifact::from_contract_for_tests(original.id().into(), artifact_path, original.contract().clone());
