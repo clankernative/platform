@@ -712,6 +712,8 @@ struct WireRequest {
     body: Vec<u8>,
 }
 fn read_request(stream: &mut TcpStream) -> WireRequest {
+    // macOS accepts peers in the nonblocking listener's mode.
+    stream.set_nonblocking(false).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
@@ -747,6 +749,35 @@ fn read_request(stream: &mut TcpStream) -> WireRequest {
         headers,
         body,
     }
+}
+
+#[test]
+fn accepted_fixture_socket_waits_for_request_bytes() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (mut peer, _) = listener.accept().unwrap();
+    peer.set_nonblocking(true).unwrap();
+    let (started, ready) = std::sync::mpsc::channel();
+    let (sent, received) = std::sync::mpsc::channel();
+    let reader = thread::spawn(move || {
+        started.send(()).unwrap();
+        sent.send(read_request(&mut peer)).unwrap();
+    });
+    ready.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(matches!(
+        received.recv_timeout(Duration::from_millis(25)),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+    ));
+    write!(
+        client,
+        "POST {PATH} HTTP/1.1\r\nContent-Length: 2\r\n\r\n{{}}"
+    )
+    .unwrap();
+    let request = received.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(request.method, Method::POST);
+    assert_eq!(request.path, PATH);
+    assert_eq!(request.body, b"{}");
+    reader.join().unwrap();
 }
 
 enum Reply {
