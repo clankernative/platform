@@ -681,15 +681,29 @@ mod tests {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("provider.sqlite");
         let mut capture = synthetic_example();
+        // Distinct totals make a swap between any persisted count columns observable.
+        capture.records = capture
+            .records
+            .into_iter()
+            .flat_map(|record| {
+                let copies = match &record {
+                    Record::Stakeholder(_) => 1,
+                    Record::Grant(_) => 2,
+                    Record::VestingEvent(_) => 3,
+                    Record::Exercise(_) => 4,
+                };
+                std::iter::repeat_n(record, copies)
+            })
+            .collect();
         let duplicate = capture.records[0].clone();
         capture.records.push(duplicate);
 
         let snapshot = seed(&path, "first", &capture)?;
-        assert_eq!(snapshot.record_count, 9);
+        assert_eq!(snapshot.record_count, 21);
         assert_eq!(snapshot.stakeholder_count, 3);
-        assert_eq!(snapshot.grant_count, 2);
-        assert_eq!(snapshot.vesting_event_count, 2);
-        assert_eq!(snapshot.exercise_count, 2);
+        assert_eq!(snapshot.grant_count, 4);
+        assert_eq!(snapshot.vesting_event_count, 6);
+        assert_eq!(snapshot.exercise_count, 8);
         assert_eq!(snapshot.source_profile, "synthetic");
         assert_eq!(seed(&path, "first", &capture)?, snapshot);
         assert_eq!(
@@ -718,6 +732,42 @@ mod tests {
         assert_eq!(final_record["kind"], "stakeholder");
         assert_eq!(records[0], records[records.len() - 1]);
         assert_ne!(seed(&path, "other", &capture)?.id, snapshot.id);
+        Ok(())
+    }
+
+    #[test]
+    fn empty_capture_reopens_zero_counts_and_finishes_at_the_first_cursor() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("provider.sqlite");
+        let capture = SyntheticSnapshot {
+            issuer_id: "synthetic-issuer".into(),
+            records: Vec::new(),
+        };
+        let snapshot = seed(&path, "first", &capture)?;
+        assert_eq!(snapshot.record_count, 0);
+        assert_eq!(snapshot.stakeholder_count, 0);
+        assert_eq!(snapshot.grant_count, 0);
+        assert_eq!(snapshot.vesting_event_count, 0);
+        assert_eq!(snapshot.exercise_count, 0);
+        assert_eq!(snapshot.source_profile, "synthetic");
+        assert_eq!(seed(&path, "first", &capture)?, snapshot);
+        assert_eq!(
+            seed_with_mode(&path, "first", &synthetic_example(), true)?,
+            snapshot,
+            "an explicitly empty capture is configured"
+        );
+        let reopened: Snapshot = serde_json::from_str(&read_at(
+            &path,
+            Read::Begin {
+                scope: "first".into(),
+                issuer_id: capture.issuer_id,
+            },
+        )?)?;
+        assert_eq!(reopened, snapshot);
+        let first: serde_json::Value =
+            serde_json::from_str(&read_at(&path, next("first", &snapshot.id, 0))?)?;
+        assert_eq!(first, json!({"kind":"done","data":"{}"}));
+        assert!(read_at(&path, next("first", &snapshot.id, 1)).is_err());
         Ok(())
     }
 
