@@ -1785,6 +1785,16 @@ mod tests {
     #[test]
     fn linux_consumers_bootstrap_only_the_same_run_verifier_before_output_mounts() {
         let producer = ci_job("verify-prepare-parts");
+        let prepared = producer
+            .find("      - run: cargo run --locked -p xtask -- verify-prepare-part ${{ matrix.part }}\n")
+            .expect("fresh native preparation precedes verifier transport");
+        let archived = producer
+            .find("      - name: Archive the current run verifier only\n")
+            .unwrap();
+        let retained = producer
+            .find("      - name: Retain the current run verifier only\n")
+            .unwrap();
+        assert!(prepared < archived && archived < retained);
         let archive = ci_step(&producer, "Archive the current run verifier only");
         assert!(archive.contains("if: ${{ matrix.part == 'inputs' }}"));
         assert!(archive.contains(
