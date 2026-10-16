@@ -55,27 +55,47 @@ fn run(root: &Path, command: &mut Command) -> Result<()> {
 
 fn run_with_budget(root: &Path, command: &mut Command, budget: std::time::Duration) -> Result<()> {
     let display = format!("{command:?}");
+    let status = match command_status_with_budget(root, command, budget) {
+        Ok(status) => status,
+        Err(CommandStatusError::Spawn(error)) => return Err(error).with_context(|| display),
+        Err(CommandStatusError::Wait(error)) => return Err(error.into()),
+        Err(CommandStatusError::Timeout) => bail!(
+            "subprocess exceeded {} second campaign budget: {display}",
+            budget.as_secs()
+        ),
+    };
+    ensure!(status.success(), "{display} failed: {status}");
+    Ok(())
+}
+
+enum CommandStatusError {
+    Spawn(std::io::Error),
+    Wait(std::io::Error),
+    Timeout,
+}
+
+fn command_status_with_budget(
+    root: &Path,
+    command: &mut Command,
+    budget: std::time::Duration,
+) -> std::result::Result<std::process::ExitStatus, CommandStatusError> {
     let mut child = command
         .current_dir(root)
         .spawn()
-        .with_context(|| display.clone())?;
+        .map_err(CommandStatusError::Spawn)?;
     let started = std::time::Instant::now();
     let status = loop {
-        if let Some(status) = child.try_wait()? {
+        if let Some(status) = child.try_wait().map_err(CommandStatusError::Wait)? {
             break status;
         }
         if started.elapsed() > budget {
             let _ = child.kill();
             let _ = child.wait();
-            bail!(
-                "subprocess exceeded {} second campaign budget: {display}",
-                budget.as_secs()
-            );
+            return Err(CommandStatusError::Timeout);
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     };
-    ensure!(status.success(), "{display} failed: {status}");
-    Ok(())
+    Ok(status)
 }
 
 fn snapshot(
