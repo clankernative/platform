@@ -1556,13 +1556,24 @@ impl Host {
                 .render_page(name, &session.actor, id, input, at)
         })?;
         if outcome.status != "success" {
-            anyhow::bail!(match outcome.error.as_str() {
-                "not_found" => crate::error::Failure::UnknownPage,
-                "invalid_input" | "invalid_page_bounds" => crate::error::Failure::InvalidPageInput,
-                "forbidden" => crate::error::Failure::Forbidden,
-                "preparation_conflict" => crate::error::Failure::PreparationConflict,
-                _ => crate::error::Failure::Internal,
-            });
+            let declared_app_error = self
+                .runtime
+                .artifact()
+                .contract()
+                .app_contract
+                .as_ref()
+                .and_then(|contract| contract.errors.get(&outcome.error));
+            if declared_app_error.is_some() {
+                let (status, _, message) =
+                    crate::web_api::outcome_failure(&self.runtime, &outcome.error);
+                return Err(anyhow::Error::new(PageOutcomeFailure { status, message }));
+            }
+            let failure = match outcome.error.as_str() {
+                "invalid_page_bounds" => crate::error::Failure::InvalidPageInput,
+                code => crate::error::Failure::from_code(code)
+                    .unwrap_or(crate::error::Failure::Internal),
+            };
+            anyhow::bail!(failure);
         }
         let renderer = view::View {
             runtime: &self.runtime,
@@ -2111,6 +2122,9 @@ fn edge_refusal(json: bool, error: &anyhow::Error) -> Response {
     }
 }
 fn failure(error: &anyhow::Error) -> Response {
+    if let Some(page_failure) = error.downcast_ref::<PageOutcomeFailure>() {
+        return error_page(page_failure.status, &page_failure.message);
+    }
     crate::web_api::record_failure(error);
     if crate::error::classify(error) == crate::error::Failure::InvalidLoginLink {
         return error_page(
@@ -2121,6 +2135,20 @@ fn failure(error: &anyhow::Error) -> Response {
     let (status, _, message) = crate::web_api::failure_details(error);
     error_page(status, message)
 }
+
+#[derive(Debug)]
+struct PageOutcomeFailure {
+    status: StatusCode,
+    message: String,
+}
+
+impl std::fmt::Display for PageOutcomeFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("page query failed")
+    }
+}
+
+impl std::error::Error for PageOutcomeFailure {}
 
 fn validate_presentation_delivery(
     expected: &crate::authority_state::AuthorityStamp,
@@ -2191,6 +2219,27 @@ fn patch(markup: Markup) -> Response {
     }
     event.push('\n');
     ([(header::CONTENT_TYPE, "text/event-stream")], event).into_response()
+}
+
+#[cfg(test)]
+mod page_failure_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn app_failure_html_uses_status_and_escapes_public_message() {
+        let response = failure(&anyhow::Error::new(PageOutcomeFailure {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            message: "Use <a safe filter> & retry.".into(),
+        }));
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = response.into_body();
+        let markup = axum::body::to_bytes(body, usize::MAX)
+            .await
+            .expect("error page body");
+        let markup = String::from_utf8(markup.to_vec()).expect("HTML is UTF-8");
+        assert!(markup.contains("Use &lt;a safe filter&gt; &amp; retry."));
+        assert!(!markup.contains("Use <a safe filter> & retry."));
+    }
 }
 
 #[cfg(test)]

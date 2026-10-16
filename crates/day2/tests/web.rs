@@ -39,6 +39,154 @@ fn apply_desired_authority(runtime: &Runtime) -> Result<()> {
 }
 
 #[test]
+fn html_and_json_pages_preserve_admitted_query_failure_statuses() -> Result<()> {
+    let artifact = std::env::var_os("DAY2_TEST_VERIFICATION_ACTORS_ARTIFACT")
+        .map(PathBuf::from)
+        .context("build fixtures/verification-actor-conformance or run xtask verify")?;
+    let directory = tempfile::tempdir()?;
+    let authority = json!({
+        "version": 1,
+        "admins": [],
+        "operations": {
+            "verifiers.create_note": {
+                "actors": ["operation-denied"],
+                "mode": {"kind": "current_state"},
+                "models": {}
+            },
+            "verifiers.count_notes": {
+                "actors": ["developer", "page-query-denied"],
+                "mode": {"kind": "read"},
+                "models": {"notes": {"read": true, "rows": {"kind": "all"}}}
+            }
+        },
+        "constraints": {}
+    });
+    let path = directory.path().join("instance.json");
+    fs::write(
+        &path,
+        serde_json::to_vec(&json!({
+            "installation": "verification_actor_web",
+            "environment": "test",
+            "apps": {
+                "verifiers": {
+                    "artifact": artifact,
+                    "readers": ["developer", "page-query-denied"],
+                    "writers": ["operation-denied"],
+                    "authority": authority
+                }
+            }
+        }))?,
+    )?;
+    let runtime = Runtime::load(&path, "verifiers")?;
+    runtime.initialize()?;
+    let db = || rusqlite::Connection::open(runtime.db()).map_err(anyhow::Error::from);
+    let notes_before: i64 = db()?.query_row("SELECT count(*) FROM notes", [], |row| row.get(0))?;
+    let changes_before: i64 =
+        db()?.query_row("SELECT count(*) FROM day2_audit_changes", [], |row| {
+            row.get(0)
+        })?;
+
+    let developer_server =
+        Server::start(runtime.clone(), "developer", 0).context("developer server")?;
+    let developer = developer_server.client()?;
+    let denied_server =
+        Server::start(runtime.clone(), "page-query-denied", 0).context("app-denied server")?;
+    let denied = denied_server.client()?;
+    // A different operation admits this session, without granting the page query or any model writes.
+    let excluded_server =
+        Server::start(runtime.clone(), "operation-denied", 0).context("host-denied server")?;
+    let excluded = excluded_server.client()?;
+
+    let html_success = developer
+        .get(format!("{}/", developer_server.origin))
+        .send()?;
+    assert_eq!(html_success.status(), StatusCode::OK);
+    assert!(html_success.text()?.contains("Notes: 0"));
+    let json_success = developer
+        .get(format!(
+            "{}/api/verifiers.count_notes",
+            developer_server.origin
+        ))
+        .send()?;
+    assert_eq!(json_success.status(), StatusCode::OK);
+    assert_eq!(
+        serde_json::from_str::<Value>(&json_success.text()?)?["count"],
+        0
+    );
+
+    let html_denied = denied.get(format!("{}/", denied_server.origin)).send()?;
+    assert_eq!(html_denied.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let html_body = html_denied.text()?;
+    let json_denied = denied
+        .get(format!(
+            "{}/api/verifiers.count_notes",
+            denied_server.origin
+        ))
+        .send()?;
+    assert_eq!(json_denied.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let json_body = json_denied.text()?;
+    for body in [&html_body, &json_body] {
+        for private_detail in [
+            "CountNotes.roc",
+            "failed_query_as",
+            "page-query-denied",
+            "stack backtrace",
+        ] {
+            assert!(
+                !body.contains(private_detail),
+                "leaked {private_detail}: {body}"
+            );
+        }
+    }
+
+    assert_eq!(
+        excluded
+            .get(format!("{}/", excluded_server.origin))
+            .send()?
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        excluded
+            .get(format!(
+                "{}/api/verifiers.count_notes",
+                excluded_server.origin
+            ))
+            .send()?
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        developer
+            .get(format!("{}/missing-page", developer_server.origin))
+            .send()?
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        developer
+            .get(format!(
+                "{}/api/verifiers.count_notes?extra=1",
+                developer_server.origin
+            ))
+            .send()?
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+
+    assert_eq!(
+        db()?.query_row("SELECT count(*) FROM notes", [], |row| row.get::<_, i64>(0))?,
+        notes_before
+    );
+    assert_eq!(
+        db()?.query_row("SELECT count(*) FROM day2_audit_changes", [], |row| row
+            .get::<_, i64>(0))?,
+        changes_before
+    );
+    Ok(())
+}
+
+#[test]
 fn openapi_docs_and_json_queries_share_the_admitted_contract() -> Result<()> {
     let world = World::new()?;
     world.seed("api-docs-seed")?;
