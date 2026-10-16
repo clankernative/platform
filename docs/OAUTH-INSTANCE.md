@@ -657,8 +657,9 @@ those other services. The host must arrange renewal before expiry; this slice
 introduces neither a background renewal loop nor an app refresh job.
 
 Canary credentials must be isolated from active product grants. Google remote
-revocation can invalidate an account/client grant; the campaign performs no
-automatic revocation or successor cleanup. See [Google's OAuth lifecycle](https://developers.google.com/identity/protocols/oauth2/web-server)
+revocation affects an account's grants across all clients in the Google project;
+the campaign performs no automatic revocation or successor cleanup. Assess the
+complete project/account scope before manual cleanup. See [Google's OAuth lifecycle](https://developers.google.com/identity/protocols/oauth2/web-server#tokenrevoke)
 and [stable identity claims](https://developers.google.com/identity/openid-connect/reference).
 
 ### Creating a company web client
