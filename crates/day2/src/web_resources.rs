@@ -178,7 +178,11 @@ fn collect(
             ensure!(kind.is_file(), "ui_resource_special_file_forbidden");
             // The Native UI builder validates this build-only lock before packaging;
             // it is an app input, not a browser resource.
-            if path == "ui.lock.json" || name.ends_with(".md") || name.ends_with(".html") {
+            if path == "ui.lock.json"
+                || path == "presentation.json"
+                || name.ends_with(".md")
+                || name.ends_with(".html")
+            {
                 continue;
             }
             media_type(&path).with_context(|| format!("ui/{path}"))?;
@@ -252,6 +256,11 @@ fn validate_woff2(bytes: &[u8]) -> Result<()> {
 }
 
 fn resolve_import(path: &str, specifier: &str, catalog: &Catalog) -> Result<()> {
+    // One closed host module, served from embedded platform bytes. This does
+    // not admit arbitrary absolute URLs or external dependency graphs.
+    if specifier == "/assets/platform/navigation.js" {
+        return Ok(());
+    }
     ensure!(
         (specifier.starts_with("./") || specifier.starts_with("../"))
             && !specifier.contains(['\\', '%', '?', '#']),

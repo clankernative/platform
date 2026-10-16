@@ -18,8 +18,10 @@ mod native_clock;
 mod native_connection_peer;
 mod native_identity;
 mod native_namespace;
+mod preparation_image;
 mod runtime_profile;
 mod seed_core;
+mod storage_authority;
 mod transport;
 
 pub(crate) use authenticated_reads::AuthenticatedReads;
@@ -29,6 +31,11 @@ pub(crate) use native_clock::NativeAcquisition;
 pub(crate) use native_connection_peer::NativeConnectionPeerObservation;
 pub(crate) use native_identity::NativeProcessObservation;
 pub(crate) use native_namespace::NativeNamespaceObservation;
+pub(crate) use storage_authority::NativeStorageCreationAuthority;
+pub(crate) use storage_authority::{
+    BeforeAttemptRefusal, NativeOriginalPreparationOutcome, OriginalCreatorFd,
+    PreparationCoordinator, RefusedOriginalPreparation,
+};
 
 #[cfg(test)]
 mod runtime_identity_tests;

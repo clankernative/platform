@@ -47,6 +47,9 @@ cargo run --locked -p xtask -- verify
 `verify-fast` runs formatting, Clippy and fixture-free library checks. Full
 `verify` builds the public fixtures and exercises native execution, SQLite,
 HTTP, authorization, recovery, simulations and the Temporal control plane.
+The full gate also builds Chart Live and runs its injected browser navigation
+tests with Node.js 22 (CI pins 22.23.3). No npm dependencies or app build scripts
+are used; Node is a test runtime only.
 It requires substantial time and disk space. Private company apps are never
 discovered or included by either command. Company acceptance suites run in their
 own private repos against the platform version they deploy.
@@ -59,6 +62,20 @@ Use `cargo run --locked -p xtask -- fmt` for authored Rust and Roc. Run
 `cargo run --locked -p xtask -- build /absolute/path/to/private-app` to build a
 separate app. Build outputs stay in ignored `artifacts/`; they can contain private
 application inputs and must not be uploaded as public release assets.
+
+## Experimental request-time presentations
+
+An opt-in, provider-neutral presentation port transforms current authorized
+query data into checked scene records before ordinary template rendering.
+Declarations and executable approval are separate; build-time UI assembly never
+runs on page requests. Apps without declarations need no renderer configuration.
+
+[Presentation setup and limits](docs/RUNTIME-PRESENTATIONS.md) describe the ABI
+and operator pin. [Chart Live](examples/chart-live/README.md) demonstrates dynamic
+SVG charts with Clanker Native UI, normal commands and server-backed ranges.
+Its [qualification record](examples/chart-live/VERIFICATION.md) distinguishes
+working request-time rendering from outstanding browser/full/release gates.
+This is experimental source support, not a production or release claim.
 
 ## Deploy a company instance
 

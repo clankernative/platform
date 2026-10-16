@@ -125,6 +125,62 @@ expect match Inputs.update.decode({encoded}) {{
 }
 
 #[test]
+fn cached_glue_generators_keep_metadata_and_native_abi_outputs_distinct() -> Result<()> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()?;
+    let temporary = crate::support::compiler::stage(&root)?;
+    let stage = temporary.path();
+    day2::sdk::stage(&root.join("sdk"), &stage.join("sdk"))?;
+    fs::write(stage.join("sdk/main.roc"), day2::sdk::app_platform())?;
+    let roc = root.join("../.toolchains/roc").canonicalize()?;
+    for pass in 0..2 {
+        for (cache, generator, expected, unexpected) in [
+            (
+                day2::sandbox::CompilerCache::SchemaGlue,
+                "tools/SchemaGlue.roc",
+                "checked-types.json",
+                "roc_platform_abi.rs",
+            ),
+            (
+                day2::sandbox::CompilerCache::RustGlue,
+                "vendor/RustGlue.roc",
+                "roc_platform_abi.rs",
+                "checked-types.json",
+            ),
+        ] {
+            let destination = stage.join(format!("{}-{pass}", cache.name()));
+            fs::create_dir(&destination)?;
+            let output = day2::sandbox::glue_compiler(&root, stage, &roc, cache)?
+                .arg("glue")
+                .arg(root.join(generator))
+                .arg(&destination)
+                .arg(stage.join("sdk/main.roc"))
+                .output()?;
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                destination.join(expected).is_file(),
+                "{generator} did not emit {expected}"
+            );
+            assert!(
+                !destination.join(unexpected).exists(),
+                "{generator} emitted another generator's output"
+            );
+        }
+    }
+    assert!(
+        day2::sandbox::glue_compiler(&root, stage, &roc, day2::sandbox::CompilerCache::General)
+            .is_err()
+    );
+    Ok(())
+}
+
+#[test]
 fn relational_storage_reflection_rejects_forged_text_codec_shapes() -> Result<()> {
     // Exercise the real compiler's storage reflection independently of the
     // function-bearing application registry. Full artifact parity is checked below.

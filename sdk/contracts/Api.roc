@@ -224,6 +224,22 @@ Api :: [].{
 
 	VerificationRequest : { action : Str, operation : Str, snapshot : Str, before : Str, output : Str, seed : U64 }
 
+	# The verification host supplies this independently of the handler's output.
+	# Input generators receive an empty input; checks receive the dispatched input.
+	VerificationContext : { actor : Str, input : Str }
+
+	verification_context : Str -> Try(VerificationContext, Str)
+	verification_context = |snapshot| {
+		decoded : Try({ verification : VerificationContext }, _)
+		decoded = Json.parse(snapshot)
+		context = decoded.map_err(|_| "missing_verification_context")?.verification
+		if context.actor.is_empty() {
+			Err("missing_verification_actor")
+		} else {
+			Ok(context)
+		}
+	}
+
 	ModelCheck(model) :: { witness : List(model), description : Str, check : Str -> Try(Bool, Str) }.{
 		description : ModelCheck(model) -> Str
 		description = |obligation| obligation.description

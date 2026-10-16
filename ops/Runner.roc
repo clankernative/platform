@@ -1,5 +1,5 @@
 app [main!] {
-	pf: platform "https://github.com/roc-lang/basic-cli/releases/download/0.22.0/F1JVZPYfWP71s8vk6tHcV1Qx1Ef6CZkwswGoCn8VHZmL.tar.zst",
+	pf: platform "https://github.com/roc-lang/basic-cli/releases/download/0.26.0-rc2/Gj3zVDr3qrQa6aTh7Z1zgUfe9NeBE6R76T5ho3xrc8af.tar.zst",
 	ops: "main.roc",
 }
 
@@ -90,7 +90,7 @@ run! = |args| match args {
 
 main! : List(OsStr.OsStr) => Try({}, [Exit(I32)])
 main! = |args| {
-	outcome = run!(args.drop_first(1).map(OsStr.display))
+	outcome = run!(args.map(OsStr.display))
 	message = match outcome {
 		Ok(result) => { protocol: 1.U32, action: "complete", input: result }
 		Err(error) => { protocol: 1.U32, action: "failed", input: error }
