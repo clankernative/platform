@@ -860,7 +860,7 @@ jobs:
           if-no-files-found: error
           retention-days: 3
 
-      # Strict adapter prerequisite only; no installer, Bazel or Reports runtime.
+      # Strict current-source prerequisite before the isolated graph inventory.
       - name: Require empty formatter output
         run: git diff --exit-code
       - name: Require exact reviewed native sites, dependency roles and proofs
@@ -887,7 +887,22 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      # One Reports feasibility slice; no platform full gate or benchmark.
+      # Inventory actual Cargo features/profiles and Bazel actions before timing.
+      # Keep these no-run outputs separate from preflight and execute no programs.
+      - name: Retain the actual native Rust compiler version
+        run: rustc -vV
+      - name: Retain the actual Cargo version
+        run: cargo -V
+      - name: Retain the locked current Cargo graph
+        run: cargo metadata --locked --offline --format-version=1 > /tmp/day2-comparison-cargo-metadata.json
+      - name: Build the ordinary Cargo driver and three auxiliaries once for inventory
+        run: cargo build --locked -p xtask -p day2-sandbox --bins --message-format=json > /tmp/day2-comparison-cargo-programs.jsonl
+        env:
+          CARGO_TARGET_DIR: /tmp/day2-comparison-cargo-target
+      - name: Compile the existing Cargo Reports harness without executing it
+        run: cargo test --locked -p day2 --test day2_integration --no-run --message-format=json > /tmp/day2-comparison-cargo-integration.jsonl
+        env:
+          CARGO_TARGET_DIR: /tmp/day2-comparison-cargo-target
       - name: Fetch the pinned Bazel executable
         run: gh release download 9.3.0 --repo bazelbuild/bazel --pattern bazel-9.3.0-linux-x86_64 --dir /tmp/day2-bazel-tools
         env:
@@ -896,35 +911,28 @@ jobs:
         run: sha256sum --check --ignore-missing "$GITHUB_WORKSPACE/.github/bazel-experiment.sha256"
         working-directory: /tmp/day2-bazel-tools
       - run: chmod 755 /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64
-      - name: Build the actual Reports driver, integration harness and three Linux auxiliaries once
-        run: /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64 --output_user_root=/tmp/day2-bazel-Reports-feasibility build --build_event_json_file=/tmp/day2-bazel-build-events.json //crates/xtask:xtask //crates/day2:day2_integration //crates/day2-sandbox:day2-sandbox //crates/day2-sandbox:day2-compiler-sandbox //crates/day2-sandbox:day2-sandbox-probe
-      - name: Retain the actual five-program action graph and compiler arguments
-        run: /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64 --output_user_root=/tmp/day2-bazel-Reports-feasibility aquery --include_param_files --output=jsonproto 'deps(set(//crates/xtask:xtask //crates/day2:day2_integration //crates/day2-sandbox:day2-sandbox //crates/day2-sandbox:day2-compiler-sandbox //crates/day2-sandbox:day2-sandbox-probe))' > /tmp/day2-bazel-action-graph.json
-      - name: Install and verify only the fixed five current Bazel programs
-        run: bazel-bin/crates/xtask/xtask experiment-bazel-install
-      - name: Build Reports through the ordinary Roc recipe and execute every selected exact case freshly
-        run: target/debug/xtask experiment-bazel-reports
+      - name: Retain the current five-program Bazel action graph without building it
+        run: /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64 --output_user_root=/tmp/day2-bazel-Cargo-equivalence aquery --include_param_files --output=jsonproto 'deps(set(//crates/xtask:xtask //crates/day2:day2_integration //crates/day2-sandbox:day2-sandbox //crates/day2-sandbox:day2-compiler-sandbox //crates/day2-sandbox:day2-sandbox-probe))' > /tmp/day2-bazel-action-graph.json
       - name: Require the Cargo lockfile to remain unchanged
         run: git diff --exit-code -- Cargo.lock
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: ${{ always() }}
         with:
-          name: day2-bazel-Reports-feasibility-${{ github.run_id }}-${{ github.run_attempt }}
+          name: day2-Cargo-Bazel-graph-inventory-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             /tmp/day2-ci-linux-context.json
             /tmp/day2-format.patch
             /tmp/day2-architecture-inventory.json
             /tmp/day2-architecture-dependencies.json
             /tmp/day2-architecture-proofs.json
-            /tmp/day2-bazel-build-events.json
             /tmp/day2-bazel-action-graph.json
+            /tmp/day2-comparison-cargo-metadata.json
+            /tmp/day2-comparison-cargo-programs.jsonl
+            /tmp/day2-comparison-cargo-integration.jsonl
             MODULE.bazel.lock
             Cargo.lock
             target/debug/xtask.d
             target/debug/day2-workflows.json
-            artifacts/bazel-programs.json
-            artifacts/bazel-reports-runtime.json
-            artifacts/**/artifact.json
           if-no-files-found: error
           retention-days: 14
 
