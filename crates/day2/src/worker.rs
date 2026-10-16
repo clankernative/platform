@@ -756,7 +756,7 @@ mod tests {
     #[test]
     fn natural_exit_keeps_original_status_separate_from_requested_cleanup() {
         let mut worker =
-            super::Worker::spawn(std::process::Command::new("/usr/bin/false")).unwrap();
+            super::Worker::spawn(std::process::Command::new("/usr/bin/false"), MAX_FRAME).unwrap();
         // This controlled child has already exited before the exchange. The
         // production exchange still performs its unchanged try-wait/kill/wait.
         assert_eq!(worker.child.wait().unwrap().code(), Some(1));
@@ -780,7 +780,7 @@ mod tests {
 
         let mut command = std::process::Command::new("/usr/bin/sleep");
         command.arg("60");
-        let mut worker = super::Worker::spawn(command).unwrap();
+        let mut worker = super::Worker::spawn(command, MAX_FRAME).unwrap();
         let error = worker.exchange(b"PRIVATE_FRAME").unwrap_err();
         let diagnostic = crate::error::diagnostic(&error);
         assert_eq!(diagnostic["failure"], "worker_timeout");
