@@ -94,6 +94,82 @@ struct CargoCaptureProblem {
     os_error: Option<i32>,
 }
 
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum SccacheDiagnostic {
+    CompilerSignal { signal: u8 },
+    MissingCompilerStatus,
+}
+
+fn sccache_diagnostics(output: Option<&[u8]>) -> BTreeSet<SccacheDiagnostic> {
+    output
+        .into_iter()
+        .flat_map(|bytes| bytes.split(|byte| *byte == b'\n'))
+        .filter_map(|line| {
+            let line = std::str::from_utf8(line).ok()?;
+            let line = line.strip_suffix('\r').unwrap_or(line);
+            if line == "sccache: Missing compiler exit status!" {
+                return Some(SccacheDiagnostic::MissingCompilerStatus);
+            }
+            // sccache 0.18 emits these outside the compiler's JSON protocol.
+            // Export only the fixed classification and bounded signal, never text.
+            let signal = [
+                "sccache: Compile terminated by signal ",
+                "sccache: Compiler killed by signal ",
+            ]
+            .iter()
+            .find_map(|prefix| line.strip_prefix(prefix))?;
+            if signal.len() > 2 || !signal.as_bytes().iter().all(u8::is_ascii_digit) {
+                return None;
+            }
+            let signal = signal.parse::<u8>().ok()?;
+            (1..=64)
+                .contains(&signal)
+                .then_some(SccacheDiagnostic::CompilerSignal { signal })
+        })
+        .collect()
+}
+
+#[derive(Debug, Serialize)]
+struct CargoMemoryDiagnostics {
+    limit_bytes: Option<u64>,
+    peak_bytes: Option<u64>,
+    oom_events: Option<u64>,
+    oom_kills: Option<u64>,
+}
+
+fn cargo_memory_diagnostics(directory: &Path) -> Option<CargoMemoryDiagnostics> {
+    let number = |name: &str| {
+        fs::read_to_string(directory.join(name))
+            .ok()?
+            .trim()
+            .parse::<u64>()
+            .ok()
+    };
+    let events = fs::read_to_string(directory.join("memory.events")).ok();
+    let event = |name: &str| {
+        events.as_deref()?.lines().find_map(|line| {
+            let (key, value) = line.split_once(' ')?;
+            if key == name {
+                value.parse::<u64>().ok()
+            } else {
+                None
+            }
+        })
+    };
+    let memory = CargoMemoryDiagnostics {
+        limit_bytes: number("memory.max"),
+        peak_bytes: number("memory.peak"),
+        oom_events: event("oom"),
+        oom_kills: event("oom_kill"),
+    };
+    (memory.limit_bytes.is_some()
+        || memory.peak_bytes.is_some()
+        || memory.oom_events.is_some()
+        || memory.oom_kills.is_some())
+    .then_some(memory)
+}
+
 #[derive(Debug)]
 struct CargoReportingFailure {
     stage: &'static str,
@@ -192,6 +268,9 @@ fn write_cargo_failure_manifest(
         "retained_digest":retained.map(digest),
         "complete":output.is_some_and(|bytes| bytes.len() <= CARGO_FAILURE_CAPTURE_BYTES),
         "rust_diagnostic_codes":diagnostic_codes,
+        "sccache_diagnostics":sccache_diagnostics(output),
+        // Job-wide absolute counters, not proof that Cargo itself was OOM-killed.
+        "cgroup_memory_at_failure":cargo_memory_diagnostics(Path::new("/sys/fs/cgroup")),
         "raw_retention":"private job-workspace spool only; not durable after runner disposal",
         "cleanup_signal_is_not_original_exit":true,
     });
@@ -291,6 +370,10 @@ fn report_cargo_capture(
         };
         eprintln!("{failure}");
         eprintln!("Cargo diagnostic codes: {diagnostic_codes:?}");
+        eprintln!(
+            "Cargo sccache diagnostics: {:?}",
+            sccache_diagnostics(output.as_deref())
+        );
         return Err(failure.into());
     }
     for message in &messages {
@@ -1750,6 +1833,100 @@ mod tests {
             signal: None,
             os_error: None,
         }
+    }
+
+    #[test]
+    fn sccache_diagnostics_allow_only_exact_wrapper_status_and_bounded_signals() {
+        let output = b"sccache: Compile terminated by signal 9\r\nsccache: Compiler killed by signal 15\nsccache: Missing compiler exit status!\nsccache: Compile terminated by signal 9\n";
+        assert_eq!(
+            sccache_diagnostics(Some(output)),
+            BTreeSet::from([
+                SccacheDiagnostic::CompilerSignal { signal: 9 },
+                SccacheDiagnostic::CompilerSignal { signal: 15 },
+                SccacheDiagnostic::MissingCompilerStatus,
+            ])
+        );
+        for output in [
+            b"sccache: Compile terminated by signal 0".as_slice(),
+            b"sccache: Compile terminated by signal 65".as_slice(),
+            b"sccache: Compile terminated by signal -9".as_slice(),
+            b"sccache: Compile terminated by signal 999999999999999999999".as_slice(),
+            b"sccache: Compile terminated by signal 9 PRIVATE-CARGO".as_slice(),
+            b"sccache: Missing compiler exit status! PRIVATE-CARGO".as_slice(),
+            b"PRIVATE-CARGO sccache: Compile terminated by signal 9".as_slice(),
+            b"sccache: Compile terminated by signal \xff".as_slice(),
+            b"{\"rendered\":\"sccache: Compile terminated by signal 9\"}".as_slice(),
+        ] {
+            assert!(sccache_diagnostics(Some(output)).is_empty());
+        }
+        assert!(sccache_diagnostics(None).is_empty());
+    }
+
+    #[test]
+    fn cargo_wrapper_signal_is_durable_without_replacing_status_or_admitting_output() -> Result<()>
+    {
+        for process in [
+            CargoProcessOutcome {
+                code: Some(101),
+                ..failed_cargo_outcome()
+            },
+            CargoProcessOutcome {
+                category: "success",
+                code: Some(0),
+                ..failed_cargo_outcome()
+            },
+        ] {
+            let root = cargo_capture_root()?;
+            let original_code = process.code;
+            let output = b"PRIVATE-CARGO-INVALID\nsccache: Compile terminated by signal 9\nsccache: Compile terminated by signal 15 PRIVATE-CARGO\n{\"reason\":\"build-finished\",\"success\":false}\n";
+            let error = report_cargo_capture(root.path(), "tests", process, Ok(output.to_vec()))
+                .unwrap_err();
+            let failure = error
+                .downcast_ref::<CargoReportingFailure>()
+                .context("typed Cargo outcome")?;
+            assert_eq!(failure.process.code, original_code);
+            assert_eq!(failure.process.signal, None);
+            assert!(failure.capture.is_some());
+            let (_, manifest) = cargo_failure_manifest(root.path())?;
+            assert_eq!(
+                manifest["sccache_diagnostics"],
+                json!([{"kind":"compiler_signal","signal":9}])
+            );
+            assert_eq!(manifest["cargo_process"]["code"], json!(original_code));
+            assert!(manifest["cargo_process"]["signal"].is_null());
+            assert!(!manifest.to_string().contains("PRIVATE-CARGO"));
+            assert!(!error.to_string().contains("PRIVATE-CARGO"));
+            assert!(!root.path().join(PREPARED).exists());
+            assert!(!root.path().join(BINARIES).exists());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn cargo_memory_diagnostics_are_optional_numeric_kernel_counters() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        assert!(cargo_memory_diagnostics(directory.path()).is_none());
+        fs::write(directory.path().join("memory.max"), "6442450944\n")?;
+        fs::write(directory.path().join("memory.peak"), "6442450944\n")?;
+        fs::write(
+            directory.path().join("memory.events"),
+            "low 0\noom 2\noom_kill 1\nPRIVATE-CARGO\n",
+        )?;
+        let memory =
+            cargo_memory_diagnostics(directory.path()).context("numeric memory evidence")?;
+        assert_eq!(memory.limit_bytes, Some(6442450944));
+        assert_eq!(memory.peak_bytes, Some(6442450944));
+        assert_eq!(memory.oom_events, Some(2));
+        assert_eq!(memory.oom_kills, Some(1));
+        assert!(!serde_json::to_string(&memory)?.contains("PRIVATE-CARGO"));
+        fs::write(directory.path().join("memory.max"), "max\n")?;
+        fs::write(directory.path().join("memory.peak"), "PRIVATE-CARGO\n")?;
+        fs::write(
+            directory.path().join("memory.events"),
+            "oom 1 PRIVATE-CARGO\noom_kill -1\n",
+        )?;
+        assert!(cargo_memory_diagnostics(directory.path()).is_none());
+        Ok(())
     }
 
     #[test]

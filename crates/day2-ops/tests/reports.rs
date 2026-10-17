@@ -168,29 +168,22 @@ fn directory_fixtures_keep_verification_repeatable_and_local_serving_fresh() -> 
     };
     let epoch = 1_700_000_000;
     let capture = collect_complete(input(epoch), &mut port(&verified, epoch)?)?;
-    assert_eq!(capture.metadata.captured_at, epoch);
-    assert_eq!(capture.expires_at, epoch + SOURCE_TTL_SECONDS);
+    assert_eq!(capture.metadata().captured_at, epoch);
+    assert_eq!(capture.metadata().expires_at, epoch + SOURCE_TTL_SECONDS);
     let expired = epoch + SOURCE_TTL_SECONDS;
+    let refreshed = collect_complete(input(expired), &mut port(&verified, expired)?)?;
+    assert_eq!(refreshed.metadata().source_captured_at, expired);
     assert_eq!(
-        collect_complete(input(expired), &mut port(&verified, expired)?)
-            .unwrap_err()
-            .to_string(),
-        "workspace_directory_hierarchy_cache_expired"
+        refreshed.metadata().expires_at,
+        expired + SOURCE_TTL_SECONDS
     );
 
-    let now = || -> Result<i64> {
-        Ok(std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_secs()
-            .try_into()?)
-    };
-    let before = now()?;
     let local = development::create(&artifact_path, &scratch.path().join("local"), None)?;
-    let after = now()?;
+    let after = epoch + 86_400;
     let hierarchy = port(&local, after)?.list_org_units()?;
-    assert!((before..=after).contains(&hierarchy.hierarchy_captured_at));
+    assert_eq!(hierarchy.hierarchy_captured_at, after);
     let capture = collect_complete(input(after), &mut port(&local, after)?)?;
-    assert_eq!(capture.metadata.captured_at, after);
+    assert_eq!(capture.metadata().captured_at, after);
     Ok(())
 }
 

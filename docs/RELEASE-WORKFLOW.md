@@ -202,11 +202,15 @@ for the pinned keys and stamps `day2.dev/credentials-sha256` with the plan's
 SHA-256, as the stack does. Infrastructure plans keep those live fields.
 
 The stack keeps the credential SecretProviderClass and the Secret Manager IAM;
-the release never writes them. The candidate's `credentials.entries` pin each
-reference key, exact numeric version and reviewed fingerprint, and the deployment
-input digest pins them all. Before preparing and again before activation the
-adapter requires that the SecretProviderClass projects exactly those versions at
-those keys, and accesses every version: its checksum must hold and the SHA-256
+the release never writes them. App-call and credential SecretProviderClasses
+encode `spec.parameters.secrets` as a JSON array of objects with exactly
+`resourceName` and `path` string fields. The release verifier rejects non-JSON
+payloads, duplicate fields or paths, and unknown fields. The candidate's
+`credentials.entries` pin each reference key, exact numeric version and reviewed
+fingerprint, and the deployment input digest pins them all. Before preparing and
+again before activation the adapter requires that the SecretProviderClass
+projects exactly those versions at those keys, and accesses every version: its
+checksum must hold and the SHA-256
 of the value without trailing newlines must equal the reviewed fingerprint, the
 same fingerprint registration enforces. Payloads are discarded after the check
 and never journaled. Admission also refuses metadata whose operator instance is

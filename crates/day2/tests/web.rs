@@ -39,101 +39,150 @@ fn apply_desired_authority(runtime: &Runtime) -> Result<()> {
 }
 
 #[test]
-fn admitted_page_business_rejection_is_an_escaped_http_422() -> Result<()> {
-    let Some(artifact) = std::env::var_os("DAY2_TEST_FREETOOL_ARTIFACT").map(PathBuf::from) else {
-        eprintln!(
-            "set DAY2_TEST_FREETOOL_ARTIFACT to run the admitted Freetool page rejection test"
-        );
-        return Ok(());
-    };
-    let actor = "freetool-space-page-unenrolled-synthetic";
-    let manifest: Value = serde_json::from_slice(&fs::read(artifact.join("artifact.json"))?)?;
-    let models = manifest["schema"]["models"]
-        .as_object()
-        .context("Freetool artifact has no model catalog")?;
-    let model_authority: serde_json::Map<String, Value> = models
-        .keys()
-        .map(|model| (model.clone(), json!({"read":true,"rows":{"kind":"all"}})))
-        .collect();
-    let operations: serde_json::Map<String, Value> = manifest["operations"]
-        .as_array()
-        .context("Freetool artifact has no operation catalog")?
-        .iter()
-        .map(|operation| {
-            let name = operation["name"].as_str().context("operation name")?;
-            let kind = operation["kind"].as_str().context("operation kind")?;
-            Ok((
-                name.to_owned(),
-                json!({
-                    "actors": if kind == "query" {vec![actor]} else {Vec::<&str>::new()},
-                    "mode": {"kind": if kind == "query" {"read"} else {"current_state"}},
-                    "models": if kind == "query" {model_authority.clone()} else {serde_json::Map::new()}
-                }),
-            ))
-        })
-        .collect::<Result<_>>()?;
+fn html_and_json_pages_preserve_admitted_query_failure_statuses() -> Result<()> {
+    let artifact = std::env::var_os("DAY2_TEST_VERIFICATION_ACTORS_ARTIFACT")
+        .map(PathBuf::from)
+        .context("build fixtures/verification-actor-conformance or run xtask verify")?;
+    let directory = tempfile::tempdir()?;
     let authority = json!({
         "version": 1,
         "admins": [],
-        "operations": operations,
+        "operations": {
+            "verifiers.create_note": {
+                "actors": ["operation-denied"],
+                "mode": {"kind": "current_state"},
+                "models": {}
+            },
+            "verifiers.count_notes": {
+                "actors": ["developer", "page-query-denied"],
+                "mode": {"kind": "read"},
+                "models": {"notes": {"read": true, "rows": {"kind": "all"}}}
+            }
+        },
         "constraints": {}
     });
-    let directory = tempfile::tempdir()?;
-    let instance_path = directory.path().join("instance.json");
+    let path = directory.path().join("instance.json");
     fs::write(
-        &instance_path,
+        &path,
         serde_json::to_vec(&json!({
-            "installation":"freetool_web_test",
-            "environment":"test",
-            "apps":{"freetool":{
-                "artifact":artifact,
-                "readers":[actor],
-                "writers":[],
-                "authority":authority
-            }}
+            "installation": "verification_actor_web",
+            "environment": "test",
+            "apps": {
+                "verifiers": {
+                    "artifact": artifact,
+                    "readers": ["developer", "page-query-denied"],
+                    "writers": ["operation-denied"],
+                    "authority": authority
+                }
+            }
         }))?,
     )?;
-    let runtime = Runtime::load(&instance_path, "freetool")?;
+    let runtime = Runtime::load(&path, "verifiers")?;
     runtime.initialize()?;
-    let page_query = runtime.render_page(
-        "space",
-        actor,
-        "page-rejection-http-test",
-        &json!({"space_id":"spa_0000000000e008000000000000"}),
-        100,
-    )?;
-    assert_eq!(page_query.status, "failure");
-    assert_eq!(page_query.error, "app:freetool.space_page_denied");
-    let db_path = runtime.db().to_path_buf();
-    let server = Server::start(runtime, actor, 0)?;
-    let client = server.client()?;
-    let response = client
-        .get(format!(
-            "{}/spaces/spa_0000000000e008000000000000",
-            server.origin
-        ))
-        .send()?;
-    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    let body = response.text()?;
-    assert!(body.contains("The current active profile cannot read this live space."));
-    assert!(
-        body.contains(
-            "Choose an accessible space from the directory or complete trusted enrollment."
-        )
-    );
-    assert!(!body.contains("Retry commands") && !body.contains("internal_error"));
+    let db = || rusqlite::Connection::open(runtime.db()).map_err(anyhow::Error::from);
+    let notes_before: i64 = db()?.query_row("SELECT count(*) FROM notes", [], |row| row.get(0))?;
+    let changes_before: i64 =
+        db()?.query_row("SELECT count(*) FROM day2_audit_changes", [], |row| {
+            row.get(0)
+        })?;
 
-    rusqlite::Connection::open(db_path)?.execute_batch("DROP TABLE users")?;
-    let response = client
+    let developer_server =
+        Server::start(runtime.clone(), "developer", 0).context("developer server")?;
+    let developer = developer_server.client()?;
+    let denied_server =
+        Server::start(runtime.clone(), "page-query-denied", 0).context("app-denied server")?;
+    let denied = denied_server.client()?;
+    // A different operation admits this session, without granting the page query or any model writes.
+    let excluded_server =
+        Server::start(runtime.clone(), "operation-denied", 0).context("host-denied server")?;
+    let excluded = excluded_server.client()?;
+
+    let html_success = developer
+        .get(format!("{}/", developer_server.origin))
+        .send()?;
+    assert_eq!(html_success.status(), StatusCode::OK);
+    assert!(html_success.text()?.contains("Notes: 0"));
+    let json_success = developer
         .get(format!(
-            "{}/spaces/spa_0000000000e008000000000000",
-            server.origin
+            "{}/api/verifiers.count_notes",
+            developer_server.origin
         ))
         .send()?;
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    let body = response.text()?;
-    assert!(body.contains("internal_error") || body.contains("could not be completed"));
-    assert!(!body.contains("no such table") && !body.contains("database connection"));
+    assert_eq!(json_success.status(), StatusCode::OK);
+    assert_eq!(
+        serde_json::from_str::<Value>(&json_success.text()?)?["count"],
+        0
+    );
+
+    let html_denied = denied.get(format!("{}/", denied_server.origin)).send()?;
+    assert_eq!(html_denied.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let html_body = html_denied.text()?;
+    let json_denied = denied
+        .get(format!(
+            "{}/api/verifiers.count_notes",
+            denied_server.origin
+        ))
+        .send()?;
+    assert_eq!(json_denied.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let json_body = json_denied.text()?;
+    for body in [&html_body, &json_body] {
+        for private_detail in [
+            "CountNotes.roc",
+            "failed_query_as",
+            "page-query-denied",
+            "stack backtrace",
+        ] {
+            assert!(
+                !body.contains(private_detail),
+                "leaked {private_detail}: {body}"
+            );
+        }
+    }
+
+    assert_eq!(
+        excluded
+            .get(format!("{}/", excluded_server.origin))
+            .send()?
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        excluded
+            .get(format!(
+                "{}/api/verifiers.count_notes",
+                excluded_server.origin
+            ))
+            .send()?
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        developer
+            .get(format!("{}/missing-page", developer_server.origin))
+            .send()?
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        developer
+            .get(format!(
+                "{}/api/verifiers.count_notes?extra=1",
+                developer_server.origin
+            ))
+            .send()?
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+
+    assert_eq!(
+        db()?.query_row("SELECT count(*) FROM notes", [], |row| row.get::<_, i64>(0))?,
+        notes_before
+    );
+    assert_eq!(
+        db()?.query_row("SELECT count(*) FROM day2_audit_changes", [], |row| row
+            .get::<_, i64>(0))?,
+        changes_before
+    );
     Ok(())
 }
 
@@ -1138,7 +1187,7 @@ fn apps_without_pages_get_the_same_api_and_documentation() -> Result<()> {
 }
 impl Server {
     fn start(runtime: Runtime, actor: &str, port: u16) -> Result<Self> {
-        let (send, receive) = mpsc::channel::<Result<(String, String)>>();
+        let (send, receive) = mpsc::channel();
         let (stop, done) = tokio::sync::oneshot::channel();
         let actor = actor.to_string();
         let thread = thread::spawn(move || {
@@ -1147,14 +1196,8 @@ impl Server {
                 .enable_all()
                 .build()?
                 .block_on(async move {
-                    let server = match LocalServer::bind(runtime, &actor, port).await {
-                        Ok(server) => server,
-                        Err(error) => {
-                            send.send(Err(anyhow::anyhow!("{error:#}")))?;
-                            return Err(error);
-                        }
-                    };
-                    send.send(Ok((server.origin.clone(), server.login_url.clone())))?;
+                    let server = LocalServer::bind(runtime, &actor, port).await?;
+                    send.send((server.origin.clone(), server.login_url.clone()))?;
                     server
                         .serve(async {
                             let _ = done.await;
@@ -1162,7 +1205,7 @@ impl Server {
                         .await
                 })
         });
-        let (origin, login) = receive.recv_timeout(Duration::from_secs(10))??;
+        let (origin, login) = receive.recv_timeout(Duration::from_secs(10))?;
         Ok(Self {
             origin,
             login,

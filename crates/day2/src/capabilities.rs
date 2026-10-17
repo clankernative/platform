@@ -5,6 +5,7 @@ use crate::integrations::GRANT_SECONDS;
 use crate::{
     protocol::*,
     store::{self, Runtime},
+    workspace_directory::CaptureMode,
 };
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, params};
@@ -126,9 +127,7 @@ enum Action {
     Live(crate::integrations::PreparedCall),
     Carta(crate::carta::Read),
     People(crate::people_providers::Action),
-    WorkspaceDirectoryCapture {
-        captured_at: i64,
-    },
+    WorkspaceDirectoryCapture(crate::workspace_directory::CapturePlan),
     WorkspaceDirectoryPage {
         capture_id: String,
         offset: u64,
@@ -262,7 +261,9 @@ pub(crate) fn authorized(
             resource.planned_calls = call.max_calls();
             Action::Live(call)
         }
-        "workspace_directory.capture.v1" | "workspace_directory.page.v1" => {
+        "workspace_directory.capture.v1"
+        | "workspace_directory.hierarchy.v1"
+        | "workspace_directory.page.v1" => {
             ensure!(
                 resource.grant.provider == Provider::WorkspaceDirectory
                     && matches!(
@@ -280,7 +281,11 @@ pub(crate) fn authorized(
                 crate::error::Failure::ResourceForbidden
             );
             match instruction.model.as_str() {
-                "workspace_directory.capture.v1" => {
+                "workspace_directory.capture.v1" | "workspace_directory.hierarchy.v1" => {
+                    let mode = match instruction.model.as_str() {
+                        "workspace_directory.hierarchy.v1" => CaptureMode::Hierarchy,
+                        _ => CaptureMode::Membership,
+                    };
                     let input: WorkspaceDirectoryCaptureRequest =
                         serde_json::from_str(&instruction.data)?;
                     ensure!(
@@ -296,27 +301,54 @@ pub(crate) fn authorized(
                                 <= crate::workspace_directory::MAX_CAPTURE_REQUEST_BYTES,
                         crate::error::Failure::ResourceForbidden
                     );
-                    quote.request_bytes = crate::workspace_directory::MAX_CAPTURE_REQUEST_BYTES;
-                    quote.response_bytes = crate::workspace_directory::MAX_CAPTURE_RESPONSE_BYTES;
+                    let ResourceTarget::WorkspaceDirectory { customer_id } = &resource.grant.target
+                    else {
+                        anyhow::bail!(crate::error::Failure::ResourceForbidden)
+                    };
+                    let plan = crate::workspace_directory::CapturePlan::prepare(
+                        &runtime.db().with_file_name("workspace_directory.sqlite"),
+                        crate::workspace_directory::CaptureInput {
+                            customer_id: customer_id.clone(),
+                            connection_id: format!(
+                                "{}@{}",
+                                resource.grant.connection.id, resource.grant.connection.revision
+                            ),
+                            actor: resource.actor.clone(),
+                            captured_at: request.context.now,
+                        },
+                        mode,
+                    )?;
+                    quote.request_bytes = if plan.is_cached() {
+                        0
+                    } else {
+                        crate::workspace_directory::MAX_CAPTURE_REQUEST_BYTES
+                    };
+                    quote.response_bytes = if plan.is_cached() {
+                        0
+                    } else {
+                        crate::workspace_directory::MAX_CAPTURE_RESPONSE_BYTES
+                    };
                     let connection = resource
                         .grant
                         .live
                         .as_ref()
                         .ok_or(crate::error::Failure::ResourceForbidden)?;
-                    resource.planned_calls = match connection {
+                    resource.planned_calls = if plan.is_cached() {
+                        0
+                    } else {
+                        match connection {
                         LiveConnection::WorkspaceDirectory {
                             auth: day2_capabilities::integrations::WorkspaceDirectoryAuth::DirectServiceAccount,
                             ..
                         } => 4,
                         _ => 5,
+                    }
                     };
                     ensure!(
                         resource.planned_calls <= crate::workspace_directory::MAX_PROVIDER_CALLS,
                         crate::error::Failure::ResourceForbidden
                     );
-                    Action::WorkspaceDirectoryCapture {
-                        captured_at: request.context.now,
-                    }
+                    Action::WorkspaceDirectoryCapture(plan)
                 }
                 _ => {
                     let input: WorkspaceDirectoryPageRequest =
@@ -593,9 +625,11 @@ impl ProviderResult {
         request_bytes: u64,
     ) -> Self {
         let planned_calls = resource.planned_calls;
+        let cached_hierarchy =
+            matches!(action, Action::WorkspaceDirectoryCapture(plan) if plan.is_cached());
         let result = match action {
-            Action::WorkspaceDirectoryCapture { captured_at } => {
-                workspace_directory_capture(runtime, resource, *captured_at)
+            Action::WorkspaceDirectoryCapture(plan) => {
+                workspace_directory_capture(runtime, resource, plan)
             }
             Action::WorkspaceDirectoryPage {
                 capture_id,
@@ -604,25 +638,26 @@ impl ProviderResult {
             } => workspace_directory_page(runtime, resource, capture_id, *offset, *now),
             _ => Err(anyhow::anyhow!("workspace_directory_action_invalid")),
         };
-        // Capture is one bounded multi-request adapter. Retain its entire
-        // response allowance even on errors or cache hits: returned metadata
-        // does not measure the authentication/user/hierarchy traffic consumed.
-        let response_bytes = if matches!(action, Action::WorkspaceDirectoryCapture { .. }) {
-            crate::workspace_directory::MAX_CAPTURE_RESPONSE_BYTES
-        } else {
-            result.as_ref().map_or(0, |value| value.len() as u64)
-        };
+        // Capture reserves the aggregate provider envelope; cache reuse is
+        // provably local and settles with no consumed traffic.
+        let response_bytes =
+            if matches!(action, Action::WorkspaceDirectoryCapture(_)) && !cached_hierarchy {
+                crate::workspace_directory::MAX_CAPTURE_RESPONSE_BYTES
+            } else {
+                result.as_ref().map_or(0, |value| value.len() as u64)
+            };
         Self {
             result,
             correlation: Vec::new(),
             pending: false,
             usage: crate::resources::ProviderUsage {
-                calls: planned_calls,
-                request_bytes,
-                response_bytes,
+                calls: if cached_hierarchy { 0 } else { planned_calls },
+                request_bytes: if cached_hierarchy { 0 } else { request_bytes },
+                response_bytes: if cached_hierarchy { 0 } else { response_bytes },
                 cost_microunits: 0,
                 known: true,
-                dispatched: matches!(action, Action::WorkspaceDirectoryCapture { .. }),
+                dispatched: matches!(action, Action::WorkspaceDirectoryCapture(_))
+                    && !cached_hierarchy,
             },
         }
     }
@@ -648,57 +683,42 @@ impl ProviderResult {
 fn workspace_directory_capture(
     runtime: &Runtime,
     resource: &crate::resources::ResourceUse,
-    captured_at: i64,
+    plan: &crate::workspace_directory::CapturePlan,
 ) -> Result<String> {
-    let day2_capabilities::resources::ResourceTarget::WorkspaceDirectory { customer_id } =
-        &resource.grant.target
-    else {
-        anyhow::bail!("workspace_directory_resource_invalid")
-    };
-    let connection = resource
-        .grant
-        .live
-        .as_ref()
-        .ok_or(crate::error::Failure::ResourceForbidden)?;
-    let connection_id = format!(
-        "{}@{}",
-        resource.grant.connection.id, resource.grant.connection.revision
-    );
-    let path = runtime.db().with_file_name("workspace_directory.sqlite");
-    let mut db = crate::workspace_directory::open_store(&path)?;
-    let input = crate::workspace_directory::CaptureInput {
-        customer_id: customer_id.clone(),
-        connection_id: connection_id.clone(),
-        actor: resource.actor.clone(),
-        captured_at,
-    };
-    let complete = if runtime.integrations().uses_simulated_providers() {
-        let mut port = crate::workspace_directory::SimulatedDirectoryPort::new(
-            runtime.db(),
-            runtime.scope(),
-            customer_id,
-            &resource.actor,
-            captured_at,
-        )?;
-        crate::workspace_directory::collect_complete(input, &mut port)?
-    } else {
-        let plan = crate::workspace_directory::AuthenticationPlan::from_connection(connection)?;
-        let cached = crate::workspace_directory::cached_hierarchy(
-            &db,
-            customer_id,
-            &connection_id,
-            captured_at,
-        )?;
-        let mut port = crate::workspace_directory::NativeDirectoryPort::new(
-            plan,
-            customer_id,
-            captured_at,
-            cached,
-        )?;
-        crate::workspace_directory::collect_complete(input, &mut port)?
-    };
+    let complete = plan.collect(|input, mode| {
+        if runtime.integrations().uses_simulated_providers() {
+            Ok(Box::new(
+                crate::workspace_directory::SimulatedDirectoryPort::new(
+                    runtime.db(),
+                    runtime.scope(),
+                    &input.customer_id,
+                    &input.actor,
+                    input.captured_at,
+                )?,
+            ))
+        } else {
+            let connection = resource
+                .grant
+                .live
+                .as_ref()
+                .ok_or(crate::error::Failure::ResourceForbidden)?;
+            let authentication =
+                crate::workspace_directory::AuthenticationPlan::from_connection(connection)?;
+            Ok(Box::new(
+                crate::workspace_directory::NativeDirectoryPort::new(
+                    authentication,
+                    &input.customer_id,
+                    input.captured_at,
+                    mode,
+                )?,
+            ))
+        }
+    })?;
+    let mut db = crate::workspace_directory::open_store(
+        &runtime.db().with_file_name("workspace_directory.sqlite"),
+    )?;
     crate::workspace_directory::publish(&mut db, &complete)?;
-    Ok(serde_json::to_string(&complete.metadata)?)
+    Ok(serde_json::to_string(complete.metadata())?)
 }
 
 fn workspace_directory_page(
@@ -799,7 +819,7 @@ fn unique_upload_key(effect: &str, prefix: &str, requested: &str) -> Result<Stri
 pub(crate) fn observe(runtime: &Runtime, capability: Authorized, attempt: &str) -> ProviderResult {
     let request_bytes = capability.quote.request_bytes;
     let result = match capability.action {
-        Action::WorkspaceDirectoryCapture { .. } | Action::WorkspaceDirectoryPage { .. } => {
+        Action::WorkspaceDirectoryCapture(_) | Action::WorkspaceDirectoryPage { .. } => {
             return ProviderResult::workspace_directory(
                 runtime,
                 &capability.resource,

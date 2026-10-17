@@ -151,7 +151,8 @@ jobs:
     env:
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
-      CARGO_BUILD_JOBS: '2'
+      # Do not compile the largest test targets concurrently inside 6 GiB.
+      CARGO_BUILD_JOBS: ${{ matrix.part == 'tests' && '1' || '2' }}
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: 'true'
       SCCACHE_GHA_VERSION: day2-platform-ci-linux-v1
@@ -275,6 +276,20 @@ jobs:
             artifacts/ci-test-binaries.json
           if-no-files-found: error
           retention-days: 14
+      # Archive only this file so tar records executable bytes, not Cargo's
+      # hard link to a hashed deps/xtask-* member in the larger preparation tar.
+      - name: Archive the current run verifier only
+        if: ${{ matrix.part == 'inputs' }}
+        run: tar -czf /tmp/day2-linux-verifier.tgz -C "$GITHUB_WORKSPACE" target/debug/xtask
+      - name: Retain the current run verifier only
+        if: ${{ matrix.part == 'inputs' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: day2-linux-verifier-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/day2-linux-verifier.tgz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
       # Each lane transports only its reviewed outputs. The test lane cannot
       # overwrite fixture caches, CLI distribution or generated worker sources.
       - name: Archive fixture and check preparation
@@ -356,6 +371,24 @@ jobs:
           cache-bin: 'false'
           cache-workspace-crates: 'false'
           shared-key: ${{ hashFiles('Cargo.toml') }}-verify
+      # Compatible intermediates warm Cargo/sccache across source edits. Cargo
+      # still checks freshness; this cache contains no completed test programs,
+      # verification manifests or runtime receipts. Exact executable admission
+      # below remains independently source/config/toolchain-bound.
+      - name: Restore compatible Cargo intermediates
+        id: cargo_intermediates
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          key: day2-cargo-intermediates-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/**', 'crates/**/Cargo.toml', 'cli/**/Cargo.toml') }}-${{ github.sha }}
+          restore-keys: |
+            day2-cargo-intermediates-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/**', 'crates/**/Cargo.toml', 'cli/**/Cargo.toml') }}-
+          path: |
+            target/debug/.fingerprint
+            target/debug/build
+            target/debug/deps/*.rlib
+            target/debug/deps/*.rmeta
+            target/debug/deps/*.d
+            target/debug/deps/*.dylib
       # Cross-run build outputs have their own source-bound namespace. Native
       # guards re-admit them; no step or runtime receipt is selected by cache-hit.
       # Reuse the pre-build key when saving instead of rehashing generated trees.
@@ -418,6 +451,20 @@ jobs:
             target/debug/xtask.d
           if-no-files-found: error
           retention-days: 14
+      # Save before rust-cache's post-job cleanup removes workspace crates.
+      # Capture the restore-time key so generated files cannot change it.
+      - name: Save compatible Cargo intermediates
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        if: ${{ steps.cargo_intermediates.outputs.cache-hit != 'true' }}
+        with:
+          key: ${{ steps.cargo_intermediates.outputs.cache-primary-key }}
+          path: |
+            target/debug/.fingerprint
+            target/debug/build
+            target/debug/deps/*.rlib
+            target/debug/deps/*.rmeta
+            target/debug/deps/*.d
+            target/debug/deps/*.dylib
       - name: Save completed fixture builds
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         if: ${{ steps.fixture_cache.outputs.cache-hit != 'true' }}
@@ -477,9 +524,18 @@ jobs:
           cache-workspace-crates: 'false'
           save-if: 'false'
       - run: cargo fetch --locked
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: day2-linux-verifier-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/day2-linux-verifier
+      # Bootstrap only the verifier from this run's successful preparation.
+      # Do not restore artifacts or generated worker files before their bounded
+      # mounts exist; the context check must see the original checkout ABI seed.
+      - name: Restore the current run verifier only
+        run: tar -xzf /tmp/day2-linux-verifier/day2-linux-verifier.tgz -C "$GITHUB_WORKSPACE" target/debug/xtask
       - name: Establish the mandatory bounded native Linux compiler context
         id: linux_context
-        run: cargo run --locked -p xtask -- verify-linux-context
+        run: target/debug/xtask verify-linux-context
       - name: Retain current native Linux preparation join context
         if: ${{ always() && steps.linux_context.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -568,9 +624,15 @@ jobs:
           cache-workspace-crates: 'false'
           save-if: 'false'
       - run: cargo fetch --locked
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: day2-linux-verifier-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/day2-linux-verifier
+      - name: Restore the current run verifier only
+        run: tar -xzf /tmp/day2-linux-verifier/day2-linux-verifier.tgz -C "$GITHUB_WORKSPACE" target/debug/xtask
       - name: Establish the mandatory bounded native Linux compiler context
         id: linux_context
-        run: cargo run --locked -p xtask -- verify-linux-context
+        run: target/debug/xtask verify-linux-context
       - name: Retain current native Linux shard context
         if: ${{ always() && steps.linux_context.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -648,9 +710,17 @@ jobs:
           save-if: 'false'
       - run: cargo fetch --locked
         if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
+        with:
+          name: day2-linux-verifier-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/day2-linux-verifier
+      - name: Restore the current run verifier only
+        run: tar -xzf /tmp/day2-linux-verifier/day2-linux-verifier.tgz -C "$GITHUB_WORKSPACE" target/debug/xtask
+        if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
       - name: Establish the mandatory bounded native Linux compiler context
         id: linux_context
-        run: cargo run --locked -p xtask -- verify-linux-context
+        run: target/debug/xtask verify-linux-context
         if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
       - name: Retain current native Linux final context
         if: ${{ always() && steps.linux_context.outcome == 'success' }}
