@@ -4674,8 +4674,9 @@ mod tests {
                                             .context("replay cookie")?
                                             .parse()?,
                                     );
-                                    self.session =
-                                        self.shell.read_session(&self.headers, self.clock.wall())?;
+                                    self.session = self
+                                        .shell
+                                        .read_session(&self.headers, self.clock.wall())?;
                                     let session =
                                         self.session.as_ref().context("replay signed session")?;
                                     session.proof.require_intent(
@@ -4724,7 +4725,12 @@ mod tests {
                             self.oauth.as_ref().context("isolated OAuth owner absent")?;
                         let pending = self
                             .shell
-                            .pending(&target.attempt, &identity(), &self.headers, self.clock.wall())?
+                            .pending(
+                                &target.attempt,
+                                &identity(),
+                                &self.headers,
+                                self.clock.wall(),
+                            )?
                             .context("isolated OAuth original pending absent")?;
                         let intent = FreshIntent::approval(&pending, &identity())?;
                         ensure!(
@@ -4735,16 +4741,20 @@ mod tests {
                             .original_oidc_clock
                             .take()
                             .context("isolated witness original Google clock absent or reused")?;
-                        let proof = shell_oidc::Reauthenticated::isolated_fixture_with_original_start(
-                            intent,
-                            identity().email,
-                            identity().subject,
-                            self.clock.wall(),
-                            started_at,
-                            started,
-                        )?;
+                        let proof =
+                            shell_oidc::Reauthenticated::isolated_fixture_with_original_start(
+                                intent,
+                                identity().email,
+                                identity().subject,
+                                self.clock.wall(),
+                                started_at,
+                                started,
+                            )?;
                         ensure!(
-                            proof.deadline()? == started_at.checked_add(300).context("replay original deadline overflow")?
+                            proof.deadline()?
+                                == started_at
+                                    .checked_add(300)
+                                    .context("replay original deadline overflow")?
                                 && proof.deadline()? == 1_300,
                             "isolated witness renewed the original authentication deadline"
                         );
@@ -4760,10 +4770,8 @@ mod tests {
                                     == Some(&self.login.authorization_identity()?),
                             "isolated witness changed the original deadline or authorization"
                         );
-                        self.headers.insert(
-                            header::COOKIE,
-                            format!("{COOKIE}={token}").parse()?,
-                        );
+                        self.headers
+                            .insert(header::COOKIE, format!("{COOKIE}={token}").parse()?);
                         self.session = Some(session);
                         Ok(Disposition::Ok)
                     }
@@ -5108,7 +5116,10 @@ mod tests {
                 ]),toolchain:Digest::new(include_bytes!("../../../../toolchain.json")),artifact:None,
                 fixture:Digest::new(b"claims-and-isolated-replay-v3;seed=17;wall=1000;complete=1001;exp=1301;original-deadline=1300;raw-Google-refused;separate-isolated-OAuth-witness;fixed-reviewed-keys"),
                 observations:Vec::new(),first_failure:None,refusals:Vec::new()};
-            if steps.is_empty() || steps.len() > 16 || !prerequisites(consumer, case, history, steps) {
+            if steps.is_empty()
+                || steps.len() > 16
+                || !prerequisites(consumer, case, history, steps)
+            {
                 trace.refuse(Failure {
                     category: "program_refusal".into(),
                     index: None,
@@ -5277,7 +5288,8 @@ mod tests {
                         if begun && !callback => {}
                     Step::Callback if begun && !callback => callback = true,
                     Step::IsolatedPostPending
-                        if callback && !confirmed
+                        if callback
+                            && !confirmed
                             && consumer == Consumer::OAuth
                             && history == History::IsolatedOAuthActions => {}
                     Step::View | Step::ExpireTicks | Step::DelayKey | Step::Restart if callback => {
@@ -5455,14 +5467,20 @@ mod tests {
         }
 
         #[test]
-        fn isolated_oauth_and_signed_credential_replay_two_positive_owner_histories() -> Result<()> {
-            compare(Consumer::OAuth, Case::Positive, History::IsolatedOAuthActions)?;
+        fn isolated_oauth_and_signed_credential_replay_two_positive_owner_histories() -> Result<()>
+        {
+            compare(
+                Consumer::OAuth,
+                Case::Positive,
+                History::IsolatedOAuthActions,
+            )?;
             compare(Consumer::Credential, Case::Positive, History::RawSigned)?;
             Ok(())
         }
 
         #[test]
-        fn isolated_oauth_and_signed_credential_replay_six_paired_negative_owner_histories() -> Result<()> {
+        fn isolated_oauth_and_signed_credential_replay_six_paired_negative_owner_histories()
+        -> Result<()> {
             for case in [
                 Case::WrongSubject,
                 Case::OppositePurpose,
