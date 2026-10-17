@@ -77,15 +77,23 @@ fn require_current_pending(
     now: i64,
 ) -> Result<()> {
     let active = authority_state::authorize_in(db, runtime, &pending.operation, &identity.email)?;
-    let selected = active.document.credentials.get(&pending.family)
+    let selected = active
+        .document
+        .credentials
+        .get(&pending.family)
         .context("credential family inactive")?;
-    runtime.credential_authority()?.check_shell(&selected.binding, shell_origin)?;
-    ensure!(pending.actor == identity.email
-        && pending.artifact == runtime.artifact().id()
-        && pending.authority == active.stamp
-        && pending.binding == Digest::of(&selected.binding)?
-        && pending.created_at <= now && now < pending.expires_at,
-        "credential pending authority changed or expired");
+    runtime
+        .credential_authority()?
+        .check_shell(&selected.binding, shell_origin)?;
+    ensure!(
+        pending.actor == identity.email
+            && pending.artifact == runtime.artifact().id()
+            && pending.authority == active.stamp
+            && pending.binding == Digest::of(&selected.binding)?
+            && pending.created_at <= now
+            && now < pending.expires_at,
+        "credential pending authority changed or expired"
+    );
     iap::bind_subject(db, identity, now)?;
     Ok(())
 }
@@ -98,10 +106,15 @@ pub(crate) fn fresh_owner(
     identity: &iap::Verified,
     now: i64,
 ) -> Result<crate::oauth::fresh_owner::ReplyData> {
-    ensure!(call.purpose == crate::oauth::fresh_owner::PurposeData::CredentialIntent,
-        "credential fresh purpose changed");
+    ensure!(
+        call.purpose == crate::oauth::fresh_owner::PurposeData::CredentialIntent,
+        "credential fresh purpose changed"
+    );
     let instance = Instance::load(runtime.instance_path())?;
-    ensure!(instance.scope(runtime.app())? == runtime.scope(), "credential fresh scope changed");
+    ensure!(
+        instance.scope(runtime.app())? == runtime.scope(),
+        "credential fresh scope changed"
+    );
     let (_, app) = instance.edge(runtime.app())?;
     let (_, shell) = instance.security_edge()?;
     let mut db = open(runtime.db())?;
@@ -109,9 +122,14 @@ pub(crate) fn fresh_owner(
     let pending = load(&tx, &call.attempt)?.context("credential fresh pending unavailable")?;
     require_current_pending(&tx, runtime, &pending, identity, &shell.origin, now)?;
     let intent = crate::oauth::fresh_auth::FreshIntent::credential(
-        runtime, &pending, identity, &app.origin, &shell.origin,
+        runtime,
+        &pending,
+        identity,
+        &app.origin,
+        &shell.origin,
     )?;
-    let reply = crate::oauth::fresh_owner::apply_in_current_app_transaction(&tx, &intent, call, now)?;
+    let reply =
+        crate::oauth::fresh_owner::apply_in_current_app_transaction(&tx, &intent, call, now)?;
     tx.commit()?;
     Ok(reply)
 }
@@ -573,7 +591,11 @@ pub(crate) fn deliver(
     now: i64,
     acknowledge: bool,
 ) -> Result<Option<String>> {
-    human_proof.require_credential_authentication(&fresh_intent(runtime, pending, identity)?, identity, now)?;
+    human_proof.require_credential_authentication(
+        &fresh_intent(runtime, pending, identity)?,
+        identity,
+        now,
+    )?;
     let now = human_proof.observe_current(now)?;
     let mut db = open(runtime.db())?;
     let tx = crate::write_queue::immediate(&mut db)?;

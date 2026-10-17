@@ -351,10 +351,20 @@ impl Manager {
     ) -> Result<crate::oauth::fresh_owner::ReplyData> {
         use crate::oauth::{fresh_auth::FreshIntent, fresh_owner::PurposeData};
         if call.purpose == PurposeData::CredentialIntent {
-            return crate::managed_credentials::browser::fresh_owner(&self.runtime, call, identity, now);
+            return crate::managed_credentials::browser::fresh_owner(
+                &self.runtime,
+                call,
+                identity,
+                now,
+            );
         }
-        ensure!(matches!(call.purpose, PurposeData::OAuthConnect | PurposeData::OAuthDisconnect),
-            "OAuth management fresh purpose refused");
+        ensure!(
+            matches!(
+                call.purpose,
+                PurposeData::OAuthConnect | PurposeData::OAuthDisconnect
+            ),
+            "OAuth management fresh purpose refused"
+        );
         // Current selected registration/key acquisition happens before taking
         // the app writer; no SQLite transaction spans the private RPC.
         let expected = self.pending(&call.attempt, identity, now)?;
@@ -363,10 +373,14 @@ impl Manager {
         let mut db = store::open(self.runtime.db())?;
         let tx = crate::write_queue::immediate(&mut db)?;
         let (view, state, _) = self.load(&tx, &call.attempt, identity, at)?;
-        ensure!(state == "pending" && view == expected, "OAuth management pending changed");
+        ensure!(
+            state == "pending" && view == expected,
+            "OAuth management pending changed"
+        );
         self.check_in(&tx, &view, identity)?;
         let intent = FreshIntent::management(&view, identity)?;
-        let reply = crate::oauth::fresh_owner::apply_in_current_app_transaction(&tx, &intent, call, at)?;
+        let reply =
+            crate::oauth::fresh_owner::apply_in_current_app_transaction(&tx, &intent, call, at)?;
         tx.commit()?;
         Ok(reply)
     }

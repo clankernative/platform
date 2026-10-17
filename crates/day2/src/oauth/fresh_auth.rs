@@ -243,7 +243,10 @@ impl FreshIntent {
         created_at: i64,
         expires_at: i64,
     ) -> Result<Self> {
-        ensure!(created_at >= 0 && expires_at > created_at, "parser fixture original interval");
+        ensure!(
+            created_at >= 0 && expires_at > created_at,
+            "parser fixture original interval"
+        );
         Ok(Self {
             context: Context::OAuth {
                 app: "parserfixture".into(),
@@ -337,9 +340,11 @@ impl VerifiedAuthTime {
         identity: &iap::Verified,
         entry_now: i64,
     ) -> Result<()> {
-        ensure!(self.purpose() == FreshPurpose::CredentialIntent
-            && current.purpose() == FreshPurpose::CredentialIntent,
-            "credential original purpose required");
+        ensure!(
+            self.purpose() == FreshPurpose::CredentialIntent
+                && current.purpose() == FreshPurpose::CredentialIntent,
+            "credential original purpose required"
+        );
         self.require_intent(current, identity)?;
         self.require_current(entry_now)?;
         self.google.require_post_pending_authentication()

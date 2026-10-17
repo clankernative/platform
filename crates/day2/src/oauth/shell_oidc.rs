@@ -19,13 +19,13 @@ use day2_capabilities::Digest;
 use ring::digest::{SHA256, digest};
 use ring::signature::{RSA_PKCS1_2048_8192_SHA256, RsaPublicKeyComponents};
 use serde::Deserialize;
+#[cfg(test)]
+use std::collections::HashMap;
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
     time::Duration,
 };
-#[cfg(test)]
-use std::collections::HashMap;
 
 const AUTHORIZATION_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
@@ -163,8 +163,13 @@ impl GoogleCodeExchange {
 
 impl CodeExchange for GoogleCodeExchange {
     fn profile_binding(&self) -> Result<Digest> {
-        Digest::of(&("google-code-client-reference-v1", self.version.project_number,
-            &self.version.secret, self.version.version, self.endpoint.as_str()))
+        Digest::of(&(
+            "google-code-client-reference-v1",
+            self.version.project_number,
+            &self.version.secret,
+            self.version.version,
+            self.endpoint.as_str(),
+        ))
     }
 
     fn exchange(
@@ -206,7 +211,9 @@ struct VerifiedIdToken {
 // Both spellings accepted by the existing Google verifier denote its one
 // fixed issuer/key source. No arbitrary issuer string can enter this wrapper.
 #[derive(PartialEq, Eq)]
-enum GoogleIssuer { Accounts }
+enum GoogleIssuer {
+    Accounts,
+}
 
 struct GoogleFlow {
     state: Digest,
@@ -243,32 +250,68 @@ pub(crate) struct ManualView {
     pub(in crate::oauth) deadline: i64,
 }
 
-struct ManualBinding { handle: String, csrf: String, tuples: Digest }
+struct ManualBinding {
+    handle: String,
+    csrf: String,
+    tuples: Digest,
+}
 
 impl ManualBinding {
     // Exact UTF-8 JSON tuple framing, with explicit version and distinct ASCII
     // purpose labels. The tuple bundle commits both private Google phases;
     // the final immutable publication aggregates that bundle plus both UI MAC
     // commitments, avoiding a self-referential hash/MAC definition.
-    fn frame(label: &str, original: &Original, profile: &Digest, tuples: &Digest) -> Result<Vec<u8>> {
-        Ok(serde_json::to_vec(&("day2-google-manual-hmac-v1", label,
-            original.intent.commitment()?, &original.owner, profile, tuples))?)
+    fn frame(
+        label: &str,
+        original: &Original,
+        profile: &Digest,
+        tuples: &Digest,
+    ) -> Result<Vec<u8>> {
+        Ok(serde_json::to_vec(&(
+            "day2-google-manual-hmac-v1",
+            label,
+            original.intent.commitment()?,
+            &original.owner,
+            profile,
+            tuples,
+        ))?)
     }
 
     fn new(original: &Original, profile: &Digest, tuples: Digest, verifier: &str) -> Result<Self> {
         let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, verifier.as_bytes());
-        let handle = URL_SAFE_NO_PAD.encode(ring::hmac::sign(&key, &Self::frame("handle", original, profile, &tuples)?).as_ref());
-        let csrf = URL_SAFE_NO_PAD.encode(ring::hmac::sign(&key, &Self::frame("csrf", original, profile, &tuples)?).as_ref());
-        Ok(Self { handle, csrf, tuples })
+        let handle = URL_SAFE_NO_PAD.encode(
+            ring::hmac::sign(&key, &Self::frame("handle", original, profile, &tuples)?).as_ref(),
+        );
+        let csrf = URL_SAFE_NO_PAD.encode(
+            ring::hmac::sign(&key, &Self::frame("csrf", original, profile, &tuples)?).as_ref(),
+        );
+        Ok(Self {
+            handle,
+            csrf,
+            tuples,
+        })
     }
 
-    fn verify(&self, csrf: &str, original: &Original, profile: &Digest, verifier: &str) -> Result<()> {
+    fn verify(
+        &self,
+        csrf: &str,
+        original: &Original,
+        profile: &Digest,
+        verifier: &str,
+    ) -> Result<()> {
         ensure!(token_shape(csrf), "Google manual CSRF shape refused");
         let bytes = URL_SAFE_NO_PAD.decode(csrf)?;
-        ensure!(URL_SAFE_NO_PAD.encode(&bytes) == csrf, "Google manual CSRF encoding refused");
+        ensure!(
+            URL_SAFE_NO_PAD.encode(&bytes) == csrf,
+            "Google manual CSRF encoding refused"
+        );
         let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, verifier.as_bytes());
-        ring::hmac::verify(&key, &Self::frame("csrf", original, profile, &self.tuples)?, &bytes)
-            .map_err(|_| anyhow::anyhow!("Google manual CSRF refused"))
+        ring::hmac::verify(
+            &key,
+            &Self::frame("csrf", original, profile, &self.tuples)?,
+            &bytes,
+        )
+        .map_err(|_| anyhow::anyhow!("Google manual CSRF refused"))
     }
 }
 
@@ -283,19 +326,31 @@ struct GoogleOrder {
 }
 
 impl GoogleBundle {
-    pub(super) fn baseline_state(&self) -> &Digest { &self.baseline.state }
+    pub(super) fn baseline_state(&self) -> &Digest {
+        &self.baseline.state
+    }
 
-    pub(super) fn baseline_location(&self) -> &str { &self.baseline.location }
+    pub(super) fn baseline_location(&self) -> &str {
+        &self.baseline.location
+    }
 }
 
 impl GoogleFresh {
-    pub(super) fn state(&self) -> &Digest { &self.fresh.state }
+    pub(super) fn state(&self) -> &Digest {
+        &self.fresh.state
+    }
 
-    pub(super) fn location(&self) -> &str { &self.fresh.location }
+    pub(super) fn location(&self) -> &str {
+        &self.fresh.location
+    }
 
-    pub(super) fn manual_handle(&self) -> &str { &self.manual.handle }
+    pub(super) fn manual_handle(&self) -> &str {
+        &self.manual.handle
+    }
 
-    pub(super) fn manual_location(&self) -> String { format!("{MANUAL_PREFIX}{}", self.manual.handle) }
+    pub(super) fn manual_location(&self) -> String {
+        format!("{MANUAL_PREFIX}{}", self.manual.handle)
+    }
 }
 
 pub(crate) struct Reauthenticated {
@@ -321,9 +376,18 @@ struct Lifetime {
 impl Reauthenticated {
     /// Observation DATA only; this never exports the private token pair or
     /// constructs a current-role/original-clock/fresh-human proof.
-    pub(in crate::oauth) fn owned_ordering_data(&self) -> Option<(i64, i64, Digest, Digest, Digest)> {
-        self.ordering.as_ref().map(|value| (value.baseline.claims.iat, value.fresh.claims.auth_time,
-            value.original.clone(), value.owner.clone(), value.publication.clone()))
+    pub(in crate::oauth) fn owned_ordering_data(
+        &self,
+    ) -> Option<(i64, i64, Digest, Digest, Digest)> {
+        self.ordering.as_ref().map(|value| {
+            (
+                value.baseline.claims.iat,
+                value.fresh.claims.auth_time,
+                value.original.clone(),
+                value.owner.clone(),
+                value.publication.clone(),
+            )
+        })
     }
 
     pub(in crate::oauth) fn intent(&self) -> &FreshIntent {
@@ -352,8 +416,12 @@ impl Reauthenticated {
             return Ok(());
         }
         if let Some((baseline_iat, auth_time, original, _, _)) = self.owned_ordering_data() {
-            ensure!(original == self.intent.commitment()? && auth_time == self.authenticated_at
-                && auth_time > baseline_iat, "Google original ordering context changed");
+            ensure!(
+                original == self.intent.commitment()?
+                    && auth_time == self.authenticated_at
+                    && auth_time > baseline_iat,
+                "Google original ordering context changed"
+            );
         }
         // An owned issuer-order observation is necessary but not a factory for
         // genuine original lifetime/current role/epoch or final app settlement.
@@ -590,17 +658,26 @@ impl FreshAuthenticator for GoogleFreshAuthenticator {
         now: i64,
     ) -> Result<ReauthStart> {
         let location = match &self.begin_transport {
-            BeginTransport::Remote(owners) => self.oidc.begin_owned(owners, identity, intent, headers, now)?,
+            BeginTransport::Remote(owners) => self
+                .oidc
+                .begin_owned(owners, identity, intent, headers, now)?,
             #[cfg(test)]
             BeginTransport::ParserOnly => self.oidc.begin(identity, intent, now)?,
         };
         Ok(ReauthStart::Redirect(location))
     }
 
-    fn complete(&self, query: &str, identity: &iap::Verified, headers: &HeaderMap, now: i64)
-        -> Result<super::security_shell::ReauthCallback> {
+    fn complete(
+        &self,
+        query: &str,
+        identity: &iap::Verified,
+        headers: &HeaderMap,
+        now: i64,
+    ) -> Result<super::security_shell::ReauthCallback> {
         match &self.begin_transport {
-            BeginTransport::Remote(owners) => self.oidc.complete_owned(owners, query, identity, headers, now),
+            BeginTransport::Remote(owners) => self
+                .oidc
+                .complete_owned(owners, query, identity, headers, now),
             #[cfg(test)]
             BeginTransport::ParserOnly => Ok(super::security_shell::ReauthCallback::Observed(
                 self.oidc.complete(query, identity, now)?,
@@ -608,22 +685,41 @@ impl FreshAuthenticator for GoogleFreshAuthenticator {
         }
     }
 
-    fn manual_view(&self, handle: &str, identity: &iap::Verified, headers: &HeaderMap, now: i64) -> Result<ManualView> {
+    fn manual_view(
+        &self,
+        handle: &str,
+        identity: &iap::Verified,
+        headers: &HeaderMap,
+        now: i64,
+    ) -> Result<ManualView> {
         let owners = match &self.begin_transport {
             BeginTransport::Remote(owners) => owners,
             #[cfg(test)]
-            BeginTransport::ParserOnly => anyhow::bail!("parser-only Google has no manual checkpoint"),
+            BeginTransport::ParserOnly => {
+                anyhow::bail!("parser-only Google has no manual checkpoint")
+            }
         };
-        self.oidc.manual_view_owned(owners, handle, identity, headers, now)
+        self.oidc
+            .manual_view_owned(owners, handle, identity, headers, now)
     }
 
-    fn resume_manual(&self, handle: &str, csrf: &str, identity: &iap::Verified, headers: &HeaderMap, now: i64) -> Result<String> {
+    fn resume_manual(
+        &self,
+        handle: &str,
+        csrf: &str,
+        identity: &iap::Verified,
+        headers: &HeaderMap,
+        now: i64,
+    ) -> Result<String> {
         let owners = match &self.begin_transport {
             BeginTransport::Remote(owners) => owners,
             #[cfg(test)]
-            BeginTransport::ParserOnly => anyhow::bail!("parser-only Google cannot resume an owned checkpoint"),
+            BeginTransport::ParserOnly => {
+                anyhow::bail!("parser-only Google cannot resume an owned checkpoint")
+            }
         };
-        self.oidc.resume_manual_owned(owners, handle, csrf, identity, headers, now)
+        self.oidc
+            .resume_manual_owned(owners, handle, csrf, identity, headers, now)
     }
 }
 
@@ -631,13 +727,31 @@ impl FreshAuthenticator for GoogleFreshAuthenticator {
 impl GoogleFreshAuthenticator {
     /// Explicit standalone parser adapter. No app-owner/native/live admission
     /// is established, and the production post-Pending guard remains closed.
-    pub(in crate::oauth) fn begin_parser(&self, identity: &iap::Verified, intent: FreshIntent, now: i64) -> Result<ReauthStart> {
-        ensure!(matches!(self.begin_transport, BeginTransport::ParserOnly), "owned Google Begin cannot use parser adapter");
-        Ok(ReauthStart::Redirect(self.oidc.begin(identity, intent, now)?))
+    pub(in crate::oauth) fn begin_parser(
+        &self,
+        identity: &iap::Verified,
+        intent: FreshIntent,
+        now: i64,
+    ) -> Result<ReauthStart> {
+        ensure!(
+            matches!(self.begin_transport, BeginTransport::ParserOnly),
+            "owned Google Begin cannot use parser adapter"
+        );
+        Ok(ReauthStart::Redirect(
+            self.oidc.begin(identity, intent, now)?,
+        ))
     }
 
-    pub(in crate::oauth) fn complete_parser(&self, query: &str, identity: &iap::Verified, now: i64) -> Result<Reauthenticated> {
-        ensure!(matches!(self.begin_transport, BeginTransport::ParserOnly), "owned Google callback cannot use parser adapter");
+    pub(in crate::oauth) fn complete_parser(
+        &self,
+        query: &str,
+        identity: &iap::Verified,
+        now: i64,
+    ) -> Result<Reauthenticated> {
+        ensure!(
+            matches!(self.begin_transport, BeginTransport::ParserOnly),
+            "owned Google callback cannot use parser adapter"
+        );
         self.oidc.complete(query, identity, now)
     }
 }
@@ -682,10 +796,21 @@ impl GoogleOidc {
     }
 
     fn owned_profile(&self) -> Result<Digest> {
-        Digest::of(&("google-two-phase-profile-v1", AUTHORIZATION_URL, TOKEN_URL, JWK_URL, ISSUER,
-            &self.client_id, &self.redirect_uri, &self.hosted_domain, self.exchange.profile_binding()?,
-            Digest::new(include_bytes!("shell_oidc.rs")), Digest::new(include_bytes!("google_begin.rs")),
-            Digest::new(include_bytes!("fresh_owner.rs")), Digest::new(include_bytes!("../../../../Cargo.lock"))))
+        Digest::of(&(
+            "google-two-phase-profile-v1",
+            AUTHORIZATION_URL,
+            TOKEN_URL,
+            JWK_URL,
+            ISSUER,
+            &self.client_id,
+            &self.redirect_uri,
+            &self.hosted_domain,
+            self.exchange.profile_binding()?,
+            Digest::new(include_bytes!("shell_oidc.rs")),
+            Digest::new(include_bytes!("google_begin.rs")),
+            Digest::new(include_bytes!("fresh_owner.rs")),
+            Digest::new(include_bytes!("../../../../Cargo.lock")),
+        ))
     }
 
     fn flow(&self, human: &str) -> Result<GoogleFlow> {
@@ -695,35 +820,73 @@ impl GoogleOidc {
         let challenge = URL_SAFE_NO_PAD.encode(digest(&SHA256, verifier.as_bytes()).as_ref());
         let mut url = url::Url::parse(AUTHORIZATION_URL)?;
         url.query_pairs_mut()
-            .append_pair("response_type", "code").append_pair("scope", "openid email")
-            .append_pair("client_id", &self.client_id).append_pair("redirect_uri", &self.redirect_uri)
-            .append_pair("state", &state).append_pair("nonce", &nonce)
-            .append_pair("code_challenge", &challenge).append_pair("code_challenge_method", "S256")
+            .append_pair("response_type", "code")
+            .append_pair("scope", "openid email")
+            .append_pair("client_id", &self.client_id)
+            .append_pair("redirect_uri", &self.redirect_uri)
+            .append_pair("state", &state)
+            .append_pair("nonce", &nonce)
+            .append_pair("code_challenge", &challenge)
+            .append_pair("code_challenge_method", "S256")
             .append_pair("max_age", "0")
             .append_pair("claims", r#"{"id_token":{"auth_time":{"essential":true}}}"#)
-            .append_pair("hd", &self.hosted_domain).append_pair("login_hint", human);
+            .append_pair("hd", &self.hosted_domain)
+            .append_pair("login_hint", human);
         // Account selection is not proof. The authenticated expected identity
         // is verified in both signed responses, not inferred from a URL hint.
         let location: String = url.into();
         ensure!(location.len() <= 4096, "Google authorization capacity");
-        Ok(GoogleFlow { state: Digest::new(state.as_bytes()), nonce, verifier, challenge, location })
+        Ok(GoogleFlow {
+            state: Digest::new(state.as_bytes()),
+            nonce,
+            verifier,
+            challenge,
+            location,
+        })
     }
 
     fn bundle(&self, original: &Original) -> Result<GoogleBundle> {
         let profile = self.owned_profile()?;
         let baseline = self.flow(original.intent.human())?;
         let fresh = self.flow(original.intent.human())?;
-        ensure!(baseline.state != fresh.state && baseline.nonce != fresh.nonce && baseline.verifier != fresh.verifier,
-            "Google phase tuples must be distinct");
+        ensure!(
+            baseline.state != fresh.state
+                && baseline.nonce != fresh.nonce
+                && baseline.verifier != fresh.verifier,
+            "Google phase tuples must be distinct"
+        );
         let original_id = original.intent.commitment()?;
-        let tuples = Digest::of(&("google-two-phase-private-tuples-v1", &original_id, &original.owner, &profile,
-            &baseline.state, Digest::new(baseline.nonce.as_bytes()), &baseline.challenge,
-            &fresh.state, Digest::new(fresh.nonce.as_bytes()), &fresh.challenge))?;
+        let tuples = Digest::of(&(
+            "google-two-phase-private-tuples-v1",
+            &original_id,
+            &original.owner,
+            &profile,
+            &baseline.state,
+            Digest::new(baseline.nonce.as_bytes()),
+            &baseline.challenge,
+            &fresh.state,
+            Digest::new(fresh.nonce.as_bytes()),
+            &fresh.challenge,
+        ))?;
         let manual = ManualBinding::new(original, &profile, tuples.clone(), &fresh.verifier)?;
-        let bundle = Digest::of(&("google-two-phase-private-bundle-v2", &tuples,
-            Digest::new(manual.handle.as_bytes()), Digest::new(manual.csrf.as_bytes())))?;
-        let publication = serde_json::to_string(&GoogleBundleData::from_native_parts(original_id, profile.clone(), bundle))?;
-        Ok(GoogleBundle { baseline, fresh, profile, publication, manual })
+        let bundle = Digest::of(&(
+            "google-two-phase-private-bundle-v2",
+            &tuples,
+            Digest::new(manual.handle.as_bytes()),
+            Digest::new(manual.csrf.as_bytes()),
+        ))?;
+        let publication = serde_json::to_string(&GoogleBundleData::from_native_parts(
+            original_id,
+            profile.clone(),
+            bundle,
+        ))?;
+        Ok(GoogleBundle {
+            baseline,
+            fresh,
+            profile,
+            publication,
+            manual,
+        })
     }
 
     /// These existing clock observations only tighten the original operation.
@@ -731,14 +894,24 @@ impl GoogleOidc {
     /// native continuous-original-lifetime factory for production acceptance.
     fn owned_now(original: &Original, entry: i64) -> Result<i64> {
         let now = effects::wall_time()?;
-        let ceiling = original.started_at.checked_add(ATTEMPT_SECONDS)
-            .context("Google original attempt overflow")?.min(original.intent.deadline());
-        let seconds = ceiling.checked_sub(original.started_at).and_then(|v| u64::try_from(v).ok())
+        let ceiling = original
+            .started_at
+            .checked_add(ATTEMPT_SECONDS)
+            .context("Google original attempt overflow")?
+            .min(original.intent.deadline());
+        let seconds = ceiling
+            .checked_sub(original.started_at)
+            .and_then(|v| u64::try_from(v).ok())
             .context("Google original lifetime invalid")?;
-        ensure!(now >= entry && now >= original.started_at && now < ceiling
-            && effects::Instant::now().checked_duration_since(original.started)
-                .is_some_and(|elapsed| elapsed < Duration::from_secs(seconds)),
-            "Google original attempt expired or changed clock");
+        ensure!(
+            now >= entry
+                && now >= original.started_at
+                && now < ceiling
+                && effects::Instant::now()
+                    .checked_duration_since(original.started)
+                    .is_some_and(|elapsed| elapsed < Duration::from_secs(seconds)),
+            "Google original attempt expired or changed clock"
+        );
         Ok(now)
     }
 
@@ -750,16 +923,30 @@ impl GoogleOidc {
         entry: i64,
     ) -> Result<()> {
         let (publication, profile) = match flight.payload()? {
-            Payload::Publication(bundle) | Payload::Baseline(bundle) | Payload::BaselineCallback(bundle) => (&bundle.publication, &bundle.profile),
-            Payload::Manual(fresh) | Payload::Fresh(fresh) | Payload::FreshCallback(fresh) => (&fresh.publication, &fresh.profile),
+            Payload::Publication(bundle)
+            | Payload::Baseline(bundle)
+            | Payload::BaselineCallback(bundle) => (&bundle.publication, &bundle.profile),
+            Payload::Manual(fresh) | Payload::Fresh(fresh) | Payload::FreshCallback(fresh) => {
+                (&fresh.publication, &fresh.profile)
+            }
             _ => anyhow::bail!("Google immutable bundle publication required"),
         };
-        ensure!(*profile == self.owned_profile()?, "Google original bundle profile changed");
+        ensure!(
+            *profile == self.owned_profile()?,
+            "Google original bundle profile changed"
+        );
         Self::owned_now(&flight.original, entry)?;
-        let call = CallData::publication(&flight.original.intent, flight.original.owner.clone(), publication.clone())?;
+        let call = CallData::publication(
+            &flight.original.intent,
+            flight.original.owner.clone(),
+            publication.clone(),
+        )?;
         let reply = owners.fresh_owner(&flight.original.intent, call.clone(), headers)?;
         reply.require_call(&call, &flight.original.intent)?;
-        ensure!(matches!(reply.outcome, OutcomeData::Published { .. }), "Google bundle publication refused");
+        ensure!(
+            matches!(reply.outcome, OutcomeData::Published { .. }),
+            "Google bundle publication refused"
+        );
         Self::owned_now(&flight.original, entry)?;
         Ok(())
     }
@@ -773,23 +960,33 @@ impl GoogleOidc {
         now: i64,
     ) -> Result<String> {
         intent.require_identity(identity)?;
-        intent.require_shell_origin(&url::Url::parse(&self.redirect_uri)?.origin().ascii_serialization())?;
+        intent.require_shell_origin(
+            &url::Url::parse(&self.redirect_uri)?
+                .origin()
+                .ascii_serialization(),
+        )?;
         let mut flight = self.begins.reserve(&intent, now)?;
         Self::owned_now(&flight.original, now)?;
         if matches!(flight.payload()?, Payload::Claim) {
             let call = CallData::claim(&intent, flight.original.owner.clone())?;
             let reply = owners.fresh_owner(&intent, call.clone(), headers)?;
             reply.require_call(&call, &intent)?;
-            if !matches!(reply.outcome, OutcomeData::Allocation {
-                state: AllocationData::Allocated | AllocationData::ExistingOwner,
-            }) {
+            if !matches!(
+                reply.outcome,
+                OutcomeData::Allocation {
+                    state: AllocationData::Allocated | AllocationData::ExistingOwner,
+                }
+            ) {
                 flight.terminal()?;
                 anyhow::bail!("Google original app owner refused");
             }
             Self::owned_now(&flight.original, now)?;
             // After this take, any failure is terminal. The two-tuples are
             // allocated ONCE, only after the actual app Claim returned committed.
-            ensure!(matches!(flight.take()?, Payload::Claim), "Google original allocation changed");
+            ensure!(
+                matches!(flight.take()?, Payload::Claim),
+                "Google original allocation changed"
+            );
             let bundle = self.bundle(&flight.original)?;
             flight.retain_publication(bundle)?;
         }
@@ -797,15 +994,31 @@ impl GoogleOidc {
         flight.offered()
     }
 
-    fn verified_owned_token(&self, token: &str, nonce: &str, identity: &iap::Verified, now: i64) -> Result<VerifiedIdToken> {
+    fn verified_owned_token(
+        &self,
+        token: &str,
+        nonce: &str,
+        identity: &iap::Verified,
+        now: i64,
+    ) -> Result<VerifiedIdToken> {
         let claims = self.verify_id_token(token, nonce, identity, now)?;
         ensure!(claims.iat > 0, "Google issuer timestamp missing");
-        Ok(VerifiedIdToken { issuer: GoogleIssuer::Accounts, claims,
-            nonce: Digest::new(nonce.as_bytes()), profile: self.owned_profile()? })
+        Ok(VerifiedIdToken {
+            issuer: GoogleIssuer::Accounts,
+            claims,
+            nonce: Digest::new(nonce.as_bytes()),
+            profile: self.owned_profile()?,
+        })
     }
 
-    fn manual_view_owned(&self, owners: &super::shell_transport::RemoteApprovals, handle: &str,
-        identity: &iap::Verified, headers: &HeaderMap, now: i64) -> Result<ManualView> {
+    fn manual_view_owned(
+        &self,
+        owners: &super::shell_transport::RemoteApprovals,
+        handle: &str,
+        identity: &iap::Verified,
+        headers: &HeaderMap,
+        now: i64,
+    ) -> Result<ManualView> {
         ensure!(token_shape(handle), "Google manual handle refused");
         let flight = self.begins.manual(handle)?;
         flight.original.intent.require_identity(identity)?;
@@ -814,14 +1027,29 @@ impl GoogleOidc {
             Payload::Manual(fresh) | Payload::Fresh(fresh) => fresh,
             _ => anyhow::bail!("Google manual checkpoint phase refused"),
         };
-        let deadline = flight.original.started_at.checked_add(ATTEMPT_SECONDS)
-            .context("Google original checkpoint overflow")?.min(flight.original.intent.deadline());
-        Ok(ManualView { location: fresh.manual_location(), csrf: fresh.manual.csrf.clone(),
-            human: flight.original.intent.human().into(), deadline })
+        let deadline = flight
+            .original
+            .started_at
+            .checked_add(ATTEMPT_SECONDS)
+            .context("Google original checkpoint overflow")?
+            .min(flight.original.intent.deadline());
+        Ok(ManualView {
+            location: fresh.manual_location(),
+            csrf: fresh.manual.csrf.clone(),
+            human: flight.original.intent.human().into(),
+            deadline,
+        })
     }
 
-    fn resume_manual_owned(&self, owners: &super::shell_transport::RemoteApprovals, handle: &str, csrf: &str,
-        identity: &iap::Verified, headers: &HeaderMap, now: i64) -> Result<String> {
+    fn resume_manual_owned(
+        &self,
+        owners: &super::shell_transport::RemoteApprovals,
+        handle: &str,
+        csrf: &str,
+        identity: &iap::Verified,
+        headers: &HeaderMap,
+        now: i64,
+    ) -> Result<String> {
         ensure!(token_shape(handle), "Google manual handle refused");
         let flight = self.begins.manual(handle)?;
         flight.original.intent.require_identity(identity)?;
@@ -830,7 +1058,12 @@ impl GoogleOidc {
             Payload::Manual(fresh) | Payload::Fresh(fresh) => fresh,
             _ => anyhow::bail!("Google manual resume phase refused"),
         };
-        fresh.manual.verify(csrf, &flight.original, &fresh.profile, &fresh.fresh.verifier)?;
+        fresh.manual.verify(
+            csrf,
+            &flight.original,
+            &fresh.profile,
+            &fresh.fresh.verifier,
+        )?;
         self.publish_owned(owners, &flight, headers, now)?;
         flight.resumed()
     }
@@ -846,9 +1079,17 @@ impl GoogleOidc {
         ensure!(raw_query.len() <= 4096, "OIDC callback too large");
         let mut fields = BTreeMap::new();
         for (key, value) in url::form_urlencoded::parse(raw_query.as_bytes()) {
-            ensure!(fields.insert(key.into_owned(), value.into_owned()).is_none(), "duplicate OIDC callback field");
+            ensure!(
+                fields
+                    .insert(key.into_owned(), value.into_owned())
+                    .is_none(),
+                "duplicate OIDC callback field"
+            );
         }
-        ensure!(fields.get("iss").map(String::as_str) == Some(ISSUER), "invalid OIDC callback issuer");
+        ensure!(
+            fields.get("iss").map(String::as_str) == Some(ISSUER),
+            "invalid OIDC callback issuer"
+        );
         let state = fields.get("state").context("OIDC state missing")?;
         ensure!(token_shape(state), "invalid OIDC state");
         let code = fields.get("code").context("OIDC code missing")?;
@@ -864,45 +1105,89 @@ impl GoogleOidc {
         // ambiguous exchange can never retry a code, baseline or native bundle.
         match flight.take()? {
             Payload::BaselineCallback(bundle) => {
-                ensure!(bundle.profile == expected_profile, "Google baseline profile changed");
-                let token = self.exchange.exchange(code, &bundle.baseline.verifier, &self.redirect_uri, &self.client_id)?;
+                ensure!(
+                    bundle.profile == expected_profile,
+                    "Google baseline profile changed"
+                );
+                let token = self.exchange.exchange(
+                    code,
+                    &bundle.baseline.verifier,
+                    &self.redirect_uri,
+                    &self.client_id,
+                )?;
                 let at = Self::owned_now(&flight.original, now)?;
-                let baseline = self.verified_owned_token(&token, &bundle.baseline.nonce, identity, at)?;
-                ensure!(baseline.profile == bundle.profile && baseline.nonce == Digest::new(bundle.baseline.nonce.as_bytes()),
-                    "Google baseline binding changed");
-                let fresh = GoogleFresh { baseline, fresh: bundle.fresh, profile: bundle.profile,
-                    publication: bundle.publication, manual: bundle.manual };
+                let baseline =
+                    self.verified_owned_token(&token, &bundle.baseline.nonce, identity, at)?;
+                ensure!(
+                    baseline.profile == bundle.profile
+                        && baseline.nonce == Digest::new(bundle.baseline.nonce.as_bytes()),
+                    "Google baseline binding changed"
+                );
+                let fresh = GoogleFresh {
+                    baseline,
+                    fresh: bundle.fresh,
+                    profile: bundle.profile,
+                    publication: bundle.publication,
+                    manual: bundle.manual,
+                };
                 flight.retain_manual(fresh)?;
                 self.publish_owned(owners, &flight, headers, now)?;
-                Ok(super::security_shell::ReauthCallback::Manual(flight.offered()?))
+                Ok(super::security_shell::ReauthCallback::Manual(
+                    flight.offered()?,
+                ))
             }
             Payload::FreshCallback(pending) => {
-                ensure!(pending.profile == expected_profile, "Google fresh profile changed");
-                let token = self.exchange.exchange(code, &pending.fresh.verifier, &self.redirect_uri, &self.client_id)?;
+                ensure!(
+                    pending.profile == expected_profile,
+                    "Google fresh profile changed"
+                );
+                let token = self.exchange.exchange(
+                    code,
+                    &pending.fresh.verifier,
+                    &self.redirect_uri,
+                    &self.client_id,
+                )?;
                 let at = Self::owned_now(&flight.original, now)?;
-                let fresh = self.verified_owned_token(&token, &pending.fresh.nonce, identity, at)?;
+                let fresh =
+                    self.verified_owned_token(&token, &pending.fresh.nonce, identity, at)?;
                 // Trust the documented issuer meanings of signed NumericDate
                 // values. No local/Google clock subtraction or skew margin
                 // establishes this ordering. Equality never proves a new event.
-                ensure!(fresh.profile == pending.baseline.profile
-                    && fresh.issuer == pending.baseline.issuer
-                    && fresh.claims.sub == pending.baseline.claims.sub
-                    && fresh.claims.aud == pending.baseline.claims.aud
-                    && fresh.nonce == Digest::new(pending.fresh.nonce.as_bytes())
-                    && fresh.claims.auth_time > pending.baseline.claims.iat
-                    && fresh.claims.auth_time <= fresh.claims.iat,
-                    "Google authentication did not advance past the original baseline");
+                ensure!(
+                    fresh.profile == pending.baseline.profile
+                        && fresh.issuer == pending.baseline.issuer
+                        && fresh.claims.sub == pending.baseline.claims.sub
+                        && fresh.claims.aud == pending.baseline.claims.aud
+                        && fresh.nonce == Digest::new(pending.fresh.nonce.as_bytes())
+                        && fresh.claims.auth_time > pending.baseline.claims.iat
+                        && fresh.claims.auth_time <= fresh.claims.iat,
+                    "Google authentication did not advance past the original baseline"
+                );
                 let authenticated_at = fresh.claims.auth_time;
                 let provider_expires_at = fresh.claims.exp.min(pending.baseline.claims.exp);
-                let ordering = GoogleOrder { baseline: pending.baseline, fresh,
-                    original: flight.original.intent.commitment()?, owner: flight.original.owner.clone(),
-                    publication: Digest::new(pending.publication.as_bytes()) };
+                let ordering = GoogleOrder {
+                    baseline: pending.baseline,
+                    fresh,
+                    original: flight.original.intent.commitment()?,
+                    owner: flight.original.owner.clone(),
+                    publication: Digest::new(pending.publication.as_bytes()),
+                };
                 let observed = Reauthenticated {
-                    intent: flight.original.intent.clone(), human: identity.email.clone(), subject: identity.subject.clone(),
-                    authenticated_at, provider_expires_at, started_at: flight.original.started_at,
-                    started: flight.original.started, lifetime: Mutex::new(Lifetime {
-                        wall: at, observed: effects::Instant::now(), refused: false,
-                    }), ordering: Some(ordering), #[cfg(test)] isolated_fixture: false,
+                    intent: flight.original.intent.clone(),
+                    human: identity.email.clone(),
+                    subject: identity.subject.clone(),
+                    authenticated_at,
+                    provider_expires_at,
+                    started_at: flight.original.started_at,
+                    started: flight.original.started,
+                    lifetime: Mutex::new(Lifetime {
+                        wall: at,
+                        observed: effects::Instant::now(),
+                        refused: false,
+                    }),
+                    ordering: Some(ordering),
+                    #[cfg(test)]
+                    isolated_fixture: false,
                 };
                 flight.terminal()?;
                 Ok(super::security_shell::ReauthCallback::Observed(observed))
@@ -914,12 +1199,7 @@ impl GoogleOidc {
     /// Starts a new provider authentication after the account was quarantined.
     /// State, nonce and PKCE verifier never enter the app or provider callback URL.
     #[cfg(test)]
-    fn begin(
-        &self,
-        identity: &iap::Verified,
-        intent: FreshIntent,
-        now: i64,
-    ) -> Result<String> {
+    fn begin(&self, identity: &iap::Verified, intent: FreshIntent, now: i64) -> Result<String> {
         intent.require_identity(identity)?;
         let origin = url::Url::parse(&self.redirect_uri)?
             .origin()
@@ -1256,19 +1536,33 @@ mod signed_fixtures {
             let mut sequence = der(&mut bytes, 0x30)?;
             let n = der(&mut sequence, 0x02)?;
             let e = der(&mut sequence, 0x02)?;
-            ensure!(bytes.is_empty() && sequence.is_empty(), "provider input key shape");
+            ensure!(
+                bytes.is_empty() && sequence.is_empty(),
+                "provider input key shape"
+            );
             let jwks = serde_json::json!({"keys":[{"kid":"owned-google-input","kty":"RSA","alg":"RS256","use":"sig",
                 "n":URL_SAFE_NO_PAD.encode(n.strip_prefix(&[0]).unwrap_or(n)),"e":URL_SAFE_NO_PAD.encode(e)}]}).to_string();
             Ok(Self { key, jwks })
         }
 
-        pub(in crate::oauth) fn jwks(&self) -> &str { &self.jwks }
+        pub(in crate::oauth) fn jwks(&self) -> &str {
+            &self.jwks
+        }
 
         pub(in crate::oauth) fn sign(&self, claims: &serde_json::Value) -> Result<String> {
-            let signed = format!("{}.{}", URL_SAFE_NO_PAD.encode(br#"{"alg":"RS256","kid":"owned-google-input"}"#),
-                URL_SAFE_NO_PAD.encode(serde_json::to_vec(claims)?));
+            let signed = format!(
+                "{}.{}",
+                URL_SAFE_NO_PAD.encode(br#"{"alg":"RS256","kid":"owned-google-input"}"#),
+                URL_SAFE_NO_PAD.encode(serde_json::to_vec(claims)?)
+            );
             let mut signature = vec![0; self.key.public_key().modulus_len()];
-            self.key.sign(&RSA_PKCS1_SHA256, &SystemRandom::new(), signed.as_bytes(), &mut signature)
+            self.key
+                .sign(
+                    &RSA_PKCS1_SHA256,
+                    &SystemRandom::new(),
+                    signed.as_bytes(),
+                    &mut signature,
+                )
                 .map_err(|_| anyhow::anyhow!("provider input signing failed"))?;
             Ok(format!("{signed}.{}", URL_SAFE_NO_PAD.encode(signature)))
         }
@@ -1577,7 +1871,7 @@ mod signed_fixtures {
                     }),
                 )?,
                 oidc,
-            begin_transport: BeginTransport::ParserOnly,
+                begin_transport: BeginTransport::ParserOnly,
             });
             let claim_identity = Digest::of(&(
                 "signed-replay-claim-inputs-v1",
@@ -2020,7 +2314,11 @@ mod tests {
             assert_eq!(proof.authenticated_at(), 101);
             assert_eq!(proof.subject(), identity.subject);
             assert_eq!(proof.deadline()?, 400); // Original begin, not completion +300.
-            assert!(authenticator.complete_parser(&callback, &verified, 101).is_err());
+            assert!(
+                authenticator
+                    .complete_parser(&callback, &verified, 101)
+                    .is_err()
+            );
             let independent_proof = || -> Result<super::super::fresh_auth::VerifiedAuthTime> {
                 let (authenticator, headers, callback) =
                     fixture_login(&identity, intent.clone(), 100, 101, 101)?;
@@ -2134,7 +2432,11 @@ mod tests {
                     .complete_parser(&callback, &current, if expired { 401 } else { 101 })
                     .is_err()
             );
-            assert!(authenticator.complete_parser(&callback, &identity, 101).is_err());
+            assert!(
+                authenticator
+                    .complete_parser(&callback, &identity, 101)
+                    .is_err()
+            );
         }
         Ok(())
     }
@@ -2414,7 +2716,12 @@ mod tests {
     #[test]
     fn shell_requires_iap_assertion_before_starting_google_step_up() {
         let authenticator = GoogleFreshAuthenticator {
-            iap: iap::Verifier::new("/projects/123/global/backendServices/456", "example.com", Box::new(iap::GoogleKeys)).unwrap(),
+            iap: iap::Verifier::new(
+                "/projects/123/global/backendServices/456",
+                "example.com",
+                Box::new(iap::GoogleKeys),
+            )
+            .unwrap(),
             oidc: oidc(),
             begin_transport: BeginTransport::ParserOnly,
         };
@@ -2471,7 +2778,9 @@ mod tests {
             99,
             100,
         )?;
-        let error = oidc.begin(&identity(), intent, 100).err()
+        let error = oidc
+            .begin(&identity(), intent, 100)
+            .err()
             .ok_or_else(|| anyhow::anyhow!("expired original allocated Google state"))?;
         assert!(error.to_string().contains("invalid OIDC attempt"));
         assert!(oidc.pending.lock().unwrap().is_empty());
