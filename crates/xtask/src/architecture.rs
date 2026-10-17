@@ -1980,7 +1980,7 @@ impl<'a> Scanner<'a> {
                 .unwrap()
                 .extend(names.into_iter().map(|(name, _)| name));
         }
-        self.use_tree(&import.tree, "", review);
+        self.use_tree(&import.tree, "", review, import.leading_colon.is_some());
     }
 
     fn canonical_html_macro(&self, invocation: &syn::Macro) -> bool {
@@ -2070,7 +2070,7 @@ impl<'a> Scanner<'a> {
         current
     }
 
-    fn use_tree(&mut self, tree: &UseTree, prefix: &str, review: bool) {
+    fn use_tree(&mut self, tree: &UseTree, prefix: &str, review: bool, absolute: bool) {
         let join = |name: &str| {
             if prefix.is_empty() {
                 name.to_owned()
@@ -2080,7 +2080,7 @@ impl<'a> Scanner<'a> {
         };
         match tree {
             UseTree::Path(path) => {
-                self.use_tree(&path.tree, &join(&identifier_name(&path.ident)), review)
+                self.use_tree(&path.tree, &join(&identifier_name(&path.ident)), review, absolute)
             }
             UseTree::Name(name) => {
                 let target = if name.ident == "self" {
@@ -2093,8 +2093,11 @@ impl<'a> Scanner<'a> {
                 } else {
                     identifier_name(&name.ident)
                 };
-                self.import_provenance(&alias, &target);
-                let target = self.resolve_name(&target);
+                // Preserve an actual extern-root stdio import even when a local
+                // module is named std. Other families retain their old path.
+                let absolute_stdio = absolute && stdio_path_target(&target);
+                self.import_provenance(&alias, &if absolute_stdio { format!("::{target}") } else { target.clone() });
+                let target = if absolute_stdio { target } else { self.resolve_name(&target) };
                 self.bind_alias(alias, target.clone(), tree);
                 if review && ambient_binding(&target) {
                     self.record("effect-reexport", &target, tree);
@@ -2106,8 +2109,9 @@ impl<'a> Scanner<'a> {
                 } else {
                     join(&identifier_name(&rename.ident))
                 };
-                self.import_provenance(&identifier_name(&rename.rename), &raw_target);
-                let target = self.resolve_name(&raw_target);
+                let absolute_stdio = absolute && stdio_path_target(&raw_target);
+                self.import_provenance(&identifier_name(&rename.rename), &if absolute_stdio { format!("::{raw_target}") } else { raw_target.clone() });
+                let target = if absolute_stdio { raw_target } else { self.resolve_name(&raw_target) };
                 self.bind_alias(identifier_name(&rename.rename), target.clone(), tree);
                 if review && ambient_binding(&target) {
                     self.record("effect-reexport", &target, tree);
@@ -2115,7 +2119,7 @@ impl<'a> Scanner<'a> {
             }
             UseTree::Group(group) => {
                 for item in &group.items {
-                    self.use_tree(item, prefix, review);
+                    self.use_tree(item, prefix, review, absolute);
                 }
             }
             UseTree::Glob(_) => {
@@ -2639,6 +2643,13 @@ impl<'a> Scanner<'a> {
         for _ in 0..MAX_ALIAS_ROUNDS {
             if !seen.insert((current.clone(), frame)) {
                 return Err("cyclic standard-stream alias");
+            }
+            if let Some(canonical) = current.strip_prefix("::") {
+                return if canonical.starts_with("std::io::") && stdio_path_target(canonical) {
+                    Ok(Some(canonical.to_owned()))
+                } else {
+                    Err("unresolved absolute standard-stream import")
+                };
             }
             let (first, rest) = current.split_once("::").unwrap_or((&current, ""));
             if matches!(first, "self" | "super" | "crate") {
@@ -5792,6 +5803,17 @@ mod tests {
                 ::std::io::Stderr::flush(&mut output);
                 let make = ::std::io::stderr; make();
             }
+            fn absolute_imports() {
+                mod std {}
+                use ::std::io as native;
+                use ::std::io::{stderr as make, Stderr as Output, Write as OutputWrite};
+                let mut output: Output = make();
+                native::stderr();
+                OutputWrite::write_all(&mut output, b"x");
+                <Output as OutputWrite>::flush(&mut output);
+                Output::flush(&mut output);
+                let captured = make; captured();
+            }
         "#);
         assert_eq!(stdio_counts(&actual.findings), expected_stdio(&[
             ("imported_before_shadow", "std::io::stderr", 1),
@@ -5801,6 +5823,9 @@ mod tests {
             ("absolute", "std::io::stderr", 3),
             ("absolute", "std::io::Stderr::write_all", 1),
             ("absolute", "std::io::Stderr::flush", 1),
+            ("absolute_imports", "std::io::stderr", 4),
+            ("absolute_imports", "std::io::Stderr::write_all", 1),
+            ("absolute_imports", "std::io::Stderr::flush", 2),
         ]));
     }
 
