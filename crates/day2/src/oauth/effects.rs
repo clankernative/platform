@@ -37,7 +37,8 @@ pub(super) fn provider_observation(data: super::shell_oidc::ProviderObservationD
     if let Some(hooks) = HOOKS.with(|slot| slot.borrow().clone()) {
         return hooks.provider_observation(data);
     }
-    // A partial or failed write is never retried and never changes the refusal.
+    // One write_all invocation may internally continue short writes/EINTR. No
+    // second invocation follows its error; delivery never changes the refusal.
     std::io::stderr().lock().write_all(&line)?;
     Ok(())
 }

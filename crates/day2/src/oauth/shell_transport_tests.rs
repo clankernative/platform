@@ -1965,6 +1965,7 @@ mod owned_google {
         secret_sends: AtomicUsize,
         external_authentication: AtomicI64,
         observation_sink: Option<Arc<ObservationSink>>,
+        expected_credential_wall: Option<i64>,
     }
 
     #[derive(Clone, Copy)]
@@ -2025,6 +2026,15 @@ mod owned_google {
     }
 
     impl Port {
+        fn require_observation_context(&self) -> Result<()> {
+            if let Some(expected) = self.expected_credential_wall {
+                ensure!(crate::managed_credentials::effects::wall_time()? == expected
+                    && effects::wall_time()? == self.wall_time()?,
+                    "mounted request lost or replaced an effect track");
+            }
+            Ok(())
+        }
+
         fn response(status: u16, body: Vec<u8>) -> effects::Response {
             let mut headers = HeaderMap::new();
             headers.insert(
@@ -2337,6 +2347,7 @@ mod owned_google {
 
     impl effects::Hooks for Port {
         fn provider_observation(&self, data: crate::oauth::shell_oidc::ProviderObservationData) -> Result<()> {
+            self.require_observation_context()?;
             self.observation_sink.as_ref().context("unscripted provider observation")?.write(data)
         }
 
@@ -2359,6 +2370,7 @@ mod owned_google {
             Ok(())
         }
         fn send(&self, request: reqwest::blocking::Request) -> Result<effects::Response> {
+            self.require_observation_context()?;
             match request.url().host_str() {
                 Some("app.example.com") => self.private_send(request),
                 Some("www.gstatic.com")
@@ -2439,9 +2451,9 @@ mod owned_google {
         Digest::of(&("google-provider-profile-observation-v1", profile))
     }
 
-    // Native HTTP adapter conformance using real signed Google inputs/current
+    // Native HTTP adapter conformance using locally signed provider fixtures/current
     // app SQLite. It cannot supply real provider or native fresh-human proof.
-    fn mounted_observation(case: Case, outcome: SinkOutcome, cancel: bool) -> Result<()> {
+    fn mounted_observation(case: Case, outcome: SinkOutcome, cancel: bool, with_registry: bool) -> Result<()> {
         let setup = Setup::new()?;
         let instance = Instance::load(&setup.instance)?;
         let runtime = setup.runtime(0)?;
@@ -2451,6 +2463,21 @@ mod owned_google {
         receiver.authority = "app.example.com".into();
         receiver.route = route_prefix(&instance.installation, &instance.environment, "workspace")?;
         let receiver = Arc::new(receiver).with_management(manager)?;
+        let serving_credentials = crate::managed_credentials::simulation::World::new(1130);
+        serving_credentials.set_wall(73);
+        let registry_credentials = crate::managed_credentials::simulation::World::new(1131);
+        registry_credentials.set_wall(83);
+        // Construct the ordinary registry BEFORE the OAuth fixture scope. Its
+        // OAuth capture is None; its selected credential track must still win
+        // while preserving the later ambient serving OAuth track.
+        let registry = if with_registry {
+            let authority = Arc::new(crate::managed_credentials::authority::SelectedAuthority::new(
+                Vec::new(), Arc::new(fixtures::TestApprovalKeys(0.into())),
+            )?);
+            Some(Arc::new(crate::managed_credentials::effects::scope(registry_credentials.clone(), || {
+                crate::managed_credentials::browser::Registry::new(&instance, Vec::new(), authority)
+            })?))
+        } else { None };
         let sink = Arc::new(ObservationSink {
             outcome, pause: cancel, entered: tokio::sync::Notify::new(),
             released: Mutex::new(false), release: std::sync::Condvar::new(),
@@ -2466,15 +2493,18 @@ mod owned_google {
             inputs: Mutex::new(Vec::new()), entropy_inputs: Mutex::new(Vec::new()), trace: Mutex::new(Vec::new()),
             fills: AtomicUsize::new(0), token_sends: AtomicUsize::new(0), secret_sends: AtomicUsize::new(0),
             external_authentication: AtomicI64::new(99), observation_sink: Some(sink.clone()),
+            expected_credential_wall: Some(if with_registry {83} else {73}),
         });
         let owners = Arc::new(RemoteApprovals::from_instance(&instance, Arc::new(EdgeBearer))?);
         let (client, exchange) = clients::reauthentication(&instance, Arc::new(crate::oauth::registration::tests::TokensSource(AtomicUsize::new(0))))?;
         let auth = Arc::new(GoogleFreshAuthenticator::new(SHELL_AUDIENCE, "example.com", "https://security.example.com/", client, exchange, owners.clone())?);
         let shell = crate::oauth::security_shell::SecurityShell::with_transport("https://security.example.com/".into(), owners.clone(), setup.signer.clone(), auth.clone())?.with_management_fixture()?;
+        let shell = match registry { Some(registry) => shell.with_credentials(registry)?, None => shell };
         let mut headers = HeaderMap::new();
         headers.insert(iap::ASSERTION_HEADER, setup.human_assertion.parse()?);
         headers.insert(header::HOST, HeaderValue::from_static("security.example.com"));
-        let (query, expected_profile, expected_correlation, before, entropy, mut private_values) = effects::scope(port.clone(), || -> Result<_> {
+        let setup_credentials = if with_registry {registry_credentials} else {serving_credentials.clone()};
+        let (query, expected_profile, expected_correlation, before, entropy, mut private_values) = crate::managed_credentials::effects::scope(setup_credentials, || effects::scope(port.clone(), || -> Result<_> {
             let human = auth.identify(&headers, 100)?;
             let ManagementReply::Pending { view } = owners.management("workspace", Call::Capture { registration: "calendar".into(), operation: Action::Connect }, &headers)? else { anyhow::bail!("mounted current Pending absent"); };
             let intent = FreshIntent::management(&view, &human)?;
@@ -2528,14 +2558,15 @@ mod owned_google {
             let mut private_values = port.entropy_inputs.lock().unwrap().clone();
             private_values.extend([handle.to_owned(), prompt.csrf]);
             Ok((query, expected_profile, expected_correlation, simulation::snapshot(&crate::store::open(&port.database)?)?, port.fills.load(Ordering::SeqCst), private_values))
-        })?;
+        }))?;
         private_values.push(setup.human_assertion.clone());
         let executor = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-        executor.block_on(effects::scope_async(port.clone(), async {
+        executor.block_on(crate::managed_credentials::effects::scope_async(serving_credentials, effects::scope_async(port.clone(), async {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
             let endpoint = format!("http://{}", listener.local_addr()?);
             let (stop, shutdown) = tokio::sync::oneshot::channel();
-            let server = tokio::spawn(effects::scope_async(port.clone(), shell.clone().serve_bounded(listener, 1, Arc::new(AtomicBool::new(true)), async { let _ = shutdown.await; })));
+            let serving_effects = crate::managed_credentials::effects::capture();
+            let server = tokio::spawn(serving_effects.run_async(shell.clone().serve_bounded(listener, 1, Arc::new(AtomicBool::new(true)), async { let _ = shutdown.await; })));
             let client = reqwest::Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none()).build()?;
             let request = || client.get(format!("{endpoint}/_day2/reauth/callback?{query}")).headers(headers.clone());
             if cancel {
@@ -2568,11 +2599,11 @@ mod owned_google {
             }
             tokio::time::timeout(Duration::from_secs(3), server).await???;
             Ok::<_, anyhow::Error>(())
-        }))?;
+        })))?;
         let attempts = sink.attempts.lock().unwrap();
         let accepted = case.accepts_second_token() && !matches!(case, Case::ChangedFreshPending | Case::ExpiredFresh);
         ensure!(attempts.len() == usize::from(accepted), "verified observation count or replay changed");
-        ensure!(simulation::snapshot(&crate::store::open(&port.database)?)? == before && port.fills.load(Ordering::SeqCst) == entropy, "refusal changed app database or session entropy");
+        ensure!(simulation::snapshot(&crate::store::open(&port.database)?)? == before && port.fills.load(Ordering::SeqCst) == entropy, "refusal changed OAuth table projection or session entropy");
         ensure!(port.token_sends.load(Ordering::SeqCst) == if matches!(case, Case::ChangedFreshPending | Case::ExpiredFresh) {1} else {2}, "callback replay repeated exchange");
         if let Some(record) = attempts.first() {
             ensure!(record == &json!({"version":1,"kind":"google_provider_prerequisite","outcome":"signed_auth_time_and_ordering_verified_native_producer_unavailable","baseline_iat":101,"fresh_auth_time":102,"profile":expected_profile,"correlation":expected_correlation}), "operator record differs from independent metadata/manual projection");
@@ -2594,19 +2625,25 @@ mod owned_google {
 
     #[test]
     fn mounted_signed_provider_observation_never_authorizes_even_when_delivery_is_ambiguous() -> Result<()> {
-        for outcome in [SinkOutcome::Complete, SinkOutcome::PartialUnknown, SinkOutcome::CompleteThenError, SinkOutcome::Unavailable] { mounted_observation(Case::Advance, outcome, false)?; }
+        for outcome in [SinkOutcome::Complete, SinkOutcome::PartialUnknown, SinkOutcome::CompleteThenError, SinkOutcome::Unavailable] { mounted_observation(Case::Advance, outcome, false, false)?; }
         Ok(())
     }
 
     #[test]
     fn mounted_provider_observation_keeps_native_capacity_after_browser_cancellation() -> Result<()> {
-        mounted_observation(Case::Advance, SinkOutcome::Complete, true)
+        mounted_observation(Case::Advance, SinkOutcome::Complete, true, false)
     }
 
     #[test]
     fn mounted_provider_observation_refuses_unverified_or_noncurrent_inputs_without_writing() -> Result<()> {
-        for case in [Case::EqualAuthentication, Case::OlderAuthentication, Case::AuthenticationAfterIssue, Case::MissingAuthentication, Case::WrongSubject, Case::WrongClient, Case::CrossPhase, Case::ChangedFreshPending, Case::ExpiredFresh] { mounted_observation(case, SinkOutcome::Complete, false)?; }
+        for case in [Case::EqualAuthentication, Case::OlderAuthentication, Case::AuthenticationAfterIssue, Case::MissingAuthentication, Case::WrongSubject, Case::WrongClient, Case::CrossPhase, Case::ChangedFreshPending, Case::ExpiredFresh] { mounted_observation(case, SinkOutcome::Complete, false, false)?; }
         Ok(())
+    }
+
+    #[test]
+    fn mounted_provider_observation_composes_registry_credentials_with_serving_oauth() -> Result<()> {
+        mounted_observation(Case::Advance, SinkOutcome::Complete, false, true)?;
+        mounted_observation(Case::Advance, SinkOutcome::Complete, true, true)
     }
 
     fn run(
@@ -2649,6 +2686,7 @@ mod owned_google {
             secret_sends: AtomicUsize::new(0),
             external_authentication: AtomicI64::new(99),
             observation_sink: None,
+            expected_credential_wall: None,
         });
         let owners = Arc::new(RemoteApprovals::from_instance(
             &instance,

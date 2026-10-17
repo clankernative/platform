@@ -591,11 +591,18 @@ impl SecurityShell {
         );
         let capacity = Arc::new(Semaphore::new(concurrency));
         let router_capacity = capacity.clone();
+        // Axum spawns connection/request tasks outside this future's poll.
+        // Capture BOTH ambient tracks before that boundary. A selected registry
+        // still supplies its inner context in handle; absent inner hooks leave
+        // these serving hooks active rather than silently selecting native I/O.
+        let request_effects = crate::managed_credentials::effects::capture();
         let router = Router::new().fallback(move |request: Request| {
             let shell = self.clone();
             let admission = admission.clone();
             let capacity = router_capacity.clone();
+            let captured = request_effects.clone();
             async move {
+                captured.run_async(async move {
                 let path = request.uri().path();
                 if matches!(path, "/health/live" | "/health/ready") {
                     let status =
@@ -615,6 +622,7 @@ impl SecurityShell {
                     return protected(StatusCode::SERVICE_UNAVAILABLE.into_response());
                 };
                 shell.handle(request, permit, admission).await
+                }).await
             }
         });
         axum::serve(listener, router)
