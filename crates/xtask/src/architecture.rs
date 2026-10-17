@@ -1274,9 +1274,16 @@ fn ambient_import_names(
     );
     let mut names = BTreeSet::from([
         "DirBuilder".to_owned(),
-        "io".to_owned(), "stdin".to_owned(), "stdout".to_owned(), "stderr".to_owned(),
-        "Stdin".to_owned(), "StdinLock".to_owned(), "Stdout".to_owned(),
-        "StdoutLock".to_owned(), "Stderr".to_owned(), "StderrLock".to_owned(),
+        "io".to_owned(),
+        "stdin".to_owned(),
+        "stdout".to_owned(),
+        "stderr".to_owned(),
+        "Stdin".to_owned(),
+        "StdinLock".to_owned(),
+        "Stdout".to_owned(),
+        "StdoutLock".to_owned(),
+        "Stderr".to_owned(),
+        "StderrLock".to_owned(),
     ]);
     names.extend(imports.3.iter().cloned());
     names.extend(
@@ -1648,7 +1655,11 @@ impl<'a> Scanner<'a> {
             self.stdio_ambiguities.is_empty(),
             "unsupported standard-output operations in {} (a canonical supported receiver operation is required): {}",
             self.source,
-            self.stdio_ambiguities.iter().cloned().collect::<Vec<_>>().join(", ")
+            self.stdio_ambiguities
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
         );
         Ok(())
     }
@@ -2085,9 +2096,12 @@ impl<'a> Scanner<'a> {
             }
         };
         match tree {
-            UseTree::Path(path) => {
-                self.use_tree(&path.tree, &join(&identifier_name(&path.ident)), review, absolute)
-            }
+            UseTree::Path(path) => self.use_tree(
+                &path.tree,
+                &join(&identifier_name(&path.ident)),
+                review,
+                absolute,
+            ),
             UseTree::Name(name) => {
                 let target = if name.ident == "self" {
                     prefix.to_owned()
@@ -2104,7 +2118,11 @@ impl<'a> Scanner<'a> {
                 let absolute_stdio = absolute && stdio_path_target(&target);
                 self.remember_stdio_import(&alias, &target, absolute);
                 self.import_provenance(&alias, &target);
-                let target = if absolute_stdio { target } else { self.resolve_name(&target) };
+                let target = if absolute_stdio {
+                    target
+                } else {
+                    self.resolve_name(&target)
+                };
                 self.bind_alias(alias, target.clone(), tree);
                 if review && ambient_binding(&target) {
                     self.record("effect-reexport", &target, tree);
@@ -2119,7 +2137,11 @@ impl<'a> Scanner<'a> {
                 let absolute_stdio = absolute && stdio_path_target(&raw_target);
                 self.remember_stdio_import(&identifier_name(&rename.rename), &raw_target, absolute);
                 self.import_provenance(&identifier_name(&rename.rename), &raw_target);
-                let target = if absolute_stdio { raw_target } else { self.resolve_name(&raw_target) };
+                let target = if absolute_stdio {
+                    raw_target
+                } else {
+                    self.resolve_name(&raw_target)
+                };
                 self.bind_alias(identifier_name(&rename.rename), target.clone(), tree);
                 if review && ambient_binding(&target) {
                     self.record("effect-reexport", &target, tree);
@@ -2202,7 +2224,10 @@ impl<'a> Scanner<'a> {
         match ty {
             Type::Path(path) => {
                 let last = path.path.segments.last()?;
-                let resolved = self.stdio_resolve_path(&path.path, PathNamespace::Type).ok().flatten()?;
+                let resolved = self
+                    .stdio_resolve_path(&path.path, PathNamespace::Type)
+                    .ok()
+                    .flatten()?;
                 if let syn::PathArguments::AngleBracketed(arguments) = &last.arguments {
                     let types = arguments
                         .args
@@ -2472,8 +2497,15 @@ impl<'a> Scanner<'a> {
                 {
                     return Some(identifier_name(&path.path.segments[0].ident));
                 }
-                let namespace = if path.path.segments.len() == 1 { PathNamespace::Value } else { PathNamespace::Type };
-                let name = self.stdio_resolve_path(&path.path, namespace).ok().flatten()?;
+                let namespace = if path.path.segments.len() == 1 {
+                    PathNamespace::Value
+                } else {
+                    PathNamespace::Type
+                };
+                let name = self
+                    .stdio_resolve_path(&path.path, namespace)
+                    .ok()
+                    .flatten()?;
                 self.values
                     .iter()
                     .skip(*self.value_floors.last().unwrap())
@@ -2628,7 +2660,11 @@ impl<'a> Scanner<'a> {
         self.origin(&call.receiver).as_deref() == Some(READ_DIR_HANDLE)
     }
 
-    fn stdio_resolve_path(&self, path: &syn::Path, namespace: PathNamespace) -> std::result::Result<Option<String>, &'static str> {
+    fn stdio_resolve_path(
+        &self,
+        path: &syn::Path,
+        namespace: PathNamespace,
+    ) -> std::result::Result<Option<String>, &'static str> {
         self.stdio_resolve_name(&path_name(path), path.leading_colon.is_some(), namespace)
     }
 
@@ -2651,26 +2687,39 @@ impl<'a> Scanner<'a> {
             let mut namespaces = BTreeMap::new();
             let mut unresolved = BTreeSet::new();
             for (alias, raw) in &imports {
-                let origin = if let Some(canonical) = self.stdio_absolute_imports[frame].get(alias) {
+                let origin = if let Some(canonical) = self.stdio_absolute_imports[frame].get(alias)
+                {
                     Ok(Some(canonical.clone()))
                 } else {
                     self.stdio_resolve_name(raw, false, PathNamespace::Any)
                 };
                 match origin {
                     Ok(Some(origin)) => {
-                        let kind = if origin == "std" || origin == "std::io" || origin == "std::io::Write" || stdio_handle(&origin).is_some() {
+                        let kind = if origin == "std"
+                            || origin == "std::io"
+                            || origin == "std::io::Write"
+                            || stdio_handle(&origin).is_some()
+                        {
                             Some(DeclarationNamespace::Type)
                         } else if stdio_factory_result(&origin).is_some() {
                             Some(DeclarationNamespace::Value)
-                        } else { None };
-                        if let Some(kind) = kind { namespaces.insert(alias.clone(), kind); }
+                        } else {
+                            None
+                        };
+                        if let Some(kind) = kind {
+                            namespaces.insert(alias.clone(), kind);
+                        }
                     }
-                    Err(reason) => { unresolved.insert(reason); }
+                    Err(reason) => {
+                        unresolved.insert(reason);
+                    }
                     Ok(None) => {}
                 }
             }
             if namespaces == self.stdio_import_namespaces[frame] {
-                for reason in unresolved { self.refuse_stdio_operation(reason); }
+                for reason in unresolved {
+                    self.refuse_stdio_operation(reason);
+                }
                 return;
             }
             self.stdio_import_namespaces[frame] = namespaces;
@@ -2678,7 +2727,12 @@ impl<'a> Scanner<'a> {
         self.refuse_stdio_operation("standard-stream import namespace convergence limit exceeded");
     }
 
-    fn stdio_candidate(&self, name: &str, absolute: bool, namespace: PathNamespace) -> Option<String> {
+    fn stdio_candidate(
+        &self,
+        name: &str,
+        absolute: bool,
+        namespace: PathNamespace,
+    ) -> Option<String> {
         if absolute {
             return stdio_path_target(name).then(|| name.to_owned());
         }
@@ -2686,37 +2740,63 @@ impl<'a> Scanner<'a> {
         let mut frame = self.aliases.len() - 1;
         let mut seen = BTreeSet::new();
         for _ in 0..MAX_ALIAS_ROUNDS {
-            if !seen.insert((current.clone(), frame)) { return None; }
+            if !seen.insert((current.clone(), frame)) {
+                return None;
+            }
             let (first, rest) = current.split_once("::").unwrap_or((&current, ""));
-            let requested = if rest.is_empty() { namespace } else { PathNamespace::Type };
+            let requested = if rest.is_empty() {
+                namespace
+            } else {
+                PathNamespace::Type
+            };
             let Some((index, stored)) = (0..=frame).rev().find_map(|index| {
                 let target = self.aliases[index].get(first)?;
-                let canonical = self.stdio_absolute_imports[index].get(first).unwrap_or(target);
-                self.stdio_import_namespaces[index].get(first).copied()
+                let canonical = self.stdio_absolute_imports[index]
+                    .get(first)
+                    .unwrap_or(target);
+                self.stdio_import_namespaces[index]
+                    .get(first)
+                    .copied()
                     .or_else(|| canonical_import_namespace(canonical))
                     .is_none_or(|kind| kind.includes(requested))
                     .then_some((index, target))
             }) else {
                 return stdio_path_target(&current).then_some(current);
             };
-            let target = self.stdio_absolute_imports[index].get(first).unwrap_or(stored);
-            let candidate = if rest.is_empty() { target.clone() } else { format!("{target}::{rest}") };
-            if stdio_path_target(&candidate) { return Some(candidate); }
+            let target = self.stdio_absolute_imports[index]
+                .get(first)
+                .unwrap_or(stored);
+            let candidate = if rest.is_empty() {
+                target.clone()
+            } else {
+                format!("{target}::{rest}")
+            };
+            if stdio_path_target(&candidate) {
+                return Some(candidate);
+            }
             // Discovery also follows an alias whose stored target was already
             // rewritten by a later std alias. Its raw dependency still points
             // at the original import and its defining frame.
             let raw = self.named_imports[index].get(first).unwrap_or(stored);
-            current = if rest.is_empty() { raw.clone() } else { format!("{raw}::{rest}") };
+            current = if rest.is_empty() {
+                raw.clone()
+            } else {
+                format!("{raw}::{rest}")
+            };
             frame = index;
         }
         None
     }
 
-    fn stdio_resolve_name(&self, name: &str, absolute: bool, namespace: PathNamespace) -> std::result::Result<Option<String>, &'static str> {
+    fn stdio_resolve_name(
+        &self,
+        name: &str,
+        absolute: bool,
+        namespace: PathNamespace,
+    ) -> std::result::Result<Option<String>, &'static str> {
         let captured = self.stdio_candidate(name, absolute, namespace);
         let resolved = self.resolve_name(name);
-        let family = captured
-            .or_else(|| stdio_path_target(&resolved).then(|| resolved.clone()));
+        let family = captured.or_else(|| stdio_path_target(&resolved).then(|| resolved.clone()));
         if family.is_none() {
             return Ok(Some(resolved));
         }
@@ -2747,19 +2827,30 @@ impl<'a> Scanner<'a> {
             if matches!(first, "self" | "super" | "crate") {
                 return Err("unmodeled qualified standard-stream alias");
             }
-            let requested = if rest.is_empty() { namespace } else { PathNamespace::Type };
+            let requested = if rest.is_empty() {
+                namespace
+            } else {
+                PathNamespace::Type
+            };
             let declaration = (0..=frame).rev().find(|index| {
-                self.declarations[*index].get(first).is_some_and(|kind| kind.includes(requested))
+                self.declarations[*index]
+                    .get(first)
+                    .is_some_and(|kind| kind.includes(requested))
             });
             let alias = (0..=frame).rev().find(|index| {
                 self.aliases[*index].get(first).is_some_and(|target| {
-                    let canonical = self.stdio_absolute_imports[*index].get(first).unwrap_or(target);
-                    self.stdio_import_namespaces[*index].get(first).copied()
+                    let canonical = self.stdio_absolute_imports[*index]
+                        .get(first)
+                        .unwrap_or(target);
+                    self.stdio_import_namespaces[*index]
+                        .get(first)
+                        .copied()
                         .or_else(|| canonical_import_namespace(canonical))
                         .is_none_or(|kind| kind.includes(requested))
                 })
             });
-            if declaration.is_some_and(|declaration| alias.is_none_or(|alias| declaration >= alias)) {
+            if declaration.is_some_and(|declaration| alias.is_none_or(|alias| declaration >= alias))
+            {
                 return Ok(None);
             }
             let Some(index) = alias else {
@@ -2772,19 +2863,30 @@ impl<'a> Scanner<'a> {
             // Check an import's original path in its defining frame. Resolving
             // only its stored canonical target would launder a shadowed prefix;
             // rechecking it in the use frame would shadow a valid older import.
-            let target = self.named_imports[index].get(first)
-                .or_else(|| self.aliases[index].get(first)).unwrap();
+            let target = self.named_imports[index]
+                .get(first)
+                .or_else(|| self.aliases[index].get(first))
+                .unwrap();
             let target = if let Some(canonical) = self.stdio_absolute_imports[index].get(first) {
                 format!("::{canonical}")
-            } else { target.clone() };
-            current = if rest.is_empty() { target } else { format!("{target}::{rest}") };
+            } else {
+                target.clone()
+            };
+            current = if rest.is_empty() {
+                target
+            } else {
+                format!("{target}::{rest}")
+            };
             frame = index;
         }
         Err("standard-stream alias chain limit exceeded")
     }
 
     fn stdio_trait_path(&self, path: &syn::ExprPath) -> Option<String> {
-        let target = self.stdio_resolve_path(&path.path, PathNamespace::Type).ok().flatten()?;
+        let target = self
+            .stdio_resolve_path(&path.path, PathNamespace::Type)
+            .ok()
+            .flatten()?;
         let (owner, method) = target.rsplit_once("::")?;
         if owner != "std::io::Write" {
             return None;
@@ -2798,28 +2900,58 @@ impl<'a> Scanner<'a> {
         call: &syn::ExprCall,
         target: &str,
     ) -> std::result::Result<Option<StdioOperation>, &'static str> {
-        let Some((owner, method)) = target.rsplit_once("::") else { return Ok(None); };
+        let Some((owner, method)) = target.rsplit_once("::") else {
+            return Ok(None);
+        };
         let concrete = stdio_handle(owner);
         let trait_owner = owner == "std::io::Write";
         if concrete.is_none() && !trait_owner && !stdio_write_method(method) && method != "by_ref" {
             return Ok(None);
         }
-        let path = match call.func.as_ref() { Expr::Path(path) => Some(path), _ => None };
+        let path = match call.func.as_ref() {
+            Expr::Path(path) => Some(path),
+            _ => None,
+        };
         // Only a write-shaped ambiguous path with a native argument needs this
         // contextual check. Generic memory Write imports remain ordinary DATA.
         let uncertain_path = path.is_some_and(|path| {
-            let Some(first) = path.path.segments.first() else { return false; };
+            let Some(first) = path.path.segments.first() else {
+                return false;
+            };
             let first = identifier_name(&first.ident);
             parent_import(&path_name(&path.path))
-                || self.alias_has_flag(&first, &self.parent_aliases, &mut BTreeSet::new(), MAX_ALIAS_ROUNDS)
-                || self.alias_has_flag(&first, &self.conditional_aliases, &mut BTreeSet::new(), MAX_ALIAS_ROUNDS)
-                || self.parent_globs.iter().skip(*self.declaration_floors.last().unwrap()).any(|value| *value)
+                || self.alias_has_flag(
+                    &first,
+                    &self.parent_aliases,
+                    &mut BTreeSet::new(),
+                    MAX_ALIAS_ROUNDS,
+                )
+                || self.alias_has_flag(
+                    &first,
+                    &self.conditional_aliases,
+                    &mut BTreeSet::new(),
+                    MAX_ALIAS_ROUNDS,
+                )
+                || self
+                    .parent_globs
+                    .iter()
+                    .skip(*self.declaration_floors.last().unwrap())
+                    .any(|value| *value)
                     && first != "std"
-                    && self.declaration_scope(&first, PathNamespace::Type).is_none()
-                    && !self.named_imports.iter().rev().any(|scope| scope.contains_key(&first))
+                    && self
+                        .declaration_scope(&first, PathNamespace::Type)
+                        .is_none()
+                    && !self
+                        .named_imports
+                        .iter()
+                        .rev()
+                        .any(|scope| scope.contains_key(&first))
                     && self.value_origin(&first).flatten().is_none()
         });
-        if concrete.is_none() && !trait_owner && !(uncertain_path && (stdio_write_method(method) || method == "by_ref")) {
+        if concrete.is_none()
+            && !trait_owner
+            && !(uncertain_path && (stdio_write_method(method) || method == "by_ref"))
+        {
             return Ok(None);
         }
         let argument = call.args.first().and_then(|argument| self.origin(argument));
@@ -2827,12 +2959,20 @@ impl<'a> Scanner<'a> {
         if concrete.is_none() && !trait_owner {
             return if argument_handle.is_some_and(stdio_output) {
                 Err("ambiguous native output callee")
-            } else { Ok(None) };
+            } else {
+                Ok(None)
+            };
         }
-        let explicit = path.and_then(|path| path.qself.as_ref()).and_then(|value| self.type_origin(&value.ty));
+        let explicit = path
+            .and_then(|path| path.qself.as_ref())
+            .and_then(|value| self.type_origin(&value.ty));
         let explicit_handle = explicit.as_deref().and_then(stdio_handle);
-        let selected = concrete.or(explicit_handle).or(argument_handle.filter(|value| stdio_output(value)));
-        let Some(selected) = selected else { return Ok(None); };
+        let selected = concrete
+            .or(explicit_handle)
+            .or(argument_handle.filter(|value| stdio_output(value)));
+        let Some(selected) = selected else {
+            return Ok(None);
+        };
         if let Some(argument) = argument_handle
             && argument != selected
         {
@@ -2842,11 +2982,18 @@ impl<'a> Scanner<'a> {
             if path.is_some_and(|path| path.qself.is_some()) && explicit_handle != Some(selected) {
                 return Err("contradictory explicit Self and native output receiver");
             }
-            let Some(path) = path else { return Err("unmodeled stored generic Write callee"); };
-            let Some(first) = path.path.segments.first() else { return Err("missing canonical Write path"); };
+            let Some(path) = path else {
+                return Err("unmodeled stored generic Write callee");
+            };
+            let Some(first) = path.path.segments.first() else {
+                return Err("missing canonical Write path");
+            };
             let first = identifier_name(&first.ident);
-            if path.path.segments.len() < 2 || uncertain_path
-                || self.declaration_scope(&first, PathNamespace::Type).is_some()
+            if path.path.segments.len() < 2
+                || uncertain_path
+                || self
+                    .declaration_scope(&first, PathNamespace::Type)
+                    .is_some()
             {
                 return Err("unresolved native output Write path");
             }
@@ -2860,8 +3007,15 @@ impl<'a> Scanner<'a> {
         if self.stdio_ambiguities.len() == MAX_PARENT_EFFECT_DIAGNOSTICS {
             return;
         }
-        let context = if self.context.is_empty() { "<module>".to_owned() } else { self.context.join("::") };
-        self.stdio_ambiguities.insert(format!("{context}: {}", target.chars().take(256).collect::<String>()));
+        let context = if self.context.is_empty() {
+            "<module>".to_owned()
+        } else {
+            self.context.join("::")
+        };
+        self.stdio_ambiguities.insert(format!(
+            "{context}: {}",
+            target.chars().take(256).collect::<String>()
+        ));
     }
 
     fn read_dir_call_candidate(&self, call: &syn::ExprCall) -> Option<(String, String)> {
@@ -3101,8 +3255,14 @@ impl<'a> Scanner<'a> {
                 return Some(name.to_owned());
             }
         }
-        let namespace = if name.contains("::") { PathNamespace::Type } else { PathNamespace::Value };
-        self.stdio_resolve_name(name, false, namespace).ok().flatten()
+        let namespace = if name.contains("::") {
+            PathNamespace::Type
+        } else {
+            PathNamespace::Value
+        };
+        self.stdio_resolve_name(name, false, namespace)
+            .ok()
+            .flatten()
     }
 
     fn expression_kind(&self, expression: &Expr) -> ValueKind {
@@ -3154,7 +3314,11 @@ impl<'a> Scanner<'a> {
             Expr::Call(call)
                 if self.origin(&call.func).is_some_and(|target| {
                     stdio_factory_result(&target).is_some()
-                        || self.stdio_call_operation(call, &target).ok().flatten().is_some_and(|operation| operation.result.is_some())
+                        || self
+                            .stdio_call_operation(call, &target)
+                            .ok()
+                            .flatten()
+                            .is_some_and(|operation| operation.result.is_some())
                         || matches!(target.as_str(), "rand::rng" | "rand::thread_rng")
                         || target == "std::path::absolute"
                         || target == "std::fs::read_dir"
@@ -4139,7 +4303,11 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
                 PathNamespace::Type
             },
         );
-        let namespace = if expression.path.segments.len() == 1 { PathNamespace::Value } else { PathNamespace::Type };
+        let namespace = if expression.path.segments.len() == 1 {
+            PathNamespace::Value
+        } else {
+            PathNamespace::Type
+        };
         let resolution = self.stdio_resolve_path(&expression.path, namespace);
         if let Err(reason) = &resolution {
             self.refuse_stdio_operation(reason);
@@ -4155,7 +4323,10 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
                 }
             });
         if let Some(target) = target {
-            if target.rsplit_once("::").is_some_and(|(owner, method)| stdio_operation(owner, method).is_err()) {
+            if target
+                .rsplit_once("::")
+                .is_some_and(|(owner, method)| stdio_operation(owner, method).is_err())
+            {
                 self.refuse_stdio_operation("unmodeled known output method reference");
             } else if let Some(kind) = hazard(&target) {
                 self.record(kind, &target, expression);
@@ -4189,17 +4360,21 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
         } else if let Some(target) = self.origin(&call.func) {
             match self.stdio_call_operation(call, &target) {
                 Ok(Some(operation)) => {
-                    if operation.effect { self.record("stdio", &operation.target(), call); }
+                    if operation.effect {
+                        self.record("stdio", &operation.target(), call);
+                    }
                     suppress_direct_reference = true;
                 }
                 Err(reason) => {
                     self.refuse_stdio_operation(reason);
                     suppress_direct_reference = true;
                 }
-                Ok(None) => if let Some(kind) = hazard(&target) {
-                    self.record(kind, &target, call);
-                    suppress_direct_reference = true;
-                },
+                Ok(None) => {
+                    if let Some(kind) = hazard(&target) {
+                        self.record(kind, &target, call);
+                        suppress_direct_reference = true;
+                    }
+                }
             }
         }
         for attribute in &call.attrs {
@@ -4252,7 +4427,11 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
             && (stdio_output(owner) || stdio_operation(owner, &method).ok().flatten().is_some())
         {
             match stdio_operation(owner, &method) {
-                Ok(Some(operation)) => if operation.effect { self.record("stdio", &operation.target(), call); },
+                Ok(Some(operation)) => {
+                    if operation.effect {
+                        self.record("stdio", &operation.target(), call);
+                    }
+                }
                 Err(reason) => self.refuse_stdio_operation(reason),
                 Ok(None) => {}
             }
@@ -4487,7 +4666,11 @@ impl Scanner<'_> {
                     index = expression_end;
                     continue;
                 }
-                let namespace = if name.contains("::") { PathNamespace::Type } else { PathNamespace::Value };
+                let namespace = if name.contains("::") {
+                    PathNamespace::Type
+                } else {
+                    PathNamespace::Value
+                };
                 if let Err(reason) = self.stdio_resolve_name(&name, false, namespace) {
                     self.refuse_stdio_operation(reason);
                 }
@@ -4748,7 +4931,9 @@ fn stdio_path_target(target: &str) -> bool {
         || target.starts_with("std::io::Write::")
         || stdio_factory_result(target).is_some()
         || stdio_handle(target).is_some()
-        || target.rsplit_once("::").is_some_and(|(owner, _)| stdio_handle(owner).is_some())
+        || target
+            .rsplit_once("::")
+            .is_some_and(|(owner, _)| stdio_handle(owner).is_some())
 }
 
 fn stdio_factory_result(target: &str) -> Option<&'static str> {
@@ -4773,15 +4958,26 @@ fn stdio_handle(target: &str) -> Option<&'static str> {
 }
 
 fn stdio_output(target: &str) -> bool {
-    matches!(target, "std::io::Stdout" | "std::io::StdoutLock" | "std::io::Stderr" | "std::io::StderrLock")
+    matches!(
+        target,
+        "std::io::Stdout" | "std::io::StdoutLock" | "std::io::Stderr" | "std::io::StderrLock"
+    )
 }
 
 fn stdio_write_method(method: &str) -> bool {
-    matches!(method, "write" | "write_all" | "write_vectored" | "write_fmt" | "flush")
+    matches!(
+        method,
+        "write" | "write_all" | "write_vectored" | "write_fmt" | "flush"
+    )
 }
 
-fn stdio_operation(owner: &str, method: &str) -> std::result::Result<Option<StdioOperation>, &'static str> {
-    let Some(owner) = stdio_handle(owner) else { return Ok(None); };
+fn stdio_operation(
+    owner: &str,
+    method: &str,
+) -> std::result::Result<Option<StdioOperation>, &'static str> {
+    let Some(owner) = stdio_handle(owner) else {
+        return Ok(None);
+    };
     let lock = match owner {
         "std::io::Stdin" => Some("std::io::StdinLock"),
         "std::io::Stdout" => Some("std::io::StdoutLock"),
@@ -4800,7 +4996,12 @@ fn stdio_operation(owner: &str, method: &str) -> std::result::Result<Option<Stdi
         // Input Read/BufRead and iterator behavior is outside this finite family.
         return Ok(None);
     };
-    Ok(Some(StdioOperation { owner, method: method.to_owned(), result, effect }))
+    Ok(Some(StdioOperation {
+        owner,
+        method: method.to_owned(),
+        result,
+        effect,
+    }))
 }
 
 fn path_receiver_type(target: &str) -> bool {
@@ -5254,7 +5455,10 @@ fn task_set_scheduling_method(method: &str) -> bool {
 fn hazard(target: &str) -> Option<&'static str> {
     if stdio_factory_result(target).is_some()
         || target.rsplit_once("::").is_some_and(|(owner, method)| {
-            stdio_operation(owner, method).ok().flatten().is_some_and(|operation| operation.effect)
+            stdio_operation(owner, method)
+                .ok()
+                .flatten()
+                .is_some_and(|operation| operation.effect)
         })
     {
         return Some("stdio");
@@ -5464,7 +5668,11 @@ fn hazard(target: &str) -> Option<&'static str> {
 }
 
 fn method_hazard(origin: &str, method: &str) -> Option<&'static str> {
-    if stdio_operation(origin, method).ok().flatten().is_some_and(|operation| operation.effect) {
+    if stdio_operation(origin, method)
+        .ok()
+        .flatten()
+        .is_some_and(|operation| operation.effect)
+    {
         return Some("stdio");
     }
     if origin == "tokio::task::JoinSet" && task_set_scheduling_method(method) {
@@ -5693,42 +5901,109 @@ mod tests {
     fn stdio_counts(findings: &[Finding]) -> BTreeMap<(String, String), usize> {
         let mut counts = BTreeMap::new();
         for finding in findings.iter().filter(|finding| finding.kind == "stdio") {
-            *counts.entry((finding.context.clone(), finding.target.clone())).or_insert(0) += finding.count;
+            *counts
+                .entry((finding.context.clone(), finding.target.clone()))
+                .or_insert(0) += finding.count;
         }
         counts
     }
 
     fn expected_stdio(rows: &[(&str, &str, usize)]) -> BTreeMap<(String, String), usize> {
-        rows.iter().map(|(context, target, count)| ((context.to_string(), target.to_string()), *count)).collect()
+        rows.iter()
+            .map(|(context, target, count)| ((context.to_string(), target.to_string()), *count))
+            .collect()
     }
 
     #[test]
     fn stdio_actual_private_sink_has_three_independent_sites_and_keeps_old_seven() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let actual = inventory(&root).unwrap();
-        let file: Vec<_> = actual.findings.into_iter().filter(|finding| finding.source == "crates/day2/src/oauth/effects.rs").collect();
-        assert_eq!(stdio_counts(&file), expected_stdio(&[
-            ("provider_observation", "std::io::stderr", 1),
-            ("provider_observation", "std::io::Stderr::lock", 1),
-            ("provider_observation", "std::io::StderrLock::write_all", 1),
-        ]));
-        let old: BTreeSet<_> = file.iter().filter(|finding| finding.kind != "stdio").map(|finding| (
-            finding.kind.as_str(), finding.target.as_str(), finding.context.as_str(), finding.fingerprint.as_str(), finding.count,
-        )).collect();
-        assert_eq!(old, BTreeSet::from([
-            ("clock", "std::time::Instant::now", "Instant::now", "fa1ef12febafd3fa761ee093ffa4527966891c79a5e7b59615674e7c25451390", 1),
-            ("clock", "std::time::SystemTime::now", "wall_time", "b409e7dc4ec088470e877435299336378d2fac13493a576ee3dec7d399335516", 1),
-            ("entropy", "getrandom::fill", "fill", "e8e76acc965cefd9193ab09829ca9a8feb39cce0606938d330df82341a85fe76", 1),
-            ("network", "reqwest::blocking::Client::builder", "Client::builder", "f04a41a17e59ad0c029c1e286f7c28ed52b982d5ebc45bc322f959d3269a57d7", 1),
-            ("network", "reqwest::blocking::Client::execute", "Request::send", "eb29510df0935693d43ec4298b5779557980e06bd3b60b58dcf8e05ee91332cc", 1),
-            ("scheduling", "tokio::task::spawn_blocking", "spawn_blocking", "9005f3c8ce848d034e54fb76637aef7817f61299b231a84daca54fbda3307d89", 1),
-            ("timer", "tokio::time::timeout", "timeout", "c450f8705d76d8de58d192447eeae36ba6838a0757d71139a80cca960a592f3f", 1),
-        ]));
+        let file: Vec<_> = actual
+            .findings
+            .into_iter()
+            .filter(|finding| finding.source == "crates/day2/src/oauth/effects.rs")
+            .collect();
+        assert_eq!(
+            stdio_counts(&file),
+            expected_stdio(&[
+                ("provider_observation", "std::io::stderr", 1),
+                ("provider_observation", "std::io::Stderr::lock", 1),
+                ("provider_observation", "std::io::StderrLock::write_all", 1),
+            ])
+        );
+        let old: BTreeSet<_> = file
+            .iter()
+            .filter(|finding| finding.kind != "stdio")
+            .map(|finding| {
+                (
+                    finding.kind.as_str(),
+                    finding.target.as_str(),
+                    finding.context.as_str(),
+                    finding.fingerprint.as_str(),
+                    finding.count,
+                )
+            })
+            .collect();
+        assert_eq!(
+            old,
+            BTreeSet::from([
+                (
+                    "clock",
+                    "std::time::Instant::now",
+                    "Instant::now",
+                    "fa1ef12febafd3fa761ee093ffa4527966891c79a5e7b59615674e7c25451390",
+                    1
+                ),
+                (
+                    "clock",
+                    "std::time::SystemTime::now",
+                    "wall_time",
+                    "b409e7dc4ec088470e877435299336378d2fac13493a576ee3dec7d399335516",
+                    1
+                ),
+                (
+                    "entropy",
+                    "getrandom::fill",
+                    "fill",
+                    "e8e76acc965cefd9193ab09829ca9a8feb39cce0606938d330df82341a85fe76",
+                    1
+                ),
+                (
+                    "network",
+                    "reqwest::blocking::Client::builder",
+                    "Client::builder",
+                    "f04a41a17e59ad0c029c1e286f7c28ed52b982d5ebc45bc322f959d3269a57d7",
+                    1
+                ),
+                (
+                    "network",
+                    "reqwest::blocking::Client::execute",
+                    "Request::send",
+                    "eb29510df0935693d43ec4298b5779557980e06bd3b60b58dcf8e05ee91332cc",
+                    1
+                ),
+                (
+                    "scheduling",
+                    "tokio::task::spawn_blocking",
+                    "spawn_blocking",
+                    "9005f3c8ce848d034e54fb76637aef7817f61299b231a84daca54fbda3307d89",
+                    1
+                ),
+                (
+                    "timer",
+                    "tokio::time::timeout",
+                    "timeout",
+                    "c450f8705d76d8de58d192447eeae36ba6838a0757d71139a80cca960a592f3f",
+                    1
+                ),
+            ])
+        );
     }
 
     #[test]
     fn stdio_factories_locks_and_canonical_aliases_keep_exact_targets() {
-        let actual = stdio_inventory(r#"
+        let actual = stdio_inventory(
+            r#"
             use std::io as native;
             use std::io::stderr as error_output;
             fn direct() { std::io::stdin().lock(); std::io::stdout().lock(); std::io::stderr().lock(); }
@@ -5739,21 +6014,30 @@ mod tests {
             }
             fn cast() { (std::io::stderr as fn() -> std::io::Stderr)(); }
             fn raw() { r#std::r#io::r#stderr(); }
-        "#);
-        assert_eq!(stdio_counts(&actual.findings), expected_stdio(&[
-            ("direct", "std::io::stdin", 1), ("direct", "std::io::Stdin::lock", 1),
-            ("direct", "std::io::stdout", 1), ("direct", "std::io::Stdout::lock", 1),
-            ("direct", "std::io::stderr", 1), ("direct", "std::io::Stderr::lock", 1),
-            ("aliases", "std::io::stdout", 1), ("aliases", "std::io::stderr", 1),
-            ("reference", "std::io::stderr", 2),
-            ("cast", "std::io::stderr", 1),
-            ("raw", "std::io::stderr", 1),
-        ]));
+        "#,
+        );
+        assert_eq!(
+            stdio_counts(&actual.findings),
+            expected_stdio(&[
+                ("direct", "std::io::stdin", 1),
+                ("direct", "std::io::Stdin::lock", 1),
+                ("direct", "std::io::stdout", 1),
+                ("direct", "std::io::Stdout::lock", 1),
+                ("direct", "std::io::stderr", 1),
+                ("direct", "std::io::Stderr::lock", 1),
+                ("aliases", "std::io::stdout", 1),
+                ("aliases", "std::io::stderr", 1),
+                ("reference", "std::io::stderr", 2),
+                ("cast", "std::io::stderr", 1),
+                ("raw", "std::io::stderr", 1),
+            ])
+        );
     }
 
     #[test]
     fn stdio_typed_outputs_borrows_moves_and_fields_retain_receiver() {
-        let actual = stdio_inventory(r#"
+        let actual = stdio_inventory(
+            r#"
             use std::io::{Write, Stderr as ErrorOutput, StderrLock as ErrorLock, Stdout, StdoutLock};
             fn f(mut error: ErrorOutput, mut output: Stdout, mut error_lock: ErrorLock<'_>, mut output_lock: StdoutLock<'_>) {
                 error.write_all(b"x"); output.flush(); error_lock.write(b"x"); output_lock.write_fmt(format_args!("x"));
@@ -5766,42 +6050,74 @@ mod tests {
             fn reassign(mut output: std::io::Stderr) {
                 let mut selected = std::io::stderr(); selected = output; selected.write_all(b"x");
             }
-        "#);
-        assert_eq!(stdio_counts(&actual.findings), expected_stdio(&[
-            ("f", "std::io::Stderr::write_all", 2), ("f", "std::io::Stdout::flush", 1),
-            ("f", "std::io::StderrLock::write", 1), ("f", "std::io::StdoutLock::write_fmt", 1),
-            ("f", "std::io::Stderr::flush", 1), ("reference", "std::io::Stderr::write_all", 1),
-            ("field", "std::io::Stderr::flush", 1),
-            ("reassign", "std::io::stderr", 1), ("reassign", "std::io::Stderr::write_all", 1),
-        ]));
+        "#,
+        );
+        assert_eq!(
+            stdio_counts(&actual.findings),
+            expected_stdio(&[
+                ("f", "std::io::Stderr::write_all", 2),
+                ("f", "std::io::Stdout::flush", 1),
+                ("f", "std::io::StderrLock::write", 1),
+                ("f", "std::io::StdoutLock::write_fmt", 1),
+                ("f", "std::io::Stderr::flush", 1),
+                ("reference", "std::io::Stderr::write_all", 1),
+                ("field", "std::io::Stderr::flush", 1),
+                ("reassign", "std::io::stderr", 1),
+                ("reassign", "std::io::Stderr::write_all", 1),
+            ])
+        );
     }
 
     #[test]
     fn stdio_five_writes_and_canonical_trait_ufcs_require_output_provenance() {
-        for receiver in ["std::io::Stdout", "std::io::StdoutLock<'_>", "std::io::Stderr", "std::io::StderrLock<'_>"] {
+        for receiver in [
+            "std::io::Stdout",
+            "std::io::StdoutLock<'_>",
+            "std::io::Stderr",
+            "std::io::StderrLock<'_>",
+        ] {
             let owner = receiver.split('<').next().unwrap();
-            for (method, args) in [("write", "b\"x\""), ("write_all", "b\"x\""), ("write_vectored", "&[]"), ("write_fmt", "format_args!(\"x\")"), ("flush", "")] {
-                let source = format!("use std::io::Write; fn f(mut output: {receiver}) {{ output.{method}({args}); }}");
+            for (method, args) in [
+                ("write", "b\"x\""),
+                ("write_all", "b\"x\""),
+                ("write_vectored", "&[]"),
+                ("write_fmt", "format_args!(\"x\")"),
+                ("flush", ""),
+            ] {
+                let source = format!(
+                    "use std::io::Write; fn f(mut output: {receiver}) {{ output.{method}({args}); }}"
+                );
                 let actual = stdio_inventory(&source);
-                assert_eq!(stdio_counts(&actual.findings), expected_stdio(&[("f", &format!("{owner}::{method}"), 1)]), "{source}");
+                assert_eq!(
+                    stdio_counts(&actual.findings),
+                    expected_stdio(&[("f", &format!("{owner}::{method}"), 1)]),
+                    "{source}"
+                );
             }
         }
-        let actual = stdio_inventory(r#"
+        let actual = stdio_inventory(
+            r#"
             use std::io::{Write as OutputWrite, StderrLock};
             fn f(mut output: StderrLock<'_>) {
                 OutputWrite::write_all(&mut output, b"x");
                 <StderrLock<'_> as std::io::Write>::flush(&mut output);
                 std::io::StderrLock::write_all(&mut output, b"x");
             }
-        "#);
-        assert_eq!(stdio_counts(&actual.findings), expected_stdio(&[
-            ("f", "std::io::StderrLock::write_all", 2), ("f", "std::io::StderrLock::flush", 1),
-        ]));
+        "#,
+        );
+        assert_eq!(
+            stdio_counts(&actual.findings),
+            expected_stdio(&[
+                ("f", "std::io::StderrLock::write_all", 2),
+                ("f", "std::io::StderrLock::flush", 1),
+            ])
+        );
     }
 
     #[test]
     fn stdio_memory_generic_write_result_and_format_data_are_not_native() {
-        let actual = stdio_inventory(r#"
+        let actual = stdio_inventory(
+            r#"
             use std::io::{Write, Cursor, Result};
             fn f(mut bytes: Vec<u8>, mut memory: Cursor<Vec<u8>>) {
                 bytes.write_all(b"x"); memory.flush();
@@ -5811,13 +6127,15 @@ mod tests {
                 format!("{}", bytes.len()); serde_json::to_vec(&bytes);
             }
             fn generic<W: Write>(mut output: W) { output.write_all(b"x"); Write::flush(&mut output); }
-        "#);
+        "#,
+        );
         assert!(actual.findings.is_empty(), "{:?}", actual.findings);
     }
 
     #[test]
     fn stdio_nearer_value_type_module_and_trait_names_do_not_mint_native_receivers() {
-        let actual = stdio_inventory(r#"
+        let actual = stdio_inventory(
+            r#"
             use std::io::stderr as factory;
             struct Buffer;
             impl Buffer { fn write_all(&mut self, _: &[u8]) {} }
@@ -5835,7 +6153,8 @@ mod tests {
             fn type_name(mut output: local::Stderr) { output.write_all(b"x"); }
             trait Write { fn write_all(_: &mut Buffer, _: &[u8]); }
             fn trait_name(mut output: Buffer) { Write::write_all(&mut output, b"x"); }
-        "#);
+        "#,
+        );
         assert!(actual.findings.is_empty(), "{:?}", actual.findings);
         for source in [
             r#"
@@ -5892,9 +6211,14 @@ mod tests {
             "#,
         ] {
             let actual = stdio_inventory(source);
-            assert!(actual.findings.is_empty(), "{source}: {:?}", actual.findings);
+            assert!(
+                actual.findings.is_empty(),
+                "{source}: {:?}",
+                actual.findings
+            );
         }
-        let actual = stdio_inventory(r#"
+        let actual = stdio_inventory(
+            r#"
             use std::io as native;
             use native::stderr as original;
             fn imported_before_shadow() {
@@ -5929,20 +6253,25 @@ mod tests {
                 Output::flush(&mut output);
                 let captured = make; captured();
             }
-        "#);
-        assert_eq!(stdio_counts(&actual.findings), expected_stdio(&[
-            ("imported_before_shadow", "std::io::stderr", 1),
-            ("outer::rebound", "std::io::stderr", 1),
-            ("outer::rebound", "std::io::Stderr::write_all", 1),
-            ("outer::rebound", "std::io::Stderr::flush", 1),
-            ("absolute", "std::io::stderr", 3),
-            ("absolute", "std::io::Stderr::write_all", 1),
-            ("absolute", "std::io::Stderr::flush", 1),
-            ("absolute_imports", "std::io::stderr", 4),
-            ("absolute_imports", "std::io::Stderr::write_all", 1),
-            ("absolute_imports", "std::io::Stderr::flush", 2),
-        ]));
-        let actual = stdio_inventory(r#"
+        "#,
+        );
+        assert_eq!(
+            stdio_counts(&actual.findings),
+            expected_stdio(&[
+                ("imported_before_shadow", "std::io::stderr", 1),
+                ("outer::rebound", "std::io::stderr", 1),
+                ("outer::rebound", "std::io::Stderr::write_all", 1),
+                ("outer::rebound", "std::io::Stderr::flush", 1),
+                ("absolute", "std::io::stderr", 3),
+                ("absolute", "std::io::Stderr::write_all", 1),
+                ("absolute", "std::io::Stderr::flush", 1),
+                ("absolute_imports", "std::io::stderr", 4),
+                ("absolute_imports", "std::io::Stderr::write_all", 1),
+                ("absolute_imports", "std::io::Stderr::flush", 2),
+            ])
+        );
+        let actual = stdio_inventory(
+            r#"
             use std::io as native;
             use std::io::{stderr as emit, Stderr as Output, Write as OutputWrite};
             mod fake {}
@@ -5985,22 +6314,27 @@ mod tests {
                 use ::std::{self as runtime};
                 runtime::io::stdout().flush();
             }
-        "#);
-        assert_eq!(stdio_counts(&actual.findings), expected_stdio(&[
-            ("captured", "std::io::stderr", 4),
-            ("captured", "std::io::Stderr::write_all", 1),
-            ("captured", "std::io::Stderr::flush", 2),
-            ("aliases_before_std", "std::io::stderr", 2),
-            ("aliases_after_std", "std::io::stderr", 2),
-            ("aliases_after_std", "std::io::Stderr::write_all", 1),
-            ("aliases_after_std", "std::io::Stderr::flush", 1),
-            ("absolute_root", "std::io::stderr", 4),
-            ("absolute_root", "std::io::Stderr::flush", 1),
-            ("absolute_root", "std::io::Stderr::write_all", 1),
-            ("absolute_root_group", "std::io::stdout", 1),
-            ("absolute_root_group", "std::io::Stdout::flush", 1),
-        ]));
-        let actual = stdio_inventory(r#"
+        "#,
+        );
+        assert_eq!(
+            stdio_counts(&actual.findings),
+            expected_stdio(&[
+                ("captured", "std::io::stderr", 4),
+                ("captured", "std::io::Stderr::write_all", 1),
+                ("captured", "std::io::Stderr::flush", 2),
+                ("aliases_before_std", "std::io::stderr", 2),
+                ("aliases_after_std", "std::io::stderr", 2),
+                ("aliases_after_std", "std::io::Stderr::write_all", 1),
+                ("aliases_after_std", "std::io::Stderr::flush", 1),
+                ("absolute_root", "std::io::stderr", 4),
+                ("absolute_root", "std::io::Stderr::flush", 1),
+                ("absolute_root", "std::io::Stderr::write_all", 1),
+                ("absolute_root_group", "std::io::stdout", 1),
+                ("absolute_root_group", "std::io::Stdout::flush", 1),
+            ])
+        );
+        let actual = stdio_inventory(
+            r#"
             use ::std::io::Write;
             fn value_std() {
                 use ::std::io::stderr as std;
@@ -6027,17 +6361,21 @@ mod tests {
                     std::io::stderr().flush();
                 }
             }
-        "#);
-        assert_eq!(stdio_counts(&actual.findings), expected_stdio(&[
-            ("value_std", "std::io::stderr", 1),
-            ("value_std", "std::io::Stderr::write_all", 1),
-            ("absolute_root_over_value_std", "std::io::stderr", 1),
-            ("absolute_root_over_value_std", "std::io::Stderr::flush", 1),
-            ("nested_value_std", "std::io::stderr", 1),
-            ("nested_value_std", "std::io::Stderr::flush", 1),
-            ("forward_nested_value_std", "std::io::stderr", 1),
-            ("forward_nested_value_std", "std::io::Stderr::flush", 1),
-        ]));
+        "#,
+        );
+        assert_eq!(
+            stdio_counts(&actual.findings),
+            expected_stdio(&[
+                ("value_std", "std::io::stderr", 1),
+                ("value_std", "std::io::Stderr::write_all", 1),
+                ("absolute_root_over_value_std", "std::io::stderr", 1),
+                ("absolute_root_over_value_std", "std::io::Stderr::flush", 1),
+                ("nested_value_std", "std::io::stderr", 1),
+                ("nested_value_std", "std::io::Stderr::flush", 1),
+                ("forward_nested_value_std", "std::io::stderr", 1),
+                ("forward_nested_value_std", "std::io::Stderr::flush", 1),
+            ])
+        );
         // The existing shared namespace guard conservatively refuses opposite
         // named imports with an older ambient binding. Keep that refusal rather
         // than expanding unrelated resolution to accept these cross-namespace
@@ -6062,7 +6400,10 @@ mod tests {
         ] {
             let directory = fixture(source);
             let error = inventory(directory.path()).unwrap_err().to_string();
-            assert!(error.contains("ambiguous imported namespace precedence"), "{source}: {error}");
+            assert!(
+                error.contains("ambiguous imported namespace precedence"),
+                "{source}: {error}"
+            );
         }
     }
 
@@ -6079,17 +6420,29 @@ mod tests {
         ] {
             let directory = fixture(source);
             let error = inventory(directory.path()).unwrap_err().to_string();
-            assert!(error.contains("unresolved") || error.contains("conditional") || error.contains("standard-output"), "{source}: {error}");
+            assert!(
+                error.contains("unresolved")
+                    || error.contains("conditional")
+                    || error.contains("standard-output"),
+                "{source}: {error}"
+            );
         }
-        let actual = stdio_inventory("use super::*; use std::io::stderr as r#error; fn f() { r#error().flush(); }");
-        assert_eq!(stdio_counts(&actual.findings), expected_stdio(&[
-            ("f", "std::io::stderr", 1), ("f", "std::io::Stderr::flush", 1),
-        ]));
+        let actual = stdio_inventory(
+            "use super::*; use std::io::stderr as r#error; fn f() { r#error().flush(); }",
+        );
+        assert_eq!(
+            stdio_counts(&actual.findings),
+            expected_stdio(&[
+                ("f", "std::io::stderr", 1),
+                ("f", "std::io::Stderr::flush", 1),
+            ])
+        );
     }
 
     #[test]
     fn stdio_completed_write_results_are_data_but_borrows_are_handles() {
-        let actual = stdio_inventory(r#"
+        let actual = stdio_inventory(
+            r#"
             use std::io::Write;
             trait Pure { fn flush(&mut self) {} fn write_all(&mut self, _: &[u8]) {} }
             impl Pure for bool {} impl Pure for usize {}
@@ -6098,11 +6451,16 @@ mod tests {
                 let mut size = output.write(b"x").unwrap(); size.write_all(b"x");
                 let borrow = output.by_ref(); borrow.write_all(b"x");
             }
-        "#);
-        assert_eq!(stdio_counts(&actual.findings), expected_stdio(&[
-            ("f", "std::io::Stderr::flush", 1), ("f", "std::io::Stderr::write", 1),
-            ("f", "std::io::Stderr::write_all", 1),
-        ]));
+        "#,
+        );
+        assert_eq!(
+            stdio_counts(&actual.findings),
+            expected_stdio(&[
+                ("f", "std::io::Stderr::flush", 1),
+                ("f", "std::io::Stderr::write", 1),
+                ("f", "std::io::Stderr::write_all", 1),
+            ])
+        );
     }
 
     #[test]
@@ -6117,7 +6475,10 @@ mod tests {
         ] {
             let directory = fixture(source);
             let error = inventory(directory.path()).unwrap_err().to_string();
-            assert!(error.contains("unsupported standard-output"), "{source}: {error}");
+            assert!(
+                error.contains("unsupported standard-output"),
+                "{source}: {error}"
+            );
         }
     }
 
@@ -6130,40 +6491,79 @@ mod tests {
         let expressions = [
             ("std::io::stderr", "std::io::stderr()"),
             ("std::io::Stderr::lock", "std::io::stderr().lock()"),
-            ("std::io::StderrLock::write_all", "std::io::stderr().lock().write_all(b\"x\")"),
+            (
+                "std::io::StderrLock::write_all",
+                "std::io::stderr().lock().write_all(b\"x\")",
+            ),
         ];
-        let mut rules = Rules { version: VERSION, sources: vec!["crates/fixture/src/lib.rs".to_owned()], allowances: Vec::new() };
+        let mut rules = Rules {
+            version: VERSION,
+            sources: vec!["crates/fixture/src/lib.rs".to_owned()],
+            allowances: Vec::new(),
+        };
         let error = validate(&rules, &actual).unwrap_err().to_string();
         assert!(error.contains("unreviewed stdio"), "{error}");
-        rules.allowances = expressions.into_iter().map(|(target, expression)| {
-            let syntax: Expr = syn::parse_str(expression).unwrap();
-            Allowance {
-                source: "crates/fixture/src/lib.rs".to_owned(), kind: "stdio".to_owned(),
-                target: target.to_owned(), context: "f".to_owned(),
-                fingerprint: day2::digest(format!("stdio\n{target}\nf\n{}", syntax.to_token_stream()).as_bytes()).trim_start_matches("sha256:").to_owned(),
-                count: 1, reason: "Exact synthetic standard-output source obligation.".to_owned(),
-            }
-        }).collect();
+        rules.allowances = expressions
+            .into_iter()
+            .map(|(target, expression)| {
+                let syntax: Expr = syn::parse_str(expression).unwrap();
+                Allowance {
+                    source: "crates/fixture/src/lib.rs".to_owned(),
+                    kind: "stdio".to_owned(),
+                    target: target.to_owned(),
+                    context: "f".to_owned(),
+                    fingerprint: day2::digest(
+                        format!("stdio\n{target}\nf\n{}", syntax.to_token_stream()).as_bytes(),
+                    )
+                    .trim_start_matches("sha256:")
+                    .to_owned(),
+                    count: 1,
+                    reason: "Exact synthetic standard-output source obligation.".to_owned(),
+                }
+            })
+            .collect();
         validate(&rules, &actual).unwrap();
-        let duplicate = stdio_inventory(r#"fn f() { let _ = std::io::stderr().lock().write_all(b"x"); let _ = std::io::stderr().lock().write_all(b"x"); }"#);
+        let duplicate = stdio_inventory(
+            r#"fn f() { let _ = std::io::stderr().lock().write_all(b"x"); let _ = std::io::stderr().lock().write_all(b"x"); }"#,
+        );
         assert!(validate(&rules, &duplicate).is_err());
-        let added = stdio_inventory(r#"fn f() { let _ = std::io::stderr().lock().write_all(b"x"); let _ = std::io::stderr().flush(); }"#);
+        let added = stdio_inventory(
+            r#"fn f() { let _ = std::io::stderr().lock().write_all(b"x"); let _ = std::io::stderr().flush(); }"#,
+        );
         assert!(validate(&rules, &added).is_err());
-        let mixed = stdio_inventory(r#"
+        let mixed = stdio_inventory(
+            r#"
             fn f(mut tasks: tokio::task::JoinSet<()>) {
                 std::time::Instant::now(); std::fs::read("x"); std::process::id();
                 reqwest::blocking::Client::new(); std::io::stderr().flush();
                 let mut entries = std::fs::read_dir(".").unwrap(); entries.next();
                 tasks.spawn(async {});
             }
-        "#);
-        let old: BTreeMap<_, _> = mixed.findings.iter().filter(|finding| finding.kind != "stdio").map(|finding| ((finding.kind.as_str(), finding.target.as_str()), finding.count)).collect();
-        assert_eq!(old, BTreeMap::from([
-            (("clock", "std::time::Instant::now"), 1), (("filesystem", "std::fs::read"), 1),
-            (("process", "std::process::id"), 1), (("network", "reqwest::blocking::Client::new"), 1),
-            (("filesystem", "std::fs::read_dir"), 1), (("filesystem", "std::fs::ReadDir::next"), 1),
-            (("scheduling", "tokio::task::JoinSet::spawn"), 1),
-        ]));
+        "#,
+        );
+        let old: BTreeMap<_, _> = mixed
+            .findings
+            .iter()
+            .filter(|finding| finding.kind != "stdio")
+            .map(|finding| {
+                (
+                    (finding.kind.as_str(), finding.target.as_str()),
+                    finding.count,
+                )
+            })
+            .collect();
+        assert_eq!(
+            old,
+            BTreeMap::from([
+                (("clock", "std::time::Instant::now"), 1),
+                (("filesystem", "std::fs::read"), 1),
+                (("process", "std::process::id"), 1),
+                (("network", "reqwest::blocking::Client::new"), 1),
+                (("filesystem", "std::fs::read_dir"), 1),
+                (("filesystem", "std::fs::ReadDir::next"), 1),
+                (("scheduling", "tokio::task::JoinSet::spawn"), 1),
+            ])
+        );
     }
 
     fn scan(source: &str) -> Vec<Finding> {
