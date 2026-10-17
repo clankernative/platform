@@ -539,6 +539,18 @@ impl SecurityShell {
         }))
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_management_fixture(mut self: Arc<Self>) -> Result<Arc<Self>> {
+        // Reuse this shell's exact existing contexts; this attaches no proof,
+        // caller, key, session or alternate authenticator.
+        let management = Arc::new(super::management::shell::Shell::new(
+            self.origin.clone(), self.approvals.clone(), self.signer.clone(),
+            self.authenticator.clone(),
+        ));
+        Arc::get_mut(&mut self).context("security shell already shared")?.management = Some(management);
+        Ok(self)
+    }
+
     /// Attach the same installation's selected local credential adapter before
     /// serving. OAuth retains its separately configured private transport; both
     /// flows share this isolated edge and fresh OIDC verifier.
@@ -675,7 +687,18 @@ impl SecurityShell {
                 admission.load(Ordering::Acquire),
                 "security shell is draining"
             );
-            self.dispatch(&method, &path, query.as_deref(), &headers, &body, at)
+            match self.dispatch(&method, &path, query.as_deref(), &headers, &body, at) {
+                Ok(response) => Ok(response),
+                Err(error) => match shell_oidc::take_provider_observation(error) {
+                    Ok(data) => {
+                        // Keep the SAME native permit through complete, failed,
+                        // or unknown diagnostic delivery, including disconnect.
+                        let _ = effects::provider_observation(data);
+                        Err(anyhow::anyhow!(shell_oidc::PRODUCER_UNAVAILABLE))
+                    }
+                    Err(error) => Err(error),
+                },
+            }
         })
         .await;
         protected(match response {
@@ -3865,6 +3888,10 @@ mod tests {
         }
 
         impl effects::Hooks for Clock {
+            fn provider_observation(&self, _: crate::oauth::shell_oidc::ProviderObservationData) -> Result<()> {
+                anyhow::bail!("unscripted provider observation")
+            }
+
             fn domain(&self) -> u64 {
                 effects::Hooks::domain(self.oauth.as_ref())
             }

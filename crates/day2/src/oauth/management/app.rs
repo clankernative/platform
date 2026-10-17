@@ -944,6 +944,10 @@ mod tests {
     }
 
     impl effects::Hooks for Port {
+        fn provider_observation(&self, _: crate::oauth::shell_oidc::ProviderObservationData) -> Result<()> {
+            anyhow::bail!("unscripted provider observation")
+        }
+
         fn domain(&self) -> u64 {
             97831
         }

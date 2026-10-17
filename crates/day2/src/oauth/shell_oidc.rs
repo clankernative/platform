@@ -5,7 +5,7 @@
 
 use super::{
     approval_keys::{GcpSecretReader, GcpSecretVersion},
-    fresh_auth::FreshIntent,
+    fresh_auth::{FreshIntent, FreshPurpose},
     fresh_owner::{AllocationData, CallData, GoogleBundleData, OutcomeData},
     google_begin::{Begins, Original, Payload},
     security_shell::{FreshAuthenticator, ReauthStart},
@@ -18,7 +18,7 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use day2_capabilities::Digest;
 use ring::digest::{SHA256, digest};
 use ring::signature::{RSA_PKCS1_2048_8192_SHA256, RsaPublicKeyComponents};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use std::collections::HashMap;
 use std::{
@@ -323,7 +323,72 @@ struct GoogleOrder {
     original: Digest,
     owner: Digest,
     publication: Digest,
+    observation_correlation: Digest,
 }
+
+pub(super) const PRODUCER_UNAVAILABLE: &str = "OAuth post-pending authentication producer unavailable";
+
+/// Private diagnostic DATA, never an authentication or authorization witness.
+/// Only the normal signed owned callback can supply the private ordering input.
+#[derive(Serialize)]
+pub(crate) struct ProviderObservationData {
+    version: u8,
+    kind: &'static str,
+    outcome: &'static str,
+    baseline_iat: i64,
+    fresh_auth_time: i64,
+    profile: Digest,
+    correlation: Digest,
+}
+
+struct ProviderObservationUnavailable(ProviderObservationData);
+
+impl std::fmt::Debug for ProviderObservationUnavailable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(PRODUCER_UNAVAILABLE)
+    }
+}
+
+impl std::fmt::Display for ProviderObservationUnavailable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(PRODUCER_UNAVAILABLE)
+    }
+}
+
+impl std::error::Error for ProviderObservationUnavailable {}
+
+fn observation_profile(profile: &Digest) -> Result<Digest> {
+    Digest::of(&("google-provider-profile-observation-v1", profile))
+}
+
+fn manual_observation_correlation(profile_observation: &Digest, handle: &str) -> Result<Digest> {
+    Digest::of(&("google-provider-manual-observation-v1", profile_observation, handle))
+}
+
+/// The blocking request owner consumes this error exactly once. Other error
+/// types and their contexts pass through without any diagnostic effect.
+pub(super) fn take_provider_observation(
+    error: anyhow::Error,
+) -> std::result::Result<ProviderObservationData, anyhow::Error> {
+    error.downcast::<ProviderObservationUnavailable>().map(|value| value.0)
+}
+
+const _: () = {
+    macro_rules! assert_not_impl {
+        ($type:ty, $trait:path) => {{
+            trait AmbiguousIfImpl<A> { fn check() {} }
+            impl<T: ?Sized> AmbiguousIfImpl<()> for T {}
+            impl<T: ?Sized + $trait> AmbiguousIfImpl<u8> for T {}
+            let _ = <$type as AmbiguousIfImpl<_>>::check;
+        }};
+    }
+    assert_not_impl!(ProviderObservationData, Clone);
+    assert_not_impl!(ProviderObservationData, Copy);
+    assert_not_impl!(ProviderObservationData, Default);
+    assert_not_impl!(ProviderObservationData, std::fmt::Debug);
+    assert_not_impl!(ProviderObservationData, serde::Deserialize<'static>);
+    assert_not_impl!(ProviderObservationUnavailable, Clone);
+};
 
 impl GoogleBundle {
     pub(super) fn baseline_state(&self) -> &Digest {
@@ -423,10 +488,22 @@ impl Reauthenticated {
                 "Google original ordering context changed"
             );
         }
+        if matches!(self.intent.purpose(), FreshPurpose::OAuthConnect | FreshPurpose::OAuthDisconnect)
+            && let Some(order) = &self.ordering {
+                return Err(ProviderObservationUnavailable(ProviderObservationData {
+                    version: 1,
+                    kind: "google_provider_prerequisite",
+                    outcome: "signed_auth_time_and_ordering_verified_native_producer_unavailable",
+                    baseline_iat: order.baseline.claims.iat,
+                    fresh_auth_time: order.fresh.claims.auth_time,
+                    profile: observation_profile(&order.fresh.profile)?,
+                    correlation: order.observation_correlation.clone(),
+                }).into());
+        }
         // An owned issuer-order observation is necessary but not a factory for
         // genuine original lifetime/current role/epoch or final app settlement.
         // No production success branch is installed before those are supplied.
-        anyhow::bail!("OAuth post-pending authentication producer unavailable")
+        anyhow::bail!(PRODUCER_UNAVAILABLE)
     }
 
     pub(in crate::oauth) fn deadline(&self) -> Result<i64> {
@@ -1165,12 +1242,16 @@ impl GoogleOidc {
                 );
                 let authenticated_at = fresh.claims.auth_time;
                 let provider_expires_at = fresh.claims.exp.min(pending.baseline.claims.exp);
+                let observation_correlation = manual_observation_correlation(
+                    &observation_profile(&fresh.profile)?, &pending.manual.handle,
+                )?;
                 let ordering = GoogleOrder {
                     baseline: pending.baseline,
                     fresh,
                     original: flight.original.intent.commitment()?,
                     owner: flight.original.owner.clone(),
                     publication: Digest::new(pending.publication.as_bytes()),
+                    observation_correlation,
                 };
                 let observed = Reauthenticated {
                     intent: flight.original.intent.clone(),
@@ -2247,6 +2328,63 @@ mod tests {
     use super::*;
 
     #[test]
+    fn parser_approval_and_isolated_fixture_cannot_supply_provider_observation_data() -> Result<()> {
+        let clock = crate::oauth::simulation::World::new(315);
+        clock.advance(95);
+        effects::scope(clock.clone(), || -> Result<()> {
+            let identity = identity();
+            let intent = FreshIntent::fixture_oauth(&identity, "no-observation-parser", &Digest::new(b"parser only"), "https://security.example.com/", 0, 400)?;
+            assert!(intent.purpose() == FreshPurpose::OAuthApproval);
+            let (authenticator, _, callback) = fixture_login(&identity, intent.clone(), 100, 101, 101)?;
+            clock.advance(1);
+            let parsed = authenticator.complete_parser(&callback, &identity, 101)?;
+            assert!(parsed.ordering.is_none());
+            let error = parsed.require_post_pending_authentication().err().context("parser authorized")?;
+            assert!(take_provider_observation(error).is_err());
+            let isolated = Reauthenticated::fixture(intent, identity.email, identity.subject, 101);
+            assert!(isolated.ordering.is_none());
+            isolated.require_post_pending_authentication()?;
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn provider_observation_frame_matches_independent_browser_vectors_and_error_is_opaque() -> Result<()> {
+        // Fixed independently computed ASCII compact-JSON vectors from the
+        // operator capture calibration, not a Google or native witness.
+        let profile = Digest::try_from(format!("sha256:{}", "1".repeat(64)))?;
+        let handle = "A".repeat(43);
+        let correlation = manual_observation_correlation(&profile, &handle)?;
+        assert_eq!(correlation.as_str(), "sha256:5abfd5d0eb3d5e6488e1a1c6fe748e849b9d8425e130a66500541917d06dc552");
+        let other = Digest::try_from(format!("sha256:{}", "0".repeat(64)))?;
+        assert_eq!(manual_observation_correlation(&other, &format!("{}8", "_".repeat(42)))?.as_str(), "sha256:b815019280129fbe4bf021261bfaf6efbfef1f24355fde52f57e6e75d5846e9a");
+        assert_ne!(manual_observation_correlation(&other, &handle)?, correlation);
+        assert_ne!(manual_observation_correlation(&profile, &format!("{}E", "A".repeat(42)))?, correlation);
+        let data = ProviderObservationData {
+            version: 1, kind: "google_provider_prerequisite",
+            outcome: "signed_auth_time_and_ordering_verified_native_producer_unavailable",
+            baseline_iat: 101, fresh_auth_time: 102, profile, correlation,
+        };
+        let error = ProviderObservationUnavailable(data);
+        assert_eq!(format!("{error}"), PRODUCER_UNAVAILABLE);
+        assert_eq!(format!("{error:?}"), PRODUCER_UNAVAILABLE);
+        let data = take_provider_observation(error.into()).map_err(|_| anyhow::anyhow!("typed refusal lost"))?;
+        let value = serde_json::to_value(&data)?;
+        assert_eq!(value.as_object().unwrap().len(), 7);
+        assert_eq!(value["baseline_iat"], 101);
+        assert_eq!(value["fresh_auth_time"], 102);
+        assert!(!serde_json::to_string(&data)?.contains(&handle));
+        let ordinary = anyhow::anyhow!("ordinary refusal").context("unchanged context");
+        let ordinary = take_provider_observation(ordinary).err().context("ordinary error consumed")?;
+        assert_eq!(format!("{ordinary:#}"), "unchanged context: ordinary refusal");
+        // A scoped but unscripted observer cannot silently use ambient stderr.
+        effects::scope(crate::oauth::simulation::World::new(314), || {
+            assert_eq!(effects::provider_observation(data).unwrap_err().to_string(), "unscripted provider observation");
+        });
+        Ok(())
+    }
+
+    #[test]
     fn signed_original_google_intent_reuse_completion_and_lifetime_are_owned() -> Result<()> {
         struct FixedClock {
             domain: u64,
@@ -2254,6 +2392,10 @@ mod tests {
             ticks: Duration,
         }
         impl effects::Hooks for FixedClock {
+            fn provider_observation(&self, _: crate::oauth::shell_oidc::ProviderObservationData) -> Result<()> {
+                anyhow::bail!("unscripted provider observation")
+            }
+
             fn domain(&self) -> u64 {
                 self.domain
             }
