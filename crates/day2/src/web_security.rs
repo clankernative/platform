@@ -307,7 +307,7 @@ pub(crate) fn list_fields(
         );
         let values = fields.entry(key).or_default();
         ensure!(
-            values.len() < 64,
+            values.len() < crate::input_shape::MAX_LIST_ITEMS,
             crate::error::Failure::DuplicateOrExcessFields
         );
         values.push(value.into_owned());
@@ -423,6 +423,30 @@ pub(crate) fn field_value(kind: &crate::schema::Kind, raw: &str) -> Result<Value
 #[cfg(test)]
 mod session_tests {
     use super::*;
+
+    #[test]
+    fn repeated_form_values_match_the_typed_collection_budget() -> Result<()> {
+        let repeatable = std::collections::BTreeSet::from(["tags".into()]);
+        let body = |count: usize| {
+            (0..count)
+                .map(|index| format!("tags=choice-{index}"))
+                .collect::<Vec<_>>()
+                .join("&")
+        };
+        let accepted = body(crate::input_shape::MAX_LIST_ITEMS);
+        let fields = list_fields(accepted.as_bytes(), &repeatable)?;
+        assert_eq!(fields["tags"].len(), crate::input_shape::MAX_LIST_ITEMS);
+        assert!(
+            list_fields(
+                body(crate::input_shape::MAX_LIST_ITEMS + 1).as_bytes(),
+                &repeatable
+            )
+            .is_err()
+        );
+        assert!(list_fields(b"name=one&name=two", &repeatable).is_err());
+        assert!(list_fields(b"_csrf=one&_csrf=two", &repeatable).is_err());
+        Ok(())
+    }
 
     #[test]
     fn tickets_match_hmac_sha256_known_answers_and_reject_invalid_tags() -> Result<()> {
