@@ -3404,9 +3404,11 @@ mod tests {
         fn assert_fresh_owner_unit(runtime: &crate::store::Runtime) -> Result<()> {
             let db = crate::store::open(runtime.db())?;
             assert_eq!(
-                db.query_row("SELECT version FROM native_fresh_schema_version", [], |row| {
-                    row.get::<_, i64>(0)
-                })?,
+                db.query_row(
+                    "SELECT version FROM native_fresh_schema_version",
+                    [],
+                    |row| { row.get::<_, i64>(0) }
+                )?,
                 1
             );
             for guard in [
