@@ -21,6 +21,8 @@
 //! are DATA, while lock/by_ref retain their known handle. Unsupported explicit
 //! output methods refuse. Input Read/BufRead iteration, printing macros,
 //! hidden containers and arbitrary generic/return flow are not modeled here.
+//! Standard-I/O-exposing globs require explicit named imports; their finite
+//! refusal is checked only after the enclosing import frame is complete.
 
 use anyhow::{Context, Result, bail, ensure};
 use quote::ToTokens;
@@ -1538,6 +1540,12 @@ struct Scanner<'a> {
     // shared import namespace/resolver remains unchanged for other families.
     stdio_absolute_imports: Vec<BTreeMap<String, String>>,
     stdio_import_namespaces: Vec<BTreeMap<String, DeclarationNamespace>>,
+    // Only crate-root extern declarations establish absolute std aliases.
+    // Ordinary local use aliases cannot change an extern-prelude origin.
+    stdio_extern_std_roots: BTreeSet<String>,
+    // Possible exposure above is not proof when an actual extern declaration
+    // gives the same root a conflicting or conditional crate origin.
+    stdio_canonical_extern_std_roots: BTreeSet<String>,
     named_imports: Vec<BTreeMap<String, String>>,
     parent_aliases: Vec<BTreeSet<String>>,
     conditional_aliases: Vec<BTreeSet<String>>,
@@ -1584,6 +1592,8 @@ impl<'a> Scanner<'a> {
             aliases: vec![BTreeMap::new()],
             stdio_absolute_imports: vec![BTreeMap::new()],
             stdio_import_namespaces: vec![BTreeMap::new()],
+            stdio_extern_std_roots: BTreeSet::from(["std".to_owned()]),
+            stdio_canonical_extern_std_roots: BTreeSet::from(["std".to_owned()]),
             named_imports: vec![BTreeMap::new()],
             parent_aliases: vec![BTreeSet::new()],
             conditional_aliases: vec![BTreeSet::new()],
@@ -2677,6 +2687,18 @@ impl<'a> Scanner<'a> {
         }
     }
 
+    fn remember_stdio_extern(&mut self, item: &syn::ItemExternCrate) {
+        if identifier_name(&item.ident) == "std"
+            && let Some((_, alias)) = &item.rename
+        {
+            let alias = identifier_name(alias);
+            self.remember_stdio_import(&alias, "std", true);
+            if !unconditional_scope(&item.attrs) {
+                self.conditional_aliases.last_mut().unwrap().insert(alias);
+            }
+        }
+    }
+
     fn refresh_stdio_import_namespaces(&mut self) {
         let frame = self.aliases.len() - 1;
         let imports = self.named_imports[frame].clone();
@@ -2750,7 +2772,9 @@ impl<'a> Scanner<'a> {
                 PathNamespace::Type
             };
             let Some((index, stored)) = (0..=frame).rev().find_map(|index| {
-                let target = self.aliases[index].get(first)?;
+                let target = self.aliases[index]
+                    .get(first)
+                    .or_else(|| self.stdio_absolute_imports[index].get(first))?;
                 let canonical = self.stdio_absolute_imports[index]
                     .get(first)
                     .unwrap_or(target);
@@ -2771,6 +2795,12 @@ impl<'a> Scanner<'a> {
             } else {
                 format!("{target}::{rest}")
             };
+            // A retained raw extern-root import supplies its actual origin,
+            // including a known NONstdio path. Stop before a same-spelling
+            // local alias can manufacture a different output-family probe.
+            if self.stdio_absolute_imports[index].contains_key(first) {
+                return Some(candidate);
+            }
             if stdio_path_target(&candidate) {
                 return Some(candidate);
             }
@@ -2794,12 +2824,38 @@ impl<'a> Scanner<'a> {
         absolute: bool,
         namespace: PathNamespace,
     ) -> std::result::Result<Option<String>, &'static str> {
+        self.stdio_resolve_name_for_output(name, absolute, namespace, false)
+    }
+
+    fn stdio_resolve_name_for_output(
+        &self,
+        name: &str,
+        absolute: bool,
+        namespace: PathNamespace,
+        native_output: bool,
+    ) -> std::result::Result<Option<String>, &'static str> {
         let captured = self.stdio_candidate(name, absolute, namespace);
-        let resolved = self.resolve_name(name);
+        let (root, rest) = name.split_once("::").unwrap_or((name, ""));
+        // A proven raw extern-std path cannot borrow a local alias's identity.
+        // This preserves real clock/filesystem/etc targets, not blanket DATA.
+        // Native output still runs the strict raw-path checks below; ambiguous
+        // or unknown roots keep the existing conservative resolver path.
+        let resolved = if absolute && self.stdio_canonical_extern_std_roots.contains(root) {
+            if rest.is_empty() { "std".to_owned() } else { format!("std::{rest}") }
+        } else {
+            self.resolve_name(name)
+        };
         let family = captured.or_else(|| stdio_path_target(&resolved).then(|| resolved.clone()));
         if family.is_none() {
             return Ok(Some(resolved));
         }
+        // A trait name alone can operate solely on memory. Namespace derivation
+        // likewise carries no native use. Keep the raw conditional dependency
+        // until an actual factory/handle or supported native output is used.
+        let memory_write = family.as_deref().is_some_and(|target| {
+            target == "std::io::Write" || target.starts_with("std::io::Write::")
+        });
+        let native_family = family.as_deref().is_some_and(stdio_path_target);
         // Only this finite family checks namespace precedence here. Keep every
         // other effect family's existing resolver and facts unchanged.
         if absolute {
@@ -2817,7 +2873,7 @@ impl<'a> Scanner<'a> {
                 return Err("cyclic standard-stream alias");
             }
             if let Some(canonical) = current.strip_prefix("::") {
-                return if canonical.starts_with("std::io::") && stdio_path_target(canonical) {
+                return if canonical == "std" || canonical.starts_with("std::") {
                     Ok(Some(canonical.to_owned()))
                 } else {
                     Err("unresolved absolute standard-stream import")
@@ -2838,7 +2894,9 @@ impl<'a> Scanner<'a> {
                     .is_some_and(|kind| kind.includes(requested))
             });
             let alias = (0..=frame).rev().find(|index| {
-                self.aliases[*index].get(first).is_some_and(|target| {
+                self.aliases[*index].get(first)
+                    .or_else(|| self.stdio_absolute_imports[*index].get(first))
+                    .is_some_and(|target| {
                     let canonical = self.stdio_absolute_imports[*index]
                         .get(first)
                         .unwrap_or(target);
@@ -2860,12 +2918,20 @@ impl<'a> Scanner<'a> {
                     Err("unresolved standard-stream alias dependency")
                 };
             };
+            if native_family
+                && !matches!(namespace, PathNamespace::Any)
+                && (native_output || !memory_write)
+                && self.conditional_aliases[index].contains(first)
+            {
+                return Err("conditional standard-stream alias");
+            }
             // Check an import's original path in its defining frame. Resolving
             // only its stored canonical target would launder a shadowed prefix;
             // rechecking it in the use frame would shadow a valid older import.
             let target = self.named_imports[index]
                 .get(first)
                 .or_else(|| self.aliases[index].get(first))
+                .or_else(|| self.stdio_absolute_imports[index].get(first))
                 .unwrap();
             let target = if let Some(canonical) = self.stdio_absolute_imports[index].get(first) {
                 format!("::{canonical}")
@@ -2880,6 +2946,59 @@ impl<'a> Scanner<'a> {
             frame = index;
         }
         Err("standard-stream alias chain limit exceeded")
+    }
+
+    fn stdio_glob_import(&mut self, import: &syn::ItemUse) {
+        fn collect(tree: &UseTree, prefix: String, output: &mut Vec<String>) {
+            match tree {
+                UseTree::Path(path) => collect(
+                    &path.tree,
+                    if prefix.is_empty() {
+                        identifier_name(&path.ident)
+                    } else {
+                        format!("{prefix}::{}", identifier_name(&path.ident))
+                    },
+                    output,
+                ),
+                UseTree::Group(group) => {
+                    for tree in &group.items {
+                        collect(tree, prefix.clone(), output);
+                    }
+                }
+                UseTree::Glob(_) => output.push(prefix),
+                _ => {}
+            }
+        }
+        let mut prefixes = Vec::new();
+        collect(&import.tree, String::new(), &mut prefixes);
+        for prefix in prefixes {
+            if import.leading_colon.is_some() {
+                // Check the raw extern root, never local use aliases or their
+                // generic cache. Only std's root and io module expose this
+                // finite family; no arbitrary export inference is made here.
+                let (root, rest) = prefix.split_once("::").unwrap_or((&prefix, ""));
+                if self.stdio_extern_std_roots.contains(root) && matches!(rest, "" | "io") {
+                    self.refuse_stdio_operation("standard-stream glob needs explicit named imports");
+                }
+                continue;
+            }
+            // These are namespace DATA probes, not imported values or an
+            // inference about arbitrary exports. Call only with the complete
+            // frame and its converged namespace sidecars, before visitor replay.
+            for suffix in ["stderr", "io::stderr"] {
+                match self.stdio_resolve_name(
+                    &format!("{prefix}::{suffix}"),
+                    import.leading_colon.is_some(),
+                    PathNamespace::Any,
+                ) {
+                    Ok(Some(target)) if target == "std::io::stderr" => {
+                        self.refuse_stdio_operation("standard-stream glob needs explicit named imports");
+                    }
+                    Err(reason) => self.refuse_stdio_operation(reason),
+                    _ => {}
+                }
+            }
+        }
     }
 
     fn stdio_trait_path(&self, path: &syn::ExprPath) -> Option<String> {
@@ -2978,6 +3097,46 @@ impl<'a> Scanner<'a> {
         {
             return Err("contradictory explicit Self and native output receiver");
         }
+        let canonical_path = if let Some(path) = path {
+            let local_reference = path.path.segments.len() == 1
+                && path.qself.is_none()
+                && concrete.is_some()
+                && self.value_kind(&identifier_name(&path.path.segments[0].ident))
+                    == Some(ValueKind::Reference)
+                && self
+                    .value_origin(&identifier_name(&path.path.segments[0].ident))
+                    .flatten()
+                    .as_deref()
+                    == Some(target);
+            if local_reference {
+                // The original native method reference was checked when this
+                // unconditional value was bound; an unrelated type alias with
+                // the same spelling cannot replace that value's provenance.
+                true
+            } else {
+                let namespace = if path.path.segments.len() == 1 {
+                    PathNamespace::Value
+                } else {
+                    PathNamespace::Type
+                };
+                self.stdio_resolve_name_for_output(
+                    &path_name(&path.path),
+                    path.path.leading_colon.is_some(),
+                    namespace,
+                    true,
+                )?
+                .is_some_and(|resolved| {
+                    resolved == format!("std::io::Write::{method}")
+                        || resolved == format!("{selected}::{method}")
+                })
+            }
+        } else {
+            false
+        };
+        // The selected raw defining-frame path supersedes only a spelling's
+        // unrelated use-frame flags. Unknown/native callee refusals still use
+        // the existing conservative path checks.
+        let uncertain_path = uncertain_path && !canonical_path;
         if trait_owner {
             if path.is_some_and(|path| path.qself.is_some()) && explicit_handle != Some(selected) {
                 return Err("contradictory explicit Self and native output receiver");
@@ -3728,6 +3887,15 @@ impl<'a> Scanner<'a> {
             })));
         self.push_values();
         for statement in &block.stmts {
+            if let syn::Stmt::Item(Item::ExternCrate(item)) = statement
+                && !definitely_test_only(&item.attrs)
+                && identifier_name(&item.ident) == "std"
+                && item.rename.is_some()
+            {
+                self.remember_stdio_extern(item);
+            }
+        }
+        for statement in &block.stmts {
             if let syn::Stmt::Item(Item::Use(import)) = statement
                 && !definitely_test_only(&import.attrs)
             {
@@ -3735,6 +3903,13 @@ impl<'a> Scanner<'a> {
             }
         }
         self.refresh_stdio_import_namespaces();
+        for statement in &block.stmts {
+            if let syn::Stmt::Item(Item::Use(import)) = statement
+                && !definitely_test_only(&import.attrs)
+            {
+                self.stdio_glob_import(import);
+            }
+        }
         for (index, statement) in block.stmts.iter().enumerate() {
             if callable_tail
                 && index + 1 == block.stmts.len()
@@ -3941,6 +4116,43 @@ impl<'a> Scanner<'a> {
 impl<'ast> Visit<'ast> for Scanner<'_> {
     fn visit_file(&mut self, file: &'ast syn::File) {
         *self.declarations.last_mut().unwrap() = declarations(&file.items);
+        // Root extern aliases are added to the extern prelude independently
+        // of source order and local import/declaration shadowing. A known
+        // unconditional other crate named std replaces only the implicit root;
+        // conditional declarations cannot erase a possible std exposure.
+        self.stdio_extern_std_roots = file.items.iter().filter_map(|item| {
+            if let Item::ExternCrate(item) = item
+                && !definitely_test_only(&item.attrs)
+                && identifier_name(&item.ident) == "std"
+            {
+                Some(item.rename.as_ref().map(|(_, alias)| identifier_name(alias))
+                    .unwrap_or_else(|| "std".to_owned()))
+            } else {
+                None
+            }
+        }).collect();
+        let explicit_other_std = file.items.iter().any(|item| {
+            matches!(item, Item::ExternCrate(item)
+                if !definitely_test_only(&item.attrs)
+                    && unconditional_scope(&item.attrs)
+                    && identifier_name(&item.ident) != "std"
+                    && item.rename.as_ref().is_some_and(|(_, alias)| identifier_name(alias) == "std"))
+        });
+        if !explicit_other_std {
+            self.stdio_extern_std_roots.insert("std".to_owned());
+        }
+        let uncertain_extern_roots: BTreeSet<_> = file.items.iter().filter_map(|item| {
+            if let Item::ExternCrate(item) = item
+                && !definitely_test_only(&item.attrs)
+                && (identifier_name(&item.ident) != "std" || !unconditional_scope(&item.attrs))
+            {
+                Some(identifier_name(item.rename.as_ref().map(|(_, alias)| alias).unwrap_or(&item.ident)))
+            } else {
+                None
+            }
+        }).collect();
+        self.stdio_canonical_extern_std_roots = self.stdio_extern_std_roots.iter()
+            .filter(|root| !uncertain_extern_roots.contains(*root)).cloned().collect();
         // Imports are independent of textual declaration order in Rust.
         for item in &file.items {
             if let Item::ExternCrate(item) = item
@@ -3948,6 +4160,7 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
                 && let Some((_, alias)) = &item.rename
             {
                 self.bind_alias(identifier_name(alias), identifier_name(&item.ident), item);
+                self.remember_stdio_extern(item);
             }
         }
         for item in &file.items {
@@ -3958,6 +4171,13 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
             }
         }
         self.refresh_stdio_import_namespaces();
+        for item in &file.items {
+            if let Item::Use(import) = item
+                && !definitely_test_only(&import.attrs)
+            {
+                self.stdio_glob_import(import);
+            }
+        }
         for item in &file.items {
             if let Item::Struct(structure) = item
                 && !definitely_test_only(&structure.attrs)
@@ -4002,6 +4222,7 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
                     && let Some((_, alias)) = &item.rename
                 {
                     self.bind_alias(identifier_name(alias), identifier_name(&item.ident), item);
+                    self.remember_stdio_extern(item);
                 }
             }
             for item in items {
@@ -4012,6 +4233,13 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
                 }
             }
             self.refresh_stdio_import_namespaces();
+            for item in items {
+                if let Item::Use(import) = item
+                    && !definitely_test_only(&import.attrs)
+                {
+                    self.stdio_glob_import(import);
+                }
+            }
             for item in items {
                 if let Item::Struct(structure) = item
                     && !definitely_test_only(&structure.attrs)
@@ -4308,7 +4536,18 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
         } else {
             PathNamespace::Type
         };
-        let resolution = self.stdio_resolve_path(&expression.path, namespace);
+        let native_self = expression
+            .qself
+            .as_ref()
+            .and_then(|value| self.type_origin(&value.ty))
+            .as_deref()
+            .is_some_and(stdio_output);
+        let resolution = self.stdio_resolve_name_for_output(
+            &name,
+            expression.path.leading_colon.is_some(),
+            namespace,
+            native_self,
+        );
         if let Err(reason) = &resolution {
             self.refuse_stdio_operation(reason);
         }
@@ -4316,7 +4555,12 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
             .task_set_trait_path(expression)
             .or_else(|| self.stdio_trait_path(expression))
             .or_else(|| {
-                if expression.path.leading_colon.is_some() && stdio_path_target(&name) {
+                if expression.path.leading_colon.is_some()
+                    && (stdio_path_target(&name)
+                        || name.split("::").next().is_some_and(|root| {
+                            self.stdio_canonical_extern_std_roots.contains(root)
+                        }))
+                {
                     resolution.ok().flatten()
                 } else {
                     self.reference_target(&name)
@@ -6130,6 +6374,22 @@ mod tests {
         "#,
         );
         assert!(actual.findings.is_empty(), "{:?}", actual.findings);
+        for source in [
+            "#[cfg(unix)] use std::io::Write as W; fn f(mut v: Vec<u8>) { W::write_all(&mut v, b\"x\"); }",
+            "#[cfg(unix)] use std::io::Write as W; fn f<T: W>(mut v: T) { W::flush(&mut v); }",
+            "#[cfg(unix)] use std::io::stderr as E; use E as Captured; fn f() {}",
+            "use E as Captured; #[cfg(unix)] use std::io::stderr as E; fn f() {}",
+            "#[cfg(unix)] use ::std as native; use native::io::Stderr as Output; fn f() {}",
+            "#[cfg(unix)] use std::io::Stderr as output; fn f() { fn output() -> Vec<u8> { Vec::new() } output().len(); }",
+            "#[cfg(unix)] use std::io::Write as W; use W as Captured; fn f(mut v: Vec<u8>) { Captured::write_all(&mut v, b\"x\"); }",
+            "fn f() { #[cfg(unix)] extern crate std as native; use native::io::Stderr as Output; }",
+            "fn f(mut v: Vec<u8>) { #[cfg(unix)] extern crate std as native; native::io::Write::write_all(&mut v, b\"x\"); }",
+        ] {
+            let actual = stdio_inventory(source);
+            // Unused imports retain their existing reviewable reexport rows;
+            // they do not acquire or operate on a native standard stream.
+            assert!(stdio_counts(&actual.findings).is_empty(), "{source}: {:?}", actual.findings);
+        }
     }
 
     #[test]
@@ -6427,6 +6687,28 @@ mod tests {
                 "{source}: {error}"
             );
         }
+        // Keep the original native failure and its seven-member oracle above.
+        // These pairs exercise conditional provenance in the defining frame,
+        // rather than a same-spelling alias at the later use site.
+        for source in [
+            "#[cfg(unix)] use ::std::io::stderr as r#output; fn f() { r#output(); }",
+            "#[cfg(unix)] use ::std as native; fn f() { native::io::stderr(); }",
+            "#[cfg(unix)] use std::io as native; fn f() { native::stderr(); }",
+            "#[cfg(unix)] use std::io::stderr as E; use E as Captured; fn f() { Captured(); }",
+            "use E as Captured; #[cfg(unix)] use std::io::stderr as E; fn f() { Captured(); }",
+            "#[cfg(unix)] use std::io::stderr as E; fn f() { struct E {} E(); }",
+            "#[cfg(unix)] use std::io::Stderr as Output; use Output as Captured; fn f(mut v: Captured) { v.flush(); }",
+            "#[cfg(unix)] use std::io::Write as W; use W as Captured; fn f(mut v: std::io::Stderr) { use std::io::stderr as W; Captured::flush(&mut v); }",
+            "use W as Captured; #[cfg(unix)] use std::io::Write as W; fn f(mut v: std::io::Stderr) { use std::io::stderr as W; Captured::flush(&mut v); }",
+            "#[cfg(unix)] use std::io::Write as W; use W as Captured; fn f(mut v: std::io::Stderr) { let _ = <std::io::Stderr as Captured>::flush; }",
+            "#[cfg(unix)] extern crate std as native; fn f() { native::io::stderr(); }",
+            "fn f() { #[cfg(unix)] extern crate std as native; native::io::stderr(); }",
+            "mod m { #[cfg(unix)] extern crate std as native; fn f() { native::io::stderr(); } }",
+        ] {
+            let directory = fixture(source);
+            let error = inventory(directory.path()).unwrap_err().to_string();
+            assert!(error.contains("conditional"), "{source}: {error}");
+        }
         let actual = stdio_inventory(
             "use super::*; use std::io::stderr as r#error; fn f() { r#error().flush(); }",
         );
@@ -6437,6 +6719,135 @@ mod tests {
                 ("f", "std::io::Stderr::flush", 1),
             ])
         );
+        let actual = stdio_inventory(
+            "use std::io::Write as W; use W as Captured; fn f(mut v: std::io::Stderr) { #[cfg(unix)] use std::io::stderr as W; Captured::flush(&mut v); }",
+        );
+        assert_eq!(
+            stdio_counts(&actual.findings),
+            expected_stdio(&[("f", "std::io::Stderr::flush", 1)])
+        );
+        let actual = stdio_inventory(
+            "#[cfg(unix)] use std::io::Stderr as write; fn f(mut v: std::io::Stderr) { let write = std::io::Stderr::flush; write(&mut v); }",
+        );
+        assert_eq!(
+            stdio_counts(&actual.findings),
+            expected_stdio(&[("f", "std::io::Stderr::flush", 2)])
+        );
+        for (source, context) in [
+            ("extern crate std as native; mod std {} fn f() { native::io::stderr().flush(); }", "f"),
+            ("fn f() { extern crate std as native; mod std {} native::io::stderr().flush(); }", "f"),
+            ("mod m { extern crate std as native; mod std {} fn f() { native::io::stderr().flush(); } }", "m::f"),
+            ("use ::std::io::Write as std; fn f() { ::std::io::stderr().flush(); }", "f"),
+        ] {
+            let actual = stdio_inventory(source);
+            assert_eq!(
+                stdio_counts(&actual.findings),
+                expected_stdio(&[(context, "std::io::stderr", 1), (context, "std::io::Stderr::flush", 1)])
+            );
+        }
+    }
+
+    #[test]
+    fn stdio_canonical_globs_need_explicit_named_imports() {
+        for source in [
+            "use std::io::*; fn f() { stderr().flush(); }",
+            "use std::*; fn f() { io::stderr().flush(); }",
+            "use later::*; use std::io as later; fn f() { stderr().flush(); }",
+            "use std::io as later; use later::*; fn f() { stderr().flush(); }",
+            "use later::*; use std as later; fn f() { io::stderr().flush(); }",
+            "use std as later; use later::*; fn f() { io::stderr().flush(); }",
+            "fn f() { use later::*; use std::io as later; stderr().flush(); }",
+            "fn f() { use std::io as later; use later::*; stderr().flush(); }",
+            "mod m { use later::*; use std::io as later; fn f() { stderr().flush(); } }",
+            "mod m { use std::io as later; use later::*; fn f() { stderr().flush(); } }",
+            "mod std {} use ::std::io::*; fn f() { stderr().flush(); }",
+            "mod std {} use ::std::*; fn f() { io::stderr().flush(); }",
+            "use ::std as r#native; fn f() { mod std {} use r#native::io::*; stderr().flush(); }",
+            "use ::std::io as r#native; fn f() { mod std {} use r#native::*; stderr().flush(); }",
+            "#[cfg(unix)] use ::std::io as later; use later::*; fn f() {}",
+            "use std::io::*; fn f(mut v: Vec<u8>) { Write::write_all(&mut v, b\"x\"); }",
+            "use ::std::io::Write as std; use ::std::io::*; fn f() {}",
+            "use ::std::io::Write as std; use ::std::*; fn f() {}",
+            "extern crate std as native; use ::native::io::*; fn f() { stderr().flush(); }",
+            "use ::native::io::*; extern crate std as native; fn f() { stderr().flush(); }",
+            "extern crate std as native; use ::native::*; fn f() { io::stderr().flush(); }",
+            "use ::native::*; extern crate std as native; fn f() { io::stderr().flush(); }",
+            "extern crate std as r#native; fn f() { use ::r#native::io::*; stderr().flush(); }",
+            "extern crate std as native; mod m { use ::native::*; fn f() { io::stderr().flush(); } }",
+            "#[cfg(unix)] extern crate std as native; use ::native::io::*; fn f() {}",
+            "extern crate std as native; fn f() { mod native {} use ::native::io::*; }",
+            "fn f() { extern crate std as native; use native::io::*; stderr().flush(); }",
+            "fn f() { use native::io::*; extern crate std as native; stderr().flush(); }",
+            "fn f() { extern crate std as native; use native::*; io::stderr().flush(); }",
+            "fn f() { use native::*; extern crate std as native; io::stderr().flush(); }",
+            "fn f() { extern crate std as native; use native as captured; use captured::io::*; stderr().flush(); }",
+            "fn f() { use captured::io::*; use native as captured; extern crate std as native; stderr().flush(); }",
+            "extern crate std as native; mod std {} use native::io::*; fn f() { stderr().flush(); }",
+            "extern crate std as native; fn f() { mod std {} use native::io::*; stderr().flush(); }",
+            "mod m { extern crate std as native; mod std {} use native::io::*; fn f() { stderr().flush(); } }",
+            "fn f() { extern crate std as native; mod std {} use native::io::*; stderr().flush(); }",
+            "use ::std::io::Write as std; fn f() { ::std::io::stderr().unknown_output(); }",
+            "extern crate std as native; fn f() { use ::std::io::Write as native; ::native::io::stderr(); }",
+            "#[cfg(unix)] extern crate custom as std; fn f() { use ::std::io::Write as std; ::std::time::Instant::now(); }",
+            "extern crate custom as std; fn f() { use ::std::io::Write as std; ::std::fs::metadata(\"x\"); }",
+            "#[cfg(unix)] extern crate std as native; fn f() { use ::std::io::Write as native; ::native::time::Instant::now(); }",
+            "extern crate std as native; #[cfg(unix)] extern crate custom as native; fn f() { use ::std::io::Write as native; ::native::fs::metadata(\"x\"); }",
+        ] {
+            let directory = fixture(source);
+            let error = inventory(directory.path()).unwrap_err().to_string();
+            assert!(
+                error.contains("standard-stream glob") || error.contains("standard-output"),
+                "{source}: {error}"
+            );
+        }
+        for source in [
+            "mod std { pub mod io { pub fn stderr() {} } } use std::io::*; fn f() { stderr(); }",
+            "use own as std; mod own { pub mod io { pub fn stderr() {} } } use std::io::*; fn f() { stderr(); }",
+            "mod later { pub fn stderr() {} } use later::*; fn f() { stderr(); }",
+            "use later::*; mod later { pub fn stderr() {} } fn f() { stderr(); }",
+            "use std::time::*; fn f() { Instant::now(); }",
+            "use ::std::io::Write as std; use ::std::time::*; fn f() {}",
+            "use ::std::time::*; use ::std::io::Write as std; fn f() {}",
+            "use ::std::io::Write as std; use ::std::fs::*; fn f() {}",
+            "use ::std::fs::*; use ::std::io::Write as std; fn f() {}",
+            "fn f() { use ::std::io::Write as std; use ::std::time::*; }",
+            "mod m { use ::std::io::Write as std; use ::std::fs::*; fn f() {} }",
+            "extern crate std as native; use ::native::time::*; fn f() {}",
+            "use ::native::fs::*; extern crate std as native; fn f() {}",
+            "extern crate std as native; fn f() { use ::std::io::Write as native; use ::native::time::*; }",
+            "use ::std::io::Write as native; use ::native::time::*; fn f() {}",
+            "extern crate custom as std; use ::std::io::*; fn f() {}",
+            "fn f() { extern crate std as native; use native::time::*; }",
+            "fn f() { use native::fs::*; extern crate std as native; }",
+            "extern crate std as native; fn f() { mod native { pub fn stderr() {} } use native::*; stderr(); }",
+            "extern crate std as native; use ::std::io::Write as std; use native::time::*; fn f() {}",
+            "mod m { extern crate std as native; use ::std::io::Write as std; use native::fs::*; fn f() {} }",
+            "fn f() { extern crate std as native; use ::std::io::Write as std; use native::time::*; }",
+            "use ::std::io::Write as std; fn f() { let _: Option<::std::time::Instant> = None; }",
+            "use ::std::io::Write as std; fn f() { let _ = ::std::time::Duration::ZERO; }",
+        ] {
+            let actual = stdio_inventory(source);
+            assert!(stdio_counts(&actual.findings).is_empty(), "{source}: {:?}", actual.findings);
+        }
+        for (source, count) in [
+            ("use ::std::io::Write as std; fn f() { let _ = ::std::time::Instant::now(); let _ = ::std::fs::metadata(\"x\"); }", 1),
+            ("extern crate std as native; fn f() { use ::std::io::Write as native; let _ = ::native::time::Instant::now(); let _ = ::native::fs::metadata(\"x\"); }", 1),
+            ("use ::std::io::Write as std; fn f() { let clock = ::std::time::Instant::now; clock(); let metadata = ::std::fs::metadata; metadata(\"x\"); }", 2),
+            ("extern crate std as native; fn f() { use ::std::io::Write as native; let clock = ::native::time::Instant::now; clock(); let metadata = ::native::fs::metadata; metadata(\"x\"); }", 2),
+        ] {
+            let actual = stdio_inventory(source);
+            assert!(stdio_counts(&actual.findings).is_empty());
+            let mut targets = BTreeMap::new();
+            for finding in actual.findings.iter().filter(|finding| {
+                matches!(finding.kind.as_str(), "clock" | "filesystem")
+            }) {
+                *targets.entry((finding.kind.as_str(), finding.target.as_str())).or_insert(0) += finding.count;
+            }
+            assert_eq!(targets, BTreeMap::from([
+                (("clock", "std::time::Instant::now"), count),
+                (("filesystem", "std::fs::metadata"), count),
+            ]), "{source}");
+        }
     }
 
     #[test]
