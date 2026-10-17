@@ -25,10 +25,13 @@ pub(crate) struct GoogleBundleData {
 
 impl GoogleBundleData {
     pub(super) fn from_native_parts(original: Digest, profile: Digest, bundle: Digest) -> Self {
-        Self { original, profile, bundle }
+        Self {
+            original,
+            profile,
+            bundle,
+        }
     }
 }
-
 
 /// A closed selector for the receiver's real Pending. This is not a serialized
 /// FreshIntent: the receiver constructs that only from its own current runtime.
@@ -67,7 +70,10 @@ impl<'de> Deserialize<'de> for OperationData {
         // existing tagged/deny_unknown_fields visitor rather than normalizing.
         #[derive(Deserialize)]
         #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
-        enum Wire { Claim {}, Publish { request: String } }
+        enum Wire {
+            Claim {},
+            Publish { request: String },
+        }
 
         struct ObjectOnly;
         impl<'de> serde::de::Visitor<'de> for ObjectOnly {
@@ -77,7 +83,10 @@ impl<'de> Deserialize<'de> for OperationData {
                 formatter.write_str("one closed fresh-owner operation object")
             }
 
-            fn visit_map<M: serde::de::MapAccess<'de>>(self, map: M) -> Result<Self::Value, M::Error> {
+            fn visit_map<M: serde::de::MapAccess<'de>>(
+                self,
+                map: M,
+            ) -> Result<Self::Value, M::Error> {
                 match Wire::deserialize(serde::de::value::MapAccessDeserializer::new(map))? {
                     Wire::Claim {} => Ok(OperationData::Claim {}),
                     Wire::Publish { request } => Ok(OperationData::Publish { request }),
@@ -111,8 +120,15 @@ impl CallData {
         })
     }
 
-    pub(super) fn publication(intent: &FreshIntent, owner: Digest, request: String) -> Result<Self> {
-        ensure!(request.len() <= MAX_REQUEST, "native fresh public options capacity");
+    pub(super) fn publication(
+        intent: &FreshIntent,
+        owner: Digest,
+        request: String,
+    ) -> Result<Self> {
+        ensure!(
+            request.len() <= MAX_REQUEST,
+            "native fresh public options capacity"
+        );
         let mut call = Self::claim(intent, owner)?;
         call.operation = OperationData::Publish { request };
         Ok(call)
@@ -123,9 +139,12 @@ impl CallData {
     }
 
     pub(super) fn require_intent(&self, intent: &FreshIntent) -> Result<()> {
-        ensure!(self.attempt == intent.attempt()
-            && self.purpose == PurposeData::from_intent(intent)
-            && self.original == intent.commitment()?, "native fresh original pending changed");
+        ensure!(
+            self.attempt == intent.attempt()
+                && self.purpose == PurposeData::from_intent(intent)
+                && self.original == intent.commitment()?,
+            "native fresh original pending changed"
+        );
         Ok(())
     }
 }
@@ -149,12 +168,19 @@ pub(crate) struct ReplyData {
 impl ReplyData {
     pub(super) fn require_call(&self, call: &CallData, intent: &FreshIntent) -> Result<()> {
         call.require_intent(intent)?;
-        ensure!(self.call == call.digest()? && self.original == intent.commitment()?
-            && self.expires_at == intent.deadline(), "native fresh owner reply changed");
+        ensure!(
+            self.call == call.digest()?
+                && self.original == intent.commitment()?
+                && self.expires_at == intent.deadline(),
+            "native fresh owner reply changed"
+        );
         match (&call.operation, &self.outcome) {
             (OperationData::Claim {}, OutcomeData::Allocation { .. }) => {}
             (OperationData::Publish { request }, OutcomeData::Published { request: digest }) => {
-                ensure!(*digest == Digest::new(request.as_bytes()), "native fresh publication reply changed");
+                ensure!(
+                    *digest == Digest::new(request.as_bytes()),
+                    "native fresh publication reply changed"
+                );
             }
             _ => anyhow::bail!("native fresh owner operation changed"),
         }
@@ -181,8 +207,10 @@ pub(crate) fn apply_in_current_app_transaction(
         },
     };
     Ok(ReplyData {
-        call: call.digest()?, original: intent.commitment()?,
-        expires_at: intent.deadline(), outcome,
+        call: call.digest()?,
+        original: intent.commitment()?,
+        expires_at: intent.deadline(),
+        outcome,
     })
 }
 
@@ -268,9 +296,13 @@ fn schema_rows(db: &Connection) -> Result<Vec<SchemaRow>> {
     let mut statement = db.prepare(
         "SELECT type,name,tbl_name,sql FROM sqlite_master
          WHERE tbl_name='native_fresh_owners' OR name GLOB 'native_fresh_*'
-         ORDER BY type,name")?;
-    Ok(statement.query_map([], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)))?
-        .collect::<std::result::Result<Vec<_>,_>>()?)
+         ORDER BY type,name",
+    )?;
+    Ok(statement
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?)
 }
 
 pub(crate) fn install(db: &Connection) -> Result<()> {
@@ -337,16 +369,30 @@ pub(super) fn claim(
     owner: &Digest,
     now: i64,
 ) -> Result<AllocationData> {
-    ensure!(!db.is_autocommit(), "native fresh original app transaction required");
+    ensure!(
+        !db.is_autocommit(),
+        "native fresh original app transaction required"
+    );
     let deadline = intent.deadline();
-    ensure!(now >= intent.created_at() && now < deadline, "original fresh pending expired");
+    ensure!(
+        now >= intent.created_at() && now < deadline,
+        "original fresh pending expired"
+    );
     let original = intent.commitment()?;
     let context = serde_json::to_string(intent)?;
-    ensure!(context.len() <= 32768, "native fresh original context budget");
-    let existing: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM native_fresh_owners WHERE original=?1)",
-        [original.as_str()], |row| row.get(0))?;
+    ensure!(
+        context.len() <= 32768,
+        "native fresh original context budget"
+    );
+    let existing: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM native_fresh_owners WHERE original=?1)",
+        [original.as_str()],
+        |row| row.get(0),
+    )?;
     if !existing {
-        let count: i64 = db.query_row("SELECT count(*) FROM native_fresh_owners", [], |row| row.get(0))?;
+        let count: i64 = db.query_row("SELECT count(*) FROM native_fresh_owners", [], |row| {
+            row.get(0)
+        })?;
         ensure!(count < MAX_OWNERS, "native fresh original owner capacity");
     }
     let changed = db.execute(
@@ -358,17 +404,23 @@ pub(super) fn claim(
     if changed == 1 {
         return Ok(AllocationData::Allocated);
     }
-    let row: Option<(String,String,String,Option<String>)> = db.query_row(
-        "SELECT context,owner,stage,result_digest FROM native_fresh_owners WHERE original=?1",
-        [original.as_str()], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
-    ).optional()?;
-    let (saved, saved_owner, stage, result) = row.context("native fresh attempt purpose already bound")?;
+    let row: Option<(String, String, String, Option<String>)> = db
+        .query_row(
+            "SELECT context,owner,stage,result_digest FROM native_fresh_owners WHERE original=?1",
+            [original.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()?;
+    let (saved, saved_owner, stage, result) =
+        row.context("native fresh attempt purpose already bound")?;
     ensure!(saved == context, "native fresh original context changed");
     if saved_owner != owner.as_str() {
         return Ok(AllocationData::OtherOwner);
     }
     if stage == "consumed" {
-        return Ok(AllocationData::ConsumedHistory { result: Digest::try_from(result.context("native fresh result missing")?)? });
+        return Ok(AllocationData::ConsumedHistory {
+            result: Digest::try_from(result.context("native fresh result missing")?)?,
+        });
     }
     if stage == "refused" {
         return Ok(AllocationData::Refused);
@@ -385,27 +437,55 @@ pub(super) fn publish(
     request: &[u8],
     now: i64,
 ) -> Result<Digest> {
-    ensure!(!db.is_autocommit(), "native fresh original app transaction required");
-    ensure!(request.len() <= MAX_REQUEST, "native fresh public options capacity");
+    ensure!(
+        !db.is_autocommit(),
+        "native fresh original app transaction required"
+    );
+    ensure!(
+        request.len() <= MAX_REQUEST,
+        "native fresh public options capacity"
+    );
     let publication: GoogleBundleData = crate::json::decode(request)?;
-    ensure!(publication.original == intent.commitment()?, "Google publication original changed");
+    ensure!(
+        publication.original == intent.commitment()?,
+        "Google publication original changed"
+    );
     let deadline = intent.deadline();
-    ensure!(now >= intent.created_at() && now < deadline, "original fresh pending expired");
+    ensure!(
+        now >= intent.created_at() && now < deadline,
+        "original fresh pending expired"
+    );
     let digest = Digest::new(request);
     let changed = db.execute(
         "UPDATE native_fresh_owners SET stage='offered',request=?3,request_digest=?4
          WHERE original=?1 AND owner=?2 AND context=?5 AND stage='allocated' AND expires_at>?6",
-        params![intent.commitment()?.as_str(),owner.as_str(),std::str::from_utf8(request)?,digest.as_str(),serde_json::to_string(intent)?,now],
+        params![
+            intent.commitment()?.as_str(),
+            owner.as_str(),
+            std::str::from_utf8(request)?,
+            digest.as_str(),
+            serde_json::to_string(intent)?,
+            now
+        ],
     )?;
     if changed != 1 {
-        let saved: Option<(String,String)> = db.query_row(
-            "SELECT request_digest,request FROM native_fresh_owners
+        let saved: Option<(String, String)> = db
+            .query_row(
+                "SELECT request_digest,request FROM native_fresh_owners
              WHERE original=?1 AND owner=?2 AND context=?3 AND stage='offered' AND expires_at>?4",
-            params![intent.commitment()?.as_str(),owner.as_str(),serde_json::to_string(intent)?,now],
-            |row| Ok((row.get(0)?,row.get(1)?)),
-        ).optional()?;
-        ensure!(saved == Some((digest.as_str().into(),std::str::from_utf8(request)?.into())),
-            "native fresh publication cannot renew or change");
+                params![
+                    intent.commitment()?.as_str(),
+                    owner.as_str(),
+                    serde_json::to_string(intent)?,
+                    now
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        ensure!(
+            saved == Some((digest.as_str().into(), std::str::from_utf8(request)?.into())),
+            "native fresh publication cannot renew or change"
+        );
     }
     Ok(digest)
 }
@@ -422,9 +502,14 @@ pub(super) fn consume_in_current_app_transaction(
     result: &Digest,
     now: i64,
 ) -> Result<()> {
-    ensure!(!db.is_autocommit(), "native fresh final app transaction required");
-    ensure!(now >= intent.created_at() && now < intent.deadline(),
-        "original fresh pending expired");
+    ensure!(
+        !db.is_autocommit(),
+        "native fresh final app transaction required"
+    );
+    ensure!(
+        now >= intent.created_at() && now < intent.deadline(),
+        "original fresh pending expired"
+    );
     ensure!(db.execute(
         "UPDATE native_fresh_owners SET stage='consumed',result_digest=?4
          WHERE original=?1 AND owner=?2 AND request_digest=?3 AND context=?5 AND stage='offered' AND expires_at>?6",
@@ -441,12 +526,18 @@ pub(super) fn terminal_history(
     intent: &FreshIntent,
     owner: &Digest,
 ) -> Result<Option<Digest>> {
-    let value: Option<String> = db.query_row(
-        "SELECT result_digest FROM native_fresh_owners
+    let value: Option<String> = db
+        .query_row(
+            "SELECT result_digest FROM native_fresh_owners
          WHERE original=?1 AND owner=?2 AND context=?3 AND stage='consumed'",
-        params![intent.commitment()?.as_str(),owner.as_str(),serde_json::to_string(intent)?],
-        |row| row.get(0),
-    ).optional()?;
+            params![
+                intent.commitment()?.as_str(),
+                owner.as_str(),
+                serde_json::to_string(intent)?
+            ],
+            |row| row.get(0),
+        )
+        .optional()?;
     value.map(Digest::try_from).transpose()
 }
 
@@ -457,10 +548,17 @@ mod tests {
     use rusqlite::TransactionBehavior;
 
     fn intent() -> Result<FreshIntent> {
-        FreshIntent::fixture_oauth(&iap::Verified {
-            email: "alice@example.com".into(), subject: "google:alice".into(),
-        }, "original", &Digest::new(b"original complete pending challenge"),
-            "https://security.example.com/", 0, 300)
+        FreshIntent::fixture_oauth(
+            &iap::Verified {
+                email: "alice@example.com".into(),
+                subject: "google:alice".into(),
+            },
+            "original",
+            &Digest::new(b"original complete pending challenge"),
+            "https://security.example.com/",
+            0,
+            300,
+        )
     }
 
     fn options() -> Vec<u8> {
@@ -468,7 +566,8 @@ mod tests {
             original: intent().unwrap().commitment().unwrap(),
             profile: Digest::new(b"selected Google profile fixture DATA"),
             bundle: Digest::new(b"one original Google two-tuple bundle fixture DATA"),
-        }).unwrap()
+        })
+        .unwrap()
     }
 
     #[test]
@@ -484,15 +583,17 @@ mod tests {
             serde_json::json!({"operation":"claim","database":"/tmp/ignored-is-not-closed"}),
             serde_json::json!({"operation":"claim","actor":"another@example.com"}),
             serde_json::json!(["claim"]),
-            serde_json::json!(["claim",{}]),
+            serde_json::json!(["claim", {}]),
         ] {
             let mut changed = valid.clone();
             changed["operation"] = operation;
             assert!(crate::json::decode::<CallData>(&serde_json::to_vec(&changed)?).is_err());
             assert!(serde_json::from_value::<CallData>(changed).is_err());
         }
-        let duplicate = serde_json::to_string(&valid)?.replace("\"operation\":\"claim\"",
-            "\"operation\":\"claim\",\"operation\":\"claim\"");
+        let duplicate = serde_json::to_string(&valid)?.replace(
+            "\"operation\":\"claim\"",
+            "\"operation\":\"claim\",\"operation\":\"claim\"",
+        );
         assert!(crate::json::decode::<CallData>(duplicate.as_bytes()).is_err());
         Ok(())
     }
@@ -505,15 +606,28 @@ mod tests {
         let first = Digest::new(b"first actual shell incarnation");
         let other = Digest::new(b"different actual shell incarnation");
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        assert!(matches!(claim(&tx,&intent,&first,1)?, AllocationData::Allocated));
+        assert!(matches!(
+            claim(&tx, &intent, &first, 1)?,
+            AllocationData::Allocated
+        ));
         tx.commit()?;
         // Response loss: the same owner gets history, not another allocation.
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        assert!(matches!(claim(&tx,&intent,&first,2)?, AllocationData::ExistingOwner));
-        assert!(matches!(claim(&tx,&intent,&other,2)?, AllocationData::OtherOwner));
+        assert!(matches!(
+            claim(&tx, &intent, &first, 2)?,
+            AllocationData::ExistingOwner
+        ));
+        assert!(matches!(
+            claim(&tx, &intent, &other, 2)?,
+            AllocationData::OtherOwner
+        ));
         tx.commit()?;
-        assert_eq!(db.query_row("SELECT count(*) FROM native_fresh_owners", [], |row| row.get::<_,i64>(0))?, 1);
-        assert!(claim(&db,&intent,&first,2).is_err());
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM native_fresh_owners", [], |row| row
+                .get::<_, i64>(0))?,
+            1
+        );
+        assert!(claim(&db, &intent, &first, 2).is_err());
         Ok(())
     }
 
@@ -524,7 +638,7 @@ mod tests {
         let intent = intent()?;
         let owner = Digest::new(b"one original owner");
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        claim(&tx,&intent,&owner,1)?;
+        claim(&tx, &intent, &owner, 1)?;
         tx.commit()?;
         for sql in [
             "UPDATE native_fresh_owners SET owner='sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'",
@@ -532,16 +646,23 @@ mod tests {
             "UPDATE native_fresh_owners SET stage='consumed'",
             "DELETE FROM native_fresh_owners",
         ] {
-            assert!(db.execute(sql,[]).is_err(), "{sql}");
+            assert!(db.execute(sql, []).is_err(), "{sql}");
         }
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let request = publish(&tx,&intent,&owner,&options(),2)?;
+        let request = publish(&tx, &intent, &owner, &options(), 2)?;
         tx.commit()?;
-        assert!(db.execute("UPDATE native_fresh_owners SET stage='allocated',request=NULL,request_digest=NULL",[]).is_err());
+        assert!(
+            db.execute(
+                "UPDATE native_fresh_owners SET stage='allocated',request=NULL,request_digest=NULL",
+                []
+            )
+            .is_err()
+        );
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        assert_eq!(publish(&tx,&intent,&owner,&options(),3)?,request);
-        let mut changed = options(); changed.push(b' ');
-        assert!(publish(&tx,&intent,&owner,&changed,3).is_err());
+        assert_eq!(publish(&tx, &intent, &owner, &options(), 3)?, request);
+        let mut changed = options();
+        changed.push(b' ');
+        assert!(publish(&tx, &intent, &owner, &changed, 3).is_err());
         tx.commit()?;
         Ok(())
     }
@@ -555,16 +676,18 @@ mod tests {
         let other = Digest::new(b"new process cannot adopt old owner");
         let result = Digest::new(b"actual verified result commitment DATA");
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        claim(&tx,&intent,&owner,1)?;
-        let request = publish(&tx,&intent,&owner,&options(),2)?;
-        consume_in_current_app_transaction(&tx,&intent,&owner,&request,&result,3)?;
-        assert!(consume_in_current_app_transaction(&tx,&intent,&owner,&request,&result,3).is_err());
+        claim(&tx, &intent, &owner, 1)?;
+        let request = publish(&tx, &intent, &owner, &options(), 2)?;
+        consume_in_current_app_transaction(&tx, &intent, &owner, &request, &result, 3)?;
+        assert!(
+            consume_in_current_app_transaction(&tx, &intent, &owner, &request, &result, 3).is_err()
+        );
         tx.commit()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        assert!(claim(&tx,&intent,&owner,300).is_err());
+        assert!(claim(&tx, &intent, &owner, 300).is_err());
         tx.commit()?;
-        assert_eq!(terminal_history(&db,&intent,&owner)?,Some(result));
-        assert_eq!(terminal_history(&db,&intent,&other)?,None);
+        assert_eq!(terminal_history(&db, &intent, &owner)?, Some(result));
+        assert_eq!(terminal_history(&db, &intent, &other)?, None);
         Ok(())
     }
 
@@ -584,10 +707,17 @@ mod tests {
         null["profile"] = serde_json::Value::Null;
         let mut foreign: serde_json::Value = crate::json::decode(valid.as_bytes())?;
         foreign["original"] = serde_json::json!(Digest::new(b"different original pending"));
-        let duplicate = format!("{},\"profile\":\"{}\"}}", valid.strip_suffix('}').unwrap(),
-            Digest::new(b"second hidden profile"));
-        for request in [serde_json::to_string(&extra)?, serde_json::to_string(&null)?,
-            serde_json::to_string(&foreign)?, duplicate] {
+        let duplicate = format!(
+            "{},\"profile\":\"{}\"}}",
+            valid.strip_suffix('}').unwrap(),
+            Digest::new(b"second hidden profile")
+        );
+        for request in [
+            serde_json::to_string(&extra)?,
+            serde_json::to_string(&null)?,
+            serde_json::to_string(&foreign)?,
+            duplicate,
+        ] {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             assert!(publish(&tx, &intent, &owner, request.as_bytes(), 2).is_err());
             tx.commit()?;
@@ -597,7 +727,10 @@ mod tests {
                 "UPDATE native_fresh_owners SET stage='offered',request=?1,request_digest=?2 WHERE original=?3",
                 params![request, Digest::new(request.as_bytes()).as_str(), intent.commitment()?.as_str()],
             ).is_err());
-            let stage: String = db.query_row("SELECT stage FROM native_fresh_owners", [], |row| row.get(0))?;
+            let stage: String =
+                db.query_row("SELECT stage FROM native_fresh_owners", [], |row| {
+                    row.get(0)
+                })?;
             assert_eq!(stage, "allocated");
         }
         Ok(())
@@ -609,8 +742,13 @@ mod tests {
         db.execute_batch("CREATE TABLE native_fresh_owners(untrusted TEXT); INSERT INTO native_fresh_owners VALUES('preserve');")?;
         let before = schema_rows(&db)?;
         assert!(install(&db).is_err());
-        assert_eq!(schema_rows(&db)?,before);
-        assert_eq!(db.query_row("SELECT untrusted FROM native_fresh_owners", [], |row| row.get::<_,String>(0))?,"preserve");
+        assert_eq!(schema_rows(&db)?, before);
+        assert_eq!(
+            db.query_row("SELECT untrusted FROM native_fresh_owners", [], |row| {
+                row.get::<_, String>(0)
+            })?,
+            "preserve"
+        );
         Ok(())
     }
 }

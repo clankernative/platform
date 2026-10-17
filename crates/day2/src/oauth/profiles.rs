@@ -1345,16 +1345,18 @@ pub(super) mod tests {
             _: &HeaderMap,
             _: i64,
         ) -> Result<crate::oauth::security_shell::ReauthCallback> {
-            Ok(crate::oauth::security_shell::ReauthCallback::Observed(crate::oauth::shell_oidc::Reauthenticated::fixture(
-                self.0
-                    .lock()
-                    .unwrap()
-                    .take()
-                    .context("test callback intent unavailable")?,
-                "human_1".into(),
-                "accounts.google.com:test-human".into(),
-                5,
-            )))
+            Ok(crate::oauth::security_shell::ReauthCallback::Observed(
+                crate::oauth::shell_oidc::Reauthenticated::fixture(
+                    self.0
+                        .lock()
+                        .unwrap()
+                        .take()
+                        .context("test callback intent unavailable")?,
+                    "human_1".into(),
+                    "accounts.google.com:test-human".into(),
+                    5,
+                ),
+            ))
         }
     }
 

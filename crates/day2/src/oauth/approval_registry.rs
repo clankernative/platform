@@ -451,38 +451,61 @@ impl StoredApprovalRegistry {
         clock: &dyn Fn() -> Result<i64>,
     ) -> Result<super::fresh_owner::ReplyData> {
         use super::{fresh_auth::FreshIntent, fresh_owner::PurposeData};
-        ensure!(call.purpose == PurposeData::OAuthApproval, "OAuth approval fresh purpose refused");
-        let app = self.owner(&call.attempt)?.context("OAuth fresh pending owner unavailable")?;
+        ensure!(
+            call.purpose == PurposeData::OAuthApproval,
+            "OAuth approval fresh purpose refused"
+        );
+        let app = self
+            .owner(&call.attempt)?
+            .context("OAuth fresh pending owner unavailable")?;
         let path = &self.app_databases[&app];
         let db = crate::store::open(path)?;
         let (intent, binding) = connect::pending_approval(&db, &call.attempt, now)?
             .context("OAuth fresh pending unavailable")?;
-        ensure!(intent.owner == identity.email, "OAuth fresh pending human changed");
+        ensure!(
+            intent.owner == identity.email,
+            "OAuth fresh pending human changed"
+        );
         drop(db);
         self.authority.observe_identity(&app, identity, now)?;
         let mut reply = None;
-        let committed = self.authority.with_current(&app, &intent, &binding, now, &mut |terms| {
-            let at = clock()?;
-            ensure!(at >= now, "OAuth host clock moved backwards");
-            let context = security_shell::ApprovalContext {
-                db: path.clone(), intent: intent.clone(), binding: binding.clone(),
-                requirement: terms.requirement, permission: terms.permission,
-                reviewed: terms.reviewed, instance: terms.instance,
-                custody_key: terms.custody_key, shell_key: terms.shell_key,
-            };
-            let mut db = crate::store::open(path)?;
-            let tx = crate::write_queue::immediate(&mut db)?;
-            crate::iap::bind_subject(&tx, identity, at)?;
-            let pending = external::load_pending_external(
-                &tx, context.qualification(), &context.custody_key, at,
-            )?.context("OAuth fresh pending changed")?;
-            let view = shell_transport::ApprovalView::from_pending(&app, &context, &pending, identity)?;
-            let current = FreshIntent::approval(&view, identity)?;
-            let result = super::fresh_owner::apply_in_current_app_transaction(&tx, &current, call, at)?;
-            tx.commit()?;
-            reply = Some(result);
-            Ok(true)
-        })?;
+        let committed =
+            self.authority
+                .with_current(&app, &intent, &binding, now, &mut |terms| {
+                    let at = clock()?;
+                    ensure!(at >= now, "OAuth host clock moved backwards");
+                    let context = security_shell::ApprovalContext {
+                        db: path.clone(),
+                        intent: intent.clone(),
+                        binding: binding.clone(),
+                        requirement: terms.requirement,
+                        permission: terms.permission,
+                        reviewed: terms.reviewed,
+                        instance: terms.instance,
+                        custody_key: terms.custody_key,
+                        shell_key: terms.shell_key,
+                    };
+                    let mut db = crate::store::open(path)?;
+                    let tx = crate::write_queue::immediate(&mut db)?;
+                    crate::iap::bind_subject(&tx, identity, at)?;
+                    let pending = external::load_pending_external(
+                        &tx,
+                        context.qualification(),
+                        &context.custody_key,
+                        at,
+                    )?
+                    .context("OAuth fresh pending changed")?;
+                    let view = shell_transport::ApprovalView::from_pending(
+                        &app, &context, &pending, identity,
+                    )?;
+                    let current = FreshIntent::approval(&view, identity)?;
+                    let result = super::fresh_owner::apply_in_current_app_transaction(
+                        &tx, &current, call, at,
+                    )?;
+                    tx.commit()?;
+                    reply = Some(result);
+                    Ok(true)
+                })?;
         ensure!(committed, "OAuth fresh current authority unavailable");
         reply.context("OAuth fresh owner commit unavailable")
     }
@@ -565,7 +588,8 @@ impl shell_transport::AppApprovals for StoredAppApprovals {
         identity: &crate::iap::Verified,
         now: i64,
     ) -> Result<super::fresh_owner::ReplyData> {
-        self.registry.fresh_owner(call, identity, now, self.clock.as_ref())
+        self.registry
+            .fresh_owner(call, identity, now, self.clock.as_ref())
     }
 
     fn confirm(

@@ -197,10 +197,12 @@ impl Shell {
                 && view.shell_origin == format!("{}/", self.origin),
             "OAuth management capture changed"
         );
-        match self
-            .authenticator
-            .begin(identity, FreshIntent::management(&view, identity)?, headers, at)?
-        {
+        match self.authenticator.begin(
+            identity,
+            FreshIntent::management(&view, identity)?,
+            headers,
+            at,
+        )? {
             ReauthStart::Redirect(location) => Ok(redirect(&location)),
             #[cfg(test)]
             ReauthStart::Authenticated(_) => {
@@ -555,7 +557,13 @@ mod tests {
         fn identify(&self, _: &HeaderMap, _: i64) -> Result<iap::Verified> {
             anyhow::bail!("unused fixture edge")
         }
-        fn begin(&self, _: &iap::Verified, _: FreshIntent, _: &HeaderMap, _: i64) -> Result<ReauthStart> {
+        fn begin(
+            &self,
+            _: &iap::Verified,
+            _: FreshIntent,
+            _: &HeaderMap,
+            _: i64,
+        ) -> Result<ReauthStart> {
             anyhow::bail!("unused fixture auth")
         }
     }

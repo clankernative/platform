@@ -109,8 +109,11 @@ impl ApprovalView {
                     .any(|c| c.is_whitespace() || c.is_control())
                 && self.claim.generation > 0
                 && self.claim.quarantined_at >= 0
-                && self.expires_at.checked_sub(self.claim.quarantined_at).is_some_and(|remaining|
-                    remaining > 0 && remaining <= super::connect::MAX_CONNECT_SECONDS)
+                && self
+                    .expires_at
+                    .checked_sub(self.claim.quarantined_at)
+                    .is_some_and(|remaining| remaining > 0
+                        && remaining <= super::connect::MAX_CONNECT_SECONDS)
                 && !self.usage.trim().is_empty()
                 && self.usage.len() <= 1024
                 && !self.usage.chars().any(char::is_control)
@@ -332,7 +335,10 @@ impl AppApprovalReceiver {
         mut self: Arc<Self>,
         manager: Arc<super::management::app::Manager>,
     ) -> Result<Arc<Self>> {
-        ensure!(manager.app() == self.backend.app(), "OAuth receiver manager app mismatch");
+        ensure!(
+            manager.app() == self.backend.app(),
+            "OAuth receiver manager app mismatch"
+        );
         Arc::get_mut(&mut self)
             .context("OAuth receiver already shared")?
             .management = Some(manager);
@@ -472,28 +478,40 @@ impl AppApprovalReceiver {
         self.workload.verify_workload(one_assertion(headers)?, at)?;
         let request: RequestBody = crate::json::decode(body)?;
         let response = match request {
-            RequestBody::FreshOwner { version, human_assertion, call } => {
+            RequestBody::FreshOwner {
+                version,
+                human_assertion,
+                call,
+            } => {
                 use super::fresh_owner::PurposeData;
                 ensure!(version == VERSION, "unsupported OAuth private version");
                 let identity = self.human.verify(&human_assertion, at)?;
                 match call.purpose {
-                    PurposeData::OAuthApproval | PurposeData::OAuthConnect | PurposeData::OAuthDisconnect => {
+                    PurposeData::OAuthApproval
+                    | PurposeData::OAuthConnect
+                    | PurposeData::OAuthDisconnect => {
                         routed_attempt(&call.attempt, &self.route)?;
                     }
                     PurposeData::CredentialIntent => {
-                        ensure!(call.attempt.starts_with("credential-") && call.attempt.len() <= 128,
-                            "invalid credential fresh attempt");
+                        ensure!(
+                            call.attempt.starts_with("credential-") && call.attempt.len() <= 128,
+                            "invalid credential fresh attempt"
+                        );
                         attempt(&call.attempt)?;
                     }
                 }
                 let reply = if call.purpose == PurposeData::OAuthApproval {
                     self.backend.fresh_owner(&call, &identity, at)?
                 } else {
-                    self.management.as_ref().context("native fresh original app manager unavailable")?
+                    self.management
+                        .as_ref()
+                        .context("native fresh original app manager unavailable")?
                         .fresh_owner(&call, &identity, at)?
                 };
                 ResponseBody::FreshOwner {
-                    version: VERSION, app: self.backend.app().into(), reply: Box::new(reply),
+                    version: VERSION,
+                    app: self.backend.app().into(),
+                    reply: Box::new(reply),
                 }
             }
             RequestBody::Management {
@@ -616,19 +634,36 @@ impl RemoteApprovals {
         headers: &HeaderMap,
     ) -> Result<super::fresh_owner::ReplyData> {
         let app = intent.app();
-        let target = self.targets.get(app).context("native fresh app receiver missing")?;
+        let target = self
+            .targets
+            .get(app)
+            .context("native fresh app receiver missing")?;
         intent.require_shell_origin(&self.shell_origin)?;
         call.require_intent(intent)?;
         if call.purpose != super::fresh_owner::PurposeData::CredentialIntent {
             routed_attempt(&call.attempt, &target.route)?;
         }
         let request = RequestBody::FreshOwner {
-            version: VERSION, human_assertion: one_assertion(headers)?.into(), call: Box::new(call.clone()),
+            version: VERSION,
+            human_assertion: one_assertion(headers)?.into(),
+            call: Box::new(call.clone()),
         };
-        let ResponseBody::FreshOwner { version, app: observed, reply } =
-            self.send(app, &request, Instant::now() + Duration::from_secs(LOOKUP_SECONDS))?
-        else { anyhow::bail!("native fresh owner response refused"); };
-        ensure!(version == VERSION && observed == app, "native fresh owner receiver changed");
+        let ResponseBody::FreshOwner {
+            version,
+            app: observed,
+            reply,
+        } = self.send(
+            app,
+            &request,
+            Instant::now() + Duration::from_secs(LOOKUP_SECONDS),
+        )?
+        else {
+            anyhow::bail!("native fresh owner response refused");
+        };
+        ensure!(
+            version == VERSION && observed == app,
+            "native fresh owner receiver changed"
+        );
         reply.require_call(&call, intent)?;
         Ok(*reply)
     }

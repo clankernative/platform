@@ -3866,12 +3866,17 @@ pub(super) mod tests {
                 shell_oidc::fixture_login(&identity, intent.clone(), 100, auth_time, issued_at)?;
             clock.advance(4);
             let verified = authenticator.identify(&headers, 104)?;
-            let actual =
-                VerifiedAuthTime::from_google(authenticator.complete_parser(&callback, &verified, 104)?);
+            let actual = VerifiedAuthTime::from_google(
+                authenticator.complete_parser(&callback, &verified, 104)?,
+            );
             actual.require_intent(&intent, &identity)?;
             actual.require_current(104)?;
             assert_eq!(actual.authenticated_at(), 103);
-            assert!(authenticator.complete_parser(&callback, &verified, 104).is_err());
+            assert!(
+                authenticator
+                    .complete_parser(&callback, &verified, 104)
+                    .is_err()
+            );
             // This proof came through signature/nonce/identity verification;
             // never substitute the isolated fixture marker for the refusal.
             let keys = Arc::new(Keys::default());
