@@ -192,7 +192,7 @@ resource "kubernetes_manifest" "credentials" {
     spec = {
       provider = "gke"
       parameters = {
-        secrets = yamlencode([
+        secrets = jsonencode([
           for credential in local.credentials : {
             resourceName = credential.secret_version
             path         = credential.key

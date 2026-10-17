@@ -1197,17 +1197,22 @@ pub fn publish_scope(
     Ok(publication)
 }
 
-fn parse_projected(yaml: &str) -> Result<BTreeMap<String, String>> {
+fn parse_projected(json: &str) -> Result<BTreeMap<String, String>> {
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase", deny_unknown_fields)]
     struct Projected {
         resource_name: String,
         path: String,
     }
-    let projected: Vec<Projected> = serde_saphyr::from_str(yaml)
+    // The stack emits JSON, which is also accepted by the CSI provider's YAML
+    // decoder. Decode objects explicitly: Serde structs also accept positional
+    // arrays, which are not valid projection rows for the provider.
+    let projected: Vec<serde_json::Map<String, Value>> = day2::json::decode(json.as_bytes())
         .map_err(|_| anyhow::anyhow!("gke_release_projection_invalid"))?;
     let mut names = BTreeMap::new();
     for value in projected {
+        let value: Projected = serde_json::from_value(Value::Object(value))
+            .map_err(|_| anyhow::anyhow!("gke_release_projection_invalid"))?;
         ensure!(
             names.insert(value.path, value.resource_name).is_none(),
             "gke_release_projection_changed"
@@ -1384,7 +1389,7 @@ mod projection_tests {
     use std::collections::BTreeMap;
 
     #[test]
-    fn gke_projection_yaml_accepts_provider_yaml_and_json() {
+    fn gke_projection_accepts_compact_and_pretty_json() {
         let expected = BTreeMap::from([
             (
                 "workload".into(),
@@ -1395,19 +1400,65 @@ mod projection_tests {
                 "projects/12345/secrets/issuer/versions/5".into(),
             ),
         ]);
-        let yaml = "- resourceName: projects/12345/secrets/workload/versions/4\n  path: workload\n- resourceName: projects/12345/secrets/issuer/versions/5\n  path: issuer\n";
-        assert_eq!(parse_projected(yaml).unwrap(), expected);
-        let json = serde_json::to_string(&serde_json::json!([
+        let rows = serde_json::json!([
             {"resourceName":"projects/12345/secrets/workload/versions/4","path":"workload"},
             {"resourceName":"projects/12345/secrets/issuer/versions/5","path":"issuer"}
-        ]))
-        .unwrap();
-        assert_eq!(parse_projected(&json).unwrap(), expected);
+        ]);
+        for json in [
+            serde_json::to_string(&rows).unwrap(),
+            serde_json::to_string_pretty(&rows).unwrap(),
+        ] {
+            assert_eq!(parse_projected(&json).unwrap(), expected);
+        }
+        assert!(parse_projected("[]").unwrap().is_empty());
     }
 
     #[test]
-    fn gke_projection_yaml_rejects_ambiguous_or_invalid_rows() {
+    fn gke_projection_rejects_ambiguous_fields_and_invalid_json_rows() {
+        for json in [
+            r#"[{"resourceName":"pinned","resourceName":"changed","path":"workload"}]"#,
+            r#"[{"resourceName":"pinned","resource\u004eame":"changed","path":"workload"}]"#,
+            r#"[{"resourceName":"pinned","path":"workload","path":"issuer"}]"#,
+            r#"[{"resourceName":"pinned","path":"workload","unexpected":"value"}]"#,
+            r#"[{"resourceName":"pinned"}]"#,
+            r#"[{"path":"workload"}]"#,
+            r#"{"resourceName":"pinned","path":"workload"}"#,
+            r#"[{"resourceName":["pinned"],"path":"workload"}]"#,
+            r#"[{"resourceName":"pinned","path":null}]"#,
+            r#"[{"resourceName":1,"path":"workload"}]"#,
+            r#"[["pinned","workload"]]"#,
+            r#"[null]"#,
+            r#"[] []"#,
+            r#"[{"resourceName":"pinned","path":"workload",}]"#,
+            r#"[{"resourceName":"#,
+        ] {
+            assert_eq!(
+                parse_projected(json).unwrap_err().to_string(),
+                "gke_release_projection_invalid",
+                "accepted invalid projection: {json}"
+            );
+        }
+    }
+
+    #[test]
+    fn gke_projection_rejects_repeated_paths_even_for_the_same_version() {
+        for resource in ["pinned", "changed"] {
+            let json = serde_json::to_string(&serde_json::json!([
+                {"resourceName":"pinned","path":"workload"},
+                {"resourceName":resource,"path":"workload"}
+            ]))
+            .unwrap();
+            assert_eq!(
+                parse_projected(&json).unwrap_err().to_string(),
+                "gke_release_projection_changed"
+            );
+        }
+    }
+
+    #[test]
+    fn gke_projection_requires_json_instead_of_yaml() {
         for yaml in [
+            "- resourceName: pinned\n  path: workload\n",
             "- resourceName: pinned\n  resourceName: changed\n  path: workload\n",
             "- resourceName: pinned\n  path: workload\n  unexpected: value\n",
             "- resourceName: pinned\n",
