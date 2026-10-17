@@ -2841,7 +2841,11 @@ impl<'a> Scanner<'a> {
         // Native output still runs the strict raw-path checks below; ambiguous
         // or unknown roots keep the existing conservative resolver path.
         let resolved = if absolute && self.stdio_canonical_extern_std_roots.contains(root) {
-            if rest.is_empty() { "std".to_owned() } else { format!("std::{rest}") }
+            if rest.is_empty() {
+                "std".to_owned()
+            } else {
+                format!("std::{rest}")
+            }
         } else {
             self.resolve_name(name)
         };
@@ -2894,18 +2898,19 @@ impl<'a> Scanner<'a> {
                     .is_some_and(|kind| kind.includes(requested))
             });
             let alias = (0..=frame).rev().find(|index| {
-                self.aliases[*index].get(first)
+                self.aliases[*index]
+                    .get(first)
                     .or_else(|| self.stdio_absolute_imports[*index].get(first))
                     .is_some_and(|target| {
-                    let canonical = self.stdio_absolute_imports[*index]
-                        .get(first)
-                        .unwrap_or(target);
-                    self.stdio_import_namespaces[*index]
-                        .get(first)
-                        .copied()
-                        .or_else(|| canonical_import_namespace(canonical))
-                        .is_none_or(|kind| kind.includes(requested))
-                })
+                        let canonical = self.stdio_absolute_imports[*index]
+                            .get(first)
+                            .unwrap_or(target);
+                        self.stdio_import_namespaces[*index]
+                            .get(first)
+                            .copied()
+                            .or_else(|| canonical_import_namespace(canonical))
+                            .is_none_or(|kind| kind.includes(requested))
+                    })
             });
             if declaration.is_some_and(|declaration| alias.is_none_or(|alias| declaration >= alias))
             {
@@ -2978,7 +2983,9 @@ impl<'a> Scanner<'a> {
                 // finite family; no arbitrary export inference is made here.
                 let (root, rest) = prefix.split_once("::").unwrap_or((&prefix, ""));
                 if self.stdio_extern_std_roots.contains(root) && matches!(rest, "" | "io") {
-                    self.refuse_stdio_operation("standard-stream glob needs explicit named imports");
+                    self.refuse_stdio_operation(
+                        "standard-stream glob needs explicit named imports",
+                    );
                 }
                 continue;
             }
@@ -2992,7 +2999,9 @@ impl<'a> Scanner<'a> {
                     PathNamespace::Any,
                 ) {
                     Ok(Some(target)) if target == "std::io::stderr" => {
-                        self.refuse_stdio_operation("standard-stream glob needs explicit named imports");
+                        self.refuse_stdio_operation(
+                            "standard-stream glob needs explicit named imports",
+                        );
                     }
                     Err(reason) => self.refuse_stdio_operation(reason),
                     _ => {}
@@ -4120,17 +4129,25 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
         // of source order and local import/declaration shadowing. A known
         // unconditional other crate named std replaces only the implicit root;
         // conditional declarations cannot erase a possible std exposure.
-        self.stdio_extern_std_roots = file.items.iter().filter_map(|item| {
-            if let Item::ExternCrate(item) = item
-                && !definitely_test_only(&item.attrs)
-                && identifier_name(&item.ident) == "std"
-            {
-                Some(item.rename.as_ref().map(|(_, alias)| identifier_name(alias))
-                    .unwrap_or_else(|| "std".to_owned()))
-            } else {
-                None
-            }
-        }).collect();
+        self.stdio_extern_std_roots = file
+            .items
+            .iter()
+            .filter_map(|item| {
+                if let Item::ExternCrate(item) = item
+                    && !definitely_test_only(&item.attrs)
+                    && identifier_name(&item.ident) == "std"
+                {
+                    Some(
+                        item.rename
+                            .as_ref()
+                            .map(|(_, alias)| identifier_name(alias))
+                            .unwrap_or_else(|| "std".to_owned()),
+                    )
+                } else {
+                    None
+                }
+            })
+            .collect();
         let explicit_other_std = file.items.iter().any(|item| {
             matches!(item, Item::ExternCrate(item)
                 if !definitely_test_only(&item.attrs)
@@ -4141,18 +4158,31 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
         if !explicit_other_std {
             self.stdio_extern_std_roots.insert("std".to_owned());
         }
-        let uncertain_extern_roots: BTreeSet<_> = file.items.iter().filter_map(|item| {
-            if let Item::ExternCrate(item) = item
-                && !definitely_test_only(&item.attrs)
-                && (identifier_name(&item.ident) != "std" || !unconditional_scope(&item.attrs))
-            {
-                Some(identifier_name(item.rename.as_ref().map(|(_, alias)| alias).unwrap_or(&item.ident)))
-            } else {
-                None
-            }
-        }).collect();
-        self.stdio_canonical_extern_std_roots = self.stdio_extern_std_roots.iter()
-            .filter(|root| !uncertain_extern_roots.contains(*root)).cloned().collect();
+        let uncertain_extern_roots: BTreeSet<_> = file
+            .items
+            .iter()
+            .filter_map(|item| {
+                if let Item::ExternCrate(item) = item
+                    && !definitely_test_only(&item.attrs)
+                    && (identifier_name(&item.ident) != "std" || !unconditional_scope(&item.attrs))
+                {
+                    Some(identifier_name(
+                        item.rename
+                            .as_ref()
+                            .map(|(_, alias)| alias)
+                            .unwrap_or(&item.ident),
+                    ))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        self.stdio_canonical_extern_std_roots = self
+            .stdio_extern_std_roots
+            .iter()
+            .filter(|root| !uncertain_extern_roots.contains(*root))
+            .cloned()
+            .collect();
         // Imports are independent of textual declaration order in Rust.
         for item in &file.items {
             if let Item::ExternCrate(item) = item
@@ -6388,7 +6418,11 @@ mod tests {
             let actual = stdio_inventory(source);
             // Unused imports retain their existing reviewable reexport rows;
             // they do not acquire or operate on a native standard stream.
-            assert!(stdio_counts(&actual.findings).is_empty(), "{source}: {:?}", actual.findings);
+            assert!(
+                stdio_counts(&actual.findings).is_empty(),
+                "{source}: {:?}",
+                actual.findings
+            );
         }
     }
 
@@ -6734,15 +6768,30 @@ mod tests {
             expected_stdio(&[("f", "std::io::Stderr::flush", 2)])
         );
         for (source, context) in [
-            ("extern crate std as native; mod std {} fn f() { native::io::stderr().flush(); }", "f"),
-            ("fn f() { extern crate std as native; mod std {} native::io::stderr().flush(); }", "f"),
-            ("mod m { extern crate std as native; mod std {} fn f() { native::io::stderr().flush(); } }", "m::f"),
-            ("use ::std::io::Write as std; fn f() { ::std::io::stderr().flush(); }", "f"),
+            (
+                "extern crate std as native; mod std {} fn f() { native::io::stderr().flush(); }",
+                "f",
+            ),
+            (
+                "fn f() { extern crate std as native; mod std {} native::io::stderr().flush(); }",
+                "f",
+            ),
+            (
+                "mod m { extern crate std as native; mod std {} fn f() { native::io::stderr().flush(); } }",
+                "m::f",
+            ),
+            (
+                "use ::std::io::Write as std; fn f() { ::std::io::stderr().flush(); }",
+                "f",
+            ),
         ] {
             let actual = stdio_inventory(source);
             assert_eq!(
                 stdio_counts(&actual.findings),
-                expected_stdio(&[(context, "std::io::stderr", 1), (context, "std::io::Stderr::flush", 1)])
+                expected_stdio(&[
+                    (context, "std::io::stderr", 1),
+                    (context, "std::io::Stderr::flush", 1)
+                ])
             );
         }
     }
@@ -6827,26 +6876,50 @@ mod tests {
             "use ::std::io::Write as std; fn f() { let _ = ::std::time::Duration::ZERO; }",
         ] {
             let actual = stdio_inventory(source);
-            assert!(stdio_counts(&actual.findings).is_empty(), "{source}: {:?}", actual.findings);
+            assert!(
+                stdio_counts(&actual.findings).is_empty(),
+                "{source}: {:?}",
+                actual.findings
+            );
         }
         for (source, count) in [
-            ("use ::std::io::Write as std; fn f() { let _ = ::std::time::Instant::now(); let _ = ::std::fs::metadata(\"x\"); }", 1),
-            ("extern crate std as native; fn f() { use ::std::io::Write as native; let _ = ::native::time::Instant::now(); let _ = ::native::fs::metadata(\"x\"); }", 1),
-            ("use ::std::io::Write as std; fn f() { let clock = ::std::time::Instant::now; clock(); let metadata = ::std::fs::metadata; metadata(\"x\"); }", 2),
-            ("extern crate std as native; fn f() { use ::std::io::Write as native; let clock = ::native::time::Instant::now; clock(); let metadata = ::native::fs::metadata; metadata(\"x\"); }", 2),
+            (
+                "use ::std::io::Write as std; fn f() { let _ = ::std::time::Instant::now(); let _ = ::std::fs::metadata(\"x\"); }",
+                1,
+            ),
+            (
+                "extern crate std as native; fn f() { use ::std::io::Write as native; let _ = ::native::time::Instant::now(); let _ = ::native::fs::metadata(\"x\"); }",
+                1,
+            ),
+            (
+                "use ::std::io::Write as std; fn f() { let clock = ::std::time::Instant::now; clock(); let metadata = ::std::fs::metadata; metadata(\"x\"); }",
+                2,
+            ),
+            (
+                "extern crate std as native; fn f() { use ::std::io::Write as native; let clock = ::native::time::Instant::now; clock(); let metadata = ::native::fs::metadata; metadata(\"x\"); }",
+                2,
+            ),
         ] {
             let actual = stdio_inventory(source);
             assert!(stdio_counts(&actual.findings).is_empty());
             let mut targets = BTreeMap::new();
-            for finding in actual.findings.iter().filter(|finding| {
-                matches!(finding.kind.as_str(), "clock" | "filesystem")
-            }) {
-                *targets.entry((finding.kind.as_str(), finding.target.as_str())).or_insert(0) += finding.count;
+            for finding in actual
+                .findings
+                .iter()
+                .filter(|finding| matches!(finding.kind.as_str(), "clock" | "filesystem"))
+            {
+                *targets
+                    .entry((finding.kind.as_str(), finding.target.as_str()))
+                    .or_insert(0) += finding.count;
             }
-            assert_eq!(targets, BTreeMap::from([
-                (("clock", "std::time::Instant::now"), count),
-                (("filesystem", "std::fs::metadata"), count),
-            ]), "{source}");
+            assert_eq!(
+                targets,
+                BTreeMap::from([
+                    (("clock", "std::time::Instant::now"), count),
+                    (("filesystem", "std::fs::metadata"), count),
+                ]),
+                "{source}"
+            );
         }
     }
 
