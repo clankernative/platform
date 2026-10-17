@@ -53,6 +53,7 @@ pub(crate) fn install(db: &Connection) -> Result<()> {
     ) STRICT;
     CREATE INDEX IF NOT EXISTS day2_credential_browser_expiry ON day2_credential_browser(expires_at);",
     )?;
+    crate::oauth::fresh_owner::install(db)?;
     Ok(())
 }
 
@@ -65,6 +66,54 @@ fn load(db: &Connection, attempt: &str) -> Result<Option<Pending>> {
     .optional()?
     .map(|raw| crate::json::decode(raw.as_bytes()))
     .transpose()
+}
+
+fn require_current_pending(
+    db: &Connection,
+    runtime: &Runtime,
+    pending: &Pending,
+    identity: &iap::Verified,
+    shell_origin: &str,
+    now: i64,
+) -> Result<()> {
+    let active = authority_state::authorize_in(db, runtime, &pending.operation, &identity.email)?;
+    let selected = active.document.credentials.get(&pending.family)
+        .context("credential family inactive")?;
+    runtime.credential_authority()?.check_shell(&selected.binding, shell_origin)?;
+    ensure!(pending.actor == identity.email
+        && pending.artifact == runtime.artifact().id()
+        && pending.authority == active.stamp
+        && pending.binding == Digest::of(&selected.binding)?
+        && pending.created_at <= now && now < pending.expires_at,
+        "credential pending authority changed or expired");
+    iap::bind_subject(db, identity, now)?;
+    Ok(())
+}
+
+/// The selected app host resolves its own actual credential Pending. This is
+/// allocation/publication DATA only, not acceptance, enrollment or fresh proof.
+pub(crate) fn fresh_owner(
+    runtime: &Runtime,
+    call: &crate::oauth::fresh_owner::CallData,
+    identity: &iap::Verified,
+    now: i64,
+) -> Result<crate::oauth::fresh_owner::ReplyData> {
+    ensure!(call.purpose == crate::oauth::fresh_owner::PurposeData::CredentialIntent,
+        "credential fresh purpose changed");
+    let instance = Instance::load(runtime.instance_path())?;
+    ensure!(instance.scope(runtime.app())? == runtime.scope(), "credential fresh scope changed");
+    let (_, app) = instance.edge(runtime.app())?;
+    let (_, shell) = instance.security_edge()?;
+    let mut db = open(runtime.db())?;
+    let tx = crate::write_queue::immediate(&mut db)?;
+    let pending = load(&tx, &call.attempt)?.context("credential fresh pending unavailable")?;
+    require_current_pending(&tx, runtime, &pending, identity, &shell.origin, now)?;
+    let intent = crate::oauth::fresh_auth::FreshIntent::credential(
+        runtime, &pending, identity, &app.origin, &shell.origin,
+    )?;
+    let reply = crate::oauth::fresh_owner::apply_in_current_app_transaction(&tx, &intent, call, now)?;
+    tx.commit()?;
+    Ok(reply)
 }
 
 /// Called only after ordinary app authentication, CSRF, input and idempotency
@@ -234,30 +283,7 @@ impl Registry {
             let tx = crate::write_queue::immediate(&mut db)?;
             if let Some(pending) = load(&tx, attempt)? {
                 ensure!(found.is_none(), "ambiguous credential attempt");
-                let active = authority_state::authorize_in(
-                    &tx,
-                    runtime,
-                    &pending.operation,
-                    &identity.email,
-                )?;
-                let selected = active
-                    .document
-                    .credentials
-                    .get(&pending.family)
-                    .context("credential family inactive")?;
-                runtime
-                    .credential_authority()?
-                    .check_shell(&selected.binding, &self.origin)?;
-                ensure!(
-                    pending.actor == identity.email
-                        && pending.artifact == runtime.artifact().id()
-                        && pending.authority == active.stamp
-                        && pending.binding == Digest::of(&selected.binding)?
-                        && pending.created_at <= now
-                        && now < pending.expires_at,
-                    "credential pending authority changed or expired"
-                );
-                iap::bind_subject(&tx, identity, now)?;
+                require_current_pending(&tx, runtime, &pending, identity, &self.origin, now)?;
                 found = Some((runtime.clone(), pending));
             }
             tx.commit()?;
@@ -547,7 +573,7 @@ pub(crate) fn deliver(
     now: i64,
     acknowledge: bool,
 ) -> Result<Option<String>> {
-    human_proof.require_intent(&fresh_intent(runtime, pending, identity)?, identity)?;
+    human_proof.require_credential_authentication(&fresh_intent(runtime, pending, identity)?, identity, now)?;
     let now = human_proof.observe_current(now)?;
     let mut db = open(runtime.db())?;
     let tx = crate::write_queue::immediate(&mut db)?;

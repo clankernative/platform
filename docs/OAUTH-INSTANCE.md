@@ -754,9 +754,24 @@ explicit isolated test witnesses exercise successful management transitions;
 actual signed-token conformance inputs remain refused by these gates. The
 production external-approval signing entry accepts the typed approval view and
 session; scalar timestamp signing helpers exist only in isolated tests. Shared
-credential consumers retain their separate behavior and are not qualified by
-these management tests. A real admitted producer and new complete qualification
+credential sessions and confirmation-context projections now require the same
+mandatory producer guard. Signed inputs alone cannot allocate a credential
+session or reach confirmation; explicitly isolated witnesses exercise separate
+native product and ownership properties. A real admitted producer and new complete qualification
 are required before the live connect/read/refresh/disconnect campaign.
+
+The owned Google path commits one two-phase challenge bundle after the owning
+app's original Pending claim. A verified first response establishes the issuer
+baseline. The shell then pauses on its own manual sign-in page; it does not
+immediately send a second Google request. The person may complete a fresh Google
+sign-in in another tab and return to the same-origin, CSRF-protected Continue
+form. Choosing to sign out affects that browser's Google sign-in and may require
+signing into the tool again; the shell never signs the person out automatically.
+The Google account link and Continue action are presentation, not authentication
+evidence. Only the later signed `auth_time` strictly greater than the retained
+baseline's signed `iat`, and no greater than the later token's `iat`, establishes
+the accepted issuer ordering. Original deadlines and the separate mandatory
+native lifetime, role, epoch and final-writer guards still apply.
 
 The initial execution profile is Google Calendar with a mapped current human
 and an empty slot. Other reviewed provider metadata stays admitted; this UI

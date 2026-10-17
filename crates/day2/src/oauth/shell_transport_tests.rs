@@ -24,6 +24,10 @@ use std::{
     thread,
 };
 
+// The owned Google campaign below exercises this same private receiver and
+// SQLite writer. It emulates the IAP edge and Google/Secret Manager inputs; it
+// cannot establish hosted IAM, native lifetime, enrollment or live readiness.
+
 const HUMAN: &str = "ada@example.com";
 const SUBJECT: &str = "accounts.google.com:1234567890";
 const MACHINE: &str = "security@company.iam.gserviceaccount.com";
@@ -391,6 +395,33 @@ fn receiver_requires_independent_machine_and_human_assertions_before_sqlite() {
         1,
         "all invalid inputs are rejected before backend access"
     );
+}
+
+#[test]
+fn actual_pending_expiry_is_required_and_cannot_be_replaced_by_a_shell_lifetime() -> Result<()> {
+    let fixture = Fixture::new();
+    let view = fixture.view();
+    assert_eq!(view.expires_at, fixture.facts.intent.expires_at);
+    let original = crate::oauth::fresh_auth::FreshIntent::approval(&view, &human())?;
+    assert_eq!(original.deadline(), fixture.facts.intent.expires_at);
+    let bytes = serde_json::to_vec(&view)?;
+    let decoded: ApprovalView = crate::json::decode(&bytes)?;
+    assert_eq!(decoded.expires_at, fixture.facts.intent.expires_at);
+    let mut absent: serde_json::Value = crate::json::decode(&bytes)?;
+    absent.as_object_mut().unwrap().remove("expires_at");
+    assert!(crate::json::decode::<ApprovalView>(&serde_json::to_vec(&absent)?).is_err());
+    for deadline in [view.claim.quarantined_at, -1, i64::MAX] {
+        let mut changed = view.clone();
+        changed.expires_at = deadline;
+        assert!(changed.validate(&human()).is_err());
+    }
+    let mut changed = view.clone();
+    changed.expires_at -= 1;
+    changed.validate(&human())?;
+    assert_ne!(changed.digest()?, view.digest()?);
+    assert!(original != crate::oauth::fresh_auth::FreshIntent::approval(&changed, &human())?);
+    assert_eq!(fixture.state(), connect::ConnectState::AwaitingAccountApproval);
+    Ok(())
 }
 
 #[test]
@@ -1113,6 +1144,73 @@ fn mounted_management_authenticates_both_callers_and_lost_confirmation_is_not_re
     };
     assert_eq!(view.human, identity.email);
     assert_eq!(view.subject, identity.subject);
+    // The real authenticated receiver resolves this exact app-owned Pending.
+    // Response loss can reconcile the one allocation but cannot allocate a
+    // replacement owner, change purpose, or publish a different request.
+    let original = FreshIntent::management(&view, &identity)?;
+    let owner = Digest::new(b"one original native shell incarnation");
+    let claim = crate::oauth::fresh_owner::CallData::claim(&original, owner.clone())?;
+    let owner_body = |call: crate::oauth::fresh_owner::CallData| -> Result<Vec<u8>> {
+        Ok(serde_json::to_vec(&RequestBody::FreshOwner {
+            version: VERSION, human_assertion: human_assertion.clone(), call: Box::new(call),
+        })?)
+    };
+    let before_claim = snapshot()?;
+    let mut missing_workload = assertions.headers();
+    missing_workload.remove(iap::ASSERTION_HEADER);
+    assert_eq!(invoke(missing_workload, owner_body(claim.clone())?)?.0, StatusCode::FORBIDDEN);
+    assert_eq!(snapshot()?, before_claim);
+    let claim_bytes = owner_body(claim.clone())?;
+    let mut changed_purpose: serde_json::Value = crate::json::decode(&claim_bytes)?;
+    changed_purpose["call"]["purpose"] = serde_json::to_value(crate::oauth::fresh_owner::PurposeData::OAuthDisconnect)?;
+    let mut changed_original: serde_json::Value = crate::json::decode(&claim_bytes)?;
+    changed_original["call"]["original"] = json!(Digest::new(b"different original pending"));
+    let mut browser_database: serde_json::Value = crate::json::decode(&claim_bytes)?;
+    browser_database["call"]["database"] = json!("/tmp/selected-by-browser.sqlite");
+    let mut nested_database: serde_json::Value = crate::json::decode(&claim_bytes)?;
+    nested_database["call"]["operation"]["database"] = json!("/tmp/nested-ignored-field");
+    let mut array_claim: serde_json::Value = crate::json::decode(&claim_bytes)?;
+    array_claim["call"]["operation"] = json!(["claim"]);
+    let mut array_fields: serde_json::Value = crate::json::decode(&claim_bytes)?;
+    array_fields["call"]["operation"] = json!(["claim",{}]);
+    for tampered in [changed_purpose, changed_original, browser_database, nested_database, array_claim, array_fields] {
+        assert_eq!(invoke(assertions.headers(), serde_json::to_vec(&tampered)?)?.0, StatusCode::FORBIDDEN);
+        assert_eq!(snapshot()?, before_claim);
+        assert_eq!(crate::store::open(&database)?.query_row("SELECT count(*) FROM native_fresh_owners", [],
+            |row| row.get::<_, i64>(0))?, 0);
+    }
+    let (status, bytes) = invoke(assertions.headers(), claim_bytes.clone())?;
+    assert_eq!(status, StatusCode::OK);
+    let ResponseBody::FreshOwner { reply, app, version: VERSION } = crate::json::decode(&bytes)? else {
+        anyhow::bail!("native fresh allocation response changed");
+    };
+    assert_eq!(app, "workspace");
+    reply.require_call(&claim, &original)?;
+    assert!(matches!(reply.outcome, crate::oauth::fresh_owner::OutcomeData::Allocation {
+        state: crate::oauth::fresh_owner::AllocationData::Allocated,
+    }));
+    let committed_owner = snapshot()?;
+    drop(bytes); // Lost reply: retry exactly the same owner and original.
+    let (status, bytes) = invoke(assertions.headers(), claim_bytes)?;
+    assert_eq!(status, StatusCode::OK);
+    let ResponseBody::FreshOwner { reply, .. } = crate::json::decode(&bytes)? else {
+        anyhow::bail!("native fresh reconciliation response changed");
+    };
+    reply.require_call(&claim, &original)?;
+    assert!(matches!(reply.outcome, crate::oauth::fresh_owner::OutcomeData::Allocation {
+        state: crate::oauth::fresh_owner::AllocationData::ExistingOwner,
+    }));
+    assert_eq!(snapshot()?, committed_owner);
+    let replacement = crate::oauth::fresh_owner::CallData::claim(&original, Digest::new(b"restarted shell"))?;
+    let (status, bytes) = invoke(assertions.headers(), owner_body(replacement)?)?;
+    assert_eq!(status, StatusCode::OK);
+    let ResponseBody::FreshOwner { reply, .. } = crate::json::decode(&bytes)? else {
+        anyhow::bail!("native fresh second owner response changed");
+    };
+    assert!(matches!(reply.outcome, crate::oauth::fresh_owner::OutcomeData::Allocation {
+        state: crate::oauth::fresh_owner::AllocationData::OtherOwner,
+    }));
+    assert_eq!(snapshot()?, committed_owner);
     let pending = snapshot()?;
     port.at.store(102, Ordering::SeqCst);
     let proof = effects::scope(port.clone(), || -> Result<_> {
@@ -1589,4 +1687,704 @@ fn app_host_mounts_reserved_receiver_before_human_dispatch_and_drains_admission(
     let _ = shutdown_tx.send(());
     task.join().expect("app host fixture panicked")?;
     Ok(())
+}
+
+mod owned_google {
+    use super::*;
+    use crate::oauth::{
+        admission, clients,
+        fresh_auth::FreshIntent,
+        management::{Action, app::{Call, Manager, Reply as ManagementReply}},
+        security_shell::{FreshAuthenticator, ReauthCallback, ReauthStart},
+        shell_oidc::{GoogleFreshAuthenticator, ProviderInputSigner},
+        simulation,
+    };
+    use serde::{Deserialize, Serialize};
+    use crate::oauth::effects::Hooks as _;
+    use std::{collections::{BTreeSet, VecDeque}, io::Cursor, path::{Path, PathBuf}, sync::Weak};
+
+    const EMAIL: &str = "alice@example.com";
+    const GOOGLE_SUBJECT: &str = "accounts.google.com:alice";
+    const CLIENT_SECRET: &[u8] = b"owned-provider-input-only";
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    enum Case {
+        Advance, IssuerAlias, ContinueWithoutLogin, ExpiredManual, ChangedManualPending,
+        LostManualPublication, ManualInFlight, LostClaim, LostPublication, LostBaselinePublication,
+        BaselineInFlight, FreshInFlight, LostBaselineExchange, LostFreshExchange,
+        ChangedBaselinePending, ChangedFreshPending, ExpiredBaseline, ExpiredFresh,
+        EqualAuthentication, OlderAuthentication, AuthenticationAfterIssue,
+        MissingAuthentication, MissingBaselineAuthentication, WrongSubject, WrongClient, CrossPhase, CrossPhaseCode,
+    }
+
+    // Independent issuer-event policy: an old login is 99, the first token is
+    // issued at 101, a genuinely later login is 102, and the second token is
+    // issued at 103. This oracle reads no private host stage or transition.
+    impl Case {
+        fn fresh_authentication(self) -> Option<i64> {
+            match self {
+                Self::EqualAuthentication => Some(101),
+                Self::OlderAuthentication => Some(100),
+                Self::AuthenticationAfterIssue => Some(104),
+                Self::MissingAuthentication => None,
+                Self::ContinueWithoutLogin => Some(99),
+                _ => Some(102),
+            }
+        }
+
+        fn accepts_second_token(self) -> bool {
+            self.fresh_authentication().is_some_and(|auth| auth > 101 && auth <= 103)
+                && !matches!(self, Self::WrongSubject | Self::WrongClient | Self::CrossPhase | Self::CrossPhaseCode)
+        }
+    }
+
+    struct FixtureHost;
+    impl crate::host_inputs::Clock for FixtureHost {
+        fn wall_time(&self) -> Result<Duration> { Ok(Duration::from_secs(100)) }
+        fn monotonic(&self) -> Duration { Duration::ZERO }
+    }
+    impl crate::host::Host for FixtureHost {
+        fn entropy(&self, _: &str, _: &str) -> Result<[u8; 32]> { Ok([29; 32]) }
+        fn now_ms(&self) -> Result<i64> { Ok(100_000) }
+        fn worker_action(&self, _: crate::protocol::Phase, _: &crate::protocol::Request) -> Result<crate::host::WorkerAction> {
+            anyhow::bail!("owned Google fixture forbids workers")
+        }
+        fn record_exchange(&self, _: crate::protocol::Phase, _: &crate::protocol::Request, _: &Result<crate::protocol::Response>) -> Result<()> {
+            anyhow::bail!("owned Google fixture forbids worker exchange")
+        }
+        fn monotonic(&self) -> Duration { Duration::ZERO }
+    }
+
+    struct Setup {
+        directory: tempfile::TempDir,
+        instance: PathBuf,
+        artifact: crate::artifact::LoadedArtifact,
+        authority: Arc<admission::ArtifactApprovalAuthority>,
+        signer: Arc<admission::ArtifactShellSigner>,
+        assertions: Assertions,
+        human_assertion: String,
+        machine_assertion: String,
+        provider: Arc<ProviderInputSigner>,
+    }
+
+    impl Setup {
+        fn new() -> Result<Self> {
+            let directory = tempfile::tempdir()?;
+            let (runtime, authority, signer) = admission::tests::management_fixture(directory.path())?;
+            let assertions = Assertions::new();
+            let claims = json!({"iss":"https://cloud.google.com/iap","aud":SHELL_AUDIENCE,
+                "email":EMAIL,"sub":GOOGLE_SUBJECT,"hd":"example.com","iat":0,"exp":600});
+            let signed = format!("{}.{}", URL_SAFE_NO_PAD.encode(br#"{"kid":"fixture","alg":"ES256"}"#),
+                URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims)?));
+            let signature = assertions.pair.sign(&SystemRandom::new(), signed.as_bytes())
+                .map_err(|_| anyhow::anyhow!("owned IAP input signing failed"))?;
+            let human_assertion = format!("{signed}.{}", URL_SAFE_NO_PAD.encode(signature.as_ref()));
+            let machine_assertion = assertions.assertion(APP_AUDIENCE, MACHINE, "service-123");
+            Ok(Self { instance: runtime.instance_path().to_path_buf(), artifact: runtime.artifact().clone(),
+                directory, authority, signer, assertions, human_assertion, machine_assertion,
+                provider: Arc::new(ProviderInputSigner::new()?) })
+        }
+
+        fn runtime(&self, ordinal: usize) -> Result<crate::store::Runtime> {
+            let host = Arc::new(FixtureHost);
+            let runtime = crate::store::Runtime::from_artifact_for_tests(self.instance.clone(), "workspace".into(),
+                self.directory.path().join(format!("owner-{ordinal}.sqlite")), self.artifact.clone())?
+                .with_host(host.clone(), host);
+            runtime.initialize()?;
+            Ok(runtime)
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct SignedInput { claims: serde_json::Value, token: String }
+
+    struct Authorization { fields: BTreeMap<String, String> }
+
+    enum Reentry {
+        Callback { auth: Weak<GoogleFreshAuthenticator>, query: String, headers: HeaderMap },
+        Manual { auth: Weak<GoogleFreshAuthenticator>, handle: String, csrf: String, headers: HeaderMap },
+    }
+
+    struct Port {
+        world: Arc<simulation::World>,
+        receiver: Arc<AppApprovalReceiver>,
+        database: PathBuf,
+        machine: String,
+        iap_keys: String,
+        provider: Arc<ProviderInputSigner>,
+        case: Case,
+        authorizations: Mutex<BTreeMap<String, Authorization>>,
+        exchanged: Mutex<BTreeSet<String>>,
+        lose_reply: Mutex<Option<&'static str>>,
+        reentry: Mutex<Option<Reentry>>,
+        replay: Mutex<Option<VecDeque<SignedInput>>>,
+        inputs: Mutex<Vec<SignedInput>>,
+        entropy_inputs: Mutex<Vec<String>>,
+        trace: Mutex<Vec<serde_json::Value>>,
+        fills: AtomicUsize,
+        token_sends: AtomicUsize,
+        secret_sends: AtomicUsize,
+        external_authentication: AtomicI64,
+    }
+
+    fn identity() -> iap::Verified {
+        iap::Verified { email: EMAIL.into(), subject: GOOGLE_SUBJECT.into() }
+    }
+
+    impl Port {
+        fn response(status: u16, body: Vec<u8>) -> effects::Response {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+            effects::Response::Simulated { status: reqwest::StatusCode::from_u16(status).unwrap(),
+                headers, body: Cursor::new(body), peer: None }
+        }
+
+        fn observe(&self, label: &str) -> Result<()> {
+            let db = crate::store::open(&self.database)?;
+            let mut rows = db.prepare("SELECT json_array(original,attempt,purpose,human,subject,context,owner,created_at,expires_at,stage,request,request_digest,result_digest) FROM native_fresh_owners ORDER BY original")?;
+            let owners = rows.query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            self.trace.lock().unwrap().push(json!({"event":label,"wall":self.wall_time()?,
+                "fills":self.fills.load(Ordering::SeqCst),"tokens":self.token_sends.load(Ordering::SeqCst),
+                "entropy_inputs":self.entropy_inputs.lock().unwrap().clone(),
+                "owners":owners,"oauth":simulation::snapshot(&db)?}));
+            Ok(())
+        }
+
+        fn owner(&self) -> Result<(i64, String, Option<String>)> {
+            let db = crate::store::open(&self.database)?;
+            Ok(db.query_row("SELECT count(*),max(stage),max(request) FROM native_fresh_owners", [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?)
+        }
+
+        fn change_current_pending(&self, id: &str) -> Result<()> {
+            let db = crate::store::open(&self.database)?;
+            ensure!(db.execute("UPDATE oauth_management_intents SET view=json_set(view,'$.challenge',?2) WHERE id=?1 AND state='pending'",
+                rusqlite::params![id, Digest::new(b"changed actual app Pending").as_str()])? == 1,
+                "owned campaign current Pending absent");
+            Ok(())
+        }
+
+        fn capture(&self, phase: &str, location: &str, client: &str) -> Result<String> {
+            let url = Url::parse(location)?;
+            ensure!(url.origin().ascii_serialization() == "https://accounts.google.com"
+                && url.path() == "/o/oauth2/v2/auth" && url.fragment().is_none(), "owned authorization endpoint changed");
+            let mut fields = BTreeMap::new();
+            for (key, value) in url.query_pairs().into_owned() {
+                ensure!(fields.insert(key, value).is_none(), "owned authorization duplicate field");
+            }
+            ensure!(fields.len() == 12, "owned authorization field set changed");
+            for (key, value) in [("response_type","code"),("scope","openid email"),("client_id",client),
+                ("redirect_uri","https://security.example.com/_day2/reauth/callback"),
+                ("code_challenge_method","S256"),("max_age","0"),
+                ("claims",r#"{"id_token":{"auth_time":{"essential":true}}}"#),("hd","example.com"),("login_hint",EMAIL)] {
+                ensure!(fields.get(key).map(String::as_str) == Some(value), "owned authorization selected field changed");
+            }
+            for key in ["state","nonce","code_challenge"] {
+                ensure!(fields.get(key).is_some_and(|value| value.len() == 43), "owned phase tuple missing");
+            }
+            let code = format!("owned-{phase}-code");
+            let mut authorizations = self.authorizations.lock().unwrap();
+            if let Some(previous) = authorizations.get(&code) {
+                ensure!(previous.fields == fields, "owned phase regenerated");
+            } else {
+                for previous in authorizations.values() {
+                    for key in ["state","nonce","code_challenge"] {
+                        ensure!(previous.fields[key] != fields[key], "owned phase reused tuple");
+                    }
+                }
+                authorizations.insert(code.clone(), Authorization { fields: fields.clone() });
+            }
+            Ok(url::form_urlencoded::Serializer::new(String::new())
+                .append_pair("iss","https://accounts.google.com")
+                .append_pair("state", &fields["state"]).append_pair("code", &code).finish())
+        }
+
+        fn private_send(&self, request: reqwest::blocking::Request) -> Result<effects::Response> {
+            ensure!(request.method() == reqwest::Method::POST && request.url().path() == PATH
+                && request.url().query().is_none() && request.headers()[header::AUTHORIZATION] == "Bearer owned-edge-input",
+                "owned emulated IAP edge refused request");
+            let bytes = request.body().and_then(reqwest::blocking::Body::as_bytes).context("owned private body missing")?;
+            let value: serde_json::Value = crate::json::decode(bytes)?;
+            let operation = value["call"]["operation"]["operation"].as_str().unwrap_or("management");
+            // The test edge supplies its separately signed machine assertion.
+            // The actual receiver independently verifies it and the exact human
+            // assertion carried by RemoteApprovals, then executes real SQLite.
+            let mut headers = request.headers().clone();
+            headers.insert(iap::ASSERTION_HEADER, self.machine.parse()?);
+            let result = self.receiver.dispatch(&Method::POST, PATH, None, &headers, bytes, self.wall_time()?);
+            let reentry = {
+                let mut slot = self.reentry.lock().unwrap();
+                if matches!(&*slot, Some(Reentry::Manual { .. })) { slot.take() } else { None }
+            };
+            if let Some(Reentry::Manual { auth, handle, csrf, headers }) = reentry {
+                ensure!(auth.upgrade().context("in-flight manual owner missing")?
+                    .resume_manual(&handle, &csrf, &identity(), &headers, self.wall_time()?).is_err(),
+                    "manual POST was not fenced before app RPC");
+            }
+            self.trace.lock().unwrap().push(json!({"rpc":operation,"request":Digest::new(bytes),"committed":result.is_ok()}));
+            if result.is_ok() {
+                let mut loss = self.lose_reply.lock().unwrap();
+                if *loss == Some(operation) {
+                    *loss = None;
+                    anyhow::bail!("owned campaign reply lost AFTER app commit");
+                }
+            }
+            match result {
+                Ok(bytes) => Ok(Self::response(200, bytes)),
+                Err(_) => Ok(Self::response(403, Vec::new())),
+            }
+        }
+
+        fn token_send(&self, request: reqwest::blocking::Request) -> Result<effects::Response> {
+            ensure!(request.method() == reqwest::Method::POST && request.url().as_str() == "https://oauth2.googleapis.com/token",
+                "owned token endpoint changed");
+            self.token_sends.fetch_add(1, Ordering::SeqCst);
+            let bytes = request.body().and_then(reqwest::blocking::Body::as_bytes).context("owned token body missing")?;
+            let mut form = BTreeMap::new();
+            for (key, value) in url::form_urlencoded::parse(bytes).into_owned() {
+                ensure!(form.insert(key, value).is_none(), "owned token duplicate field");
+            }
+            let code = form.get("code").context("owned token code missing")?;
+            let authorizations = self.authorizations.lock().unwrap();
+            let authorization = authorizations.get(code).context("owned provider unknown code")?;
+            ensure!(form.len() == 6 && form["grant_type"] == "authorization_code"
+                && form["client_id"] == authorization.fields["client_id"]
+                && form["redirect_uri"] == authorization.fields["redirect_uri"]
+                && form["client_secret"].as_bytes() == CLIENT_SECRET
+                && URL_SAFE_NO_PAD.encode(ring::digest::digest(&ring::digest::SHA256, form["code_verifier"].as_bytes()).as_ref())
+                    == authorization.fields["code_challenge"], "owned provider PKCE/client binding refused");
+            let fresh = code == "owned-fresh-code";
+            let mut claims = json!({"iss":"https://accounts.google.com","aud":authorization.fields["client_id"],
+                "sub":"alice","email":EMAIL,"email_verified":true,"hd":"example.com","exp":500,
+                "iat":if fresh {103} else {101},
+                "auth_time":if fresh {self.external_authentication.load(Ordering::SeqCst)} else {99},"nonce":authorization.fields["nonce"]});
+            if !fresh && self.case == Case::MissingBaselineAuthentication {
+                claims.as_object_mut().unwrap().remove("auth_time");
+            }
+            if fresh {
+                match self.case.fresh_authentication() {
+                    Some(value) if matches!(self.case, Case::EqualAuthentication | Case::OlderAuthentication | Case::AuthenticationAfterIssue) => claims["auth_time"] = json!(value),
+                    Some(_) => {},
+                    None => { claims.as_object_mut().unwrap().remove("auth_time"); }
+                }
+                match self.case {
+                    Case::WrongSubject => claims["sub"] = json!("another-human"),
+                    Case::WrongClient => claims["aud"] = json!("different.apps.googleusercontent.com"),
+                    Case::CrossPhase => claims["nonce"] = json!(authorizations["owned-baseline-code"].fields["nonce"]),
+                    Case::IssuerAlias => claims["iss"] = json!("accounts.google.com"),
+                    _ => {}
+                }
+            }
+            drop(authorizations);
+            ensure!(self.exchanged.lock().unwrap().insert(code.clone()), "provider code already consumed");
+            self.trace.lock().unwrap().push(json!({"provider_exchange":code,"claims":claims}));
+            // Reenter while the actual provider dispatch is in progress. The
+            // same callback must already be fenced, before any second send.
+            let reentry = self.reentry.lock().unwrap().take();
+            if let Some(Reentry::Callback { auth, query, headers }) = reentry {
+                let auth = auth.upgrade().context("owned in-flight shell missing")?;
+                ensure!(auth.complete(&query, &identity(), &headers, self.wall_time()?).is_err(),
+                    "in-flight callback was dispatched twice");
+            }
+            if (!fresh && self.case == Case::LostBaselineExchange) || (fresh && self.case == Case::LostFreshExchange) {
+                anyhow::bail!("owned provider exchange response lost AFTER code consumption");
+            }
+            let input = match self.replay.lock().unwrap().as_mut() {
+                Some(replay) => {
+                    let input = replay.pop_front().context("owned signed input replay exhausted")?;
+                    ensure!(input.claims == claims, "owned replay signed claims changed");
+                    input
+                }
+                None => SignedInput { token: self.provider.sign(&claims)?, claims },
+            };
+            self.inputs.lock().unwrap().push(input.clone());
+            if !fresh && self.case == Case::LostBaselinePublication {
+                *self.lose_reply.lock().unwrap() = Some("publish");
+            }
+            Ok(Self::response(200, serde_json::to_vec(&json!({"id_token":input.token}))?))
+        }
+    }
+
+    impl effects::Hooks for Port {
+        fn domain(&self) -> u64 { effects::Hooks::domain(self.world.as_ref()) }
+        fn wall_time(&self) -> Result<i64> { effects::Hooks::wall_time(self.world.as_ref()) }
+        fn monotonic(&self) -> Duration { effects::Hooks::monotonic(self.world.as_ref()) }
+        fn fill(&self, bytes: &mut [u8]) -> Result<()> {
+            self.fills.fetch_add(1, Ordering::SeqCst);
+            effects::Hooks::fill(self.world.as_ref(), bytes)?;
+            self.entropy_inputs.lock().unwrap().push(URL_SAFE_NO_PAD.encode(bytes));
+            Ok(())
+        }
+        fn send(&self, request: reqwest::blocking::Request) -> Result<effects::Response> {
+            match request.url().host_str() {
+                Some("app.example.com") => self.private_send(request),
+                Some("www.gstatic.com") if request.url().as_str() == iap::KEYS_URL
+                    && request.method() == reqwest::Method::GET => Ok(Self::response(200, self.iap_keys.as_bytes().to_vec())),
+                Some("www.googleapis.com") if request.url().path() == "/oauth2/v3/certs" =>
+                    Ok(Self::response(200, self.provider.jwks().as_bytes().to_vec())),
+                Some("secretmanager.googleapis.com") => {
+                    ensure!(request.method() == reqwest::Method::GET
+                        && request.url().path() == "/v1/projects/12345/secrets/google_reauth/versions/3:access",
+                        "owned secret selected version changed");
+                    self.secret_sends.fetch_add(1, Ordering::SeqCst);
+                    let name = request.url().path().strip_prefix("/v1/").unwrap().strip_suffix(":access").unwrap();
+                    Ok(Self::response(200, serde_json::to_vec(&json!({"name":name,"payload":{
+                        "data":base64::engine::general_purpose::STANDARD.encode(CLIENT_SECRET),
+                        "dataCrc32c":crc32c::crc32c(CLIENT_SECRET).to_string()}}))?))
+                }
+                Some("oauth2.googleapis.com") => self.token_send(request),
+                _ => anyhow::bail!("owned Google campaign forbids unscripted HTTP"),
+            }
+        }
+    }
+
+    struct EdgeBearer;
+    impl PrivateBearerSource for EdgeBearer {
+        fn bearer(&self, app: &str, receiver: &Url) -> Result<String> {
+            ensure!(app == "workspace" && receiver.as_str() == "https://app.example.com/_day2/oauth/approval",
+                "owned app receiver selection changed");
+            Ok("owned-edge-input".into())
+        }
+    }
+
+    #[derive(Debug, PartialEq, Serialize)]
+    struct Transcript { events: Vec<serde_json::Value>, inputs: Vec<SignedInput> }
+
+    fn redirect(start: ReauthStart) -> Result<String> {
+        match start {
+            ReauthStart::Redirect(location) => Ok(location),
+            _ => anyhow::bail!("owned Google Begin bypassed provider"),
+        }
+    }
+
+    fn run(setup: &Setup, ordinal: usize, seed: u64, case: Case, replay: Option<Vec<SignedInput>>) -> Result<Transcript> {
+        let instance = Instance::load(&setup.instance)?;
+        let runtime = setup.runtime(ordinal)?;
+        let database = runtime.db().to_path_buf();
+        let manager = Arc::new(Manager::new(runtime, setup.authority.clone()));
+        let mut receiver = setup.assertions.receiver(Arc::new(RegistrationOnly));
+        receiver.authority = "app.example.com".into();
+        receiver.route = route_prefix(&instance.installation, &instance.environment, "workspace")?;
+        let receiver = Arc::new(receiver).with_management(manager)?;
+        let world = simulation::World::new(seed);
+        world.advance(95);
+        let port = Arc::new(Port { world, receiver, database, machine: setup.machine_assertion.clone(),
+            iap_keys: setup.assertions.keys.clone(), provider: setup.provider.clone(), case,
+            authorizations: Mutex::new(BTreeMap::new()), exchanged: Mutex::new(BTreeSet::new()),
+            lose_reply: Mutex::new(None), reentry: Mutex::new(None), replay: Mutex::new(replay.map(VecDeque::from)),
+            inputs: Mutex::new(Vec::new()), entropy_inputs: Mutex::new(Vec::new()), trace: Mutex::new(Vec::new()), fills: AtomicUsize::new(0),
+            token_sends: AtomicUsize::new(0), secret_sends: AtomicUsize::new(0), external_authentication: AtomicI64::new(99) });
+        let owners = Arc::new(RemoteApprovals::from_instance(&instance, Arc::new(EdgeBearer))?);
+        let authenticator = || -> Result<Arc<GoogleFreshAuthenticator>> {
+            let (client, exchange) = clients::reauthentication(&instance,
+                Arc::new(crate::oauth::registration::tests::TokensSource(AtomicUsize::new(0))))?;
+            Ok(Arc::new(GoogleFreshAuthenticator::new(SHELL_AUDIENCE, "example.com", "https://security.example.com/",
+                client, exchange, owners.clone())?))
+        };
+        let auth = authenticator()?;
+        let mut headers = HeaderMap::new();
+        headers.insert(iap::ASSERTION_HEADER, setup.human_assertion.parse()?);
+        headers.insert(header::HOST, HeaderValue::from_static("security.example.com"));
+        let result = effects::scope(port.clone(), || -> Result<()> {
+            let human = auth.identify(&headers, 100)?;
+            ensure!(human.email == EMAIL && human.subject == GOOGLE_SUBJECT, "owned current IAP identity changed");
+            let ManagementReply::Pending { view } = owners.management("workspace", Call::Capture {
+                registration: "calendar".into(), operation: Action::Connect,
+            }, &headers)? else { anyhow::bail!("owned actual app Pending missing"); };
+            let intent = FreshIntent::management(&view, &human)?;
+            ensure!(intent.app() == "workspace" && intent.deadline() == 400, "owned app or original expiry changed");
+            let before = port.fills.load(Ordering::SeqCst);
+            *port.lose_reply.lock().unwrap() = match case { Case::LostClaim => Some("claim"), Case::LostPublication => Some("publish"), _ => None };
+            let first = auth.begin(&human, intent.clone(), &headers, 100);
+            let baseline_url = if matches!(case, Case::LostClaim | Case::LostPublication) {
+                ensure!(first.is_err(), "lost app reply was treated as observed success");
+                let allocated = port.fills.load(Ordering::SeqCst) - before;
+                ensure!(allocated == if case == Case::LostClaim {1} else {7}, "Google tuples allocated before Claim or regenerated");
+                port.observe("lost_app_reply")?;
+                redirect(auth.begin(&human, intent.clone(), &headers, 100)?)?
+            } else { redirect(first?)? };
+            ensure!(port.fills.load(Ordering::SeqCst) - before == 7, "one owner plus two tuples must allocate exactly once");
+            let publication = port.owner()?;
+            ensure!(publication.0 == 1 && publication.1 == "offered" && publication.2.is_some(), "URL preceded committed bundle");
+            let public: serde_json::Value = crate::json::decode(publication.2.as_ref().unwrap().as_bytes())?;
+            ensure!(public.as_object().is_some_and(|fields| fields.len() == 3
+                && fields.keys().all(|key| matches!(key.as_str(), "original" | "profile" | "bundle"))),
+                "app publication exposed a private tuple or token");
+            ensure!(redirect(auth.begin(&human, intent.clone(), &headers, 100)?)? == baseline_url,
+                "same shell replaced original baseline URL");
+            ensure!(port.fills.load(Ordering::SeqCst) - before == 7 && port.owner()? == publication,
+                "reopening replaced app publication or native bundle");
+            // A process restart/other shell may name an owner, but cannot adopt
+            // the committed row or allocate a replacement Google tuple pair.
+            let other = authenticator()?;
+            let fills = port.fills.load(Ordering::SeqCst);
+            ensure!(other.begin(&human, intent.clone(), &headers, 100).is_err(), "other shell adopted original");
+            ensure!(port.fills.load(Ordering::SeqCst) == fills + 1 && port.owner()? == publication,
+                "other shell allocated Google tuple or changed publication");
+            ensure!(other.begin(&human, intent.clone(), &headers, 100).is_err()
+                && port.fills.load(Ordering::SeqCst) == fills + 1, "refused other shell renewed allocation");
+            port.observe("baseline_offered")?;
+            let client = &instance.oauth_clients.as_ref().unwrap().reauthentication.client_id;
+            let baseline_query = port.capture("baseline", &baseline_url, client)?;
+            port.world.advance(1);
+            if case == Case::ChangedBaselinePending { port.change_current_pending(&view.id)?; }
+            if case == Case::ExpiredBaseline { port.world.advance(299); }
+            if case == Case::BaselineInFlight {
+                *port.reentry.lock().unwrap() = Some(Reentry::Callback { auth: Arc::downgrade(&auth), query: baseline_query.clone(), headers: headers.clone() });
+            }
+            let first_callback = auth.complete(&baseline_query, &human, &headers, port.wall_time()?);
+            if matches!(case, Case::ChangedBaselinePending | Case::ExpiredBaseline | Case::LostBaselineExchange | Case::MissingBaselineAuthentication) {
+                ensure!(first_callback.is_err(), "refused baseline advanced");
+                let expected = usize::from(matches!(case, Case::LostBaselineExchange | Case::MissingBaselineAuthentication));
+                ensure!(port.token_sends.load(Ordering::SeqCst) == expected && port.secret_sends.load(Ordering::SeqCst) == expected,
+                    "baseline dispatched before current Pending/expiry check");
+                ensure!(auth.complete(&baseline_query, &human, &headers, port.wall_time()?).is_err()
+                    && auth.begin(&human, intent.clone(), &headers, port.wall_time()?).is_err(), "refused baseline was renewed");
+                port.observe("baseline_refused")?;
+                return Ok(());
+            }
+            let manual_path = if case == Case::LostBaselinePublication {
+                ensure!(first_callback.is_err(), "lost manual publication acknowledged");
+                ensure!(port.token_sends.load(Ordering::SeqCst) == 1, "baseline unexpectedly retried");
+                redirect(auth.begin(&human, intent.clone(), &headers, 101)?)?
+            } else {
+                match first_callback? { ReauthCallback::Manual(location) => location,
+                    _ => anyhow::bail!("baseline bypassed manual checkpoint") }
+            };
+            let handle = manual_path.strip_prefix(crate::oauth::shell_oidc::MANUAL_PREFIX)
+                .context("baseline exposed Google URL before manual resume")?;
+            ensure!(auth.complete(&baseline_query, &human, &headers, 101).is_err(), "baseline code replayed");
+            ensure!(redirect(auth.begin(&human, intent.clone(), &headers, 101)?)? == manual_path
+                && port.owner()? == publication && port.fills.load(Ordering::SeqCst) == fills + 1,
+                "manual checkpoint regenerated original baseline or bundle");
+            let ui = crate::oauth::security_shell::SecurityShell::with_transport(
+                "https://security.example.com/".into(), owners.clone(), setup.signer.clone(), auth.clone())?;
+            let prompt = auth.manual_view(handle, &human, &headers, 101)?;
+            ensure!(prompt.location == manual_path && prompt.human == EMAIL && prompt.deadline == 400,
+                "manual checkpoint changed original human/deadline");
+            ensure!(other.manual_view(handle, &human, &headers, 101).is_err()
+                && other.resume_manual(handle, &prompt.csrf, &human, &headers, 101).is_err(),
+                "different cache owner adopted manual bundle");
+            // Adversarial callback with the correct not-yet-offered fresh state
+            // learned from the controlled entropy INPUT port. This is not a
+            // native cache getter or a proof; it models a leaked browser value.
+            let premature_state = port.entropy_inputs.lock().unwrap()[before + 4].clone();
+            let premature_query = url::form_urlencoded::Serializer::new(String::new())
+                .append_pair("iss","https://accounts.google.com").append_pair("state", &premature_state)
+                .append_pair("code","premature-fresh-code").finish();
+            ensure!(auth.complete(&premature_query, &human, &headers, 101).is_err()
+                && port.token_sends.load(Ordering::SeqCst) == 1 && port.secret_sends.load(Ordering::SeqCst) == 1,
+                "fresh callback was enabled before explicit manual POST");
+            let page = ui.dispatch(&Method::GET, &manual_path, None, &headers, &[], 101)?;
+            ensure!(page.status() == StatusCode::OK && !page.headers().contains_key(header::SET_COOKIE),
+                "manual presentation minted a session");
+            let executor = tokio::runtime::Builder::new_current_thread().build()?;
+            let page = executor.block_on(to_bytes(page.into_body(), 16 * 1024))?;
+            let page = std::str::from_utf8(&page)?;
+            ensure!(page.contains("Complete a fresh Google sign-in") && page.contains(EMAIL)
+                && page.contains(&prompt.csrf) && page.contains(&manual_path)
+                && !page.contains("o/oauth2/v2/auth"), "manual page missing bound form or exposing fresh URL");
+            let csrf = prompt.csrf;
+            let mut post = headers.clone();
+            post.insert(header::ORIGIN, HeaderValue::from_static("https://security.example.com"));
+            post.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/x-www-form-urlencoded"));
+            post.insert("sec-fetch-site", HeaderValue::from_static("same-origin"));
+            let body = url::form_urlencoded::Serializer::new(String::new()).append_pair("csrf", &csrf).finish();
+            let before_negative = simulation::snapshot(&crate::store::open(&port.database)?)?;
+            for invalid in [String::new(), "csrf=wrong".into(), format!("csrf={}", "A".repeat(43)),
+                format!("csrf={handle}"), format!("{body}&extra=ignored"), format!("{body}&{body}")] {
+                ensure!(ui.dispatch(&Method::POST, &manual_path, None, &post, invalid.as_bytes(), 101).is_err(),
+                    "manual form accepted missing/unknown/duplicate/wrong CSRF");
+            }
+            for header_name in [header::ORIGIN, header::CONTENT_TYPE] {
+                let mut wrong = post.clone();
+                wrong.remove(&header_name);
+                ensure!(ui.dispatch(&Method::POST, &manual_path, None, &wrong, body.as_bytes(), 101).is_err(),
+                    "manual form accepted missing origin/type");
+                wrong.insert(header_name.clone(), HeaderValue::from_static("https://foreign.example"));
+                ensure!(ui.dispatch(&Method::POST, &manual_path, None, &wrong, body.as_bytes(), 101).is_err(),
+                    "manual form accepted foreign origin/type");
+                let mut duplicate = post.clone();
+                duplicate.append(header_name.clone(), post[&header_name].clone());
+                ensure!(ui.dispatch(&Method::POST, &manual_path, None, &duplicate, body.as_bytes(), 101).is_err(),
+                    "manual form accepted duplicate origin/type");
+            }
+            let mut cross_site = post.clone();
+            cross_site.insert("sec-fetch-site", HeaderValue::from_static("cross-site"));
+            ensure!(ui.dispatch(&Method::POST, &manual_path, None, &cross_site, body.as_bytes(), 101).is_err()
+                && ui.dispatch(&Method::PUT, &manual_path, None, &post, body.as_bytes(), 101).is_err()
+                && ui.dispatch(&Method::GET, &manual_path, Some("extra=1"), &headers, &[], 101).is_err()
+                && ui.dispatch(&Method::GET, &manual_path, None, &headers, b"body", 101).is_err(),
+                "manual route accepted cross-site/method/query/body input");
+            let mut foreign = human.clone();
+            foreign.subject = "accounts.google.com:another".into();
+            ensure!(auth.manual_view(handle, &foreign, &headers, 101).is_err()
+                && auth.resume_manual(handle, &csrf, &foreign, &post, 101).is_err(), "manual checkpoint changed current subject");
+            ensure!(port.token_sends.load(Ordering::SeqCst) == 1 && port.secret_sends.load(Ordering::SeqCst) == 1
+                && port.fills.load(Ordering::SeqCst) == fills + 1 && port.owner()? == publication
+                && simulation::snapshot(&crate::store::open(&port.database)?)? == before_negative,
+                "invalid manual request dispatched a provider, replaced a bundle or changed SQLite");
+            ensure!(auth.manual_view(handle, &human, &headers, 101)?.csrf == csrf,
+                "wrong CSRF consumed or replaced original manual authority");
+            port.observe("manual_checkpoint")?;
+            if matches!(case, Case::ExpiredManual | Case::ChangedManualPending) {
+                if case == Case::ExpiredManual { port.world.advance(299); }
+                else { port.change_current_pending(&view.id)?; }
+                ensure!(auth.manual_view(handle, &human, &headers, port.wall_time()?).is_err()
+                    && ui.dispatch(&Method::POST, &manual_path, None, &post, body.as_bytes(), port.wall_time()?).is_err()
+                    && port.token_sends.load(Ordering::SeqCst) == 1
+                    && port.secret_sends.load(Ordering::SeqCst) == 1 && port.owner()? == publication,
+                    "manual checkpoint ignored actual current Pending/expiry");
+                port.observe("manual_refused")?;
+                return Ok(());
+            }
+            // Independent provider EVENT, separate from the user's Continue.
+            // The server and POST never change this fixture issuer timeline.
+            port.world.advance(2);
+            if case != Case::ContinueWithoutLogin {
+                port.external_authentication.store(102, Ordering::SeqCst);
+                port.trace.lock().unwrap().push(json!({"external_google_authentication":102}));
+            }
+            if case == Case::LostManualPublication { *port.lose_reply.lock().unwrap() = Some("publish"); }
+            if case == Case::ManualInFlight {
+                *port.reentry.lock().unwrap() = Some(Reentry::Manual { auth: Arc::downgrade(&auth),
+                    handle: handle.into(), csrf: csrf.clone(), headers: post.clone() });
+            }
+            let first_resume = ui.dispatch(&Method::POST, &manual_path, None, &post, body.as_bytes(), 103);
+            let resume = if case == Case::LostManualPublication {
+                ensure!(first_resume.is_err(), "lost manual publication reply treated as acknowledged");
+                ensure!(auth.complete(&premature_query, &human, &headers, 103).is_err()
+                    && port.token_sends.load(Ordering::SeqCst) == 1,
+                    "unknown manual publication enabled the fresh callback");
+                ui.dispatch(&Method::POST, &manual_path, None, &post, body.as_bytes(), 103)?
+            } else { first_resume? };
+            ensure!(case != Case::ManualInFlight || port.reentry.lock().unwrap().is_none(),
+                "manual in-flight callback control was not exercised");
+            ensure!(resume.status() == StatusCode::SEE_OTHER && !resume.headers().contains_key(header::SET_COOKIE),
+                "manual resume minted a session");
+            let fresh_url = resume.headers()[header::LOCATION].to_str()?.to_owned();
+            drop(resume); // Lost 303 reconciliation must retain exactly this URL.
+            let repeated = ui.dispatch(&Method::POST, &manual_path, None, &post, body.as_bytes(), 103)?;
+            ensure!(repeated.headers()[header::LOCATION].to_str()? == fresh_url
+                && redirect(auth.begin(&human, intent.clone(), &headers, 103)?)? == manual_path
+                && port.owner()? == publication && port.fills.load(Ordering::SeqCst) == fills + 1
+                && port.token_sends.load(Ordering::SeqCst) == 1, "manual POST/reopen renewed original or auto-exchanged code");
+            port.observe("fresh_offered_after_explicit_continue")?;
+            let fresh_query = port.capture("fresh", &fresh_url, client)?;
+            if case == Case::ChangedFreshPending { port.change_current_pending(&view.id)?; }
+            if case == Case::ExpiredFresh { port.world.advance(297); }
+            if case == Case::FreshInFlight {
+                *port.reentry.lock().unwrap() = Some(Reentry::Callback { auth: Arc::downgrade(&auth), query: fresh_query.clone(), headers: headers.clone() });
+            }
+            let submitted = if case == Case::CrossPhaseCode {
+                let mut query = url::form_urlencoded::Serializer::new(String::new());
+                for (name, value) in url::form_urlencoded::parse(fresh_query.as_bytes()) {
+                    query.append_pair(&name, if name == "code" { "owned-baseline-code" } else { value.as_ref() });
+                }
+                query.finish()
+            } else { fresh_query.clone() };
+            let second_callback = auth.complete(&submitted, &human, &headers, port.wall_time()?);
+            if matches!(case, Case::ChangedFreshPending | Case::ExpiredFresh) {
+                ensure!(second_callback.is_err() && port.token_sends.load(Ordering::SeqCst) == 1
+                    && port.secret_sends.load(Ordering::SeqCst) == 1, "fresh exchange preceded current Pending/expiry check");
+            } else if case == Case::LostFreshExchange || !case.accepts_second_token() {
+                ensure!(second_callback.is_err() && port.token_sends.load(Ordering::SeqCst) == 2,
+                    "issuer-event policy or dispatch ambiguity accepted");
+            } else {
+                let ReauthCallback::Observed(observed) = second_callback? else { anyhow::bail!("second callback did not finish observations"); };
+                let (baseline_iat, authenticated_at, original, _, request) = observed.owned_ordering_data()
+                    .context("actual two-token ordering absent")?;
+                ensure!(baseline_iat == 101 && authenticated_at == 102 && original == intent.commitment()?
+                    && request == Digest::new(publication.2.as_ref().unwrap().as_bytes()) && observed.deadline()? == 400,
+                    "original Google bundle or lifetime changed");
+                ensure!(observed.require_post_pending_authentication().is_err(),
+                    "DATA ordering bypassed missing lifetime/role/epoch/final-CAS producer");
+                let snapshot = simulation::snapshot(&crate::store::open(&port.database)?)?;
+                let fills = port.fills.load(Ordering::SeqCst);
+                let management = crate::oauth::management::shell::Shell::new(
+                    "https://security.example.com".into(), owners.clone(), setup.signer.clone(), auth.clone());
+                let error = management.reauthenticated(crate::oauth::fresh_auth::VerifiedAuthTime::from_google(observed),
+                    &headers, &human, port.wall_time()?).err().context("ordered DATA allocated a management cookie")?;
+                ensure!(error.root_cause().to_string() == "OAuth post-pending authentication producer unavailable"
+                    && port.fills.load(Ordering::SeqCst) == fills
+                    && simulation::snapshot(&crate::store::open(&port.database)?)? == snapshot
+                    && port.owner()? == publication, "management refusal changed cookie entropy or app SQLite");
+                port.trace.lock().unwrap().push(json!({"event":"ordered_observation_only","baseline_iat":baseline_iat,
+                    "authenticated_at":authenticated_at,"original":original,"publication":request}));
+            }
+            let sends = port.token_sends.load(Ordering::SeqCst);
+            ensure!(auth.complete(&fresh_query, &human, &headers, port.wall_time()?).is_err()
+                && auth.complete(&baseline_query, &human, &headers, port.wall_time()?).is_err()
+                && auth.begin(&human, intent, &headers, port.wall_time()?).is_err()
+                && auth.manual_view(handle, &human, &headers, port.wall_time()?).is_err()
+                && ui.dispatch(&Method::POST, &manual_path, None, &post, body.as_bytes(), port.wall_time()?).is_err()
+                && port.token_sends.load(Ordering::SeqCst) == sends, "terminal callback/manual route reopened or replayed");
+            ensure!(port.owner()? == publication, "observation fabricated app completion");
+            port.observe("terminal")?;
+            Ok(())
+        });
+        if let Err(error) = result {
+            let trace = port.trace.lock().unwrap().clone();
+            let inputs = port.inputs.lock().unwrap().clone();
+            retain(setup, seed, case, &trace, &inputs, Some(error.to_string()))?;
+            return Err(error.context(format!("owned Google campaign {case:?}, seed {seed}")));
+        }
+        ensure!(port.replay.lock().unwrap().as_ref().is_none_or(VecDeque::is_empty), "owned signed replay inputs unused");
+        let events = port.trace.lock().unwrap().clone();
+        let inputs = port.inputs.lock().unwrap().clone();
+        Ok(Transcript { events, inputs })
+    }
+
+    fn retain(setup: &Setup, seed: u64, case: Case, trace: &[serde_json::Value], inputs: &[SignedInput], error: Option<String>) -> Result<()> {
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../artifacts/oauth-owned-google");
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&root)?;
+        let directory = tempfile::Builder::new().prefix("campaign-").tempdir_in(&root)?;
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))?;
+        let record = json!({"version":1,"seed":seed,"case":case,"error":error,"trace":trace,
+            "signed_provider_inputs":inputs,"artifact":setup.artifact.id(),
+            "instance":Digest::new(&std::fs::read(&setup.instance)?),
+            "source":Digest::of(&(include_str!("shell_oidc.rs"),include_str!("google_begin.rs"),
+                include_str!("fresh_owner.rs"),include_str!("shell_transport.rs"),include_str!("shell_transport_tests.rs"),
+                include_str!("simulation_sources.rs"),include_str!("../../../../Cargo.lock")))?,
+            "iap_inputs":{"keys":setup.assertions.keys,"human":setup.human_assertion,"machine":setup.machine_assertion},
+            "scope":"synthetic provider inputs, actual receiver/verifiers/SQLite; no native or hosted readiness"});
+        let path = directory.path().join("replay.json");
+        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)?;
+        file.write_all(&serde_json::to_vec(&record)?)?;
+        file.sync_all()?;
+        let _retained = directory.keep();
+        Ok(())
+    }
+
+    #[test]
+    fn owned_google_two_phase_receiver_sqlite_faults_and_signed_input_replay() -> Result<()> {
+        let setup = Setup::new()?;
+        let mut ordinal = 0;
+        for seed in [7, 41] {
+            for case in [Case::Advance, Case::IssuerAlias, Case::ContinueWithoutLogin, Case::ExpiredManual, Case::ChangedManualPending,
+                Case::LostManualPublication, Case::ManualInFlight, Case::LostClaim, Case::LostPublication, Case::LostBaselinePublication,
+                Case::BaselineInFlight, Case::FreshInFlight, Case::LostBaselineExchange, Case::LostFreshExchange,
+                Case::ChangedBaselinePending, Case::ChangedFreshPending, Case::ExpiredBaseline, Case::ExpiredFresh,
+                Case::EqualAuthentication, Case::OlderAuthentication, Case::AuthenticationAfterIssue,
+                Case::MissingAuthentication, Case::MissingBaselineAuthentication, Case::WrongSubject, Case::WrongClient, Case::CrossPhase, Case::CrossPhaseCode] {
+                let first = run(&setup, ordinal, seed, case, None)?;
+                ordinal += 1;
+                // A fresh SQLite database and process-local cache consume the
+                // exact signed inputs, not regenerated signing randomness.
+                let replay = run(&setup, ordinal, seed, case, Some(first.inputs.clone()))?;
+                ordinal += 1;
+                if first != replay {
+                    retain(&setup, seed, case, &first.events, &first.inputs, Some("semantic replay divergence".into()))?;
+                    retain(&setup, seed, case, &replay.events, &replay.inputs, Some("replay observation".into()))?;
+                    anyhow::bail!("owned Google replay diverged for {case:?}, seed {seed}");
+                }
+                retain(&setup, seed, case, &first.events, &first.inputs, None)?;
+            }
+        }
+        Ok(())
+    }
 }

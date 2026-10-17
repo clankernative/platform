@@ -3867,11 +3867,11 @@ pub(super) mod tests {
             clock.advance(4);
             let verified = authenticator.identify(&headers, 104)?;
             let actual =
-                VerifiedAuthTime::from_google(authenticator.complete(&callback, &verified, 104)?);
+                VerifiedAuthTime::from_google(authenticator.complete_parser(&callback, &verified, 104)?);
             actual.require_intent(&intent, &identity)?;
             actual.require_current(104)?;
             assert_eq!(actual.authenticated_at(), 103);
-            assert!(authenticator.complete(&callback, &verified, 104).is_err());
+            assert!(authenticator.complete_parser(&callback, &verified, 104).is_err());
             // This proof came through signature/nonce/identity verification;
             // never substitute the isolated fixture marker for the refusal.
             let keys = Arc::new(Keys::default());
@@ -4269,6 +4269,7 @@ pub(super) mod tests {
                 terms: Digest::of(&"app-owned current readiness terms")?,
                 shell_origin: "https://security.example.com/".into(),
                 app_origin: "https://app.example.com/".into(),
+                expires_at: 304,
                 claim: super::super::external::ApprovalClaim {
                     attempt: super::super::shell_transport::scoped_attempt(
                         "company",
@@ -4309,7 +4310,7 @@ pub(super) mod tests {
             let (authenticator, headers, callback) =
                 super::super::shell_oidc::fixture_login(&identity, intent, 5, 5, 5)?;
             let identity = authenticator.identify(&headers, 5)?;
-            let google = authenticator.complete(&callback, &identity, 5)?;
+            let google = authenticator.complete_parser(&callback, &identity, 5)?;
             google.require_current(5)?;
             assert_eq!(google.authenticated_at(), 5);
             let rejected = super::super::security_shell::ShellSession::approval_signed_fixture(
@@ -4340,7 +4341,7 @@ pub(super) mod tests {
             let (authenticator, headers, callback) =
                 super::super::shell_oidc::fixture_login(&identity, intent, 5, 5, 5)?;
             let identity = authenticator.identify(&headers, 5)?;
-            let future_clock = authenticator.complete(&callback, &identity, 5)?;
+            let future_clock = authenticator.complete_parser(&callback, &identity, 5)?;
             // A refused original lifetime is terminal. Keep this negative control's
             // proof separate from the retirement and post-key-load controls below.
             let future_entry = super::super::security_shell::ShellSession::approval_fixture(
