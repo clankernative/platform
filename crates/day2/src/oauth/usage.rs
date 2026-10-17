@@ -809,7 +809,10 @@ mod tests {
 
     struct Clock;
     impl super::super::effects::Hooks for Clock {
-        fn provider_observation(&self, _: crate::oauth::shell_oidc::ProviderObservationData) -> Result<()> {
+        fn provider_observation(
+            &self,
+            _: crate::oauth::shell_oidc::ProviderObservationData,
+        ) -> Result<()> {
             anyhow::bail!("unscripted provider observation")
         }
 
@@ -1143,7 +1146,10 @@ mod tests {
     }
 
     impl super::super::effects::Hooks for ProductPort {
-        fn provider_observation(&self, _: crate::oauth::shell_oidc::ProviderObservationData) -> Result<()> {
+        fn provider_observation(
+            &self,
+            _: crate::oauth::shell_oidc::ProviderObservationData,
+        ) -> Result<()> {
             anyhow::bail!("unscripted provider observation")
         }
 

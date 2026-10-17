@@ -1018,7 +1018,10 @@ fn mounted_management_authenticates_both_callers_and_lost_confirmation_is_not_re
         sends: AtomicUsize,
     }
     impl effects::Hooks for Port {
-        fn provider_observation(&self, _: crate::oauth::shell_oidc::ProviderObservationData) -> Result<()> {
+        fn provider_observation(
+            &self,
+            _: crate::oauth::shell_oidc::ProviderObservationData,
+        ) -> Result<()> {
             anyhow::bail!("unscripted provider observation")
         }
 
@@ -1969,7 +1972,12 @@ mod owned_google {
     }
 
     #[derive(Clone, Copy)]
-    enum SinkOutcome { Complete, PartialUnknown, CompleteThenError, Unavailable }
+    enum SinkOutcome {
+        Complete,
+        PartialUnknown,
+        CompleteThenError,
+        Unavailable,
+    }
 
     struct ObservationSink {
         outcome: SinkOutcome,
@@ -1983,20 +1991,29 @@ mod owned_google {
 
     impl ObservationSink {
         fn write(&self, data: crate::oauth::shell_oidc::ProviderObservationData) -> Result<()> {
-            self.attempts.lock().unwrap().push(serde_json::to_value(&data)?);
+            self.attempts
+                .lock()
+                .unwrap()
+                .push(serde_json::to_value(&data)?);
             let mut line = serde_json::to_vec(&data)?;
             line.push(b'\n');
             self.entered.notify_one();
             if self.pause {
                 let mut released = self.released.lock().unwrap();
                 while !*released {
-                    let (next, timeout) = self.release.wait_timeout(released, Duration::from_secs(10)).unwrap();
+                    let (next, timeout) = self
+                        .release
+                        .wait_timeout(released, Duration::from_secs(10))
+                        .unwrap();
                     ensure!(!timeout.timed_out(), "observation fixture release deadline");
                     released = next;
                 }
             }
             match self.outcome {
-                SinkOutcome::Complete => { *self.delivered.lock().unwrap() = line; Ok(()) }
+                SinkOutcome::Complete => {
+                    *self.delivered.lock().unwrap() = line;
+                    Ok(())
+                }
                 SinkOutcome::PartialUnknown => {
                     *self.delivered.lock().unwrap() = line[..17].to_vec();
                     anyhow::bail!("scripted partial or unknown observation delivery")
@@ -2028,9 +2045,11 @@ mod owned_google {
     impl Port {
         fn require_observation_context(&self) -> Result<()> {
             if let Some(expected) = self.expected_credential_wall {
-                ensure!(crate::managed_credentials::effects::wall_time()? == expected
-                    && effects::wall_time()? == self.wall_time()?,
-                    "mounted request lost or replaced an effect track");
+                ensure!(
+                    crate::managed_credentials::effects::wall_time()? == expected
+                        && effects::wall_time()? == self.wall_time()?,
+                    "mounted request lost or replaced an effect track"
+                );
             }
             Ok(())
         }
@@ -2346,9 +2365,15 @@ mod owned_google {
     }
 
     impl effects::Hooks for Port {
-        fn provider_observation(&self, data: crate::oauth::shell_oidc::ProviderObservationData) -> Result<()> {
+        fn provider_observation(
+            &self,
+            data: crate::oauth::shell_oidc::ProviderObservationData,
+        ) -> Result<()> {
             self.require_observation_context()?;
-            self.observation_sink.as_ref().context("unscripted provider observation")?.write(data)
+            self.observation_sink
+                .as_ref()
+                .context("unscripted provider observation")?
+                .write(data)
         }
 
         fn domain(&self) -> u64 {
@@ -2435,25 +2460,59 @@ mod owned_google {
         }
     }
 
-    fn independently_reconstructed_profile(instance: &Instance, sources: &[Digest; 4]) -> Result<Digest> {
-        let client = &instance.oauth_clients.as_ref().context("test client missing")?.reauthentication;
-        let selected = &instance.control.as_ref().context("test catalog missing")?.secrets[&client.credential];
-        let day2_capabilities::SecretProvider::GcpVersion { project_number, secret, version } = selected;
-        let exchange = Digest::of(&("google-code-client-reference-v1", project_number.get(), secret.as_str(), version.get(), "https://oauth2.googleapis.com/token"))?;
+    fn independently_reconstructed_profile(
+        instance: &Instance,
+        sources: &[Digest; 4],
+    ) -> Result<Digest> {
+        let client = &instance
+            .oauth_clients
+            .as_ref()
+            .context("test client missing")?
+            .reauthentication;
+        let selected = &instance
+            .control
+            .as_ref()
+            .context("test catalog missing")?
+            .secrets[&client.credential];
+        let day2_capabilities::SecretProvider::GcpVersion {
+            project_number,
+            secret,
+            version,
+        } = selected;
+        let exchange = Digest::of(&(
+            "google-code-client-reference-v1",
+            project_number.get(),
+            secret.as_str(),
+            version.get(),
+            "https://oauth2.googleapis.com/token",
+        ))?;
         let (identity, edge) = instance.security_edge()?;
         let profile = Digest::of(&(
-            "google-two-phase-profile-v1", "https://accounts.google.com/o/oauth2/v2/auth",
-            "https://oauth2.googleapis.com/token", "https://www.googleapis.com/oauth2/v3/certs",
-            "https://accounts.google.com", &client.client_id,
-            format!("{}/_day2/reauth/callback", edge.origin), &identity.hosted_domain,
-            exchange, &sources[0], &sources[1], &sources[2], &sources[3],
+            "google-two-phase-profile-v1",
+            "https://accounts.google.com/o/oauth2/v2/auth",
+            "https://oauth2.googleapis.com/token",
+            "https://www.googleapis.com/oauth2/v3/certs",
+            "https://accounts.google.com",
+            &client.client_id,
+            format!("{}/_day2/reauth/callback", edge.origin),
+            &identity.hosted_domain,
+            exchange,
+            &sources[0],
+            &sources[1],
+            &sources[2],
+            &sources[3],
         ))?;
         Digest::of(&("google-provider-profile-observation-v1", profile))
     }
 
     // Native HTTP adapter conformance using locally signed provider fixtures/current
     // app SQLite. It cannot supply real provider or native fresh-human proof.
-    fn mounted_observation(case: Case, outcome: SinkOutcome, cancel: bool, with_registry: bool) -> Result<()> {
+    fn mounted_observation(
+        case: Case,
+        outcome: SinkOutcome,
+        cancel: bool,
+        with_registry: bool,
+    ) -> Result<()> {
         let setup = Setup::new()?;
         let instance = Instance::load(&setup.instance)?;
         let runtime = setup.runtime(0)?;
@@ -2471,177 +2530,477 @@ mod owned_google {
         // OAuth capture is None; its selected credential track must still win
         // while preserving the later ambient serving OAuth track.
         let registry = if with_registry {
-            let authority = Arc::new(crate::managed_credentials::authority::SelectedAuthority::new(
-                Vec::new(), Arc::new(fixtures::TestApprovalKeys(0.into())),
-            )?);
-            Some(Arc::new(crate::managed_credentials::effects::scope(registry_credentials.clone(), || {
-                crate::managed_credentials::browser::Registry::new(&instance, Vec::new(), authority)
-            })?))
-        } else { None };
+            let authority = Arc::new(
+                crate::managed_credentials::authority::SelectedAuthority::new(
+                    Vec::new(),
+                    Arc::new(fixtures::TestApprovalKeys(0.into())),
+                )?,
+            );
+            Some(Arc::new(crate::managed_credentials::effects::scope(
+                registry_credentials.clone(),
+                || {
+                    crate::managed_credentials::browser::Registry::new(
+                        &instance,
+                        Vec::new(),
+                        authority,
+                    )
+                },
+            )?))
+        } else {
+            None
+        };
         let sink = Arc::new(ObservationSink {
-            outcome, pause: cancel, entered: tokio::sync::Notify::new(),
-            released: Mutex::new(false), release: std::sync::Condvar::new(),
-            attempts: Mutex::new(Vec::new()), delivered: Mutex::new(Vec::new()),
+            outcome,
+            pause: cancel,
+            entered: tokio::sync::Notify::new(),
+            released: Mutex::new(false),
+            release: std::sync::Condvar::new(),
+            attempts: Mutex::new(Vec::new()),
+            delivered: Mutex::new(Vec::new()),
         });
         let world = simulation::World::new(1129);
         world.advance(95);
         let port = Arc::new(Port {
-            world, receiver, database, machine: setup.machine_assertion.clone(),
-            iap_keys: setup.assertions.keys.clone(), provider: setup.provider.clone(), case,
-            authorizations: Mutex::new(BTreeMap::new()), exchanged: Mutex::new(BTreeSet::new()),
-            lose_reply: Mutex::new(None), reentry: Mutex::new(None), replay: Mutex::new(None),
-            inputs: Mutex::new(Vec::new()), entropy_inputs: Mutex::new(Vec::new()), trace: Mutex::new(Vec::new()),
-            fills: AtomicUsize::new(0), token_sends: AtomicUsize::new(0), secret_sends: AtomicUsize::new(0),
-            external_authentication: AtomicI64::new(99), observation_sink: Some(sink.clone()),
-            expected_credential_wall: Some(if with_registry {83} else {73}),
+            world,
+            receiver,
+            database,
+            machine: setup.machine_assertion.clone(),
+            iap_keys: setup.assertions.keys.clone(),
+            provider: setup.provider.clone(),
+            case,
+            authorizations: Mutex::new(BTreeMap::new()),
+            exchanged: Mutex::new(BTreeSet::new()),
+            lose_reply: Mutex::new(None),
+            reentry: Mutex::new(None),
+            replay: Mutex::new(None),
+            inputs: Mutex::new(Vec::new()),
+            entropy_inputs: Mutex::new(Vec::new()),
+            trace: Mutex::new(Vec::new()),
+            fills: AtomicUsize::new(0),
+            token_sends: AtomicUsize::new(0),
+            secret_sends: AtomicUsize::new(0),
+            external_authentication: AtomicI64::new(99),
+            observation_sink: Some(sink.clone()),
+            expected_credential_wall: Some(if with_registry { 83 } else { 73 }),
         });
-        let owners = Arc::new(RemoteApprovals::from_instance(&instance, Arc::new(EdgeBearer))?);
-        let (client, exchange) = clients::reauthentication(&instance, Arc::new(crate::oauth::registration::tests::TokensSource(AtomicUsize::new(0))))?;
-        let auth = Arc::new(GoogleFreshAuthenticator::new(SHELL_AUDIENCE, "example.com", "https://security.example.com/", client, exchange, owners.clone())?);
-        let shell = crate::oauth::security_shell::SecurityShell::with_transport("https://security.example.com/".into(), owners.clone(), setup.signer.clone(), auth.clone())?.with_management_fixture()?;
-        let shell = match registry { Some(registry) => shell.with_credentials(registry)?, None => shell };
+        let owners = Arc::new(RemoteApprovals::from_instance(
+            &instance,
+            Arc::new(EdgeBearer),
+        )?);
+        let (client, exchange) = clients::reauthentication(
+            &instance,
+            Arc::new(crate::oauth::registration::tests::TokensSource(
+                AtomicUsize::new(0),
+            )),
+        )?;
+        let auth = Arc::new(GoogleFreshAuthenticator::new(
+            SHELL_AUDIENCE,
+            "example.com",
+            "https://security.example.com/",
+            client,
+            exchange,
+            owners.clone(),
+        )?);
+        let shell = crate::oauth::security_shell::SecurityShell::with_transport(
+            "https://security.example.com/".into(),
+            owners.clone(),
+            setup.signer.clone(),
+            auth.clone(),
+        )?
+        .with_management_fixture()?;
+        let shell = match registry {
+            Some(registry) => shell.with_credentials(registry)?,
+            None => shell,
+        };
         let mut headers = HeaderMap::new();
         headers.insert(iap::ASSERTION_HEADER, setup.human_assertion.parse()?);
-        headers.insert(header::HOST, HeaderValue::from_static("security.example.com"));
-        let setup_credentials = if with_registry {registry_credentials} else {serving_credentials.clone()};
-        let (query, expected_profile, expected_correlation, before, entropy, mut private_values) = crate::managed_credentials::effects::scope(setup_credentials, || effects::scope(port.clone(), || -> Result<_> {
-            let human = auth.identify(&headers, 100)?;
-            let ManagementReply::Pending { view } = owners.management("workspace", Call::Capture { registration: "calendar".into(), operation: Action::Connect }, &headers)? else { anyhow::bail!("mounted current Pending absent"); };
-            let intent = FreshIntent::management(&view, &human)?;
-            let first = redirect(auth.begin(&human, intent, &headers, 100)?)?;
-            let client = &instance.oauth_clients.as_ref().unwrap().reauthentication.client_id;
-            let baseline = port.capture("baseline", &first, client)?;
-            port.world.advance(1);
-            let ReauthCallback::Manual(manual) = auth.complete(&baseline, &human, &headers, 101)? else { anyhow::bail!("mounted baseline skipped checkpoint"); };
-            let handle = manual.strip_prefix(crate::oauth::shell_oidc::MANUAL_PREFIX).context("mounted manual path")?;
-            let prompt = auth.manual_view(handle, &human, &headers, 101)?;
-            let sources = [Digest::new(include_bytes!("shell_oidc.rs")), Digest::new(include_bytes!("google_begin.rs")), Digest::new(include_bytes!("fresh_owner.rs")), Digest::new(include_bytes!("../../../../Cargo.lock"))];
-            let expected_profile = independently_reconstructed_profile(&instance, &sources)?;
-            for index in 0..4 {
-                let mut changed = sources.clone();
-                changed[index] = Digest::new(b"different qualified source bytes");
-                ensure!(independently_reconstructed_profile(&instance, &changed)? != expected_profile, "source substitution retained observation profile");
-            }
-            // These are independent reader-input substitutions, not qualified
-            // alternate serving instances or new provider registrations.
-            for field in 0..6 {
-                let mut changed = instance.clone();
-                match field {
-                    0 => changed.oauth_clients.as_mut().unwrap().reauthentication.client_id = "999-reauth.apps.googleusercontent.com".into(),
-                    1 => changed.security_shell.as_mut().unwrap().origin = "https://other-security.example.com".into(),
-                    2 => changed.identity.as_mut().unwrap().hosted_domain = "other.example.com".into(),
-                    _ => {
-                        let credential = changed.oauth_clients.as_ref().unwrap().reauthentication.credential.clone();
-                        let day2_capabilities::SecretProvider::GcpVersion { project_number, secret, version } = changed.control.as_mut().unwrap().secrets.get_mut(&credential).unwrap();
+        headers.insert(
+            header::HOST,
+            HeaderValue::from_static("security.example.com"),
+        );
+        let setup_credentials = if with_registry {
+            registry_credentials
+        } else {
+            serving_credentials.clone()
+        };
+        let (query, expected_profile, expected_correlation, before, entropy, mut private_values) =
+            crate::managed_credentials::effects::scope(setup_credentials, || {
+                effects::scope(port.clone(), || -> Result<_> {
+                    let human = auth.identify(&headers, 100)?;
+                    let ManagementReply::Pending { view } = owners.management(
+                        "workspace",
+                        Call::Capture {
+                            registration: "calendar".into(),
+                            operation: Action::Connect,
+                        },
+                        &headers,
+                    )?
+                    else {
+                        anyhow::bail!("mounted current Pending absent");
+                    };
+                    let intent = FreshIntent::management(&view, &human)?;
+                    let first = redirect(auth.begin(&human, intent, &headers, 100)?)?;
+                    let client = &instance
+                        .oauth_clients
+                        .as_ref()
+                        .unwrap()
+                        .reauthentication
+                        .client_id;
+                    let baseline = port.capture("baseline", &first, client)?;
+                    port.world.advance(1);
+                    let ReauthCallback::Manual(manual) =
+                        auth.complete(&baseline, &human, &headers, 101)?
+                    else {
+                        anyhow::bail!("mounted baseline skipped checkpoint");
+                    };
+                    let handle = manual
+                        .strip_prefix(crate::oauth::shell_oidc::MANUAL_PREFIX)
+                        .context("mounted manual path")?;
+                    let prompt = auth.manual_view(handle, &human, &headers, 101)?;
+                    let sources = [
+                        Digest::new(include_bytes!("shell_oidc.rs")),
+                        Digest::new(include_bytes!("google_begin.rs")),
+                        Digest::new(include_bytes!("fresh_owner.rs")),
+                        Digest::new(include_bytes!("../../../../Cargo.lock")),
+                    ];
+                    let expected_profile =
+                        independently_reconstructed_profile(&instance, &sources)?;
+                    for index in 0..4 {
+                        let mut changed = sources.clone();
+                        changed[index] = Digest::new(b"different qualified source bytes");
+                        ensure!(
+                            independently_reconstructed_profile(&instance, &changed)?
+                                != expected_profile,
+                            "source substitution retained observation profile"
+                        );
+                    }
+                    // These are independent reader-input substitutions, not qualified
+                    // alternate serving instances or new provider registrations.
+                    for field in 0..6 {
+                        let mut changed = instance.clone();
                         match field {
-                            3 => *project_number = std::num::NonZeroU64::new(12346).unwrap(),
-                            4 => *secret = day2_capabilities::Name::try_from("different_reauth".to_owned())?,
-                            5 => *version = std::num::NonZeroU64::new(4).unwrap(),
-                            _ => unreachable!(),
+                            0 => {
+                                changed
+                                    .oauth_clients
+                                    .as_mut()
+                                    .unwrap()
+                                    .reauthentication
+                                    .client_id = "999-reauth.apps.googleusercontent.com".into()
+                            }
+                            1 => {
+                                changed.security_shell.as_mut().unwrap().origin =
+                                    "https://other-security.example.com".into()
+                            }
+                            2 => {
+                                changed.identity.as_mut().unwrap().hosted_domain =
+                                    "other.example.com".into()
+                            }
+                            _ => {
+                                let credential = changed
+                                    .oauth_clients
+                                    .as_ref()
+                                    .unwrap()
+                                    .reauthentication
+                                    .credential
+                                    .clone();
+                                let day2_capabilities::SecretProvider::GcpVersion {
+                                    project_number,
+                                    secret,
+                                    version,
+                                } = changed
+                                    .control
+                                    .as_mut()
+                                    .unwrap()
+                                    .secrets
+                                    .get_mut(&credential)
+                                    .unwrap();
+                                match field {
+                                    3 => {
+                                        *project_number = std::num::NonZeroU64::new(12346).unwrap()
+                                    }
+                                    4 => {
+                                        *secret = day2_capabilities::Name::try_from(
+                                            "different_reauth".to_owned(),
+                                        )?
+                                    }
+                                    5 => *version = std::num::NonZeroU64::new(4).unwrap(),
+                                    _ => unreachable!(),
+                                }
+                            }
                         }
+                        ensure!(
+                            independently_reconstructed_profile(&changed, &sources)?
+                                != expected_profile,
+                            "metadata substitution retained observation profile"
+                        );
                     }
-                }
-                ensure!(independently_reconstructed_profile(&changed, &sources)? != expected_profile, "metadata substitution retained observation profile");
-            }
-            let expected_correlation = Digest::of(&("google-provider-manual-observation-v1", &expected_profile, handle))?;
-            port.external_authentication.store(102, Ordering::SeqCst);
-            port.world.advance(2);
-            let mut post = headers.clone();
-            post.insert(header::ORIGIN, HeaderValue::from_static("https://security.example.com"));
-            post.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/x-www-form-urlencoded"));
-            let body = url::form_urlencoded::Serializer::new(String::new()).append_pair("csrf", &prompt.csrf).finish();
-            let offered = shell.dispatch(&Method::POST, &manual, None, &post, body.as_bytes(), 103)?;
-            ensure!(offered.status() == StatusCode::SEE_OTHER && !offered.headers().contains_key(header::SET_COOKIE), "manual produced a session");
-            let query = port.capture("fresh", offered.headers()[header::LOCATION].to_str()?, client)?;
-            if case == Case::ChangedFreshPending { port.change_current_pending(&view.id)?; }
-            if case == Case::ExpiredFresh { port.world.advance(297); }
-            let mut private_values = port.entropy_inputs.lock().unwrap().clone();
-            private_values.extend([handle.to_owned(), prompt.csrf]);
-            Ok((query, expected_profile, expected_correlation, simulation::snapshot(&crate::store::open(&port.database)?)?, port.fills.load(Ordering::SeqCst), private_values))
-        }))?;
+                    let expected_correlation = Digest::of(&(
+                        "google-provider-manual-observation-v1",
+                        &expected_profile,
+                        handle,
+                    ))?;
+                    port.external_authentication.store(102, Ordering::SeqCst);
+                    port.world.advance(2);
+                    let mut post = headers.clone();
+                    post.insert(
+                        header::ORIGIN,
+                        HeaderValue::from_static("https://security.example.com"),
+                    );
+                    post.insert(
+                        header::CONTENT_TYPE,
+                        HeaderValue::from_static("application/x-www-form-urlencoded"),
+                    );
+                    let body = url::form_urlencoded::Serializer::new(String::new())
+                        .append_pair("csrf", &prompt.csrf)
+                        .finish();
+                    let offered = shell.dispatch(
+                        &Method::POST,
+                        &manual,
+                        None,
+                        &post,
+                        body.as_bytes(),
+                        103,
+                    )?;
+                    ensure!(
+                        offered.status() == StatusCode::SEE_OTHER
+                            && !offered.headers().contains_key(header::SET_COOKIE),
+                        "manual produced a session"
+                    );
+                    let query = port.capture(
+                        "fresh",
+                        offered.headers()[header::LOCATION].to_str()?,
+                        client,
+                    )?;
+                    if case == Case::ChangedFreshPending {
+                        port.change_current_pending(&view.id)?;
+                    }
+                    if case == Case::ExpiredFresh {
+                        port.world.advance(297);
+                    }
+                    let mut private_values = port.entropy_inputs.lock().unwrap().clone();
+                    private_values.extend([handle.to_owned(), prompt.csrf]);
+                    Ok((
+                        query,
+                        expected_profile,
+                        expected_correlation,
+                        simulation::snapshot(&crate::store::open(&port.database)?)?,
+                        port.fills.load(Ordering::SeqCst),
+                        private_values,
+                    ))
+                })
+            })?;
         private_values.push(setup.human_assertion.clone());
-        let executor = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-        executor.block_on(crate::managed_credentials::effects::scope_async(serving_credentials, effects::scope_async(port.clone(), async {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-            let endpoint = format!("http://{}", listener.local_addr()?);
-            let (stop, shutdown) = tokio::sync::oneshot::channel();
-            let serving_effects = crate::managed_credentials::effects::capture();
-            let server = tokio::spawn(serving_effects.run_async(shell.clone().serve_bounded(listener, 1, Arc::new(AtomicBool::new(true)), async { let _ = shutdown.await; })));
-            let client = reqwest::Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none()).build()?;
-            let request = || client.get(format!("{endpoint}/_day2/reauth/callback?{query}")).headers(headers.clone());
-            if cancel {
-                let _release_on_error = ReleaseObservation(sink.clone());
-                let browser = tokio::spawn(request().send());
-                tokio::time::timeout(Duration::from_secs(3), sink.entered.notified()).await?;
-                // Selection already happened at103. The same physical write
-                // may finish at the original400 cutoff; no authority renews.
-                port.world.advance(297);
-                browser.abort();
-                let _ = browser.await;
-                ensure!(request().send().await?.status() == StatusCode::SERVICE_UNAVAILABLE, "paused observation released native capacity");
-                let _ = stop.send(());
-                tokio::task::yield_now().await;
-                ensure!(!server.is_finished(), "shutdown did not drain observation writer");
-                *sink.released.lock().unwrap() = true;
-                sink.release.notify_all();
-            } else {
-                for _ in 0..2 {
-                    let response = request().send().await?;
-                    ensure!(response.status() == StatusCode::FORBIDDEN && !response.headers().contains_key(header::SET_COOKIE), "observation minted response authority");
-                    for value in response.headers().values() {
-                        for private in [expected_profile.as_str(), expected_correlation.as_str(), EMAIL, std::str::from_utf8(CLIENT_SECRET)?].into_iter().chain(private_values.iter().map(String::as_str)) {
-                            ensure!(!value.as_bytes().windows(private.len()).any(|window| window == private.as_bytes()), "private observation entered browser header");
+        let executor = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        executor.block_on(crate::managed_credentials::effects::scope_async(
+            serving_credentials,
+            effects::scope_async(port.clone(), async {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+                let endpoint = format!("http://{}", listener.local_addr()?);
+                let (stop, shutdown) = tokio::sync::oneshot::channel();
+                let serving_effects = crate::managed_credentials::effects::capture();
+                let server = tokio::spawn(serving_effects.run_async(shell.clone().serve_bounded(
+                    listener,
+                    1,
+                    Arc::new(AtomicBool::new(true)),
+                    async {
+                        let _ = shutdown.await;
+                    },
+                )));
+                let client = reqwest::Client::builder()
+                    .no_proxy()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .build()?;
+                let request = || {
+                    client
+                        .get(format!("{endpoint}/_day2/reauth/callback?{query}"))
+                        .headers(headers.clone())
+                };
+                if cancel {
+                    let _release_on_error = ReleaseObservation(sink.clone());
+                    let browser = tokio::spawn(request().send());
+                    tokio::time::timeout(Duration::from_secs(3), sink.entered.notified()).await?;
+                    // Selection already happened at103. The same physical write
+                    // may finish at the original400 cutoff; no authority renews.
+                    port.world.advance(297);
+                    browser.abort();
+                    let _ = browser.await;
+                    ensure!(
+                        request().send().await?.status() == StatusCode::SERVICE_UNAVAILABLE,
+                        "paused observation released native capacity"
+                    );
+                    let _ = stop.send(());
+                    tokio::task::yield_now().await;
+                    ensure!(
+                        !server.is_finished(),
+                        "shutdown did not drain observation writer"
+                    );
+                    *sink.released.lock().unwrap() = true;
+                    sink.release.notify_all();
+                } else {
+                    for _ in 0..2 {
+                        let response = request().send().await?;
+                        ensure!(
+                            response.status() == StatusCode::FORBIDDEN
+                                && !response.headers().contains_key(header::SET_COOKIE),
+                            "observation minted response authority"
+                        );
+                        for value in response.headers().values() {
+                            for private in [
+                                expected_profile.as_str(),
+                                expected_correlation.as_str(),
+                                EMAIL,
+                                std::str::from_utf8(CLIENT_SECRET)?,
+                            ]
+                            .into_iter()
+                            .chain(private_values.iter().map(String::as_str))
+                            {
+                                ensure!(
+                                    !value
+                                        .as_bytes()
+                                        .windows(private.len())
+                                        .any(|window| window == private.as_bytes()),
+                                    "private observation entered browser header"
+                                );
+                            }
                         }
+                        ensure!(
+                            response.bytes().await?.is_empty(),
+                            "private observation entered browser body"
+                        );
                     }
-                    ensure!(response.bytes().await?.is_empty(), "private observation entered browser body");
+                    let _ = stop.send(());
                 }
-                let _ = stop.send(());
-            }
-            tokio::time::timeout(Duration::from_secs(3), server).await???;
-            Ok::<_, anyhow::Error>(())
-        })))?;
+                tokio::time::timeout(Duration::from_secs(3), server).await???;
+                Ok::<_, anyhow::Error>(())
+            }),
+        ))?;
         let attempts = sink.attempts.lock().unwrap();
-        let accepted = case.accepts_second_token() && !matches!(case, Case::ChangedFreshPending | Case::ExpiredFresh);
-        ensure!(attempts.len() == usize::from(accepted), "verified observation count or replay changed");
-        ensure!(simulation::snapshot(&crate::store::open(&port.database)?)? == before && port.fills.load(Ordering::SeqCst) == entropy, "refusal changed OAuth table projection or session entropy");
-        ensure!(port.token_sends.load(Ordering::SeqCst) == if matches!(case, Case::ChangedFreshPending | Case::ExpiredFresh) {1} else {2}, "callback replay repeated exchange");
+        let accepted = case.accepts_second_token()
+            && !matches!(case, Case::ChangedFreshPending | Case::ExpiredFresh);
+        ensure!(
+            attempts.len() == usize::from(accepted),
+            "verified observation count or replay changed"
+        );
+        ensure!(
+            simulation::snapshot(&crate::store::open(&port.database)?)? == before
+                && port.fills.load(Ordering::SeqCst) == entropy,
+            "refusal changed OAuth table projection or session entropy"
+        );
+        ensure!(
+            port.token_sends.load(Ordering::SeqCst)
+                == if matches!(case, Case::ChangedFreshPending | Case::ExpiredFresh) {
+                    1
+                } else {
+                    2
+                },
+            "callback replay repeated exchange"
+        );
         if let Some(record) = attempts.first() {
-            ensure!(record == &json!({"version":1,"kind":"google_provider_prerequisite","outcome":"signed_auth_time_and_ordering_verified_native_producer_unavailable","baseline_iat":101,"fresh_auth_time":102,"profile":expected_profile,"correlation":expected_correlation}), "operator record differs from independent metadata/manual projection");
+            ensure!(
+                record
+                    == &json!({"version":1,"kind":"google_provider_prerequisite","outcome":"signed_auth_time_and_ordering_verified_native_producer_unavailable","baseline_iat":101,"fresh_auth_time":102,"profile":expected_profile,"correlation":expected_correlation}),
+                "operator record differs from independent metadata/manual projection"
+            );
             let bytes = serde_json::to_vec(record)?;
-            ensure!(bytes.len() < 1024 && bytes.is_ascii(), "operator record exceeded fixed bound");
+            ensure!(
+                bytes.len() < 1024 && bytes.is_ascii(),
+                "operator record exceeded fixed bound"
+            );
             let text = std::str::from_utf8(&bytes)?;
-            for private in [EMAIL, GOOGLE_SUBJECT, std::str::from_utf8(CLIENT_SECRET)?, "owned-fresh-code", "owned-baseline-code", "https://", "nonce", "state", "verifier", "cookie"] { ensure!(!text.contains(private), "private sentinel entered observation"); }
-            for private in &private_values { ensure!(!text.contains(private), "private entropy or manual value entered observation"); }
-            for input in port.inputs.lock().unwrap().iter() { ensure!(!text.contains(&input.token), "signed token entered observation"); }
+            for private in [
+                EMAIL,
+                GOOGLE_SUBJECT,
+                std::str::from_utf8(CLIENT_SECRET)?,
+                "owned-fresh-code",
+                "owned-baseline-code",
+                "https://",
+                "nonce",
+                "state",
+                "verifier",
+                "cookie",
+            ] {
+                ensure!(
+                    !text.contains(private),
+                    "private sentinel entered observation"
+                );
+            }
+            for private in &private_values {
+                ensure!(
+                    !text.contains(private),
+                    "private entropy or manual value entered observation"
+                );
+            }
+            for input in port.inputs.lock().unwrap().iter() {
+                ensure!(
+                    !text.contains(&input.token),
+                    "signed token entered observation"
+                );
+            }
         }
         let delivered = sink.delivered.lock().unwrap();
-        if accepted { match outcome {
-            SinkOutcome::Complete | SinkOutcome::CompleteThenError => ensure!(delivered.last() == Some(&b'\n'), "complete sink model missing line"),
-            SinkOutcome::PartialUnknown => ensure!(delivered.len() == 17, "partial sink model not exercised"),
-            SinkOutcome::Unavailable => ensure!(delivered.is_empty(), "unavailable sink model wrote bytes"),
-        }} else { ensure!(delivered.is_empty(), "unverified callback wrote diagnostic"); }
+        if accepted {
+            match outcome {
+                SinkOutcome::Complete | SinkOutcome::CompleteThenError => ensure!(
+                    delivered.last() == Some(&b'\n'),
+                    "complete sink model missing line"
+                ),
+                SinkOutcome::PartialUnknown => {
+                    ensure!(delivered.len() == 17, "partial sink model not exercised")
+                }
+                SinkOutcome::Unavailable => {
+                    ensure!(delivered.is_empty(), "unavailable sink model wrote bytes")
+                }
+            }
+        } else {
+            ensure!(delivered.is_empty(), "unverified callback wrote diagnostic");
+        }
         Ok(())
     }
 
     #[test]
-    fn mounted_signed_provider_observation_never_authorizes_even_when_delivery_is_ambiguous() -> Result<()> {
-        for outcome in [SinkOutcome::Complete, SinkOutcome::PartialUnknown, SinkOutcome::CompleteThenError, SinkOutcome::Unavailable] { mounted_observation(Case::Advance, outcome, false, false)?; }
+    fn mounted_signed_provider_observation_never_authorizes_even_when_delivery_is_ambiguous()
+    -> Result<()> {
+        for outcome in [
+            SinkOutcome::Complete,
+            SinkOutcome::PartialUnknown,
+            SinkOutcome::CompleteThenError,
+            SinkOutcome::Unavailable,
+        ] {
+            mounted_observation(Case::Advance, outcome, false, false)?;
+        }
         Ok(())
     }
 
     #[test]
-    fn mounted_provider_observation_keeps_native_capacity_after_browser_cancellation() -> Result<()> {
+    fn mounted_provider_observation_keeps_native_capacity_after_browser_cancellation() -> Result<()>
+    {
         mounted_observation(Case::Advance, SinkOutcome::Complete, true, false)
     }
 
     #[test]
-    fn mounted_provider_observation_refuses_unverified_or_noncurrent_inputs_without_writing() -> Result<()> {
-        for case in [Case::EqualAuthentication, Case::OlderAuthentication, Case::AuthenticationAfterIssue, Case::MissingAuthentication, Case::WrongSubject, Case::WrongClient, Case::CrossPhase, Case::ChangedFreshPending, Case::ExpiredFresh] { mounted_observation(case, SinkOutcome::Complete, false, false)?; }
+    fn mounted_provider_observation_refuses_unverified_or_noncurrent_inputs_without_writing()
+    -> Result<()> {
+        for case in [
+            Case::EqualAuthentication,
+            Case::OlderAuthentication,
+            Case::AuthenticationAfterIssue,
+            Case::MissingAuthentication,
+            Case::WrongSubject,
+            Case::WrongClient,
+            Case::CrossPhase,
+            Case::ChangedFreshPending,
+            Case::ExpiredFresh,
+        ] {
+            mounted_observation(case, SinkOutcome::Complete, false, false)?;
+        }
         Ok(())
     }
 
     #[test]
-    fn mounted_provider_observation_composes_registry_credentials_with_serving_oauth() -> Result<()> {
+    fn mounted_provider_observation_composes_registry_credentials_with_serving_oauth() -> Result<()>
+    {
         mounted_observation(Case::Advance, SinkOutcome::Complete, false, true)?;
         mounted_observation(Case::Advance, SinkOutcome::Complete, true, true)
     }

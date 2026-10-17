@@ -189,7 +189,10 @@ impl crate::host_inputs::Clock for World {
 }
 
 impl effects::Hooks for World {
-    fn provider_observation(&self, _: crate::oauth::shell_oidc::ProviderObservationData) -> Result<()> {
+    fn provider_observation(
+        &self,
+        _: crate::oauth::shell_oidc::ProviderObservationData,
+    ) -> Result<()> {
         anyhow::bail!("unscripted provider observation")
     }
 

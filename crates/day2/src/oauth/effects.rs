@@ -31,7 +31,10 @@ pub(crate) trait Hooks: Send + Sync {
 /// only by the existing admitted blocking request, never by an async logger.
 pub(super) fn provider_observation(data: super::shell_oidc::ProviderObservationData) -> Result<()> {
     let mut line = serde_json::to_vec(&data)?;
-    ensure!(line.len() < 1024 && line.is_ascii() && !line.contains(&b'\n') && !line.contains(&b'\r'), "provider observation encoding refused");
+    ensure!(
+        line.len() < 1024 && line.is_ascii() && !line.contains(&b'\n') && !line.contains(&b'\r'),
+        "provider observation encoding refused"
+    );
     line.push(b'\n');
     #[cfg(test)]
     if let Some(hooks) = HOOKS.with(|slot| slot.borrow().clone()) {
