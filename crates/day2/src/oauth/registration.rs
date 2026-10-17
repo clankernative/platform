@@ -496,19 +496,33 @@ impl Authorization {
         ))
     }
 
+    /// Pure preflight for a provider that advertises issuer responses. It does
+    /// not validate state or mint a code/authority; the consuming path below
+    /// still owns those checks and validates optional-issuer profiles.
+    pub(super) fn validate_required_issuer(&self, query: &[u8]) -> Result<()> {
+        let parameters = self.adapter.callback_parameters();
+        if !parameters.require_issuer {
+            return Ok(());
+        }
+        let parsed = super::protocol::parse_callback(query, &parameters)?;
+        let issuer = match &parsed {
+            super::protocol::ParsedCallback::Code { issuer, .. }
+            | super::protocol::ParsedCallback::Denied { issuer, .. } => issuer.as_deref(),
+        };
+        ensure!(
+            issuer == Some(self.issuer.as_str()),
+            "Provider canary callback issuer mismatch"
+        );
+        Ok(())
+    }
+
     pub(crate) fn complete(self, query: &[u8], session: &Digest) -> Result<Code> {
         ensure!(
             &self.session == session
                 && self.started.elapsed() < Duration::from_secs(VALID_SECONDS as u64),
             "Provider canary session expired or changed"
         );
-        let parsed = super::protocol::parse_callback(
-            query,
-            &super::protocol::CallbackParameters {
-                require_issuer: false,
-                allowed_extras: self.adapter.callback_extras(),
-            },
-        )?;
+        let parsed = super::protocol::parse_callback(query, &self.adapter.callback_parameters())?;
         let super::protocol::ParsedCallback::Code {
             code,
             state,

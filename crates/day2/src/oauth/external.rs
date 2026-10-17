@@ -439,27 +439,41 @@ impl ShellApprovalKeyLease {
         })
     }
 
-    pub(crate) fn attest(
+    #[cfg(test)]
+    pub(crate) fn attest_fixture(
         &self,
         pending: &PendingExternalApproval,
         session: Digest,
         authenticated_at: i64,
         confirmed_at: i64,
     ) -> Result<FreshExternalApproval> {
-        self.attest_claim(&pending.claim(), session, authenticated_at, confirmed_at)
-    }
-
-    pub(crate) fn attest_claim(
-        &self,
-        pending: &ApprovalClaim,
-        session: Digest,
-        authenticated_at: i64,
-        confirmed_at: i64,
-    ) -> Result<FreshExternalApproval> {
-        self.attest_inner(pending, None, session, authenticated_at, confirmed_at)
+        self.attest_inner(
+            &pending.claim(),
+            None,
+            session,
+            authenticated_at,
+            confirmed_at,
+        )
     }
 
     pub(crate) fn attest_view(
+        &self,
+        view: &super::shell_transport::ApprovalView,
+        session: &super::security_shell::ShellSession,
+        confirmed_at: i64,
+    ) -> Result<FreshExternalApproval> {
+        session.require_approval(view, confirmed_at)?;
+        self.attest_inner(
+            &view.claim,
+            Some(view.digest()?),
+            session.digest(),
+            session.authenticated_at(),
+            confirmed_at,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn attest_fixture_view(
         &self,
         pending: &ApprovalClaim,
         preview: Digest,

@@ -190,13 +190,20 @@ impl Adapter {
         Ok(())
     }
 
-    pub(super) fn callback_extras(self) -> BTreeSet<String> {
+    pub(super) fn callback_parameters(self) -> super::protocol::CallbackParameters {
         match self {
-            Self::GoogleCalendar => ["scope", "authuser", "prompt", "hd"]
-                .into_iter()
-                .map(str::to_owned)
-                .collect(),
-            Self::GitlabProjects => BTreeSet::new(),
+            // Google's discovery document advertises RFC 9207 issuer support.
+            Self::GoogleCalendar => super::protocol::CallbackParameters {
+                require_issuer: true,
+                allowed_extras: ["scope", "authuser", "prompt", "hd"]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
+            },
+            Self::GitlabProjects => super::protocol::CallbackParameters {
+                require_issuer: false,
+                allowed_extras: BTreeSet::new(),
+            },
         }
     }
 }

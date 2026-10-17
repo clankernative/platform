@@ -38,6 +38,23 @@ pub(super) fn handle_callback(
     ingress: CallbackIngress<'_>,
     custody_write: impl FnOnce(&Transaction<'_>, &str) -> Result<()>,
 ) -> Result<CallbackOutcome> {
+    handle_callback_profile(
+        db,
+        ingress,
+        &CallbackParameters {
+            require_issuer: true,
+            allowed_extras: BTreeSet::new(),
+        },
+        custody_write,
+    )
+}
+
+pub(super) fn handle_callback_profile(
+    db: &mut Connection,
+    ingress: CallbackIngress<'_>,
+    parameters: &CallbackParameters,
+    custody_write: impl FnOnce(&Transaction<'_>, &str) -> Result<()>,
+) -> Result<CallbackOutcome> {
     connect::identifier(ingress.attempt)?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let row: Option<(String, i64, String, String)> = tx
@@ -64,19 +81,16 @@ pub(super) fn handle_callback(
     {
         return Ok(CallbackOutcome::Rejected);
     }
-    let parsed = protocol::parse_callback(
-        ingress.raw_query,
-        &CallbackParameters {
-            require_issuer: true,
-            allowed_extras: BTreeSet::new(),
-        },
-    )?;
+    let parsed = protocol::parse_callback(ingress.raw_query, parameters)?;
     let (state, issuer) = match &parsed {
         ParsedCallback::Code { state, issuer, .. }
         | ParsedCallback::Denied { state, issuer, .. } => (state, issuer),
     };
     if connect::callback_state_hash(state.as_str().as_bytes())? != *binding.state_hash()
-        || issuer.as_deref() != Some(binding.issuer_url())
+        || issuer
+            .as_deref()
+            .is_some_and(|issuer| issuer != binding.issuer_url())
+        || (parameters.require_issuer && issuer.is_none())
     {
         return Ok(CallbackOutcome::Rejected);
     }

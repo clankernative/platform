@@ -187,6 +187,44 @@ pub(crate) struct ArtifactShellSigner {
 }
 
 impl ArtifactShellSigner {
+    pub(super) fn attest_management(
+        &self,
+        view: &super::management::View,
+        proof: &super::fresh_auth::VerifiedAuthTime,
+        identity: &crate::iap::Verified,
+        session: Digest,
+        now: i64,
+    ) -> Result<super::management::Attestation> {
+        proof.require_management_authentication()?;
+        let state = self
+            .state
+            .read()
+            .map_err(|_| anyhow::anyhow!("OAuth shell selection lock poisoned"))?;
+        let selected = management_selection(&state.selected, view)?;
+        let reference = &selected.shell_attestation;
+        let key = state
+            .keys
+            .as_ref()
+            .context("OAuth shell key provider missing")?
+            .load(reference, ApprovalKeyPurpose::ShellAttestation)?;
+        ensure!(
+            key.binding == reference.binding
+                && key.version == reference.version
+                && key.purpose == ApprovalKeyPurpose::ShellAttestation,
+            "OAuth management key changed"
+        );
+        let at = proof.observe_current(now)?;
+        super::management::Attestation::sign(
+            view,
+            proof,
+            identity,
+            session,
+            &key.bytes,
+            key.version,
+            at,
+        )
+    }
+
     pub(crate) fn with_gcp(
         selected: QualifiedConnections,
         tokens: Arc<dyn AccessTokenSource>,
@@ -357,13 +395,7 @@ impl super::shell_transport::ApprovalSigner for ArtifactShellSigner {
             view.claim.security_origin.clone(),
             view.claim.approval.clone(),
         )?
-        .attest_view(
-            &view.claim,
-            view.digest()?,
-            session.digest(),
-            authenticated_at,
-            now,
-        )
+        .attest_view(view, session, now)
     }
 }
 
@@ -371,6 +403,40 @@ pub(crate) struct QualifiedConnections {
     instance: Instance,
     entries: BTreeMap<(String, String), SelectedConnection>,
     key_bindings: Vec<GcpBinding>,
+}
+
+fn management_selection<'a>(
+    selected: &'a QualifiedConnections,
+    view: &super::management::View,
+) -> Result<&'a SelectedConnection> {
+    let candidate = selected
+        .entries
+        .get(&(view.app.clone(), view.registration.clone()))
+        .context("OAuth management requirement retired")?;
+    let (_, shell) = selected.instance.security_edge()?;
+    let edge = selected
+        .instance
+        .apps
+        .get(&view.app)
+        .and_then(|app| app.edge.as_ref())
+        .context("OAuth app edge missing")?;
+    ensure!(
+        view.logical_id == candidate.requirement.logical_id
+            && view.usage == candidate.requirement.usage
+            && view.scopes
+                == candidate
+                    .permission
+                    .action_scopes
+                    .values()
+                    .flatten()
+                    .cloned()
+                    .collect()
+            && view.binding_namespace == binding_namespace(&candidate.binding)?
+            && view.shell_origin == format!("{}/", shell.origin)
+            && view.app_origin == format!("{}/", edge.origin),
+        "OAuth management selection changed"
+    );
+    Ok(candidate)
 }
 
 impl QualifiedConnections {
@@ -1050,6 +1116,61 @@ pub(crate) struct ArtifactApprovalAuthority {
 }
 
 impl ArtifactApprovalAuthority {
+    pub(super) fn verify_management(
+        &self,
+        view: &super::management::View,
+        proof: &super::management::Attestation,
+        identity: &crate::iap::Verified,
+        now: i64,
+    ) -> Result<()> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| anyhow::anyhow!("OAuth selection lock poisoned"))?;
+        let selected = management_selection(&state.selected, view)?;
+        let reference = &selected.shell_attestation;
+        let key = state
+            .keys
+            .as_ref()
+            .context("OAuth selected key provider missing")?
+            .load(reference, ApprovalKeyPurpose::ShellAttestation)?;
+        ensure!(
+            key.binding == reference.binding
+                && key.version == reference.version
+                && key.purpose == ApprovalKeyPurpose::ShellAttestation,
+            "OAuth management key changed"
+        );
+        let at = super::effects::wall_time()?;
+        ensure!(at >= now, "OAuth management clock moved backwards");
+        proof.verify(view, identity, &key.bytes, &key.version, at)
+    }
+
+    pub(super) fn management_client(&self, view: &super::management::View) -> Result<String> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| anyhow::anyhow!("OAuth selection lock poisoned"))?;
+        let selected = management_selection(&state.selected, view)?;
+        let client = state
+            .selected
+            .instance
+            .oauth_clients
+            .as_ref()
+            .context("OAuth clients missing")?
+            .registrations
+            .get(&selected.binding.registration.id)
+            .context("OAuth client missing")?
+            .client();
+        ensure!(
+            matches!(
+                client,
+                day2_capabilities::oauth::ProviderClient::Google { .. }
+            ),
+            "OAuth management adapter unavailable"
+        );
+        Ok(client.client_id().to_owned())
+    }
+
     pub(crate) fn with_gcp(
         selected: QualifiedConnections,
         readiness: Arc<dyn OutboundReadiness>,
@@ -3584,6 +3705,217 @@ pub(super) mod tests {
         }
     }
 
+    /// Real host storage and selected native adapter, with synthetic readiness
+    /// and keys only. The test effects port still handles the real wire parser.
+    pub(in crate::oauth) fn management_fixture(
+        directory: &Path,
+    ) -> Result<(
+        crate::store::Runtime,
+        Arc<ArtifactApprovalAuthority>,
+        Arc<ArtifactShellSigner>,
+    )> {
+        struct Host;
+        impl crate::host_inputs::Clock for Host {
+            fn wall_time(&self) -> Result<std::time::Duration> {
+                Ok(std::time::Duration::from_secs(100))
+            }
+            fn monotonic(&self) -> std::time::Duration {
+                std::time::Duration::ZERO
+            }
+        }
+        impl crate::host::Host for Host {
+            fn entropy(&self, _: &str, _: &str) -> Result<[u8; 32]> {
+                Ok([29; 32])
+            }
+            fn now_ms(&self) -> Result<i64> {
+                Ok(100_000)
+            }
+            fn worker_action(
+                &self,
+                _: crate::protocol::Phase,
+                _: &crate::protocol::Request,
+            ) -> Result<crate::host::WorkerAction> {
+                anyhow::bail!("unexpected fixture worker")
+            }
+            fn record_exchange(
+                &self,
+                _: crate::protocol::Phase,
+                _: &crate::protocol::Request,
+                _: &Result<crate::protocol::Response>,
+            ) -> Result<()> {
+                anyhow::bail!("unexpected fixture exchange")
+            }
+            fn monotonic(&self) -> std::time::Duration {
+                std::time::Duration::ZERO
+            }
+        }
+        struct Tokens;
+        impl AccessTokenSource for Tokens {
+            fn access_token(&self) -> Result<String> {
+                Ok("fixture-metadata-access".into())
+            }
+        }
+        let mut fixture = fixture(AccountBindingPolicy::MappedHuman)?;
+        let app = fixture.instance.apps.get_mut("workspace").unwrap();
+        let artifact_path = directory.join("artifact");
+        std::fs::create_dir(&artifact_path)?;
+        app.artifact = artifact_path
+            .to_str()
+            .context("fixture artifact path")?
+            .into();
+        app.readers = BTreeSet::from(["alice@example.com".into()]);
+        let original = &fixture.artifacts["workspace"];
+        let mut contract = original.contract().clone();
+        // The catalog fixture is intentionally abstract. Actual Runtime
+        // initialization requires a nonempty, valid product schema.
+        contract.schema = serde_json::from_value(json!({
+            "models":{"entries":{"fields":{"note":"text"}}},
+            "inputs":{"input":{"fields":{}}},"foreign_keys":[]
+        }))?;
+        let artifact =
+            LoadedArtifact::from_contract_for_tests(original.id().into(), artifact_path, contract);
+        fixture
+            .artifacts
+            .insert("workspace".into(), artifact.clone());
+        if let profiles::AccountBindingEvidence::MappedHuman { owner, .. } =
+            &mut fixture.evidence.account
+        {
+            *owner = "alice@example.com".into();
+        }
+        let path = directory.join("instance.json");
+        std::fs::write(&path, serde_json::to_vec(&fixture.instance)?)?;
+        let host = Arc::new(Host);
+        let runtime = crate::store::Runtime::from_artifact_for_tests(
+            path,
+            "workspace".into(),
+            directory.join("app.sqlite"),
+            artifact,
+        )?
+        .with_host(host.clone(), host);
+        runtime.initialize()?;
+        let keys: Arc<dyn ApprovalKeyProvider> = Arc::new(Keys::default());
+        let readiness = Arc::new(Readiness {
+            runtime: Digest::of(fixture.instance.oauth_runtime.as_ref().unwrap())?,
+            current: RwLock::new(Some(fixture.evidence.clone())),
+            calls: AtomicUsize::new(0),
+        });
+        let authority = Arc::new(ArtifactApprovalAuthority::with_keys(
+            fixture.qualify()?,
+            readiness,
+            keys.clone(),
+        ));
+        authority.state.write().unwrap().tokens = Some(Arc::new(Tokens));
+        let signer = Arc::new(ArtifactShellSigner {
+            state: RwLock::new(AuthorityState {
+                selected: fixture.qualify()?,
+                keys: Some(keys),
+                tokens: None,
+            }),
+        });
+        Ok((runtime, authority, signer))
+    }
+
+    #[test]
+    fn google_signed_timestamps_do_not_authorize_management_without_a_causal_producer() -> Result<()>
+    {
+        use super::super::{
+            fresh_auth::{FreshIntent, VerifiedAuthTime},
+            management::{
+                Action, Attestation,
+                app::{Call, Manager, Reply},
+            },
+            security_shell::FreshAuthenticator,
+            shell_oidc,
+        };
+        let directory = tempfile::tempdir()?;
+        let (runtime, authority, signer) = management_fixture(directory.path())?;
+        let database = runtime.db().to_path_buf();
+        let clock = super::super::simulation::World::new(77662);
+        clock.advance(95);
+        super::super::effects::scope(clock.clone(), || -> Result<()> {
+            let identity = crate::iap::Verified {
+                email: "alice@example.com".into(),
+                subject: "accounts.google.com:alice".into(),
+            };
+            let manager = Manager::new(runtime, authority);
+            let Reply::Pending { view } = manager.dispatch(
+                Call::Capture {
+                    registration: "calendar".into(),
+                    operation: Action::Connect,
+                },
+                &identity,
+                100,
+            )?
+            else {
+                anyhow::bail!("native capture did not return pending");
+            };
+            let view = *view;
+            let intent = FreshIntent::management(&view, &identity)?;
+            // Independent real-event assignment: authentication precedes pending,
+            // token issuance follows pending, issuer clock leads local by four
+            // seconds. The callback's signed scalars still pass all comparisons.
+            let pending_ms = 100_000;
+            let authenticated_ms = 99_000;
+            let issued_ms = 100_500;
+            let issuer_offset_ms = 4_000;
+            assert!(authenticated_ms < pending_ms && issued_ms > pending_ms);
+            let auth_time = (authenticated_ms + issuer_offset_ms) / 1000;
+            let issued_at = (issued_ms + issuer_offset_ms) / 1000;
+            assert_eq!((auth_time, issued_at), (103, 104));
+            let (authenticator, headers, callback) =
+                shell_oidc::fixture_login(&identity, intent.clone(), 100, auth_time, issued_at)?;
+            clock.advance(4);
+            let verified = authenticator.identify(&headers, 104)?;
+            let actual =
+                VerifiedAuthTime::from_google(authenticator.complete(&callback, &verified, 104)?);
+            actual.require_intent(&intent, &identity)?;
+            actual.require_current(104)?;
+            assert_eq!(actual.authenticated_at(), 103);
+            assert!(authenticator.complete(&callback, &verified, 104).is_err());
+            // This proof came through signature/nonce/identity verification;
+            // never substitute the isolated fixture marker for the refusal.
+            let keys = Arc::new(Keys::default());
+            signer.state.write().unwrap().keys = Some(keys.clone());
+            let before = super::super::simulation::snapshot(&crate::store::open(&database)?)?;
+            let session = Digest::new(b"management-causal-control-browser");
+            let refused = signer.attest_management(&view, &actual, &identity, session.clone(), 104);
+            assert!(refused.is_err_and(|e| e.to_string().contains("producer unavailable")));
+            assert_eq!(keys.calls.load(Ordering::SeqCst), 0);
+            let refused = Attestation::sign(
+                &view,
+                &actual,
+                &identity,
+                session.clone(),
+                &[11; 32],
+                "11".into(),
+                104,
+            );
+            assert!(refused.is_err_and(|e| e.to_string().contains("producer unavailable")));
+            assert_eq!(
+                super::super::simulation::snapshot(&crate::store::open(&database)?)?,
+                before
+            );
+            assert!(clock.requests().is_empty());
+            // A separate, explicitly isolated per-proof witness keeps native
+            // conformance tests meaningful. It is absent from production builds.
+            let isolated = VerifiedAuthTime::from_google(shell_oidc::Reauthenticated::fixture(
+                intent,
+                identity.email.clone(),
+                identity.subject.clone(),
+                103,
+            ));
+            let accepted = signer.attest_management(&view, &isolated, &identity, session, 104)?;
+            accepted.verify(&view, &identity, &[11; 32], "11", 104)?;
+            assert_eq!(keys.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                super::super::simulation::snapshot(&crate::store::open(&database)?)?,
+                before
+            );
+            assert!(clock.requests().is_empty());
+            Ok(())
+        })
+    }
+
     #[test]
     fn authority_rechecks_readiness_and_exact_keys_then_revokes_removed_selection() -> Result<()> {
         let mut fixture = fixture(AccountBindingPolicy::ExplicitExternalAccount)?;
@@ -3978,28 +4310,50 @@ pub(super) mod tests {
                 super::super::shell_oidc::fixture_login(&identity, intent, 5, 5, 5)?;
             let identity = authenticator.identify(&headers, 5)?;
             let google = authenticator.complete(&callback, &identity, 5)?;
-            let fresh = super::super::security_shell::ShellSession::approval_signed_fixture(
+            google.require_current(5)?;
+            assert_eq!(google.authenticated_at(), 5);
+            let rejected = super::super::security_shell::ShellSession::approval_signed_fixture(
                 &view,
                 &identity,
                 google,
                 session.clone(),
                 5,
+            )
+            .err()
+            .context("actual signed timestamps constructed an approval session")?;
+            assert!(
+                format!("{rejected:#}")
+                    .contains("OAuth post-pending authentication producer unavailable")
+            );
+            assert_eq!(keys.0.load(Ordering::SeqCst), 0);
+            // The original selected-presentation and post-key-load lifetime
+            // oracles use explicitly isolated proof ownership and synthetic keys.
+            let fresh = super::super::security_shell::ShellSession::approval_fixture(
+                &view,
+                &identity,
+                5,
+                session.clone(),
             )?;
-            // A refused original lifetime is terminal. Keep this negative control's
-            // proof separate from the retirement and post-key-load controls below.
+            // Keep the actual signed proof's wall-clock observation independent
+            // of isolated positive witnesses and the unavailable producer check.
             let intent = super::super::fresh_auth::FreshIntent::approval(&view, &identity)?;
             let (authenticator, headers, callback) =
                 super::super::shell_oidc::fixture_login(&identity, intent, 5, 5, 5)?;
             let identity = authenticator.identify(&headers, 5)?;
-            let google = authenticator.complete(&callback, &identity, 5)?;
-            let future_entry = super::super::security_shell::ShellSession::approval_signed_fixture(
+            let future_clock = authenticator.complete(&callback, &identity, 5)?;
+            // A refused original lifetime is terminal. Keep this negative control's
+            // proof separate from the retirement and post-key-load controls below.
+            let future_entry = super::super::security_shell::ShellSession::approval_fixture(
                 &view,
                 &identity,
-                google,
-                session.clone(),
                 5,
+                session.clone(),
             )?;
             clock.advance(1);
+            future_clock.require_current(6)?;
+            assert!(7 < future_clock.deadline()?);
+            assert!(future_clock.require_current(7).is_err());
+            assert!(future_clock.require_current(6).is_err());
             let proof = signer.attest(&view, &fresh, 6)?;
             assert_eq!(proof.preview, Some(view.digest()?));
             assert_eq!(keys.0.load(Ordering::SeqCst), 1);

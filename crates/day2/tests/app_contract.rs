@@ -109,6 +109,53 @@ expect Api.error_metadata("denied", Api.error({description: "Denied.", recovery:
 }
 
 #[test]
+fn example_step_generated_is_typed_and_has_an_explicit_wire_tag() -> Result<()> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()?;
+    let stage = crate::support::compiler::stage(&root)?;
+    day2::sdk::stage(&root.join("sdk"), &stage.path().join("sdk"))?;
+    fs::write(stage.path().join("sdk/main.roc"), day2::sdk::app_platform())?;
+    fs::write(
+        stage.path().join("app.roc"),
+        r#"app [step] { pf: platform "sdk/main.roc" }
+import pf.Example
+import pf.Input
+import pf.Output
+import pf.Write
+step : Str -> Str
+step = |raw| raw
+input : Input({ name : Str })
+input = Input.define("input", |raw| Json.parse(raw).map_err(|_| "invalid"), |value| Json.to_str(value))
+output : Output(Str)
+output = Output.define("output", |value| value)
+create : Write({ name : Str }, Str)
+create = Write.define("app.create", input, output)
+generated = Example.define("later", Ok([Example.Step.generated(create, 0)]))
+static = Example.define("first", Ok([Example.Step.command(create, {name: "known"})]))
+encoded = Example.encode([generated, static])
+expect encoded.contains("\"kind\":\"generated\"") and encoded.contains("\"kind\":\"command\"")
+expect encoded.contains("\"operation\":\"app.create\"") and encoded.contains("\"payload\":\"0\"")
+"#,
+    )?;
+    let compiler = root.join("../.toolchains/roc").canonicalize()?;
+    let output = day2::sandbox::compiler(&root, stage.path(), &compiler)?
+        .arg("test")
+        .arg(stage.path().join("app.roc"))
+        .output()?;
+    let diagnostics = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    ensure!(
+        output.status.success() && diagnostics.contains("All (2) tests passed"),
+        "generated example SDK contract: {diagnostics}"
+    );
+    Ok(())
+}
+
+#[test]
 fn native_workspace_directory_pages_decode_through_public_sdk() -> Result<()> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")

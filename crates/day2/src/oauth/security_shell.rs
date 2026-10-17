@@ -247,6 +247,7 @@ pub(crate) struct SecurityShell {
     credentials: Option<Arc<credentials::Registry>>,
     canaries: Option<Arc<registration::shell::Canaries>>,
     guard: Option<Arc<dyn ShellGuard>>,
+    management: Option<Arc<super::management::shell::Shell>>,
 }
 
 pub(crate) struct RegistrationShell {
@@ -437,11 +438,21 @@ impl SecurityShell {
         let approvals = Arc::new(shell_transport::RemoteApprovals::from_instance(
             &instance, bearers,
         )?);
-        Ok((
-            Self::with_transport(origin, approvals.clone(), signer.clone(), authenticator)?,
-            signer,
-            approvals,
-        ))
+        let mut shell = Self::with_transport(
+            origin.clone(),
+            approvals.clone(),
+            signer.clone(),
+            authenticator.clone(),
+        )?;
+        Arc::get_mut(&mut shell)
+            .context("security shell already shared")?
+            .management = Some(Arc::new(super::management::shell::Shell::new(
+            origin.trim_end_matches('/').into(),
+            approvals.clone(),
+            signer.clone(),
+            authenticator,
+        )));
+        Ok((shell, signer, approvals))
     }
 
     #[cfg(test)]
@@ -483,6 +494,7 @@ impl SecurityShell {
             credentials: None,
             canaries: None,
             guard: None,
+            management: None,
         }))
     }
 
@@ -662,6 +674,25 @@ impl SecurityShell {
                     error
                 }
             })?;
+        }
+        if let Some(management) = &self.management {
+            if let Some(response) = management.provider_callback(
+                super::management::shell::CallbackRequest {
+                    method,
+                    path,
+                    query,
+                    headers,
+                    body,
+                },
+                &identity,
+                at,
+            )? {
+                return Ok(response);
+            }
+            if let Some(tail) = path.strip_prefix(super::management::PREFIX) {
+                ensure!(query.is_none(), "OAuth management query refused");
+                return management.dispatch(method, tail, headers, body, &identity, at);
+            }
         }
         if registration::shell::reserved(path) {
             return self
@@ -895,6 +926,16 @@ impl SecurityShell {
         let proof =
             VerifiedAuthTime::from_google(self.authenticator.complete(query, identity, at)?);
         proof.require_current(at)?;
+        if matches!(
+            proof.purpose(),
+            FreshPurpose::OAuthConnect | FreshPurpose::OAuthDisconnect
+        ) {
+            return self
+                .management
+                .as_ref()
+                .context("OAuth management unavailable")?
+                .reauthenticated(proof, headers, identity, at);
+        }
         if proof.purpose() == FreshPurpose::CredentialIntent {
             let registry = self
                 .credentials
@@ -3886,6 +3927,19 @@ mod tests {
             Credential,
         }
 
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+        enum History {
+            RawSigned,
+            // Signed Google data is refused first. Only the separately named
+            // test witness can exercise subsequent OAuth action transitions.
+            IsolatedOAuthActions,
+        }
+
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+        enum RawOAuthRefusal {
+            PostPendingProducerUnavailable,
+        }
+
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
         enum Case {
             Positive,
@@ -3904,6 +3958,7 @@ mod tests {
             OppositePurpose,
             Invalidate,
             Callback,
+            IsolatedPostPending,
             View,
             ExpireTicks,
             DelayKey,
@@ -3935,6 +3990,7 @@ mod tests {
             product_rows: i64,
             delivery_closed: i64,
             response_verified: bool,
+            raw_oauth_refusal: Option<RawOAuthRefusal>,
             oauth_keys: admission::tests::ReplayKeyCounts,
             credential_keys: [usize; 2],
             providers: shell_oidc::ReplayProviderCounts,
@@ -3945,15 +4001,17 @@ mod tests {
         struct Model {
             consumer: Consumer,
             case: Case,
+            history: History,
             state: PublicState,
             restarted: bool,
         }
 
         impl Model {
-            fn new(consumer: Consumer, case: Case) -> Self {
+            fn new(consumer: Consumer, case: Case, history: History) -> Self {
                 Self {
                     consumer,
                     case,
+                    history,
                     restarted: false,
                     state: PublicState {
                         wall: 1_000,
@@ -3966,6 +4024,7 @@ mod tests {
                         product_rows: 0,
                         delivery_closed: 0,
                         response_verified: false,
+                        raw_oauth_refusal: None,
                         oauth_keys: Default::default(),
                         credential_keys: [0; 2],
                         providers: Default::default(),
@@ -4025,8 +4084,18 @@ mod tests {
                             };
                         }
                         self.app_lookup();
+                        if self.consumer == Consumer::OAuth {
+                            self.state.raw_oauth_refusal =
+                                Some(RawOAuthRefusal::PostPendingProducerUnavailable);
+                            return Disposition::Refused;
+                        }
                         self.state.sessions = 1;
                         Disposition::Redirect
+                    }
+                    Step::IsolatedPostPending => {
+                        self.app_lookup();
+                        self.state.sessions = 1;
+                        Disposition::Ok
                     }
                     Step::View => {
                         self.app_lookup();
@@ -4083,7 +4152,8 @@ mod tests {
                         Disposition::Redirect
                     }
                     Step::Duplicate => {
-                        if self.case == Case::WrongSubject
+                        if (self.consumer == Consumer::OAuth && self.history == History::RawSigned)
+                            || self.case == Case::WrongSubject
                             || self.case == Case::Invalidate
                             || self.case == Case::Restart
                         {
@@ -4120,7 +4190,9 @@ mod tests {
             callback: Option<String>,
             session: Option<ShellSession>,
             original_intent: Option<FreshIntent>,
+            original_oidc_clock: Option<(i64, effects::Instant)>,
             original_authorization: Option<Digest>,
+            raw_oauth_refusal: Option<RawOAuthRefusal>,
             response_verified: bool,
             response_identity: Option<Digest>,
             invalidated: bool,
@@ -4204,7 +4276,9 @@ mod tests {
                     callback: None,
                     session: None,
                     original_intent: None,
+                    original_oidc_clock: None,
                     original_authorization: None,
+                    raw_oauth_refusal: None,
                     response_verified: false,
                     response_identity: None,
                     invalidated: false,
@@ -4260,6 +4334,7 @@ mod tests {
 
             fn capture_intent(&mut self) -> Result<()> {
                 self.original_intent = Some(self.login.pending_intent()?);
+                self.original_oidc_clock = Some(self.login.pending_clock()?);
                 self.original_authorization = Some(self.login.authorization_identity()?);
                 Ok(())
             }
@@ -4586,31 +4661,119 @@ mod tests {
                             self.callback.as_deref(),
                             &[],
                         );
-                        if let Ok(response) = response {
-                            let status = response.status();
-                            if let Some(cookie) = response.headers().get(header::SET_COOKIE) {
-                                self.headers.insert(
-                                    header::COOKIE,
-                                    cookie
-                                        .to_str()?
-                                        .split(';')
-                                        .next()
-                                        .context("replay cookie")?
-                                        .parse()?,
-                                );
-                                self.session =
-                                    self.shell.read_session(&self.headers, self.clock.wall())?;
-                                let session =
-                                    self.session.as_ref().context("replay signed session")?;
-                                session.proof.require_intent(
-                                    self.original_intent.as_ref().unwrap(),
-                                    &identity(),
-                                )?;
+                        match response {
+                            Ok(response) => {
+                                let status = response.status();
+                                if let Some(cookie) = response.headers().get(header::SET_COOKIE) {
+                                    self.headers.insert(
+                                        header::COOKIE,
+                                        cookie
+                                            .to_str()?
+                                            .split(';')
+                                            .next()
+                                            .context("replay cookie")?
+                                            .parse()?,
+                                    );
+                                    self.session = self
+                                        .shell
+                                        .read_session(&self.headers, self.clock.wall())?;
+                                    let session =
+                                        self.session.as_ref().context("replay signed session")?;
+                                    session.proof.require_intent(
+                                        self.original_intent.as_ref().unwrap(),
+                                        &identity(),
+                                    )?;
+                                }
+                                Ok(disposition(status))
                             }
-                            Ok(disposition(status))
-                        } else {
-                            Ok(Disposition::Refused)
+                            Err(error) => {
+                                if self.consumer == Consumer::OAuth
+                                    && step == Step::Callback
+                                    && !matches!(case, Case::WrongSubject | Case::Invalidate)
+                                {
+                                    ensure!(
+                                        error.root_cause().to_string()
+                                            == "OAuth post-pending authentication producer unavailable",
+                                        "signed OAuth callback refused for another reason: {error:#}"
+                                    );
+                                    self.raw_oauth_refusal =
+                                        Some(RawOAuthRefusal::PostPendingProducerUnavailable);
+                                }
+                                Ok(Disposition::Refused)
+                            }
                         }
+                    }
+                    Step::IsolatedPostPending => {
+                        ensure!(
+                            self.consumer == Consumer::OAuth
+                                && self.raw_oauth_refusal
+                                    == Some(RawOAuthRefusal::PostPendingProducerUnavailable)
+                                && self.session.is_none()
+                                && self.shell.sessions.lock().unwrap().is_empty(),
+                            "isolated witness requires the exact raw signed OAuth refusal"
+                        );
+                        let (before, _, _, _) = self.observe()?;
+                        ensure!(
+                            before.oauth_keys.shell_attestation == 0
+                                && before.activation == 0
+                                && before.product == 0
+                                && before.receipts == 0
+                                && before.product_rows == 0,
+                            "raw signed OAuth proof reached a key or writer before isolated witness"
+                        );
+                        let (_, target, _, _, _, _) =
+                            self.oauth.as_ref().context("isolated OAuth owner absent")?;
+                        let pending = self
+                            .shell
+                            .pending(
+                                &target.attempt,
+                                &identity(),
+                                &self.headers,
+                                self.clock.wall(),
+                            )?
+                            .context("isolated OAuth original pending absent")?;
+                        let intent = FreshIntent::approval(&pending, &identity())?;
+                        ensure!(
+                            self.original_intent.as_ref() == Some(&intent),
+                            "isolated witness changed the complete original pending intent"
+                        );
+                        let (started_at, started) = self
+                            .original_oidc_clock
+                            .take()
+                            .context("isolated witness original Google clock absent or reused")?;
+                        let proof =
+                            shell_oidc::Reauthenticated::isolated_fixture_with_original_start(
+                                intent,
+                                identity().email,
+                                identity().subject,
+                                self.clock.wall(),
+                                started_at,
+                                started,
+                            )?;
+                        ensure!(
+                            proof.deadline()?
+                                == started_at
+                                    .checked_add(300)
+                                    .context("replay original deadline overflow")?
+                                && proof.deadline()? == 1_300,
+                            "isolated witness renewed the original authentication deadline"
+                        );
+                        let (session, token) = self.shell.issue_session(
+                            &pending,
+                            &identity(),
+                            VerifiedAuthTime::from_google(proof),
+                            self.clock.wall(),
+                        )?;
+                        ensure!(
+                            session.expires_at == 1_300
+                                && self.original_authorization.as_ref()
+                                    == Some(&self.login.authorization_identity()?),
+                            "isolated witness changed the original deadline or authorization"
+                        );
+                        self.headers
+                            .insert(header::COOKIE, format!("{COOKIE}={token}").parse()?);
+                        self.session = Some(session);
+                        Ok(Disposition::Ok)
                     }
                     Step::View => Ok(disposition(
                         self.dispatch(Method::GET, &self.path, None, &[])?.status(),
@@ -4715,6 +4878,7 @@ mod tests {
                     product_rows: 0,
                     delivery_closed: 0,
                     response_verified: self.response_verified,
+                    raw_oauth_refusal: self.raw_oauth_refusal,
                     oauth_keys: Default::default(),
                     credential_keys: [0; 2],
                     providers,
@@ -4825,7 +4989,7 @@ mod tests {
             }
         }
 
-        fn program(consumer: Consumer, case: Case) -> Vec<Step> {
+        fn program(consumer: Consumer, case: Case, history: History) -> Vec<Step> {
             let mut steps = vec![Step::Begin];
             if case == Case::OppositePurpose {
                 steps.push(Step::OppositePurpose);
@@ -4835,9 +4999,14 @@ mod tests {
                 steps.push(Step::Invalidate);
             }
             steps.push(Step::Callback);
-            if matches!(case, Case::WrongSubject | Case::Invalidate) {
+            if (consumer == Consumer::OAuth && history == History::RawSigned)
+                || matches!(case, Case::WrongSubject | Case::Invalidate)
+            {
                 steps.push(Step::Duplicate);
                 return steps;
+            }
+            if consumer == Consumer::OAuth {
+                steps.push(Step::IsolatedPostPending);
             }
             steps.push(Step::View);
             match case {
@@ -4909,6 +5078,7 @@ mod tests {
             version: u32,
             consumer: Consumer,
             case: Case,
+            history: History,
             program: Vec<Step>,
             sources: BTreeMap<String, Digest>,
             toolchain: Digest,
@@ -4931,8 +5101,8 @@ mod tests {
         const TRACE_BYTES: usize = 4 * 1_024 * 1_024;
         const SNAPSHOT_BYTES: usize = 96 * 1_024;
 
-        fn execute(consumer: Consumer, case: Case, steps: &[Step]) -> Trace {
-            let mut trace = Trace {version:2,consumer,case,program:steps.to_vec(),
+        fn execute(consumer: Consumer, case: Case, history: History, steps: &[Step]) -> Trace {
+            let mut trace = Trace {version:3,consumer,case,history,program:steps.to_vec(),
                 sources:BTreeMap::from([
                     ("crates/day2/src/development.rs".into(),Digest::new(include_bytes!("../development.rs"))),
                     ("crates/day2/src/oauth/admission.rs".into(),Digest::new(include_bytes!("admission.rs"))),
@@ -4944,9 +5114,12 @@ mod tests {
                     ("crates/day2/src/managed_credentials/store.rs".into(),Digest::new(include_bytes!("../managed_credentials/store.rs"))),
                     ("crates/day2/src/store.rs".into(),Digest::new(include_bytes!("../store.rs"))),
                 ]),toolchain:Digest::new(include_bytes!("../../../../toolchain.json")),artifact:None,
-                fixture:Digest::new(b"signed-google-replay-v2;seed=17;wall=1000;complete=1001;exp=1301;fixed-reviewed-keys;modeled-host-deadline"),
+                fixture:Digest::new(b"claims-and-isolated-replay-v3;seed=17;wall=1000;complete=1001;exp=1301;original-deadline=1300;raw-Google-refused;separate-isolated-OAuth-witness;fixed-reviewed-keys"),
                 observations:Vec::new(),first_failure:None,refusals:Vec::new()};
-            if steps.is_empty() || steps.len() > 16 || !prerequisites(consumer, case, steps) {
+            if steps.is_empty()
+                || steps.len() > 16
+                || !prerequisites(consumer, case, history, steps)
+            {
                 trace.refuse(Failure {
                     category: "program_refusal".into(),
                     index: None,
@@ -4971,7 +5144,7 @@ mod tests {
                         .credential
                         .as_ref()
                         .map(|world| world.runtime.artifact().id().to_owned());
-                    let mut model = Model::new(consumer, case);
+                    let mut model = Model::new(consumer, case, history);
                     for (index, step) in steps.iter().copied().enumerate() {
                         let expected = model.step(step);
                         let actual = match world.step(step, case) {
@@ -5073,12 +5246,19 @@ mod tests {
             })
         }
 
-        fn prerequisites(consumer: Consumer, case: Case, steps: &[Step]) -> bool {
+        fn prerequisites(consumer: Consumer, case: Case, history: History, steps: &[Step]) -> bool {
+            if (consumer == Consumer::OAuth
+                && history == History::RawSigned
+                && !matches!(case, Case::Positive | Case::OppositePurpose))
+                || (consumer == Consumer::Credential && history != History::RawSigned)
+            {
+                return false;
+            }
             // Preserve the original owner's begin/callback, the actual
             // negative trigger, final post and one-use probe. Reduction can
             // remove only the two optional observations, never manufacture a
             // refusal by deleting its causal action or lifetime boundary.
-            let declared = program(consumer, case);
+            let declared = program(consumer, case, history);
             let essential = |steps: &[Step]| {
                 steps
                     .iter()
@@ -5107,6 +5287,11 @@ mod tests {
                     Step::Reuse | Step::OppositePurpose | Step::Invalidate
                         if begun && !callback => {}
                     Step::Callback if begun && !callback => callback = true,
+                    Step::IsolatedPostPending
+                        if callback
+                            && !confirmed
+                            && consumer == Consumer::OAuth
+                            && history == History::IsolatedOAuthActions => {}
                     Step::View | Step::ExpireTicks | Step::DelayKey | Step::Restart if callback => {
                     }
                     Step::Confirm if callback && !confirmed => confirmed = true,
@@ -5218,12 +5403,12 @@ mod tests {
                 while index < reduced.program.len() && attempts < 64 {
                     let mut candidate = reduced.program.clone();
                     candidate.remove(index);
-                    if !prerequisites(first.consumer, first.case, &candidate) {
+                    if !prerequisites(first.consumer, first.case, first.history, &candidate) {
                         index += 1;
                         continue;
                     }
                     attempts += 1;
-                    let actual = execute(first.consumer, first.case, &candidate);
+                    let actual = execute(first.consumer, first.case, first.history, &candidate);
                     let actual_failure = actual.first_failure.clone();
                     // Preserve exact original failed field AND protected
                     // counterexample values, not merely a generic refusal.
@@ -5243,7 +5428,7 @@ mod tests {
             write(
                 "reduction.json",
                 &serde_json::to_vec(&serde_json::json!({
-                    "version":2,"classification":"synthetic-local-signed-replay-only",
+                    "version":3,"classification":"synthetic-local-claims-and-isolated-witness-replay-only",
                     "reduction_attempts":attempts,"actual_attempt_refusals":refusals,
                     "equality_only_divergence":"original pair retained without speculative reduction",
                     "saved_corpus_input":"absent; this is a newly retained actual divergence",
@@ -5252,14 +5437,14 @@ mod tests {
             Ok(())
         }
 
-        fn compare(consumer: Consumer, case: Case) -> Result<()> {
-            let steps = program(consumer, case);
+        fn compare(consumer: Consumer, case: Case, history: History) -> Result<()> {
+            let steps = program(consumer, case, history);
             ensure!(
-                prerequisites(consumer, case, &steps),
+                prerequisites(consumer, case, history, &steps),
                 "signed replay declared prerequisites"
             );
-            let first = execute(consumer, case, &steps);
-            let second = execute(consumer, case, &steps);
+            let first = execute(consumer, case, history, &steps);
+            let second = execute(consumer, case, history, &steps);
             if first.first_failure.is_some() || second.first_failure.is_some() || first != second {
                 persist_failure(&first, &second)?;
                 anyhow::bail!(
@@ -5274,15 +5459,28 @@ mod tests {
         }
 
         #[test]
-        fn signed_google_replay_two_positive_owner_histories() -> Result<()> {
-            for consumer in [Consumer::OAuth, Consumer::Credential] {
-                compare(consumer, Case::Positive)?;
+        fn raw_signed_google_replay_refuses_oauth_without_post_pending_producer() -> Result<()> {
+            for case in [Case::Positive, Case::OppositePurpose] {
+                compare(Consumer::OAuth, case, History::RawSigned)?;
             }
             Ok(())
         }
 
         #[test]
-        fn signed_google_replay_six_paired_negative_owner_histories() -> Result<()> {
+        fn isolated_oauth_and_signed_credential_replay_two_positive_owner_histories() -> Result<()>
+        {
+            compare(
+                Consumer::OAuth,
+                Case::Positive,
+                History::IsolatedOAuthActions,
+            )?;
+            compare(Consumer::Credential, Case::Positive, History::RawSigned)?;
+            Ok(())
+        }
+
+        #[test]
+        fn isolated_oauth_and_signed_credential_replay_six_paired_negative_owner_histories()
+        -> Result<()> {
             for case in [
                 Case::WrongSubject,
                 Case::OppositePurpose,
@@ -5291,9 +5489,8 @@ mod tests {
                 Case::KeyDelay,
                 Case::Restart,
             ] {
-                for consumer in [Consumer::OAuth, Consumer::Credential] {
-                    compare(consumer, case)?;
-                }
+                compare(Consumer::OAuth, case, History::IsolatedOAuthActions)?;
+                compare(Consumer::Credential, case, History::RawSigned)?;
             }
             Ok(())
         }

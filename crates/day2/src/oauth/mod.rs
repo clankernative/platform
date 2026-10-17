@@ -17,6 +17,7 @@ pub(crate) mod gitlab;
 pub(crate) mod google;
 pub(crate) mod host;
 pub mod inbound;
+pub(crate) mod management;
 pub mod outbound;
 pub mod profiles;
 pub mod protocol;

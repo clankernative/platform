@@ -131,6 +131,10 @@ pub(crate) fn app_receiver(
         })),
         None => Ok(receiver),
     }?;
+    let receiver = receiver.with_management(Arc::new(super::management::app::Manager::new(
+        runtime.clone(),
+        authority.clone(),
+    )))?;
     runtime.connections = Some(authority);
     Ok((runtime, receiver))
 }
