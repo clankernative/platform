@@ -2200,7 +2200,7 @@ impl<'a> Scanner<'a> {
         match ty {
             Type::Path(path) => {
                 let last = path.path.segments.last()?;
-                let resolved = self.stdio_resolve_path(&path.path).ok().flatten()?;
+                let resolved = self.stdio_resolve_path(&path.path, PathNamespace::Type).ok().flatten()?;
                 if let syn::PathArguments::AngleBracketed(arguments) = &last.arguments {
                     let types = arguments
                         .args
@@ -2470,7 +2470,8 @@ impl<'a> Scanner<'a> {
                 {
                     return Some(identifier_name(&path.path.segments[0].ident));
                 }
-                let name = self.stdio_resolve_path(&path.path).ok().flatten()?;
+                let namespace = if path.path.segments.len() == 1 { PathNamespace::Value } else { PathNamespace::Type };
+                let name = self.stdio_resolve_path(&path.path, namespace).ok().flatten()?;
                 self.values
                     .iter()
                     .skip(*self.value_floors.last().unwrap())
@@ -2625,8 +2626,8 @@ impl<'a> Scanner<'a> {
         self.origin(&call.receiver).as_deref() == Some(READ_DIR_HANDLE)
     }
 
-    fn stdio_resolve_path(&self, path: &syn::Path) -> std::result::Result<Option<String>, &'static str> {
-        self.stdio_resolve_name(&path_name(path), path.leading_colon.is_some())
+    fn stdio_resolve_path(&self, path: &syn::Path, namespace: PathNamespace) -> std::result::Result<Option<String>, &'static str> {
+        self.stdio_resolve_name(&path_name(path), path.leading_colon.is_some(), namespace)
     }
 
     fn remember_stdio_import(&mut self, alias: &str, target: &str, absolute: bool) {
@@ -2638,7 +2639,7 @@ impl<'a> Scanner<'a> {
         }
     }
 
-    fn stdio_candidate(&self, name: &str, absolute: bool) -> Option<String> {
+    fn stdio_candidate(&self, name: &str, absolute: bool, namespace: PathNamespace) -> Option<String> {
         if absolute {
             return stdio_path_target(name).then(|| name.to_owned());
         }
@@ -2648,8 +2649,12 @@ impl<'a> Scanner<'a> {
         for _ in 0..MAX_ALIAS_ROUNDS {
             if !seen.insert((current.clone(), frame)) { return None; }
             let (first, rest) = current.split_once("::").unwrap_or((&current, ""));
+            let requested = if rest.is_empty() { namespace } else { PathNamespace::Type };
             let Some((index, stored)) = (0..=frame).rev().find_map(|index| {
-                self.aliases[index].get(first).map(|target| (index, target))
+                let target = self.aliases[index].get(first)?;
+                let canonical = self.stdio_absolute_imports[index].get(first).unwrap_or(target);
+                canonical_import_namespace(canonical).is_none_or(|kind| kind.includes(requested))
+                    .then_some((index, target))
             }) else {
                 return stdio_path_target(&current).then_some(current);
             };
@@ -2666,14 +2671,14 @@ impl<'a> Scanner<'a> {
         None
     }
 
-    fn stdio_resolve_name(&self, name: &str, absolute: bool) -> std::result::Result<Option<String>, &'static str> {
-        let captured = self.stdio_candidate(name, absolute);
+    fn stdio_resolve_name(&self, name: &str, absolute: bool, namespace: PathNamespace) -> std::result::Result<Option<String>, &'static str> {
+        let captured = self.stdio_candidate(name, absolute, namespace);
         let resolved = self.resolve_name(name);
         let family = captured
             .or_else(|| stdio_path_target(&resolved).then(|| resolved.clone()));
-        let Some(family) = family else {
+        if family.is_none() {
             return Ok(Some(resolved));
-        };
+        }
         // Only this finite family checks namespace precedence here. Keep every
         // other effect family's existing resolver and facts unchanged.
         if absolute {
@@ -2701,18 +2706,14 @@ impl<'a> Scanner<'a> {
             if matches!(first, "self" | "super" | "crate") {
                 return Err("unmodeled qualified standard-stream alias");
             }
-            let namespace = if rest.is_empty() && stdio_factory_result(&family).is_some() {
-                PathNamespace::Value
-            } else {
-                PathNamespace::Type
-            };
+            let requested = if rest.is_empty() { namespace } else { PathNamespace::Type };
             let declaration = (0..=frame).rev().find(|index| {
-                self.declarations[*index].get(first).is_some_and(|kind| kind.includes(namespace))
+                self.declarations[*index].get(first).is_some_and(|kind| kind.includes(requested))
             });
             let alias = (0..=frame).rev().find(|index| {
                 self.aliases[*index].get(first).is_some_and(|target| {
-                    canonical_import_namespace(&self.resolve_name(target))
-                        .is_none_or(|kind| kind.includes(namespace))
+                    let canonical = self.stdio_absolute_imports[*index].get(first).unwrap_or(target);
+                    canonical_import_namespace(canonical).is_none_or(|kind| kind.includes(requested))
                 })
             });
             if declaration.is_some_and(|declaration| alias.is_none_or(|alias| declaration >= alias)) {
@@ -2740,7 +2741,7 @@ impl<'a> Scanner<'a> {
     }
 
     fn stdio_trait_path(&self, path: &syn::ExprPath) -> Option<String> {
-        let target = self.stdio_resolve_path(&path.path).ok().flatten()?;
+        let target = self.stdio_resolve_path(&path.path, PathNamespace::Type).ok().flatten()?;
         let (owner, method) = target.rsplit_once("::")?;
         if owner != "std::io::Write" {
             return None;
@@ -3057,7 +3058,8 @@ impl<'a> Scanner<'a> {
                 return Some(name.to_owned());
             }
         }
-        self.stdio_resolve_name(name, false).ok().flatten()
+        let namespace = if name.contains("::") { PathNamespace::Type } else { PathNamespace::Value };
+        self.stdio_resolve_name(name, false, namespace).ok().flatten()
     }
 
     fn expression_kind(&self, expression: &Expr) -> ValueKind {
@@ -4064,7 +4066,7 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
             .collect::<Vec<_>>()
             .join("::");
         self.parent_effect_path_checked(&name, false, PathNamespace::Type);
-        if let Err(reason) = self.stdio_resolve_path(&ty.path) {
+        if let Err(reason) = self.stdio_resolve_path(&ty.path, PathNamespace::Type) {
             self.refuse_stdio_operation(reason);
         }
         visit::visit_type_path(self, ty);
@@ -4087,7 +4089,8 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
                 PathNamespace::Type
             },
         );
-        let resolution = self.stdio_resolve_path(&expression.path);
+        let namespace = if expression.path.segments.len() == 1 { PathNamespace::Value } else { PathNamespace::Type };
+        let resolution = self.stdio_resolve_path(&expression.path, namespace);
         if let Err(reason) = &resolution {
             self.refuse_stdio_operation(reason);
         }
@@ -4434,7 +4437,8 @@ impl Scanner<'_> {
                     index = expression_end;
                     continue;
                 }
-                if let Err(reason) = self.stdio_resolve_name(&name, false) {
+                let namespace = if name.contains("::") { PathNamespace::Type } else { PathNamespace::Value };
+                if let Err(reason) = self.stdio_resolve_name(&name, false, namespace) {
                     self.refuse_stdio_operation(reason);
                 }
                 let target = self.reference_target(&name);
@@ -5946,6 +5950,50 @@ mod tests {
             ("absolute_root_group", "std::io::stdout", 1),
             ("absolute_root_group", "std::io::Stdout::flush", 1),
         ]));
+        let actual = stdio_inventory(r#"
+            use ::std::io::Write;
+            fn value_std() {
+                use ::std::io::stderr as std;
+                std::io::stderr().write_all(b"x");
+            }
+            fn absolute_root_over_value_std() {
+                use ::std::io::stderr as std;
+                use ::std as runtime;
+                runtime::io::stderr().flush();
+            }
+        "#);
+        assert_eq!(stdio_counts(&actual.findings), expected_stdio(&[
+            ("value_std", "std::io::stderr", 1),
+            ("value_std", "std::io::Stderr::write_all", 1),
+            ("absolute_root_over_value_std", "std::io::stderr", 1),
+            ("absolute_root_over_value_std", "std::io::Stderr::flush", 1),
+        ]));
+        // The existing shared namespace guard conservatively refuses opposite
+        // named imports with an older ambient binding. Keep that refusal rather
+        // than expanding unrelated resolution to accept these cross-namespace
+        // forms; neither may silently become ordinary DATA.
+        for source in [
+            r#"
+                use ::std::io::{Write, Stderr as Output};
+                fn f() {
+                    use ::std::io::stderr as Output;
+                    fn typed(mut output: Output) { output.flush(); }
+                    let make = Output; make().flush();
+                }
+            "#,
+            r#"
+                use ::std::io::{Write, stderr as factory};
+                fn f() {
+                    use ::std::io::Stderr as factory;
+                    fn typed(mut output: factory) { output.flush(); }
+                    factory().flush();
+                }
+            "#,
+        ] {
+            let directory = fixture(source);
+            let error = inventory(directory.path()).unwrap_err().to_string();
+            assert!(error.contains("ambiguous imported namespace precedence"), "{source}: {error}");
+        }
     }
 
     #[test]
