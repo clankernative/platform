@@ -1,1 +1,55 @@
-exports_files(["rust.bzl", "README.md"])
+load(":cargo_context.bzl", "cargo_context_controls", "cargo_context_probe", "cargo_dependency_context")
+
+exports_files([
+    "rust.bzl",
+    "README.md",
+    "cargo_context.bzl",
+    "cargo_contexts.bzl",
+] + glob(["patches/*.patch"]))
+
+cargo_dependency_context(
+    name = "dependency_context",
+    visibility = ["//visibility:public"],
+)
+
+config_setting(
+    name = "linux_exec_context",
+    constraint_values = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+    flag_values = {":dependency_context": "host"},
+    visibility = ["//visibility:public"],
+)
+
+config_setting(
+    name = "linux_target_context",
+    constraint_values = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+    flag_values = {":dependency_context": "target"},
+    visibility = ["//visibility:public"],
+)
+
+cargo_context_probe(
+    name = "normal_context_probe",
+    expected = "target",
+    selected = select({
+        ":linux_exec_context": ["host"],
+        ":linux_target_context": ["target"],
+        "//conditions:default": [],
+    }),
+    tags = ["manual"],
+)
+
+cargo_context_probe(
+    name = "exec_context_probe",
+    expected = "host",
+    selected = select({
+        ":linux_exec_context": ["host"],
+        ":linux_target_context": ["target"],
+        "//conditions:default": [],
+    }),
+    tags = ["manual"],
+)
+
+cargo_context_controls(
+    name = "context_controls",
+    normal = ":normal_context_probe",
+    tool = ":exec_context_probe",
+)

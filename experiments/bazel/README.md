@@ -96,3 +96,30 @@ strict Clippy plus the complete case-catalog control module. New native sites
 require explicit review before an architecture-admitted Reports runtime gate.
 This preliminary gate does not install the bundle, build Reports, execute its
 runtime cases, or establish Cargo feature equivalence or a timing comparison.
+
+## Dependency contexts
+
+The simultaneous Cargo inventory compiled ten programs and fourteen test
+harnesses. The matching Bazel analysis still flattened distinct dependency
+feature variants. The experiment now models those thirteen packages with
+separate normal-target and build-tool variants, including their optional
+dependency edges. Cargo manifests, defaults, profiles and dependency versions
+remain authoritative and unchanged.
+
+`cargo_contexts.bzl` contains the reviewed Linux context prediction for the
+selected graph. It is not a resolver for arbitrary workspaces. Its feature sets
+were checked against the prior compiler-artifact inventory; the current source
+also preserves main's subsequent YAML-parser removal. Fresh hosted Cargo JSON
+and Bazel analysis must validate this composition before further builds or
+timing. Any mismatch stops the comparison and requires a reviewed model update.
+
+The crate-universe annotations patch only generated BUILD load bindings. The
+wrappers preserve source files, archive checksums and compiler settings. A
+build-script variant uses its owning crate's literal feature set for both
+compilation and execution; its build dependencies use the exec context. The
+context controls check normal and exec selection without compiling Rust.
+
+These context overrides apply to native x86-64 Linux. Other platforms retain
+the existing generated declarations and need their own independent analysis and
+native qualification. Current analysis is not proof of executed Bazel Rust
+actions, dynamic build-script values, complete compiler equivalence or speedup.

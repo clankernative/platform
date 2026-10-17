@@ -1,0 +1,13 @@
+--- a/BUILD.bazel
++++ b/BUILD.bazel
+@@ -9,5 +9,2 @@
+-load(
+-    "@rules_rust//cargo:defs.bzl",
+-    "cargo_build_script",
+-    "cargo_toml_env_vars",
+-)
++load("@rules_rust//cargo:defs.bzl", "cargo_toml_env_vars")
++load("@@//experiments/bazel:cargo_context.bzl", cargo_build_script = "cargo_context_build_script")
+@@ -15 +12 @@
+-load("@rules_rust//rust:defs.bzl", "rust_library")
++load("@@//experiments/bazel:cargo_context.bzl", rust_library = "cargo_context_rust_library")
