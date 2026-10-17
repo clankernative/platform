@@ -1853,6 +1853,7 @@ mod owned_google {
 
     struct Setup {
         directory: tempfile::TempDir,
+        retention_root: PathBuf,
         instance: PathBuf,
         artifact: crate::artifact::LoadedArtifact,
         authority: Arc<admission::ArtifactApprovalAuthority>,
@@ -1884,6 +1885,8 @@ mod owned_google {
                 format!("{signed}.{}", URL_SAFE_NO_PAD.encode(signature.as_ref()));
             let machine_assertion = assertions.assertion(APP_AUDIENCE, MACHINE, "service-123");
             Ok(Self {
+                retention_root: Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../artifacts/oauth-owned-google"),
                 instance: runtime.instance_path().to_path_buf(),
                 artifact: runtime.artifact().clone(),
                 directory,
@@ -2378,6 +2381,8 @@ mod owned_google {
         let receiver = Arc::new(receiver).with_management(manager)?;
         let world = simulation::World::new(seed);
         world.advance(95);
+        // Preserve supplied values even when the receiver never consumes them.
+        let replay_inputs = replay.clone();
         let port = Arc::new(Port {
             world,
             receiver,
@@ -3018,20 +3023,25 @@ mod owned_google {
             port.observe("terminal")?;
             Ok(())
         });
+        // Apply the unchanged oracle to EVERY successful scope return,
+        // including expected baseline/manual refusals that return early.
+        let result = result.and_then(|()| {
+            ensure!(
+                port.replay
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .is_none_or(VecDeque::is_empty),
+                "owned signed replay inputs unused"
+            );
+            Ok(())
+        });
         if let Err(error) = result {
             let trace = port.trace.lock().unwrap().clone();
             let inputs = port.inputs.lock().unwrap().clone();
-            retain(setup, seed, case, &trace, &inputs, Some(error.to_string()))?;
+            retain(setup, seed, case, &trace, &inputs, replay_inputs.as_deref(), Some(error.to_string()))?;
             return Err(error.context(format!("owned Google campaign {case:?}, seed {seed}")));
         }
-        ensure!(
-            port.replay
-                .lock()
-                .unwrap()
-                .as_ref()
-                .is_none_or(VecDeque::is_empty),
-            "owned signed replay inputs unused"
-        );
         let events = port.trace.lock().unwrap().clone();
         let inputs = port.inputs.lock().unwrap().clone();
         Ok(Transcript { events, inputs })
@@ -3043,20 +3053,21 @@ mod owned_google {
         case: Case,
         trace: &[serde_json::Value],
         inputs: &[SignedInput],
+        replay_inputs: Option<&[SignedInput]>,
         error: Option<String>,
     ) -> Result<()> {
         use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../artifacts/oauth-owned-google");
+        let root = &setup.retention_root;
         std::fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
-            .create(&root)?;
+            .create(root)?;
         let directory = tempfile::Builder::new()
             .prefix("campaign-")
-            .tempdir_in(&root)?;
+            .tempdir_in(root)?;
         std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))?;
-        let record = json!({"version":1,"seed":seed,"case":case,"error":error,"trace":trace,
-            "signed_provider_inputs":inputs,"artifact":setup.artifact.id(),
+        let record = json!({"version":2,"seed":seed,"case":case,"error":error,"trace":trace,
+            "signed_provider_inputs":inputs,"replay_provider_inputs":replay_inputs,"artifact":setup.artifact.id(),
             "instance":Digest::new(&std::fs::read(&setup.instance)?),
             "source":Digest::of(&(include_str!("shell_oidc.rs"),include_str!("google_begin.rs"),
                 include_str!("fresh_owner.rs"),include_str!("shell_transport.rs"),include_str!("shell_transport_tests.rs"),
@@ -3071,7 +3082,54 @@ mod owned_google {
             .open(path)?;
         file.write_all(&serde_json::to_vec(&record)?)?;
         file.sync_all()?;
+        std::fs::File::open(directory.path())?.sync_all()?;
         let _retained = directory.keep();
+        std::fs::File::open(root)?.sync_all()?;
+        Ok(())
+    }
+
+    #[test]
+    fn unused_signed_replay_inputs_retain_terminal_and_early_counterexamples() -> Result<()> {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        let controls = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../artifacts/oauth-owned-google-retention-control");
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&controls)?;
+        for case in [Case::Advance, Case::ExpiredManual] {
+            let mut setup = Setup::new()?;
+            let directory = tempfile::Builder::new().prefix("counterexample-").tempdir_in(&controls)?;
+            std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))?;
+            // Preserve each expected failure outside the 54 positive histories.
+            setup.retention_root = directory.keep();
+            std::fs::File::open(&controls)?.sync_all()?;
+            let first = run(&setup, 0, 7, case, None)?;
+            let extra = first.inputs.last().context("signed replay fixture is empty")?.clone();
+            let mut supplied = first.inputs.clone();
+            supplied.push(extra);
+            let error = run(&setup, 1, 7, case, Some(supplied.clone()))
+                .err().context("unused signed replay input must refuse")?;
+            ensure!(error.root_cause().to_string() == "owned signed replay inputs unused",
+                "counterexample failed before the unchanged unused-input oracle");
+            let retained = std::fs::read_dir(&setup.retention_root)?
+                .collect::<std::io::Result<Vec<_>>>()?;
+            ensure!(retained.len() == 1, "unused-input failure was not retained exactly once");
+            let directory = retained[0].path();
+            let metadata = std::fs::symlink_metadata(&directory)?;
+            ensure!(metadata.is_dir() && metadata.permissions().mode() & 0o7777 == 0o700,
+                "counterexample directory is not private");
+            let path = directory.join("replay.json");
+            let metadata = std::fs::symlink_metadata(&path)?;
+            ensure!(metadata.is_file() && metadata.permissions().mode() & 0o7777 == 0o600,
+                "counterexample file is not private");
+            let record: serde_json::Value = crate::json::decode(&std::fs::read(path)?)?;
+            ensure!(record["version"] == 2 && record["seed"] == 7
+                && record["case"] == serde_json::to_value(case)?
+                && record["error"] == "owned signed replay inputs unused",
+                "persisted counterexample lost its exact failure or case");
+            ensure!(record["signed_provider_inputs"] == serde_json::to_value(&first.inputs)?
+                && record["replay_provider_inputs"] == serde_json::to_value(&supplied)?
+                && record["trace"] == serde_json::to_value(&first.events)?,
+                "persisted counterexample omitted raw supplied input or actual observations");
+        }
         Ok(())
     }
 
@@ -3122,6 +3180,7 @@ mod owned_google {
                         case,
                         &first.events,
                         &first.inputs,
+                        None,
                         Some("semantic replay divergence".into()),
                     )?;
                     retain(
@@ -3130,11 +3189,12 @@ mod owned_google {
                         case,
                         &replay.events,
                         &replay.inputs,
+                        Some(first.inputs.as_slice()),
                         Some("replay observation".into()),
                     )?;
                     anyhow::bail!("owned Google replay diverged for {case:?}, seed {seed}");
                 }
-                retain(&setup, seed, case, &first.events, &first.inputs, None)?;
+                retain(&setup, seed, case, &first.events, &first.inputs, None, None)?;
             }
         }
         Ok(())
