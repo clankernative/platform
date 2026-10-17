@@ -8,7 +8,7 @@ App :: [].{
 	definition = {
 		namespace: "things",
 		operations: { tag: TagThing.definition, list: ListThings.definition },
-		pages: { things: Routes.directory.register() },
+		pages: { things: Routes.directory.register(), native_controls: Routes.native_controls.register() },
 		properties: { things: ThingInvariants.things },
 		errors: {},
 		examples: [Demo.definition],

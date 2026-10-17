@@ -2594,6 +2594,27 @@ mod people_resource_tests {
     }
 }
 
+/// Reopen only a disposable, credential-free development instance. Reattaching
+/// its simulation host neither reseeds provider state nor activates authority.
+pub fn reopen_for(instance_path: &Path) -> Result<Runtime> {
+    let runtime = Runtime::load(instance_path, "app")?;
+    ensure!(
+        runtime.scope() == "localdev/disposable/app",
+        "local development requires disposable scope"
+    );
+    ensure!(
+        runtime.artifact().contract().credential_manifest.is_empty(),
+        "credential artifacts require explicit verification selection or an admitted installation"
+    );
+    let database = runtime.db().to_path_buf();
+    let scope = runtime.scope().to_owned();
+    Ok(runtime.with_integrations(crate::integration_host::Host::simulated(&database, &scope)))
+}
+
+pub fn uses_simulated_providers(runtime: &Runtime) -> bool {
+    runtime.integrations().uses_simulated_providers()
+}
+
 pub fn create_for(
     artifact_path: &Path,
     directory: &Path,
