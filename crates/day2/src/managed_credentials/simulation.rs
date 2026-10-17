@@ -987,7 +987,10 @@ async fn credential_effects_follow_async_and_blocking_scopes() -> Result<()> {
 async fn credential_blocking_requests_preserve_both_tracks_and_scripted_http() -> Result<()> {
     struct HttpPorts(Arc<std::sync::atomic::AtomicUsize>);
     impl crate::oauth::effects::Hooks for HttpPorts {
-        fn provider_observation(&self, _: crate::oauth::shell_oidc::ProviderObservationData) -> Result<()> {
+        fn provider_observation(
+            &self,
+            _: crate::oauth::shell_oidc::ProviderObservationData,
+        ) -> Result<()> {
             anyhow::bail!("unscripted provider observation")
         }
 

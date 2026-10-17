@@ -544,10 +544,14 @@ impl SecurityShell {
         // Reuse this shell's exact existing contexts; this attaches no proof,
         // caller, key, session or alternate authenticator.
         let management = Arc::new(super::management::shell::Shell::new(
-            self.origin.clone(), self.approvals.clone(), self.signer.clone(),
+            self.origin.clone(),
+            self.approvals.clone(),
+            self.signer.clone(),
             self.authenticator.clone(),
         ));
-        Arc::get_mut(&mut self).context("security shell already shared")?.management = Some(management);
+        Arc::get_mut(&mut self)
+            .context("security shell already shared")?
+            .management = Some(management);
         Ok(self)
     }
 
@@ -602,27 +606,31 @@ impl SecurityShell {
             let capacity = router_capacity.clone();
             let captured = request_effects.clone();
             async move {
-                captured.run_async(async move {
-                let path = request.uri().path();
-                if matches!(path, "/health/live" | "/health/ready") {
-                    let status =
-                        if request.method() != Method::GET || request.uri().query().is_some() {
-                            StatusCode::BAD_REQUEST
-                        } else if path == "/health/ready" && !admission.load(Ordering::Acquire) {
-                            StatusCode::SERVICE_UNAVAILABLE
-                        } else {
-                            StatusCode::OK
+                captured
+                    .run_async(async move {
+                        let path = request.uri().path();
+                        if matches!(path, "/health/live" | "/health/ready") {
+                            let status = if request.method() != Method::GET
+                                || request.uri().query().is_some()
+                            {
+                                StatusCode::BAD_REQUEST
+                            } else if path == "/health/ready" && !admission.load(Ordering::Acquire)
+                            {
+                                StatusCode::SERVICE_UNAVAILABLE
+                            } else {
+                                StatusCode::OK
+                            };
+                            return protected(status.into_response());
+                        }
+                        if !admission.load(Ordering::Acquire) {
+                            return protected(StatusCode::SERVICE_UNAVAILABLE.into_response());
+                        }
+                        let Ok(permit) = capacity.try_acquire_owned() else {
+                            return protected(StatusCode::SERVICE_UNAVAILABLE.into_response());
                         };
-                    return protected(status.into_response());
-                }
-                if !admission.load(Ordering::Acquire) {
-                    return protected(StatusCode::SERVICE_UNAVAILABLE.into_response());
-                }
-                let Ok(permit) = capacity.try_acquire_owned() else {
-                    return protected(StatusCode::SERVICE_UNAVAILABLE.into_response());
-                };
-                shell.handle(request, permit, admission).await
-                }).await
+                        shell.handle(request, permit, admission).await
+                    })
+                    .await
             }
         });
         axum::serve(listener, router)
@@ -3896,7 +3904,10 @@ mod tests {
         }
 
         impl effects::Hooks for Clock {
-            fn provider_observation(&self, _: crate::oauth::shell_oidc::ProviderObservationData) -> Result<()> {
+            fn provider_observation(
+                &self,
+                _: crate::oauth::shell_oidc::ProviderObservationData,
+            ) -> Result<()> {
                 anyhow::bail!("unscripted provider observation")
             }
 
