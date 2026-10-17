@@ -3039,7 +3039,15 @@ mod owned_google {
         if let Err(error) = result {
             let trace = port.trace.lock().unwrap().clone();
             let inputs = port.inputs.lock().unwrap().clone();
-            retain(setup, seed, case, &trace, &inputs, replay_inputs.as_deref(), Some(error.to_string()))?;
+            retain(
+                setup,
+                seed,
+                case,
+                &trace,
+                &inputs,
+                replay_inputs.as_deref(),
+                Some(error.to_string()),
+            )?;
             return Err(error.context(format!("owned Google campaign {case:?}, seed {seed}")));
         }
         let events = port.trace.lock().unwrap().clone();
@@ -3093,42 +3101,66 @@ mod owned_google {
         use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
         let controls = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../artifacts/oauth-owned-google-retention-control");
-        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&controls)?;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&controls)?;
         for case in [Case::Advance, Case::ExpiredManual] {
             let mut setup = Setup::new()?;
-            let directory = tempfile::Builder::new().prefix("counterexample-").tempdir_in(&controls)?;
+            let directory = tempfile::Builder::new()
+                .prefix("counterexample-")
+                .tempdir_in(&controls)?;
             std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))?;
             // Preserve each expected failure outside the 54 positive histories.
             setup.retention_root = directory.keep();
             std::fs::File::open(&controls)?.sync_all()?;
             let first = run(&setup, 0, 7, case, None)?;
-            let extra = first.inputs.last().context("signed replay fixture is empty")?.clone();
+            let extra = first
+                .inputs
+                .last()
+                .context("signed replay fixture is empty")?
+                .clone();
             let mut supplied = first.inputs.clone();
             supplied.push(extra);
             let error = run(&setup, 1, 7, case, Some(supplied.clone()))
-                .err().context("unused signed replay input must refuse")?;
-            ensure!(error.root_cause().to_string() == "owned signed replay inputs unused",
-                "counterexample failed before the unchanged unused-input oracle");
-            let retained = std::fs::read_dir(&setup.retention_root)?
-                .collect::<std::io::Result<Vec<_>>>()?;
-            ensure!(retained.len() == 1, "unused-input failure was not retained exactly once");
+                .err()
+                .context("unused signed replay input must refuse")?;
+            ensure!(
+                error.root_cause().to_string() == "owned signed replay inputs unused",
+                "counterexample failed before the unchanged unused-input oracle"
+            );
+            let retained =
+                std::fs::read_dir(&setup.retention_root)?.collect::<std::io::Result<Vec<_>>>()?;
+            ensure!(
+                retained.len() == 1,
+                "unused-input failure was not retained exactly once"
+            );
             let directory = retained[0].path();
             let metadata = std::fs::symlink_metadata(&directory)?;
-            ensure!(metadata.is_dir() && metadata.permissions().mode() & 0o7777 == 0o700,
-                "counterexample directory is not private");
+            ensure!(
+                metadata.is_dir() && metadata.permissions().mode() & 0o7777 == 0o700,
+                "counterexample directory is not private"
+            );
             let path = directory.join("replay.json");
             let metadata = std::fs::symlink_metadata(&path)?;
-            ensure!(metadata.is_file() && metadata.permissions().mode() & 0o7777 == 0o600,
-                "counterexample file is not private");
+            ensure!(
+                metadata.is_file() && metadata.permissions().mode() & 0o7777 == 0o600,
+                "counterexample file is not private"
+            );
             let record: serde_json::Value = crate::json::decode(&std::fs::read(path)?)?;
-            ensure!(record["version"] == 2 && record["seed"] == 7
-                && record["case"] == serde_json::to_value(case)?
-                && record["error"] == "owned signed replay inputs unused",
-                "persisted counterexample lost its exact failure or case");
-            ensure!(record["signed_provider_inputs"] == serde_json::to_value(&first.inputs)?
-                && record["replay_provider_inputs"] == serde_json::to_value(&supplied)?
-                && record["trace"] == serde_json::to_value(&first.events)?,
-                "persisted counterexample omitted raw supplied input or actual observations");
+            ensure!(
+                record["version"] == 2
+                    && record["seed"] == 7
+                    && record["case"] == serde_json::to_value(case)?
+                    && record["error"] == "owned signed replay inputs unused",
+                "persisted counterexample lost its exact failure or case"
+            );
+            ensure!(
+                record["signed_provider_inputs"] == serde_json::to_value(&first.inputs)?
+                    && record["replay_provider_inputs"] == serde_json::to_value(&supplied)?
+                    && record["trace"] == serde_json::to_value(&first.events)?,
+                "persisted counterexample omitted raw supplied input or actual observations"
+            );
         }
         Ok(())
     }
