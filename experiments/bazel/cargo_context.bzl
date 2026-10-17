@@ -63,6 +63,15 @@ def cargo_context_rust_library(name, version, crate_features, deps = [], proc_ma
 
 def cargo_context_build_script(name, pkg_name, version, crate_features, deps = [], proc_macro_deps = [], aliases = {}, visibility = None, **kwargs):
     model = _model(pkg_name.replace("-", "_"), version)
+    if name != "_bs":
+        fail("Unreviewed generated build-script name: " + name)
+    # The pinned wrapper derives CARGO_CRATE_NAME from name_to_pkg_name(name).
+    # Its generated `_bs` name maps to the empty string. Preserve that value
+    # before introducing owner-variant labels; keep explicit caller values.
+    env = dict(kwargs.pop("rustc_env", {}))
+    if "CARGO_CRATE_NAME" not in env:
+        env["CARGO_CRATE_NAME"] = ""
+    kwargs["rustc_env"] = env
     # Each call passes literal owner features to both build-script compilation
     # and execution. Its build dependencies still take the normal exec edge.
     for context in ["target", "host"]:
