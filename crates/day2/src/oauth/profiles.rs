@@ -1304,6 +1304,7 @@ pub(super) mod tests {
             &self,
             identity: &crate::iap::Verified,
             _: crate::oauth::fresh_auth::FreshIntent,
+            _: &HeaderMap,
             _: i64,
         ) -> Result<ReauthStart> {
             Ok(ReauthStart::Authenticated(FreshHuman {
@@ -1328,6 +1329,7 @@ pub(super) mod tests {
             &self,
             _: &crate::iap::Verified,
             intent: crate::oauth::fresh_auth::FreshIntent,
+            _: &HeaderMap,
             _: i64,
         ) -> Result<ReauthStart> {
             *self.0.lock().unwrap() = Some(intent);
@@ -1340,9 +1342,10 @@ pub(super) mod tests {
             &self,
             _: &str,
             _: &crate::iap::Verified,
+            _: &HeaderMap,
             _: i64,
-        ) -> Result<crate::oauth::shell_oidc::Reauthenticated> {
-            Ok(crate::oauth::shell_oidc::Reauthenticated::fixture(
+        ) -> Result<crate::oauth::security_shell::ReauthCallback> {
+            Ok(crate::oauth::security_shell::ReauthCallback::Observed(crate::oauth::shell_oidc::Reauthenticated::fixture(
                 self.0
                     .lock()
                     .unwrap()
@@ -1351,7 +1354,7 @@ pub(super) mod tests {
                 "human_1".into(),
                 "accounts.google.com:test-human".into(),
                 5,
-            ))
+            )))
         }
     }
 

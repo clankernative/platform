@@ -97,15 +97,24 @@ pub(crate) trait ApprovalRegistry: Send + Sync {
 /// neither proves when the human last authenticated.
 pub(crate) trait FreshAuthenticator: Send + Sync {
     fn identify(&self, headers: &HeaderMap, now: i64) -> Result<iap::Verified>;
-    fn begin(&self, identity: &iap::Verified, intent: FreshIntent, now: i64)
+    fn begin(&self, identity: &iap::Verified, intent: FreshIntent, headers: &HeaderMap, now: i64)
     -> Result<ReauthStart>;
     fn complete(
         &self,
         _query: &str,
         _identity: &iap::Verified,
+        _headers: &HeaderMap,
         _now: i64,
-    ) -> Result<shell_oidc::Reauthenticated> {
+    ) -> Result<ReauthCallback> {
         anyhow::bail!("reauthentication callback unavailable")
+    }
+
+    fn manual_view(&self, _: &str, _: &iap::Verified, _: &HeaderMap, _: i64) -> Result<shell_oidc::ManualView> {
+        anyhow::bail!("manual Google checkpoint unavailable")
+    }
+
+    fn resume_manual(&self, _: &str, _: &str, _: &iap::Verified, _: &HeaderMap, _: i64) -> Result<String> {
+        anyhow::bail!("manual Google resume unavailable")
     }
 }
 
@@ -113,6 +122,19 @@ pub(crate) enum ReauthStart {
     #[cfg(test)]
     Authenticated(FreshHuman),
     Redirect(String),
+}
+
+pub(crate) enum ReauthCallback {
+    Manual(String),
+    Observed(shell_oidc::Reauthenticated),
+}
+
+struct ManualRequest<'a> {
+    method: &'a Method,
+    handle: &'a str,
+    query: Option<&'a str>,
+    headers: &'a HeaderMap,
+    body: &'a [u8],
 }
 
 #[cfg(test)]
@@ -428,15 +450,16 @@ impl SecurityShell {
         let (identity, edge) = instance.security_edge()?;
         let origin = format!("{}/", edge.origin);
         let (client_id, exchange) = super::clients::reauthentication(&instance, tokens)?;
+        let approvals = Arc::new(shell_transport::RemoteApprovals::from_instance(
+            &instance, bearers,
+        )?);
         let authenticator = Arc::new(shell_oidc::GoogleFreshAuthenticator::new(
             &edge.iap_audience,
             &identity.hosted_domain,
             &origin,
             client_id,
             exchange,
-        )?);
-        let approvals = Arc::new(shell_transport::RemoteApprovals::from_instance(
-            &instance, bearers,
+            approvals.clone(),
         )?);
         let mut shell = Self::with_transport(
             origin.clone(),
@@ -701,6 +724,9 @@ impl SecurityShell {
                 .context("registration campaign unavailable")?
                 .dispatch(method, path, query, headers, body, &identity, at);
         }
+        if let Some(handle) = path.strip_prefix(shell_oidc::MANUAL_PREFIX) {
+            return self.manual_google(ManualRequest { method, handle, query, headers, body }, &identity, at);
+        }
         if path == shell_oidc::GoogleOidc::callback_path() {
             ensure!(
                 *method == Method::GET && body.is_empty(),
@@ -779,6 +805,7 @@ impl SecurityShell {
             "security shell registry origin mismatch"
         );
         view.validate(identity)?;
+        ensure!(at >= view.quarantined_at() && at < view.expires_at, "original OAuth approval expired");
         Ok(Some(view))
     }
 
@@ -803,6 +830,7 @@ impl SecurityShell {
                     match self.authenticator.begin(
                         identity,
                         FreshIntent::approval(&pending, identity)?,
+                        headers,
                         at,
                     )? {
                         #[cfg(test)]
@@ -923,8 +951,16 @@ impl SecurityShell {
         identity: &iap::Verified,
         at: i64,
     ) -> Result<Response> {
-        let proof =
-            VerifiedAuthTime::from_google(self.authenticator.complete(query, identity, at)?);
+        let observed = match self.authenticator.complete(query, identity, headers, at)? {
+            ReauthCallback::Manual(location) => {
+                ensure!(location.starts_with(shell_oidc::MANUAL_PREFIX)
+                    && token_shape(&location[shell_oidc::MANUAL_PREFIX.len()..]),
+                    "Google manual checkpoint location refused");
+                return Ok((StatusCode::SEE_OTHER, [(header::LOCATION, location)]).into_response());
+            }
+            ReauthCallback::Observed(observed) => observed,
+        };
+        let proof = VerifiedAuthTime::from_google(observed);
         proof.require_current(at)?;
         if matches!(
             proof.purpose(),
@@ -968,6 +1004,54 @@ impl SecurityShell {
             "{COOKIE}={token}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age={SESSION_SECONDS}"
         ).parse()?);
         Ok(response)
+    }
+
+    fn manual_google(&self, request: ManualRequest<'_>, identity: &iap::Verified, at: i64) -> Result<Response> {
+        let ManualRequest { method, handle, query, headers, body } = request;
+        ensure!(token_shape(handle) && query.is_none(), "invalid Google manual checkpoint route");
+        if *method == Method::GET {
+            ensure!(body.is_empty(), "Google manual GET body refused");
+            let view = self.authenticator.manual_view(handle, identity, headers, at)?;
+            ensure!(view.location == format!("{}{handle}", shell_oidc::MANUAL_PREFIX)
+                && view.human == identity.email && at < view.deadline, "Google manual view context changed");
+            let deadline = time::OffsetDateTime::from_unix_timestamp(view.deadline)?
+                .format(&time::format_description::well_known::Rfc3339)?;
+            let markup = html! { (DOCTYPE) html lang="en" {
+                head { meta charset="utf-8"; title { "Complete a fresh Google sign-in" } }
+                body { main {
+                    h1 { "Complete a fresh Google sign-in" }
+                    p { "Account: " (view.human) }
+                    p { "Complete a fresh Google sign-in in another tab, then return here and continue." }
+                    p { a href="https://accounts.google.com/" target="_blank" rel="noopener noreferrer" { "Open Google account" }
+                        " may show your existing sign-in. Opening it does not create a new authentication." }
+                    p { "If you choose to sign out and sign back in, this ends the Google sign-in for this browser. You may need to sign back into this tool before continuing. This page does not sign you out." }
+                    p { "Continue checks your new sign-in; if verification fails, start a new request." }
+                    p { "This request expires at " (deadline) ". Signing in, reloading or continuing does not extend it." }
+                    form method="post" action=(view.location) {
+                        input type="hidden" name="csrf" value=(view.csrf);
+                        button type="submit" { "Continue" }
+                    }
+                } }
+            }};
+            return Ok((StatusCode::OK, [(header::CONTENT_TYPE, "text/html; charset=utf-8")], markup.into_string()).into_response());
+        }
+        ensure!(*method == Method::POST && body.len() <= 1024
+            && headers.get_all(header::ORIGIN).iter().count() == 1
+            && headers.get(header::ORIGIN).and_then(|value| value.to_str().ok()) == Some(&self.origin)
+            && headers.get_all(header::CONTENT_TYPE).iter().count() == 1
+            && headers.get(header::CONTENT_TYPE).and_then(|value| value.to_str().ok()) == Some("application/x-www-form-urlencoded")
+            && headers.get_all("sec-fetch-site").iter().count() <= 1
+            && headers.get("sec-fetch-site").is_none_or(|value| value == "same-origin"),
+            "Google manual form method, origin or type refused");
+        let fields = web_security::fields(body)?;
+        ensure!(fields.len() == 1, "Google manual form field set refused");
+        let csrf = fields.get("csrf").context("Google manual CSRF missing")?;
+        let location = self.authenticator.resume_manual(handle, csrf, identity, headers, at)?;
+        let target = url::Url::parse(&location)?;
+        ensure!(location.len() <= 4096 && target.origin().ascii_serialization() == "https://accounts.google.com"
+            && target.path() == "/o/oauth2/v2/auth" && target.fragment().is_none()
+            && target.username().is_empty() && target.password().is_none(), "Google manual resume target refused");
+        Ok((StatusCode::SEE_OTHER, [(header::LOCATION, location)]).into_response())
     }
 
     fn confirm(
@@ -1046,11 +1130,11 @@ impl SecurityShell {
         proof: VerifiedAuthTime,
         at: i64,
     ) -> Result<(ShellSession, String)> {
-        proof.require_intent(
+        proof.require_credential_authentication(
             &credentials::fresh_intent(runtime, pending, identity)?,
             identity,
+            at,
         )?;
-        proof.require_current(at)?;
         let token = effects::random()?;
         let session = ShellSession {
             attempt: pending.attempt.clone(),
@@ -1140,7 +1224,7 @@ impl SecurityShell {
                 .read_session(headers, at)?
             {
                 Some(session) if valid(&session) => (session, None),
-                _ => match self.authenticator.begin(identity, intent.clone(), at)? {
+                _ => match self.authenticator.begin(identity, intent.clone(), headers, at)? {
                     #[cfg(test)]
                     ReauthStart::Authenticated(human) => {
                         let (session, token) = self
@@ -1624,7 +1708,7 @@ mod tests {
                     .into(),
             })
         }
-        fn begin(&self, identity: &iap::Verified, _: FreshIntent, now: i64) -> Result<ReauthStart> {
+        fn begin(&self, identity: &iap::Verified, _: FreshIntent, _: &HeaderMap, now: i64) -> Result<ReauthStart> {
             if !self.fresh {
                 return Ok(ReauthStart::Redirect(
                     "https://accounts.google.com/reauthenticate".into(),
@@ -3013,9 +3097,10 @@ mod tests {
 
     #[test]
     fn credential_signed_google_session_keeps_original_intent_across_three_roles() -> Result<()> {
-        // The normal checked Credential Metadata artifact and actual local
-        // registry/product-command consumer remain mandatory. This is a native
-        // signed fixture, not a Google live campaign or remote app transport.
+        // Keep this mandatory entrypoint: actual signed callbacks must refuse
+        // before a credential session/context/confirmation. A separately explicit
+        // isolated witness then retains all original three-role product oracles.
+        // The real Credential Metadata artifact and local registry remain required.
         struct CredentialClock(Arc<super::super::simulation::World>);
 
         impl crate::host::Host for CredentialClock {
@@ -3102,6 +3187,8 @@ mod tests {
                 .resolve(attempt, &identity, world.now)?
                 .context("actual pending")?;
             let intent = credentials::fresh_intent(&runtime, &pending, &identity)?;
+            let google_started_at = world.now;
+            let google_started = effects::Instant::now();
             let (authenticator, assertions, callback) = shell_oidc::fixture_login(
                 &identity,
                 intent.clone(),
@@ -3124,7 +3211,7 @@ mod tests {
                 let changed = credentials::fresh_intent(&runtime, &changed, &owner)?;
                 assert!(
                     authenticator
-                        .begin(&owner, changed.clone(), world.now)
+                        .begin_parser(&owner, changed.clone(), world.now)
                         .is_err(),
                     "active Google intent accepted substitution {mutation}"
                 );
@@ -3135,10 +3222,12 @@ mod tests {
                 attempt,
                 &pending.challenge()?,
                 "https://security.example.com/",
+                pending.created_at,
+                pending.expires_at,
             )?;
             assert!(
                 authenticator
-                    .begin(&identity, opposite.clone(), world.now)
+                    .begin_parser(&identity, opposite.clone(), world.now)
                     .is_err()
             );
             let oauth = Arc::new(NoOAuth);
@@ -3160,25 +3249,51 @@ mod tests {
                 world.runtime.host().now_ms()?.div_euclid(1000),
                 effects::wall_time()?
             );
-            let response = shell.dispatch(
+            let before = signed_replay::database_snapshot_digest(world.runtime.db())?;
+            let keys_before = world.keys.0.load(Ordering::SeqCst);
+            let error = shell.dispatch(
                 &Method::GET,
                 shell_oidc::GoogleOidc::callback_path(),
                 Some(&callback),
                 &headers,
                 &[],
                 world.now + 1,
-            )?;
-            assert_eq!(response.status(), StatusCode::SEE_OTHER);
-            let cookie = response.headers()[header::SET_COOKIE]
-                .to_str()?
-                .split(';')
-                .next()
-                .context("issued credential cookie")?
-                .to_owned();
-            headers.insert(header::COOKIE, cookie.parse()?);
+            ).err().context("signed credential callback manufactured a native proof")?;
+            assert_eq!(error.root_cause().to_string(), "OAuth post-pending authentication producer unavailable");
+            assert!(shell.sessions.lock().unwrap().is_empty());
+            assert!(!headers.contains_key(header::COOKIE));
+            assert_eq!(signed_replay::database_snapshot_digest(world.runtime.db())?, before);
+            assert_eq!(world.keys.0.load(Ordering::SeqCst), keys_before);
+            // Exercise direct consumers too: no caller can bypass the common
+            // guard by projecting confirmation DATA or skipping the callback.
+            let (parser, _, query) = shell_oidc::fixture_login(&identity, intent.clone(), world.now,
+                world.now + 1, world.now + 1)?;
+            let signed = VerifiedAuthTime::from_google(parser.complete_parser(&query, &identity, world.now + 1)?);
+            signed.require_intent(&intent, &identity)?;
+            signed.require_current(world.now + 1)?;
+            assert!(signed.credential_confirmation_context(&intent, &identity, world.now + 1).is_err());
+            assert!(credentials::confirm(&runtime, &pending, &identity, "signed-parser-no-session", &signed,
+                world.now + 1).is_err());
+            for acknowledge in [false, true] {
+                assert!(credentials::deliver(&runtime, &pending, &identity, "signed-parser-no-session", &signed,
+                    world.now + 1, acknowledge).is_err());
+            }
+            assert!(shell.credential_session(&runtime, &pending, &identity, signed, world.now + 1).is_err());
+            assert!(shell.sessions.lock().unwrap().is_empty());
+            assert_eq!(signed_replay::database_snapshot_digest(world.runtime.db())?, before);
+            assert_eq!(world.keys.0.load(Ordering::SeqCst), keys_before);
+            // Only this named isolated test witness exercises the product
+            // transitions below. No signed input or callback is promoted to it.
+            let isolated = shell_oidc::Reauthenticated::isolated_fixture_with_original_start(
+                intent.clone(), identity.email.clone(), identity.subject.clone(), world.now + 1,
+                google_started_at, google_started)?;
+            assert_eq!(isolated.deadline()?, intent.deadline());
+            let (_, token) = shell.credential_session(&runtime, &pending, &identity,
+                VerifiedAuthTime::from_google(isolated), world.now + 1)?;
+            headers.insert(header::COOKIE, format!("{COOKIE}={token}").parse()?);
             let session = shell
                 .read_session(&headers, world.now + 1)?
-                .context("actual Google session")?;
+                .context("explicit isolated credential session")?;
             session.proof.require_intent(&intent, &identity)?;
             assert!(session.proof.purpose() == FreshPurpose::CredentialIntent);
             assert!(session.proof.require_intent(&opposite, &identity).is_err());
@@ -3931,12 +4046,12 @@ mod tests {
         enum History {
             RawSigned,
             // Signed Google data is refused first. Only the separately named
-            // test witness can exercise subsequent OAuth action transitions.
-            IsolatedOAuthActions,
+            // test witness can exercise subsequent consumer action transitions.
+            IsolatedActions,
         }
 
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-        enum RawOAuthRefusal {
+        enum RawSignedRefusal {
             PostPendingProducerUnavailable,
         }
 
@@ -3990,7 +4105,7 @@ mod tests {
             product_rows: i64,
             delivery_closed: i64,
             response_verified: bool,
-            raw_oauth_refusal: Option<RawOAuthRefusal>,
+            raw_signed_refusal: Option<RawSignedRefusal>,
             oauth_keys: admission::tests::ReplayKeyCounts,
             credential_keys: [usize; 2],
             providers: shell_oidc::ReplayProviderCounts,
@@ -4024,7 +4139,7 @@ mod tests {
                         product_rows: 0,
                         delivery_closed: 0,
                         response_verified: false,
-                        raw_oauth_refusal: None,
+                        raw_signed_refusal: None,
                         oauth_keys: Default::default(),
                         credential_keys: [0; 2],
                         providers: Default::default(),
@@ -4084,13 +4199,9 @@ mod tests {
                             };
                         }
                         self.app_lookup();
-                        if self.consumer == Consumer::OAuth {
-                            self.state.raw_oauth_refusal =
-                                Some(RawOAuthRefusal::PostPendingProducerUnavailable);
-                            return Disposition::Refused;
-                        }
-                        self.state.sessions = 1;
-                        Disposition::Redirect
+                        self.state.raw_signed_refusal =
+                            Some(RawSignedRefusal::PostPendingProducerUnavailable);
+                        Disposition::Refused
                     }
                     Step::IsolatedPostPending => {
                         self.app_lookup();
@@ -4152,7 +4263,7 @@ mod tests {
                         Disposition::Redirect
                     }
                     Step::Duplicate => {
-                        if (self.consumer == Consumer::OAuth && self.history == History::RawSigned)
+                        if self.history == History::RawSigned
                             || self.case == Case::WrongSubject
                             || self.case == Case::Invalidate
                             || self.case == Case::Restart
@@ -4192,7 +4303,7 @@ mod tests {
             original_intent: Option<FreshIntent>,
             original_oidc_clock: Option<(i64, effects::Instant)>,
             original_authorization: Option<Digest>,
-            raw_oauth_refusal: Option<RawOAuthRefusal>,
+            raw_signed_refusal: Option<RawSignedRefusal>,
             response_verified: bool,
             response_identity: Option<Digest>,
             invalidated: bool,
@@ -4278,7 +4389,7 @@ mod tests {
                     original_intent: None,
                     original_oidc_clock: None,
                     original_authorization: None,
-                    raw_oauth_refusal: None,
+                    raw_signed_refusal: None,
                     response_verified: false,
                     response_identity: None,
                     invalidated: false,
@@ -4606,12 +4717,14 @@ mod tests {
                                 &world.pending.attempt,
                                 &world.pending.challenge()?,
                                 "https://security.example.com/",
+                                world.pending.created_at,
+                                world.pending.expires_at,
                             )?
                         };
                         ensure!(
                             self.login
                                 .authenticator
-                                .begin(&identity(), intent, self.clock.wall())
+                                .begin_parser(&identity(), intent, self.clock.wall())
                                 .is_err(),
                             "opposite purpose accepted"
                         );
@@ -4687,17 +4800,16 @@ mod tests {
                                 Ok(disposition(status))
                             }
                             Err(error) => {
-                                if self.consumer == Consumer::OAuth
-                                    && step == Step::Callback
+                                if step == Step::Callback
                                     && !matches!(case, Case::WrongSubject | Case::Invalidate)
                                 {
                                     ensure!(
                                         error.root_cause().to_string()
                                             == "OAuth post-pending authentication producer unavailable",
-                                        "signed OAuth callback refused for another reason: {error:#}"
+                                        "signed consumer callback refused for another reason: {error:#}"
                                     );
-                                    self.raw_oauth_refusal =
-                                        Some(RawOAuthRefusal::PostPendingProducerUnavailable);
+                                    self.raw_signed_refusal =
+                                        Some(RawSignedRefusal::PostPendingProducerUnavailable);
                                 }
                                 Ok(Disposition::Refused)
                             }
@@ -4705,12 +4817,11 @@ mod tests {
                     }
                     Step::IsolatedPostPending => {
                         ensure!(
-                            self.consumer == Consumer::OAuth
-                                && self.raw_oauth_refusal
-                                    == Some(RawOAuthRefusal::PostPendingProducerUnavailable)
+                            self.raw_signed_refusal
+                                    == Some(RawSignedRefusal::PostPendingProducerUnavailable)
                                 && self.session.is_none()
                                 && self.shell.sessions.lock().unwrap().is_empty(),
-                            "isolated witness requires the exact raw signed OAuth refusal"
+                            "isolated witness requires the exact raw signed consumer refusal"
                         );
                         let (before, _, _, _) = self.observe()?;
                         ensure!(
@@ -4718,21 +4829,23 @@ mod tests {
                                 && before.activation == 0
                                 && before.product == 0
                                 && before.receipts == 0
-                                && before.product_rows == 0,
-                            "raw signed OAuth proof reached a key or writer before isolated witness"
+                                && before.product_rows == 0
+                                && before.credential_keys == [0; 2],
+                            "raw signed consumer proof reached a key or writer before isolated witness"
                         );
-                        let (_, target, _, _, _, _) =
-                            self.oauth.as_ref().context("isolated OAuth owner absent")?;
-                        let pending = self
-                            .shell
-                            .pending(
-                                &target.attempt,
-                                &identity(),
-                                &self.headers,
-                                self.clock.wall(),
-                            )?
-                            .context("isolated OAuth original pending absent")?;
-                        let intent = FreshIntent::approval(&pending, &identity())?;
+                        let oauth_pending = if let Some((_, target, _, _, _, _)) = &self.oauth {
+                            Some(self.shell.pending(&target.attempt, &identity(), &self.headers, self.clock.wall())?
+                                .context("isolated OAuth original pending absent")?)
+                        } else { None };
+                        let credential_pending = if let Some(world) = &self.credential {
+                            Some(world.registry.resolve(&world.pending.attempt, &identity(), self.clock.wall())?
+                                .context("isolated credential original pending absent")?)
+                        } else { None };
+                        let intent = match (&oauth_pending, &credential_pending) {
+                            (Some(pending), None) => FreshIntent::approval(pending, &identity())?,
+                            (None, Some((runtime, pending))) => credentials::fresh_intent(runtime, pending, &identity())?,
+                            _ => anyhow::bail!("isolated consumer original owner ambiguous"),
+                        };
                         ensure!(
                             self.original_intent.as_ref() == Some(&intent),
                             "isolated witness changed the complete original pending intent"
@@ -4758,12 +4871,12 @@ mod tests {
                                 && proof.deadline()? == 1_300,
                             "isolated witness renewed the original authentication deadline"
                         );
-                        let (session, token) = self.shell.issue_session(
-                            &pending,
-                            &identity(),
-                            VerifiedAuthTime::from_google(proof),
-                            self.clock.wall(),
-                        )?;
+                        let proof = VerifiedAuthTime::from_google(proof);
+                        let (session, token) = match (&oauth_pending, &credential_pending) {
+                            (Some(pending), None) => self.shell.issue_session(pending, &identity(), proof, self.clock.wall())?,
+                            (None, Some((runtime, pending))) => self.shell.credential_session(runtime, pending, &identity(), proof, self.clock.wall())?,
+                            _ => anyhow::bail!("isolated consumer session owner ambiguous"),
+                        };
                         ensure!(
                             session.expires_at == 1_300
                                 && self.original_authorization.as_ref()
@@ -4878,7 +4991,7 @@ mod tests {
                     product_rows: 0,
                     delivery_closed: 0,
                     response_verified: self.response_verified,
-                    raw_oauth_refusal: self.raw_oauth_refusal,
+                    raw_signed_refusal: self.raw_signed_refusal,
                     oauth_keys: Default::default(),
                     credential_keys: [0; 2],
                     providers,
@@ -4999,15 +5112,12 @@ mod tests {
                 steps.push(Step::Invalidate);
             }
             steps.push(Step::Callback);
-            if (consumer == Consumer::OAuth && history == History::RawSigned)
-                || matches!(case, Case::WrongSubject | Case::Invalidate)
+            if history == History::RawSigned || matches!(case, Case::WrongSubject | Case::Invalidate)
             {
                 steps.push(Step::Duplicate);
                 return steps;
             }
-            if consumer == Consumer::OAuth {
-                steps.push(Step::IsolatedPostPending);
-            }
+            steps.push(Step::IsolatedPostPending);
             steps.push(Step::View);
             match case {
                 Case::TicksExpired => steps.push(Step::ExpireTicks),
@@ -5247,11 +5357,7 @@ mod tests {
         }
 
         fn prerequisites(consumer: Consumer, case: Case, history: History, steps: &[Step]) -> bool {
-            if (consumer == Consumer::OAuth
-                && history == History::RawSigned
-                && !matches!(case, Case::Positive | Case::OppositePurpose))
-                || (consumer == Consumer::Credential && history != History::RawSigned)
-            {
+            if history == History::RawSigned && !matches!(case, Case::Positive | Case::OppositePurpose) {
                 return false;
             }
             // Preserve the original owner's begin/callback, the actual
@@ -5290,8 +5396,7 @@ mod tests {
                     Step::IsolatedPostPending
                         if callback
                             && !confirmed
-                            && consumer == Consumer::OAuth
-                            && history == History::IsolatedOAuthActions => {}
+                            && history == History::IsolatedActions => {}
                     Step::View | Step::ExpireTicks | Step::DelayKey | Step::Restart if callback => {
                     }
                     Step::Confirm if callback && !confirmed => confirmed = true,
@@ -5462,6 +5567,7 @@ mod tests {
         fn raw_signed_google_replay_refuses_oauth_without_post_pending_producer() -> Result<()> {
             for case in [Case::Positive, Case::OppositePurpose] {
                 compare(Consumer::OAuth, case, History::RawSigned)?;
+                compare(Consumer::Credential, case, History::RawSigned)?;
             }
             Ok(())
         }
@@ -5472,9 +5578,9 @@ mod tests {
             compare(
                 Consumer::OAuth,
                 Case::Positive,
-                History::IsolatedOAuthActions,
+                History::IsolatedActions,
             )?;
-            compare(Consumer::Credential, Case::Positive, History::RawSigned)?;
+            compare(Consumer::Credential, Case::Positive, History::IsolatedActions)?;
             Ok(())
         }
 
@@ -5489,8 +5595,8 @@ mod tests {
                 Case::KeyDelay,
                 Case::Restart,
             ] {
-                compare(Consumer::OAuth, case, History::IsolatedOAuthActions)?;
-                compare(Consumer::Credential, case, History::RawSigned)?;
+                compare(Consumer::OAuth, case, History::IsolatedActions)?;
+                compare(Consumer::Credential, case, History::IsolatedActions)?;
             }
             Ok(())
         }
@@ -5508,16 +5614,20 @@ mod tests {
                                 world.step(Step::Begin, Case::Positive)? == Disposition::Redirect,
                                 "original signed begin refused"
                             );
-                            ensure!(
-                                world.step(Step::Callback, Case::Positive)?
-                                    == Disposition::Redirect,
-                                "actual signed callback refused"
-                            );
+                            let (_, _, before, foreign_before) = world.observe()?;
+                            ensure!(world.step(Step::Callback, Case::Positive)? == Disposition::Refused,
+                                "actual signed callback manufactured a native proof");
+                            let (raw, _, after, foreign_after) = world.observe()?;
+                            ensure!(before == after && foreign_before == foreign_after
+                                && raw.sessions == 0 && raw.credential_keys == [0; 2],
+                                "raw signed credential refusal changed a database, key or cookie");
+                            ensure!(world.step(Step::IsolatedPostPending, Case::Positive)? == Disposition::Ok,
+                                "explicit isolated original witness refused");
                             let credential = world.credential.as_ref().unwrap();
                             let session = world
                                 .session
                                 .as_ref()
-                                .context("actual signed session missing")?;
+                                .context("explicit isolated credential session missing")?;
                             let binding = world.original_session_binding()?;
                             let fault = credentials::confirm_with_fault(
                                 &credential.runtime,
@@ -5775,6 +5885,10 @@ mod tests {
             definition: Digest,
             columns: Vec<String>,
             rows: Vec<Vec<serde_json::Value>>,
+        }
+
+        pub(super) fn database_snapshot_digest(path: &Path) -> Result<Digest> {
+            Digest::of(&snapshot(path)?)
         }
 
         fn snapshot(path: &Path) -> Result<Vec<Table>> {
