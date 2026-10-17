@@ -587,13 +587,7 @@ impl shell_transport::ApprovalSigner for LocalShellApprovals {
             .context("OAuth test approval disappeared")?;
         let now = session.observe_current(now)?;
         session.require_approval(view, now)?;
-        context.shell_key.attest_view(
-            &view.claim,
-            view.digest()?,
-            session.digest(),
-            session.authenticated_at(),
-            now,
-        )
+        context.shell_key.attest_view(view, session, now)
     }
 }
 

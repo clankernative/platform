@@ -657,8 +657,9 @@ those other services. The host must arrange renewal before expiry; this slice
 introduces neither a background renewal loop nor an app refresh job.
 
 Canary credentials must be isolated from active product grants. Google remote
-revocation can invalidate an account/client grant; the campaign performs no
-automatic revocation or successor cleanup. See [Google's OAuth lifecycle](https://developers.google.com/identity/protocols/oauth2/web-server)
+revocation affects an account's grants across all clients in the Google project;
+the campaign performs no automatic revocation or successor cleanup. Assess the
+complete project/account scope before manual cleanup. See [Google's OAuth lifecycle](https://developers.google.com/identity/protocols/oauth2/web-server#tokenrevoke)
 and [stable identity claims](https://developers.google.com/identity/openid-connect/reference).
 
 ### Creating a company web client
@@ -731,6 +732,74 @@ shell-only retirement does not retract an app's already accepted five-minute lea
 Renewal and workload deployment remain runtime work. The real HTTP fixtures exercise the
 same native campaign and Roc recipe but cannot qualify a Google client.
 
+## Product connection management
+
+The dedicated security shell mounts `/oauth/connections/APP/REGISTRATION` for
+admitted selections. Its forms capture an immutable pending action at the owning
+app through the authenticated private transport. A signed nonce- and
+purpose-bound authentication after that capture and a same-origin confirmation
+are required before connect or disconnect. An existing IAP login or provider
+consent click does not establish fresh authentication. The original five-minute
+deadline is never renewed by a redirect, confirmation, exchange or restart.
+
+Product connect and disconnect currently refuse at the native attestation
+factory, and external-account approval refuses before constructing an approval
+session: no qualified producer proves a human authentication event after the
+original pending request. Google signature, nonce and identity validation remain
+necessary, but signed `auth_time` compared with our local wall clock does not
+supply that causal proof. `max_age`, consent, token issue time and a timestamp
+skew allowance cannot replace it. See [Google's authentication-time contract](https://developers.google.com/identity/siwg/security-bundle#authentication_time).
+Enabling Google's session-age claim alone cannot enable product actions. Only
+explicit isolated test witnesses exercise successful management transitions;
+actual signed-token conformance inputs remain refused by these gates. The
+production external-approval signing entry accepts the typed approval view and
+session; scalar timestamp signing helpers exist only in isolated tests. Shared
+credential consumers retain their separate behavior and are not qualified by
+these management tests. A real admitted producer and new complete qualification
+are required before the live connect/read/refresh/disconnect campaign.
+
+The initial execution profile is Google Calendar with a mapped current human
+and an empty slot. Other reviewed provider metadata stays admitted; this UI
+refuses unsupported execution. Replacement, reconnecting a disabled slot and
+adopting restored state are unavailable. A new disposable installation is
+required for another first-slot campaign.
+
+The callback keeps a dedicated Secure/HttpOnly/SameSite=Lax browser session so it
+can return from Google. Exact state, selected callback path, original purpose,
+human and session are checked before consuming it. The owning app verifies the
+current shell key, registration, account mapping, active business authority and
+slot again. It commits the dispatch fence before one code exchange and publishes
+encrypted tokens only with the final local checks in the same transaction.
+Unknown exchange outcomes never trigger an automatic retry or become readiness.
+A slot dispatch barrier is committed with the one-time exchange permit. It
+blocks new and already-pending competing connects, survives attempt expiry and
+database reopen, and has no reset API. An unknown send therefore requires a
+disposable reset or independently resolved operator cleanup before reuse.
+
+Google advertises authorization-response issuer support in its
+[discovery document](https://accounts.google.com/.well-known/openid-configuration).
+Qualification and product callbacks therefore require one nonempty `iss` exactly
+equal to `https://accounts.google.com`, including provider denials. Missing,
+duplicate, empty or mismatched issuers are refused before the shell consumes the
+pending authorization. The reviewed Google callback extras remain allowed. This
+follows [RFC 9207](https://www.rfc-editor.org/rfc/rfc9207.html#section-2.4);
+other adapters retain their explicitly reviewed callback policies.
+
+Disconnect disables local use, increments its epoch, cancels outstanding local
+work and deletes private material atomically. Google revocation affects the
+account's grants for **all clients in the Google project**, including other
+clients used for reauthentication. See [Google's revocation contract](https://developers.google.com/identity/protocols/oauth2/web-server#tokenrevoke).
+This profile has no complete cross-app/installation
+holder inventory and therefore sends no automatic revocation request. It records
+`intervention_required` and reports provider cleanup as an operator assessment.
+Manual cleanup also requires that assessment; a client-level inventory is
+insufficient for the project-wide revocation domain.
+
+These checks do not establish an external nonrollback security epoch. Secured
+restore remains refused; this profile must not be used as restore, bootstrap or
+enrollment evidence. Native tests, a qualified release, actual Google
+registration and the deployed live lifecycle remain separate gates.
+
 ## Remaining runtime work
 
 The dedicated shell launcher and deployment root are now available. The app
@@ -745,8 +814,8 @@ These declarations do not audit all effective inherited IAM privileges.
 Use the [installation IAM audit procedure](OAUTH-IAM-AUDIT.md) before reporting
 workload isolation; an API selection or successful secret read is not that evidence.
 
-The next runtime slice must qualify the actual deployed frontend/workload/secret
-policies and wire connect attempt creation.
+The live campaign must qualify the actual deployed frontend/workload/secret
+policies and the product connection-management path.
 Independent app facts and registration publication are now composed in the
 ordinary qualified edge launcher. The real Google web clients and
 their exact secret versions remain required; their instance contract and native

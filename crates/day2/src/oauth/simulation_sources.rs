@@ -23,6 +23,10 @@ pub(super) const SOURCES: &[(&str, &str)] = &[
     ("host.rs", include_str!("host.rs")),
     ("inbound.rs", include_str!("inbound.rs")),
     ("live_readiness.rs", include_str!("live_readiness.rs")),
+    ("management", ""),
+    ("management.rs", include_str!("management.rs")),
+    ("management/app.rs", include_str!("management/app.rs")),
+    ("management/shell.rs", include_str!("management/shell.rs")),
     ("mod.rs", include_str!("mod.rs")),
     ("outbound.rs", include_str!("outbound.rs")),
     ("profiles.rs", include_str!("profiles.rs")),
@@ -282,7 +286,7 @@ fn ambient_macro_effects_and_namespace_aliases_cannot_bypass_the_guard() -> Resu
 #[test]
 fn every_oauth_module_uses_the_controlled_effect_boundary() -> Result<()> {
     let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/oauth");
-    let mut files = std::fs::read_dir(directory)?
+    let mut files = std::fs::read_dir(&directory)?
         .map(|entry| {
             entry?
                 .file_name()
@@ -299,6 +303,19 @@ fn every_oauth_module_uses_the_controlled_effect_boundary() -> Result<()> {
     ensure!(
         files == expected,
         "OAuth source catalog changed; add effect guard and replay identity coverage"
+    );
+    let mut management = std::fs::read_dir(directory.join("management"))?
+        .map(|entry| {
+            entry?
+                .file_name()
+                .into_string()
+                .map_err(|_| anyhow::anyhow!("non-UTF8 management source"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    management.sort();
+    ensure!(
+        management == ["app.rs", "shell.rs"],
+        "OAuth management source catalog changed"
     );
     for &(name, source) in SOURCES {
         if matches!(

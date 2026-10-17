@@ -49,6 +49,8 @@ impl CredentialContextData {
 pub(in crate::oauth) enum FreshPurpose {
     OAuthApproval,
     CredentialIntent,
+    OAuthConnect,
+    OAuthDisconnect,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -62,6 +64,12 @@ enum Context {
         app: String,
         artifact: String,
         app_origin: String,
+        shell_origin: String,
+        expires_at: i64,
+    },
+    Management {
+        action: super::management::Action,
+        view: Digest,
         shell_origin: String,
         expires_at: i64,
     },
@@ -82,6 +90,26 @@ pub(crate) struct FreshIntent {
 }
 
 impl FreshIntent {
+    pub(in crate::oauth) fn management(
+        view: &super::management::View,
+        identity: &iap::Verified,
+    ) -> Result<Self> {
+        view.validate(identity, view.created_at)?;
+        Ok(Self {
+            context: Context::Management {
+                action: view.action,
+                view: view.digest()?,
+                shell_origin: admitted_origin(&view.shell_origin)?,
+                expires_at: view.expires_at,
+            },
+            attempt: view.id.clone(),
+            challenge: view.challenge.clone(),
+            human: view.human.clone(),
+            subject: view.subject.clone(),
+            created_at: view.created_at,
+        })
+    }
+
     pub(in crate::oauth) fn approval(
         view: &ApprovalView,
         identity: &iap::Verified,
@@ -132,6 +160,10 @@ impl FreshIntent {
         match &self.context {
             Context::OAuth { .. } => FreshPurpose::OAuthApproval,
             Context::Credential { .. } => FreshPurpose::CredentialIntent,
+            Context::Management { action, .. } => match action {
+                super::management::Action::Connect => FreshPurpose::OAuthConnect,
+                super::management::Action::Disconnect => FreshPurpose::OAuthDisconnect,
+            },
         }
     }
 
@@ -151,6 +183,7 @@ impl FreshIntent {
         match &self.context {
             Context::OAuth { .. } => None,
             Context::Credential { expires_at, .. } => Some(*expires_at),
+            Context::Management { expires_at, .. } => Some(*expires_at),
         }
     }
 
@@ -164,9 +197,9 @@ impl FreshIntent {
 
     pub(in crate::oauth) fn require_shell_origin(&self, origin: &str) -> Result<()> {
         let expected = match &self.context {
-            Context::OAuth { shell_origin, .. } | Context::Credential { shell_origin, .. } => {
-                shell_origin
-            }
+            Context::OAuth { shell_origin, .. }
+            | Context::Credential { shell_origin, .. }
+            | Context::Management { shell_origin, .. } => shell_origin,
         };
         ensure!(
             expected == &admitted_origin(origin)?,
@@ -265,6 +298,17 @@ impl VerifiedAuthTime {
         Self { google }
     }
 
+    pub(in crate::oauth) fn require_management_authentication(&self) -> Result<()> {
+        ensure!(
+            matches!(
+                self.purpose(),
+                FreshPurpose::OAuthConnect | FreshPurpose::OAuthDisconnect
+            ),
+            "OAuth management original purpose required"
+        );
+        self.google.require_post_pending_authentication()
+    }
+
     pub(in crate::oauth) fn purpose(&self) -> FreshPurpose {
         self.google.intent().purpose()
     }
@@ -321,7 +365,8 @@ impl VerifiedAuthTime {
         view: &ApprovalView,
         identity: &iap::Verified,
     ) -> Result<()> {
-        self.require_intent(&FreshIntent::approval(view, identity)?, identity)
+        self.require_intent(&FreshIntent::approval(view, identity)?, identity)?;
+        self.google.require_post_pending_authentication()
     }
 }
 

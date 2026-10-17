@@ -210,6 +210,18 @@ impl Reauthenticated {
         self.authenticated_at
     }
 
+    /// Signed timestamps alone do not establish authentication after the local
+    /// pending request. No production causal producer is admitted yet.
+    pub(in crate::oauth) fn require_post_pending_authentication(&self) -> Result<()> {
+        #[cfg(test)]
+        if self.isolated_fixture {
+            // Only the explicit per-proof isolated fixture constructor sets it;
+            // real signed Google parser fixtures leave this false.
+            return Ok(());
+        }
+        anyhow::bail!("OAuth post-pending authentication producer unavailable")
+    }
+
     pub(in crate::oauth) fn deadline(&self) -> Result<i64> {
         let deadline = self
             .authenticated_at
@@ -318,6 +330,44 @@ impl Reauthenticated {
             }),
             isolated_fixture: true,
         }
+    }
+
+    /// A distinct isolated witness, with the original attempt's clock anchors.
+    /// This constructor cannot accept or upgrade a parsed signed Google proof.
+    #[cfg(test)]
+    pub(in crate::oauth) fn isolated_fixture_with_original_start(
+        intent: FreshIntent,
+        human: String,
+        subject: String,
+        authenticated_at: i64,
+        started_at: i64,
+        started: effects::Instant,
+    ) -> Result<Self> {
+        let observed = effects::Instant::now();
+        ensure!(
+            started_at >= intent.created_at()
+                && authenticated_at > intent.created_at()
+                && authenticated_at >= started_at
+                && observed.checked_duration_since(started).is_some(),
+            "isolated witness changed the original authentication clock"
+        );
+        Ok(Self {
+            intent,
+            human,
+            subject,
+            authenticated_at,
+            provider_expires_at: authenticated_at
+                .checked_add(ATTEMPT_SECONDS)
+                .context("isolated witness provider expiry overflow")?,
+            started_at,
+            started,
+            lifetime: Mutex::new(Lifetime {
+                wall: authenticated_at,
+                observed,
+                refused: false,
+            }),
+            isolated_fixture: true,
+        })
     }
 }
 
@@ -1196,6 +1246,16 @@ mod signed_fixtures {
                 "replay needs exactly one original Google intent"
             );
             Ok(pending.values().next().unwrap().intent.clone())
+        }
+
+        pub fn pending_clock(&self) -> Result<(i64, effects::Instant)> {
+            let pending = self.authenticator.oidc.pending.lock().unwrap();
+            ensure!(
+                pending.len() == 1,
+                "replay needs exactly one original Google clock"
+            );
+            let pending = pending.values().next().unwrap();
+            Ok((pending.started_at, pending.started))
         }
 
         /// Unsigned original claim inputs remain exact; random signatures and
