@@ -1527,6 +1527,9 @@ struct Scanner<'a> {
     findings: &'a mut BTreeMap<FindingKey, Finding>,
     context: Vec<String>,
     aliases: Vec<BTreeMap<String, String>>,
+    // Absolute std-root imports are retained only for stdio provenance; the
+    // shared import namespace/resolver remains unchanged for other families.
+    stdio_absolute_imports: Vec<BTreeMap<String, String>>,
     named_imports: Vec<BTreeMap<String, String>>,
     parent_aliases: Vec<BTreeSet<String>>,
     conditional_aliases: Vec<BTreeSet<String>>,
@@ -1571,6 +1574,7 @@ impl<'a> Scanner<'a> {
             findings,
             context: Vec::new(),
             aliases: vec![BTreeMap::new()],
+            stdio_absolute_imports: vec![BTreeMap::new()],
             named_imports: vec![BTreeMap::new()],
             parent_aliases: vec![BTreeSet::new()],
             conditional_aliases: vec![BTreeSet::new()],
@@ -2096,7 +2100,8 @@ impl<'a> Scanner<'a> {
                 // Preserve an actual extern-root stdio import even when a local
                 // module is named std. Other families retain their old path.
                 let absolute_stdio = absolute && stdio_path_target(&target);
-                self.import_provenance(&alias, &if absolute_stdio { format!("::{target}") } else { target.clone() });
+                self.remember_stdio_import(&alias, &target, absolute);
+                self.import_provenance(&alias, &target);
                 let target = if absolute_stdio { target } else { self.resolve_name(&target) };
                 self.bind_alias(alias, target.clone(), tree);
                 if review && ambient_binding(&target) {
@@ -2110,7 +2115,8 @@ impl<'a> Scanner<'a> {
                     join(&identifier_name(&rename.ident))
                 };
                 let absolute_stdio = absolute && stdio_path_target(&raw_target);
-                self.import_provenance(&identifier_name(&rename.rename), &if absolute_stdio { format!("::{raw_target}") } else { raw_target.clone() });
+                self.remember_stdio_import(&identifier_name(&rename.rename), &raw_target, absolute);
+                self.import_provenance(&identifier_name(&rename.rename), &raw_target);
                 let target = if absolute_stdio { raw_target } else { self.resolve_name(&raw_target) };
                 self.bind_alias(identifier_name(&rename.rename), target.clone(), tree);
                 if review && ambient_binding(&target) {
@@ -2623,11 +2629,51 @@ impl<'a> Scanner<'a> {
         self.stdio_resolve_name(&path_name(path), path.leading_colon.is_some())
     }
 
-    fn stdio_resolve_name(&self, name: &str, absolute: bool) -> std::result::Result<Option<String>, &'static str> {
-        let resolved = self.resolve_name(name);
-        if !stdio_path_target(&resolved) && !(absolute && stdio_path_target(name)) {
-            return Ok(Some(resolved));
+    fn remember_stdio_import(&mut self, alias: &str, target: &str, absolute: bool) {
+        let origins = self.stdio_absolute_imports.last_mut().unwrap();
+        if absolute && (target == "std" || stdio_path_target(target)) {
+            origins.insert(alias.to_owned(), target.to_owned());
+        } else {
+            origins.remove(alias);
         }
+    }
+
+    fn stdio_candidate(&self, name: &str, absolute: bool) -> Option<String> {
+        if absolute {
+            return stdio_path_target(name).then(|| name.to_owned());
+        }
+        let mut current = name.to_owned();
+        let mut frame = self.aliases.len() - 1;
+        let mut seen = BTreeSet::new();
+        for _ in 0..MAX_ALIAS_ROUNDS {
+            if !seen.insert((current.clone(), frame)) { return None; }
+            let (first, rest) = current.split_once("::").unwrap_or((&current, ""));
+            let Some((index, stored)) = (0..=frame).rev().find_map(|index| {
+                self.aliases[index].get(first).map(|target| (index, target))
+            }) else {
+                return stdio_path_target(&current).then_some(current);
+            };
+            let target = self.stdio_absolute_imports[index].get(first).unwrap_or(stored);
+            let candidate = if rest.is_empty() { target.clone() } else { format!("{target}::{rest}") };
+            if stdio_path_target(&candidate) { return Some(candidate); }
+            // Discovery also follows an alias whose stored target was already
+            // rewritten by a later std alias. Its raw dependency still points
+            // at the original import and its defining frame.
+            let raw = self.named_imports[index].get(first).unwrap_or(stored);
+            current = if rest.is_empty() { raw.clone() } else { format!("{raw}::{rest}") };
+            frame = index;
+        }
+        None
+    }
+
+    fn stdio_resolve_name(&self, name: &str, absolute: bool) -> std::result::Result<Option<String>, &'static str> {
+        let captured = self.stdio_candidate(name, absolute);
+        let resolved = self.resolve_name(name);
+        let family = captured
+            .or_else(|| stdio_path_target(&resolved).then(|| resolved.clone()));
+        let Some(family) = family else {
+            return Ok(Some(resolved));
+        };
         // Only this finite family checks namespace precedence here. Keep every
         // other effect family's existing resolver and facts unchanged.
         if absolute {
@@ -2655,7 +2701,7 @@ impl<'a> Scanner<'a> {
             if matches!(first, "self" | "super" | "crate") {
                 return Err("unmodeled qualified standard-stream alias");
             }
-            let namespace = if rest.is_empty() && stdio_factory_result(&resolved).is_some() {
+            let namespace = if rest.is_empty() && stdio_factory_result(&family).is_some() {
                 PathNamespace::Value
             } else {
                 PathNamespace::Type
@@ -2684,7 +2730,10 @@ impl<'a> Scanner<'a> {
             // rechecking it in the use frame would shadow a valid older import.
             let target = self.named_imports[index].get(first)
                 .or_else(|| self.aliases[index].get(first)).unwrap();
-            current = if rest.is_empty() { target.clone() } else { format!("{target}::{rest}") };
+            let target = if let Some(canonical) = self.stdio_absolute_imports[index].get(first) {
+                format!("::{canonical}")
+            } else { target.clone() };
+            current = if rest.is_empty() { target } else { format!("{target}::{rest}") };
             frame = index;
         }
         Err("standard-stream alias chain limit exceeded")
@@ -3453,6 +3502,7 @@ impl<'a> Scanner<'a> {
 
     fn block(&mut self, block: &syn::Block, callable_tail: bool) {
         self.aliases.push(BTreeMap::new());
+        self.stdio_absolute_imports.push(BTreeMap::new());
         self.named_imports.push(BTreeMap::new());
         self.parent_aliases.push(BTreeSet::new());
         self.conditional_aliases.push(BTreeSet::new());
@@ -3486,6 +3536,7 @@ impl<'a> Scanner<'a> {
         }
         self.pop_values();
         self.aliases.pop();
+        self.stdio_absolute_imports.pop();
         self.named_imports.pop();
         self.parent_aliases.pop();
         self.conditional_aliases.pop();
@@ -3714,6 +3765,7 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
     fn visit_item_mod(&mut self, module: &'ast syn::ItemMod) {
         self.context.push(module.ident.to_string());
         self.aliases.push(BTreeMap::new());
+        self.stdio_absolute_imports.push(BTreeMap::new());
         self.named_imports.push(BTreeMap::new());
         self.parent_aliases.push(BTreeSet::new());
         self.conditional_aliases.push(BTreeSet::new());
@@ -3755,6 +3807,7 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
         }
         visit::visit_item_mod(self, module);
         self.aliases.pop();
+        self.stdio_absolute_imports.pop();
         self.named_imports.pop();
         self.parent_aliases.pop();
         self.conditional_aliases.pop();
@@ -5775,6 +5828,14 @@ mod tests {
                     std::io::stderr().write_all(b"x");
                 }
             "#,
+            r#"
+                use ::std::io::Write;
+                mod fake { pub mod io { pub fn stderr() -> Vec<u8> { Vec::new() } } }
+                fn f() {
+                    use crate::fake as std;
+                    std::io::stderr().write_all(b"x");
+                }
+            "#,
         ] {
             let actual = stdio_inventory(source);
             assert!(actual.findings.is_empty(), "{source}: {:?}", actual.findings);
@@ -5826,6 +5887,64 @@ mod tests {
             ("absolute_imports", "std::io::stderr", 4),
             ("absolute_imports", "std::io::Stderr::write_all", 1),
             ("absolute_imports", "std::io::Stderr::flush", 2),
+        ]));
+        let actual = stdio_inventory(r#"
+            use std::io as native;
+            use std::io::{stderr as emit, Stderr as Output, Write as OutputWrite};
+            mod fake {}
+            fn captured() {
+                use crate::fake as std;
+                let mut output: Output = emit();
+                native::stderr();
+                OutputWrite::write_all(&mut output, b"x");
+                <Output as OutputWrite>::flush(&mut output);
+                Output::flush(&mut output);
+                let reference = emit; reference();
+            }
+            fn aliases_before_std() {
+                use emit as later;
+                use native as later_module;
+                use crate::fake as std;
+                later(); later_module::stderr();
+            }
+            fn aliases_after_std() {
+                use crate::fake as std;
+                use emit as later;
+                use native as later_module;
+                use Output as LaterOutput;
+                use OutputWrite as LaterWrite;
+                let mut output: LaterOutput = later();
+                later_module::stderr();
+                LaterWrite::write_all(&mut output, b"x");
+                <LaterOutput as LaterWrite>::flush(&mut output);
+            }
+            fn absolute_root() {
+                mod std {}
+                use ::std as runtime;
+                runtime::io::stderr().flush();
+                let mut output: runtime::io::Stderr = runtime::io::stderr();
+                <runtime::io::Stderr as runtime::io::Write>::write_all(&mut output, b"x");
+                let make = runtime::io::stderr; make();
+            }
+            fn absolute_root_group() {
+                mod std {}
+                use ::std::{self as runtime};
+                runtime::io::stdout().flush();
+            }
+        "#);
+        assert_eq!(stdio_counts(&actual.findings), expected_stdio(&[
+            ("captured", "std::io::stderr", 4),
+            ("captured", "std::io::Stderr::write_all", 1),
+            ("captured", "std::io::Stderr::flush", 2),
+            ("aliases_before_std", "std::io::stderr", 2),
+            ("aliases_after_std", "std::io::stderr", 2),
+            ("aliases_after_std", "std::io::Stderr::write_all", 1),
+            ("aliases_after_std", "std::io::Stderr::flush", 1),
+            ("absolute_root", "std::io::stderr", 4),
+            ("absolute_root", "std::io::Stderr::flush", 1),
+            ("absolute_root", "std::io::Stderr::write_all", 1),
+            ("absolute_root_group", "std::io::stdout", 1),
+            ("absolute_root_group", "std::io::Stdout::flush", 1),
         ]));
     }
 
