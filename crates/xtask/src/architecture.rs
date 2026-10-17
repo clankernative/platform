@@ -2190,7 +2190,7 @@ impl<'a> Scanner<'a> {
         match ty {
             Type::Path(path) => {
                 let last = path.path.segments.last()?;
-                let resolved = self.resolve(&path.path);
+                let resolved = self.stdio_resolve_path(&path.path).ok().flatten()?;
                 if let syn::PathArguments::AngleBracketed(arguments) = &last.arguments {
                     let types = arguments
                         .args
@@ -2460,7 +2460,7 @@ impl<'a> Scanner<'a> {
                 {
                     return Some(identifier_name(&path.path.segments[0].ident));
                 }
-                let name = self.resolve(&path.path);
+                let name = self.stdio_resolve_path(&path.path).ok().flatten()?;
                 self.values
                     .iter()
                     .skip(*self.value_floors.last().unwrap())
@@ -2615,8 +2615,72 @@ impl<'a> Scanner<'a> {
         self.origin(&call.receiver).as_deref() == Some(READ_DIR_HANDLE)
     }
 
+    fn stdio_resolve_path(&self, path: &syn::Path) -> std::result::Result<Option<String>, &'static str> {
+        self.stdio_resolve_name(&path_name(path), path.leading_colon.is_some())
+    }
+
+    fn stdio_resolve_name(&self, name: &str, absolute: bool) -> std::result::Result<Option<String>, &'static str> {
+        let resolved = self.resolve_name(name);
+        if !stdio_path_target(&resolved) && !(absolute && stdio_path_target(name)) {
+            return Ok(Some(resolved));
+        }
+        // Only this finite family checks namespace precedence here. Keep every
+        // other effect family's existing resolver and facts unchanged.
+        if absolute {
+            return if name.starts_with("std::io::") {
+                Ok(Some(name.to_owned()))
+            } else {
+                Err("unresolved absolute standard-stream alias")
+            };
+        }
+        let mut current = name.to_owned();
+        let mut frame = self.aliases.len() - 1;
+        let mut seen = BTreeSet::new();
+        for _ in 0..MAX_ALIAS_ROUNDS {
+            if !seen.insert((current.clone(), frame)) {
+                return Err("cyclic standard-stream alias");
+            }
+            let (first, rest) = current.split_once("::").unwrap_or((&current, ""));
+            if matches!(first, "self" | "super" | "crate") {
+                return Err("unmodeled qualified standard-stream alias");
+            }
+            let namespace = if rest.is_empty() && stdio_factory_result(&resolved).is_some() {
+                PathNamespace::Value
+            } else {
+                PathNamespace::Type
+            };
+            let declaration = (0..=frame).rev().find(|index| {
+                self.declarations[*index].get(first).is_some_and(|kind| kind.includes(namespace))
+            });
+            let alias = (0..=frame).rev().find(|index| {
+                self.aliases[*index].get(first).is_some_and(|target| {
+                    canonical_import_namespace(&self.resolve_name(target))
+                        .is_none_or(|kind| kind.includes(namespace))
+                })
+            });
+            if declaration.is_some_and(|declaration| alias.is_none_or(|alias| declaration >= alias)) {
+                return Ok(None);
+            }
+            let Some(index) = alias else {
+                return if stdio_path_target(&current) {
+                    Ok(Some(current))
+                } else {
+                    Err("unresolved standard-stream alias dependency")
+                };
+            };
+            // Check an import's original path in its defining frame. Resolving
+            // only its stored canonical target would launder a shadowed prefix;
+            // rechecking it in the use frame would shadow a valid older import.
+            let target = self.named_imports[index].get(first)
+                .or_else(|| self.aliases[index].get(first)).unwrap();
+            current = if rest.is_empty() { target.clone() } else { format!("{target}::{rest}") };
+            frame = index;
+        }
+        Err("standard-stream alias chain limit exceeded")
+    }
+
     fn stdio_trait_path(&self, path: &syn::ExprPath) -> Option<String> {
-        let target = self.resolve(&path.path);
+        let target = self.stdio_resolve_path(&path.path).ok().flatten()?;
         let (owner, method) = target.rsplit_once("::")?;
         if owner != "std::io::Write" {
             return None;
@@ -2671,7 +2735,7 @@ impl<'a> Scanner<'a> {
             return Err("contradictory explicit Self and native output receiver");
         }
         if trait_owner {
-            if explicit.is_some() && explicit_handle != Some(selected) {
+            if path.is_some_and(|path| path.qself.is_some()) && explicit_handle != Some(selected) {
                 return Err("contradictory explicit Self and native output receiver");
             }
             let Some(path) = path else { return Err("unmodeled stored generic Write callee"); };
@@ -2933,7 +2997,7 @@ impl<'a> Scanner<'a> {
                 return Some(name.to_owned());
             }
         }
-        Some(self.resolve_name(name))
+        self.stdio_resolve_name(name, false).ok().flatten()
     }
 
     fn expression_kind(&self, expression: &Expr) -> ValueKind {
@@ -3936,6 +4000,9 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
             .collect::<Vec<_>>()
             .join("::");
         self.parent_effect_path_checked(&name, false, PathNamespace::Type);
+        if let Err(reason) = self.stdio_resolve_path(&ty.path) {
+            self.refuse_stdio_operation(reason);
+        }
         visit::visit_type_path(self, ty);
     }
 
@@ -3956,10 +4023,20 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
                 PathNamespace::Type
             },
         );
+        let resolution = self.stdio_resolve_path(&expression.path);
+        if let Err(reason) = &resolution {
+            self.refuse_stdio_operation(reason);
+        }
         let target = self
             .task_set_trait_path(expression)
             .or_else(|| self.stdio_trait_path(expression))
-            .or_else(|| self.reference_target(&name));
+            .or_else(|| {
+                if expression.path.leading_colon.is_some() && stdio_path_target(&name) {
+                    resolution.ok().flatten()
+                } else {
+                    self.reference_target(&name)
+                }
+            });
         if let Some(target) = target {
             if target.rsplit_once("::").is_some_and(|(owner, method)| stdio_operation(owner, method).is_err()) {
                 self.refuse_stdio_operation("unmodeled known output method reference");
@@ -4293,6 +4370,9 @@ impl Scanner<'_> {
                     index = expression_end;
                     continue;
                 }
+                if let Err(reason) = self.stdio_resolve_name(&name, false) {
+                    self.refuse_stdio_operation(reason);
+                }
                 let target = self.reference_target(&name);
                 // A fallback bare identifier may be a value reference even
                 // without a call (e.g. a function pointer in a JSON value).
@@ -4542,6 +4622,15 @@ impl StdioOperation {
     fn target(&self) -> String {
         format!("{}::{}", self.owner, self.method)
     }
+}
+
+fn stdio_path_target(target: &str) -> bool {
+    target == "std::io"
+        || target == "std::io::Write"
+        || target.starts_with("std::io::Write::")
+        || stdio_factory_result(target).is_some()
+        || stdio_handle(target).is_some()
+        || target.rsplit_once("::").is_some_and(|(owner, _)| stdio_handle(owner).is_some())
 }
 
 fn stdio_factory_result(target: &str) -> Option<&'static str> {
@@ -5539,7 +5628,7 @@ mod tests {
             ("direct", "std::io::stderr", 1), ("direct", "std::io::Stderr::lock", 1),
             ("aliases", "std::io::stdout", 1), ("aliases", "std::io::stderr", 1),
             ("reference", "std::io::stderr", 2),
-            ("cast", "std::io::stderr", 2),
+            ("cast", "std::io::stderr", 1),
             ("raw", "std::io::stderr", 1),
         ]));
     }
@@ -5630,6 +5719,89 @@ mod tests {
             fn trait_name(mut output: Buffer) { Write::write_all(&mut output, b"x"); }
         "#);
         assert!(actual.findings.is_empty(), "{:?}", actual.findings);
+        for source in [
+            r#"
+                use std::io as native; use std::io::Write;
+                fn f() {
+                    mod native { pub fn stderr() -> Vec<u8> { Vec::new() } }
+                    native::stderr().write_all(b"x");
+                    let make = native::stderr; make().write_all(b"x");
+                }
+            "#,
+            r#"
+                use std::io as native; use std::io::Write;
+                fn f() {
+                    mod native { pub fn stderr() -> Vec<u8> { Vec::new() } }
+                    use native::stderr as make;
+                    make().write_all(b"x");
+                }
+            "#,
+            r#"
+                use std::io::Stderr as Output; use std::io::Write;
+                fn f() {
+                    type Output = Vec<u8>;
+                    fn typed(mut output: Output) { output.write_all(b"x"); }
+                    Output::new().write_all(b"x");
+                    let mut bytes = Vec::new();
+                    Output::write_all(&mut bytes, b"x");
+                    <Output as std::io::Write>::write_all(&mut bytes, b"x");
+                }
+            "#,
+            r#"
+                use std::io::Write as OutputWrite;
+                fn f() {
+                    trait OutputWrite { fn write_all(_: &mut Self, _: &[u8]); }
+                    impl OutputWrite for Vec<u8> { fn write_all(_: &mut Self, _: &[u8]) {} }
+                    let mut bytes = Vec::new();
+                    OutputWrite::write_all(&mut bytes, b"x");
+                    <Vec<u8> as OutputWrite>::write_all(&mut bytes, b"x");
+                }
+            "#,
+            r#"
+                use ::std::io::Write;
+                fn f() {
+                    mod std { pub mod io { pub fn stderr() -> Vec<u8> { Vec::new() } } }
+                    std::io::stderr().write_all(b"x");
+                }
+            "#,
+        ] {
+            let actual = stdio_inventory(source);
+            assert!(actual.findings.is_empty(), "{source}: {:?}", actual.findings);
+        }
+        let actual = stdio_inventory(r#"
+            use std::io as native;
+            use native::stderr as original;
+            fn imported_before_shadow() {
+                mod native { pub fn stderr() -> Vec<u8> { Vec::new() } }
+                original();
+            }
+            mod outer {
+                mod native {}
+                pub fn rebound() {
+                    use std::io as native;
+                    use std::io::{Stderr as Output, Write as OutputWrite};
+                    let mut output: Output = native::stderr();
+                    OutputWrite::write_all(&mut output, b"x");
+                    <Output as OutputWrite>::flush(&mut output);
+                }
+            }
+            fn absolute() {
+                mod std {}
+                let mut output = ::std::io::stderr();
+                <::std::io::Stderr as ::std::io::Write>::write_all(&mut output, b"x");
+                ::std::io::Stderr::flush(&mut output);
+                let make = ::std::io::stderr; make();
+            }
+        "#);
+        assert_eq!(stdio_counts(&actual.findings), expected_stdio(&[
+            ("imported_before_shadow", "std::io::stderr", 1),
+            ("outer::rebound", "std::io::stderr", 1),
+            ("outer::rebound", "std::io::Stderr::write_all", 1),
+            ("outer::rebound", "std::io::Stderr::flush", 1),
+            ("absolute", "std::io::stderr", 3),
+            ("absolute", "std::io::Stderr::write_all", 1),
+            ("absolute", "std::io::Stderr::flush", 1),
+        ]));
     }
 
     #[test]
@@ -5640,6 +5812,8 @@ mod tests {
             "use super::*; fn f(mut out: std::io::Stderr) { Write::write_all(&mut out, b\"x\"); }",
             "#[cfg(unix)] use std::io::Stderr as ErrorOutput; fn f(mut out: ErrorOutput) { out.flush(); }",
             "#[cfg(unix)] use std::io::Write as NativeWrite; fn f(mut out: std::io::Stderr) { NativeWrite::flush(&mut out); }",
+            "use std::io as native; fn f() { self::native::stderr(); }",
+            "use std::io as native; fn f() { crate::native::stderr(); }",
         ] {
             let directory = fixture(source);
             let error = inventory(directory.path()).unwrap_err().to_string();
