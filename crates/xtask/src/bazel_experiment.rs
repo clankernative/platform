@@ -67,7 +67,9 @@ fn memory_fact(name: &str, bytes: &[u8]) -> Result<serde_json::Value> {
         ensure!(
             !key.is_empty()
                 && key.len() <= 64
-                && key.bytes().all(|byte| byte.is_ascii_lowercase() || byte == b'_'),
+                && key
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_'),
             "numeric kernel memory event required"
         );
         let value = fields
@@ -99,7 +101,10 @@ pub(super) fn resources(root: &Path, phase: &str) -> Result<()> {
         pid_metadata.is_file() && !pid_metadata.file_type().is_symlink(),
         "regular experiment server PID file required"
     );
-    let pid = server_pid(&bounded_measurement("/tmp/day2-bazel-context-server.pid", 64)?)?;
+    let pid = server_pid(&bounded_measurement(
+        "/tmp/day2-bazel-context-server.pid",
+        64,
+    )?)?;
     let server_absent = match fs::symlink_metadata(format!("/proc/{pid}")) {
         Ok(_) => false,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
