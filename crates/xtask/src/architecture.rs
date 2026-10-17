@@ -16,6 +16,11 @@
 //! types are not a containment or general Rust output-resolution claim. Lazy
 //! RHS transfers require a modeled native first iterator even in canonical
 //! Iterator UFCS; a custom implementation could otherwise advance immediately.
+//! Standard-stream acquisition and locks have an explicit finite family.
+//! Known stdout/stderr Write operations are reviewed effects; completed results
+//! are DATA, while lock/by_ref retain their known handle. Unsupported explicit
+//! output methods refuse. Input Read/BufRead iteration, printing macros,
+//! hidden containers and arbitrary generic/return flow are not modeled here.
 
 use anyhow::{Context, Result, bail, ensure};
 use quote::ToTokens;
@@ -1267,7 +1272,12 @@ fn ambient_import_names(
         converged,
         "architecture reference-alias chain limit exceeded"
     );
-    let mut names = BTreeSet::from(["DirBuilder".to_owned()]);
+    let mut names = BTreeSet::from([
+        "DirBuilder".to_owned(),
+        "io".to_owned(), "stdin".to_owned(), "stdout".to_owned(), "stderr".to_owned(),
+        "Stdin".to_owned(), "StdinLock".to_owned(), "Stdout".to_owned(),
+        "StdoutLock".to_owned(), "Stderr".to_owned(), "StderrLock".to_owned(),
+    ]);
     names.extend(imports.3.iter().cloned());
     names.extend(
         imports
@@ -1530,6 +1540,7 @@ struct Scanner<'a> {
     unresolved_parent_effects: BTreeSet<String>,
     conditional_effect_bindings: BTreeSet<String>,
     read_dir_ambiguities: BTreeSet<String>,
+    stdio_ambiguities: BTreeSet<String>,
     values: Vec<BTreeMap<String, String>>,
     bindings: Vec<BTreeSet<String>>,
     // Receiver provenance can survive a call result (File/Command methods),
@@ -1571,6 +1582,7 @@ impl<'a> Scanner<'a> {
             unresolved_parent_effects: BTreeSet::new(),
             conditional_effect_bindings: BTreeSet::new(),
             read_dir_ambiguities: BTreeSet::new(),
+            stdio_ambiguities: BTreeSet::new(),
             values: vec![BTreeMap::new()],
             bindings: vec![BTreeSet::new()],
             value_kinds: vec![BTreeMap::new()],
@@ -1625,6 +1637,12 @@ impl<'a> Scanner<'a> {
                 .cloned()
                 .collect::<Vec<_>>()
                 .join(", ")
+        );
+        ensure!(
+            self.stdio_ambiguities.is_empty(),
+            "unsupported standard-output operations in {} (a canonical supported receiver operation is required): {}",
+            self.source,
+            self.stdio_ambiguities.iter().cloned().collect::<Vec<_>>().join(", ")
         );
         Ok(())
     }
@@ -2423,6 +2441,9 @@ impl<'a> Scanner<'a> {
                 if let Some(target) = self.task_set_trait_path(path) {
                     return Some(target);
                 }
+                if let Some(target) = self.stdio_trait_path(path) {
+                    return Some(target);
+                }
                 if path_is_ident(&path.path, "self") {
                     return self.self_type.clone();
                 }
@@ -2460,6 +2481,14 @@ impl<'a> Scanner<'a> {
                     };
                 }
                 self.origin(&call.func).and_then(|origin| {
+                    if let Some(result) = stdio_factory_result(&origin) {
+                        return Some(result.to_owned());
+                    }
+                    match self.stdio_call_operation(call, &origin) {
+                        Ok(Some(operation)) => return operation.result.map(str::to_owned),
+                        Err(_) => return None,
+                        Ok(None) => {}
+                    }
                     if call.args.len() == 1 && value_wrapper_target(&origin) {
                         let inner = self.origin(&call.args[0]);
                         if inner.as_deref().is_some_and(read_dir_lineage) {
@@ -2513,6 +2542,13 @@ impl<'a> Scanner<'a> {
                 // Resolve the receiver once. Repeating this recursive query in
                 // each classification branch multiplies ordinary chain work.
                 let receiver = self.origin(&call.receiver);
+                if let Some(owner) = receiver.as_deref() {
+                    match stdio_operation(owner, &method) {
+                        Ok(Some(operation)) => return operation.result.map(str::to_owned),
+                        Err(_) => return None,
+                        Ok(None) => {}
+                    }
+                }
                 if let Some(result) = receiver
                     .as_deref()
                     .and_then(|owner| read_dir_projection_result(owner, &method))
@@ -2577,6 +2613,87 @@ impl<'a> Scanner<'a> {
         // Unknown left receivers must use canonical Iterator UFCS; only an
         // already retained bare native iterator proves the dot-method lineage.
         self.origin(&call.receiver).as_deref() == Some(READ_DIR_HANDLE)
+    }
+
+    fn stdio_trait_path(&self, path: &syn::ExprPath) -> Option<String> {
+        let target = self.resolve(&path.path);
+        let (owner, method) = target.rsplit_once("::")?;
+        if owner != "std::io::Write" {
+            return None;
+        }
+        let receiver = self.type_origin(&path.qself.as_ref()?.ty)?;
+        stdio_output(&receiver).then(|| format!("{receiver}::{method}"))
+    }
+
+    fn stdio_call_operation(
+        &self,
+        call: &syn::ExprCall,
+        target: &str,
+    ) -> std::result::Result<Option<StdioOperation>, &'static str> {
+        let Some((owner, method)) = target.rsplit_once("::") else { return Ok(None); };
+        let concrete = stdio_handle(owner);
+        let trait_owner = owner == "std::io::Write";
+        if concrete.is_none() && !trait_owner && !stdio_write_method(method) && method != "by_ref" {
+            return Ok(None);
+        }
+        let path = match call.func.as_ref() { Expr::Path(path) => Some(path), _ => None };
+        // Only a write-shaped ambiguous path with a native argument needs this
+        // contextual check. Generic memory Write imports remain ordinary DATA.
+        let uncertain_path = path.is_some_and(|path| {
+            let Some(first) = path.path.segments.first() else { return false; };
+            let first = identifier_name(&first.ident);
+            parent_import(&path_name(&path.path))
+                || self.alias_has_flag(&first, &self.parent_aliases, &mut BTreeSet::new(), MAX_ALIAS_ROUNDS)
+                || self.alias_has_flag(&first, &self.conditional_aliases, &mut BTreeSet::new(), MAX_ALIAS_ROUNDS)
+                || self.parent_globs.iter().skip(*self.declaration_floors.last().unwrap()).any(|value| *value)
+                    && first != "std"
+                    && self.declaration_scope(&first, PathNamespace::Type).is_none()
+                    && !self.named_imports.iter().rev().any(|scope| scope.contains_key(&first))
+                    && self.value_origin(&first).flatten().is_none()
+        });
+        if concrete.is_none() && !trait_owner && !(uncertain_path && (stdio_write_method(method) || method == "by_ref")) {
+            return Ok(None);
+        }
+        let argument = call.args.first().and_then(|argument| self.origin(argument));
+        let argument_handle = argument.as_deref().and_then(stdio_handle);
+        if concrete.is_none() && !trait_owner {
+            return if argument_handle.is_some_and(stdio_output) {
+                Err("ambiguous native output callee")
+            } else { Ok(None) };
+        }
+        let explicit = path.and_then(|path| path.qself.as_ref()).and_then(|value| self.type_origin(&value.ty));
+        let explicit_handle = explicit.as_deref().and_then(stdio_handle);
+        let selected = concrete.or(explicit_handle).or(argument_handle.filter(|value| stdio_output(value)));
+        let Some(selected) = selected else { return Ok(None); };
+        if let Some(argument) = argument_handle
+            && argument != selected
+        {
+            return Err("contradictory explicit Self and native output receiver");
+        }
+        if trait_owner {
+            if explicit.is_some() && explicit_handle != Some(selected) {
+                return Err("contradictory explicit Self and native output receiver");
+            }
+            let Some(path) = path else { return Err("unmodeled stored generic Write callee"); };
+            let Some(first) = path.path.segments.first() else { return Err("missing canonical Write path"); };
+            let first = identifier_name(&first.ident);
+            if path.path.segments.len() < 2 || uncertain_path
+                || self.declaration_scope(&first, PathNamespace::Type).is_some()
+            {
+                return Err("unresolved native output Write path");
+            }
+        } else if uncertain_path {
+            return Err("unresolved native output method path");
+        }
+        stdio_operation(selected, method)
+    }
+
+    fn refuse_stdio_operation(&mut self, target: &str) {
+        if self.stdio_ambiguities.len() == MAX_PARENT_EFFECT_DIAGNOSTICS {
+            return;
+        }
+        let context = if self.context.is_empty() { "<module>".to_owned() } else { self.context.join("::") };
+        self.stdio_ambiguities.insert(format!("{context}: {}", target.chars().take(256).collect::<String>()));
     }
 
     fn read_dir_call_candidate(&self, call: &syn::ExprCall) -> Option<(String, String)> {
@@ -2867,7 +2984,9 @@ impl<'a> Scanner<'a> {
             }
             Expr::Call(call)
                 if self.origin(&call.func).is_some_and(|target| {
-                    matches!(target.as_str(), "rand::rng" | "rand::thread_rng")
+                    stdio_factory_result(&target).is_some()
+                        || self.stdio_call_operation(call, &target).ok().flatten().is_some_and(|operation| operation.result.is_some())
+                        || matches!(target.as_str(), "rand::rng" | "rand::thread_rng")
                         || target == "std::path::absolute"
                         || target == "std::fs::read_dir"
                         || target.starts_with("ureq::")
@@ -3839,11 +3958,14 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
         );
         let target = self
             .task_set_trait_path(expression)
+            .or_else(|| self.stdio_trait_path(expression))
             .or_else(|| self.reference_target(&name));
-        if let Some(target) = target
-            && let Some(kind) = hazard(&target)
-        {
-            self.record(kind, &target, expression);
+        if let Some(target) = target {
+            if target.rsplit_once("::").is_some_and(|(owner, method)| stdio_operation(owner, method).is_err()) {
+                self.refuse_stdio_operation("unmodeled known output method reference");
+            } else if let Some(kind) = hazard(&target) {
+                self.record(kind, &target, expression);
+            }
         }
         visit::visit_expr_path(self, expression);
     }
@@ -3870,11 +3992,21 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
         } else if let Some(target) = self.task_set_trait_call(call, false) {
             self.record("scheduling", &target, call);
             suppress_direct_reference = true;
-        } else if let Some(target) = self.origin(&call.func)
-            && let Some(kind) = hazard(&target)
-        {
-            self.record(kind, &target, call);
-            suppress_direct_reference = true;
+        } else if let Some(target) = self.origin(&call.func) {
+            match self.stdio_call_operation(call, &target) {
+                Ok(Some(operation)) => {
+                    if operation.effect { self.record("stdio", &operation.target(), call); }
+                    suppress_direct_reference = true;
+                }
+                Err(reason) => {
+                    self.refuse_stdio_operation(reason);
+                    suppress_direct_reference = true;
+                }
+                Ok(None) => if let Some(kind) = hazard(&target) {
+                    self.record(kind, &target, call);
+                    suppress_direct_reference = true;
+                },
+            }
         }
         for attribute in &call.attrs {
             self.visit_attribute(attribute);
@@ -3922,6 +4054,14 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
             })
         {
             self.refuse_read_dir_handoff(&method);
+        } else if let Some(owner) = receiver.as_deref()
+            && (stdio_output(owner) || stdio_operation(owner, &method).ok().flatten().is_some())
+        {
+            match stdio_operation(owner, &method) {
+                Ok(Some(operation)) => if operation.effect { self.record("stdio", &operation.target(), call); },
+                Err(reason) => self.refuse_stdio_operation(reason),
+                Ok(None) => {}
+            }
         } else if let Some(origin) = self.origin(&call.receiver)
             && let Some(kind) = method_hazard(&origin, &method)
         {
@@ -4391,6 +4531,71 @@ impl syn::parse::Parse for HtmlAttributeLabels {
     }
 }
 
+struct StdioOperation {
+    owner: &'static str,
+    method: String,
+    result: Option<&'static str>,
+    effect: bool,
+}
+
+impl StdioOperation {
+    fn target(&self) -> String {
+        format!("{}::{}", self.owner, self.method)
+    }
+}
+
+fn stdio_factory_result(target: &str) -> Option<&'static str> {
+    match target {
+        "std::io::stdin" => Some("std::io::Stdin"),
+        "std::io::stdout" => Some("std::io::Stdout"),
+        "std::io::stderr" => Some("std::io::Stderr"),
+        _ => None,
+    }
+}
+
+fn stdio_handle(target: &str) -> Option<&'static str> {
+    match target {
+        "std::io::Stdin" => Some("std::io::Stdin"),
+        "std::io::StdinLock" => Some("std::io::StdinLock"),
+        "std::io::Stdout" => Some("std::io::Stdout"),
+        "std::io::StdoutLock" => Some("std::io::StdoutLock"),
+        "std::io::Stderr" => Some("std::io::Stderr"),
+        "std::io::StderrLock" => Some("std::io::StderrLock"),
+        _ => None,
+    }
+}
+
+fn stdio_output(target: &str) -> bool {
+    matches!(target, "std::io::Stdout" | "std::io::StdoutLock" | "std::io::Stderr" | "std::io::StderrLock")
+}
+
+fn stdio_write_method(method: &str) -> bool {
+    matches!(method, "write" | "write_all" | "write_vectored" | "write_fmt" | "flush")
+}
+
+fn stdio_operation(owner: &str, method: &str) -> std::result::Result<Option<StdioOperation>, &'static str> {
+    let Some(owner) = stdio_handle(owner) else { return Ok(None); };
+    let lock = match owner {
+        "std::io::Stdin" => Some("std::io::StdinLock"),
+        "std::io::Stdout" => Some("std::io::StdoutLock"),
+        "std::io::Stderr" => Some("std::io::StderrLock"),
+        _ => None,
+    };
+    let (result, effect) = if method == "lock" && lock.is_some() {
+        (lock, true)
+    } else if stdio_output(owner) && method == "by_ref" {
+        (Some(owner), false)
+    } else if stdio_output(owner) && stdio_write_method(method) {
+        (None, true)
+    } else if stdio_output(owner) {
+        return Err("unmodeled known output method");
+    } else {
+        // Input Read/BufRead and iterator behavior is outside this finite family.
+        return Ok(None);
+    };
+    Ok(Some(StdioOperation { owner, method: method.to_owned(), result, effect }))
+}
+
 fn path_receiver_type(target: &str) -> bool {
     matches!(target, "std::path::Path" | "std::path::PathBuf")
 }
@@ -4557,7 +4762,8 @@ fn ambient_receiver_type(target: &str) -> bool {
     // Metadata, read buffers, PIDs, UUIDs and raw clock samples are not receivers
     // merely because their factory is ambient. This is not general Rust
     // output-type or wrapper resolution.
-    path_receiver_type(target)
+    stdio_handle(target).is_some()
+        || path_receiver_type(target)
         || path_projection_type(target)
         || read_dir_lineage(target)
         || matches!(
@@ -4603,6 +4809,11 @@ fn receiver_returns_data(origin: &str, method: &str) -> bool {
     // propagation. Other methods of an already known handle conservatively
     // retain it: this includes builders, open/clone and unmodeled transforms,
     // and is not a claim that every such result has the same Rust output type.
+    match stdio_operation(origin, method) {
+        Ok(Some(operation)) => return operation.result.is_none(),
+        Err(_) => return true, // The visitor records the non-allowable refusal.
+        Ok(None) => {}
+    }
     // Only exact known return carriers retain receiver provenance. Completed
     // Metadata/bool values must not inherit Path's filesystem predicates.
     if path_method_result(origin, method).is_some_and(ambient_receiver_type) {
@@ -4752,7 +4963,10 @@ fn dangerous_namespace(target: &str) -> bool {
 /// import provenance and conservative alternate-target alias retention; concrete
 /// call findings still use the exact hazard list, rather than every type method.
 fn ambient_binding(target: &str) -> bool {
-    read_dir_lineage(target)
+    target == "std::io"
+        || stdio_factory_result(target).is_some()
+        || stdio_handle(target).is_some()
+        || read_dir_lineage(target)
         || dangerous_namespace(target)
         || matches!(
             target,
@@ -4831,6 +5045,13 @@ fn task_set_scheduling_method(method: &str) -> bool {
 }
 
 fn hazard(target: &str) -> Option<&'static str> {
+    if stdio_factory_result(target).is_some()
+        || target.rsplit_once("::").is_some_and(|(owner, method)| {
+            stdio_operation(owner, method).ok().flatten().is_some_and(|operation| operation.effect)
+        })
+    {
+        return Some("stdio");
+    }
     if target.rsplit_once("::").is_some_and(|(owner, method)| {
         owner == "tokio::task::JoinSet" && task_set_scheduling_method(method)
     }) {
@@ -5036,6 +5257,9 @@ fn hazard(target: &str) -> Option<&'static str> {
 }
 
 fn method_hazard(origin: &str, method: &str) -> Option<&'static str> {
+    if stdio_operation(origin, method).ok().flatten().is_some_and(|operation| operation.effect) {
+        return Some("stdio");
+    }
     if origin == "tokio::task::JoinSet" && task_set_scheduling_method(method) {
         return Some("scheduling");
     }
@@ -5253,6 +5477,258 @@ fn sql_hazards(sql: &str, require_sql_shape: bool) -> BTreeSet<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn stdio_inventory(source: &str) -> Inventory {
+        let directory = fixture(source);
+        inventory(directory.path()).unwrap()
+    }
+
+    fn stdio_counts(findings: &[Finding]) -> BTreeMap<(String, String), usize> {
+        let mut counts = BTreeMap::new();
+        for finding in findings.iter().filter(|finding| finding.kind == "stdio") {
+            *counts.entry((finding.context.clone(), finding.target.clone())).or_insert(0) += finding.count;
+        }
+        counts
+    }
+
+    fn expected_stdio(rows: &[(&str, &str, usize)]) -> BTreeMap<(String, String), usize> {
+        rows.iter().map(|(context, target, count)| ((context.to_string(), target.to_string()), *count)).collect()
+    }
+
+    #[test]
+    fn stdio_actual_private_sink_has_three_independent_sites_and_keeps_old_seven() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let actual = inventory(&root).unwrap();
+        let file: Vec<_> = actual.findings.into_iter().filter(|finding| finding.source == "crates/day2/src/oauth/effects.rs").collect();
+        assert_eq!(stdio_counts(&file), expected_stdio(&[
+            ("provider_observation", "std::io::stderr", 1),
+            ("provider_observation", "std::io::Stderr::lock", 1),
+            ("provider_observation", "std::io::StderrLock::write_all", 1),
+        ]));
+        let old: BTreeSet<_> = file.iter().filter(|finding| finding.kind != "stdio").map(|finding| (
+            finding.kind.as_str(), finding.target.as_str(), finding.context.as_str(), finding.fingerprint.as_str(), finding.count,
+        )).collect();
+        assert_eq!(old, BTreeSet::from([
+            ("clock", "std::time::Instant::now", "Instant::now", "fa1ef12febafd3fa761ee093ffa4527966891c79a5e7b59615674e7c25451390", 1),
+            ("clock", "std::time::SystemTime::now", "wall_time", "b409e7dc4ec088470e877435299336378d2fac13493a576ee3dec7d399335516", 1),
+            ("entropy", "getrandom::fill", "fill", "e8e76acc965cefd9193ab09829ca9a8feb39cce0606938d330df82341a85fe76", 1),
+            ("network", "reqwest::blocking::Client::builder", "Client::builder", "f04a41a17e59ad0c029c1e286f7c28ed52b982d5ebc45bc322f959d3269a57d7", 1),
+            ("network", "reqwest::blocking::Client::execute", "Request::send", "eb29510df0935693d43ec4298b5779557980e06bd3b60b58dcf8e05ee91332cc", 1),
+            ("scheduling", "tokio::task::spawn_blocking", "spawn_blocking", "9005f3c8ce848d034e54fb76637aef7817f61299b231a84daca54fbda3307d89", 1),
+            ("timer", "tokio::time::timeout", "timeout", "c450f8705d76d8de58d192447eeae36ba6838a0757d71139a80cca960a592f3f", 1),
+        ]));
+    }
+
+    #[test]
+    fn stdio_factories_locks_and_canonical_aliases_keep_exact_targets() {
+        let actual = stdio_inventory(r#"
+            use std::io as native;
+            use std::io::stderr as error_output;
+            fn direct() { std::io::stdin().lock(); std::io::stdout().lock(); std::io::stderr().lock(); }
+            fn aliases() { native::stdout(); error_output(); }
+            fn reference() {
+                let make: fn() -> std::io::Stderr = std::io::stderr;
+                make();
+            }
+            fn cast() { (std::io::stderr as fn() -> std::io::Stderr)(); }
+            fn raw() { r#std::r#io::r#stderr(); }
+        "#);
+        assert_eq!(stdio_counts(&actual.findings), expected_stdio(&[
+            ("direct", "std::io::stdin", 1), ("direct", "std::io::Stdin::lock", 1),
+            ("direct", "std::io::stdout", 1), ("direct", "std::io::Stdout::lock", 1),
+            ("direct", "std::io::stderr", 1), ("direct", "std::io::Stderr::lock", 1),
+            ("aliases", "std::io::stdout", 1), ("aliases", "std::io::stderr", 1),
+            ("reference", "std::io::stderr", 2),
+            ("cast", "std::io::stderr", 2),
+            ("raw", "std::io::stderr", 1),
+        ]));
+    }
+
+    #[test]
+    fn stdio_typed_outputs_borrows_moves_and_fields_retain_receiver() {
+        let actual = stdio_inventory(r#"
+            use std::io::{Write, Stderr as ErrorOutput, StderrLock as ErrorLock, Stdout, StdoutLock};
+            fn f(mut error: ErrorOutput, mut output: Stdout, mut error_lock: ErrorLock<'_>, mut output_lock: StdoutLock<'_>) {
+                error.write_all(b"x"); output.flush(); error_lock.write(b"x"); output_lock.write_fmt(format_args!("x"));
+                let borrowed = Write::by_ref(&mut error); borrowed.flush();
+                let mut moved = error; moved.write_all(b"x");
+            }
+            fn reference(output: &mut ErrorOutput) { (&mut *output).write_all(b"x"); }
+            struct Holder { error: std::io::Stderr }
+            fn field(holder: &mut Holder) { holder.error.flush(); }
+            fn reassign(mut output: std::io::Stderr) {
+                let mut selected = std::io::stderr(); selected = output; selected.write_all(b"x");
+            }
+        "#);
+        assert_eq!(stdio_counts(&actual.findings), expected_stdio(&[
+            ("f", "std::io::Stderr::write_all", 2), ("f", "std::io::Stdout::flush", 1),
+            ("f", "std::io::StderrLock::write", 1), ("f", "std::io::StdoutLock::write_fmt", 1),
+            ("f", "std::io::Stderr::flush", 1), ("reference", "std::io::Stderr::write_all", 1),
+            ("field", "std::io::Stderr::flush", 1),
+            ("reassign", "std::io::stderr", 1), ("reassign", "std::io::Stderr::write_all", 1),
+        ]));
+    }
+
+    #[test]
+    fn stdio_five_writes_and_canonical_trait_ufcs_require_output_provenance() {
+        for receiver in ["std::io::Stdout", "std::io::StdoutLock<'_>", "std::io::Stderr", "std::io::StderrLock<'_>"] {
+            let owner = receiver.split('<').next().unwrap();
+            for (method, args) in [("write", "b\"x\""), ("write_all", "b\"x\""), ("write_vectored", "&[]"), ("write_fmt", "format_args!(\"x\")"), ("flush", "")] {
+                let source = format!("use std::io::Write; fn f(mut output: {receiver}) {{ output.{method}({args}); }}");
+                let actual = stdio_inventory(&source);
+                assert_eq!(stdio_counts(&actual.findings), expected_stdio(&[("f", &format!("{owner}::{method}"), 1)]), "{source}");
+            }
+        }
+        let actual = stdio_inventory(r#"
+            use std::io::{Write as OutputWrite, StderrLock};
+            fn f(mut output: StderrLock<'_>) {
+                OutputWrite::write_all(&mut output, b"x");
+                <StderrLock<'_> as std::io::Write>::flush(&mut output);
+                std::io::StderrLock::write_all(&mut output, b"x");
+            }
+        "#);
+        assert_eq!(stdio_counts(&actual.findings), expected_stdio(&[
+            ("f", "std::io::StderrLock::write_all", 2), ("f", "std::io::StderrLock::flush", 1),
+        ]));
+    }
+
+    #[test]
+    fn stdio_memory_generic_write_result_and_format_data_are_not_native() {
+        let actual = stdio_inventory(r#"
+            use std::io::{Write, Cursor, Result};
+            fn f(mut bytes: Vec<u8>, mut memory: Cursor<Vec<u8>>) {
+                bytes.write_all(b"x"); memory.flush();
+                Write::write_all(&mut bytes, b"x");
+                <Vec<u8> as std::io::Write>::write_all(&mut bytes, b"x");
+                let result: Result<()> = Ok(()); result.is_ok();
+                format!("{}", bytes.len()); serde_json::to_vec(&bytes);
+            }
+            fn generic<W: Write>(mut output: W) { output.write_all(b"x"); Write::flush(&mut output); }
+        "#);
+        assert!(actual.findings.is_empty(), "{:?}", actual.findings);
+    }
+
+    #[test]
+    fn stdio_nearer_value_type_module_and_trait_names_do_not_mint_native_receivers() {
+        let actual = stdio_inventory(r#"
+            use std::io::stderr as factory;
+            struct Buffer;
+            impl Buffer { fn write_all(&mut self, _: &[u8]) {} }
+            fn value() { let factory = || Buffer; let mut output = factory(); output.write_all(b"x"); }
+            fn function() {
+                fn factory() -> Buffer { Buffer }
+                let mut output = factory(); output.write_all(b"x");
+            }
+            mod local {
+                pub struct Stderr;
+                impl Stderr { pub fn write_all(&mut self, _: &[u8]) {} }
+                pub fn stderr() -> Stderr { Stderr }
+            }
+            fn module() { let mut output = local::stderr(); output.write_all(b"x"); }
+            fn type_name(mut output: local::Stderr) { output.write_all(b"x"); }
+            trait Write { fn write_all(_: &mut Buffer, _: &[u8]); }
+            fn trait_name(mut output: Buffer) { Write::write_all(&mut output, b"x"); }
+        "#);
+        assert!(actual.findings.is_empty(), "{:?}", actual.findings);
+    }
+
+    #[test]
+    fn stdio_parent_and_conditional_aliases_require_canonical_local_resolution() {
+        for source in [
+            "use super::*; fn f() { stderr(); }",
+            "#[cfg(unix)] use std::io::stderr as ErrorOutput; fn f() { ErrorOutput(); }",
+            "use super::*; fn f(mut out: std::io::Stderr) { Write::write_all(&mut out, b\"x\"); }",
+            "#[cfg(unix)] use std::io::Stderr as ErrorOutput; fn f(mut out: ErrorOutput) { out.flush(); }",
+            "#[cfg(unix)] use std::io::Write as NativeWrite; fn f(mut out: std::io::Stderr) { NativeWrite::flush(&mut out); }",
+        ] {
+            let directory = fixture(source);
+            let error = inventory(directory.path()).unwrap_err().to_string();
+            assert!(error.contains("unresolved") || error.contains("conditional") || error.contains("standard-output"), "{source}: {error}");
+        }
+        let actual = stdio_inventory("use super::*; use std::io::stderr as r#error; fn f() { r#error().flush(); }");
+        assert_eq!(stdio_counts(&actual.findings), expected_stdio(&[
+            ("f", "std::io::stderr", 1), ("f", "std::io::Stderr::flush", 1),
+        ]));
+    }
+
+    #[test]
+    fn stdio_completed_write_results_are_data_but_borrows_are_handles() {
+        let actual = stdio_inventory(r#"
+            use std::io::Write;
+            trait Pure { fn flush(&mut self) {} fn write_all(&mut self, _: &[u8]) {} }
+            impl Pure for bool {} impl Pure for usize {}
+            fn f(mut output: std::io::Stderr) {
+                let mut done = output.flush().is_ok(); done.flush();
+                let mut size = output.write(b"x").unwrap(); size.write_all(b"x");
+                let borrow = output.by_ref(); borrow.write_all(b"x");
+            }
+        "#);
+        assert_eq!(stdio_counts(&actual.findings), expected_stdio(&[
+            ("f", "std::io::Stderr::flush", 1), ("f", "std::io::Stderr::write", 1),
+            ("f", "std::io::Stderr::write_all", 1),
+        ]));
+    }
+
+    #[test]
+    fn stdio_unknown_output_projection_and_contradictory_self_refuse() {
+        for source in [
+            "fn f(out: std::io::Stderr) { out.as_raw_fd(); }",
+            "fn f(out: std::io::Stdout) { out.hidden().flush(); }",
+            "fn f() { Some(std::io::stderr()).unwrap().write_all(b\"x\"); }",
+            "fn f(mut out: std::io::Stdout) { <std::io::Stderr as std::io::Write>::flush(&mut out); }",
+            "fn f(mut out: std::io::Stderr) { <Vec<u8> as std::io::Write>::write_all(&mut out, b\"x\"); }",
+            "fn f(mut out: std::io::Stderr) { let write = std::io::Write::write_all; write(&mut out, b\"x\"); }",
+        ] {
+            let directory = fixture(source);
+            let error = inventory(directory.path()).unwrap_err().to_string();
+            assert!(error.contains("unsupported standard-output"), "{source}: {error}");
+        }
+    }
+
+    #[test]
+    fn stdio_policy_rejects_new_and_duplicated_writes_without_retagging_old_effects() {
+        let source = r#"fn f() { let _ = std::io::stderr().lock().write_all(b"x"); }"#;
+        let actual = stdio_inventory(source);
+        // Independently specified canonical expressions and the existing public
+        // fingerprint encoding, never the new stdio classification helpers.
+        let expressions = [
+            ("std::io::stderr", "std::io::stderr()"),
+            ("std::io::Stderr::lock", "std::io::stderr().lock()"),
+            ("std::io::StderrLock::write_all", "std::io::stderr().lock().write_all(b\"x\")"),
+        ];
+        let mut rules = Rules { version: VERSION, sources: vec!["crates/fixture/src/lib.rs".to_owned()], allowances: Vec::new() };
+        let error = validate(&rules, &actual).unwrap_err().to_string();
+        assert!(error.contains("unreviewed stdio"), "{error}");
+        rules.allowances = expressions.into_iter().map(|(target, expression)| {
+            let syntax: Expr = syn::parse_str(expression).unwrap();
+            Allowance {
+                source: "crates/fixture/src/lib.rs".to_owned(), kind: "stdio".to_owned(),
+                target: target.to_owned(), context: "f".to_owned(),
+                fingerprint: day2::digest(format!("stdio\n{target}\nf\n{}", syntax.to_token_stream()).as_bytes()).trim_start_matches("sha256:").to_owned(),
+                count: 1, reason: "Exact synthetic standard-output source obligation.".to_owned(),
+            }
+        }).collect();
+        validate(&rules, &actual).unwrap();
+        let duplicate = stdio_inventory(r#"fn f() { let _ = std::io::stderr().lock().write_all(b"x"); let _ = std::io::stderr().lock().write_all(b"x"); }"#);
+        assert!(validate(&rules, &duplicate).is_err());
+        let added = stdio_inventory(r#"fn f() { let _ = std::io::stderr().lock().write_all(b"x"); let _ = std::io::stderr().flush(); }"#);
+        assert!(validate(&rules, &added).is_err());
+        let mixed = stdio_inventory(r#"
+            fn f(mut tasks: tokio::task::JoinSet<()>) {
+                std::time::Instant::now(); std::fs::read("x"); std::process::id();
+                reqwest::blocking::Client::new(); std::io::stderr().flush();
+                let mut entries = std::fs::read_dir(".").unwrap(); entries.next();
+                tasks.spawn(async {});
+            }
+        "#);
+        let old: BTreeMap<_, _> = mixed.findings.iter().filter(|finding| finding.kind != "stdio").map(|finding| ((finding.kind.as_str(), finding.target.as_str()), finding.count)).collect();
+        assert_eq!(old, BTreeMap::from([
+            (("clock", "std::time::Instant::now"), 1), (("filesystem", "std::fs::read"), 1),
+            (("process", "std::process::id"), 1), (("network", "reqwest::blocking::Client::new"), 1),
+            (("filesystem", "std::fs::read_dir"), 1), (("filesystem", "std::fs::ReadDir::next"), 1),
+            (("scheduling", "tokio::task::JoinSet::spawn"), 1),
+        ]));
+    }
 
     fn scan(source: &str) -> Vec<Finding> {
         scan_syntax(syn::parse_file(source).unwrap())
