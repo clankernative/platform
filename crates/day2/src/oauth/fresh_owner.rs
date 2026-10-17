@@ -710,7 +710,7 @@ mod tests {
         let duplicate = format!(
             "{},\"profile\":\"{}\"}}",
             valid.strip_suffix('}').unwrap(),
-            Digest::new(b"second hidden profile")
+            Digest::new(b"second hidden profile").as_str()
         );
         for request in [
             serde_json::to_string(&extra)?,
