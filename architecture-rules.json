@@ -2465,6 +2465,78 @@
       "fingerprint": "b415d0a0527edc2bbf90702fb301c2c5b7171b229108fecba1a4518c6d709126",
       "count": 1,
       "reason": "Owner: isolated Bazel/Roc representative experiment host adapter. Compile the exact existing Reports test module as catalog data, parse with syn, refuse empty/ignored/conditional/duplicate cases, and require exact harness existence before fresh execution. Not a second test catalog. Removal: remove this exact site and allowance with the measurement adapter; never land this experimental policy in production."
+    },
+    {
+      "source": "crates/xtask/src/bazel_experiment.rs",
+      "kind": "filesystem",
+      "target": "std::fs::File::open",
+      "context": "bounded_measurement",
+      "fingerprint": "aa72aa70d059a14a516013bb59ee0c9490be8614f0fad63772565d47a2d5bb07",
+      "count": 1,
+      "reason": "Owner: isolated Bazel/Cargo lifecycle measurement adapter. Open only caller-fixed measurement files: trusted Bazel server PID (64 bytes) or two fixed cgroup memory files (4096 bytes). No arbitrary CLI path; trusted measurement scratch is not hostile inode continuity. Removal: remove this exact site with the temporary experiment; NEVER land in production."
+    },
+    {
+      "source": "crates/xtask/src/bazel_experiment.rs",
+      "kind": "filesystem",
+      "target": "std::fs::File::read_to_end",
+      "context": "bounded_measurement",
+      "fingerprint": "b16e5292d1c66bf34df1fcfa190873392879b46599ba4bae952c53660f7bb03a",
+      "count": 1,
+      "reason": "Owner: isolated Bazel/Cargo lifecycle measurement adapter. Read at most caller-fixed maximum+1 bytes through Read::take, then refuse overlength. Fixed maxima64/4096; bounds this retained/read prefix, not elapsed kernel I/O, descendant lifetime or compiler output. Removal: remove this exact site with the temporary experiment; NEVER land in production."
+    },
+    {
+      "source": "crates/xtask/src/bazel_experiment.rs",
+      "kind": "filesystem",
+      "target": "std::fs::symlink_metadata",
+      "context": "resources",
+      "fingerprint": "da2c8d3376148eedb04627eab3f52fab3ce5ab7b1e4c50cf658e6a6d4d141fcd",
+      "count": 1,
+      "reason": "Owner: isolated Bazel/Cargo lifecycle measurement adapter. Reject final-symlink/nonregular PID measurement before a separately bounded read. Trusted tool-written scratch; not an atomic hostile-file identity proof. Removal: remove this exact site with the temporary experiment; NEVER land in production."
+    },
+    {
+      "source": "crates/xtask/src/bazel_experiment.rs",
+      "kind": "filesystem",
+      "target": "std::fs::symlink_metadata",
+      "context": "resources",
+      "fingerprint": "e29cd5a61e9162d612f05149e5015a78df2fbe63b4844894bfdf9ee30ff59403",
+      "count": 1,
+      "reason": "Owner: isolated Bazel/Cargo lifecycle measurement adapter. Read-only procfs snapshot for a strict decimal u32 PID greater than1 from the pinned owned Bazel info command. Before Cargo require NotFound after explicit owned shutdown; live/inaccessible entries refuse. No signal/wait/thread, no PID authority or future/descendant closure claim. Removal: remove this exact site with the temporary experiment; NEVER land in production."
+    },
+    {
+      "source": "crates/xtask/src/bazel_experiment.rs",
+      "kind": "filesystem",
+      "target": "std::fs::write",
+      "context": "resources",
+      "fingerprint": "4eb345191d74202e610a11af318648e6ce1aa90f56d616a18d67489c82706b41",
+      "count": 1,
+      "reason": "Owner: isolated Bazel/Cargo lifecycle measurement adapter. Write one of two closed fixed artifact paths with source/run/attempt, absence snapshot and bounded numeric memory observations. No raw resource bytes/private paths/environments, cached outcomes, causal OOM or compiler exit claim. Removal: remove this exact site with the temporary experiment; NEVER land in production."
+    },
+    {
+      "source": "crates/xtask/src/bazel_experiment.rs",
+      "kind": "environment",
+      "target": "std::env::var",
+      "context": "resources",
+      "fingerprint": "69c05a5e8dba34f9698cdd4007bd36b257853b982a6cf4a4fe5056f2780d5d11",
+      "count": 1,
+      "reason": "Owner: isolated Bazel/Cargo lifecycle measurement adapter. Read only diagnostic run metadata; independently authenticated current API still required. Removal: remove this exact site with the temporary experiment; NEVER land in production."
+    },
+    {
+      "source": "crates/xtask/src/bazel_experiment.rs",
+      "kind": "environment",
+      "target": "std::env::var",
+      "context": "resources",
+      "fingerprint": "16c731f0c97b182f9d803e30861ee53eae839f4f9b9bb37ea8172e66fbb22962",
+      "count": 1,
+      "reason": "Owner: isolated Bazel/Cargo lifecycle measurement adapter. Read only diagnostic attempt metadata; no prior attempt proof transfer or source admission from environment. Removal: remove this exact site with the temporary experiment; NEVER land in production."
+    },
+    {
+      "source": "crates/xtask/src/bazel_experiment.rs",
+      "kind": "environment",
+      "target": "std::env::var",
+      "context": "resources",
+      "fingerprint": "89ee4260dbf3378d500ed9f45fd82efe48d7882e9d4b7a98285141c5fab1ba20",
+      "count": 1,
+      "reason": "Owner: isolated Bazel/Cargo lifecycle measurement adapter. Read only diagnostic source metadata; compare against actual logged Git checkout externally, never treat as compiler/process cause evidence. Removal: remove this exact site with the temporary experiment; NEVER land in production."
     }
   ]
 }

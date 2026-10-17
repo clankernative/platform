@@ -3,8 +3,9 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs,
+    io::Read,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -30,6 +31,108 @@ const PROGRAMS: &[(&str, &str)] = &[
         "target/debug/day2-sandbox-probe",
     ),
 ];
+
+fn bounded_measurement(path: &str, maximum: u64) -> Result<Vec<u8>> {
+    let file = fs::File::open(path)?;
+    let mut bytes = Vec::new();
+    file.take(maximum + 1).read_to_end(&mut bytes)?;
+    ensure!(
+        bytes.len() as u64 <= maximum,
+        "experiment measurement byte limit exceeded"
+    );
+    Ok(bytes)
+}
+
+fn server_pid(bytes: &[u8]) -> Result<u32> {
+    let text = std::str::from_utf8(bytes)?.trim();
+    ensure!(
+        !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit()),
+        "decimal experiment server PID required"
+    );
+    let pid: u32 = text.parse()?;
+    ensure!(pid > 1, "ordinary experiment server PID required");
+    Ok(pid)
+}
+
+fn memory_fact(name: &str, bytes: &[u8]) -> Result<serde_json::Value> {
+    let text = std::str::from_utf8(bytes)?;
+    if name == "memory.current" {
+        return Ok(json!(text.trim().parse::<u64>()?));
+    }
+    ensure!(name == "memory.events", "fixed memory fact required");
+    let mut events = BTreeMap::new();
+    for line in text.lines() {
+        let mut fields = line.split_whitespace();
+        let key = fields.next().context("memory event key required")?;
+        ensure!(
+            !key.is_empty()
+                && key.len() <= 64
+                && key.bytes().all(|byte| byte.is_ascii_lowercase() || byte == b'_'),
+            "numeric kernel memory event required"
+        );
+        let value = fields
+            .next()
+            .context("memory event value required")?
+            .parse::<u64>()?;
+        ensure!(
+            fields.next().is_none() && events.insert(key, value).is_none(),
+            "one value per memory event required"
+        );
+    }
+    ensure!(!events.is_empty(), "nonempty memory events required");
+    Ok(serde_json::to_value(events)?)
+}
+
+/// Diagnostic data only; no compiler exit or OOM cause is inferred from counters.
+pub(super) fn resources(root: &Path, phase: &str) -> Result<()> {
+    ensure!(
+        std::env::consts::OS == "linux",
+        "Linux experiment scope required"
+    );
+    let output = match phase {
+        "before-cargo" => "artifacts/bazel-cargo-before-resources.json",
+        "after-cargo" => "artifacts/bazel-cargo-after-resources.json",
+        _ => bail!("fixed experiment measurement phase required"),
+    };
+    let pid_metadata = fs::symlink_metadata("/tmp/day2-bazel-context-server.pid")?;
+    ensure!(
+        pid_metadata.is_file() && !pid_metadata.file_type().is_symlink(),
+        "regular experiment server PID file required"
+    );
+    let pid = server_pid(&bounded_measurement("/tmp/day2-bazel-context-server.pid", 64)?)?;
+    let server_absent = match fs::symlink_metadata(format!("/proc/{pid}")) {
+        Ok(_) => false,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+        Err(error) => return Err(error.into()),
+    };
+    ensure!(
+        phase != "before-cargo" || server_absent,
+        "experiment Bazel server remains visible after shutdown"
+    );
+    let facts: BTreeMap<_, _> = ["memory.current", "memory.events"]
+        .into_iter()
+        .map(|name| {
+            let observed = bounded_measurement(&format!("/sys/fs/cgroup/{name}"), 4096)
+                .and_then(|bytes| memory_fact(name, &bytes));
+            let fact = match observed {
+                Ok(value) => json!({"status":"observed","value":value}),
+                Err(error) => {
+                    let errno = error
+                        .downcast_ref::<std::io::Error>()
+                        .and_then(std::io::Error::raw_os_error);
+                    json!({"status":"unavailable","errno":errno})
+                }
+            };
+            (name, fact)
+        })
+        .collect();
+    let run = std::env::var("GITHUB_RUN_ID")?;
+    let attempt = std::env::var("GITHUB_RUN_ATTEMPT")?;
+    let checkout = std::env::var("GITHUB_SHA")?;
+    let receipt = json!({"kind":"bazel-cargo-resource-observation-v1","phase":phase,"run":run,"attempt":attempt,"checkout":checkout,"workflow":day2::automation::source_digest(),"server_pid":pid,"server_absent_snapshot":server_absent,"memory":facts,"cause_attribution":false});
+    fs::write(root.join(output), serde_json::to_vec_pretty(&receipt)?)?;
+    Ok(())
+}
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -316,6 +419,29 @@ pub(super) fn reports(root: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resource_measurements_accept_only_numeric_kernel_facts() -> Result<()> {
+        assert_eq!(memory_fact("memory.current", b"123\n")?, json!(123));
+        assert_eq!(
+            memory_fact("memory.events", b"oom 0\noom_kill 1\n")?,
+            json!({"oom":0,"oom_kill":1})
+        );
+        for bytes in [&b"oom private\n"[..], &b"oom 1\noom 2\n"[..], &b""[..]] {
+            assert!(memory_fact("memory.events", bytes).is_err());
+        }
+        assert!(memory_fact("foreign", b"1").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn experiment_server_pid_refuses_nondecimal_and_special_processes() -> Result<()> {
+        assert_eq!(server_pid(b"123\n")?, 123);
+        for bytes in [&b"0"[..], &b"1"[..], &b"-1"[..], &b"12/../"[..], &b""[..]] {
+            assert!(server_pid(bytes).is_err());
+        }
+        Ok(())
+    }
 
     #[test]
     fn actual_reports_cases_are_nonempty_unignored_and_source_derived() -> Result<()> {

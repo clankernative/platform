@@ -1021,6 +1021,18 @@ fn main() -> Result<()> {
             ensure!(args.next().is_none(), "workflows accepts no arguments");
             workflows::build(&root)?;
         }
+        "experiment-bazel-before-cargo" | "experiment-bazel-after-cargo" => {
+            ensure!(
+                args.next().is_none(),
+                "Bazel resource observations accept no overrides"
+            );
+            let phase = if action == "experiment-bazel-before-cargo" {
+                "before-cargo"
+            } else {
+                "after-cargo"
+            };
+            bazel_experiment::resources(&root, phase)?;
+        }
         "experiment-bazel-install" | "experiment-bazel-reports" => {
             ensure!(
                 args.next().is_none(),

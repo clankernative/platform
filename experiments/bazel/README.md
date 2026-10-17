@@ -123,3 +123,27 @@ These context overrides apply to native x86-64 Linux. Other platforms retain
 the existing generated declarations and need their own independent analysis and
 native qualification. Current analysis is not proof of executed Bazel Rust
 actions, dynamic build-script values, complete compiler equivalence or speedup.
+### Separate tool lifetimes during graph inventory
+
+The context-model prerequisite starts a dedicated Bazel server for its write-only
+context controls and action query. Before the unchanged Cargo all-targets command,
+record that server's PID with the pinned Bazel executable, request its shutdown,
+and require the numeric PID's procfs entry to be absent. This is a read-only
+absence snapshot after the owned shutdown, not a PID identity, hostile-file,
+descendant-lifetime, or future-process guarantee. A still-visible or inaccessible
+entry stops the experiment before Cargo; there is no extra wait or signal.
+
+The existing experiment adapter records only `memory.current` and numeric
+`memory.events` before and after Cargo. Each read is limited to 4096 plus one
+sentinel byte, with overlength or unavailable observations explicit. The PID
+read has a separate 64-byte limit. These fixed observations carry source/run/
+attempt metadata and do not establish a compiler kill actor or an OOM cause.
+The after observation runs following an actual Cargo success or failure; an
+outer runner timeout can still prevent its execution or artifact upload.
+
+The preceding prerequisite's Cargo build was incomplete: sccache reported a
+compiler termination by signal 9 while compiling the day2 test library. Its
+successful context controls and partial matching dependency records do not
+qualify a complete graph, a Bazel Rust build, or a timing comparison. Explicit
+server shutdown tests a tool-overlap hypothesis under the same caps, profiles,
+jobs, and complete target selection; it is not a historical cause fix.
