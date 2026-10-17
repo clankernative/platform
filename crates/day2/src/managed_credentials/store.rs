@@ -3401,6 +3401,30 @@ mod tests {
 
     #[test]
     fn schema_native_runtime_initialization_reopens_with_installed_peers() -> Result<()> {
+        fn assert_fresh_owner_unit(runtime: &crate::store::Runtime) -> Result<()> {
+            let db = crate::store::open(runtime.db())?;
+            assert_eq!(
+                db.query_row("SELECT version FROM native_fresh_schema_version", [], |row| {
+                    row.get::<_, i64>(0)
+                })?,
+                1
+            );
+            for guard in [
+                "native_fresh_owners_shape_INSERT_v1",
+                "native_fresh_owners_shape_UPDATE_v1",
+            ] {
+                assert_eq!(
+                    db.query_row(
+                        "SELECT count(*) FROM sqlite_master WHERE type='trigger' AND name=?1",
+                        [guard],
+                        |row| row.get::<_, i64>(0),
+                    )?,
+                    1
+                );
+            }
+            Ok(())
+        }
+
         let artifact=std::path::PathBuf::from(std::env::var_os("DAY2_TEST_CREDENTIAL_METADATA_ARTIFACT")
             .context("build credential-metadata-conformance and set DAY2_TEST_CREDENTIAL_METADATA_ARTIFACT")?);
         let directory = tempfile::tempdir()?;
@@ -3411,8 +3435,10 @@ mod tests {
             "alice@example.com",
         )?;
         runtime.initialize()?;
+        assert_fresh_owner_unit(&runtime)?;
         let reopened = crate::store::Runtime::load(runtime.instance_path(), runtime.app())?;
         reopened.initialize()?;
+        assert_fresh_owner_unit(&reopened)?;
         let db = crate::store::open(reopened.db())?;
         assert_eq!(db.query_row("SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('day2_credential_browser','day2_credential_confirmations','day2_credential_origins')",[],|row| row.get::<_,i64>(0))?,3);
         Ok(())

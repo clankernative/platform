@@ -45,6 +45,8 @@ impl Pending {
     }
 }
 
+/// Canonical credential peer DDL, also used to build trusted reference schemas.
+/// Runtime initialization separately admits the fresh-owner unit.
 pub(crate) fn install(db: &Connection) -> Result<()> {
     db.execute_batch(
         "CREATE TABLE IF NOT EXISTS day2_credential_browser (
@@ -53,7 +55,6 @@ pub(crate) fn install(db: &Connection) -> Result<()> {
     ) STRICT;
     CREATE INDEX IF NOT EXISTS day2_credential_browser_expiry ON day2_credential_browser(expires_at);",
     )?;
-    crate::oauth::fresh_owner::install(db)?;
     Ok(())
 }
 
