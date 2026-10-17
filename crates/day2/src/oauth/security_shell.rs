@@ -540,19 +540,30 @@ impl SecurityShell {
     }
 
     #[cfg(test)]
-    pub(crate) fn with_management_fixture(mut self: Arc<Self>) -> Result<Arc<Self>> {
-        // Reuse this shell's exact existing contexts; this attaches no proof,
-        // caller, key, session or alternate authenticator.
+    pub(crate) fn with_management_fixture(
+        origin: String,
+        approvals: Arc<shell_transport::RemoteApprovals>,
+        signer: Arc<admission::ArtifactShellSigner>,
+        authenticator: Arc<dyn FreshAuthenticator>,
+    ) -> Result<Arc<Self>> {
+        // Both contexts share the same concrete handles before trait erasure.
+        // This fixture attaches no proof, caller, key or alternate authenticator.
+        let mut shell = Self::with_transport(
+            origin,
+            approvals.clone(),
+            signer.clone(),
+            authenticator,
+        )?;
         let management = Arc::new(super::management::shell::Shell::new(
-            self.origin.clone(),
-            self.approvals.clone(),
-            self.signer.clone(),
-            self.authenticator.clone(),
+            shell.origin.clone(),
+            approvals,
+            signer,
+            shell.authenticator.clone(),
         ));
-        Arc::get_mut(&mut self)
+        Arc::get_mut(&mut shell)
             .context("security shell already shared")?
             .management = Some(management);
-        Ok(self)
+        Ok(shell)
     }
 
     /// Attach the same installation's selected local credential adapter before

@@ -2601,13 +2601,12 @@ mod owned_google {
             exchange,
             owners.clone(),
         )?);
-        let shell = crate::oauth::security_shell::SecurityShell::with_transport(
+        let shell = crate::oauth::security_shell::SecurityShell::with_management_fixture(
             "https://security.example.com/".into(),
             owners.clone(),
             setup.signer.clone(),
             auth.clone(),
-        )?
-        .with_management_fixture()?;
+        )?;
         let shell = match registry {
             Some(registry) => shell.with_credentials(registry)?,
             None => shell,
