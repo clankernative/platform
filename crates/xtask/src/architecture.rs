@@ -1530,6 +1530,7 @@ struct Scanner<'a> {
     // Absolute std-root imports are retained only for stdio provenance; the
     // shared import namespace/resolver remains unchanged for other families.
     stdio_absolute_imports: Vec<BTreeMap<String, String>>,
+    stdio_import_namespaces: Vec<BTreeMap<String, DeclarationNamespace>>,
     named_imports: Vec<BTreeMap<String, String>>,
     parent_aliases: Vec<BTreeSet<String>>,
     conditional_aliases: Vec<BTreeSet<String>>,
@@ -1575,6 +1576,7 @@ impl<'a> Scanner<'a> {
             context: Vec::new(),
             aliases: vec![BTreeMap::new()],
             stdio_absolute_imports: vec![BTreeMap::new()],
+            stdio_import_namespaces: vec![BTreeMap::new()],
             named_imports: vec![BTreeMap::new()],
             parent_aliases: vec![BTreeSet::new()],
             conditional_aliases: vec![BTreeSet::new()],
@@ -2639,6 +2641,43 @@ impl<'a> Scanner<'a> {
         }
     }
 
+    fn refresh_stdio_import_namespaces(&mut self) {
+        let frame = self.aliases.len() - 1;
+        let imports = self.named_imports[frame].clone();
+        // Use items are order-independent. Derive only finite stdio namespace
+        // proofs after the complete frame has been collected, to convergence;
+        // a generic stored target is never the namespace proof for an alias.
+        for _ in 0..MAX_ALIAS_ROUNDS {
+            let mut namespaces = BTreeMap::new();
+            let mut unresolved = BTreeSet::new();
+            for (alias, raw) in &imports {
+                let origin = if let Some(canonical) = self.stdio_absolute_imports[frame].get(alias) {
+                    Ok(Some(canonical.clone()))
+                } else {
+                    self.stdio_resolve_name(raw, false, PathNamespace::Any)
+                };
+                match origin {
+                    Ok(Some(origin)) => {
+                        let kind = if origin == "std" || origin == "std::io" || origin == "std::io::Write" || stdio_handle(&origin).is_some() {
+                            Some(DeclarationNamespace::Type)
+                        } else if stdio_factory_result(&origin).is_some() {
+                            Some(DeclarationNamespace::Value)
+                        } else { None };
+                        if let Some(kind) = kind { namespaces.insert(alias.clone(), kind); }
+                    }
+                    Err(reason) => { unresolved.insert(reason); }
+                    Ok(None) => {}
+                }
+            }
+            if namespaces == self.stdio_import_namespaces[frame] {
+                for reason in unresolved { self.refuse_stdio_operation(reason); }
+                return;
+            }
+            self.stdio_import_namespaces[frame] = namespaces;
+        }
+        self.refuse_stdio_operation("standard-stream import namespace convergence limit exceeded");
+    }
+
     fn stdio_candidate(&self, name: &str, absolute: bool, namespace: PathNamespace) -> Option<String> {
         if absolute {
             return stdio_path_target(name).then(|| name.to_owned());
@@ -2653,7 +2692,9 @@ impl<'a> Scanner<'a> {
             let Some((index, stored)) = (0..=frame).rev().find_map(|index| {
                 let target = self.aliases[index].get(first)?;
                 let canonical = self.stdio_absolute_imports[index].get(first).unwrap_or(target);
-                canonical_import_namespace(canonical).is_none_or(|kind| kind.includes(requested))
+                self.stdio_import_namespaces[index].get(first).copied()
+                    .or_else(|| canonical_import_namespace(canonical))
+                    .is_none_or(|kind| kind.includes(requested))
                     .then_some((index, target))
             }) else {
                 return stdio_path_target(&current).then_some(current);
@@ -2713,7 +2754,9 @@ impl<'a> Scanner<'a> {
             let alias = (0..=frame).rev().find(|index| {
                 self.aliases[*index].get(first).is_some_and(|target| {
                     let canonical = self.stdio_absolute_imports[*index].get(first).unwrap_or(target);
-                    canonical_import_namespace(canonical).is_none_or(|kind| kind.includes(requested))
+                    self.stdio_import_namespaces[*index].get(first).copied()
+                        .or_else(|| canonical_import_namespace(canonical))
+                        .is_none_or(|kind| kind.includes(requested))
                 })
             });
             if declaration.is_some_and(|declaration| alias.is_none_or(|alias| declaration >= alias)) {
@@ -3505,6 +3548,7 @@ impl<'a> Scanner<'a> {
     fn block(&mut self, block: &syn::Block, callable_tail: bool) {
         self.aliases.push(BTreeMap::new());
         self.stdio_absolute_imports.push(BTreeMap::new());
+        self.stdio_import_namespaces.push(BTreeMap::new());
         self.named_imports.push(BTreeMap::new());
         self.parent_aliases.push(BTreeSet::new());
         self.conditional_aliases.push(BTreeSet::new());
@@ -3526,6 +3570,7 @@ impl<'a> Scanner<'a> {
                 self.import_use(import, false);
             }
         }
+        self.refresh_stdio_import_namespaces();
         for (index, statement) in block.stmts.iter().enumerate() {
             if callable_tail
                 && index + 1 == block.stmts.len()
@@ -3539,6 +3584,7 @@ impl<'a> Scanner<'a> {
         self.pop_values();
         self.aliases.pop();
         self.stdio_absolute_imports.pop();
+        self.stdio_import_namespaces.pop();
         self.named_imports.pop();
         self.parent_aliases.pop();
         self.conditional_aliases.pop();
@@ -3747,6 +3793,7 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
                 self.import_use(import, false);
             }
         }
+        self.refresh_stdio_import_namespaces();
         for item in &file.items {
             if let Item::Struct(structure) = item
                 && !definitely_test_only(&structure.attrs)
@@ -3768,6 +3815,7 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
         self.context.push(module.ident.to_string());
         self.aliases.push(BTreeMap::new());
         self.stdio_absolute_imports.push(BTreeMap::new());
+        self.stdio_import_namespaces.push(BTreeMap::new());
         self.named_imports.push(BTreeMap::new());
         self.parent_aliases.push(BTreeSet::new());
         self.conditional_aliases.push(BTreeSet::new());
@@ -3799,6 +3847,7 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
                     self.import_use(import, false);
                 }
             }
+            self.refresh_stdio_import_namespaces();
             for item in items {
                 if let Item::Struct(structure) = item
                     && !definitely_test_only(&structure.attrs)
@@ -3810,6 +3859,7 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
         visit::visit_item_mod(self, module);
         self.aliases.pop();
         self.stdio_absolute_imports.pop();
+        self.stdio_import_namespaces.pop();
         self.named_imports.pop();
         self.parent_aliases.pop();
         self.conditional_aliases.pop();
@@ -5961,12 +6011,32 @@ mod tests {
                 use ::std as runtime;
                 runtime::io::stderr().flush();
             }
+            fn nested_value_std() {
+                use ::std::io::stderr as std;
+                {
+                    use ::std::io::stderr as first;
+                    use first as std;
+                    std::io::stderr().flush();
+                }
+            }
+            fn forward_nested_value_std() {
+                use ::std::io::stderr as std;
+                {
+                    use first as std;
+                    use ::std::io::stderr as first;
+                    std::io::stderr().flush();
+                }
+            }
         "#);
         assert_eq!(stdio_counts(&actual.findings), expected_stdio(&[
             ("value_std", "std::io::stderr", 1),
             ("value_std", "std::io::Stderr::write_all", 1),
             ("absolute_root_over_value_std", "std::io::stderr", 1),
             ("absolute_root_over_value_std", "std::io::Stderr::flush", 1),
+            ("nested_value_std", "std::io::stderr", 1),
+            ("nested_value_std", "std::io::Stderr::flush", 1),
+            ("forward_nested_value_std", "std::io::stderr", 1),
+            ("forward_nested_value_std", "std::io::Stderr::flush", 1),
         ]));
         // The existing shared namespace guard conservatively refuses opposite
         // named imports with an older ambient binding. Keep that refusal rather
