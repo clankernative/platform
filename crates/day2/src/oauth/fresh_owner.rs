@@ -151,7 +151,7 @@ impl CallData {
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case", deny_unknown_fields)]
-pub(crate) enum OutcomeData {
+pub(super) enum OutcomeData {
     Allocation { state: AllocationData },
     Published { request: Digest },
 }
@@ -162,7 +162,7 @@ pub(crate) struct ReplyData {
     call: Digest,
     original: Digest,
     expires_at: i64,
-    pub(crate) outcome: OutcomeData,
+    pub(super) outcome: OutcomeData,
 }
 
 impl ReplyData {
