@@ -227,6 +227,7 @@
     "crates/day2/src/migration.rs",
     "crates/day2/src/oauth/account.rs",
     "crates/day2/src/oauth/admission.rs",
+    "crates/day2/src/oauth/admission/desired_epochs.rs",
     "crates/day2/src/oauth/approval_keys.rs",
     "crates/day2/src/oauth/approval_registry.rs",
     "crates/day2/src/oauth/calendar.rs",
