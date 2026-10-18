@@ -548,12 +548,8 @@ impl SecurityShell {
     ) -> Result<Arc<Self>> {
         // Both contexts share the same concrete handles before trait erasure.
         // This fixture attaches no proof, caller, key or alternate authenticator.
-        let mut shell = Self::with_transport(
-            origin,
-            approvals.clone(),
-            signer.clone(),
-            authenticator,
-        )?;
+        let mut shell =
+            Self::with_transport(origin, approvals.clone(), signer.clone(), authenticator)?;
         let management = Arc::new(super::management::shell::Shell::new(
             shell.origin.clone(),
             approvals,
