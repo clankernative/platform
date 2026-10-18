@@ -336,25 +336,27 @@ fn gitlab_actual_wire_campaign_checks_rotation_scopes_client_and_account() -> Re
 fn provider_codes_pin_both_canary_roles_before_any_native_io() -> Result<()> {
     let world = crate::oauth::simulation::World::new(81);
     crate::oauth::effects::scope(world.clone(), || -> Result<()> {
-        for field in [
-            "provider_subject",
-            "provider_tenant",
-            "qualification_subject",
-        ] {
-            let original = gitlab_target()?;
-            let codes = crate::oauth::simulation::registration_codes(&original)?;
-            let mut changed = original.clone();
-            match field {
-                "provider_subject" => changed.canary_subject = "43".into(),
-                "provider_tenant" => changed.canary_tenant = "other.example".into(),
-                "qualification_subject" => {
-                    changed.qualification_subject = "accounts.google.com:other-human".into()
+        for original in [fixture()?.target, gitlab_target()?] {
+            for field in [
+                "provider_subject",
+                "provider_tenant",
+                "qualification_subject",
+            ] {
+                let codes = crate::oauth::simulation::registration_codes(&original)?;
+                let mut changed = original.clone();
+                match field {
+                    "provider_subject" => changed.canary_subject = "43".into(),
+                    "provider_tenant" => changed.canary_tenant = "other.example".into(),
+                    "qualification_subject" => {
+                        changed.qualification_subject = "accounts.google.com:other-human".into()
+                    }
+                    _ => unreachable!(),
                 }
-                _ => unreachable!(),
+                assert!(
+                    Session::new(changed, codes, Arc::new(TokensSource(AtomicUsize::new(0))))
+                        .is_err()
+                );
             }
-            assert!(
-                Session::new(changed, codes, Arc::new(TokensSource(AtomicUsize::new(0)))).is_err()
-            );
         }
         assert!(world.requests().is_empty());
         Ok(())
