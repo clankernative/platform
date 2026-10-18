@@ -770,7 +770,7 @@ impl FreshAuthenticator for GoogleFreshAuthenticator {
                 .complete_owned(owners, query, identity, headers, now),
             #[cfg(test)]
             BeginTransport::ParserOnly => Ok(super::security_shell::ReauthCallback::Observed(
-                self.oidc.complete(query, identity, now)?,
+                Box::new(self.oidc.complete(query, identity, now)?),
             )),
         }
     }
@@ -782,15 +782,15 @@ impl FreshAuthenticator for GoogleFreshAuthenticator {
         headers: &HeaderMap,
         now: i64,
     ) -> Result<ManualView> {
-        let owners = match &self.begin_transport {
-            BeginTransport::Remote(owners) => owners,
+        match &self.begin_transport {
+            BeginTransport::Remote(owners) => self
+                .oidc
+                .manual_view_owned(owners, handle, identity, headers, now),
             #[cfg(test)]
             BeginTransport::ParserOnly => {
                 anyhow::bail!("parser-only Google has no manual checkpoint")
             }
-        };
-        self.oidc
-            .manual_view_owned(owners, handle, identity, headers, now)
+        }
     }
 
     fn resume_manual(
@@ -801,15 +801,15 @@ impl FreshAuthenticator for GoogleFreshAuthenticator {
         headers: &HeaderMap,
         now: i64,
     ) -> Result<String> {
-        let owners = match &self.begin_transport {
-            BeginTransport::Remote(owners) => owners,
+        match &self.begin_transport {
+            BeginTransport::Remote(owners) => self
+                .oidc
+                .resume_manual_owned(owners, handle, csrf, identity, headers, now),
             #[cfg(test)]
             BeginTransport::ParserOnly => {
                 anyhow::bail!("parser-only Google cannot resume an owned checkpoint")
             }
-        };
-        self.oidc
-            .resume_manual_owned(owners, handle, csrf, identity, headers, now)
+        }
     }
 }
 
@@ -1285,7 +1285,9 @@ impl GoogleOidc {
                     isolated_fixture: false,
                 };
                 flight.terminal()?;
-                Ok(super::security_shell::ReauthCallback::Observed(observed))
+                Ok(super::security_shell::ReauthCallback::Observed(Box::new(
+                    observed,
+                )))
             }
             _ => anyhow::bail!("Google callback phase refused"),
         }
