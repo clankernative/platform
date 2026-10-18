@@ -402,28 +402,10 @@ pub struct GoogleWebClient {
     pub credential: Name,
 }
 
+/// A reviewed provider client and its independently selected qualification human.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct GoogleRegistrationClient {
-    pub client: GoogleWebClient,
-    /// Immutable Google subject of an isolated, explicitly selected canary user.
-    pub canary_subject: String,
-    pub canary_tenant: String,
-}
-
-/// Version 1 has exactly the historical Google shape. Version 2 requires the
-/// tagged reviewed client and a separately selected shell qualification human.
-/// Admission below rejects mixing these shapes or silently upgrading a version.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum RegistrationClient {
-    LegacyGoogle(GoogleRegistrationClient),
-    Reviewed(ReviewedRegistrationClient),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ReviewedRegistrationClient {
+pub struct RegistrationClient {
     pub client: ProviderClient,
     pub canary: RegistrationCanary,
 }
@@ -483,24 +465,11 @@ impl ProviderClient {
 
 impl RegistrationClient {
     pub fn client(&self) -> ProviderClient {
-        match self {
-            Self::LegacyGoogle(selected) => ProviderClient::Google {
-                client_id: selected.client.client_id.clone(),
-                credential: selected.client.credential.clone(),
-            },
-            Self::Reviewed(selected) => selected.client.clone(),
-        }
+        self.client.clone()
     }
 
     pub fn canary(&self) -> RegistrationCanary {
-        match self {
-            Self::LegacyGoogle(selected) => RegistrationCanary {
-                qualification_subject: format!("accounts.google.com:{}", selected.canary_subject),
-                provider_subject: selected.canary_subject.clone(),
-                provider_tenant: selected.canary_tenant.clone(),
-            },
-            Self::Reviewed(selected) => selected.canary.clone(),
-        }
+        self.canary.clone()
     }
 }
 
@@ -522,7 +491,7 @@ impl GoogleWebClient {
 impl ClientCatalog {
     pub fn validate(&self) -> Result<()> {
         ensure!(
-            matches!(self.version, 1 | 2),
+            self.version == 2,
             "unsupported OAuth client catalog version"
         );
         ensure!(
@@ -531,13 +500,6 @@ impl ClientCatalog {
         );
         self.reauthentication.validate()?;
         for selected in self.registrations.values() {
-            ensure!(
-                matches!(
-                    (self.version, selected),
-                    (1, RegistrationClient::LegacyGoogle(_)) | (2, RegistrationClient::Reviewed(_))
-                ),
-                "OAuth client shape does not match catalog version"
-            );
             let client = selected.client();
             let canary = selected.canary();
             client.validate()?;
@@ -1172,34 +1134,44 @@ mod tests {
     use crate::Name;
 
     #[test]
-    fn versioned_client_selection_preserves_legacy_and_rejects_unreviewed_shapes() -> Result<()> {
+    fn reviewed_client_selection_rejects_retired_and_unreviewed_shapes() -> Result<()> {
         use serde_json::json;
-        let legacy = json!({
-            "version":1,
+        let google = json!({
+            "version":2,
             "reauthentication":{"client_id":"123-reauth.apps.googleusercontent.com","credential":"reauth"},
             "registrations":{"calendar":{
-                "client":{"client_id":"123-calendar.apps.googleusercontent.com","credential":"calendar_secret"},
-                "canary_subject":"42","canary_tenant":"example.com"
+                "client":{"kind":"google","client_id":"123-calendar.apps.googleusercontent.com","credential":"calendar_secret"},
+                "canary":{"qualification_subject":"accounts.google.com:42","provider_subject":"42","provider_tenant":"example.com"}
             }}
         });
-        let catalog: ClientCatalog = serde_json::from_value(legacy.clone())?;
+        let catalog: ClientCatalog = serde_json::from_value(google.clone())?;
         catalog.validate()?;
-        assert_eq!(serde_json::to_value(catalog)?, legacy);
-        let mut reviewed = legacy.clone();
-        reviewed["version"] = json!(2);
+        assert_eq!(serde_json::to_value(catalog)?, google);
+        let mut reviewed = google.clone();
         reviewed["registrations"]["calendar"] = json!({
             "client":{"kind":"gitlab","client_id":"a".repeat(64),"credential":"gitlab_secret"},
             "canary":{"qualification_subject":"accounts.google.com:shell-human","provider_subject":"42","provider_tenant":"gitlab.com"}
         });
-        serde_json::from_value::<ClientCatalog>(reviewed.clone())?.validate()?;
-        // The version cannot reinterpret an otherwise valid client shape.
-        for (mut value, version) in [(legacy, 2), (reviewed.clone(), 1), (reviewed.clone(), 3)] {
+        let catalog: ClientCatalog = serde_json::from_value(reviewed.clone())?;
+        catalog.validate()?;
+        assert_eq!(serde_json::to_value(catalog)?, reviewed);
+        for version in [1, 3] {
+            let mut value = reviewed.clone();
             value["version"] = json!(version);
             assert!(
                 serde_json::from_value::<ClientCatalog>(value)?
                     .validate()
                     .is_err()
             );
+        }
+        for version in [1, 2, 3] {
+            let mut retired = google.clone();
+            retired["version"] = json!(version);
+            retired["registrations"]["calendar"] = json!({
+                "client":{"client_id":"123-calendar.apps.googleusercontent.com","credential":"calendar_secret"},
+                "canary_subject":"42","canary_tenant":"example.com"
+            });
+            assert!(serde_json::from_value::<ClientCatalog>(retired).is_err());
         }
         let mut mixed = reviewed.clone();
         mixed["registrations"]["calendar"]["canary_subject"] = json!("42");

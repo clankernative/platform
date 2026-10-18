@@ -738,7 +738,7 @@ impl QualifiedConnections {
             .oauth_clients
             .as_ref()
             .context("OAuth clients not selected")?;
-        let (identity, edge) = self.instance.security_edge()?;
+        let (_, edge) = self.instance.security_edge()?;
         ensure!(
             shell.instance == instance_identity(&self.instance)?
                 && shell.origin_url == format!("{}/", edge.origin),
@@ -760,15 +760,6 @@ impl QualifiedConnections {
                 let provider = client.client();
                 let adapter = super::catalog::Adapter::selected(&selected.reviewed)?;
                 adapter.validate_client(&provider)?;
-                if matches!(
-                    client,
-                    day2_capabilities::oauth::RegistrationClient::LegacyGoogle(_)
-                ) {
-                    ensure!(
-                        canary.provider_tenant == identity.hosted_domain,
-                        "Google canary must use the shell's verified tenant"
-                    );
-                }
                 let target = super::registration::Target::new(
                     &selected.requirement,
                     &selected.binding.profile,
@@ -2599,9 +2590,9 @@ pub(super) mod tests {
             .id
             .as_str();
         fixture.instance.oauth_clients = Some(serde_json::from_value(json!({
-            "version":1,"reauthentication":{"client_id":"123-reauth.apps.googleusercontent.com","credential":"reauth_client"},
-            "registrations":{registration:{"client":{"client_id":"123-calendar.apps.googleusercontent.com","credential":"calendar_client"},
-                "canary_subject":"112233","canary_tenant":"example.com"}}
+            "version":2,"reauthentication":{"client_id":"123-reauth.apps.googleusercontent.com","credential":"reauth_client"},
+            "registrations":{registration:{"client":{"kind":"google","client_id":"123-calendar.apps.googleusercontent.com","credential":"calendar_client"},
+                "canary":{"qualification_subject":"accounts.google.com:112233","provider_subject":"112233","provider_tenant":"example.com"}}}
         }))?);
         crate::oauth::clients::tests::select_desired_epoch(
             &mut fixture.instance,
@@ -2713,10 +2704,10 @@ pub(super) mod tests {
             );
         }
         fixture.instance.oauth_clients = Some(serde_json::from_value(json!({
-            "version":1,"reauthentication":{"client_id":"123-reauth.apps.googleusercontent.com","credential":"reauth_client"},
+            "version":2,"reauthentication":{"client_id":"123-reauth.apps.googleusercontent.com","credential":"reauth_client"},
             "registrations":{
-                "calendar_registration":{"client":{"client_id":"123-calendar.apps.googleusercontent.com","credential":"calendar_client"},"canary_subject":"112233","canary_tenant":"example.com"},
-                "sibling_registration":{"client":{"client_id":"123-sibling.apps.googleusercontent.com","credential":"sibling_client"},"canary_subject":"112233","canary_tenant":"example.com"}
+                "calendar_registration":{"client":{"kind":"google","client_id":"123-calendar.apps.googleusercontent.com","credential":"calendar_client"},"canary":{"qualification_subject":"accounts.google.com:112233","provider_subject":"112233","provider_tenant":"example.com"}},
+                "sibling_registration":{"client":{"kind":"google","client_id":"123-sibling.apps.googleusercontent.com","credential":"sibling_client"},"canary":{"qualification_subject":"accounts.google.com:112233","provider_subject":"112233","provider_tenant":"example.com"}}
             }
         }))?);
         crate::oauth::clients::tests::select_desired_epoch(
@@ -3120,9 +3111,9 @@ pub(super) mod tests {
         control.secrets.insert(name("reauth_client"), serde_json::from_value(json!({"kind":"gcp_version","project_number":12345,"secret":"google_reauth","version":3}))?);
         control.secrets.insert(name("calendar_client"), serde_json::from_value(json!({"kind":"gcp_version","project_number":12345,"secret":"google_client_secret","version":7}))?);
         instance.oauth_clients = Some(serde_json::from_value(json!({
-            "version":1,"reauthentication":{"client_id":"123-reauth.apps.googleusercontent.com","credential":"reauth_client"},
-            "registrations":{"calendar_registration":{"client":{"client_id":"12345-fixture.apps.googleusercontent.com","credential":"calendar_client"},
-                "canary_subject":"google-canary-subject","canary_tenant":"example.com"}}
+            "version":2,"reauthentication":{"client_id":"123-reauth.apps.googleusercontent.com","credential":"reauth_client"},
+            "registrations":{"calendar_registration":{"client":{"kind":"google","client_id":"12345-fixture.apps.googleusercontent.com","credential":"calendar_client"},
+                "canary":{"qualification_subject":"accounts.google.com:google-canary-subject","provider_subject":"google-canary-subject","provider_tenant":"example.com"}}}
         }))?);
         let account = match &policy {
             AccountBindingPolicy::MappedHuman => json!({"kind":"iap_subject"}),
