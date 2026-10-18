@@ -2,6 +2,8 @@
 //! artifacts; provider semantics come from reviewed host code. Qualification
 //! does not establish external readiness or grant invocation authority.
 
+mod desired_epochs;
+
 use super::{
     approval_keys::{AccessTokenSource, GcpApprovalKeys, GcpSecretVersion},
     approval_registry::{
@@ -531,7 +533,7 @@ impl QualifiedConnections {
     /// loader still sees fields whose refusal occurs before typed decoding.
     fn prepare_desired_bytes(bytes: &[u8]) -> Result<Instance> {
         let mut raw: serde_json::Value = crate::json::decode(bytes)?;
-        let mut desired: Instance = serde_json::from_value(raw.clone())?;
+        let mut desired = desired_epochs::decode(&raw)?;
         Self::repin_desired_epochs(&mut desired)?;
         for (app, binding) in &desired.apps {
             if binding.oauth_connections.is_empty() {
@@ -2941,6 +2943,288 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn setup_derives_an_omitted_epoch_key_set_while_serving_stays_strict() -> Result<()> {
+        let fixture = fixture(AccountBindingPolicy::ExplicitExternalAccount)?;
+        let instance = live::tests::selected()?.instance;
+        let alias = instance
+            .control
+            .as_ref()
+            .unwrap()
+            .security_epochs
+            .keys()
+            .next()
+            .unwrap();
+        let mut raw = serde_json::to_value(&instance)?;
+        raw["control"]["security_epochs"][alias.as_str()]
+            .as_object_mut()
+            .unwrap()
+            .remove("key_set");
+        let bytes = serde_json::to_vec(&raw)?;
+        assert!(Instance::from_bytes(&bytes).is_err());
+        let desired = QualifiedConnections::prepare_desired_bytes(&bytes)?;
+        let mut prepared = QualifiedConnections::prepare_instance(desired, &fixture.artifacts)?;
+        live::setup_selected(&mut prepared)?;
+        let complete = Instance::from_bytes(&serde_json::to_vec(&prepared.instance)?)?;
+        assert_eq!(
+            complete.control.as_ref().unwrap().security_epochs[alias].key_set,
+            complete.security_key_set("workspace")?
+        );
+        // Every operator-selected resource, UID, IAM, alias and lease is preserved.
+        assert_eq!(
+            serde_json::to_value(&complete)?,
+            serde_json::to_value(&instance)?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn setup_initial_epoch_projection_refuses_invalid_supplied_or_missing_metadata() -> Result<()> {
+        let instance = live::tests::selected()?.instance;
+        let alias = instance
+            .control
+            .as_ref()
+            .unwrap()
+            .security_epochs
+            .keys()
+            .next()
+            .unwrap()
+            .as_str();
+        let mut initial = serde_json::to_value(&instance)?;
+        initial["control"]["security_epochs"][alias]
+            .as_object_mut()
+            .unwrap()
+            .remove("key_set");
+        let selected = format!("/control/security_epochs/{alias}");
+        for value in [
+            json!(null),
+            json!(""),
+            json!("sha256:malformed"),
+            json!(format!("sha256:{}", "A".repeat(64))),
+            json!(1),
+            json!(false),
+            json!([]),
+            json!({}),
+        ] {
+            let mut raw = initial.clone();
+            raw.pointer_mut(&selected)
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .insert("key_set".into(), value.clone());
+            assert!(
+                QualifiedConnections::prepare_desired_bytes(&serde_json::to_vec(&raw)?).is_err(),
+                "accepted supplied digest {value}"
+            );
+        }
+        for field in [
+            "scope",
+            "provider",
+            "max_lease_seconds",
+            "provider/database_uid",
+            "provider/iam_source/service_account_uid",
+        ] {
+            let mut raw = initial.clone();
+            let (parent, field) = field.rsplit_once('/').unwrap_or(("", field));
+            let parent = if parent.is_empty() {
+                selected.clone()
+            } else {
+                format!("{selected}/{parent}")
+            };
+            raw.pointer_mut(&parent)
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            assert!(
+                QualifiedConnections::prepare_desired_bytes(&serde_json::to_vec(&raw)?).is_err(),
+                "supplied missing {parent}/{field}"
+            );
+        }
+        for object in ["", "/scope", "/provider", "/provider/iam_source"] {
+            let mut raw = initial.clone();
+            raw.pointer_mut(&format!("{selected}{object}"))
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .insert("unreviewed".into(), json!(true));
+            assert!(
+                QualifiedConnections::prepare_desired_bytes(&serde_json::to_vec(&raw)?).is_err(),
+                "discarded unknown field in {object}"
+            );
+        }
+        for (path, value) in [
+            ("/control/security_epochs".to_owned(), json!(null)),
+            ("/control/security_epochs".to_owned(), json!([])),
+            (selected.clone(), json!(null)),
+            (format!("{selected}/scope/environment"), json!("foreign")),
+            (format!("{selected}/scope/app"), json!("uninstalled")),
+            (format!("{selected}/max_lease_seconds"), json!(0)),
+            (format!("{selected}/max_lease_seconds"), json!(61)),
+            (
+                format!("{selected}/provider/database_uid"),
+                json!("guessed"),
+            ),
+        ] {
+            let mut raw = initial.clone();
+            *raw.pointer_mut(&path).unwrap() = value;
+            assert!(
+                QualifiedConnections::prepare_desired_bytes(&serde_json::to_vec(&raw)?).is_err(),
+                "normalized forbidden input {path}"
+            );
+        }
+        let record = initial["control"]["security_epochs"][alias].clone();
+        let mut duplicated = initial.clone();
+        duplicated["control"]["security_epochs"]["duplicate_epoch"] = record.clone();
+        assert!(
+            QualifiedConnections::prepare_desired_bytes(&serde_json::to_vec(&duplicated)?).is_err()
+        );
+        let mut oversized = initial.clone();
+        oversized["control"]["security_epochs"] = serde_json::to_value(
+            (0..129)
+                .map(|n| (format!("epoch_{n}"), record.clone()))
+                .collect::<BTreeMap<_, _>>(),
+        )?;
+        let error = QualifiedConnections::prepare_desired_bytes(&serde_json::to_vec(&oversized)?)
+            .unwrap_err();
+        assert!(error.to_string().contains("control binding budget"));
+
+        let key_set = serde_json::to_string(
+            &instance.control.as_ref().unwrap().security_epochs[&name(alias)].key_set,
+        )?;
+        let encoded = serde_json::to_string(&instance)?;
+        let duplicate_field = encoded.replacen(
+            &format!("\"key_set\":{key_set}"),
+            &format!("\"key_set\":{key_set},\"\\u006bey_set\":{key_set}"),
+            1,
+        );
+        let escaped_alias = format!("\"\\u{:04x}{}\"", alias.as_bytes()[0], &alias[1..]);
+        let duplicate_alias = serde_json::to_string(&initial)?.replacen(
+            &format!("\"{alias}\":{record}"),
+            &format!("\"{alias}\":{record},{escaped_alias}:{record}"),
+            1,
+        );
+        for raw in [duplicate_field, duplicate_alias] {
+            let error = QualifiedConnections::prepare_desired_bytes(raw.as_bytes()).unwrap_err();
+            assert!(error.to_string().contains("duplicate JSON key"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn setup_initial_epoch_projection_preserves_complete_credential_only_siblings() -> Result<()> {
+        let instance = multi_app_security_projection_fixture()?;
+        let mut raw = serde_json::to_value(&instance)?;
+        raw["control"]["security_epochs"]["workspace_epoch"]
+            .as_object_mut()
+            .unwrap()
+            .remove("key_set");
+        let prepared = QualifiedConnections::prepare_desired_bytes(&serde_json::to_vec(&raw)?)?;
+        assert_eq!(prepared.control, instance.control);
+        assert_eq!(
+            prepared.apps["sibling"].credential_families,
+            instance.apps["sibling"].credential_families
+        );
+        assert_eq!(prepared.control.as_ref().unwrap().security_epochs.len(), 2);
+        raw["control"]["security_epochs"]["credential-epoch"]
+            .as_object_mut()
+            .unwrap()
+            .remove("key_set");
+        let error =
+            QualifiedConnections::prepare_desired_bytes(&serde_json::to_vec(&raw)?).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("initial_security_epoch_key_set_requires_selected_oauth_app")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn setup_initial_epoch_projection_restores_stores_before_checking_bootstrap_refs() -> Result<()>
+    {
+        // Desired fixture selections only: no cluster, bootstrap, issuer or epoch proof.
+        let mut instance = live::tests::selected()?.instance;
+        let (alias, store) = instance
+            .control
+            .as_ref()
+            .unwrap()
+            .security_epochs
+            .iter()
+            .next()
+            .unwrap();
+        let alias = alias.clone();
+        let reference = BindingRef {
+            id: alias.clone(),
+            revision: Digest::of(store)?,
+        };
+        let day2_capabilities::security_epoch::EpochProvider::FirestoreNativeV1 {
+            project,
+            iam_source,
+            ..
+        } = &store.provider;
+        let role = |role: &str, account: serde_json::Value| {
+            json!({
+                "namespace":{"name":"tools","uid":"namespace-one"},
+                "kubernetes_service_account":{"name":role,"uid":format!("{role}-service-account")},
+                "google_service_account":account,"workload_kind":"deployment_v1",
+                "workload":{"name":role,"uid":format!("{role}-deployment")},
+                "token_review_audience":"fixture-audience"
+            })
+        };
+        let digest = Digest::of(&"synthetic bootstrap selections")?;
+        let policy = serde_json::from_value(json!({
+            "scope":store.scope,"epoch_store":reference,
+            "cluster":{"project":project,"location":"us-central1","name":"fixture-cluster",
+                "uid":"cluster-one","api_origin":"https://10.0.0.1","certificate_authority":digest},
+            "controller":role("controller",json!({"kind":"gke_workload_identity_v1",
+                "service_account":"controller@company-tools.iam.gserviceaccount.com",
+                "service_account_uid":"100000000000000000099"})),
+            "app":role("app",serde_json::to_value(iam_source)?),
+            "control_store":{"kind":"firestore_authority_database_v1","epoch_store":reference},
+            "runtime_profile":{"kind":"gke_linux_trusted_native_v1","manifest":digest,
+                "controller_code":digest,"app_artifact":digest},
+            "fresh_storage":{"provider_volume_uid":"volume-one","mount_binding":digest,
+                "schema_contract":digest,"marker_format":"fixture_marker_v1"}
+        }))?;
+        instance
+            .control
+            .as_mut()
+            .unwrap()
+            .security_bootstraps
+            .insert(name("initial"), policy);
+        Instance::from_bytes(&serde_json::to_vec(&instance)?)?;
+        let mut raw = serde_json::to_value(&instance)?;
+        raw["control"]["security_epochs"][alias.as_str()]
+            .as_object_mut()
+            .unwrap()
+            .remove("key_set");
+        let restored = QualifiedConnections::prepare_desired_bytes(&serde_json::to_vec(&raw)?)?;
+        assert_eq!(restored.control, instance.control);
+
+        let SecretProvider::GcpVersion { version, .. } = instance
+            .control
+            .as_mut()
+            .unwrap()
+            .secrets
+            .get_mut(&name("encryption"))
+            .unwrap();
+        *version = std::num::NonZeroU64::new(version.get() + 1).unwrap();
+        let mut changed = serde_json::to_value(&instance)?;
+        changed["control"]["security_epochs"][alias.as_str()]
+            .as_object_mut()
+            .unwrap()
+            .remove("key_set");
+        let error = QualifiedConnections::prepare_desired_bytes(&serde_json::to_vec(&changed)?)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("bootstrap_epoch_store_selection_mismatch")
+        );
+        Ok(())
+    }
+
+    #[test]
     fn setup_requires_existing_unique_exact_scoped_epoch_and_preserves_raw_refusals() -> Result<()>
     {
         let fixture = fixture(AccountBindingPolicy::ExplicitExternalAccount)?;
@@ -2972,6 +3256,18 @@ pub(super) mod tests {
             );
         }
         let mut raw = serde_json::to_value(&instance)?;
+        let alias = instance
+            .control
+            .as_ref()
+            .unwrap()
+            .security_epochs
+            .keys()
+            .next()
+            .unwrap();
+        raw["control"]["security_epochs"][alias.as_str()]
+            .as_object_mut()
+            .unwrap()
+            .remove("key_set");
         raw["apps"]["workspace"]["auditors"] = json!(["not-an-owner@example.com"]);
         let error =
             QualifiedConnections::prepare_desired_bytes(&serde_json::to_vec(&raw)?).unwrap_err();
@@ -3029,10 +3325,18 @@ pub(super) mod tests {
             .get_mut(&name("encryption"))
             .unwrap();
         *version = std::num::NonZeroU64::new(version.get() + 1).unwrap();
-        let prepared = QualifiedConnections::prepare_instance(desired.clone(), &fixture.artifacts)?;
+        let initial_keys = desired.security_key_set("workspace")?;
+        let mut initial = serde_json::to_value(&desired)?;
+        initial["control"]["security_epochs"]["credential-epoch"]
+            .as_object_mut()
+            .unwrap()
+            .remove("key_set");
+        let initial = QualifiedConnections::prepare_desired_bytes(&serde_json::to_vec(&initial)?)?;
+        let prepared = QualifiedConnections::prepare_instance(initial, &fixture.artifacts)?;
         let instance = Instance::from_bytes(&serde_json::to_vec(&prepared.instance)?)?;
         let epoch = &instance.control.as_ref().unwrap().security_epochs[&name("credential-epoch")];
         assert_eq!(epoch.key_set, instance.security_key_set("workspace")?);
+        assert_ne!(epoch.key_set, initial_keys);
         assert_eq!(
             instance.apps["workspace"].credential_families["agents"].epoch_store,
             BindingRef {
