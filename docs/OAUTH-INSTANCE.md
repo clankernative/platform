@@ -390,6 +390,14 @@ and approved product-return selection remain operator selections. A missing
 declaration, wrong profile ID, unknown JSON field or overlapping secret role
 fails setup. Serving constructors always require exact derived pins.
 
+For an already selected exact-scoped OAuth store, `oauth-setup` may accept an
+omitted initial `key_set` and derives it from the complete selected native key
+inventory. A supplied value must be a canonical digest; null or malformed values
+refuse. Resource, UID, IAM, alias and lease selections remain required. Serving
+admission always requires complete exact pins. Credential-only sibling stores
+still require complete pins; bootstrap policy references are never rewritten by
+OAuth setup.
+
 The output includes an `instance` document with the recomputed bindings and
 all other selections preserved. Review it before saving it as the installation
 snapshot. Running setup against that snapshot is idempotent. Recompute and
