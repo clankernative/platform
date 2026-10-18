@@ -157,7 +157,13 @@ impl Fixture {
     }
 
     fn with_keys(keys: Arc<dyn ApprovalKeyProvider>) -> Self {
-        let directory = tempfile::tempdir().unwrap();
+        Self::with_directory_and_keys(tempfile::tempdir().unwrap(), keys)
+    }
+
+    fn with_directory_and_keys(
+        directory: tempfile::TempDir,
+        keys: Arc<dyn ApprovalKeyProvider>,
+    ) -> Self {
         let path = directory.path().join("app.sqlite");
         let mut facts = fixtures::external_fixture();
         facts.intent.attempt = scoped_attempt("installation", "production", "app").unwrap();
@@ -1049,6 +1055,8 @@ fn mounted_management_authenticates_both_callers_and_lost_confirmation_is_not_re
     let directory = tempfile::tempdir()?;
     let (runtime, authority, signer) = admission::tests::management_fixture(directory.path())?;
     let database = runtime.db().to_path_buf();
+    let instance = Instance::load(runtime.instance_path())?;
+    let route = route_prefix(&instance.installation, &instance.environment, runtime.app())?;
     let manager = Arc::new(Manager::new(runtime, authority));
     let assertions = Assertions::new();
     let identity = iap::Verified {
@@ -1068,7 +1076,7 @@ fn mounted_management_authenticates_both_callers_and_lost_confirmation_is_not_re
         .unwrap();
     let human_assertion = format!("{signed}.{}", URL_SAFE_NO_PAD.encode(signature.as_ref()));
     let mut receiver = assertions.receiver(Arc::new(RegistrationOnly));
-    receiver.route = route_prefix("installation", "production", "workspace")?;
+    receiver.route = route;
     let receiver = Arc::new(receiver).with_management(manager)?;
     let port = Arc::new(Port {
         at: AtomicI64::new(100),
@@ -1605,10 +1613,11 @@ fn app_host_mounts_reserved_receiver_before_human_dispatch_and_drains_admission(
             self.0.confirm(attempt, view, identity, proof, 6)
         }
     }
-    let fixture = Fixture::new();
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("app.sqlite");
     let assertions = Assertions::new();
     let instance = fixtures::selected_instance();
-    let instance_path = fixture._directory.path().join("instance.json");
+    let instance_path = directory.path().join("instance.json");
     std::fs::write(&instance_path, serde_json::to_vec(&instance)?)?;
     let mut contract: crate::artifact::Artifact = serde_json::from_value(json!({
         "format":crate::artifact::CURRENT_FORMAT,"verification_limits":crate::artifact::VerificationLimits::QUALIFIED,"namespace":"app","roc_version":"fixture",
@@ -1632,15 +1641,18 @@ fn app_host_mounts_reserved_receiver_before_human_dispatch_and_drains_admission(
     contract.operation_metadata = contract.app_contract.as_ref().unwrap().intents();
     let artifact = crate::artifact::LoadedArtifact::from_contract_for_tests(
         crate::digest(b"host-route-fixture"),
-        fixture._directory.path().into(),
+        directory.path().into(),
         contract,
     );
     let runtime = crate::store::Runtime::from_artifact_for_tests(
         instance_path,
         "app".into(),
-        fixture.path.clone(),
+        path,
         artifact,
     )?;
+    runtime.initialize()?;
+    let fixture =
+        Fixture::with_directory_and_keys(directory, Arc::new(fixtures::TestApprovalKeys(0.into())));
     let receiver = Arc::new(assertions.receiver(Arc::new(AtSix(fixture.backend.clone()))));
     let verifier = iap::Verifier::new(
         APP_AUDIENCE,
