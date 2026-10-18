@@ -144,7 +144,7 @@ pub(crate) enum ReauthStart {
 
 pub(crate) enum ReauthCallback {
     Manual(String),
-    Observed(shell_oidc::Reauthenticated),
+    Observed(Box<shell_oidc::Reauthenticated>),
 }
 
 struct ManualRequest<'a> {
@@ -1037,7 +1037,7 @@ impl SecurityShell {
                 );
                 return Ok((StatusCode::SEE_OTHER, [(header::LOCATION, location)]).into_response());
             }
-            ReauthCallback::Observed(observed) => observed,
+            ReauthCallback::Observed(observed) => *observed,
         };
         let proof = VerifiedAuthTime::from_google(observed);
         proof.require_current(at)?;

@@ -3612,7 +3612,7 @@ mod owned_google {
                 );
                 let error = management
                     .reauthenticated(
-                        crate::oauth::fresh_auth::VerifiedAuthTime::from_google(observed),
+                        crate::oauth::fresh_auth::VerifiedAuthTime::from_google(*observed),
                         &headers,
                         &human,
                         port.wall_time()?,

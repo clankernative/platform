@@ -1346,7 +1346,7 @@ pub(super) mod tests {
             _: i64,
         ) -> Result<crate::oauth::security_shell::ReauthCallback> {
             Ok(crate::oauth::security_shell::ReauthCallback::Observed(
-                crate::oauth::shell_oidc::Reauthenticated::fixture(
+                Box::new(crate::oauth::shell_oidc::Reauthenticated::fixture(
                     self.0
                         .lock()
                         .unwrap()
@@ -1355,7 +1355,7 @@ pub(super) mod tests {
                     "human_1".into(),
                     "accounts.google.com:test-human".into(),
                     5,
-                ),
+                )),
             ))
         }
     }
