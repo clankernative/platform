@@ -1,53 +1,33 @@
-use crate::security_epoch::runtime_profile::ContainerSelection;
+use super::NativeRole;
 use anyhow::{Result, ensure};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use day2_capabilities::{
     Digest,
     security_epoch::{
-        AuthorityScope, EpochStore,
-        bootstrap::{GkeClusterSelection, GkeRoleSelection},
+        EpochStore,
+        bootstrap::{GkeRoleSelection, InitialBootstrapPolicy},
     },
 };
 use serde::{Deserialize, Serialize};
 
-/// Closed native roles. These do not identify a human, app worker or provider.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum NativeRole {
-    AppHost,
-    SecurityShell,
-    EpochController,
-}
-
-/// Operator selections, not proof that any selected process currently exists.
+/// Operator selections only. Role, workload, container, code and profile have
+/// one canonical source in the shared initial-bootstrap contract.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct EnrollmentPolicy {
-    pub scope: AuthorityScope,
+pub(super) struct EnrollmentPolicy {
+    pub bootstrap: InitialBootstrapPolicy,
+    /// Routing/identity DATA; enrollment does not read or require an epoch.
+    pub store: EpochStore,
     pub root_version: String,
     pub root_public_key: String,
     pub provisioner_code: Digest,
     pub issuer_code: Digest,
-    pub app_host_code: Digest,
-    pub security_shell_code: Digest,
-    pub controller_code: Digest,
-    pub profile: Digest,
     pub runtime: RuntimeSelection,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct RuntimeSelection {
-    pub cluster: GkeClusterSelection,
-    /// Used only for authenticated project/cluster route selection. No epoch
-    /// read or already-created authority is needed to enroll a native role.
-    pub store: EpochStore,
-    pub app: GkeRoleSelection,
-    pub app_container: ContainerSelection,
-    pub shell: GkeRoleSelection,
-    pub shell_container: ContainerSelection,
-    pub controller: GkeRoleSelection,
-    pub controller_container: ContainerSelection,
     pub containerd_code: Digest,
     pub containerd_version: String,
     pub containerd_revision: String,
@@ -60,6 +40,11 @@ pub(super) struct RuntimeSelection {
 
 impl EnrollmentPolicy {
     pub(super) fn validate(&self) -> Result<()> {
+        self.bootstrap
+            .validate(&std::collections::BTreeMap::from([(
+                self.bootstrap.epoch_store.id.clone(),
+                self.store.clone(),
+            )]))?;
         ensure!(
             !self.root_version.is_empty()
                 && self.root_version.len() <= 128
@@ -70,15 +55,6 @@ impl EnrollmentPolicy {
             "native_enrollment_root_version"
         );
         self.root_key()?;
-        self.runtime.cluster.validate()?;
-        self.runtime.store.validate()?;
-        self.runtime.app.validate()?;
-        self.runtime.shell.validate()?;
-        self.runtime.controller.validate()?;
-        ensure!(
-            self.runtime.store.scope == self.scope,
-            "native_enrollment_scope_selection"
-        );
         for value in [
             &self.runtime.containerd_version,
             &self.runtime.containerd_revision,
@@ -108,21 +84,11 @@ impl EnrollmentPolicy {
     }
 
     pub(super) fn code(&self, role: NativeRole) -> &Digest {
-        match role {
-            NativeRole::AppHost => &self.app_host_code,
-            NativeRole::SecurityShell => &self.security_shell_code,
-            NativeRole::EpochController => &self.controller_code,
-        }
+        self.bootstrap.native_role(role).code
     }
 
-    pub(super) fn workload(&self, role: NativeRole) -> (&GkeRoleSelection, &ContainerSelection) {
-        match role {
-            NativeRole::AppHost => (&self.runtime.app, &self.runtime.app_container),
-            NativeRole::SecurityShell => (&self.runtime.shell, &self.runtime.shell_container),
-            NativeRole::EpochController => {
-                (&self.runtime.controller, &self.runtime.controller_container)
-            }
-        }
+    pub(super) fn workload(&self, role: NativeRole) -> &GkeRoleSelection {
+        self.bootstrap.native_role(role).workload
     }
 }
 

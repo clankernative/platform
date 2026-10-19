@@ -21,8 +21,8 @@ mod runtime_wire;
 #[cfg(target_os = "linux")]
 mod service;
 
+pub(crate) use day2_capabilities::security_epoch::bootstrap::NativeRole;
 pub(crate) use owner::{EnrolledOriginalClock, EnrolledProcessRoleOwner, EnrolledRoleStage};
-pub(crate) use policy::NativeRole;
 
 pub(crate) fn run(issuer: bool) -> anyhow::Result<()> {
     #[cfg(target_os = "linux")]
