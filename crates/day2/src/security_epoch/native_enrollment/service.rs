@@ -32,7 +32,7 @@ pub(super) fn run() -> Result<()> {
 
 fn serve(
     issuer: &mut IssuerOwner,
-    enrolled: &mut BTreeMap<(u32, u64, super::policy::NativeRole), Enrollment>,
+    enrolled: &mut BTreeMap<(u32, u64, super::NativeRole), Enrollment>,
     channel: &mut Channel,
     acquisition: &mut NativeAcquisition,
 ) -> Result<()> {

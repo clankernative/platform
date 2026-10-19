@@ -1,4 +1,7 @@
-use crate::security_epoch::native_enrollment::policy::{EnrollmentPolicy, NativeRole, decode_key};
+use crate::security_epoch::native_enrollment::{
+    NativeRole,
+    policy::{EnrollmentPolicy, decode_key},
+};
 use anyhow::{Result, ensure};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use day2_capabilities::Digest;
