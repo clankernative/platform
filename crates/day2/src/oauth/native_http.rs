@@ -315,14 +315,11 @@ impl<T: rt::Read + Unpin> rt::Read for OwnerIo<T> {
 
 impl<T: rt::Write + Unpin> rt::Write for OwnerIo<T> {
     fn poll_write(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut TaskContext<'_>,
         bytes: &[u8],
     ) -> Poll<io::Result<usize>> {
         self.check()?;
-        self.sink
-            .check()
-            .map_err(|_| io::Error::other("native response original unavailable"))?;
         #[cfg(test)]
         if let Some(exchange) = &self.exchange {
             exchange
@@ -331,21 +328,36 @@ impl<T: rt::Write + Unpin> rt::Write for OwnerIo<T> {
                 .unwrap()
                 .push(std::thread::current().id());
         }
-        Pin::new(&mut self.inner).poll_write(cx, bytes)
+        let this = self.get_mut();
+        this.sink
+            .with_current(|| Pin::new(&mut this.inner).poll_write(cx, bytes))
+            .unwrap_or_else(|_| {
+                Poll::Ready(Err(io::Error::other(
+                    "native response original unavailable",
+                )))
+            })
     }
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
         self.check()?;
-        self.sink
-            .check()
-            .map_err(|_| io::Error::other("native response original unavailable"))?;
-        Pin::new(&mut self.inner).poll_flush(cx)
+        let this = self.get_mut();
+        this.sink
+            .with_current(|| Pin::new(&mut this.inner).poll_flush(cx))
+            .unwrap_or_else(|_| {
+                Poll::Ready(Err(io::Error::other(
+                    "native response original unavailable",
+                )))
+            })
     }
-    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
         self.check()?;
-        self.sink
-            .check()
-            .map_err(|_| io::Error::other("native response original unavailable"))?;
-        Pin::new(&mut self.inner).poll_shutdown(cx)
+        let this = self.get_mut();
+        this.sink
+            .with_current(|| Pin::new(&mut this.inner).poll_shutdown(cx))
+            .unwrap_or_else(|_| {
+                Poll::Ready(Err(io::Error::other(
+                    "native response original unavailable",
+                )))
+            })
     }
 }
 

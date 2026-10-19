@@ -494,25 +494,29 @@ impl Sink {
         Self(Rc::new(RefCell::new(BTreeMap::new())))
     }
 
-    pub(super) fn check(&self) -> Result<()> {
+    pub(super) fn with_current<T>(&self, operation: impl FnOnce() -> T) -> Result<T> {
         let intents: Vec<_> = self
             .0
             .try_borrow()?
             .iter()
             .map(|((role, _), binding)| (*role, binding.clone()))
             .collect();
-        for (role, binding) in intents {
-            binding.effects.run(|| {
+        match intents.as_slice() {
+            [] => Ok(operation()),
+            [(role, binding)] => binding.effects.clone().run(|| {
                 with_current_for_role(
                     &binding.intent,
                     Phase::Response,
                     super::effects::wall_time()?,
-                    Some(role),
-                    |stage, original| original.check(stage),
+                    Some(*role),
+                    |stage, original| {
+                        original.check(stage)?;
+                        Ok(operation())
+                    },
                 )
-            })?;
+            }),
+            _ => anyhow::bail!("native response must have exactly one original"),
         }
-        Ok(())
     }
 
     pub(super) fn scope<F: Future>(&self, future: F) -> impl Future<Output = F::Output> {
@@ -547,7 +551,7 @@ fn enlist(role: NativeRole, intent: &FreshIntent) -> Result<()> {
             let mut indexes = sink.0.try_borrow_mut()?;
             let key = (role, intent.attempt().into());
             ensure!(
-                indexes.len() < 4 || indexes.contains_key(&key),
+                indexes.is_empty() || indexes.contains_key(&key),
                 "native response scope capacity"
             );
             if let Some(existing) = indexes.get(&key) {
