@@ -508,6 +508,20 @@ impl Sink {
         Self(Rc::new(RefCell::new(BTreeMap::new())))
     }
 
+    /// A synchronous fixture RPC still has its own response scope. It must not
+    /// enter another executor while the actual owner is already being polled.
+    #[cfg(test)]
+    pub(super) fn run<T>(&self, operation: impl FnOnce() -> T) -> T {
+        struct Restore(Option<Sink>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                ACTIVE_SINK.with(|slot| slot.replace(self.0.take()));
+            }
+        }
+        let _restore = Restore(ACTIVE_SINK.with(|slot| slot.replace(Some(self.clone()))));
+        operation()
+    }
+
     pub(super) fn with_current<T>(&self, operation: impl FnOnce() -> T) -> Result<T> {
         let intents: Vec<_> = self
             .0
