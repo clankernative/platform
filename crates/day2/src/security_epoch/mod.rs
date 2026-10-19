@@ -16,6 +16,7 @@ mod kernel;
 mod namespace_protocol;
 mod native_clock;
 mod native_connection_peer;
+pub(crate) mod native_enrollment;
 mod native_identity;
 mod native_namespace;
 mod preparation_image;

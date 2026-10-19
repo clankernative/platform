@@ -32,6 +32,45 @@ macro_rules! assert_secret_references {
 }
 
 const _: () = {
+    assert_consuming!(crate::security_epoch::native_enrollment::EnrolledProcessRoleOwner);
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::EnrolledProcessRoleOwner,
+        Send
+    );
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::EnrolledProcessRoleOwner,
+        Sync
+    );
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::EnrolledProcessRoleOwner,
+        std::fmt::Debug
+    );
+    assert_consuming!(crate::security_epoch::native_enrollment::EnrolledRoleStage<'static>);
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::EnrolledRoleStage<'static>,
+        Send
+    );
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::EnrolledRoleStage<'static>,
+        Sync
+    );
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::EnrolledRoleStage<'static>,
+        std::fmt::Debug
+    );
+    assert_consuming!(crate::security_epoch::native_enrollment::EnrolledOriginalClock);
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::EnrolledOriginalClock,
+        Send
+    );
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::EnrolledOriginalClock,
+        Sync
+    );
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::EnrolledOriginalClock,
+        std::fmt::Debug
+    );
     assert_consuming!(crate::security_epoch::NativeConnectionPeerObservation);
     assert_not_impl!(
         crate::security_epoch::NativeConnectionPeerObservation,
