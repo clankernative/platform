@@ -490,6 +490,7 @@
         "pub (super) fn budget (& mut self) -> Result < Budget >",
         "pub (super) fn fixture (domain : Digest , process : u32 , origin : Duration , limit : Duration) -> Self",
         "pub (super) fn interval_data (& mut self) -> Result < (Duration , Duration) >",
+        "pub (super) fn narrow (& mut self , max_lease_seconds : u32 , ceiling : Duration) -> Result < Self >",
         "fn observe (& mut self , now : Duration) -> Result < Sample >",
         "pub (super) fn refuse (& mut self)",
         "pub (super) fn remaining (& mut self) -> Result < Duration >",
@@ -499,6 +500,10 @@
         {
           "owner": "NativeAcquisition",
           "signature": "pub (super) fn begin (max_lease_seconds : u32) -> Result < Self >"
+        },
+        {
+          "owner": "NativeAcquisition",
+          "signature": "pub (super) fn narrow (& mut self , max_lease_seconds : u32 , ceiling : Duration) -> Result < Self >"
         }
       ],
       "material_uses": [
@@ -513,6 +518,10 @@
         {
           "owner": "NativeAcquisition",
           "signature": "pub (super) fn interval_data (& mut self) -> Result < (Duration , Duration) >"
+        },
+        {
+          "owner": "NativeAcquisition",
+          "signature": "pub (super) fn narrow (& mut self , max_lease_seconds : u32 , ceiling : Duration) -> Result < Self >"
         },
         {
           "owner": "NativeAcquisition",
@@ -1082,7 +1091,8 @@
       "methods": [
         "pub (crate) fn check (& mut self) -> Result < () >",
         "pub (crate) fn check_for (& mut self , scope : & AuthorityScope , role : NativeRole) -> Result < () >",
-        "pub (crate) fn check_selection (& mut self , policy : & day2_capabilities :: security_epoch :: bootstrap :: InitialBootstrapPolicy , store : & day2_capabilities :: security_epoch :: EpochStore , role : NativeRole) -> Result < () >"
+        "pub (crate) fn check_selection (& mut self , policy : & day2_capabilities :: security_epoch :: bootstrap :: InitialBootstrapPolicy , store : & day2_capabilities :: security_epoch :: EpochStore , role : NativeRole) -> Result < () >",
+        "pub (crate) fn narrow_io_acquisition (& mut self , max_lease_seconds : u32) -> Result < NativeAcquisition >"
       ],
       "factories": [
         {
@@ -1114,6 +1124,10 @@
         {
           "owner": "EnrolledRoleStage < '_ >",
           "signature": "pub (crate) fn check_selection (& mut self , policy : & day2_capabilities :: security_epoch :: bootstrap :: InitialBootstrapPolicy , store : & day2_capabilities :: security_epoch :: EpochStore , role : NativeRole) -> Result < () >"
+        },
+        {
+          "owner": "EnrolledRoleStage < '_ >",
+          "signature": "pub (crate) fn narrow_io_acquisition (& mut self , max_lease_seconds : u32) -> Result < NativeAcquisition >"
         }
       ],
       "proof_uses": [],
