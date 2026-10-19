@@ -1,0 +1,22 @@
+--- a/cargo/private/cargo_build_script.bzl
++++ b/cargo/private/cargo_build_script.bzl
+@@ -464,7 +464,7 @@
+         "CARGO_MANIFEST_DIR": manifest_dir,
+         "CARGO_PKG_NAME": pkg_name,
+         "HOST": toolchain.exec_triple.str,
+-        "NUM_JOBS": "1",
++        "NUM_JOBS": "2",
+         "OPT_LEVEL": compilation_mode_opt_level,
+         "RUSTC": toolchain.rustc.path,
+         "RUSTDOC": toolchain.rust_doc.path,
+@@ -474,8 +474,8 @@
+ 
+     # This isn't exactly right, but Bazel doesn't have exact views of "debug" and "release", so...
+     env.update({
+-        "DEBUG": {"dbg": "true", "fastbuild": "true", "opt": "false"}.get(ctx.var["COMPILATION_MODE"], "true"),
+-        "PROFILE": {"dbg": "debug", "fastbuild": "debug", "opt": "release"}.get(ctx.var["COMPILATION_MODE"], "unknown"),
++        "DEBUG": "false",
++        "PROFILE": "debug",
+     })
+ 
+     if ctx.attr.version:

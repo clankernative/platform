@@ -11,10 +11,14 @@ BazelExperiment :: [].{
 				_ = Capability.call!("bazel-timing-resources", Json.to_str("before-bazel-build"), host!)?
 			}
 			for phase in ["cold", "warm-1", "warm-2", "warm-3"] {
-				_ = Capability.call!("bazel-timing-build", Json.to_str({ backend, phase }), host!)?
-			}
-			if backend == "bazel" {
-				_ = Capability.call!("bazel-timing-resources", Json.to_str("after-bazel-build"), host!)?
+				result = Capability.call!("bazel-timing-build", Json.to_str({ backend, phase }), host!)
+				observed = if backend == "bazel" {
+					Capability.call!("bazel-timing-resources", Json.to_str("after-bazel-build"), host!)
+				} else {
+					Ok("{}")
+				}
+				_ = result?
+				_ = observed?
 			}
 		}
 		Ok("{}")

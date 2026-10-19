@@ -7,7 +7,10 @@ bazel_dep(name = "platforms", version = "1.1.0")
 single_version_override(
     module_name = "rules_rust",
     version = "0.74.0",
-    patches = ["//experiments/bazel:patches/rules-rust-0.74.0-child-status.patch"],
+    patches = [
+        "//experiments/bazel:patches/rules-rust-0.74.0-child-status.patch",
+        "//experiments/bazel:patches/rules-rust-0.74.0-cargo-build-env.patch",
+    ],
     patch_strip = 1,
 )
 
