@@ -2217,7 +2217,7 @@ mod owned_google {
             let mut headers = request.headers().clone();
             headers.insert(iap::ASSERTION_HEADER, self.machine.parse()?);
             let app_sink = crate::oauth::native_management::Sink::new();
-            let result = futures_executor::block_on(app_sink.scope(async {
+            let result = app_sink.run(|| {
                 self.receiver.dispatch(
                     &Method::POST,
                     PATH,
@@ -2226,7 +2226,7 @@ mod owned_google {
                     bytes,
                     self.wall_time()?,
                 )
-            }));
+            });
             let reentry = {
                 let mut slot = self.reentry.lock().unwrap();
                 if matches!(&*slot, Some(Reentry::Manual { .. })) {
