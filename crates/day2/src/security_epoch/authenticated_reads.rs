@@ -7,6 +7,7 @@ use super::{
     firestore::{self, EpochObservation, EpochReply, Names, Port, Sample},
     identity_protocol,
     native_clock::NativeAcquisition,
+    native_enrollment::EnrolledRoleStage,
     native_identity::NativeProcessObservation,
     transport::{NativeHttp, Route},
 };
@@ -21,7 +22,11 @@ use day2_capabilities::{
 use std::{collections::BTreeMap, io::Read, time::Duration};
 use zeroize::Zeroizing;
 
-pub(crate) struct AuthenticatedReads {
+pub(crate) struct AuthenticatedReads<'stage, 'role> {
+    stage: &'stage mut EnrolledRoleStage<'role>,
+    policy: InitialBootstrapPolicy,
+    purpose: NativeRole,
+    store: EpochStore,
     http: NativeHttp,
     credential: CredentialMaterial,
     acquisition: NativeAcquisition,
@@ -30,31 +35,72 @@ pub(crate) struct AuthenticatedReads {
     valid: bool,
 }
 
-impl AuthenticatedReads {
+struct RoleGuard<'stage, 'role, 'selection> {
+    stage: &'stage mut EnrolledRoleStage<'role>,
+    policy: &'selection InitialBootstrapPolicy,
+    selection: &'selection EpochStore,
+    purpose: NativeRole,
+}
+
+impl RoleGuard<'_, '_, '_> {
+    fn check(&mut self) -> Result<()> {
+        self.stage
+            .check_selection(self.policy, self.selection, self.purpose)
+    }
+
+    fn request(
+        &mut self,
+        http: &NativeHttp,
+        route: Route<'_>,
+        authorization: &reqwest::header::HeaderValue,
+        body: Option<&[u8]>,
+        acquisition: &mut NativeAcquisition,
+    ) -> Result<Vec<u8>> {
+        self.check()?;
+        let result = http.request(route, authorization, body, acquisition);
+        self.check()?;
+        result
+    }
+}
+
+pub(super) fn reader_selection(
+    policy: &InitialBootstrapPolicy,
+    purpose: NativeRole,
+) -> Result<day2_capabilities::security_epoch::bootstrap::NativeRoleSelection<'_>> {
+    ensure!(
+        purpose != NativeRole::SecurityShell,
+        "epoch_native_shell_reader_refused"
+    );
+    Ok(policy.native_role(purpose))
+}
+
+impl<'stage, 'role> AuthenticatedReads<'stage, 'role> {
     pub(super) fn acquire(
         policy: &InitialBootstrapPolicy,
         selection: &EpochStore,
         purpose: NativeRole,
+        stage: &'stage mut EnrolledRoleStage<'role>,
     ) -> Result<Self> {
         policy.validate(&BTreeMap::from([(
             policy.epoch_store.id.clone(),
             selection.clone(),
         )]))?;
-        match purpose {
-            NativeRole::EpochController => {}
-            NativeRole::AppHost => {
-                anyhow::bail!("epoch_native_app_executable_profile_producer_unavailable")
-            }
-            NativeRole::SecurityShell => {
-                anyhow::bail!("epoch_native_shell_executable_profile_producer_unavailable")
-            }
-        }
-        let selected = policy.native_role(purpose);
+        let selected = reader_selection(policy, purpose)?;
+        let mut guard = RoleGuard {
+            stage,
+            policy,
+            selection,
+            purpose,
+        };
+        guard.check()?;
         let role = selected.workload;
         // The native executable pin must come from the selected admitted profile;
         // matching it alone does not qualify the full deployment/profile/image.
-        let mut acquisition = NativeAcquisition::begin(selection.max_lease_seconds)?;
+        let mut acquisition = guard
+            .stage
+            .narrow_io_acquisition(selection.max_lease_seconds)?;
         let process = NativeProcessObservation::acquire(selected.code, &mut acquisition)?;
+        guard.check()?;
         let mut ca = Vec::new();
         acquisition.remaining()?;
         let ca_file = std::fs::File::from(rustix::fs::open(
@@ -67,13 +113,17 @@ impl AuthenticatedReads {
             "epoch_native_projection_not_regular"
         );
         ca_file.take(65_537).read_to_end(&mut ca)?;
+        guard.check()?;
         acquisition.remaining()?;
         let mut http = NativeHttp::new(selection, &policy.cluster, &ca)?;
         acquisition.remaining()?;
+        guard.check()?;
         let source = CredentialMaterial::metadata_source(&mut acquisition)?;
+        guard.check()?;
         identity_protocol::project(
             selection,
-            &http.request(
+            &guard.request(
+                &http,
                 Route::Project,
                 &source.authorization()?,
                 None,
@@ -83,13 +133,17 @@ impl AuthenticatedReads {
         // Establish the authenticated current recipient before reading or
         // sending either Kubernetes projection. Transport enforces this order.
         http.verify_cluster(&ca, &source.authorization()?, &mut acquisition)?;
+        guard.check()?;
         let api = CredentialMaterial::kubernetes_api(&mut acquisition)?;
+        guard.check()?;
         let subject = CredentialMaterial::subject(&mut acquisition)?;
+        guard.check()?;
         let request = Zeroizing::new(serde_json::to_vec(&serde_json::json!({
             "apiVersion":"authentication.k8s.io/v1","kind":"TokenReview",
             "spec":{"token":subject.subject_text()?,"audiences":[role.token_review_audience]}
         }))?);
-        let response = Zeroizing::new(http.request(
+        let response = Zeroizing::new(guard.request(
+            &http,
             Route::TokenReview,
             &api.authorization()?,
             Some(&request),
@@ -99,7 +153,8 @@ impl AuthenticatedReads {
         let ns = &role.namespace.name;
         identity_protocol::namespace(
             role,
-            &http.request(
+            &guard.request(
+                &http,
                 Route::Namespace(ns),
                 &api.authorization()?,
                 None,
@@ -108,7 +163,8 @@ impl AuthenticatedReads {
         )?;
         identity_protocol::service_account(
             role,
-            &http.request(
+            &guard.request(
+                &http,
                 Route::ServiceAccount {
                     namespace: ns,
                     name: &role.kubernetes_service_account.name,
@@ -121,7 +177,8 @@ impl AuthenticatedReads {
         let owner = identity_protocol::pod(
             role,
             &reviewed,
-            &http.request(
+            &guard.request(
+                &http,
                 Route::Pod {
                     namespace: ns,
                     name: &reviewed.pod_name,
@@ -133,7 +190,8 @@ impl AuthenticatedReads {
         )?;
         let replica = match role.workload_kind {
             WorkloadKind::DeploymentV1 => Some(
-                http.request(
+                guard.request(
+                    &http,
                     Route::ReplicaSet {
                         namespace: ns,
                         name: owner
@@ -162,12 +220,13 @@ impl AuthenticatedReads {
             role,
             &owner,
             replica.as_deref(),
-            &http.request(route, &api.authorization()?, None, &mut acquisition)?,
+            &guard.request(&http, route, &api.authorization()?, None, &mut acquisition)?,
         )?;
         identity_protocol::google_service_account(
             &role.google_service_account,
             &policy.cluster.project,
-            &http.request(
+            &guard.request(
+                &http,
                 Route::GoogleAccount(&role.google_service_account),
                 &source.authorization()?,
                 None,
@@ -180,9 +239,11 @@ impl AuthenticatedReads {
             &http,
             &mut acquisition,
         )?;
+        guard.check()?;
         identity_protocol::database(
             selection,
-            &http.request(
+            &guard.request(
+                &http,
                 Route::Database,
                 &credential.authorization()?,
                 None,
@@ -190,6 +251,10 @@ impl AuthenticatedReads {
             )?,
         )?;
         let mut reads = Self {
+            stage: guard.stage,
+            policy: policy.clone(),
+            purpose,
+            store: selection.clone(),
             http,
             credential,
             acquisition,
@@ -198,6 +263,7 @@ impl AuthenticatedReads {
             valid: true,
         };
         reads.process.check(&mut reads.acquisition)?;
+        reads.stage.check_selection(policy, selection, purpose)?;
         Ok(reads)
     }
 
@@ -227,8 +293,13 @@ impl AuthenticatedReads {
     fn sample(&mut self) -> Result<Sample> {
         let result = (|| {
             ensure!(self.valid, "epoch_native_read_refused");
+            self.stage
+                .check_selection(&self.policy, &self.store, self.purpose)?;
             self.process.check(&mut self.acquisition)?;
-            self.acquisition.sample()
+            let sample = self.acquisition.sample()?;
+            self.stage
+                .check_selection(&self.policy, &self.store, self.purpose)?;
+            Ok(sample)
         })();
         if result.is_err() {
             self.valid = false;
@@ -265,6 +336,8 @@ impl AuthenticatedReads {
                 self.http.matches(&route, url)?,
                 "epoch_native_read_route_mismatch"
             );
+            self.stage
+                .check_selection(&self.policy, &self.store, self.purpose)?;
             self.process.check(&mut self.acquisition)?;
             let bytes = self.http.request_with_ceiling(
                 route,
@@ -274,6 +347,8 @@ impl AuthenticatedReads {
                 timeout,
             )?;
             self.process.check(&mut self.acquisition)?;
+            self.stage
+                .check_selection(&self.policy, &self.store, self.purpose)?;
             Ok(EpochReply {
                 status: 200,
                 body: bytes,
@@ -290,11 +365,11 @@ impl AuthenticatedReads {
 /// This short-lived I/O borrow has no constructor outside the owning read
 /// method and cannot outlive the opaque acquisition. The owning material does
 /// not implement callback/transport traits or gain their default APIs.
-struct ReadPort<'a> {
-    owner: &'a mut AuthenticatedReads,
+struct ReadPort<'a, 'stage, 'role> {
+    owner: &'a mut AuthenticatedReads<'stage, 'role>,
 }
 
-impl Port for ReadPort<'_> {
+impl Port for ReadPort<'_, '_, '_> {
     fn sample(&mut self) -> Result<Sample> {
         self.owner.sample()
     }
