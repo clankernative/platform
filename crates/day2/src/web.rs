@@ -2088,6 +2088,10 @@ impl Host {
                     crate::web_forms::scalar_list(kind)
                         && native.omitted == Value::Array(Vec::new())
                 }
+                security::NativeMode::MultipleSelect => {
+                    crate::web_forms::scalar_list(kind)
+                        && native.omitted == Value::Array(Vec::new())
+                }
                 security::NativeMode::SetCheckbox => {
                     crate::web_forms::carrier(kind) == crate::web_forms::Carrier::Set
                         && native.omitted == serde_json::json!({"members": []})

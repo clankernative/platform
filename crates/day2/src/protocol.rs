@@ -1,3 +1,4 @@
+use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -11,6 +12,9 @@ pub(crate) enum Boundary {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Write {
     Create,
+    CreateMany,
+    UpdateMany,
+    SoftDeleteMany,
     Update {
         id: crate::identity::Id,
         version: i64,
@@ -100,6 +104,23 @@ pub(crate) enum Step<'a> {
 }
 
 impl Step<'_> {
+    pub(crate) fn affected_rows(self) -> anyhow::Result<usize> {
+        match self {
+            Self::Database(Database::Write {
+                data,
+                change: Write::CreateMany | Write::UpdateMany | Write::SoftDeleteMany,
+                ..
+            }) => {
+                let values: serde_json::Value = serde_json::from_str(data)?;
+                let rows = values.as_array().context("invalid_batch_instruction")?;
+                anyhow::ensure!(!rows.is_empty() && rows.len() <= 256, "invalid_batch_bound");
+                Ok(rows.len())
+            }
+            step if step.mutation() => Ok(1),
+            _ => Ok(0),
+        }
+    }
+
     pub(crate) fn mutation(self) -> bool {
         matches!(
             self,
@@ -428,15 +449,57 @@ impl Instruction {
                     data: &self.data,
                 })
             }
-            "create" => {
+            "create" | "create_many" | "update_many" | "soft_delete_many" => {
                 ensure!(
                     named && empty_row && empty_page && payload,
                     "invalid_create_instruction"
                 );
+                let batch = self.kind != "create";
+                if batch {
+                    ensure!(self.data.len() <= 1_048_576, "batch_input_bound");
+                    let values: serde_json::Value = serde_json::from_str(&self.data)?;
+                    let rows = values.as_array().context("invalid_batch_instruction")?;
+                    ensure!(!rows.is_empty() && rows.len() <= 256, "invalid_batch_bound");
+                    if self.kind == "create_many" {
+                        ensure!(
+                            rows.iter().all(serde_json::Value::is_object),
+                            "invalid_batch_instruction"
+                        );
+                    } else {
+                        for row in rows {
+                            ensure!(
+                                row.as_object().is_some_and(|object| {
+                                    let deletion = self.kind == "soft_delete_many";
+                                    object.len() == if deletion { 2 } else { 3 }
+                                        && object
+                                            .get("id")
+                                            .and_then(serde_json::Value::as_str)
+                                            .is_some_and(|id| {
+                                                crate::identity::Id::from_text(id).is_ok()
+                                            })
+                                        && object
+                                            .get("expected_version")
+                                            .and_then(serde_json::Value::as_i64)
+                                            .is_some_and(|version| (1..i64::MAX).contains(&version))
+                                        && (deletion
+                                            || object
+                                                .get("data")
+                                                .is_some_and(serde_json::Value::is_object))
+                                }),
+                                "invalid_batch_instruction"
+                            );
+                        }
+                    }
+                }
                 Step::Database(Database::Write {
                     model: &self.model,
                     data: &self.data,
-                    change: Write::Create,
+                    change: match self.kind.as_str() {
+                        "create" => Write::Create,
+                        "create_many" => Write::CreateMany,
+                        "update_many" => Write::UpdateMany,
+                        _ => Write::SoftDeleteMany,
+                    },
                 })
             }
             "soft_delete" | "restore" => {
@@ -648,6 +711,70 @@ mod instruction_tests {
                 assert!(!forged.only_kind("commit"));
             }
         }
+    }
+
+    #[test]
+    fn batches_are_homogeneous_bounded_and_one_mutation_step() {
+        let rows = serde_json::json!([{"name":"one"},{"name":"two"}]);
+        let create = Instruction {
+            kind: "create_many".into(),
+            model: "entries".into(),
+            data: rows.to_string(),
+            ..Instruction::default()
+        };
+        let step = create.decode().unwrap();
+        assert!(step.mutation());
+        assert_eq!(step.affected_rows().unwrap(), 2);
+        assert!(matches!(
+            step,
+            Step::Database(Database::Write {
+                change: Write::CreateMany,
+                ..
+            })
+        ));
+        for invalid in [
+            serde_json::json!([]),
+            serde_json::json!(vec![serde_json::json!({}); 257]),
+            serde_json::json!(["not a record"]),
+        ] {
+            assert!(
+                Instruction {
+                    data: invalid.to_string(),
+                    ..create.clone()
+                }
+                .decode()
+                .is_err()
+            );
+        }
+        let updates = Instruction {
+            kind: "update_many".into(),
+            data: serde_json::json!([{
+                "id":"entry_0000000000e008000000000000",
+                "expected_version":1,
+                "data":{"name":"saved"}
+            }])
+            .to_string(),
+            ..create
+        };
+        let step = updates.decode().unwrap();
+        assert_eq!(step.affected_rows().unwrap(), 1);
+        assert!(matches!(
+            step,
+            Step::Database(Database::Write {
+                change: Write::UpdateMany,
+                ..
+            })
+        ));
+        assert!(
+            Instruction {
+                data:
+                    r#"[{"id":"entry_0000000000e008000000000000","expected_version":0,"data":{}}]"#
+                        .into(),
+                ..updates
+            }
+            .decode()
+            .is_err()
+        );
     }
 
     #[test]
