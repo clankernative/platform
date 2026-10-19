@@ -1,6 +1,6 @@
-//! Exclusive original-file preparation. The production storage issuer is still
-//! absent. Successful local persistence is not a provider durability proof or
-//! a P3 acknowledgment, and cannot create a current execution permit.
+//! Exclusive original-file preparation under its retained issuer. Local
+//! persistence alone is not provider qualification or a current execution
+//! permit. The native provider composition and its campaign remain separate.
 
 use super::{NativeStorageCreationAuthority, ReviewedStorageSelection};
 use crate::security_epoch::{
@@ -16,6 +16,9 @@ use std::fs::File;
 const INITIAL_FILE: &str = "day2-initial.sqlite";
 const MAX_IMAGE_BYTES: usize = 16 * 1024 * 1024;
 const IO_CHUNK_BYTES: usize = 64 * 1024;
+
+mod app;
+pub(crate) use app::AppPreparedFile;
 
 /// Complete admitted image DATA with a fixed leaf. There is no caller pathname,
 /// descriptor adoption or arbitrary image constructor.
@@ -95,20 +98,20 @@ enum PreparationPhase {
 
 /// These are owning native states, not wire responses. There is no promotion,
 /// retry, descriptor getter, renewal or permission conversion on a refusal.
-pub(crate) enum NativeOriginalPreparationOutcome {
-    RefusedBeforeAttempt(BeforeAttemptRefusal),
-    Prepared(OriginalCreatorFd),
-    RefusedAfterAttempt(RefusedOriginalPreparation),
+pub(crate) enum NativeOriginalPreparationOutcome<'role> {
+    RefusedBeforeAttempt(BeforeAttemptRefusal<'role>),
+    Prepared(OriginalCreatorFd<'role>),
+    RefusedAfterAttempt(RefusedOriginalPreparation<'role>),
 }
 
-pub(crate) struct BeforeAttemptRefusal {
-    authority: NativeStorageCreationAuthority,
+pub(crate) struct BeforeAttemptRefusal<'role> {
+    authority: NativeStorageCreationAuthority<'role>,
     proposal: OriginalFileProposal,
     phase: PreparationPhase,
 }
 
-pub(crate) struct RefusedOriginalPreparation {
-    authority: NativeStorageCreationAuthority,
+pub(crate) struct RefusedOriginalPreparation<'role> {
+    authority: NativeStorageCreationAuthority<'role>,
     proposal: OriginalFileProposal,
     // None means that no descriptor returned. It never proves noncreation.
     file: Option<File>,
@@ -118,8 +121,8 @@ pub(crate) struct RefusedOriginalPreparation {
 /// Retains the original file and consumed anchor/runtime/provider owner. No
 /// current-use or P3 factory is supplied. Drop can permanently forfeit this
 /// owner; Rust ownership does not prevent explicit drop, unwind or process exit.
-pub(crate) struct OriginalCreatorFd {
-    authority: NativeStorageCreationAuthority,
+pub(crate) struct OriginalCreatorFd<'role> {
+    authority: NativeStorageCreationAuthority<'role>,
     proposal: OriginalFileProposal,
     file: File,
     identity: FileIdentity,
@@ -128,8 +131,8 @@ pub(crate) struct OriginalCreatorFd {
 /// Owns the ORIGINAL interval as well as the creator and exact admitted image.
 /// This is a continuity owner, not provider P3, an app holder or a writer grant.
 /// Its only constructor consumes the existing creator; DATA cannot recreate it.
-pub(crate) struct PreparedInitialFile {
-    creator: OriginalCreatorFd,
+pub(crate) struct PreparedInitialFile<'role> {
+    creator: OriginalCreatorFd<'role>,
     layout: ReviewedFileLayout,
     acquisition: NativeAcquisition,
 }
@@ -146,11 +149,11 @@ pub(crate) struct PreparedFileProjection {
     identity: FileIdentity,
 }
 
-impl PreparedInitialFile {
+impl<'role> PreparedInitialFile<'role> {
     /// Package owners without a fallible gap. Every subsequent use checks the
     /// supplied interval against the creator's retained original domain/budget.
     pub(super) fn retain_original(
-        creator: OriginalCreatorFd,
+        creator: OriginalCreatorFd<'role>,
         layout: ReviewedFileLayout,
         acquisition: NativeAcquisition,
     ) -> Self {
@@ -206,7 +209,7 @@ impl PreparedFileProjection {
     }
 }
 
-impl OriginalCreatorFd {
+impl OriginalCreatorFd<'_> {
     /// Checks only unchanged initial-file continuity under the ORIGINAL budget.
     /// A later SQLite write deliberately refuses this check. Returning unit is
     /// not a reusable witness, current-role permission or P3 acknowledgment.
@@ -291,19 +294,19 @@ struct FileIdentity {
 
 /// Sole owners live outside every fallible stage. Once a descriptor returns,
 /// assigning it here is infallible and precedes all post-create checks.
-pub(crate) struct PreparationCoordinator {
-    authority: NativeStorageCreationAuthority,
+pub(crate) struct PreparationCoordinator<'role> {
+    authority: NativeStorageCreationAuthority<'role>,
     proposal: OriginalFileProposal,
     file: Option<File>,
     identity: Option<FileIdentity>,
     phase: PreparationPhase,
 }
 
-pub(super) fn prepare_original_file(
-    authority: NativeStorageCreationAuthority,
+pub(super) fn prepare_original_file<'role>(
+    authority: NativeStorageCreationAuthority<'role>,
     plan: &ReviewedFileLayout,
     acquisition: &mut NativeAcquisition,
-) -> NativeOriginalPreparationOutcome {
+) -> NativeOriginalPreparationOutcome<'role> {
     let mut owner = PreparationCoordinator {
         authority,
         proposal: plan.proposal.clone(),
@@ -354,7 +357,7 @@ pub(super) fn prepare_original_file(
     }
 }
 
-impl PreparationCoordinator {
+impl PreparationCoordinator<'_> {
     fn validate_plan(
         &mut self,
         plan: &ReviewedFileLayout,
@@ -506,13 +509,27 @@ impl PreparationCoordinator {
 }
 
 fn observe_file(
-    authority: &NativeStorageCreationAuthority,
+    authority: &NativeStorageCreationAuthority<'_>,
+    file: &File,
+    expected_length: usize,
+) -> Result<FileIdentity> {
+    observe_anchored_file(
+        &authority.directory,
+        &authority.identity,
+        file,
+        expected_length,
+    )
+}
+
+fn observe_anchored_file(
+    directory: &File,
+    anchor: &super::DirectoryIdentity,
     file: &File,
     expected_length: usize,
 ) -> Result<FileIdentity> {
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (authority, file, expected_length);
+        let _ = (directory, anchor, file, expected_length);
         anyhow::bail!("original_file_platform_unsupported")
     }
     #[cfg(target_os = "linux")]
@@ -526,12 +543,7 @@ fn observe_file(
             | StatxFlags::SIZE
             | StatxFlags::MNT_ID;
         let observed = rustix::fs::statx(file, "", AtFlags::EMPTY_PATH, mask)?;
-        let directory = rustix::fs::statx(
-            &authority.directory,
-            "",
-            AtFlags::EMPTY_PATH,
-            StatxFlags::UID,
-        )?;
+        let directory = rustix::fs::statx(directory, "", AtFlags::EMPTY_PATH, StatxFlags::UID)?;
         ensure!(
             observed.stx_mask & mask.bits() == mask.bits()
                 && directory.stx_mask & StatxFlags::UID.bits() != 0
@@ -541,9 +553,9 @@ fn observe_file(
                 && observed.stx_nlink == 1
                 && observed.stx_ino != 0
                 && observed.stx_size == expected_length as u64
-                && observed.stx_dev_major == authority.identity.device_major
-                && observed.stx_dev_minor == authority.identity.device_minor
-                && observed.stx_mnt_id == authority.identity.mount,
+                && observed.stx_dev_major == anchor.device_major
+                && observed.stx_dev_minor == anchor.device_minor
+                && observed.stx_mnt_id == anchor.mount,
             "original_file_identity_required"
         );
         Ok(FileIdentity {
@@ -557,7 +569,7 @@ fn observe_file(
 }
 
 fn check_file_identity(
-    authority: &mut NativeStorageCreationAuthority,
+    authority: &mut NativeStorageCreationAuthority<'_>,
     file: &File,
     identity: &FileIdentity,
     expected_length: usize,
