@@ -23,7 +23,7 @@ fn certificate(
 ) -> IssuerCertificate {
     let data = IssuerData {
         policy: policy.digest().unwrap(),
-        root_version: policy.root_version.clone(),
+        root_version: policy.root.version.clone(),
         nonce,
         public_key: KeyOwner::generate().unwrap().public(),
         process: data.clone(),

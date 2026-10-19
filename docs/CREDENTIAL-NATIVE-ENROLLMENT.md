@@ -26,24 +26,46 @@ create infrastructure or qualify the live canary.
 
 The root-owned regular `/etc/day2/native-enrollment.json` contains an
 `EnrollmentPolicy`: the shared `InitialBootstrapPolicy`, its exact selected
-`EpochStore`, root public key/version, provisioner/issuer executable digests and
+`EpochStore`, `root: { version, public_key }`, provisioner/issuer executable digests and
 the explicit runtime/node selections. Shared `native_role` selections are the
 single source of role, workload, container, image, native code and profile.
 Unknown fields refuse. Configuration must not be writable by group or others.
 These inputs are DATA; validating them grants no enrollment.
 
-The provisioner loads the matching Ed25519 PKCS#8 operator root from the
-root-owned regular `/run/secrets/day2-native-enrollment-root.pk8`, with no group
-or other permissions. Root and issuer are trusted privileged native processes;
-this arrangement does not claim OS isolation of the root secret from a hostile
-privileged issuer. The Rust key owner exposes signatures and a public key only.
-The issuer never receives the root private key through the protocol. App and
-Shell remain unprivileged with all capabilities dropped. Their issuer receipt
+The root is a software-protected Ed25519 key generated inside Cloud KMS.
+`root.version` is the complete numeric CryptoKeyVersion resource name;
+`root.public_key` pins its canonical base64url public key. There is no private
+root file, secret-loader fallback, endpoint override or configurable algorithm.
+The provisioner authenticates through the fixed GCP metadata credential source.
+Only its selected workload identity should receive KMS version metadata,
+public-key read and signing permissions on this dedicated key. App, Shell and
+issuer receive no root-signing grant. KMS IAM alone proves no native role.
+
+After joining its actual retained child, nonce and key possession, the private
+birth path calls only the fixed KMS issuer-birth operation. The request signs the
+original domain-separated PureEdDSA frame, never a precomputed digest or arbitrary
+CSR. The client checks the exact enabled version, SOFTWARE protection, Ed25519
+algorithm and public key, both request/response CRCs, and the returned signature.
+Metadata authentication, three KMS requests, body reads and final native owner
+checks share the original five-second acquisition. Proxies, redirects and
+automatic retries are disabled. A failure permanently refuses that acquisition;
+it cannot select a local key or extend the deadline. The child/process/namespace
+checks surround the signing call and final channel publication.
+
+KMS keeps the root private key; the issuer/client process keys remain local.
+Privileged process inspection and compromised authorized provisioners are still
+part of the native trust boundary. This source creates no KMS resource or grant.
+The software Ed25519 profile still needs actual deployment qualification.
+See [KMS signing](https://docs.cloud.google.com/kms/docs/reference/rest/v1/projects.locations.keyRings.cryptoKeys.cryptoKeyVersions/asymmetricSign)
+and [algorithm support](https://docs.cloud.google.com/kms/docs/algorithms).
+
+App and Shell remain unprivileged with all capabilities dropped. Their issuer receipt
 retains the real per-message pidfd and requires a fresh signed request/challenge
 from the root-enrolled child key. Executable/namespace measurement of the root
 issuer belongs to the privileged provisioner and issuer's own current native
 checks; clients do not need ptrace access to the issuer. An authenticated birth
 certificate alone cannot reconstruct a receipt or current role owner.
+
 
 The provisioner starts `/usr/local/bin/day2-native-enrollment issuer` itself,
 retains its actual `Child`, and passes freshly created private sequence-packet
