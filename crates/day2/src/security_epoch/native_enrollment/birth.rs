@@ -130,53 +130,14 @@ pub(super) fn run() -> Result<()> {
         _listener: listener,
         socket_identity: (metadata.dev(), metadata.ino()),
     };
-    let nonce = protocol::nonce("issuer-birth")?;
-    let policy_hash = policy.digest()?;
-    channel.send(
-        &Packet::BirthChallenge {
-            policy: policy_hash.clone(),
-            nonce: nonce.clone(),
-        },
+    birth.peer = Some(grant_child(
+        &mut birth.child,
+        &mut channel,
+        &root,
+        &mut current,
+        &policy,
         &mut acquisition,
-    )?;
-    let (packet, mut peer) = channel.receive(&policy.issuer_code, &mut acquisition)?;
-    let Packet::BirthKey {
-        nonce: echoed,
-        public_key,
-        signature,
-    } = packet
-    else {
-        anyhow::bail!("native_enrollment_birth_order")
-    };
-    ensure!(
-        echoed == nonce
-            && peer.data().process == birth.child.id()
-            && birth.child.try_wait()?.is_none(),
-        "native_enrollment_birth_child"
-    );
-    super::runtime::require_common(&current.data, peer.data())?;
-    protocol::verify(
-        &public_key,
-        "issuer-birth-key",
-        &(&policy_hash, &nonce, &public_key),
-        &signature,
-    )?;
-    let data = IssuerData {
-        policy: policy_hash,
-        root_version: policy.root_version.clone(),
-        nonce,
-        public_key,
-        process: peer.data().clone(),
-        provisioner: current.data.clone(),
-    };
-    let certificate = IssuerCertificate {
-        signature: root.sign("issuer-birth", &data)?,
-        data,
-    };
-    current.check(&mut acquisition)?;
-    peer.check_identity(&mut acquisition)?;
-    channel.send(&Packet::BirthGrant { certificate }, &mut acquisition)?;
-    birth.peer = Some(peer);
+    )?);
     // Root stays alive and retains actual child ownership. There is no restart,
     // key export, saved-row re-enrollment or successful-reply retry path.
     loop {
@@ -192,6 +153,67 @@ pub(super) fn run() -> Result<()> {
             .check_identity(&mut check)?;
         std::thread::sleep(std::time::Duration::from_millis(250));
     }
+}
+
+fn grant_child(
+    child: &mut Child,
+    channel: &mut Channel,
+    root: &KeyOwner,
+    current: &mut SelfSnapshot,
+    policy: &EnrollmentPolicy,
+    acquisition: &mut NativeAcquisition,
+) -> Result<MessageProcess> {
+    let result = (|| {
+        let nonce = protocol::nonce("issuer-birth")?;
+        let policy_hash = policy.digest()?;
+        channel.send(
+            &Packet::BirthChallenge {
+                policy: policy_hash.clone(),
+                nonce: nonce.clone(),
+            },
+            acquisition,
+        )?;
+        let (packet, mut peer) = channel.receive(&policy.issuer_code, acquisition)?;
+        let Packet::BirthKey {
+            nonce: echoed,
+            public_key,
+            signature,
+        } = packet
+        else {
+            anyhow::bail!("native_enrollment_birth_order")
+        };
+        ensure!(
+            echoed == nonce && peer.data().process == child.id() && child.try_wait()?.is_none(),
+            "native_enrollment_birth_child"
+        );
+        super::runtime::require_common(&current.data, peer.data())?;
+        protocol::verify(
+            &public_key,
+            "issuer-birth-key",
+            &(&policy_hash, &nonce, &public_key),
+            &signature,
+        )?;
+        let data = IssuerData {
+            policy: policy_hash,
+            root_version: policy.root_version.clone(),
+            nonce,
+            public_key,
+            process: peer.data().clone(),
+            provisioner: current.data.clone(),
+        };
+        let certificate = IssuerCertificate {
+            signature: root.sign("issuer-birth", &data)?,
+            data,
+        };
+        current.check(acquisition)?;
+        peer.check_identity(acquisition)?;
+        channel.send(&Packet::BirthGrant { certificate }, acquisition)?;
+        Ok(peer)
+    })();
+    if result.is_err() {
+        acquisition.refuse();
+    }
+    result
 }
 
 pub(super) struct IssuerOwner {
@@ -260,5 +282,141 @@ impl IssuerOwner {
             parent,
             listener,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct ChildGuard(Child);
+
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[test]
+    #[ignore = "native subprocess helper invoked by retained_child_birth_requires_original_nonce_and_key_possession"]
+    fn issuer_child() {
+        let selected = std::env::var("DAY2_ENROLLMENT_BIRTH_TEST_POLICY").unwrap();
+        let policy: EnrollmentPolicy = crate::json::decode(selected.as_bytes()).unwrap();
+        let mut acquisition = NativeAcquisition::begin(5).unwrap();
+        let current = SelfSnapshot::acquire(&policy.issuer_code, &mut acquisition).unwrap();
+        let mut channel = Channel::startup(&mut acquisition).unwrap();
+        let (packet, parent) = channel
+            .receive(&policy.provisioner_code, &mut acquisition)
+            .unwrap();
+        let Packet::BirthChallenge {
+            policy: digest,
+            nonce,
+        } = packet
+        else {
+            panic!("birth order")
+        };
+        assert_eq!(digest, policy.digest().unwrap());
+        let key = KeyOwner::generate().unwrap();
+        let public_key = key.public();
+        let echoed = if std::env::var_os("DAY2_ENROLLMENT_WRONG_BIRTH_NONCE").is_some() {
+            day2_capabilities::Digest::new(b"not-the-original")
+        } else {
+            nonce.clone()
+        };
+        let signature = key
+            .sign("issuer-birth-key", &(&digest, &echoed, &public_key))
+            .unwrap();
+        channel
+            .send(
+                &Packet::BirthKey {
+                    nonce: echoed,
+                    public_key: public_key.clone(),
+                    signature,
+                },
+                &mut acquisition,
+            )
+            .unwrap();
+        if std::env::var_os("DAY2_ENROLLMENT_WRONG_BIRTH_NONCE").is_some() {
+            loop {
+                std::thread::park();
+            }
+        }
+        let (packet, grant_parent) = channel
+            .receive(&policy.provisioner_code, &mut acquisition)
+            .unwrap();
+        let Packet::BirthGrant { certificate } = packet else {
+            panic!("birth grant order")
+        };
+        certificate.verify(&policy).unwrap();
+        assert_eq!(certificate.data.nonce, nonce);
+        assert_eq!(certificate.data.public_key, public_key);
+        assert_eq!(certificate.data.process, current.data);
+        assert_eq!(&certificate.data.provisioner, parent.data());
+        assert_eq!(parent.data(), grant_parent.data());
+        channel
+            .send(
+                &Packet::BirthChallenge {
+                    policy: digest,
+                    nonce,
+                },
+                &mut acquisition,
+            )
+            .unwrap();
+        loop {
+            std::thread::park();
+        }
+    }
+
+    #[test]
+    fn retained_child_birth_requires_original_nonce_and_key_possession() {
+        let code = day2_capabilities::Digest::new(&std::fs::read("/proc/self/exe").unwrap());
+        for wrong_nonce in [false, true] {
+            let mut acquisition = NativeAcquisition::begin(5).unwrap();
+            let root = KeyOwner::generate().unwrap();
+            let mut policy = crate::security_epoch::native_enrollment::tests::policy(&root);
+            policy.provisioner_code = code.clone();
+            policy.issuer_code = code.clone();
+            let mut current = SelfSnapshot::acquire(&code, &mut acquisition).unwrap();
+            let (mut channel, child_socket) = Channel::pair(&mut acquisition).unwrap();
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "security_epoch::native_enrollment::birth::tests::issuer_child",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env(
+                    "DAY2_ENROLLMENT_BIRTH_TEST_POLICY",
+                    serde_json::to_string(&policy).unwrap(),
+                )
+                .stdin(Stdio::from(child_socket))
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit());
+            if wrong_nonce {
+                command.env("DAY2_ENROLLMENT_WRONG_BIRTH_NONCE", "1");
+            }
+            let mut child = ChildGuard(command.spawn().unwrap());
+            let result = grant_child(
+                &mut child.0,
+                &mut channel,
+                &root,
+                &mut current,
+                &policy,
+                &mut acquisition,
+            );
+            if wrong_nonce {
+                assert!(result.is_err());
+                assert!(acquisition.remaining().is_err());
+            } else {
+                let mut peer = result.unwrap();
+                assert_eq!(peer.data().process, child.0.id());
+                let (reply, ack_peer) = channel.receive(&code, &mut acquisition).unwrap();
+                assert!(matches!(reply, Packet::BirthChallenge { .. }));
+                assert_eq!(peer.data(), ack_peer.data());
+                peer.check_identity(&mut acquisition).unwrap();
+            }
+        }
     }
 }
