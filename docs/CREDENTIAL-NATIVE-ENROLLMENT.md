@@ -86,6 +86,12 @@ thread. Its origin is DATA. The consumer must enforce its original human
 lifetime and operation binding. Owners, stages and clocks are neither Send,
 Sync, Clone nor serializable; certificates cannot recreate them.
 
+`SameEnrolledOwner` captures only continuity from a checked current stage. It
+retains a weak reference to that exact native owner and checks a later current
+stage against it. Dropping or replacing the owner permanently refuses the
+handle. It grants no role, preparation, storage or human permission and never
+extends an earlier phase's deadline.
+
 ## Verification limits
 
 Focused tests cover signatures/selections, bounded task joins, real inherited
