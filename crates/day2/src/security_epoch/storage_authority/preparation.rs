@@ -10,6 +10,7 @@ use crate::security_epoch::{
 };
 use anyhow::{Result, ensure};
 use day2_capabilities::{Digest, security_epoch::EpochStore};
+use serde::{Deserialize, Serialize};
 use std::fs::File;
 
 const INITIAL_FILE: &str = "day2-initial.sqlite";
@@ -124,6 +125,87 @@ pub(crate) struct OriginalCreatorFd {
     identity: FileIdentity,
 }
 
+/// Owns the ORIGINAL interval as well as the creator and exact admitted image.
+/// This is a continuity owner, not provider P3, an app holder or a writer grant.
+/// Its only constructor consumes the existing creator; DATA cannot recreate it.
+pub(crate) struct PreparedInitialFile {
+    creator: OriginalCreatorFd,
+    layout: ReviewedFileLayout,
+    acquisition: NativeAcquisition,
+}
+
+/// A closed statement for the native first-holder exchange. Even an exact copy
+/// of this value does not own the file, its original clock or the controller.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PreparedFileProjection {
+    core: OriginalSeedCore,
+    marker: InitialMarker,
+    image: Digest,
+    length: u64,
+    identity: FileIdentity,
+}
+
+impl PreparedInitialFile {
+    /// Package owners without a fallible gap. Every subsequent use checks the
+    /// supplied interval against the creator's retained original domain/budget.
+    pub(super) fn retain_original(
+        creator: OriginalCreatorFd,
+        layout: ReviewedFileLayout,
+        acquisition: NativeAcquisition,
+    ) -> Self {
+        Self {
+            creator,
+            layout,
+            acquisition,
+        }
+    }
+
+    pub(crate) fn check_original(&mut self) -> Result<()> {
+        self.creator
+            .check_unchanged_initial_file(&self.layout, &mut self.acquisition)
+    }
+
+    pub(crate) fn projection(&mut self) -> Result<crate::security_epoch::PreparedFileProjection> {
+        self.check_original()?;
+        let value = PreparedFileProjection {
+            core: self.creator.proposal.core.clone(),
+            marker: self.creator.proposal.marker.clone(),
+            image: self.creator.proposal.image.clone(),
+            length: self.creator.proposal.length.try_into()?,
+            identity: self.creator.identity.clone(),
+        };
+        self.check_original()?;
+        Ok(value)
+    }
+}
+
+impl PreparedFileProjection {
+    pub(crate) fn scope(&self) -> &day2_capabilities::security_epoch::AuthorityScope {
+        &self.core.scope
+    }
+
+    pub(crate) fn digest(&self) -> Result<Digest> {
+        Digest::of(&("day2-original-prepared-file-projection-v1", self))
+    }
+
+    pub(super) fn validate_selection(
+        &self,
+        policy: &day2_capabilities::security_epoch::bootstrap::InitialBootstrapPolicy,
+        store: &EpochStore,
+    ) -> Result<()> {
+        self.core.validate(policy, store)?;
+        ensure!(
+            self.marker == self.core.marker()?
+                && (100..=MAX_IMAGE_BYTES as u64).contains(&self.length)
+                && self.identity.inode != 0
+                && self.identity.mount != 0,
+            "original_file_projection_mismatch"
+        );
+        Ok(())
+    }
+}
+
 impl OriginalCreatorFd {
     /// Checks only unchanged initial-file continuity under the ORIGINAL budget.
     /// A later SQLite write deliberately refuses this check. Returning unit is
@@ -197,7 +279,8 @@ impl OriginalCreatorFd {
     }
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct FileIdentity {
     device_major: u32,
     device_minor: u32,

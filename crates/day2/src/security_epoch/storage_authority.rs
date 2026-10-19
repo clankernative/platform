@@ -14,7 +14,8 @@ use std::{collections::BTreeMap, fs::File, marker::PhantomData, rc::Rc, thread::
 mod preparation;
 pub(crate) use preparation::{
     BeforeAttemptRefusal, NativeOriginalPreparationOutcome, OriginalCreatorFd,
-    PreparationCoordinator, RefusedOriginalPreparation,
+    PreparationCoordinator, PreparedFileProjection, PreparedInitialFile,
+    RefusedOriginalPreparation,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
