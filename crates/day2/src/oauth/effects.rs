@@ -70,6 +70,7 @@ thread_local! {
 
 #[cfg(test)]
 pub(crate) fn scope<T>(hooks: std::sync::Arc<dyn Hooks>, run: impl FnOnce() -> T) -> T {
+    let _originals = super::native_management::fixtures::scope(hooks.clone());
     struct Restore(Option<std::sync::Arc<dyn Hooks>>);
     impl Drop for Restore {
         fn drop(&mut self) {
@@ -251,7 +252,7 @@ pub(crate) async fn timeout<F: std::future::Future>(
     duration: Duration,
     future: F,
 ) -> Result<F::Output, tokio::time::error::Elapsed> {
-    tokio::time::timeout(duration, future).await
+    super::native_http::timer(|| tokio::time::timeout(duration, future)).await
 }
 
 #[cfg(test)]

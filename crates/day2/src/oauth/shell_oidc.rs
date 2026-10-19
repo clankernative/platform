@@ -7,7 +7,7 @@ use super::{
     approval_keys::{GcpSecretReader, GcpSecretVersion},
     fresh_auth::{FreshIntent, FreshPurpose},
     fresh_owner::{AllocationData, CallData, GoogleBundleData, OutcomeData},
-    google_begin::{Begins, Original, Payload},
+    google_begin::{Begins, OriginalData, Payload},
     security_shell::{FreshAuthenticator, ReauthStart},
 };
 use crate::iap;
@@ -263,7 +263,7 @@ impl ManualBinding {
     // commitments, avoiding a self-referential hash/MAC definition.
     fn frame(
         label: &str,
-        original: &Original,
+        original: &OriginalData,
         profile: &Digest,
         tuples: &Digest,
     ) -> Result<Vec<u8>> {
@@ -277,7 +277,12 @@ impl ManualBinding {
         ))?)
     }
 
-    fn new(original: &Original, profile: &Digest, tuples: Digest, verifier: &str) -> Result<Self> {
+    fn new(
+        original: &OriginalData,
+        profile: &Digest,
+        tuples: Digest,
+        verifier: &str,
+    ) -> Result<Self> {
         let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, verifier.as_bytes());
         let handle = URL_SAFE_NO_PAD.encode(
             ring::hmac::sign(&key, &Self::frame("handle", original, profile, &tuples)?).as_ref(),
@@ -295,7 +300,7 @@ impl ManualBinding {
     fn verify(
         &self,
         csrf: &str,
-        original: &Original,
+        original: &OriginalData,
         profile: &Digest,
         verifier: &str,
     ) -> Result<()> {
@@ -935,7 +940,7 @@ impl GoogleOidc {
         })
     }
 
-    fn bundle(&self, original: &Original) -> Result<GoogleBundle> {
+    fn bundle(&self, original: &OriginalData) -> Result<GoogleBundle> {
         let profile = self.owned_profile()?;
         let baseline = self.flow(original.intent.human())?;
         let fresh = self.flow(original.intent.human())?;
@@ -982,8 +987,13 @@ impl GoogleOidc {
     /// These existing clock observations only tighten the original operation.
     /// They do not map Google's issuer clock or replace the missing genuine
     /// native continuous-original-lifetime factory for production acceptance.
-    fn owned_now(original: &Original, entry: i64) -> Result<i64> {
+    fn owned_now(original: &OriginalData, entry: i64) -> Result<i64> {
         let now = effects::wall_time()?;
+        super::native_management::check(
+            &original.intent,
+            super::native_management::Phase::ShellFlow,
+            now,
+        )?;
         let ceiling = original
             .started_at
             .checked_add(ATTEMPT_SECONDS)
