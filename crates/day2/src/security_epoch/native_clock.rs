@@ -108,6 +108,46 @@ impl NativeAcquisition {
         Ok((self.origin, self.deadline))
     }
 
+    /// A narrower I/O clock derived from this actual owner, never from stored
+    /// DATA. The original domain/origin and spent time are preserved. This
+    /// grants no role or provider authority and cannot extend either deadline.
+    pub(super) fn narrow(&mut self, max_lease_seconds: u32, ceiling: Duration) -> Result<Self> {
+        let result = (|| {
+            let sample = self.sample()?;
+            ensure!(
+                (1..=60).contains(&max_lease_seconds),
+                "epoch_native_acquisition_bound"
+            );
+            let deadline = self
+                .origin
+                .checked_add(Duration::from_secs(u64::from(max_lease_seconds)))
+                .ok_or_else(|| anyhow::anyhow!("epoch_native_clock_overflow"))?
+                .min(self.deadline)
+                .min(ceiling);
+            ensure!(
+                sample.elapsed < deadline,
+                "epoch_native_narrowed_acquisition_expired"
+            );
+            let mut child = Self {
+                domain: self.domain.clone(),
+                process: self.process,
+                origin: self.origin,
+                latest: sample.elapsed,
+                deadline,
+                valid: true,
+                local: PhantomData,
+                #[cfg(test)]
+                fixture_time: self.fixture_time,
+            };
+            child.sample()?;
+            Ok(child)
+        })();
+        if result.is_err() {
+            self.refuse();
+        }
+        result
+    }
+
     #[cfg(test)]
     pub(super) fn fixture(domain: Digest, process: u32, origin: Duration, limit: Duration) -> Self {
         Self {
@@ -175,6 +215,32 @@ mod tests {
         assert!(error.contains("epoch_native_process_changed"));
         acquisition.process = std::process::id();
         assert!(acquisition.sample().is_err());
+    }
+
+    #[test]
+    fn narrowed_io_keeps_original_domain_origin_and_spent_time() {
+        let mut original = NativeAcquisition::fixture(
+            Digest::new(b"original"),
+            std::process::id(),
+            Duration::from_secs(100),
+            Duration::from_secs(5),
+        );
+        original.fixture_time = Some(Duration::from_millis(104_900));
+        let mut child = original.narrow(60, Duration::from_millis(104_950)).unwrap();
+        assert_eq!(child.domain, original.domain);
+        assert_eq!(child.origin, original.origin);
+        assert_eq!(child.remaining().unwrap(), Duration::from_millis(50));
+        child.fixture_time = Some(Duration::from_millis(104_950));
+        assert!(child.remaining().is_err());
+        child.fixture_time = Some(Duration::from_millis(104_910));
+        assert!(child.remaining().is_err());
+        let mut original_bound = original.narrow(60, Duration::from_secs(200)).unwrap();
+        assert_eq!(
+            original_bound.remaining().unwrap(),
+            Duration::from_millis(100)
+        );
+        assert!(original.narrow(1, Duration::from_secs(200)).is_err());
+        assert!(original.remaining().is_err());
     }
 
     #[cfg(not(target_os = "linux"))]
