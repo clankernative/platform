@@ -256,7 +256,7 @@ impl Canaries {
         match *method {
             Method::GET => {
                 ensure!(body.is_empty(), "qualification GET body refused");
-                self.page(id, path, identity, now)
+                self.page(id, path, headers, identity, now)
             }
             Method::POST => {
                 ensure!(
@@ -278,7 +278,14 @@ impl Canaries {
         }
     }
 
-    fn page(&self, id: &str, path: &str, identity: &iap::Verified, now: i64) -> Result<Response> {
+    fn page(
+        &self,
+        id: &str,
+        path: &str,
+        headers: &HeaderMap,
+        identity: &iap::Verified,
+        now: i64,
+    ) -> Result<Response> {
         let mut state = self
             .state
             .lock()
@@ -290,6 +297,30 @@ impl Canaries {
             .clone();
         selected_human(&target, identity)?;
         state.pending.retain(|_, pending| fresh(pending, now));
+        if let Some(token) = optional_cookie_token(headers)?
+            && let Some(pending) = state.pending.get(Digest::new(token.as_bytes()).as_str())
+            && matches!(pending.stage, Stage::Authorization(_))
+        {
+            ensure!(
+                pending.identity.subject == identity.subject
+                    && pending.identity.email == identity.email,
+                "canary session identity changed"
+            );
+            let page = html! { (DOCTYPE) html lang="en" {
+                head { meta charset="utf-8"; title { "Qualification already in progress" } }
+                body {
+                    h1 { "Qualification already in progress" }
+                    p { "Return to the tab where Google is open and finish all three rounds there." }
+                    p { "To start over, wait for the original five-minute session to expire." }
+                }
+            }};
+            return Ok((
+                StatusCode::CONFLICT,
+                [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                page.into_string(),
+            )
+                .into_response());
+        }
         ensure!(state.pending.len() < 128, "qualification session budget");
         let token = effects::random()?;
         let csrf = effects::random()?;
@@ -417,7 +448,7 @@ impl Canaries {
         )?;
         pending.stage = Stage::Authorization(authorization);
         self.put(key, pending, now)?;
-        Ok(redirect(&location))
+        Ok(authorization_page(&location, 1))
     }
 
     fn callback(
@@ -450,8 +481,13 @@ impl Canaries {
             let (authorization, location) =
                 Authorization::begin(&pending.target, purpose, pending.session.clone())?;
             pending.stage = Stage::Authorization(authorization);
+            let round = if pending.reject_credential.is_some() {
+                3
+            } else {
+                2
+            };
             self.put(key, pending, now)?;
-            return Ok(redirect(&location));
+            return Ok(authorization_page(&location, round));
         }
         let codes = Codes {
             positive: code.context("positive canary missing")?,
@@ -515,6 +551,10 @@ fn selected_human(target: &Target, identity: &iap::Verified) -> Result<()> {
 }
 
 fn cookie_token(headers: &HeaderMap) -> Result<String> {
+    optional_cookie_token(headers)?.context("canary cookie missing")
+}
+
+fn optional_cookie_token(headers: &HeaderMap) -> Result<Option<String>> {
     let mut token = None;
     for header in headers.get_all(header::COOKIE) {
         for cookie in cookie::Cookie::split_parse(header.to_str()?) {
@@ -535,11 +575,24 @@ fn cookie_token(headers: &HeaderMap) -> Result<String> {
             }
         }
     }
-    token.context("canary cookie missing")
+    Ok(token)
 }
 
-fn redirect(location: &str) -> Response {
-    (StatusCode::SEE_OTHER, [(header::LOCATION, location)]).into_response()
+fn authorization_page(location: &str, round: u8) -> Response {
+    let page = html! { (DOCTYPE) html lang="en" {
+        head { meta charset="utf-8"; title { "Google authorization " (round) " of 3" } }
+        body {
+            h1 { "Google authorization " (round) " of 3" }
+            p { "Google asks you to choose your account and confirm access in each round." }
+            p { "Complete all three rounds in this tab within the original five-minute session." }
+            p { a href=(location) { "Continue to Google" } }
+        }
+    }};
+    (
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        page.into_string(),
+    )
+        .into_response()
 }
 
 #[cfg(test)]
@@ -676,11 +729,28 @@ mod tests {
             &identity(),
             now,
         )?;
-        assert_eq!(response.status(), StatusCode::SEE_OTHER);
-        Ok((
-            headers,
-            response.headers()[header::LOCATION].to_str()?.into(),
-        ))
+        Ok((headers, handoff_location(response, 1).await?))
+    }
+
+    async fn handoff_location(response: Response, round: usize) -> Result<String> {
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(!response.headers().contains_key(header::LOCATION));
+        let page = String::from_utf8(
+            axum::body::to_bytes(response.into_body(), 16_384)
+                .await?
+                .to_vec(),
+        )?;
+        assert!(page.contains(&format!("Google authorization {round} of 3")));
+        assert!(page.contains("Continue to Google"));
+        assert!(!page.contains("http-equiv=\"refresh\""));
+        Ok(page
+            .split("href=\"")
+            .nth(1)
+            .context("handoff missing")?
+            .split('"')
+            .next()
+            .unwrap()
+            .replace("&amp;", "&"))
     }
 
     fn callback(location: &str, code: &str) -> Result<(String, String)> {
@@ -698,7 +768,7 @@ mod tests {
         Ok((path, query))
     }
 
-    fn advance(
+    async fn advance(
         canaries: &Canaries,
         headers: &HeaderMap,
         location: &str,
@@ -715,8 +785,7 @@ mod tests {
             &identity(),
             now,
         )?;
-        assert_eq!(response.status(), StatusCode::SEE_OTHER);
-        Ok(response.headers()[header::LOCATION].to_str()?.into())
+        handoff_location(response, index + 1).await
     }
 
     fn time_now() -> i64 {
@@ -941,9 +1010,9 @@ mod tests {
             .split('"')
             .next()
             .context("handoff destination missing")?;
-        assert!(handoff.contains(&format!(
-            "http-equiv=\"refresh\" content=\"0;url={destination}\""
-        )));
+        assert!(handoff.contains("Google authorization 1 of 3"));
+        assert!(handoff.contains("Continue to Google"));
+        assert!(!handoff.contains("http-equiv=\"refresh\""));
         let location = url::Url::parse(&destination.replace("&amp;", "&"))?;
         let authorization = url::Url::parse(google::AUTHORIZATION)?;
         assert_eq!(location.origin(), authorization.origin());
@@ -960,6 +1029,98 @@ mod tests {
         assert!(csp.contains("base-uri 'none'"));
         let _ = stop.send(());
         tokio::time::timeout(Duration::from_secs(3), server).await???;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn numbered_rounds_and_second_tab_preserve_the_original_campaign() -> Result<()> {
+        struct ObservedCampaign(AtomicUsize);
+        impl Campaign for ObservedCampaign {
+            fn run(&self, _: Target, _: Codes) -> Result<Receipt> {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                anyhow::bail!("fixture stops before native qualification")
+            }
+        }
+        let fixture = fixture()?;
+        let campaign = Arc::new(ObservedCampaign(AtomicUsize::new(0)));
+        let readiness = Arc::new(ProviderReadiness::new(Arc::new(Facts(fixture.evidence))));
+        let canaries = Canaries::at(
+            "https://security.example.com",
+            vec![fixture.target],
+            campaign.clone(),
+            readiness,
+        )?;
+        let now = time_now();
+        let (headers, mut location) = begin(&canaries, now).await?;
+        let key = Digest::new(cookie_token(&headers)?.as_bytes())
+            .as_str()
+            .to_owned();
+        let snapshot = || -> Result<_> {
+            let state = canaries.state.lock().unwrap();
+            let pending = state
+                .pending
+                .get(&key)
+                .context("original campaign missing")?;
+            let Stage::Authorization(authorization) = &pending.stage else {
+                anyhow::bail!("stage changed");
+            };
+            Ok((
+                pending.started_at,
+                pending.started,
+                pending.session.clone(),
+                crate::oauth::registration::tests::authorization_snapshot(authorization)?,
+            ))
+        };
+        for completed in 0..3 {
+            let before = snapshot()?;
+            let second_tab = canaries.dispatch(
+                &Method::GET,
+                &format!("{PREFIX}calendar_registration"),
+                None,
+                &headers,
+                &[],
+                &identity(),
+                now + 1,
+            )?;
+            assert_eq!(second_tab.status(), StatusCode::CONFLICT);
+            assert!(!second_tab.headers().contains_key(header::SET_COOKIE));
+            let page = String::from_utf8(
+                axum::body::to_bytes(second_tab.into_body(), 16_384)
+                    .await?
+                    .to_vec(),
+            )?;
+            assert!(page.contains("Qualification already in progress"));
+            assert!(!page.contains("Start qualification"));
+            assert!(!page.contains("state="));
+            assert_eq!(snapshot()?, before);
+            if completed < 2 {
+                location = advance(&canaries, &headers, &location, completed + 1, now + 1).await?;
+                let after = snapshot()?;
+                assert_eq!((after.0, after.1, after.2), (before.0, before.1, before.2));
+            }
+        }
+        assert_eq!(campaign.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let (path, query) = callback(&location, "private-code-three")?;
+        let error = canaries
+            .dispatch(
+                &Method::GET,
+                &path,
+                Some(&query),
+                &headers,
+                &[],
+                &identity(),
+                now + 1,
+            )
+            .unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<QualificationFailure>()
+                .unwrap()
+                .stage(),
+            "native_workflow"
+        );
+        assert_eq!(campaign.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(!canaries.state.lock().unwrap().pending.contains_key(&key));
         Ok(())
     }
 
@@ -991,8 +1152,8 @@ mod tests {
         );
         let now = time_now();
         let (headers, location) = begin(&canaries, now).await?;
-        let location = advance(&canaries, &headers, &location, 1, now)?;
-        let location = advance(&canaries, &headers, &location, 2, now)?;
+        let location = advance(&canaries, &headers, &location, 1, now).await?;
+        let location = advance(&canaries, &headers, &location, 2, now).await?;
         assert!(server.requests.lock().unwrap().is_empty());
         assert!(
             readiness
@@ -1068,8 +1229,8 @@ mod tests {
         );
         let now = time_now();
         let (headers, location) = begin(&canaries, now).await?;
-        let location = advance(&canaries, &headers, &location, 1, now)?;
-        let location = advance(&canaries, &headers, &location, 2, now)?;
+        let location = advance(&canaries, &headers, &location, 1, now).await?;
+        let location = advance(&canaries, &headers, &location, 2, now).await?;
         let (path, query) = callback(&location, "private-code-3")?;
         let worker = canaries.clone();
         let (request_headers, request_path, request_query) =
@@ -1232,7 +1393,7 @@ mod tests {
                     assert!(response.is_err());
                     assert!(!canaries.state.lock().unwrap().pending.contains_key(&key));
                 } else {
-                    assert_eq!(response?.status(), StatusCode::SEE_OTHER);
+                    assert_eq!(response?.status(), StatusCode::OK);
                     assert_ne!(snapshot()?, before);
                 }
                 assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
@@ -1396,8 +1557,8 @@ mod tests {
         )?);
         let now = time_now();
         let (headers, location) = begin(&canaries, now).await?;
-        let location = advance(&canaries, &headers, &location, 1, now)?;
-        let location = advance(&canaries, &headers, &location, 2, now)?;
+        let location = advance(&canaries, &headers, &location, 1, now).await?;
+        let location = advance(&canaries, &headers, &location, 2, now).await?;
         let (path, query) = callback(&location, "private-code-3")?;
         let worker = canaries.clone();
         let task = std::thread::spawn(move || {
