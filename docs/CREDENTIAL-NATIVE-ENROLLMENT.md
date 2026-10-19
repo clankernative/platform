@@ -37,9 +37,12 @@ The root is a software-protected Ed25519 key generated inside Cloud KMS.
 `root.public_key` pins its canonical base64url public key. There is no private
 root file, secret-loader fallback, endpoint override or configurable algorithm.
 The provisioner authenticates through the fixed GCP metadata credential source.
-Only its selected workload identity should receive KMS version metadata,
-public-key read and signing permissions on this dedicated key. App, Shell and
-issuer receive no root-signing grant. KMS IAM alone proves no native role.
+Its selected workload identity should receive only version metadata, public-key
+read and signing permissions on this dedicated key. App and Shell identities
+receive no root-signing grant. The issuer child shares the provisioner's Pod
+identity and privileged native trust boundary: KMS IAM does not isolate those
+processes or prevent a compromised authorized process from requesting a
+signature. KMS IAM alone proves no native role.
 
 After joining its actual retained child, nonce and key possession, the private
 birth path calls only the fixed KMS issuer-birth operation. The request signs the
