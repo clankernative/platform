@@ -485,13 +485,17 @@ impl LocalServer {
     }
     pub async fn serve(self, shutdown: impl Future<Output = ()> + Send + 'static) -> Result<()> {
         let (stop, stopped) = tokio::sync::watch::channel(false);
-        let background = tokio::spawn(crate::host_loop::run(
-            self.host.runtime.clone(),
-            self.host.clock.clone(),
-            self.host.live_ticks.clone(),
-            self.host.admitting.clone(),
-            stopped,
-        ));
+        let background = if self.host.oauth.is_none() {
+            Some(tokio::spawn(crate::host_loop::run(
+                self.host.runtime.clone(),
+                self.host.clock.clone(),
+                self.host.live_ticks.clone(),
+                self.host.admitting.clone(),
+                stopped,
+            )))
+        } else {
+            None
+        };
         let admitting = self.host.admitting.clone();
         let shutdown_admission = admitting.clone();
         let shutdown_stop = stop.clone();
@@ -521,7 +525,9 @@ impl LocalServer {
         // their transactions or interrupt external calls. Await pump settlement.
         admitting.store(false, Ordering::Release);
         let _ = stop.send(true);
-        background.await??;
+        if let Some(background) = background {
+            background.await??;
+        }
         result?;
         Ok(())
     }
@@ -581,6 +587,20 @@ pub(crate) fn native_scopes(
         .as_ref()
         .context("native OAuth receiver missing")?
         .native_scopes()
+}
+
+pub(crate) async fn native_pump(
+    host: Arc<Host>,
+    stopped: tokio::sync::watch::Receiver<bool>,
+) -> Result<()> {
+    crate::host_loop::run_on_owner(
+        host.runtime.clone(),
+        host.clock.clone(),
+        host.live_ticks.clone(),
+        host.admitting.clone(),
+        stopped,
+    )
+    .await
 }
 
 pub(crate) async fn handle_native(host: Arc<Host>, request: Request) -> Response {
