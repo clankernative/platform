@@ -27,7 +27,7 @@ first S1 operator profile admits exactly one scope; a shared shell with other
 selected scopes refuses startup unless every scope can actually enroll. It
 never borrows the first app's enrollment for another app. The private registry
 retains nonclone, nonserializable originals on that thread. Request IDs, SQLite
-rows, Google navigation metadata, and the connection's list of original indexes
+rows, Google navigation metadata, and the connection's original index
 are data. None can recreate an original after restart or on another executor.
 
 App time starts at entry to `Manager::capture`, before SQLite, IAP binding,
@@ -49,8 +49,9 @@ original or extends its deadline. Test binaries have an explicit scripted
 supplier within the existing full effect simulation scope. Serving binaries
 contain no scripted enrollment or clock constructor.
 
-Every connection carries a private list of exact original indexes used by its
-request. The socket wrapper resolves those indexes and rechecks the originals
+Every connection carries a private index of the one exact original used by its
+request. Enlisting a second role or attempt refuses. The socket wrapper resolves
+that index and rechecks the original
 before write, flush and shutdown. Both HTTP headers and body bytes go through
 that wrapper; checking only `Body::poll_frame` would miss buffered headers and
 writes. There is one request per connection, with keepalive and pipelining
@@ -72,3 +73,8 @@ admission, local commit and physical delivery remain distinct events.
 These owners do not implement the missing epoch/storage authority or create a
 fresh-human proof. The existing production proof refusal remains until S1, S2
 and S3 are composed and qualified together.
+
+Ordinary read and refresh consumers borrow a current App role for their exact
+authority scope through `with_current_app_role`. They do not borrow a human
+management original or acquire another 300 seconds. Their current epoch, writer
+and response-disposition checks remain S3's consuming boundary.
