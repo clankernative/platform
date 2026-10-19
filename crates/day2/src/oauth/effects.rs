@@ -81,6 +81,11 @@ pub(crate) fn scope<T>(hooks: std::sync::Arc<dyn Hooks>, run: impl FnOnce() -> T
     run()
 }
 
+#[cfg(test)]
+pub(super) fn current_domain() -> Option<u64> {
+    HOOKS.with(|slot| slot.borrow().as_ref().map(|hooks| hooks.domain()))
+}
+
 /// Native task capture is empty in serving binaries. Test captures retain the
 /// reviewed clock, entropy and HTTP ports together across async host boundaries.
 #[derive(Clone)]

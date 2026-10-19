@@ -667,7 +667,8 @@ async fn handle_inner(host: Arc<Host>, request: Request) -> Response {
         Ok(Err(_)) => Err(StatusCode::PAYLOAD_TOO_LARGE),
         Err(_) => Err(StatusCode::REQUEST_TIMEOUT),
     };
-    let response = crate::managed_credentials::effects::spawn_blocking(move || {
+    let native = host.oauth.is_some();
+    let dispatch = move || {
         let _permit = permit;
         let at = if parts
             .uri
@@ -742,10 +743,16 @@ async fn handle_inner(host: Arc<Host>, request: Request) -> Response {
             response.status().as_u16(),
         )?;
         Ok::<_, anyhow::Error>(response)
-    })
-    .await;
+    };
+    let response = if native {
+        dispatch()
+    } else {
+        crate::managed_credentials::effects::spawn_blocking(dispatch)
+            .await
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("web dispatch task failed")))
+    };
     let response = match response {
-        Ok(Ok(response)) => response,
+        Ok(response) => response,
         _ => transport_error(
             json,
             StatusCode::SERVICE_UNAVAILABLE,
@@ -796,10 +803,12 @@ async fn handle_app_call(host: Arc<Host>, request: Request) -> Response {
     } else {
         200_000
     };
-    let body = match tokio::time::timeout(
-        Duration::from_secs(3),
-        to_bytes(request.into_body(), maximum),
-    )
+    let body = match crate::oauth::native_http::timer(|| {
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            to_bytes(request.into_body(), maximum),
+        )
+    })
     .await
     {
         Ok(Ok(body)) => body,
@@ -819,7 +828,8 @@ async fn handle_app_call(host: Arc<Host>, request: Request) -> Response {
     let Ok(permit) = capacity.clone().try_acquire_owned() else {
         return secure(StatusCode::SERVICE_UNAVAILABLE.into_response());
     };
-    match tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
+    let native = host.oauth.is_some();
+    let dispatch = move || -> Result<Vec<u8>> {
         let _permit = permit;
         let at = host.wall_seconds()?;
         host.runtime.web_event(at, None, "app_call", 102)?;
@@ -827,12 +837,16 @@ async fn handle_app_call(host: Arc<Host>, request: Request) -> Response {
         host.runtime
             .web_event(at, None, "app_call", if result.is_ok() { 200 } else { 403 })?;
         result
-    })
-    .await
-    {
-        Ok(Ok(body)) => {
-            secure(([(header::CONTENT_TYPE, "application/json")], body).into_response())
-        }
+    };
+    let response = if native {
+        dispatch()
+    } else {
+        tokio::task::spawn_blocking(dispatch)
+            .await
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("app call task failed")))
+    };
+    match response {
+        Ok(body) => secure(([(header::CONTENT_TYPE, "application/json")], body).into_response()),
         _ => secure((StatusCode::FORBIDDEN, "{\"error\":\"app_call_refused\"}").into_response()),
     }
 }

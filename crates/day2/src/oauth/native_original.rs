@@ -5,12 +5,7 @@
 use super::fresh_auth::FreshIntent;
 use anyhow::{Result, ensure};
 use day2_capabilities::Digest;
-use std::{
-    marker::PhantomData,
-    rc::Rc,
-    thread::{self, ThreadId},
-    time::Duration,
-};
+use std::{marker::PhantomData, rc::Rc, thread::ThreadId, time::Duration};
 
 const ORIGINAL: Duration = Duration::from_secs(300);
 
@@ -36,7 +31,9 @@ pub(super) struct Original<C> {
 }
 
 impl<C: Clock> Original<C> {
-    pub(super) fn refuse(&mut self) { self.refused = true; }
+    pub(super) fn refuse(&mut self) {
+        self.refused = true;
+    }
 
     /// Call with a clock captured at creator entry BEFORE DB/entropy/RPC. Clock
     /// construction, not this bookkeeping, fixes the original BOOTTIME origin.
@@ -48,7 +45,7 @@ impl<C: Clock> Original<C> {
         Ok(Self {
             clock,
             process: std::process::id(),
-            thread: thread::current().id(),
+            thread: std::thread::current().id(),
             origin,
             latest: origin,
             ceiling,
@@ -144,7 +141,7 @@ impl<C: Clock> Original<C> {
             ensure!(
                 !self.refused
                     && self.process == std::process::id()
-                    && self.thread == thread::current().id(),
+                    && self.thread == std::thread::current().id(),
                 "native original executor unavailable"
             );
             ensure!(

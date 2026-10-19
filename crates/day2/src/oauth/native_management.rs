@@ -87,6 +87,11 @@ pub(super) fn clear() {
     OWNERS.with(|owners| owners.borrow_mut().clear());
 }
 
+#[cfg(test)]
+pub(super) fn simulation_installed() -> bool {
+    fixtures::active()
+}
+
 pub(super) fn selected_scopes(
     instance: &crate::artifact::Instance,
     only_app: Option<&str>,
@@ -254,7 +259,11 @@ pub(crate) enum Phase {
     ShellFlow,
 }
 
-pub(crate) enum RoleStage<'a> {
+pub(crate) struct RoleStage<'a> {
+    source: RoleSource<'a>,
+}
+
+enum RoleSource<'a> {
     Native(EnrolledRoleStage<'a>),
     #[cfg(test)]
     Simulated(fixtures::SimulationStage),
@@ -262,12 +271,74 @@ pub(crate) enum RoleStage<'a> {
 
 impl RoleStage<'_> {
     pub(crate) fn check(&mut self) -> Result<()> {
-        match self {
-            Self::Native(stage) => stage.check(),
+        match &mut self.source {
+            RoleSource::Native(stage) => stage.check(),
             #[cfg(test)]
-            Self::Simulated(stage) => stage.check(),
+            RoleSource::Simulated(stage) => stage.check(),
         }
     }
+
+    pub(crate) fn check_for(&mut self, scope: &AuthorityScope, role: NativeRole) -> Result<()> {
+        match &mut self.source {
+            RoleSource::Native(stage) => stage.check_for(scope, role),
+            #[cfg(test)]
+            RoleSource::Simulated(stage) => stage.check_for(scope, role),
+        }
+    }
+
+    /// S3 may borrow the real stage for native authenticated reads. A scripted
+    /// role never constructs or substitutes a native enrolled stage.
+    pub(crate) fn with_native<T>(
+        &mut self,
+        use_native: impl FnOnce(&mut EnrolledRoleStage<'_>) -> Result<T>,
+    ) -> Result<T> {
+        match &mut self.source {
+            RoleSource::Native(stage) => {
+                stage.check()?;
+                use_native(stage)
+            }
+            #[cfg(test)]
+            RoleSource::Simulated(_) => {
+                anyhow::bail!("real native enrolled stage unavailable in simulation")
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum RuntimePhase {
+    Read,
+    Refresh,
+}
+
+/// Autonomous read/refresh has a current role phase, never a human original.
+/// The callback retains the actual native borrow through read/admission/result.
+pub(crate) fn with_current_app_role<T>(
+    scope: &AuthorityScope,
+    phase: RuntimePhase,
+    use_current: impl FnOnce(&mut RoleStage<'_>) -> Result<T>,
+) -> Result<T> {
+    #[cfg(test)]
+    if fixtures::active() {
+        return fixtures::with_app_role(scope, phase, use_current);
+    }
+    OWNERS.with(|owners| {
+        let mut owners = owners.try_borrow_mut()?;
+        let owners = owners
+            .get_mut(scope.app.as_str())
+            .context("native App role executor missing")?;
+        ensure!(
+            owners.kind == NativeRole::AppHost,
+            "autonomous runtime requires App owner"
+        );
+        let mut role = owners.role.try_borrow_mut()?;
+        let mut stage = RoleStage {
+            source: RoleSource::Native(role.begin_current_stage()?),
+        };
+        stage.check_for(scope, NativeRole::AppHost)?;
+        let _ = phase;
+        use_current(&mut stage)
+    })
 }
 
 pub(crate) struct OriginalPhase<'a> {
@@ -286,25 +357,25 @@ enum PhaseOriginal<'a> {
 impl OriginalPhase<'_> {
     pub(crate) fn check(&mut self, stage: &mut RoleStage<'_>) -> Result<()> {
         let result = (|| {
-        let wall = super::effects::wall_time()?;
-        ensure!(
-            wall >= self.wall,
-            "native original wall clock moved backwards"
-        );
-        self.wall = wall;
-        stage.check()?;
-        match (&mut self.original, stage) {
-            (PhaseOriginal::Native(original), RoleStage::Native(stage)) => {
-                let now = original.clock.clock.sample(stage);
-                original.check_sample(self.intent, self.wall, now)
+            let wall = super::effects::wall_time()?;
+            ensure!(
+                wall >= self.wall,
+                "native original wall clock moved backwards"
+            );
+            self.wall = wall;
+            stage.check()?;
+            match (&mut self.original, &mut stage.source) {
+                (PhaseOriginal::Native(original), RoleSource::Native(stage)) => {
+                    let now = original.clock.clock.sample(stage);
+                    original.check_sample(self.intent, self.wall, now)
+                }
+                #[cfg(test)]
+                (PhaseOriginal::Simulated(original), RoleSource::Simulated(_)) => {
+                    original.check(self.intent, self.wall)
+                }
+                #[cfg(test)]
+                _ => anyhow::bail!("native original role supplier changed"),
             }
-            #[cfg(test)]
-            (PhaseOriginal::Simulated(original), RoleStage::Simulated(_)) => {
-                original.check(self.intent, self.wall)
-            }
-            #[cfg(test)]
-            _ => anyhow::bail!("native original role supplier changed"),
-        }
         })();
         if result.is_err() {
             match &mut self.original {
@@ -330,7 +401,10 @@ pub(crate) fn with_current_original<T>(
 }
 
 fn with_current_for_role<T>(
-    intent: &FreshIntent, phase: Phase, wall: i64, expected: Option<NativeRole>,
+    intent: &FreshIntent,
+    phase: Phase,
+    wall: i64,
+    expected: Option<NativeRole>,
     use_current: impl FnOnce(&mut RoleStage<'_>, &mut OriginalPhase<'_>) -> Result<T>,
 ) -> Result<T> {
     #[cfg(test)]
@@ -342,7 +416,10 @@ fn with_current_for_role<T>(
         let owners = owners
             .get_mut(intent.app())
             .context("native original executor missing")?;
-        ensure!(expected.is_none_or(|expected| expected == owners.kind), "native response role changed");
+        ensure!(
+            expected.is_none_or(|expected| expected == owners.kind),
+            "native response role changed"
+        );
         match phase {
             Phase::StartCommit
             | Phase::DispatchCommit
@@ -364,7 +441,9 @@ fn with_current_for_role<T>(
             .context("native original absent; rows cannot restore it")?;
         let role = original.clock.role.clone();
         let mut role = role.try_borrow_mut()?;
-        let mut stage = RoleStage::Native(role.begin_current_stage()?);
+        let mut stage = RoleStage {
+            source: RoleSource::Native(role.begin_current_stage()?),
+        };
         let mut original = OriginalPhase {
             original: PhaseOriginal::Native(original),
             intent,
@@ -380,7 +459,13 @@ fn with_current_for_role<T>(
 /// actual socket resolves them back to the retained executor owners on every
 /// write/flush/shutdown. Disconnect drops this list, not the originals.
 #[derive(Clone)]
-pub(super) struct Sink(Rc<RefCell<BTreeMap<(NativeRole, String), FreshIntent>>>);
+pub(super) struct Sink(Rc<RefCell<BTreeMap<(NativeRole, String), SinkBinding>>>);
+
+#[derive(Clone)]
+struct SinkBinding {
+    intent: FreshIntent,
+    effects: crate::managed_credentials::effects::Captured,
+}
 
 impl Sink {
     pub(super) fn new() -> Self {
@@ -388,10 +473,22 @@ impl Sink {
     }
 
     pub(super) fn check(&self) -> Result<()> {
-        let intents: Vec<_> = self.0.try_borrow()?.iter().map(|((role, _), intent)| (*role, intent.clone())).collect();
-        for (role, intent) in intents {
-            with_current_for_role(&intent, Phase::Response, super::effects::wall_time()?, Some(role),
-                |stage, original| original.check(stage))?;
+        let intents: Vec<_> = self
+            .0
+            .try_borrow()?
+            .iter()
+            .map(|((role, _), binding)| (*role, binding.clone()))
+            .collect();
+        for (role, binding) in intents {
+            binding.effects.run(|| {
+                with_current_for_role(
+                    &binding.intent,
+                    Phase::Response,
+                    super::effects::wall_time()?,
+                    Some(role),
+                    |stage, original| original.check(stage),
+                )
+            })?;
         }
         Ok(())
     }
@@ -432,9 +529,18 @@ fn enlist(role: NativeRole, intent: &FreshIntent) -> Result<()> {
                 "native response scope capacity"
             );
             if let Some(existing) = indexes.get(&key) {
-                ensure!(existing == intent, "native response original changed");
+                ensure!(
+                    existing.intent == *intent,
+                    "native response original changed"
+                );
             } else {
-                indexes.insert(key, intent.clone());
+                indexes.insert(
+                    key,
+                    SinkBinding {
+                        intent: intent.clone(),
+                        effects: crate::managed_credentials::effects::capture(),
+                    },
+                );
             }
         }
         Ok(())
@@ -446,14 +552,21 @@ pub(super) fn check(intent: &FreshIntent, phase: Phase, wall: i64) -> Result<()>
 }
 
 #[cfg(test)]
-pub(super) mod fixtures {
+pub(crate) mod fixtures {
     use super::*;
     use crate::oauth::effects::Hooks;
 
-    thread_local! { static FIXTURE: RefCell<Option<Fixture>> = const { RefCell::new(None) }; }
+    thread_local! {
+        static FIXTURE: RefCell<Option<Fixture>> = const { RefCell::new(None) };
+        // Distinct inner effect tracks survive across requests ONLY for the
+        // lifetime of the fixed executor thread. A scope switch is not a
+        // process restart and cannot discard its original owners.
+        static RETAINED: RefCell<BTreeMap<u64, Fixture>> = const { RefCell::new(BTreeMap::new()) };
+    }
     struct Fixture {
         hooks: std::sync::Arc<dyn Hooks>,
         originals: BTreeMap<(NativeRole, String), Original<SimulationClock>>,
+        scopes: BTreeMap<String, AuthorityScope>,
     }
     pub(super) struct SimulationClock {
         hooks: std::sync::Arc<dyn Hooks>,
@@ -462,20 +575,34 @@ pub(super) mod fixtures {
     pub(crate) struct SimulationStage {
         hooks: std::sync::Arc<dyn Hooks>,
         origin: Duration,
+        latest: Duration,
         thread: std::thread::ThreadId,
         refused: bool,
+        role: NativeRole,
+        scope: Option<AuthorityScope>,
     }
     impl SimulationStage {
+        pub(super) fn check_for(&mut self, scope: &AuthorityScope, role: NativeRole) -> Result<()> {
+            self.check()?;
+            ensure!(
+                self.scope.as_ref() == Some(scope) && self.role == role,
+                "simulated native role selection changed"
+            );
+            Ok(())
+        }
         pub(super) fn check(&mut self) -> Result<()> {
             let result = (|| {
                 let now = self.hooks.monotonic();
                 ensure!(
                     !self.refused
+                        && super::super::effects::current_domain() == Some(self.hooks.domain())
                         && self.thread == std::thread::current().id()
                         && now >= self.origin
+                        && now >= self.latest
                         && now - self.origin < Duration::from_secs(5),
                     "simulated native stage expired or executor changed"
                 );
+                self.latest = now;
                 Ok(())
             })();
             if result.is_err() {
@@ -489,6 +616,10 @@ pub(super) mod fixtures {
             self.origin
         }
         fn sample(&mut self) -> Result<Duration> {
+            ensure!(
+                super::super::effects::current_domain() == Some(self.hooks.domain()),
+                "native simulation clock domain changed"
+            );
             Ok(self.hooks.monotonic())
         }
     }
@@ -506,7 +637,16 @@ pub(super) mod fixtures {
     impl Drop for Guard {
         fn drop(&mut self) {
             if self.changed {
-                FIXTURE.with(|slot| slot.replace(self.previous.take()));
+                let current = FIXTURE.with(|slot| slot.replace(self.previous.take()));
+                if super::super::native_http::owns_thread() {
+                    if let Some(current) = current {
+                        RETAINED.with(|retained| {
+                            retained
+                                .borrow_mut()
+                                .insert(current.hooks.domain(), current)
+                        });
+                    }
+                }
             }
         }
     }
@@ -515,7 +655,14 @@ pub(super) mod fixtures {
     /// production proof refusal. Only test binaries contain this supplier.
     pub(crate) fn scope(hooks: std::sync::Arc<dyn Hooks>) -> Guard {
         FIXTURE.with(|slot| {
-            let mut slot = slot.borrow_mut();
+            let Ok(mut slot) = slot.try_borrow_mut() else {
+                // A changed nested simulator domain cannot replace borrowed
+                // originals. Current-domain checks below refuse that use.
+                return Guard {
+                    previous: None,
+                    changed: false,
+                };
+            };
             if slot
                 .as_ref()
                 .is_some_and(|fixture| fixture.hooks.domain() == hooks.domain())
@@ -525,11 +672,13 @@ pub(super) mod fixtures {
                     changed: false,
                 };
             }
+            let retained = RETAINED.with(|retained| retained.borrow_mut().remove(&hooks.domain()));
             Guard {
-                previous: slot.replace(Fixture {
+                previous: slot.replace(retained.unwrap_or_else(|| Fixture {
                     hooks,
                     originals: BTreeMap::new(),
-                }),
+                    scopes: BTreeMap::new(),
+                })),
                 changed: true,
             }
         })
@@ -593,6 +742,54 @@ pub(super) mod fixtures {
         FIXTURE.with(|slot| slot.borrow().is_some())
     }
 
+    pub(crate) fn select_app_scope(scope: &AuthorityScope) -> Result<()> {
+        FIXTURE.with(|slot| {
+            let mut slot = slot.try_borrow_mut()?;
+            let fixture = slot
+                .as_mut()
+                .context("native simulation supplier missing")?;
+            if let Some(selected) = fixture.scopes.get(scope.app.as_str()) {
+                ensure!(selected == scope, "native simulation scope cannot change");
+            } else {
+                fixture
+                    .scopes
+                    .insert(scope.app.as_str().into(), scope.clone());
+            }
+            Ok(())
+        })
+    }
+
+    pub(super) fn with_app_role<T>(
+        scope: &AuthorityScope,
+        _phase: RuntimePhase,
+        use_current: impl FnOnce(&mut RoleStage<'_>) -> Result<T>,
+    ) -> Result<T> {
+        FIXTURE.with(|slot| {
+            let slot = slot.try_borrow()?;
+            let fixture = slot
+                .as_ref()
+                .context("native simulation supplier missing")?;
+            ensure!(
+                fixture.scopes.get(scope.app.as_str()) == Some(scope),
+                "native simulation App scope missing"
+            );
+            let origin = fixture.hooks.monotonic();
+            let mut stage = RoleStage {
+                source: RoleSource::Simulated(SimulationStage {
+                    hooks: fixture.hooks.clone(),
+                    origin,
+                    latest: origin,
+                    thread: std::thread::current().id(),
+                    refused: false,
+                    role: NativeRole::AppHost,
+                    scope: Some(scope.clone()),
+                }),
+            };
+            stage.check_for(scope, NativeRole::AppHost)?;
+            use_current(&mut stage)
+        })
+    }
+
     pub(super) fn with_current<T>(
         intent: &FreshIntent,
         phase: Phase,
@@ -619,12 +816,17 @@ pub(super) mod fixtures {
                 }
                 _ => NativeRole::AppHost,
             });
-            let mut stage = RoleStage::Simulated(SimulationStage {
-                hooks: fixture.hooks.clone(),
-                origin: fixture.hooks.monotonic(),
-                thread: std::thread::current().id(),
-                refused: false,
-            });
+            let mut stage = RoleStage {
+                source: RoleSource::Simulated(SimulationStage {
+                    hooks: fixture.hooks.clone(),
+                    origin: fixture.hooks.monotonic(),
+                    latest: fixture.hooks.monotonic(),
+                    thread: std::thread::current().id(),
+                    refused: false,
+                    role: kind,
+                    scope: fixture.scopes.get(intent.app()).cloned(),
+                }),
+            };
             let original = fixture
                 .originals
                 .get_mut(&(kind, intent.attempt().into()))
