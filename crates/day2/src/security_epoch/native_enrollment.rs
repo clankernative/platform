@@ -16,6 +16,7 @@ mod policy;
 #[cfg(target_os = "linux")]
 mod process;
 mod protocol;
+mod root_kms;
 #[cfg(target_os = "linux")]
 mod runtime;
 #[cfg(target_os = "linux")]
