@@ -163,6 +163,7 @@ pub(crate) fn verify_csrf(secret: &[u8], session: &Session, raw: &str) -> Result
 pub(crate) enum NativeMode {
     BooleanCheckbox,
     ListCheckbox,
+    MultipleSelect,
     SetCheckbox,
     Radio,
 }

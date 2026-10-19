@@ -1,0 +1,3 @@
+BatchLifecycleTypes :: [].{
+	Input := { bucket : Str }
+}
