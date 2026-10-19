@@ -7,6 +7,7 @@ use crate::security_epoch::native_enrollment::{
     policy::EnrollmentPolicy,
     process::{MessageProcess, SelfSnapshot},
     protocol::{self, IssuerCertificate, IssuerData, KeyOwner, Packet},
+    root_kms::RootKms,
 };
 use anyhow::{Result, ensure};
 use std::{
@@ -17,11 +18,10 @@ use std::{
 };
 
 const POLICY: &str = "/etc/day2/native-enrollment.json";
-const ROOT_KEY: &str = "/run/secrets/day2-native-enrollment-root.pk8";
 const ISSUER: &str = "/usr/local/bin/day2-native-enrollment";
 
 pub(super) fn load_policy(acquisition: &mut NativeAcquisition) -> Result<EnrollmentPolicy> {
-    let bytes = selected_file(POLICY, 65_536, false, acquisition)?;
+    let bytes = selected_file(POLICY, 65_536, acquisition)?;
     let policy: EnrollmentPolicy = crate::json::decode(&bytes)?;
     policy.validate()?;
     acquisition.remaining()?;
@@ -31,7 +31,6 @@ pub(super) fn load_policy(acquisition: &mut NativeAcquisition) -> Result<Enrollm
 fn selected_file(
     path: &'static str,
     limit: u64,
-    secret: bool,
     acquisition: &mut NativeAcquisition,
 ) -> Result<zeroize::Zeroizing<Vec<u8>>> {
     acquisition.remaining()?;
@@ -48,7 +47,6 @@ fn selected_file(
         metadata.is_file()
             && metadata.uid() == 0
             && metadata.mode() & 0o022 == 0
-            && (!secret || metadata.mode() & 0o077 == 0)
             && metadata.len() > 0
             && metadata.len() <= limit,
         "native_enrollment_operator_file"
@@ -88,11 +86,7 @@ pub(super) fn run() -> Result<()> {
     let policy = load_policy(&mut acquisition)?;
     let mut current = SelfSnapshot::acquire(&policy.provisioner_code, &mut acquisition)?;
     current.require_node_init(&mut acquisition)?;
-    let root = KeyOwner::from_pkcs8(&selected_file(ROOT_KEY, 4096, true, &mut acquisition)?)?;
-    ensure!(
-        root.public() == policy.root_public_key,
-        "native_enrollment_root_key_selection"
-    );
+    let root = RootSigner::Kms(RootKms::new()?);
     match std::fs::create_dir("/run/day2-native-enrollment") {
         Ok(()) => std::fs::set_permissions(
             "/run/day2-native-enrollment",
@@ -138,8 +132,8 @@ pub(super) fn run() -> Result<()> {
         &policy,
         &mut acquisition,
     )?);
-    // Root stays alive and retains actual child ownership. There is no restart,
-    // key export, saved-row re-enrollment or successful-reply retry path.
+    // Provisioner stays alive and retains actual child ownership. The root key
+    // remains in KMS. There is no saved-row adoption or successful-reply retry.
     loop {
         ensure!(
             birth.child.try_wait()?.is_none(),
@@ -155,10 +149,16 @@ pub(super) fn run() -> Result<()> {
     }
 }
 
+enum RootSigner {
+    Kms(RootKms),
+    #[cfg(test)]
+    Fixture(KeyOwner),
+}
+
 fn grant_child(
     child: &mut Child,
     channel: &mut Channel,
-    root: &KeyOwner,
+    root: &RootSigner,
     current: &mut SelfSnapshot,
     policy: &EnrollmentPolicy,
     acquisition: &mut NativeAcquisition,
@@ -195,18 +195,30 @@ fn grant_child(
         )?;
         let data = IssuerData {
             policy: policy_hash,
-            root_version: policy.root_version.clone(),
+            root_version: policy.root.version.clone(),
             nonce,
             public_key,
             process: peer.data().clone(),
             provisioner: current.data.clone(),
         };
-        let certificate = IssuerCertificate {
-            signature: root.sign("issuer-birth", &data)?,
-            data,
+        current.check(acquisition)?;
+        peer.check_identity(acquisition)?;
+        ensure!(
+            child.try_wait()?.is_none(),
+            "native_enrollment_birth_child_stopped"
+        );
+        let signature = match root {
+            RootSigner::Kms(kms) => kms.issuer_birth(&policy.root, &data, acquisition)?,
+            #[cfg(test)]
+            RootSigner::Fixture(key) => key.sign("issuer-birth", &data)?,
         };
         current.check(acquisition)?;
         peer.check_identity(acquisition)?;
+        ensure!(
+            child.try_wait()?.is_none(),
+            "native_enrollment_birth_child_stopped"
+        );
+        let certificate = IssuerCertificate { signature, data };
         channel.send(&Packet::BirthGrant { certificate }, acquisition)?;
         Ok(peer)
     })();
@@ -401,7 +413,7 @@ mod tests {
             let result = grant_child(
                 &mut child.0,
                 &mut channel,
-                &root,
+                &RootSigner::Fixture(root),
                 &mut current,
                 &policy,
                 &mut acquisition,

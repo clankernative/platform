@@ -1,4 +1,5 @@
 use super::NativeRole;
+use super::root_kms::KmsRootSelection;
 use anyhow::{Result, ensure};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use day2_capabilities::{
@@ -18,8 +19,7 @@ pub(super) struct EnrollmentPolicy {
     pub bootstrap: InitialBootstrapPolicy,
     /// Routing/identity DATA; enrollment does not read or require an epoch.
     pub store: EpochStore,
-    pub root_version: String,
-    pub root_public_key: String,
+    pub root: KmsRootSelection,
     pub provisioner_code: Digest,
     pub issuer_code: Digest,
     pub runtime: RuntimeSelection,
@@ -45,15 +45,7 @@ impl EnrollmentPolicy {
                 self.bootstrap.epoch_store.id.clone(),
                 self.store.clone(),
             )]))?;
-        ensure!(
-            !self.root_version.is_empty()
-                && self.root_version.len() <= 128
-                && self
-                    .root_version
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.')),
-            "native_enrollment_root_version"
-        );
+        self.root.validate()?;
         self.root_key()?;
         for value in [
             &self.runtime.containerd_version,
@@ -75,7 +67,7 @@ impl EnrollmentPolicy {
     }
 
     pub(super) fn root_key(&self) -> Result<[u8; 32]> {
-        decode_key(&self.root_public_key)
+        decode_key(&self.root.public_key)
     }
 
     pub(super) fn digest(&self) -> Result<Digest> {
