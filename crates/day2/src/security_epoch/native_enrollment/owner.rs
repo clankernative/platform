@@ -228,6 +228,25 @@ impl EnrolledProcessRoleOwner {
 }
 
 impl EnrolledRoleStage<'_> {
+    /// The caller must retain this stage through native I/O and final admission.
+    /// Returning a bounded clock does not return a role or storage permission.
+    pub(crate) fn narrow_io_acquisition(
+        &mut self,
+        max_lease_seconds: u32,
+    ) -> Result<NativeAcquisition> {
+        let result = (|| {
+            self.check()?;
+            let child = self.acquisition.narrow(max_lease_seconds, self.deadline)?;
+            self.check()?;
+            Ok(child)
+        })();
+        if result.is_err() {
+            self.owner.refused = true;
+            self.acquisition.refuse();
+        }
+        result
+    }
+
     pub(crate) fn check_selection(
         &mut self,
         policy: &day2_capabilities::security_epoch::bootstrap::InitialBootstrapPolicy,
