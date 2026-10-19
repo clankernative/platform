@@ -904,14 +904,12 @@ jobs:
         working-directory: /tmp/day2-bazel-tools
       - run: chmod 755 /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64
       - name: Check normal and exec dependency-context selection without Rust compilation
-        run: /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64 --output_user_root=/tmp/day2-bazel-Cargo-context-model build --symlink_prefix=/tmp/day2-bazel-model- //experiments/bazel:context_controls
+        run: /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64 --batch --output_user_root=/tmp/day2-bazel-Cargo-context-model build --symlink_prefix=/tmp/day2-bazel-model- //experiments/bazel:context_controls
       - name: Retain every source-derived matching Bazel executable action without building it
-        run: /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64 --output_user_root=/tmp/day2-bazel-Cargo-context-model aquery --include_param_files --output=jsonproto 'deps(set(//crates/day2:unit_lib //crates/day2:day2 //crates/day2:unit_day2 //crates/day2:day2-health //crates/day2:unit_day2_health //crates/day2:day2-inspect //crates/day2:unit_day2_inspect //crates/day2:day2-package //crates/day2:unit_day2_package //crates/day2:day2-security-shell //crates/day2:unit_day2_security_shell //crates/day2:sandbox_probe //crates/day2:unit_sandbox_probe //crates/day2:day2_integration //crates/day2-sandbox:unit_lib //crates/day2-sandbox:day2-compiler-sandbox //crates/day2-sandbox:unit_day2_compiler_sandbox //crates/day2-sandbox:day2-sandbox //crates/day2-sandbox:unit_day2_sandbox //crates/day2-sandbox:day2-sandbox-probe //crates/day2-sandbox:unit_day2_sandbox_probe //crates/day2-sandbox:isolation //crates/xtask:xtask //crates/xtask:unit_xtask))' > /tmp/day2-bazel-action-graph.json
-      - name: Retain the dedicated experiment Bazel server PID
-        run: /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64 --output_user_root=/tmp/day2-bazel-Cargo-context-model info server_pid > /tmp/day2-bazel-context-server.pid
-      - name: Stop the dedicated experiment Bazel server before Cargo compilation
-        run: /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64 --output_user_root=/tmp/day2-bazel-Cargo-context-model shutdown
-      - name: Require server exit and record bounded memory facts before Cargo
+        run: /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64 --batch --output_user_root=/tmp/day2-bazel-Cargo-context-model aquery --include_param_files --output=jsonproto 'deps(set(//crates/day2:unit_lib //crates/day2:day2 //crates/day2:unit_day2 //crates/day2:day2-health //crates/day2:unit_day2_health //crates/day2:day2-inspect //crates/day2:unit_day2_inspect //crates/day2:day2-package //crates/day2:unit_day2_package //crates/day2:day2-security-shell //crates/day2:unit_day2_security_shell //crates/day2:sandbox_probe //crates/day2:unit_sandbox_probe //crates/day2:day2_integration //crates/day2-sandbox:unit_lib //crates/day2-sandbox:day2-compiler-sandbox //crates/day2-sandbox:unit_day2_compiler_sandbox //crates/day2-sandbox:day2-sandbox //crates/day2-sandbox:unit_day2_sandbox //crates/day2-sandbox:day2-sandbox-probe //crates/day2-sandbox:unit_day2_sandbox_probe //crates/day2-sandbox:isolation //crates/xtask:xtask //crates/xtask:unit_xtask))' > /tmp/day2-bazel-action-graph.json
+      - name: Retain the final foreground Bazel invocation PID
+        run: /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64 --batch --output_user_root=/tmp/day2-bazel-Cargo-context-model info server_pid > /tmp/day2-bazel-context-server.pid
+      - name: Require final foreground invocation exit and record bounded memory facts before Cargo
         run: target/debug/xtask experiment-bazel-before-cargo
       - name: Compile the complete default target set of the three selected Cargo packages once
         id: context_cargo_build
