@@ -416,13 +416,14 @@ impl KnownClaim {
     }
 
     pub(super) fn prepare(
-        &mut self,
+        mut self,
         selection: &EpochStore,
         port: &mut impl Port,
-    ) -> Result<(Request, Budget)> {
+    ) -> Result<(Self, Request, Budget)> {
         self.mutation.check(selection, port)?;
         let budget = self.mutation.context.budget(port)?;
-        Ok((self.mutation.core.counter.clone(), budget))
+        let request = self.mutation.core.counter.clone();
+        Ok((self, request, budget))
     }
 
     pub(super) fn send(self, selection: &EpochStore, port: &mut impl Port) -> Result<()> {
