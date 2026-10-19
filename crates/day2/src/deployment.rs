@@ -632,6 +632,13 @@ async fn serve_configured(
     cause
 }
 
+/// Closed native enrollment service entrypoint. Operator-selected boot/profile
+/// configuration is read by the service; applications cannot choose a signer,
+/// runtime endpoint or process to enroll.
+pub fn run_native_enrollment(issuer: bool) -> anyhow::Result<()> {
+    crate::security_epoch::native_enrollment::run(issuer)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -964,10 +971,4 @@ mod tests {
             .is_err()
         );
     }
-}
-/// Closed native enrollment service entrypoint. Operator-selected boot/profile
-/// configuration is read by the service; applications cannot choose a signer,
-/// runtime endpoint or process to enroll.
-pub fn run_native_enrollment(issuer: bool) -> anyhow::Result<()> {
-    crate::security_epoch::native_enrollment::run(issuer)
 }
