@@ -19,6 +19,7 @@ pub(super) enum Route<'a> {
     Namespace(&'a str),
     ServiceAccount { namespace: &'a str, name: &'a str },
     Pod { namespace: &'a str, name: &'a str },
+    Node(&'a str),
     ReplicaSet { namespace: &'a str, name: &'a str },
     Deployment { namespace: &'a str, name: &'a str },
     StatefulSet { namespace: &'a str, name: &'a str },
@@ -155,6 +156,7 @@ impl NativeHttp {
                 Method::GET,
                 true,
             ),
+            Route::Node(name) => (kube(&["api", "v1", "nodes", name])?, Method::GET, true),
             Route::ReplicaSet { namespace, name } => (
                 kube(&[
                     "apis",

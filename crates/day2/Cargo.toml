@@ -17,7 +17,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 rusqlite = { version = "=0.40.2", features = ["bundled", "hooks", "limits", "serialize"] }
 tempfile = "3.27"
-rustix = { version = "=1.1.4", features = ["fs", "time"] }
+rustix = { version = "=1.1.5", features = ["fs", "time", "net", "event", "process"] }
 axum = "0.8.9"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "signal", "sync", "time", "macros"] }
 tokio-stream = "0.1.19"
@@ -49,6 +49,11 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { version = "=0.31.3", default-features = false, features = ["socket", "poll"] }
+prost = "=0.14.4"
+tonic = { version = "=0.14.6", default-features = false, features = ["transport", "codegen"] }
+tonic-prost = "=0.14.6"
+hyper-util = { version = "=0.1.20", features = ["tokio"] }
+tower = { version = "=0.5.3", features = ["util"] }
 
 [dev-dependencies]
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp"] }
