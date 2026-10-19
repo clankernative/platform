@@ -123,6 +123,35 @@ fn timed_build(root: &Path, timing: Timing) -> Result<serde_json::Value> {
 }
 
 pub(super) fn timings(root: &Path) -> Result<()> {
+    let graph: serde_json::Value =
+        serde_json::from_slice(&fs::read("/tmp/day2-bazel-action-graph.json")?)?;
+    let mut scripts = 0;
+    for action in graph["actions"].as_array().context("action graph required")? {
+        if action["mnemonic"] != "CargoBuildScriptRun" {
+            continue;
+        }
+        let fields: BTreeMap<_, _> = action["environmentVariables"]
+            .as_array()
+            .context("build-script environment required")?
+            .iter()
+            .filter_map(|field| Some((field["key"].as_str()?, field["value"].as_str()?)))
+            .filter(|(key, _)| ["NUM_JOBS", "DEBUG", "PROFILE", "OPT_LEVEL"].contains(key))
+            .collect();
+        for (key, expected) in [
+            ("NUM_JOBS", "2"),
+            ("DEBUG", "false"),
+            ("PROFILE", "debug"),
+            ("OPT_LEVEL", "2"),
+        ] {
+            ensure!(
+                fields.get(key) == Some(&expected),
+                "Bazel build-script settings differ from selected Cargo jobs/profile"
+            );
+        }
+        scripts += 1;
+    }
+    ensure!(scripts > 0, "nonempty build-script action set required");
+    eprintln!("Matched fixed jobs/profile fields on {scripts} build-script actions");
     let runner = super::workflows::build(root)?;
     day2::automation::run(&runner, &["bazel-timings"], |request| {
         match request.action.as_str() {
