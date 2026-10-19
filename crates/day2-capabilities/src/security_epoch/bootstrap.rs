@@ -33,7 +33,7 @@ pub struct GkeClusterSelection {
 }
 
 impl GkeClusterSelection {
-    fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> Result<()> {
         bounded_identifier(&self.uid, 128)?;
         let origin = self.api_origin.strip_prefix("https://");
         ensure!(
@@ -75,7 +75,7 @@ pub struct GkeRoleSelection {
 }
 
 impl GkeRoleSelection {
-    fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> Result<()> {
         self.namespace.validate()?;
         self.kubernetes_service_account.validate()?;
         self.workload.validate()?;
