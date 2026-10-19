@@ -3,6 +3,14 @@ module(name = "day2_bazel_experiment", version = "0.0.0")
 bazel_dep(name = "rules_rust", version = "0.74.0")
 bazel_dep(name = "platforms", version = "1.1.0")
 
+# Experiment-only numeric child-status diagnostics; the upstream archive stays pinned.
+single_version_override(
+    module_name = "rules_rust",
+    version = "0.74.0",
+    patches = ["//experiments/bazel:patches/rules-rust-0.74.0-child-status.patch"],
+    patch_strip = 1,
+)
+
 rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
 rust.toolchain(
     edition = "2024",
