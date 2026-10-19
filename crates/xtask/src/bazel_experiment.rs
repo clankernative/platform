@@ -94,6 +94,8 @@ pub(super) fn resources(root: &Path, phase: &str) -> Result<()> {
     let output = match phase {
         "before-cargo" => "artifacts/bazel-cargo-before-resources.json",
         "after-cargo" => "artifacts/bazel-cargo-after-resources.json",
+        "before-bazel-build" => "artifacts/bazel-build-before-resources.json",
+        "after-bazel-build" => "artifacts/bazel-build-after-resources.json",
         _ => bail!("fixed experiment measurement phase required"),
     };
     let pid_metadata = fs::symlink_metadata("/tmp/day2-bazel-context-server.pid")?;
@@ -134,7 +136,7 @@ pub(super) fn resources(root: &Path, phase: &str) -> Result<()> {
     let run = std::env::var("GITHUB_RUN_ID")?;
     let attempt = std::env::var("GITHUB_RUN_ATTEMPT")?;
     let checkout = std::env::var("GITHUB_SHA")?;
-    let receipt = json!({"kind":"bazel-cargo-resource-observation-v1","phase":phase,"run":run,"attempt":attempt,"checkout":checkout,"workflow":day2::automation::source_digest(),"server_pid":pid,"server_absent_snapshot":server_absent,"memory":facts,"cause_attribution":false});
+    let receipt = json!({"kind":"bazel-resource-observation-v1","phase":phase,"run":run,"attempt":attempt,"checkout":checkout,"workflow":day2::automation::source_digest(),"server_pid":pid,"server_absent_snapshot":server_absent,"memory":facts,"cause_attribution":false});
     fs::write(root.join(output), serde_json::to_vec_pretty(&receipt)?)?;
     Ok(())
 }

@@ -1021,15 +1021,20 @@ fn main() -> Result<()> {
             ensure!(args.next().is_none(), "workflows accepts no arguments");
             workflows::build(&root)?;
         }
-        "experiment-bazel-before-cargo" | "experiment-bazel-after-cargo" => {
+        "experiment-bazel-before-cargo"
+        | "experiment-bazel-after-cargo"
+        | "experiment-bazel-before-build"
+        | "experiment-bazel-after-build" => {
             ensure!(
                 args.next().is_none(),
                 "Bazel resource observations accept no overrides"
             );
-            let phase = if action == "experiment-bazel-before-cargo" {
-                "before-cargo"
-            } else {
-                "after-cargo"
+            let phase = match action.as_str() {
+                "experiment-bazel-before-cargo" => "before-cargo",
+                "experiment-bazel-after-cargo" => "after-cargo",
+                "experiment-bazel-before-build" => "before-bazel-build",
+                "experiment-bazel-after-build" => "after-bazel-build",
+                _ => unreachable!(),
             };
             bazel_experiment::resources(&root, phase)?;
         }

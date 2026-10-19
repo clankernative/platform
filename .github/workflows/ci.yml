@@ -921,8 +921,14 @@ jobs:
         run: target/debug/xtask experiment-bazel-after-cargo
       - name: Run all pinned wrapper controls including genuine child exit and signal statuses
         run: /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64 --batch --output_user_root=/tmp/day2-bazel-Cargo-context-model test --test_output=all --test_timeout=60 @rules_rust//util/process_wrapper:process_wrapper_test
+      - name: Record bounded memory facts before Bazel compilation
+        run: target/debug/xtask experiment-bazel-before-build
       - name: Build all current matched Bazel programs and no-run harnesses once
+        id: context_bazel_build
         run: /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64 --batch --output_user_root=/tmp/day2-bazel-Cargo-context-model build --symlink_prefix=bazel- //crates/day2:unit_lib //crates/day2:day2 //crates/day2:unit_day2 //crates/day2:day2-health //crates/day2:unit_day2_health //crates/day2:day2-inspect //crates/day2:unit_day2_inspect //crates/day2:day2-package //crates/day2:unit_day2_package //crates/day2:day2-security-shell //crates/day2:unit_day2_security_shell //crates/day2:sandbox_probe //crates/day2:unit_sandbox_probe //crates/day2:day2_integration //crates/day2-sandbox:unit_lib //crates/day2-sandbox:day2-compiler-sandbox //crates/day2-sandbox:unit_day2_compiler_sandbox //crates/day2-sandbox:day2-sandbox //crates/day2-sandbox:unit_day2_sandbox //crates/day2-sandbox:day2-sandbox-probe //crates/day2-sandbox:unit_day2_sandbox_probe //crates/day2-sandbox:isolation //crates/xtask:xtask //crates/xtask:unit_xtask
+      - name: Record bounded memory facts after the actual Bazel build closes
+        if: ${{ always() && (steps.context_bazel_build.outcome == 'success' || steps.context_bazel_build.outcome == 'failure') }}
+        run: target/debug/xtask experiment-bazel-after-build
       - name: Require the Cargo lockfile to remain unchanged
         run: git diff --exit-code -- Cargo.lock
       - name: Install and bind the five current Bazel-built programs
@@ -945,6 +951,8 @@ jobs:
             /tmp/day2-comparison-cargo-alltargets.jsonl
             artifacts/bazel-cargo-before-resources.json
             artifacts/bazel-cargo-after-resources.json
+            artifacts/bazel-build-before-resources.json
+            artifacts/bazel-build-after-resources.json
             artifacts/bazel-programs.json
             artifacts/bazel-reports-runtime.json
             MODULE.bazel.lock

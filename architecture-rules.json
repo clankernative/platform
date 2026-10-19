@@ -2524,7 +2524,7 @@
       "context": "resources",
       "fingerprint": "4eb345191d74202e610a11af318648e6ce1aa90f56d616a18d67489c82706b41",
       "count": 1,
-      "reason": "Owner: isolated Bazel/Cargo lifecycle measurement adapter. Write one of two closed fixed artifact paths with source/run/attempt, absence snapshot and bounded numeric memory observations. No raw resource bytes/private paths/environments, cached outcomes, causal OOM or compiler exit claim. Removal: remove this exact site with the temporary experiment; NEVER land in production."
+      "reason": "Owner: isolated Bazel/Cargo lifecycle measurement adapter. Write one of four closed fixed artifact paths around Cargo or Bazel compilation, with source/run/attempt, the prior context PID absence snapshot and bounded numeric memory observations. No raw resource bytes/private paths/environments, cached outcomes, causal OOM or compiler exit claim. Removal: remove this exact site with the temporary experiment; NEVER land in production."
     },
     {
       "source": "crates/xtask/src/bazel_experiment.rs",
