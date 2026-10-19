@@ -209,7 +209,7 @@ impl Names {
         names
     }
 
-    fn endpoint(&self, operation: &str) -> String {
+    pub(super) fn endpoint(&self, operation: &str) -> String {
         format!(
             "https://firestore.googleapis.com/v1/{}/documents:{operation}",
             self.database
@@ -556,13 +556,7 @@ pub(super) fn commit(
     selection: &EpochStore,
     dispatch: super::journal::AuthorizedDispatch,
 ) -> Result<()> {
-    let (request, mut budget) = dispatch.prepare(selection, port)?;
-    let names = Names::new(selection, request.bootstrap(), None)?;
-    let bytes = budget.call(
-        port,
-        &names.endpoint("commit"),
-        &commit_body(selection, &request)?,
-    )?;
+    let reply = dispatch.prepare(selection, port)?.send(selection, port)?;
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase", deny_unknown_fields)]
     struct CommitResponse {
@@ -574,7 +568,7 @@ pub(super) fn commit(
     struct WriteResult {
         update_time: UpdateTime,
     }
-    let response: CommitResponse = crate::json::decode(&bytes)?;
+    let response: CommitResponse = crate::json::decode(reply.bytes())?;
     ensure!(
         response.write_results.len() == 3,
         "security_epoch_commit_result_count"
@@ -590,6 +584,5 @@ pub(super) fn commit(
         )?;
         ensure!(update <= commit, "security_epoch_commit_time_order");
     }
-    budget.remaining(port)?;
-    Ok(())
+    reply.finish(selection, port)
 }
