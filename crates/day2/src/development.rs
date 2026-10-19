@@ -1126,6 +1126,7 @@ fn provider_resource_fixture(
             },
             vec![
                 Action::WorkspaceDirectoryCapture,
+                Action::WorkspaceDirectoryUserPath,
                 Action::WorkspaceDirectoryHierarchy,
                 Action::WorkspaceDirectoryPage,
             ],

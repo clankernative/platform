@@ -109,6 +109,97 @@ expect Api.error_metadata("denied", Api.error({description: "Denied.", recovery:
 }
 
 #[test]
+fn admitted_directory_user_path_reads_current_actor_without_hierarchy_or_mutation() -> Result<()> {
+    use day2::integrations::simulated;
+    const ACTOR: &str = "directory-sdk@example.test";
+    const CUSTOMER: &str = "synthetic-customer-1";
+    let artifact = PathBuf::from(
+        std::env::var_os("DAY2_TEST_CONNECTION_DECLARATION_ARTIFACT").context(
+            "build the connection-declaration fixture through the native verification recipe",
+        )?,
+    );
+    let temporary = tempfile::tempdir()?;
+    let runtime =
+        day2::development::create_for(&artifact, &temporary.path().join("instance"), None, ACTOR)?;
+    simulated::update_workspace_directory(runtime.db(), runtime.scope(), |state| {
+        assert_eq!(state.world.customer_id, CUSTOMER);
+        assert!(state.calls.is_empty());
+        state.world.users.clear();
+        state.world.users.insert(ACTOR.into(), serde_json::json!({
+            "customerId":CUSTOMER,"orgUnitPath":"/Independent/SDK","primaryEmail":"not-a-profile-claim@example.test"
+        }));
+        // A hidden hierarchy dependency cannot accidentally make this pass.
+        state.world.hierarchy = serde_json::json!({"malformed":"no hierarchy is available"});
+        Ok(())
+    })?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs() as i64;
+    let before = runtime.inspect()?;
+    let result = runtime.invoke(
+        "connection_declaration.directory_user",
+        ACTOR,
+        "sdk-user-path",
+        &serde_json::json!({}),
+        now,
+        day2::store::Fault::None,
+    )?;
+    assert_eq!(result.status, "success", "{}", result.error);
+    assert_eq!(
+        result.result,
+        serde_json::json!({"actor":ACTOR,"customer_id":CUSTOMER,"user_path":"/Independent/SDK","captured_at":now})
+    );
+    assert_eq!(
+        runtime.inspect()?,
+        before,
+        "the admitted native query remains read-only"
+    );
+    let calls = simulated::update_workspace_directory(runtime.db(), runtime.scope(), |state| {
+        Ok(state.calls.clone())
+    })?;
+    assert_eq!(calls.len(), 1);
+    assert!(calls[0].starts_with(simulated::DIRECTORY_USER_ENDPOINT));
+    assert!(calls[0].contains(ACTOR));
+    let forged = runtime.invoke(
+        "connection_declaration.directory_user",
+        ACTOR,
+        "sdk-forged-user",
+        &serde_json::json!({"actor":"someone-else@example.test"}),
+        now + 1,
+        day2::store::Fault::None,
+    );
+    assert!(forged.is_err() || forged.as_ref().unwrap().status != "success");
+    assert_eq!(
+        simulated::update_workspace_directory(runtime.db(), runtime.scope(), |state| Ok(state
+            .calls
+            .clone()))?,
+        calls
+    );
+    simulated::update_workspace_directory(runtime.db(), runtime.scope(), |state| {
+        state.world.users.insert(
+            ACTOR.into(),
+            serde_json::json!({"customerId":"wrong-customer","orgUnitPath":"/"}),
+        );
+        Ok(())
+    })?;
+    let wrong_customer = runtime.invoke(
+        "connection_declaration.directory_user",
+        ACTOR,
+        "sdk-wrong-customer",
+        &serde_json::json!({}),
+        now + 2,
+        day2::store::Fault::None,
+    );
+    assert!(wrong_customer.is_err() || wrong_customer.as_ref().unwrap().status != "success");
+    assert_eq!(
+        runtime.inspect()?,
+        before,
+        "bad provider facts publish no application state"
+    );
+    Ok(())
+}
+
+#[test]
 fn native_workspace_directory_pages_decode_through_public_sdk() -> Result<()> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
