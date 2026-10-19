@@ -243,7 +243,7 @@ async fn run(
             accepted = futures_util::future::poll_fn(|cx| timer(|| listener.poll_accept(cx))), if !draining && connections.len() < capacity => {
                 let (stream, _) = accepted?;
                 let sink = super::native_management::Sink::new();
-                let io = OwnerIo { inner: TokioIo::new(stream), owner, sink: sink.clone(),
+                let connection_io = OwnerIo { inner: TokioIo::new(stream), owner, sink: sink.clone(),
                     #[cfg(test)]
                     exchange: match endpoint { Endpoint::Test(exchange) => Some(exchange.clone()), _ => None },
                 };
@@ -262,7 +262,7 @@ async fn run(
                     let connection = http1::Builder::new().keep_alive(false)
                         .timer(OwnerTimer)
                         .header_read_timeout(std::time::Duration::from_secs(3))
-                        .serve_connection(io, service);
+                        .serve_connection(connection_io, service);
                     let _ = timer(|| tokio::time::timeout(std::time::Duration::from_secs(30), connection)).await;
                 });
             }

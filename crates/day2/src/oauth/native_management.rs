@@ -256,7 +256,7 @@ pub(super) fn reserve_shell(intent: &FreshIntent, wall: i64) -> Result<()> {
 
 /// These select consumers, never grants. Each invocation borrows the live
 /// original and a newly acquired <=5s enrolled role stage on this executor.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Phase {
     Pending,
     Claim,
@@ -359,6 +359,7 @@ pub(crate) struct OriginalPhase<'a> {
     original: PhaseOriginal<'a>,
     intent: &'a FreshIntent,
     wall: i64,
+    phase: Phase,
 }
 
 enum PhaseOriginal<'a> {
@@ -369,6 +370,18 @@ enum PhaseOriginal<'a> {
 
 /* The two borrows remain inside the callback; neither is a response DTO. */
 impl OriginalPhase<'_> {
+    pub(crate) fn require_signature(
+        &mut self,
+        role: &mut RoleStage<'_>,
+        expected: &FreshIntent,
+    ) -> Result<()> {
+        ensure!(
+            self.phase == Phase::Signature && self.intent == expected,
+            "native signature phase required"
+        );
+        self.check(role)
+    }
+
     pub(crate) fn check(&mut self, stage: &mut RoleStage<'_>) -> Result<()> {
         let result = (|| {
             let wall = super::effects::wall_time()?;
@@ -462,6 +475,7 @@ fn with_current_for_role<T>(
             original: PhaseOriginal::Native(original),
             intent,
             wall,
+            phase,
         };
         original.check(&mut stage)?;
         enlist(owners.kind, intent)?;
@@ -580,6 +594,42 @@ pub(super) fn check(intent: &FreshIntent, phase: Phase, wall: i64) -> Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn signature_borrow_cannot_substitute_another_phase_or_original() -> Result<()> {
+        let world = super::super::simulation::World::new(89);
+        super::super::effects::scope(world, || -> Result<()> {
+            let identity = crate::iap::Verified {
+                email: "alice@example.com".into(),
+                subject: "alice".into(),
+            };
+            let intent = FreshIntent::fixture_oauth(
+                &identity,
+                "original",
+                &day2_capabilities::Digest::new(b"challenge"),
+                "https://security.example.com",
+                5,
+                305,
+            )?;
+            let changed = FreshIntent::fixture_oauth(
+                &identity,
+                "original",
+                &day2_capabilities::Digest::new(b"different challenge"),
+                "https://security.example.com",
+                5,
+                305,
+            )?;
+            reserve_shell(&intent, 5)?;
+            with_current_original(&intent, Phase::ShellFlow, 5, |role, original| {
+                assert!(original.require_signature(role, &intent).is_err());
+                Ok(())
+            })?;
+            with_current_original(&intent, Phase::Signature, 5, |role, original| {
+                assert!(original.require_signature(role, &changed).is_err());
+                original.require_signature(role, &intent)
+            })
+        })
+    }
 
     #[test]
     fn autonomous_role_is_scope_bound_and_cannot_supply_a_native_stage() -> Result<()> {
@@ -976,6 +1026,7 @@ pub(crate) mod fixtures {
                 original: PhaseOriginal::Simulated(original),
                 intent,
                 wall,
+                phase,
             };
             original.check(&mut stage)?;
             enlist(kind, intent)?;

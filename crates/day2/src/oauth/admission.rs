@@ -228,9 +228,9 @@ impl ArtifactShellSigner {
                     proof,
                     identity,
                     session,
-                    &key.bytes,
-                    key.version,
+                    (&key.bytes, key.version),
                     at,
+                    (role, original),
                 )
             },
         )
@@ -4194,14 +4194,22 @@ pub(super) mod tests {
             let refused = signer.attest_management(&view, &actual, &identity, session.clone(), 104);
             assert!(refused.is_err_and(|e| e.to_string().contains("producer unavailable")));
             assert_eq!(keys.calls.load(Ordering::SeqCst), 0);
-            let refused = Attestation::sign(
-                &view,
-                &actual,
-                &identity,
-                session.clone(),
-                &[11; 32],
-                "11".into(),
+            super::super::native_management::reserve_shell(&intent, 104)?;
+            let refused = super::super::native_management::with_current_original(
+                &intent,
+                super::super::native_management::Phase::Signature,
                 104,
+                |role, original| {
+                    Attestation::sign(
+                        &view,
+                        &actual,
+                        &identity,
+                        session.clone(),
+                        (&[11; 32], "11".into()),
+                        104,
+                        (role, original),
+                    )
+                },
             );
             assert!(refused.is_err_and(|e| e.to_string().contains("producer unavailable")));
             assert_eq!(

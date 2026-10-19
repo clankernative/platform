@@ -165,27 +165,29 @@ impl Attestation {
         proof: &super::fresh_auth::VerifiedAuthTime,
         identity: &iap::Verified,
         session: Digest,
-        key: &[u8; 32],
-        version: String,
+        key: (&[u8; 32], String),
         now: i64,
+        current: (
+            &mut super::native_management::RoleStage<'_>,
+            &mut super::native_management::OriginalPhase<'_>,
+        ),
     ) -> Result<Self> {
         proof.require_management_authentication()?;
         view.validate(identity, now)?;
-        proof.require_intent(
-            &super::fresh_auth::FreshIntent::management(view, identity)?,
-            identity,
-        )?;
+        let intent = super::fresh_auth::FreshIntent::management(view, identity)?;
+        proof.require_intent(&intent, identity)?;
         proof.require_current(now)?;
+        current.1.require_signature(current.0, &intent)?;
         let mut value = Self {
             view: view.digest()?,
             session,
             authenticated_at: proof.authenticated_at(),
             confirmed_at: now,
-            key_version: version,
+            key_version: key.1,
             mac: String::new(),
         };
         value.mac = crate::hex(
-            hmac::sign(&hmac::Key::new(hmac::HMAC_SHA256, key), &value.bytes()?).as_ref(),
+            hmac::sign(&hmac::Key::new(hmac::HMAC_SHA256, key.0), &value.bytes()?).as_ref(),
         );
         Ok(value)
     }
