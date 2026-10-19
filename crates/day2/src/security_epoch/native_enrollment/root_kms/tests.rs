@@ -216,6 +216,22 @@ fn wrong_resource_algorithm_protection_state_public_key_and_signature_permanentl
     );
     assert!(acquisition.remaining().is_err());
     assert_eq!(server.join().unwrap().len(), 2);
+
+    // Provider metadata and CRCs are not signature authority. A valid signature
+    // from the selected key over a different message must still refuse.
+    let key = Ed25519KeyPair::from_seed_unchecked(&[7; 32]).unwrap();
+    let wrong_frame = key.sign(b"different-birth-frame");
+    let mut replies = good;
+    replies[2]["signature"] = json!(STANDARD.encode(wrong_frame.as_ref()));
+    replies[2]["signatureCrc32c"] = json!(crc32c::crc32c(wrong_frame.as_ref()).to_string());
+    let (kms, server) = peer(responses(replies), Duration::ZERO);
+    let mut acquisition = super::tests::acquisition(Duration::from_secs(1));
+    let error = kms
+        .sign_frame(&selected, &frame, authorization(), &mut acquisition)
+        .unwrap_err();
+    assert_eq!(error.to_string(), "native_enrollment_kms_signature_refused");
+    assert!(acquisition.remaining().is_err());
+    assert_eq!(server.join().unwrap().len(), 3);
 }
 
 #[test]
