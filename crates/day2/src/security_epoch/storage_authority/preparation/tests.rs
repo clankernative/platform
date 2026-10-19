@@ -134,6 +134,43 @@ fn prepared_projection_is_closed_selection_data_without_an_owner_constructor() {
     );
 }
 
+#[test]
+fn app_admission_reconstructs_the_complete_initial_image_without_file_adoption() {
+    let (_directory, runtime) = image_fixture::runtime();
+    let store = epoch_fixture::selection();
+    let policy = image_fixture::policy(&runtime, &store);
+    let mut original = acquisition();
+    let first = InitialPreparationImage::prepare(
+        &runtime,
+        &policy,
+        &store,
+        image_fixture::incarnations(),
+        &mut original,
+    )
+    .unwrap();
+    let mut independent = acquisition();
+    let expected = InitialPreparationImage::prepare(
+        &runtime,
+        &policy,
+        &store,
+        image_fixture::incarnations(),
+        &mut independent,
+    )
+    .unwrap();
+    assert_eq!(first.bytes(), expected.bytes());
+    expected
+        .decode_exact_readback(first.bytes(), &mut independent)
+        .unwrap();
+    let mut changed = first.bytes().to_vec();
+    *changed.last_mut().unwrap() ^= 1;
+    assert!(
+        expected
+            .decode_exact_readback(&changed, &mut independent)
+            .is_err()
+    );
+    assert!(independent.remaining().is_err());
+}
+
 #[cfg(target_os = "linux")]
 mod linux {
     use super::*;
@@ -146,7 +183,7 @@ mod linux {
         directory: &tempfile::TempDir,
         selection: ReviewedStorageSelection,
         interval: &mut NativeAcquisition,
-    ) -> NativeStorageCreationAuthority {
+    ) -> NativeStorageCreationAuthority<'static> {
         NativeStorageCreationAuthority::filesystem_fixture(
             selection,
             File::open(directory.path()).unwrap(),
