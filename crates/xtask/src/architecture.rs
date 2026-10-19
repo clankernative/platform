@@ -746,7 +746,27 @@ fn glob_names(prefix: &str) -> &'static [&'static str] {
         "std::time" => &["SystemTime", "Instant"],
         "std::path" => &["Path", "PathBuf", "Components", "Iter", "absolute"],
         "time" => &["OffsetDateTime", "UtcDateTime"],
-        "rustix" => &["time", "fs", "io"],
+        "rustix" => &["time", "fs", "io", "net", "event", "process"],
+        "rustix::net" => &[
+            "socket_with",
+            "socketpair",
+            "connect",
+            "bind",
+            "listen",
+            "accept_with",
+            "send",
+            "recv_pidfd_packet",
+            "sockopt",
+        ],
+        "rustix::net::sockopt" => &[
+            "set_socket_passcred",
+            "set_socket_passpidfd",
+            "socket_type",
+            "socket_domain",
+            "socket_acceptconn",
+        ],
+        "rustix::event" => &["poll"],
+        "rustix::process" => &["getppid"],
         "rustix::fs" => &["open", "openat", "openat2", "fstatfs", "statx", "fsync"],
         "rustix::io" => &["pread", "pwrite"],
         "nix" => &["sys", "poll"],
@@ -1407,6 +1427,10 @@ fn canonical_import_namespace(target: &str) -> Option<DeclarationNamespace> {
                 | "rustix::time"
                 | "rustix::fs"
                 | "rustix::io"
+                | "rustix::net"
+                | "rustix::net::sockopt"
+                | "rustix::event"
+                | "rustix::process"
                 | "nix"
                 | "nix::sys"
                 | "nix::sys::socket"
@@ -4778,6 +4802,10 @@ fn ambient_binding(target: &str) -> bool {
                 | "rustix::io"
                 | "rustix::io::pread"
                 | "rustix::io::pwrite"
+                | "rustix::net"
+                | "rustix::net::sockopt"
+                | "rustix::event"
+                | "rustix::process"
                 | "nix"
                 | "nix::sys"
                 | "nix::sys::socket"
@@ -4923,11 +4951,30 @@ fn hazard(target: &str) -> Option<&'static str> {
     if target.starts_with("dotenv::") || target.starts_with("dotenvy::") {
         return Some("environment");
     }
-    if target == "nix::sys::socket::getsockopt" {
+    if matches!(
+        target,
+        "nix::sys::socket::getsockopt"
+            | "rustix::net::socket_with"
+            | "rustix::net::socketpair"
+            | "rustix::net::connect"
+            | "rustix::net::bind"
+            | "rustix::net::listen"
+            | "rustix::net::accept_with"
+            | "rustix::net::send"
+            | "rustix::net::recv_pidfd_packet"
+            | "rustix::net::sockopt::set_socket_passcred"
+            | "rustix::net::sockopt::set_socket_passpidfd"
+            | "rustix::net::sockopt::socket_type"
+            | "rustix::net::sockopt::socket_domain"
+            | "rustix::net::sockopt::socket_acceptconn"
+    ) {
         return Some("network");
     }
-    if target == "nix::poll::poll" {
+    if target == "nix::poll::poll" || target == "rustix::event::poll" {
         return Some("scheduling");
+    }
+    if target == "rustix::process::getppid" {
+        return Some("process");
     }
     if target.starts_with("std::fs::") || target.starts_with("tokio::fs::") {
         return Some("filesystem");
@@ -5527,6 +5574,11 @@ mod tests {
         for (module, operation, kind) in [
             ("nix::sys::socket", "getsockopt", "network"),
             ("nix::poll", "poll", "scheduling"),
+            ("rustix::net", "recv_pidfd_packet", "network"),
+            ("rustix::net", "socketpair", "network"),
+            ("rustix::net::sockopt", "set_socket_passpidfd", "network"),
+            ("rustix::event", "poll", "scheduling"),
+            ("rustix::process", "getppid", "process"),
         ] {
             let target = format!("{module}::{operation}");
             for source in [

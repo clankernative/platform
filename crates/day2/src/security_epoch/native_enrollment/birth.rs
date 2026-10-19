@@ -1,13 +1,13 @@
 //! The operator-owned provisioner creates the selected issuer, startup channel,
 //! nonce and listener itself and retains its actual Child. No CSR adoption.
 
+use crate::security_epoch::native_clock::NativeAcquisition;
 use crate::security_epoch::native_enrollment::{
     channel::{Channel, Listener},
     policy::EnrollmentPolicy,
     process::{MessageProcess, SelfSnapshot},
     protocol::{self, IssuerCertificate, IssuerData, KeyOwner, Packet},
 };
-use crate::security_epoch::native_clock::NativeAcquisition;
 use anyhow::{Result, ensure};
 use std::{
     fs::File,

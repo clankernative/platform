@@ -119,7 +119,9 @@ impl EnrollmentPolicy {
         match role {
             NativeRole::AppHost => (&self.runtime.app, &self.runtime.app_container),
             NativeRole::SecurityShell => (&self.runtime.shell, &self.runtime.shell_container),
-            NativeRole::EpochController => (&self.runtime.controller, &self.runtime.controller_container),
+            NativeRole::EpochController => {
+                (&self.runtime.controller, &self.runtime.controller_container)
+            }
         }
     }
 }
