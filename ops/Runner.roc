@@ -50,6 +50,7 @@ run! = |args| match args {
 	}
 	["build-recipe"] => Build.recipe!(call!)
 	["bazel-reports"] => BazelExperiment.reports!(call!)
+	["bazel-timings"] => BazelExperiment.timings!(call!)
 	["build-delegation"] => Delegation.build!(call!)
 	["build-delegation-business"] => Delegation.business!(call!)
 	["exercise", example, count] => Check.exercise!(example, U64.from_str(count).map_err(|_| "invalid count")?, call!)

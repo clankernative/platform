@@ -1038,6 +1038,10 @@ fn main() -> Result<()> {
             };
             bazel_experiment::resources(&root, phase)?;
         }
+        "experiment-bazel-timings" => {
+            ensure!(args.next().is_none(), "build timings accept no overrides");
+            bazel_experiment::timings(&root)?;
+        }
         "experiment-bazel-install" | "experiment-bazel-reports" => {
             ensure!(
                 args.next().is_none(),

@@ -12,6 +12,129 @@ use std::{
     time::{Duration, Instant},
 };
 
+// Same effective Rust code-generation options for both measurement arms.
+const TIMING_FLAGS: &str = "-Ccodegen-units=16 -Cembed-bitcode=no -Cstrip=none -Cdebuginfo=0 -Cdebug-assertions=on -Coverflow-checks=on";
+const TIMING_TARGETS: &[&str] = &[
+    "//crates/day2:unit_lib",
+    "//crates/day2:day2",
+    "//crates/day2:unit_day2",
+    "//crates/day2:day2-health",
+    "//crates/day2:unit_day2_health",
+    "//crates/day2:day2-inspect",
+    "//crates/day2:unit_day2_inspect",
+    "//crates/day2:day2-package",
+    "//crates/day2:unit_day2_package",
+    "//crates/day2:day2-security-shell",
+    "//crates/day2:unit_day2_security_shell",
+    "//crates/day2:sandbox_probe",
+    "//crates/day2:unit_sandbox_probe",
+    "//crates/day2:day2_integration",
+    "//crates/day2-sandbox:unit_lib",
+    "//crates/day2-sandbox:day2-compiler-sandbox",
+    "//crates/day2-sandbox:unit_day2_compiler_sandbox",
+    "//crates/day2-sandbox:day2-sandbox",
+    "//crates/day2-sandbox:unit_day2_sandbox",
+    "//crates/day2-sandbox:day2-sandbox-probe",
+    "//crates/day2-sandbox:unit_day2_sandbox_probe",
+    "//crates/day2-sandbox:isolation",
+    "//crates/xtask:xtask",
+    "//crates/xtask:unit_xtask",
+];
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Timing {
+    backend: String,
+    phase: String,
+}
+
+/// One fixed compiler invocation; Roc owns cold/warm ordering.
+fn timed_build(root: &Path, timing: Timing) -> Result<serde_json::Value> {
+    ensure!(
+        ["cold", "warm-1", "warm-2", "warm-3"].contains(&timing.phase.as_str()),
+        "fixed timing phase required"
+    );
+    let mut command = match timing.backend.as_str() {
+        "cargo" => {
+            let mut command = Command::new("cargo");
+            command.args([
+                "build",
+                "--locked",
+                "--offline",
+                "-p",
+                "day2",
+                "-p",
+                "xtask",
+                "-p",
+                "day2-sandbox",
+                "--all-targets",
+                "--message-format=json",
+                "--jobs=2",
+            ]);
+            command.env("CARGO_TARGET_DIR", "/tmp/day2-comparison-cargo-alltargets-target");
+            command.env("RUSTC_WRAPPER", "");
+            command.env("RUSTC_WORKSPACE_WRAPPER", "");
+            command.env("CARGO_INCREMENTAL", "0");
+            command.env("RUSTFLAGS", TIMING_FLAGS);
+            let output = format!("/tmp/day2-comparison-cargo-{}.jsonl", timing.phase);
+            command.stdout(Stdio::from(fs::File::create(output)?));
+            command
+        }
+        "bazel" => {
+            let mut command = Command::new("/tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64");
+            command.args([
+                "--batch",
+                "--output_user_root=/tmp/day2-bazel-Cargo-context-model",
+                "build",
+                "--symlink_prefix=bazel-",
+            ]);
+            command.args(TIMING_TARGETS);
+            command
+        }
+        _ => bail!("fixed timing backend required"),
+    };
+    command.env("SCCACHE_DISABLE", "1");
+    let started = Instant::now();
+    let result = super::run_with_budget(root, &mut command, Duration::from_secs(3600));
+    let receipt = json!({
+        "kind": "isolated-build-timing-v1",
+        "backend": timing.backend,
+        "phase": timing.phase,
+        "seconds": started.elapsed().as_secs_f64(),
+        "success": result.is_ok(),
+        "run": std::env::var("GITHUB_RUN_ID")?,
+        "attempt": std::env::var("GITHUB_RUN_ATTEMPT")?,
+        "checkout": std::env::var("GITHUB_SHA")?,
+        "workflow": day2::automation::source_digest(),
+        "jobs": 2,
+        "common_rustflags": TIMING_FLAGS,
+        "compiler_cache": false,
+        "incremental": false,
+        "targets": TIMING_TARGETS,
+        "cold_definition": "empty build outputs; source downloads and OS page cache are not cold",
+    });
+    let output = format!("artifacts/timing-{}-{}.json", timing.backend, timing.phase);
+    fs::write(root.join(output), serde_json::to_vec_pretty(&receipt)?)?;
+    result?;
+    Ok(receipt)
+}
+
+pub(super) fn timings(root: &Path) -> Result<()> {
+    let runner = super::workflows::build(root)?;
+    day2::automation::run(&runner, &["bazel-timings"], |request| {
+        match request.action.as_str() {
+            "bazel-timing-build" => timed_build(root, request.decode()?),
+            "bazel-timing-resources" => {
+                let phase: String = request.decode()?;
+                resources(root, &phase)?;
+                Ok(json!({}))
+            }
+            _ => bail!("unsupported build timing capability"),
+        }
+    })?;
+    Ok(())
+}
+
 const PROGRAMS: &[(&str, &str)] = &[
     ("bazel-bin/crates/xtask/xtask", "target/debug/xtask"),
     (

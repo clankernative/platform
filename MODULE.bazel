@@ -17,8 +17,8 @@ rust.toolchain(
     versions = ["1.98.1"],
     extra_target_triples = [],
     opt_level = {"fastbuild": "2", "dbg": "2", "opt": "2"},
-    extra_rustc_flags = ["-Cdebuginfo=0", "-Cdebug-assertions=on", "-Coverflow-checks=on"],
-    extra_exec_rustc_flags = ["-Cdebuginfo=0", "-Cdebug-assertions=on", "-Coverflow-checks=on"],
+    extra_rustc_flags = ["-Ccodegen-units=16", "-Cembed-bitcode=no", "-Cstrip=none", "-Cdebuginfo=0", "-Cdebug-assertions=on", "-Coverflow-checks=on"],
+    extra_exec_rustc_flags = ["-Ccodegen-units=16", "-Cembed-bitcode=no", "-Cstrip=none", "-Cdebuginfo=0", "-Cdebug-assertions=on", "-Coverflow-checks=on"],
 )
 use_repo(rust, "rust_toolchains")
 register_toolchains("@rust_toolchains//:all")

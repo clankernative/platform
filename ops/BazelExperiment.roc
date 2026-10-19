@@ -4,6 +4,22 @@ import Build
 # Measurement-branch workflow only. Application construction keeps the ordinary
 # Build recipe; no build or test outcome here is a production verification receipt.
 BazelExperiment :: [].{
+	timings! : (Str => Try(Str, Str)) => Try(Str, Str)
+	timings! = |host!| {
+		for backend in ["cargo", "bazel"] {
+			if backend == "bazel" {
+				_ = Capability.call!("bazel-timing-resources", Json.to_str("before-bazel-build"), host!)?
+			}
+			for phase in ["cold", "warm-1", "warm-2", "warm-3"] {
+				_ = Capability.call!("bazel-timing-build", Json.to_str({ backend, phase }), host!)?
+			}
+			if backend == "bazel" {
+				_ = Capability.call!("bazel-timing-resources", Json.to_str("after-bazel-build"), host!)?
+			}
+		}
+		Ok("{}")
+	}
+
 	reports! : (Str => Try(Str, Str)) => Try(Str, Str)
 	reports! = |host!| {
 		report = Build.source!("examples/reports", host!)?
