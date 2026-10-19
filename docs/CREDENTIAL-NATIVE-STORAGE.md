@@ -21,7 +21,23 @@ provider readback is selection input, not an observation of the calling
 process's mount. Actual admission must also join that disk to the retained
 directory and current process mount under the original native acquisition.
 
-The controller exclusively creates `day2-initial.sqlite` beneath that anchor.
+The selected controller profile is a trusted privileged native executor on the
+dedicated enrollment pool, with host PID visibility and a read-only host
+`/dev/disk/by-id` directory. Its fixed adapter opens only the selected block
+device read-only and compares its actual device number with the retained mount;
+the provider attachment and immutable disk ID must also match. This explicitly
+adds the controller and node runtime to the TCB. It grants no device, containerd
+or ptrace access to AppHost or SecurityShell and makes no hostile-code
+containment claim. Deployment of this profile requires the instance's normal
+review/apply; it has not been applied by this change.
+
+The controller uses the same selected filesystem UID as the AppHost for the
+private initial-file directory and mode-0600 file. Provider and filesystem
+identity checks still apply; a configured UID alone is not enrollment or P3.
+
+The controller exclusively creates its private `/state/day2-native` directory
+and `day2-initial.sqlite` beneath that anchor. An existing directory or file is
+a refusal, including after a controller crash; startup cannot adopt it.
 The original creator retains the file and directory, admitted image, private
 selection and original acquisition. File sync, directory sync, complete readback
 and seed/schema admission are necessary local steps. They become a provider P3
@@ -35,7 +51,7 @@ public key, Pod UID or signed certificate cannot reconstruct the native owner.
 The controller remains distinct from AppHost, and an AppHost cannot create the
 file or acquire the controller's mutation identity.
 
-The fixed exchange endpoint is `/run/day2-native/storage.sock`. Its only initial
+The fixed exchange endpoint is `/run/day2-native-enrollment/storage/peer.sock`. Its only initial
 operations are BeginInitialHolder and ConfirmPreparedMount. The statements bind
 the exact original seed, marker, file identity and image. The controller retains
 its own original interval and CreatorFD; an App observation retains its own
@@ -60,10 +76,11 @@ reply cannot reconstruct send authority or clear the permanent slot.
 
 ## Remaining production composition
 
-These boundaries do not themselves install a storage issuer, P3 owner, current
-writer or production bootstrap-execution factory. Complete the actual
-provider/mount join and exclusive mutator/impersonation governance qualification,
-then bind the first-holder peer and current serving transition. Recheck these
+The native creation factory consumes the actual enrolled controller stage and
+performs authenticated provider reads and native block-device/mount checks. It
+has not been qualified on the live GKE profile. Complete exclusive
+mutator/impersonation governance qualification, then bind the first-holder peer,
+current serving transition and production bootstrap-execution factory. Recheck these
 owners through known local admission commits, provider/body sends and final
 settlement. Keep unknown outcomes retained. Do not treat a completed response
 object as a completed human or provider exposure.
