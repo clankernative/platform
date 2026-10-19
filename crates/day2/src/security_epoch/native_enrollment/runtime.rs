@@ -3,9 +3,7 @@
 //! profile admits only task-init native hosts, never ancestor/cgroup guesses.
 
 use crate::security_epoch::native_enrollment::{
-    policy::{EnrollmentPolicy, NativeRole},
-    process::MessageProcess,
-    runtime_wire as wire,
+    NativeRole, policy::EnrollmentPolicy, process::MessageProcess, runtime_wire as wire,
 };
 use crate::security_epoch::{
     credential_material::CredentialMaterial,
@@ -44,26 +42,8 @@ pub(super) fn current(
     )?;
     let stream = UnixStream::from(socket);
     acquisition.remaining()?;
-    let credentials =
-        nix::sys::socket::getsockopt(&stream, nix::sys::socket::sockopt::PeerCredentials)?;
-    let pid = u32::try_from(credentials.pid())?;
-    let pidfd = nix::sys::socket::getsockopt(&stream, nix::sys::socket::sockopt::PeerPidfd)?;
-    // This private adapter is the sole connection-peer construction. It owns
-    // the socket created above, not a caller-adopted descriptor or PID.
-    let received = rustix::net::ReceivedPidfdPacket {
-        bytes: 0,
-        flags: rustix::net::ReturnFlags::empty(),
-        process: pidfd,
-        credentials: rustix::net::KernelCredentialsData {
-            process: rustix::net::KernelPidVisibility::Visible(
-                std::num::NonZeroU32::new(pid).context("native_enrollment_runtime_peer_pid")?,
-            ),
-            user: credentials.uid(),
-            group: credentials.gid(),
-        },
-    };
     let mut runtime =
-        MessageProcess::receive(received, &policy.runtime.containerd_code, acquisition)?;
+        MessageProcess::runtime_peer(&stream, &policy.runtime.containerd_code, acquisition)?;
     require_common(peer.data(), runtime.data())?;
     let executor = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -322,7 +302,8 @@ fn kubernetes(
     process: &super::protocol::ProcessData,
     acquisition: &mut NativeAcquisition,
 ) -> Result<RuntimeBinding> {
-    let (selected, image) = policy.workload(role);
+    let selected = policy.workload(role);
+    let image = &selected.container;
     ensure!(
         label(container, "io.kubernetes.pod.namespace")? == selected.namespace.name
             && label(container, "io.kubernetes.container.name")? == image.name,
@@ -337,10 +318,10 @@ fn kubernetes(
     ensure!(file.metadata()?.is_file(), "native_enrollment_ca_regular");
     file.take(65_537).read_to_end(&mut ca)?;
     acquisition.remaining()?;
-    let mut http = NativeHttp::new(&policy.runtime.store, &policy.runtime.cluster, &ca)?;
+    let mut http = NativeHttp::new(&policy.store, &policy.bootstrap.cluster, &ca)?;
     let source = CredentialMaterial::metadata_source(acquisition)?;
     identity_protocol::project(
-        &policy.runtime.store,
+        &policy.store,
         &http.request(Route::Project, &source.authorization()?, None, acquisition)?,
     )?;
     http.verify_cluster(&ca, &source.authorization()?, acquisition)?;
@@ -365,7 +346,7 @@ fn kubernetes(
     )?;
     identity_protocol::google_service_account(
         &selected.google_service_account,
-        &policy.runtime.cluster.project,
+        &policy.bootstrap.cluster.project,
         &http.request(
             Route::GoogleAccount(&selected.google_service_account),
             &source.authorization()?,
@@ -383,7 +364,7 @@ fn kubernetes(
         acquisition,
     )?);
     let owner = identity_protocol::pod(selected, &reviewed, &pod)?;
-    let facts = runtime_profile::container(selected, &reviewed, image, &pod)?;
+    let facts = runtime_profile::container(selected, &reviewed, &pod)?;
     ensure!(
         facts.container_id == format!("containerd://{}", container.id)
             && facts.node_name == policy.runtime.node_name,
