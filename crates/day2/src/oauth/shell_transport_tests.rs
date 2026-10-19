@@ -2216,14 +2216,17 @@ mod owned_google {
             // assertion carried by RemoteApprovals, then executes real SQLite.
             let mut headers = request.headers().clone();
             headers.insert(iap::ASSERTION_HEADER, self.machine.parse()?);
-            let result = self.receiver.dispatch(
-                &Method::POST,
-                PATH,
-                None,
-                &headers,
-                bytes,
-                self.wall_time()?,
-            );
+            let app_sink = crate::oauth::native_management::Sink::new();
+            let result = futures_executor::block_on(app_sink.scope(async {
+                self.receiver.dispatch(
+                    &Method::POST,
+                    PATH,
+                    None,
+                    &headers,
+                    bytes,
+                    self.wall_time()?,
+                )
+            }));
             let reentry = {
                 let mut slot = self.reentry.lock().unwrap();
                 if matches!(&*slot, Some(Reentry::Manual { .. })) {
@@ -2651,191 +2654,229 @@ mod owned_google {
         } else {
             serving_credentials.clone()
         };
-        let (query, expected_profile, expected_correlation, before, entropy, mut private_values) =
-            crate::managed_credentials::effects::scope(setup_credentials, || {
-                effects::scope(port.clone(), || -> Result<_> {
-                    let human = auth.identify(&headers, 100)?;
-                    let ManagementReply::Pending { view } = owners.management(
-                        "workspace",
-                        Call::Capture {
-                            registration: "calendar".into(),
-                            operation: Action::Connect,
-                        },
-                        &headers,
-                    )?
-                    else {
-                        anyhow::bail!("mounted current Pending absent");
-                    };
-                    let intent = FreshIntent::management(&view, &human)?;
-                    let first = redirect(auth.begin(&human, intent, &headers, 100)?)?;
-                    let client = &instance
-                        .oauth_clients
-                        .as_ref()
-                        .unwrap()
-                        .reauthentication
-                        .client_id;
-                    let baseline = port.capture("baseline", &first, client)?;
-                    port.world.advance(1);
-                    let ReauthCallback::Manual(manual) =
-                        auth.complete(&baseline, &human, &headers, 101)?
-                    else {
-                        anyhow::bail!("mounted baseline skipped checkpoint");
-                    };
-                    let handle = manual
-                        .strip_prefix(crate::oauth::shell_oidc::MANUAL_PREFIX)
-                        .context("mounted manual path")?;
-                    let prompt = auth.manual_view(handle, &human, &headers, 101)?;
-                    let sources = [
-                        Digest::new(include_bytes!("shell_oidc.rs")),
-                        Digest::new(include_bytes!("google_begin.rs")),
-                        Digest::new(include_bytes!("fresh_owner.rs")),
-                        Digest::new(include_bytes!("../../../../Cargo.lock")),
-                    ];
-                    let expected_profile =
-                        independently_reconstructed_profile(&instance, &sources)?;
-                    for index in 0..4 {
-                        let mut changed = sources.clone();
-                        changed[index] = Digest::new(b"different qualified source bytes");
-                        ensure!(
-                            independently_reconstructed_profile(&instance, &changed)?
-                                != expected_profile,
-                            "source substitution retained observation profile"
-                        );
-                    }
-                    // These are independent reader-input substitutions, not qualified
-                    // alternate serving instances or new provider registrations.
-                    for field in 0..6 {
-                        let mut changed = instance.clone();
-                        match field {
-                            0 => {
-                                changed
-                                    .oauth_clients
-                                    .as_mut()
-                                    .unwrap()
-                                    .reauthentication
-                                    .client_id = "999-reauth.apps.googleusercontent.com".into()
-                            }
-                            1 => {
-                                changed.security_shell.as_mut().unwrap().origin =
-                                    "https://other-security.example.com".into()
-                            }
-                            2 => {
-                                changed.identity.as_mut().unwrap().hosted_domain =
-                                    "other.example.com".into()
-                            }
-                            _ => {
-                                let credential = changed
-                                    .oauth_clients
-                                    .as_ref()
-                                    .unwrap()
-                                    .reauthentication
-                                    .credential
-                                    .clone();
-                                let day2_capabilities::SecretProvider::GcpVersion {
-                                    project_number,
-                                    secret,
-                                    version,
-                                } = changed
-                                    .control
-                                    .as_mut()
-                                    .unwrap()
-                                    .secrets
-                                    .get_mut(&credential)
-                                    .unwrap();
-                                match field {
-                                    3 => {
-                                        *project_number = std::num::NonZeroU64::new(12346).unwrap()
+        let prepare = {
+            let port = port.clone();
+            let auth = auth.clone();
+            let owners = owners.clone();
+            let shell = shell.clone();
+            let headers = headers.clone();
+            move || {
+                crate::managed_credentials::effects::scope(setup_credentials, || {
+                    effects::scope(port.clone(), || -> Result<_> {
+                        let human = auth.identify(&headers, 100)?;
+                        let ManagementReply::Pending { view } = owners.management(
+                            "workspace",
+                            Call::Capture {
+                                registration: "calendar".into(),
+                                operation: Action::Connect,
+                            },
+                            &headers,
+                        )?
+                        else {
+                            anyhow::bail!("mounted current Pending absent");
+                        };
+                        let intent = FreshIntent::management(&view, &human)?;
+                        let first = redirect(auth.begin(&human, intent, &headers, 100)?)?;
+                        let client = &instance
+                            .oauth_clients
+                            .as_ref()
+                            .unwrap()
+                            .reauthentication
+                            .client_id;
+                        let baseline = port.capture("baseline", &first, client)?;
+                        port.world.advance(1);
+                        let ReauthCallback::Manual(manual) =
+                            auth.complete(&baseline, &human, &headers, 101)?
+                        else {
+                            anyhow::bail!("mounted baseline skipped checkpoint");
+                        };
+                        let handle = manual
+                            .strip_prefix(crate::oauth::shell_oidc::MANUAL_PREFIX)
+                            .context("mounted manual path")?;
+                        let prompt = auth.manual_view(handle, &human, &headers, 101)?;
+                        let sources = [
+                            Digest::new(include_bytes!("shell_oidc.rs")),
+                            Digest::new(include_bytes!("google_begin.rs")),
+                            Digest::new(include_bytes!("fresh_owner.rs")),
+                            Digest::new(include_bytes!("../../../../Cargo.lock")),
+                        ];
+                        let expected_profile =
+                            independently_reconstructed_profile(&instance, &sources)?;
+                        for index in 0..4 {
+                            let mut changed = sources.clone();
+                            changed[index] = Digest::new(b"different qualified source bytes");
+                            ensure!(
+                                independently_reconstructed_profile(&instance, &changed)?
+                                    != expected_profile,
+                                "source substitution retained observation profile"
+                            );
+                        }
+                        // These are independent reader-input substitutions, not qualified
+                        // alternate serving instances or new provider registrations.
+                        for field in 0..6 {
+                            let mut changed = instance.clone();
+                            match field {
+                                0 => {
+                                    changed
+                                        .oauth_clients
+                                        .as_mut()
+                                        .unwrap()
+                                        .reauthentication
+                                        .client_id = "999-reauth.apps.googleusercontent.com".into()
+                                }
+                                1 => {
+                                    changed.security_shell.as_mut().unwrap().origin =
+                                        "https://other-security.example.com".into()
+                                }
+                                2 => {
+                                    changed.identity.as_mut().unwrap().hosted_domain =
+                                        "other.example.com".into()
+                                }
+                                _ => {
+                                    let credential = changed
+                                        .oauth_clients
+                                        .as_ref()
+                                        .unwrap()
+                                        .reauthentication
+                                        .credential
+                                        .clone();
+                                    let day2_capabilities::SecretProvider::GcpVersion {
+                                        project_number,
+                                        secret,
+                                        version,
+                                    } = changed
+                                        .control
+                                        .as_mut()
+                                        .unwrap()
+                                        .secrets
+                                        .get_mut(&credential)
+                                        .unwrap();
+                                    match field {
+                                        3 => {
+                                            *project_number =
+                                                std::num::NonZeroU64::new(12346).unwrap()
+                                        }
+                                        4 => {
+                                            *secret = day2_capabilities::Name::try_from(
+                                                "different_reauth".to_owned(),
+                                            )?
+                                        }
+                                        5 => *version = std::num::NonZeroU64::new(4).unwrap(),
+                                        _ => unreachable!(),
                                     }
-                                    4 => {
-                                        *secret = day2_capabilities::Name::try_from(
-                                            "different_reauth".to_owned(),
-                                        )?
-                                    }
-                                    5 => *version = std::num::NonZeroU64::new(4).unwrap(),
-                                    _ => unreachable!(),
                                 }
                             }
+                            ensure!(
+                                independently_reconstructed_profile(&changed, &sources)?
+                                    != expected_profile,
+                                "metadata substitution retained observation profile"
+                            );
                         }
-                        ensure!(
-                            independently_reconstructed_profile(&changed, &sources)?
-                                != expected_profile,
-                            "metadata substitution retained observation profile"
+                        let expected_correlation = Digest::of(&(
+                            "google-provider-manual-observation-v1",
+                            &expected_profile,
+                            handle,
+                        ))?;
+                        port.external_authentication.store(102, Ordering::SeqCst);
+                        port.world.advance(2);
+                        let mut post = headers.clone();
+                        post.insert(
+                            header::ORIGIN,
+                            HeaderValue::from_static("https://security.example.com"),
                         );
-                    }
-                    let expected_correlation = Digest::of(&(
-                        "google-provider-manual-observation-v1",
-                        &expected_profile,
-                        handle,
-                    ))?;
-                    port.external_authentication.store(102, Ordering::SeqCst);
-                    port.world.advance(2);
-                    let mut post = headers.clone();
-                    post.insert(
-                        header::ORIGIN,
-                        HeaderValue::from_static("https://security.example.com"),
-                    );
-                    post.insert(
-                        header::CONTENT_TYPE,
-                        HeaderValue::from_static("application/x-www-form-urlencoded"),
-                    );
-                    let body = url::form_urlencoded::Serializer::new(String::new())
-                        .append_pair("csrf", &prompt.csrf)
-                        .finish();
-                    let offered = shell.dispatch(
-                        &Method::POST,
-                        &manual,
-                        None,
-                        &post,
-                        body.as_bytes(),
-                        103,
-                    )?;
-                    ensure!(
-                        offered.status() == StatusCode::SEE_OTHER
-                            && !offered.headers().contains_key(header::SET_COOKIE),
-                        "manual produced a session"
-                    );
-                    let query = port.capture(
-                        "fresh",
-                        offered.headers()[header::LOCATION].to_str()?,
-                        client,
-                    )?;
-                    if case == Case::ChangedFreshPending {
-                        port.change_current_pending(&view.id)?;
-                    }
-                    if case == Case::ExpiredFresh {
-                        port.world.advance(297);
-                    }
-                    let mut private_values = port.entropy_inputs.lock().unwrap().clone();
-                    private_values.extend([handle.to_owned(), prompt.csrf]);
-                    Ok((
-                        query,
-                        expected_profile,
-                        expected_correlation,
-                        simulation::snapshot(&crate::store::open(&port.database)?)?,
-                        port.fills.load(Ordering::SeqCst),
-                        private_values,
-                    ))
+                        post.insert(
+                            header::CONTENT_TYPE,
+                            HeaderValue::from_static("application/x-www-form-urlencoded"),
+                        );
+                        let body = url::form_urlencoded::Serializer::new(String::new())
+                            .append_pair("csrf", &prompt.csrf)
+                            .finish();
+                        let offered = shell.dispatch(
+                            &Method::POST,
+                            &manual,
+                            None,
+                            &post,
+                            body.as_bytes(),
+                            103,
+                        )?;
+                        ensure!(
+                            offered.status() == StatusCode::SEE_OTHER
+                                && !offered.headers().contains_key(header::SET_COOKIE),
+                            "manual produced a session"
+                        );
+                        let query = port.capture(
+                            "fresh",
+                            offered.headers()[header::LOCATION].to_str()?,
+                            client,
+                        )?;
+                        if case == Case::ChangedFreshPending {
+                            port.change_current_pending(&view.id)?;
+                        }
+                        if case == Case::ExpiredFresh {
+                            port.world.advance(297);
+                        }
+                        let mut private_values = port.entropy_inputs.lock().unwrap().clone();
+                        private_values.extend([handle.to_owned(), prompt.csrf]);
+                        Ok((
+                            query,
+                            expected_profile,
+                            expected_correlation,
+                            simulation::snapshot(&crate::store::open(&port.database)?)?,
+                            port.fills.load(Ordering::SeqCst),
+                            private_values,
+                        ))
+                    })
                 })
-            })?;
-        private_values.push(setup.human_assertion.clone());
-        let executor = tokio::runtime::Builder::new_current_thread()
+            }
+        };
+        let executor = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
             .enable_all()
             .build()?;
+        let listener = executor.block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))?;
+        let endpoint = format!("http://{}", listener.local_addr()?);
+        let (stop, shutdown) = tokio::sync::oneshot::channel();
+        let (ready, prepared) = std::sync::mpsc::sync_channel(1);
+        let prepare = move || {
+            let result = prepare();
+            match result {
+                Ok(value) => {
+                    ready
+                        .send(Ok(value))
+                        .map_err(|_| anyhow::anyhow!("native fixture driver lost"))?;
+                    Ok(())
+                }
+                Err(error) => {
+                    let _ = ready.send(Err(error.to_string()));
+                    Err(error)
+                }
+            }
+        };
+        let serving_effects =
+            crate::managed_credentials::effects::scope(serving_credentials.clone(), || {
+                effects::scope(port.clone(), crate::managed_credentials::effects::capture)
+            });
+        let server = executor.spawn(serving_effects.run_async(crate::oauth::native_http::serve(
+            crate::oauth::native_http::Endpoint::Prepared(
+                Box::new(crate::oauth::native_http::Endpoint::Shell(shell)),
+                Box::new(prepare),
+            ),
+            listener,
+            1,
+            Arc::new(AtomicBool::new(true)),
+            async {
+                let _ = shutdown.await;
+            },
+        )));
+        let (query, expected_profile, expected_correlation, before, entropy, mut private_values) =
+            prepared
+                .recv_timeout(Duration::from_secs(10))
+                .context("native fixture preparation timed out")?
+                .map_err(anyhow::Error::msg)?;
+        private_values.push(setup.human_assertion.clone());
         executor.block_on(crate::managed_credentials::effects::scope_async(
             serving_credentials,
             effects::scope_async(port.clone(), async {
-                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-                let endpoint = format!("http://{}", listener.local_addr()?);
-                let (stop, shutdown) = tokio::sync::oneshot::channel();
-                let serving_effects = crate::managed_credentials::effects::capture();
-                let server = tokio::spawn(serving_effects.run_async(shell.clone().serve_bounded(
-                    listener,
-                    1,
-                    Arc::new(AtomicBool::new(true)),
-                    async {
-                        let _ = shutdown.await;
-                    },
-                )));
                 let client = reqwest::Client::builder()
                     .no_proxy()
                     .redirect(reqwest::redirect::Policy::none())
@@ -2855,7 +2896,9 @@ mod owned_google {
                     browser.abort();
                     let _ = browser.await;
                     ensure!(
-                        request().send().await?.status() == StatusCode::SERVICE_UNAVAILABLE,
+                        tokio::time::timeout(Duration::from_millis(20), request().send())
+                            .await
+                            .is_err(),
                         "paused observation released native capacity"
                     );
                     let _ = stop.send(());

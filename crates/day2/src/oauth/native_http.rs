@@ -120,6 +120,8 @@ pub(crate) enum Endpoint {
     Receiver(Arc<super::shell_transport::AppApprovalReceiver>),
     #[cfg(test)]
     Test(Arc<tests::Exchange>),
+    #[cfg(test)]
+    Prepared(Box<Endpoint>, Box<dyn FnOnce() -> Result<()> + Send>),
 }
 
 impl Endpoint {
@@ -141,6 +143,8 @@ impl Endpoint {
             Self::Receiver(receiver) => (receiver.native_scopes()?, NativeRole::AppHost),
             #[cfg(test)]
             Self::Test(_) => return Ok(()),
+            #[cfg(test)]
+            Self::Prepared(_, _) => anyhow::bail!("nested native fixture preparation"),
         };
         if scopes.is_empty() {
             return Ok(());
@@ -155,6 +159,8 @@ impl Endpoint {
             Self::Receiver(receiver) => receiver.clone().handle(request).await,
             #[cfg(test)]
             Self::Test(exchange) => exchange.handle(request).await,
+            #[cfg(test)]
+            Self::Prepared(_, _) => panic!("native fixture not prepared"),
         }
     }
 }
@@ -213,6 +219,16 @@ async fn run(
     shutdown: impl Future<Output = ()>,
 ) -> Result<()> {
     let owner = std::thread::current().id();
+    // Fixtures create their originals on this final executor too. Only Send
+    // metadata may return to the test driver; native owners never move.
+    #[cfg(test)]
+    let endpoint = match endpoint {
+        Endpoint::Prepared(endpoint, prepare) => {
+            prepare()?;
+            *endpoint
+        }
+        endpoint => endpoint,
+    };
     endpoint.install()?;
     let (live_sender, mut live_receiver) = tokio::sync::mpsc::channel(32);
     LIVE.with(|slot| slot.replace(Some(live_sender)));
