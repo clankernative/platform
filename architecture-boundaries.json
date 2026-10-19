@@ -361,6 +361,7 @@
             "fs",
             "net",
             "process",
+            "stdio",
             "time"
           ],
           "kind": "normal",
