@@ -70,7 +70,7 @@ impl Channel {
     /// socket. Shape/options are checked again; this alone is no enrollment.
     pub(super) fn startup(acquisition: &mut NativeAcquisition) -> Result<Self> {
         acquisition.remaining()?;
-        let fd = std::io::stdin().as_fd().try_clone_to_owned()?;
+        let fd = rustix::io::fcntl_dupfd_cloexec(rustix::stdio::stdin(), 0)?;
         ensure!(
             net::sockopt::socket_type(&fd)? == SocketType::SEQPACKET
                 && net::sockopt::socket_domain(&fd)? == AddressFamily::UNIX,
@@ -145,6 +145,48 @@ impl Channel {
         acquisition: &mut NativeAcquisition,
     ) -> Result<(Packet, MessageProcess)> {
         let result = (|| {
+            let (packet, received) = self.receive_kernel(acquisition)?;
+            let expected_code = match selection {
+                ExpectedCode::Exact(code) => code,
+                ExpectedCode::Role(policy) => {
+                    let Packet::StageHello { role, .. } = &packet else {
+                        anyhow::bail!("native_enrollment_role_order")
+                    };
+                    policy.code(*role)
+                }
+            };
+            let process = MessageProcess::receive(received, expected_code, acquisition)?;
+            acquisition.remaining()?;
+            Ok((packet, process))
+        })();
+        if result.is_err() {
+            self.refused = true;
+            acquisition.refuse();
+        }
+        result
+    }
+
+    pub(super) fn receive_issuer(
+        &mut self,
+        acquisition: &mut NativeAcquisition,
+    ) -> Result<(Packet, super::issuer_peer::IssuerReceipt)> {
+        let result = (|| {
+            let (packet, received) = self.receive_kernel(acquisition)?;
+            let receipt = super::issuer_peer::IssuerReceipt::receive(received, acquisition)?;
+            Ok((packet, receipt))
+        })();
+        if result.is_err() {
+            self.refused = true;
+            acquisition.refuse();
+        }
+        result
+    }
+
+    fn receive_kernel(
+        &mut self,
+        acquisition: &mut NativeAcquisition,
+    ) -> Result<(Packet, net::ReceivedPidfdPacket)> {
+        let result = (|| {
             ensure!(!self.refused, "native_enrollment_channel_refused");
             let mut bytes = [0_u8; MAX_PACKET];
             let received = loop {
@@ -159,18 +201,8 @@ impl Channel {
                 }
             };
             let packet = protocol::decode(&bytes[..received.bytes])?;
-            let expected_code = match selection {
-                ExpectedCode::Exact(code) => code,
-                ExpectedCode::Role(policy) => {
-                    let Packet::StageHello { role, .. } = &packet else {
-                        anyhow::bail!("native_enrollment_role_order")
-                    };
-                    policy.code(*role)
-                }
-            };
-            let process = MessageProcess::receive(received, expected_code, acquisition)?;
             acquisition.remaining()?;
-            Ok((packet, process))
+            Ok((packet, received))
         })();
         if result.is_err() {
             self.refused = true;
@@ -220,7 +252,7 @@ impl Listener {
 
     pub(super) fn startup(acquisition: &mut NativeAcquisition) -> Result<Self> {
         acquisition.remaining()?;
-        let socket = std::io::stdout().as_fd().try_clone_to_owned()?;
+        let socket = rustix::io::fcntl_dupfd_cloexec(rustix::stdio::stdout(), 0)?;
         ensure!(
             net::sockopt::socket_type(&socket)? == SocketType::SEQPACKET
                 && net::sockopt::socket_domain(&socket)? == AddressFamily::UNIX
