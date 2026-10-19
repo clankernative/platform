@@ -37,7 +37,13 @@ root-owned regular `/run/secrets/day2-native-enrollment-root.pk8`, with no group
 or other permissions. Root and issuer are trusted privileged native processes;
 this arrangement does not claim OS isolation of the root secret from a hostile
 privileged issuer. The Rust key owner exposes signatures and a public key only.
-The issuer never receives the root private key through the protocol.
+The issuer never receives the root private key through the protocol. App and
+Shell remain unprivileged with all capabilities dropped. Their issuer receipt
+retains the real per-message pidfd and requires a fresh signed request/challenge
+from the root-enrolled child key. Executable/namespace measurement of the root
+issuer belongs to the privileged provisioner and issuer's own current native
+checks; clients do not need ptrace access to the issuer. An authenticated birth
+certificate alone cannot reconstruct a receipt or current role owner.
 
 The provisioner starts `/usr/local/bin/day2-native-enrollment issuer` itself,
 retains its actual `Child`, and passes freshly created private sequence-packet
@@ -83,7 +89,10 @@ Sync, Clone nor serializable; certificates cannot recreate them.
 ## Verification limits
 
 Focused tests cover signatures/selections, bounded task joins, real inherited
-sockets, process exit and packet truncation. Dependency tests exercise ancillary
+sockets, process exit and packet truncation. The explicit Linux root fixture
+also launches a user-10001 client with zero effective capabilities: direct
+issuer executable access is denied while root-enrolled pidfd reception succeeds.
+Dependency tests exercise ancillary
 ownership on both Linux backends. These tests do not qualify the selected live
 GKE/runtime profile or turn the existing human/storage refusals into success.
 The immutable dependency pin and real operator boot/profile qualification must
