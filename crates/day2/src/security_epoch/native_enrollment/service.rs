@@ -149,7 +149,7 @@ fn serve(
     channel.send(
         &Packet::StageGrant {
             certificate: issuer.certificate.clone(),
-            stage,
+            stage: Box::new(stage),
         },
         acquisition,
     )?;

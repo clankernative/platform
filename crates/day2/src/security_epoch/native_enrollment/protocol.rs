@@ -105,7 +105,7 @@ pub(super) enum Packet {
     },
     StageGrant {
         certificate: IssuerCertificate,
-        stage: SignedStage,
+        stage: Box<SignedStage>,
     },
 }
 
