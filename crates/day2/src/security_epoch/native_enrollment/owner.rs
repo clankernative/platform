@@ -19,7 +19,14 @@ use crate::security_epoch::native_enrollment::{
 };
 use anyhow::{Result, ensure};
 use day2_capabilities::{Digest, security_epoch::AuthorityScope};
-use std::{marker::PhantomData, rc::Rc, thread::ThreadId, time::Duration};
+use std::{
+    marker::PhantomData,
+    rc::{Rc, Weak},
+    thread::ThreadId,
+    time::Duration,
+};
+
+struct OwnerIdentity;
 
 pub(crate) struct EnrolledProcessRoleOwner {
     policy: EnrollmentPolicy,
@@ -27,6 +34,7 @@ pub(crate) struct EnrolledProcessRoleOwner {
     key: KeyOwner,
     certificate: IssuerCertificate,
     incarnation: Digest,
+    identity: Rc<OwnerIdentity>,
     process: u32,
     thread: ThreadId,
     refused: bool,
@@ -69,6 +77,14 @@ pub(crate) struct EnrolledOriginalClock {
     local: PhantomData<Rc<()>>,
 }
 
+/// Continuity of one actual enrollment owner across distinct bounded phases.
+/// This is neither a current role nor preparation, P3 or human permission.
+pub(crate) struct SameEnrolledOwner {
+    identity: Weak<OwnerIdentity>,
+    incarnation: Digest,
+    refused: bool,
+}
+
 impl EnrolledProcessRoleOwner {
     /// Only operator-selected fixed configuration and the real native exchange
     /// can install a role. Call inside the executor's final owning OS thread.
@@ -100,6 +116,7 @@ impl EnrolledProcessRoleOwner {
                 key,
                 certificate,
                 incarnation,
+                identity: Rc::new(OwnerIdentity),
                 process: std::process::id(),
                 thread: std::thread::current().id(),
                 refused: false,
@@ -229,6 +246,15 @@ impl EnrolledProcessRoleOwner {
 }
 
 impl EnrolledRoleStage<'_> {
+    pub(crate) fn capture_same_owner(&mut self) -> Result<SameEnrolledOwner> {
+        self.check()?;
+        Ok(SameEnrolledOwner {
+            identity: Rc::downgrade(&self.owner.identity),
+            incarnation: self.owner.incarnation.clone(),
+            refused: false,
+        })
+    }
+
     /// The caller must retain this stage through native I/O and final admission.
     /// Returning a bounded clock does not return a role or storage permission.
     pub(crate) fn narrow_io_acquisition(
@@ -297,6 +323,30 @@ impl EnrolledRoleStage<'_> {
         if result.is_err() {
             self.owner.refused = true;
             self.acquisition.refuse();
+        }
+        result
+    }
+}
+
+impl SameEnrolledOwner {
+    pub(crate) fn check(&mut self, stage: &mut EnrolledRoleStage<'_>) -> Result<()> {
+        let result = (|| {
+            ensure!(!self.refused, "native_enrollment_owner_continuity_refused");
+            let original = self
+                .identity
+                .upgrade()
+                .ok_or_else(|| anyhow::anyhow!("native_enrollment_original_owner_dropped"))?;
+            ensure!(
+                Rc::ptr_eq(&original, &stage.owner.identity)
+                    && self.incarnation == stage.owner.incarnation,
+                "native_enrollment_original_owner_replaced"
+            );
+            stage.check()
+        })();
+        if result.is_err() {
+            self.refused = true;
+            stage.owner.refused = true;
+            stage.acquisition.refuse();
         }
         result
     }

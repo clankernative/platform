@@ -32,6 +32,19 @@ macro_rules! assert_secret_references {
 }
 
 const _: () = {
+    assert_consuming!(crate::security_epoch::native_enrollment::SameEnrolledOwner);
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::SameEnrolledOwner,
+        Send
+    );
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::SameEnrolledOwner,
+        Sync
+    );
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::SameEnrolledOwner,
+        std::fmt::Debug
+    );
     assert_consuming!(crate::security_epoch::native_enrollment::EnrolledProcessRoleOwner);
     assert_not_impl!(
         crate::security_epoch::native_enrollment::EnrolledProcessRoleOwner,
