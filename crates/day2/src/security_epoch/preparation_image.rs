@@ -495,6 +495,7 @@ pub(super) mod tests {
                 "kubernetes_service_account":{"name":name,"uid":format!("{name}-ksa-uid")},
                 "google_service_account":account,"workload_kind":if name=="app" { "stateful_set_v1" } else { "deployment_v1" },
                 "workload":{"name":name,"uid":format!("{name}-workload-uid")},
+                "container":{"name":name,"image":Digest::new(format!("{name}-image").as_bytes())},
                 "token_review_audience":"https://kubernetes.default.svc"
             })
         };
@@ -506,9 +507,13 @@ pub(super) mod tests {
                 "service_account":"controller@project-seven.iam.gserviceaccount.com",
                 "service_account_uid":"200000000000000000007"}),"controller"),
             "app":role(serde_json::to_value(iam_source).unwrap(),"app"),
+            "shell":role(serde_json::json!({"kind":"gke_workload_identity_v1",
+                "service_account":"shell@project-seven.iam.gserviceaccount.com",
+                "service_account_uid":"300000000000000000007"}),"shell"),
             "control_store":{"kind":"firestore_authority_database_v1","epoch_store":epoch},
             "runtime_profile":{"kind":"gke_linux_trusted_native_v1","manifest":Digest::new(b"profile"),
-                "controller_code":Digest::new(b"code"),"app_artifact":runtime.artifact().id()},
+                "controller_code":Digest::new(b"code"),"app_host_code":Digest::new(b"app-host-code"),
+                "security_shell_code":Digest::new(b"shell-code"),"app_artifact":runtime.artifact().id()},
             "fresh_storage":{"provider_volume_uid":"provider-volume-uid","mount_binding":Digest::new(b"mount"),
                 "schema_contract":schema,"marker_format":"initial-v1"}
         })).unwrap()
