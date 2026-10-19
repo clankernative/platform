@@ -78,6 +78,8 @@ pub(crate) struct CurrentBootstrapExecution {
     deadline: Duration,
     valid: bool,
     local: PhantomData<Rc<()>>,
+    #[cfg(test)]
+    retention: Option<Rc<()>>,
 }
 
 impl CurrentBootstrapExecution {
@@ -155,6 +157,7 @@ impl CurrentBootstrapExecution {
                 .ok_or_else(|| anyhow::anyhow!("fixture clock overflow"))?,
             valid: true,
             local: PhantomData,
+            retention: None,
         })
     }
 
@@ -162,6 +165,16 @@ impl CurrentBootstrapExecution {
     pub(super) fn lose_original_creator_fixture(&mut self) {
         // Controlled invalidation, not a producer or native file-loss proof.
         self.valid = false;
+    }
+
+    /// Only observes the lifetime of this controlled context. It does not stand
+    /// in for a native file, enrollment, provider or first-holder supplier.
+    #[cfg(test)]
+    pub(super) fn observe_fixture_lifetime(&mut self) -> std::rc::Weak<()> {
+        let owner = Rc::new(());
+        let observed = Rc::downgrade(&owner);
+        self.retention = Some(owner);
+        observed
     }
 }
 
@@ -187,38 +200,105 @@ pub(super) enum AuthorizedDispatch {
     Shared(Box<super::control_slot_io::KnownClaim>),
 }
 
+/// Keep the consuming claim and all of its native owners through the actual
+/// request and response checks. A request/budget tuple would drop those owners
+/// before entering the transport.
+pub(crate) struct PreparedDispatch {
+    owner: AuthorizedDispatch,
+    request: Request,
+    budget: Budget,
+}
+
+/// The response still owns the exact execution context. Its native owners
+/// cannot be dropped before the fixed response parser and final current check.
+pub(crate) struct CounterResponse {
+    dispatch: PreparedDispatch,
+    bytes: Vec<u8>,
+}
+
 impl AuthorizedDispatch {
     pub(super) fn prepare(
-        self,
+        mut self,
         selection: &EpochStore,
         port: &mut impl Port,
-    ) -> Result<(Request, Budget)> {
-        match self {
-            Self::Shared(claim) => (*claim).prepare(selection, port),
+    ) -> Result<PreparedDispatch> {
+        let (request, budget) = match &mut self {
+            Self::Shared(claim) => claim.prepare(selection, port)?,
             #[cfg(test)]
             Self::Create(permit) => {
-                fixture_dispatch(permit.request, permit.context, selection, port)
+                ensure!(
+                    permit.context.selection == Digest::of(selection)?,
+                    "security_epoch_execution_selection_changed"
+                );
+                (permit.request.clone(), permit.context.budget(port)?)
             }
             #[cfg(test)]
             Self::Activate(permit) => {
-                fixture_dispatch(permit.request, permit.context, selection, port)
+                ensure!(
+                    permit.context.selection == Digest::of(selection)?,
+                    "security_epoch_execution_selection_changed"
+                );
+                (permit.request.clone(), permit.context.budget(port)?)
             }
-        }
+        };
+        Ok(PreparedDispatch {
+            owner: self,
+            request,
+            budget,
+        })
     }
 }
 
-#[cfg(test)]
-fn fixture_dispatch(
-    request: Request,
-    mut context: CurrentBootstrapExecution,
-    selection: &EpochStore,
-    port: &mut impl Port,
-) -> Result<(Request, Budget)> {
-    ensure!(
-        context.selection == Digest::of(selection)?,
-        "security_epoch_execution_selection_changed"
-    );
-    Ok((request, context.budget(port)?))
+impl PreparedDispatch {
+    pub(super) fn check(&mut self, selection: &EpochStore, port: &mut impl Port) -> Result<()> {
+        match &mut self.owner {
+            AuthorizedDispatch::Shared(claim) => claim.check(selection, port)?,
+            #[cfg(test)]
+            AuthorizedDispatch::Create(permit) => {
+                ensure!(
+                    permit.context.selection == Digest::of(selection)?,
+                    "security_epoch_execution_selection_changed"
+                );
+                permit.context.sample(port)?;
+            }
+            #[cfg(test)]
+            AuthorizedDispatch::Activate(permit) => {
+                ensure!(
+                    permit.context.selection == Digest::of(selection)?,
+                    "security_epoch_execution_selection_changed"
+                );
+                permit.context.sample(port)?;
+            }
+        }
+        self.budget.remaining(port)?;
+        Ok(())
+    }
+
+    pub(super) fn send(
+        mut self,
+        selection: &EpochStore,
+        port: &mut impl Port,
+    ) -> Result<CounterResponse> {
+        let names = super::firestore::Names::new(selection, self.request.bootstrap(), None)?;
+        let body = super::firestore::commit_body(selection, &self.request)?;
+        self.check(selection, port)?;
+        let bytes = self.budget.call(port, &names.endpoint("commit"), &body)?;
+        self.check(selection, port)?;
+        Ok(CounterResponse {
+            dispatch: self,
+            bytes,
+        })
+    }
+}
+
+impl CounterResponse {
+    pub(super) fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub(super) fn finish(mut self, selection: &EpochStore, port: &mut impl Port) -> Result<()> {
+        self.dispatch.check(selection, port)
+    }
 }
 
 #[cfg(test)]
