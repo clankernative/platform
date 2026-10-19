@@ -127,15 +127,6 @@ impl KeyOwner {
         })
     }
 
-    pub(super) fn from_pkcs8(bytes: &[u8]) -> Result<Self> {
-        let key = Ed25519KeyPair::from_pkcs8(bytes)
-            .map_err(|_| anyhow::anyhow!("native_enrollment_root_key"))?;
-        Ok(Self {
-            key,
-            local: PhantomData,
-        })
-    }
-
     pub(super) fn public(&self) -> String {
         URL_SAFE_NO_PAD.encode(self.key.public_key().as_ref())
     }
@@ -150,6 +141,10 @@ fn frame<T: Serialize>(purpose: &str, value: &T) -> Result<Vec<u8>> {
     let bytes = serde_json::to_vec(&("day2-native-enrollment-v1", purpose, value))?;
     ensure!(bytes.len() <= MAX_PACKET, "native_enrollment_frame_bound");
     Ok(bytes)
+}
+
+pub(super) fn issuer_birth_frame(data: &IssuerData) -> Result<Vec<u8>> {
+    frame("issuer-birth", data)
 }
 
 pub(super) fn verify<T: Serialize>(
@@ -174,14 +169,14 @@ impl IssuerCertificate {
     pub(super) fn verify(&self, policy: &EnrollmentPolicy) -> Result<()> {
         ensure!(
             self.data.policy == policy.digest()?
-                && self.data.root_version == policy.root_version
+                && self.data.root_version == policy.root.version
                 && self.data.process.code == policy.issuer_code
                 && self.data.provisioner.code == policy.provisioner_code,
             "native_enrollment_issuer_selection"
         );
         decode_key(&self.data.public_key)?;
         verify(
-            &policy.root_public_key,
+            &policy.root.public_key,
             "issuer-birth",
             &self.data,
             &self.signature,

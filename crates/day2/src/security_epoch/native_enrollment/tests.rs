@@ -14,8 +14,10 @@ pub(super) fn policy(root: &KeyOwner) -> EnrollmentPolicy {
     EnrollmentPolicy {
         bootstrap,
         store,
-        root_version: "root-one".into(),
-        root_public_key: root.public(),
+        root: super::root_kms::KmsRootSelection {
+            version: "projects/test-project/locations/us-central1/keyRings/enrollment/cryptoKeys/root/cryptoKeyVersions/1".into(),
+            public_key: root.public(),
+        },
         provisioner_code: Digest::new(b"provisioner"),
         issuer_code: Digest::new(b"issuer"),
         runtime: RuntimeSelection {
@@ -72,7 +74,7 @@ fn issuer_certificate_requires_selected_root_generation_code_and_company() {
     let selected = policy(&root);
     let data = IssuerData {
         policy: selected.digest().unwrap(),
-        root_version: selected.root_version.clone(),
+        root_version: selected.root.version.clone(),
         nonce: Digest::new(b"original-birth"),
         public_key: issuer.public(),
         process: process(selected.issuer_code.clone()),
@@ -86,8 +88,8 @@ fn issuer_certificate_requires_selected_root_generation_code_and_company() {
     for changed in ["root", "version", "scope", "code", "profile"] {
         let mut policy = selected.clone();
         match changed {
-            "root" => policy.root_public_key = KeyOwner::generate().unwrap().public(),
-            "version" => policy.root_version = "root-two".into(),
+            "root" => policy.root.public_key = KeyOwner::generate().unwrap().public(),
+            "version" => policy.root.version = policy.root.version.replace("/1", "/2"),
             "scope" => policy.bootstrap.scope.app = serde_json::from_str("\"other\"").unwrap(),
             "code" => policy.issuer_code = Digest::new(b"replacement"),
             "profile" => {
