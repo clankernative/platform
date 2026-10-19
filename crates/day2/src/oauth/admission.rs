@@ -198,32 +198,41 @@ impl ArtifactShellSigner {
         now: i64,
     ) -> Result<super::management::Attestation> {
         proof.require_management_authentication()?;
-        let state = self
-            .state
-            .read()
-            .map_err(|_| anyhow::anyhow!("OAuth shell selection lock poisoned"))?;
-        let selected = management_selection(&state.selected, view)?;
-        let reference = &selected.shell_attestation;
-        let key = state
-            .keys
-            .as_ref()
-            .context("OAuth shell key provider missing")?
-            .load(reference, ApprovalKeyPurpose::ShellAttestation)?;
-        ensure!(
-            key.binding == reference.binding
-                && key.version == reference.version
-                && key.purpose == ApprovalKeyPurpose::ShellAttestation,
-            "OAuth management key changed"
-        );
-        let at = proof.observe_current(now)?;
-        super::management::Attestation::sign(
-            view,
-            proof,
-            identity,
-            session,
-            &key.bytes,
-            key.version,
-            at,
+        let intent = super::fresh_auth::FreshIntent::management(view, identity)?;
+        super::native_management::with_current_original(
+            &intent,
+            super::native_management::Phase::Signature,
+            now,
+            |role, original| {
+                let state = self
+                    .state
+                    .read()
+                    .map_err(|_| anyhow::anyhow!("OAuth shell selection lock poisoned"))?;
+                let selected = management_selection(&state.selected, view)?;
+                let reference = &selected.shell_attestation;
+                let key = state
+                    .keys
+                    .as_ref()
+                    .context("OAuth shell key provider missing")?
+                    .load(reference, ApprovalKeyPurpose::ShellAttestation)?;
+                ensure!(
+                    key.binding == reference.binding
+                        && key.version == reference.version
+                        && key.purpose == ApprovalKeyPurpose::ShellAttestation,
+                    "OAuth management key changed"
+                );
+                let at = proof.observe_current(now)?;
+                original.check(role)?;
+                super::management::Attestation::sign(
+                    view,
+                    proof,
+                    identity,
+                    session,
+                    &key.bytes,
+                    key.version,
+                    at,
+                )
+            },
         )
     }
 

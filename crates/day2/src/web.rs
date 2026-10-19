@@ -121,7 +121,7 @@ fn page_content_or_acknowledgement(
     }
 }
 
-struct Host {
+pub(crate) struct Host {
     entropy: Arc<dyn Entropy>,
     clock: Arc<dyn Clock>,
     live_ticks: Arc<dyn LiveTicks>,
@@ -495,14 +495,27 @@ impl LocalServer {
         let admitting = self.host.admitting.clone();
         let shutdown_admission = admitting.clone();
         let shutdown_stop = stop.clone();
-        let router = Router::new().fallback(handle).with_state(self.host);
-        let result = axum::serve(self.listener, router)
-            .with_graceful_shutdown(async move {
-                shutdown.await;
-                shutdown_admission.store(false, Ordering::Release);
-                let _ = shutdown_stop.send(true);
-            })
-            .await;
+        let shutdown = async move {
+            shutdown.await;
+            shutdown_admission.store(false, Ordering::Release);
+            let _ = shutdown_stop.send(true);
+        };
+        let result = if self.host.oauth.is_some() {
+            crate::oauth::native_http::serve(
+                crate::oauth::native_http::Endpoint::App(self.host),
+                self.listener,
+                MAX_QUEUED,
+                admitting.clone(),
+                shutdown,
+            )
+            .await
+        } else {
+            let router = Router::new().fallback(handle).with_state(self.host);
+            axum::serve(self.listener, router)
+                .with_graceful_shutdown(shutdown)
+                .await
+                .map_err(Into::into)
+        };
         // Also stop after an unexpected server exit. Already admitted requests
         // and blocking native calls may still finish; shutdown does not undo
         // their transactions or interrupt external calls. Await pump settlement.
@@ -535,10 +548,12 @@ async fn queued_permit(host: &Host, wait: Duration) -> Option<tokio::sync::Owned
         return None;
     }
     let _waiting = Waiting(&host.queued);
-    tokio::time::timeout(wait, host.capacity.clone().acquire_owned())
-        .await
-        .ok()?
-        .ok()
+    crate::oauth::native_http::timer(|| {
+        tokio::time::timeout(wait, host.capacity.clone().acquire_owned())
+    })
+    .await
+    .ok()?
+    .ok()
 }
 
 /// Health answers `200 OK` with an empty body, not `204`: a Google Cloud load
@@ -556,6 +571,19 @@ fn health_response(method: &Method, ready: bool) -> Response {
 }
 
 async fn handle(State(host): State<Arc<Host>>, request: Request) -> Response {
+    handle_native(host, request).await
+}
+
+pub(crate) fn native_scopes(
+    host: &Host,
+) -> Result<Vec<day2_capabilities::security_epoch::AuthorityScope>> {
+    host.oauth
+        .as_ref()
+        .context("native OAuth receiver missing")?
+        .native_scopes()
+}
+
+pub(crate) async fn handle_native(host: Arc<Host>, request: Request) -> Response {
     host.credential_effects
         .clone()
         .run_async(handle_inner(host, request))
