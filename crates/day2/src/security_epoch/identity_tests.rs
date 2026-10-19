@@ -16,6 +16,7 @@ fn role() -> GkeRoleSelection {
         "kubernetes_service_account":{"name":"controller","uid":"ksa-uid"},
         "google_service_account":{"kind":"gke_workload_identity_v1","service_account":"controller@project-seven.iam.gserviceaccount.com","service_account_uid":"100000000000000000007"},
         "workload_kind":"deployment_v1","workload":{"name":"controller","uid":"deployment-uid"},
+        "container":{"name":"day2","image":Digest::new(b"image")},
         "token_review_audience":"https://native.example/subject"
     })).unwrap()
 }

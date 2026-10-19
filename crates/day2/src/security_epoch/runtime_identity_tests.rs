@@ -1,11 +1,7 @@
 //! Independent fixed kernel/response DATA fixtures. Actual retained descriptors
 //! require Linux cases; no fixture promotes JSON/IDs into runtime authority.
 
-use super::{
-    identity_protocol::ReviewedSubject,
-    namespace_protocol as proc,
-    runtime_profile::{self, ContainerSelection},
-};
+use super::{identity_protocol::ReviewedSubject, namespace_protocol as proc, runtime_profile};
 use day2_capabilities::{Digest, security_epoch::bootstrap::GkeRoleSelection};
 use serde_json::{Value, json};
 
@@ -96,47 +92,39 @@ fn complete_mapping_parser_preserves_paths_and_refuses_overlap_shape_and_truncat
     assert!(proc::mappings(b"00400000-00401000 rwxp 0 08:01 73 /native\n").is_ok());
 }
 
-fn fixture() -> (GkeRoleSelection, ReviewedSubject, ContainerSelection, Value) {
+fn fixture() -> (GkeRoleSelection, ReviewedSubject, Value) {
     let role: GkeRoleSelection=serde_json::from_value(json!({
         "namespace":{"name":"native","uid":"namespace-uid"},"kubernetes_service_account":{"name":"controller","uid":"ksa-uid"},
         "google_service_account":{"kind":"gke_workload_identity_v1","service_account":"controller@project-seven.iam.gserviceaccount.com","service_account_uid":"100000000000000000007"},
-        "workload_kind":"deployment_v1","workload":{"name":"controller","uid":"deployment-uid"},"token_review_audience":"https://native.example/subject"
+        "workload_kind":"deployment_v1","workload":{"name":"controller","uid":"deployment-uid"},
+        "container":{"name":"day2","image":Digest::new(b"image")},"token_review_audience":"https://native.example/subject"
     })).unwrap();
     let subject = ReviewedSubject {
         pod_name: "controller-abc".into(),
         pod_uid: "pod-uid".into(),
     };
-    let image = Digest::new(b"image");
-    let selected = ContainerSelection {
-        name: "day2".into(),
-        image: image.clone(),
-    };
+    let image = role.container.image.clone();
     let value = json!({"apiVersion":"v1","kind":"Pod","metadata":{"name":"controller-abc","uid":"pod-uid","namespace":"native",
         "ownerReferences":[{"apiVersion":"apps/v1","kind":"ReplicaSet","name":"controller-rs","uid":"replica-uid","controller":true}]},
         "spec":{"serviceAccountName":"controller","nodeName":"node-seven","containers":[{"name":"day2","image":format!("registry/native@{}",image.as_str())}]},
         "status":{"phase":"Running","containerStatuses":[{"name":"day2","started":true,"ready":true,"state":{"running":{"startedAt":"2026-10-14T00:00:00Z"}},
             "containerID":format!("containerd://{}","7".repeat(64)),"imageID":format!("docker-pullable://registry/native@{}",image.as_str()),"restartCount":0}]}});
-    (role, subject, selected, value)
+    (role, subject, value)
 }
 
 #[test]
 fn selected_container_response_is_data_and_refuses_replacement_ambiguous_or_unpinned_image() {
-    let (role, subject, selected, good) = fixture();
+    let (role, subject, good) = fixture();
     let bytes = serde_json::to_vec(&good).unwrap();
-    let facts = runtime_profile::container(&role, &subject, &selected, &bytes).unwrap();
+    let facts = runtime_profile::container(&role, &subject, &bytes).unwrap();
     assert_eq!(facts.pod_uid, "pod-uid");
-    assert_eq!(facts.image, selected.image);
+    assert_eq!(facts.image, role.container.image);
     let mut not_ready = good.clone();
     not_ready["status"]["containerStatuses"][0]["started"] = json!(false);
     not_ready["status"]["containerStatuses"][0]["ready"] = json!(false);
     assert!(
-        runtime_profile::container(
-            &role,
-            &subject,
-            &selected,
-            &serde_json::to_vec(&not_ready).unwrap()
-        )
-        .is_ok()
+        runtime_profile::container(&role, &subject, &serde_json::to_vec(&not_ready).unwrap())
+            .is_ok()
     );
     for (pointer, value) in [
         ("/metadata/uid", json!("replacement")),
@@ -157,13 +145,8 @@ fn selected_container_response_is_data_and_refuses_replacement_ambiguous_or_unpi
         let mut bad = good.clone();
         *bad.pointer_mut(pointer).unwrap() = value;
         assert!(
-            runtime_profile::container(
-                &role,
-                &subject,
-                &selected,
-                &serde_json::to_vec(&bad).unwrap()
-            )
-            .is_err(),
+            runtime_profile::container(&role, &subject, &serde_json::to_vec(&bad).unwrap())
+                .is_err(),
             "{pointer}"
         );
     }
@@ -174,27 +157,20 @@ fn selected_container_response_is_data_and_refuses_replacement_ambiguous_or_unpi
         .unwrap()
         .push(extra);
     assert!(
-        runtime_profile::container(
-            &role,
-            &subject,
-            &selected,
-            &serde_json::to_vec(&duplicate).unwrap()
-        )
-        .is_err()
+        runtime_profile::container(&role, &subject, &serde_json::to_vec(&duplicate).unwrap())
+            .is_err()
     );
     // No CurrentRuntimeBinding factory or role permission exists in this codec.
 }
 
 #[test]
 fn selected_container_profile_refuses_malformed_names_and_digest_references() {
-    let (role, subject, selected, good) = fixture();
+    let (role, subject, good) = fixture();
     for name in ["-day2", "day2-", "Day2", "day2..other", ""] {
-        let bad = ContainerSelection {
-            name: name.into(),
-            image: selected.image.clone(),
-        };
+        let mut bad = role.clone();
+        bad.container.name = name.into();
         assert!(
-            runtime_profile::container(&role, &subject, &bad, &serde_json::to_vec(&good).unwrap())
+            runtime_profile::container(&bad, &subject, &serde_json::to_vec(&good).unwrap())
                 .unwrap_err()
                 .to_string()
                 .contains("container_selection")
@@ -212,13 +188,8 @@ fn selected_container_profile_refuses_malformed_names_and_digest_references() {
         let mut bad = good.clone();
         bad["spec"]["nodeName"] = json!(node);
         assert!(
-            runtime_profile::container(
-                &role,
-                &subject,
-                &selected,
-                &serde_json::to_vec(&bad).unwrap()
-            )
-            .is_err()
+            runtime_profile::container(&role, &subject, &serde_json::to_vec(&bad).unwrap())
+                .is_err()
         );
     }
     for repository in [
@@ -229,16 +200,46 @@ fn selected_container_profile_refuses_malformed_names_and_digest_references() {
     ] {
         let mut bad = good.clone();
         bad["status"]["containerStatuses"][0]["imageID"] =
-            json!(format!("{repository}@{}", selected.image.as_str()));
+            json!(format!("{repository}@{}", role.container.image.as_str()));
         assert!(
-            runtime_profile::container(
-                &role,
-                &subject,
-                &selected,
-                &serde_json::to_vec(&bad).unwrap()
-            )
-            .is_err()
+            runtime_profile::container(&role, &subject, &serde_json::to_vec(&bad).unwrap())
+                .is_err()
         );
+    }
+}
+
+#[test]
+fn container_response_cannot_replace_the_workload_selected_container() {
+    let (role, subject, good) = fixture();
+    let bytes = serde_json::to_vec(&good).unwrap();
+    let mut replacement = role.clone();
+    replacement.container.name = "security-shell".into();
+    assert!(runtime_profile::container(&replacement, &subject, &bytes).is_err());
+    let mut replacement = role.clone();
+    replacement.container.image = Digest::new(b"different-selected-image");
+    assert!(runtime_profile::container(&replacement, &subject, &bytes).is_err());
+    assert!(runtime_profile::container(&role, &subject, &bytes).is_ok());
+}
+
+#[test]
+fn selected_app_and_shell_code_do_not_enable_native_epoch_readers() {
+    use day2_capabilities::security_epoch::bootstrap::NativeRole;
+    let store = super::tests::selection();
+    let policy = super::control_slot_tests::policy(&store);
+    for (role, expected) in [
+        (
+            NativeRole::AppHost,
+            "epoch_native_app_executable_profile_producer_unavailable",
+        ),
+        (
+            NativeRole::SecurityShell,
+            "epoch_native_shell_executable_profile_producer_unavailable",
+        ),
+    ] {
+        let error = super::AuthenticatedReads::acquire(&policy, &store, role)
+            .err()
+            .unwrap();
+        assert_eq!(error.to_string(), expected);
     }
 }
 
