@@ -202,10 +202,19 @@ const _: () = {
     );
     assert_not_impl!(crate::security_epoch::control_slot_io::KnownClaim, Send);
     assert_not_impl!(crate::security_epoch::control_slot_io::KnownClaim, Sync);
-    assert_consuming!(crate::security_epoch::AuthenticatedReads);
-    assert_not_impl!(crate::security_epoch::AuthenticatedReads, std::fmt::Debug);
-    assert_not_impl!(crate::security_epoch::AuthenticatedReads, Send);
-    assert_not_impl!(crate::security_epoch::AuthenticatedReads, Sync);
+    assert_consuming!(crate::security_epoch::AuthenticatedReads<'static, 'static>);
+    assert_not_impl!(
+        crate::security_epoch::AuthenticatedReads<'static, 'static>,
+        std::fmt::Debug
+    );
+    assert_not_impl!(
+        crate::security_epoch::AuthenticatedReads<'static, 'static>,
+        Send
+    );
+    assert_not_impl!(
+        crate::security_epoch::AuthenticatedReads<'static, 'static>,
+        Sync
+    );
     assert_consuming!(crate::security_epoch::NativeAcquisition);
     assert_not_impl!(crate::security_epoch::NativeAcquisition, std::fmt::Debug);
     assert_not_impl!(crate::security_epoch::NativeAcquisition, Send);
