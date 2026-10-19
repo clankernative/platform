@@ -150,6 +150,20 @@ const _: () = {
     assert_not_impl!(crate::security_epoch::EpochObservation, Send);
     assert_not_impl!(crate::security_epoch::EpochObservation, Sync);
     assert_consuming!(crate::security_epoch::journal::CurrentBootstrapExecution);
+    assert_consuming!(crate::security_epoch::journal::PreparedDispatch);
+    assert_not_impl!(
+        crate::security_epoch::journal::PreparedDispatch,
+        std::fmt::Debug
+    );
+    assert_not_impl!(crate::security_epoch::journal::PreparedDispatch, Send);
+    assert_not_impl!(crate::security_epoch::journal::PreparedDispatch, Sync);
+    assert_consuming!(crate::security_epoch::journal::CounterResponse);
+    assert_not_impl!(
+        crate::security_epoch::journal::CounterResponse,
+        std::fmt::Debug
+    );
+    assert_not_impl!(crate::security_epoch::journal::CounterResponse, Send);
+    assert_not_impl!(crate::security_epoch::journal::CounterResponse, Sync);
     assert_not_impl!(
         crate::security_epoch::journal::CurrentBootstrapExecution,
         std::fmt::Debug
