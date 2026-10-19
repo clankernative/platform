@@ -1,7 +1,7 @@
 {
   "version": 1,
   "trait_checks": [
-    {"source":"crates/day2/src/structural_proofs.rs","scope":"module","fingerprint":"sha256:7a9038042e5f7ec0e94e353f0374d5035350041b41b821b6eda46f9802beb906","registration":{"source":"crates/day2/src/lib.rs","module":"structural_proofs"}},
+    {"source":"crates/day2/src/structural_proofs.rs","scope":"module","fingerprint":"sha256:39fff2985a62ca0c1a9ddab41461f4c8123a6311775639faf4cb5afc75c7bb6f","registration":{"source":"crates/day2/src/lib.rs","module":"structural_proofs"}},
     {"source":"crates/day2-control/src/release.rs","scope":"const","fingerprint":"sha256:9c616765ed20205205236e2e4d7cc7a77a49512dcd9d0c33c34e1c40da5209e3","registration":null}
   ],
   "proofs": [
@@ -868,6 +868,7 @@
       "type_name": "EnrolledRoleStage",
       "owning_children": [],
       "methods": [
+        "pub (crate) fn capture_same_owner (& mut self) -> Result < SameEnrolledOwner >",
         "pub (crate) fn check (& mut self) -> Result < () >",
         "pub (crate) fn check_for (& mut self , scope : & AuthorityScope , role : NativeRole) -> Result < () >",
         "pub (crate) fn check_selection (& mut self , policy : & day2_capabilities :: security_epoch :: bootstrap :: InitialBootstrapPolicy , store : & day2_capabilities :: security_epoch :: EpochStore , role : NativeRole) -> Result < () >",
@@ -894,6 +895,10 @@
         },
         {
           "owner": "EnrolledRoleStage < '_ >",
+          "signature": "pub (crate) fn capture_same_owner (& mut self) -> Result < SameEnrolledOwner >"
+        },
+        {
+          "owner": "EnrolledRoleStage < '_ >",
           "signature": "pub (crate) fn check (& mut self) -> Result < () >"
         },
         {
@@ -907,6 +912,33 @@
         {
           "owner": "EnrolledRoleStage < '_ >",
           "signature": "pub (crate) fn narrow_io_acquisition (& mut self , max_lease_seconds : u32) -> Result < NativeAcquisition >"
+        },
+        {
+          "owner": "SameEnrolledOwner",
+          "signature": "pub (crate) fn check (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+      "type_name": "SameEnrolledOwner",
+      "owning_children": [],
+      "methods": [
+        "pub (crate) fn check (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+      ],
+      "factories": [
+        {
+          "owner": "EnrolledRoleStage < '_ >",
+          "signature": "pub (crate) fn capture_same_owner (& mut self) -> Result < SameEnrolledOwner >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "SameEnrolledOwner",
+          "signature": "pub (crate) fn check (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
         }
       ],
       "proof_uses": [],
