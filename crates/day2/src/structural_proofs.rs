@@ -63,6 +63,10 @@ const _: () = {
     assert_not_impl!(crate::security_epoch::OriginalCreatorFd, std::fmt::Debug);
     assert_not_impl!(crate::security_epoch::OriginalCreatorFd, Send);
     assert_not_impl!(crate::security_epoch::OriginalCreatorFd, Sync);
+    assert_consuming!(crate::security_epoch::PreparedInitialFile);
+    assert_not_impl!(crate::security_epoch::PreparedInitialFile, std::fmt::Debug);
+    assert_not_impl!(crate::security_epoch::PreparedInitialFile, Send);
+    assert_not_impl!(crate::security_epoch::PreparedInitialFile, Sync);
     assert_consuming!(crate::security_epoch::BeforeAttemptRefusal);
     assert_not_impl!(crate::security_epoch::BeforeAttemptRefusal, std::fmt::Debug);
     assert_not_impl!(crate::security_epoch::BeforeAttemptRefusal, Send);
