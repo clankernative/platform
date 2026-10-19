@@ -1,7 +1,7 @@
 {
   "version": 1,
   "trait_checks": [
-    {"source":"crates/day2/src/structural_proofs.rs","scope":"module","fingerprint":"sha256:85ce63a7d114d412e8f30072009ac24560418207241dcda78894e50f9b76eeef","registration":{"source":"crates/day2/src/lib.rs","module":"structural_proofs"}},
+    {"source":"crates/day2/src/structural_proofs.rs","scope":"module","fingerprint":"sha256:35dd6b5784c4205e9b992de34f206767df01a749e038c6f6ef83b77f7f7ccb77","registration":{"source":"crates/day2/src/lib.rs","module":"structural_proofs"}},
     {"source":"crates/day2-control/src/release.rs","scope":"const","fingerprint":"sha256:9c616765ed20205205236e2e4d7cc7a77a49512dcd9d0c33c34e1c40da5209e3","registration":null}
   ],
   "proofs": [
@@ -203,6 +203,7 @@
         "pub (super) fn check (& mut self , selection : & EpochStore , request : & Request , snapshot : & Snapshot , purpose : Purpose , port : & mut impl Port) -> Result < () >",
         "pub (super) fn fixture (selection : & EpochStore , request : & Request , snapshot : & Snapshot , purpose : Purpose , sample : Sample) -> Result < Self >",
         "pub (super) fn lose_original_creator_fixture (& mut self)",
+        "pub (super) fn observe_fixture_lifetime (& mut self) -> std :: rc :: Weak < () >",
         "fn sample (& mut self , port : & mut impl Port) -> Result < Sample >"
       ],
       "factories": [],
@@ -592,10 +593,15 @@
       "type_name": "KnownClaim",
       "owning_children": [],
       "methods": [
-        "pub (super) fn prepare (mut self , selection : & EpochStore , port : & mut impl Port) -> Result < (Request , Budget) >",
+        "pub (super) fn check (& mut self , selection : & EpochStore , port : & mut impl Port) -> Result < () >",
+        "pub (super) fn prepare (mut self , selection : & EpochStore , port : & mut impl Port) -> Result < (Self , Request , Budget) >",
         "pub (super) fn send (self , selection : & EpochStore , port : & mut impl Port) -> Result < () >"
       ],
       "factories": [
+        {
+          "owner": "KnownClaim",
+          "signature": "pub (super) fn prepare (mut self , selection : & EpochStore , port : & mut impl Port) -> Result < (Self , Request , Budget) >"
+        },
         {
           "owner": "SlotClaimMutation",
           "signature": "pub (super) fn send (self , selection : & EpochStore , port : & mut impl Port) -> Result < KnownClaim >"
@@ -649,6 +655,13 @@
       "source": "crates/day2/src/security_epoch/storage_authority.rs",
       "type_name": "NativeStorageCreationAuthority",
       "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/storage_authority/persistent_disk.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/storage_authority.rs",
+            "module": "persistent_disk"
+          }
+        },
         {
           "source": "crates/day2/src/security_epoch/storage_authority/preparation.rs",
           "registration": {
@@ -722,6 +735,10 @@
         {
           "owner": "OriginalCreatorFd",
           "signature": "pub (super) fn check_unchanged_initial_file (& mut self , plan : & ReviewedFileLayout , acquisition : & mut NativeAcquisition) -> Result < () >"
+        },
+        {
+          "owner": "PreparedInitialFile",
+          "signature": "pub (super) fn retain_original (creator : OriginalCreatorFd , layout : ReviewedFileLayout , acquisition : NativeAcquisition) -> Self"
         }
       ],
       "proof_uses": [],
@@ -778,6 +795,95 @@
         }
       ],
       "material_uses": [],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/journal.rs",
+      "type_name": "CounterResponse",
+      "owning_children": [],
+      "methods": [
+        "pub (super) fn bytes (& self) -> & [u8]",
+        "pub (super) fn finish (mut self , selection : & EpochStore , port : & mut impl Port) -> Result < () >"
+      ],
+      "factories": [
+        {
+          "owner": "PreparedDispatch",
+          "signature": "pub (super) fn send (mut self , selection : & EpochStore , port : & mut impl Port) -> Result < CounterResponse >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "CounterResponse",
+          "signature": "pub (super) fn bytes (& self) -> & [u8]"
+        },
+        {
+          "owner": "CounterResponse",
+          "signature": "pub (super) fn finish (mut self , selection : & EpochStore , port : & mut impl Port) -> Result < () >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": [
+        "finish"
+      ]
+    },
+    {
+      "source": "crates/day2/src/security_epoch/journal.rs",
+      "type_name": "PreparedDispatch",
+      "owning_children": [],
+      "methods": [
+        "pub (super) fn check (& mut self , selection : & EpochStore , port : & mut impl Port) -> Result < () >",
+        "pub (super) fn send (mut self , selection : & EpochStore , port : & mut impl Port) -> Result < CounterResponse >"
+      ],
+      "factories": [
+        {
+          "owner": "AuthorizedDispatch",
+          "signature": "pub (super) fn prepare (self , selection : & EpochStore , port : & mut impl Port) -> Result < PreparedDispatch >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "PreparedDispatch",
+          "signature": "pub (super) fn check (& mut self , selection : & EpochStore , port : & mut impl Port) -> Result < () >"
+        },
+        {
+          "owner": "PreparedDispatch",
+          "signature": "pub (super) fn send (mut self , selection : & EpochStore , port : & mut impl Port) -> Result < CounterResponse >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": [
+        "send"
+      ]
+    },
+    {
+      "source": "crates/day2/src/security_epoch/storage_authority/preparation.rs",
+      "type_name": "PreparedInitialFile",
+      "owning_children": [],
+      "methods": [
+        "pub (crate) fn check_original (& mut self) -> Result < () >",
+        "pub (crate) fn projection (& mut self) -> Result < crate :: security_epoch :: PreparedFileProjection >",
+        "pub (super) fn retain_original (creator : OriginalCreatorFd , layout : ReviewedFileLayout , acquisition : NativeAcquisition) -> Self"
+      ],
+      "factories": [
+        {
+          "owner": "PreparedInitialFile",
+          "signature": "pub (super) fn retain_original (creator : OriginalCreatorFd , layout : ReviewedFileLayout , acquisition : NativeAcquisition) -> Self"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "PreparedInitialFile",
+          "signature": "pub (crate) fn check_original (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "PreparedInitialFile",
+          "signature": "pub (crate) fn projection (& mut self) -> Result < crate :: security_epoch :: PreparedFileProjection >"
+        }
+      ],
       "proof_uses": [],
       "kind": "private_material",
       "consuming_methods": []
