@@ -373,6 +373,7 @@
         "pub (super) fn begin (max_lease_seconds : u32) -> Result < Self >",
         "pub (super) fn budget (& mut self) -> Result < Budget >",
         "pub (super) fn fixture (domain : Digest , process : u32 , origin : Duration , limit : Duration) -> Self",
+        "pub (super) fn interval_data (& mut self) -> Result < (Duration , Duration) >",
         "fn observe (& mut self , now : Duration) -> Result < Sample >",
         "pub (super) fn refuse (& mut self)",
         "pub (super) fn remaining (& mut self) -> Result < Duration >",
@@ -385,6 +386,10 @@
         }
       ],
       "material_uses": [
+        {
+          "owner": "NativeAcquisition",
+          "signature": "pub (super) fn interval_data (& mut self) -> Result < (Duration , Duration) >"
+        },
         {
           "owner": "NativeAcquisition",
           "signature": "fn observe (& mut self , now : Duration) -> Result < Sample >"
@@ -616,6 +621,7 @@
       "methods": [
         "pub (super) fn acquire (acquisition : & mut NativeAcquisition) -> Result < Self >",
         "pub (super) fn check (& mut self , acquisition : & mut NativeAcquisition) -> Result < () >",
+        "pub (super) fn data (& self) -> & NamespaceFacts",
         "pub (super) fn into_data (self) -> NamespaceFacts",
         "pub (super) fn mappings (& mut self , acquisition : & mut NativeAcquisition) -> Result < Vec < namespace_protocol :: Mapping > >"
       ],
@@ -629,6 +635,10 @@
         {
           "owner": "NativeNamespaceObservation",
           "signature": "pub (super) fn check (& mut self , acquisition : & mut NativeAcquisition) -> Result < () >"
+        },
+        {
+          "owner": "NativeNamespaceObservation",
+          "signature": "pub (super) fn data (& self) -> & NamespaceFacts"
         },
         {
           "owner": "NativeNamespaceObservation",

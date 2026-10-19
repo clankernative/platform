@@ -1,6 +1,7 @@
 //! Stable native executor ownership. Nothing here adopts a parsed certificate as
 //! authority, moves a role between threads, or renews a failed original.
 
+use crate::security_epoch::native_clock::{NativeAcquisition, boottime};
 #[cfg(target_os = "linux")]
 use crate::security_epoch::native_enrollment::protocol;
 use crate::security_epoch::native_enrollment::{
@@ -15,7 +16,6 @@ use crate::security_epoch::native_enrollment::{
     protocol::{Packet, SignedStage},
     runtime,
 };
-use crate::security_epoch::native_clock::{NativeAcquisition, boottime};
 use anyhow::{Result, ensure};
 use day2_capabilities::{Digest, security_epoch::AuthorityScope};
 use std::{marker::PhantomData, rc::Rc, thread::ThreadId, time::Duration};
@@ -113,68 +113,64 @@ impl EnrolledProcessRoleOwner {
     }
 
     pub(crate) fn begin_current_stage(&mut self) -> Result<EnrolledRoleStage<'_>> {
-        let result = (|| {
-            let mut acquisition = NativeAcquisition::begin(5)?;
-            self.check_local()?;
-            #[cfg(target_os = "linux")]
-            {
-                ensure!(
-                    super::birth::load_policy(&mut acquisition)? == self.policy,
-                    "native_enrollment_operator_selection_changed"
-                );
-                self.issuer.check_identity(&mut acquisition)?;
-                self.certificate.verify(&self.policy)?;
-                let mut current =
-                    SelfSnapshot::acquire(self.policy.code(self.role), &mut acquisition)?;
-                ensure!(
-                    current.data == self.self_data,
-                    "native_enrollment_self_changed"
-                );
-                let (certificate, grant, grant_peer, nonce_peer, channel) = exchange(
-                    &self.policy,
-                    self.role,
-                    &self.key,
-                    &mut current,
-                    &mut acquisition,
-                )?;
-                ensure!(
-                    certificate == self.certificate && grant.data.runtime == self.binding,
-                    "native_enrollment_incarnation_or_runtime_changed"
-                );
-                self.issuer.check_identity(&mut acquisition)?;
-                Ok((acquisition, current, grant, grant_peer, nonce_peer, channel))
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
-                let _ = &mut acquisition;
-                anyhow::bail!("native_enrollment_platform_unsupported");
-                #[allow(unreachable_code)]
-                Ok(())
-            }
-        })();
-        if result.is_err() {
+        #[cfg(not(target_os = "linux"))]
+        {
             self.refused = true;
+            anyhow::bail!("native_enrollment_platform_unsupported")
         }
         #[cfg(target_os = "linux")]
         {
-            let (acquisition, current, grant, grant_peer, nonce_peer, channel) = result?;
-            let deadline = Duration::from_nanos(grant.data.deadline_ns);
-            let mut stage = EnrolledRoleStage {
-                owner: self,
-                acquisition,
-                deadline,
-                current,
-                nonce_peer,
-                grant_peer,
-                channel,
-            };
-            stage.check()?;
-            Ok(stage)
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            result?;
-            anyhow::bail!("native_enrollment_platform_unsupported")
+            let result = (|| {
+                let mut acquisition = NativeAcquisition::begin(5)?;
+                self.check_local()?;
+                #[cfg(target_os = "linux")]
+                {
+                    ensure!(
+                        super::birth::load_policy(&mut acquisition)? == self.policy,
+                        "native_enrollment_operator_selection_changed"
+                    );
+                    self.issuer.check_identity(&mut acquisition)?;
+                    self.certificate.verify(&self.policy)?;
+                    let mut current =
+                        SelfSnapshot::acquire(self.policy.code(self.role), &mut acquisition)?;
+                    ensure!(
+                        current.data == self.self_data,
+                        "native_enrollment_self_changed"
+                    );
+                    let (certificate, grant, grant_peer, nonce_peer, channel) = exchange(
+                        &self.policy,
+                        self.role,
+                        &self.key,
+                        &mut current,
+                        &mut acquisition,
+                    )?;
+                    ensure!(
+                        certificate == self.certificate && grant.data.runtime == self.binding,
+                        "native_enrollment_incarnation_or_runtime_changed"
+                    );
+                    self.issuer.check_identity(&mut acquisition)?;
+                    Ok((acquisition, current, grant, grant_peer, nonce_peer, channel))
+                }
+            })();
+            if result.is_err() {
+                self.refused = true;
+            }
+            #[cfg(target_os = "linux")]
+            {
+                let (acquisition, current, grant, grant_peer, nonce_peer, channel) = result?;
+                let deadline = Duration::from_nanos(grant.data.deadline_ns);
+                let mut stage = EnrolledRoleStage {
+                    owner: self,
+                    acquisition,
+                    deadline,
+                    current,
+                    nonce_peer,
+                    grant_peer,
+                    channel,
+                };
+                stage.check()?;
+                Ok(stage)
+            }
         }
     }
 
@@ -305,16 +301,21 @@ impl EnrolledOriginalClock {
     }
 }
 
-#[cfg(target_os = "linux")]
 struct ClockAnchors {
+    #[cfg(target_os = "linux")]
     proc: std::fs::File,
+    #[cfg(target_os = "linux")]
     task: std::fs::File,
+    #[cfg(target_os = "linux")]
     namespaces: std::collections::BTreeMap<String, std::fs::File>,
 }
 
-#[cfg(target_os = "linux")]
 impl ClockAnchors {
     fn capture(stage: &mut EnrolledRoleStage<'_>) -> Result<Self> {
+        #[cfg(not(target_os = "linux"))]
+        { let _ = stage; anyhow::bail!("native_enrollment_platform_unsupported") }
+        #[cfg(target_os = "linux")]
+        {
         use crate::security_epoch::native_namespace as ns;
         stage.check()?;
         let proc = ns::open_root(&mut stage.acquisition)?;
@@ -333,9 +334,14 @@ impl ClockAnchors {
         };
         owner.check(stage)?;
         Ok(owner)
+        }
     }
 
     fn check(&mut self, stage: &mut EnrolledRoleStage<'_>) -> Result<()> {
+        #[cfg(not(target_os = "linux"))]
+        { let _ = stage; anyhow::bail!("native_enrollment_platform_unsupported") }
+        #[cfg(target_os = "linux")]
+        {
         use crate::security_epoch::native_namespace as ns;
         stage.check()?;
         let current = ns::open_root(&mut stage.acquisition)?;
@@ -359,6 +365,7 @@ impl ClockAnchors {
             );
         }
         stage.check()
+        }
     }
 }
 
