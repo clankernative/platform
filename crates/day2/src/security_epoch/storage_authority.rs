@@ -11,6 +11,7 @@ use day2_capabilities::{
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fs::File, marker::PhantomData, rc::Rc, thread::ThreadId};
 
+mod persistent_disk;
 mod preparation;
 pub(crate) use preparation::{
     BeforeAttemptRefusal, NativeOriginalPreparationOutcome, OriginalCreatorFd,
