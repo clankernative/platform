@@ -1161,8 +1161,14 @@ mod tests {
         effects::scope(fixture.port.clone(), || -> Result<()> {
             type Mutate = fn(&mut View, &mut iap::Verified);
             let mutations: &[Mutate] = &[
-                |v, i| {v.human = "bob@example.com".into(); i.email = v.human.clone();},
-                |v, i| {v.subject = "accounts.google.com:another".into(); i.subject = v.subject.clone();},
+                |v, i| {
+                    v.human = "bob@example.com".into();
+                    i.email = v.human.clone();
+                },
+                |v, i| {
+                    v.subject = "accounts.google.com:another".into();
+                    i.subject = v.subject.clone();
+                },
                 |v, _| v.app = "anotherapp".into(),
                 |v, _| v.scope = "another_scope".into(),
                 |v, _| v.artifact = "another_artifact".into(),
@@ -1173,17 +1179,36 @@ mod tests {
                 |v, _| v.slot = Digest::new(b"another slot"),
                 |v, _| v.challenge = Digest::new(b"another challenge"),
                 |v, _| v.usage = "another use".into(),
-                |v, _| {v.action = Action::Disconnect; v.fence = Some(SlotFence {generation:1,epoch:1,token_version:1,
-                    account:"account".into(),affinity:"affinity".into(),profile:"profile".into(),status:"active".into()});},
+                |v, _| {
+                    v.action = Action::Disconnect;
+                    v.fence = Some(SlotFence {
+                        generation: 1,
+                        epoch: 1,
+                        token_version: 1,
+                        account: "account".into(),
+                        affinity: "affinity".into(),
+                        profile: "profile".into(),
+                        status: "active".into(),
+                    });
+                },
             ];
             for mutate in mutations {
-                let view = fixture.manager.capture("calendar", Action::Connect, &fixture.identity, 100)?;
+                let view =
+                    fixture
+                        .manager
+                        .capture("calendar", Action::Connect, &fixture.identity, 100)?;
                 let mut changed = view.clone();
                 let mut identity = fixture.identity.clone();
                 mutate(&mut changed, &mut identity);
                 let intent = FreshIntent::management(&changed, &identity)?;
-                assert!(crate::oauth::native_management::check(&intent,
-                    crate::oauth::native_management::Phase::Pending, 100).is_err());
+                assert!(
+                    crate::oauth::native_management::check(
+                        &intent,
+                        crate::oauth::native_management::Phase::Pending,
+                        100
+                    )
+                    .is_err()
+                );
             }
             Ok(())
         })

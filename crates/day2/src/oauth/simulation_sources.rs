@@ -35,6 +35,9 @@ pub(super) const SOURCES: &[(&str, &str)] = &[
     ("management/app.rs", include_str!("management/app.rs")),
     ("management/shell.rs", include_str!("management/shell.rs")),
     ("mod.rs", include_str!("mod.rs")),
+    ("native_http.rs", include_str!("native_http.rs")),
+    ("native_management.rs", include_str!("native_management.rs")),
+    ("native_original.rs", include_str!("native_original.rs")),
     ("outbound.rs", include_str!("outbound.rs")),
     ("profiles.rs", include_str!("profiles.rs")),
     ("protocol.rs", include_str!("protocol.rs")),
@@ -116,11 +119,39 @@ pub(super) const SOURCES: &[(&str, &str)] = &[
 #[derive(Default)]
 struct Guard {
     violations: Vec<String>,
+    native: NativeBoundary,
+}
+
+#[derive(Clone, Copy, Default)]
+enum NativeBoundary {
+    #[default]
+    None,
+    Original,
+    Http,
 }
 
 impl Guard {
     fn check(&mut self, segments: &[String]) {
         let path = segments.join("::");
+        // Only native owner identity and fixed HTTP executor plumbing. This
+        // does not admit a module alias, arbitrary thread work, entropy, time
+        // sampling or provider HTTP outside the controlled effect boundary.
+        if !matches!(self.native, NativeBoundary::None)
+            && matches!(
+                path.as_str(),
+                "std::thread::ThreadId" | "std::thread::current"
+            )
+        {
+            return;
+        }
+        if matches!(self.native, NativeBoundary::Http)
+            && matches!(
+                path.as_str(),
+                "std::thread::Builder::new" | "tokio::time::timeout"
+            )
+        {
+            return;
+        }
         if segments.iter().any(|segment| {
             matches!(
                 segment.as_str(),
@@ -287,6 +318,25 @@ fn ambient_macro_effects_and_namespace_aliases_cannot_bypass_the_guard() -> Resu
         guard.violations.is_empty(),
         "native test fixtures are not production effects"
     );
+    for boundary in [NativeBoundary::Original, NativeBoundary::Http] {
+        for source in [
+            "use std::thread as worker; fn f() { worker::sleep(delay); }",
+            "fn f() { std::thread::sleep(delay); }",
+            "fn f() { tokio::spawn(work); }",
+            "fn f() { reqwest::blocking::Client::new(); }",
+            "fn f() { std::time::SystemTime::now(); }",
+        ] {
+            let mut guard = Guard {
+                native: boundary,
+                ..Guard::default()
+            };
+            guard.visit_file(&syn::parse_file(source)?);
+            ensure!(
+                !guard.violations.is_empty(),
+                "native owner exception escaped its fixed ports"
+            );
+        }
+    }
     Ok(())
 }
 
@@ -349,6 +399,11 @@ fn every_oauth_module_uses_the_controlled_effect_boundary() -> Result<()> {
         }
         let parsed = syn::parse_file(source)?;
         let mut guard = Guard::default();
+        guard.native = match name {
+            "native_http.rs" => NativeBoundary::Http,
+            "native_original.rs" => NativeBoundary::Original,
+            _ => NativeBoundary::None,
+        };
         if name.ends_with("managed_credentials/crypto.rs") {
             // Shared credential crypto has unrelated operations. OAuth's
             // sealing function is the covered boundary, including its nonce.
