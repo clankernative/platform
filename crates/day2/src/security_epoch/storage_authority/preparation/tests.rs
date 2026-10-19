@@ -77,6 +77,63 @@ fn wrong_selected_schema_cannot_prepare_a_layout_or_renew_the_acquisition() {
     assert!(interval.remaining().is_err());
 }
 
+#[test]
+fn prepared_projection_is_closed_selection_data_without_an_owner_constructor() {
+    let (_directory, selection, plan, _interval) = layout();
+    // These are deliberately synthetic projection DATA. They cannot construct
+    // PreparedInitialFile or an app holder, even when every field matches.
+    let projection = PreparedFileProjection {
+        core: plan.proposal.core.clone(),
+        marker: plan.proposal.marker.clone(),
+        image: plan.proposal.image.clone(),
+        length: plan.proposal.length.try_into().unwrap(),
+        identity: FileIdentity {
+            device_major: 8,
+            device_minor: 1,
+            inode: 42,
+            mount: 71,
+            uid: 10001,
+        },
+    };
+    projection
+        .validate_selection(selection.policy(), selection.store())
+        .unwrap();
+    assert_eq!(projection.scope(), &selection.store().scope);
+    let bytes = serde_json::to_vec(&projection).unwrap();
+    let roundtrip: PreparedFileProjection = crate::json::decode(&bytes).unwrap();
+    assert!(roundtrip == projection);
+    assert_eq!(roundtrip.digest().unwrap(), projection.digest().unwrap());
+    for field in ["core", "marker", "identity"] {
+        let mut value = serde_json::to_value(&projection).unwrap();
+        value[field]["unexpected"] = serde_json::json!(true);
+        assert!(
+            crate::json::decode::<PreparedFileProjection>(&serde_json::to_vec(&value).unwrap())
+                .is_err()
+        );
+    }
+    let mut wrong = projection.clone();
+    wrong.marker.seed = Digest::new(b"foreign seed");
+    assert!(
+        wrong
+            .validate_selection(selection.policy(), selection.store())
+            .is_err()
+    );
+    let mut wrong = projection.clone();
+    wrong.core.provider_volume_uid = "foreign-volume".into();
+    assert!(
+        wrong
+            .validate_selection(selection.policy(), selection.store())
+            .is_err()
+    );
+    let mut wrong = projection.clone();
+    wrong.length = MAX_IMAGE_BYTES as u64 + 1;
+    assert!(
+        wrong
+            .validate_selection(selection.policy(), selection.store())
+            .is_err()
+    );
+}
+
 #[cfg(target_os = "linux")]
 mod linux {
     use super::*;
@@ -96,6 +153,51 @@ mod linux {
             interval,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn prepared_owner_keeps_original_interval_and_refuses_restored_file_after_tamper() {
+        for wrong_interval in [false, true] {
+            let (directory, selected, plan, mut interval) = layout();
+            let auth = authority(&directory, selected, &mut interval);
+            let NativeOriginalPreparationOutcome::Prepared(creator) =
+                prepare_original_file(auth, &plan, &mut interval)
+            else {
+                panic!("unqualified file fixture did not prepare");
+            };
+            let expected = creator.file.as_raw_fd();
+            if wrong_interval {
+                interval = NativeAcquisition::fixture(
+                    Digest::new(b"replacement interval"),
+                    std::process::id(),
+                    Duration::from_secs(100),
+                    Duration::from_secs(5),
+                );
+            }
+            let mut owner = PreparedInitialFile::retain_original(creator, plan, interval);
+            if wrong_interval {
+                assert!(owner.projection().is_err());
+            } else {
+                let projection = owner.projection().unwrap();
+                assert!(projection.identity == owner.creator.identity);
+                assert_eq!(
+                    projection.length,
+                    owner.creator.file.metadata().unwrap().len()
+                );
+                owner.creator.file.write_all_at(b"X", 0).unwrap();
+                assert!(owner.projection().is_err());
+                owner
+                    .creator
+                    .file
+                    .write_all_at(&owner.layout.image.bytes()[..1], 0)
+                    .unwrap();
+                // Restoration cannot clear the original refusal.
+                assert!(owner.check_original().is_err());
+            }
+            assert_eq!(owner.creator.file.as_raw_fd(), expected);
+            assert!(owner.creator.file.metadata().is_ok());
+            assert!(owner.acquisition.remaining().is_err());
+        }
     }
 
     #[test]
