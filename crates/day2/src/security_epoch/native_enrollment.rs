@@ -9,6 +9,8 @@
 mod birth;
 #[cfg(target_os = "linux")]
 mod channel;
+#[cfg(target_os = "linux")]
+mod issuer_peer;
 mod owner;
 mod policy;
 #[cfg(target_os = "linux")]

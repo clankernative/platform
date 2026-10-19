@@ -12,7 +12,8 @@ use crate::security_epoch::native_enrollment::{
 #[cfg(target_os = "linux")]
 use crate::security_epoch::native_enrollment::{
     channel::Channel,
-    process::{MessageProcess, SelfSnapshot},
+    issuer_peer::IssuerReceipt,
+    process::SelfSnapshot,
     protocol::{Packet, SignedStage},
     runtime,
 };
@@ -30,7 +31,7 @@ pub(crate) struct EnrolledProcessRoleOwner {
     thread: ThreadId,
     refused: bool,
     #[cfg(target_os = "linux")]
-    issuer: MessageProcess,
+    issuer: IssuerReceipt,
     #[cfg(target_os = "linux")]
     binding: super::runtime::RuntimeBinding,
     #[cfg(target_os = "linux")]
@@ -45,9 +46,9 @@ pub(crate) struct EnrolledRoleStage<'a> {
     #[cfg(target_os = "linux")]
     current: SelfSnapshot,
     #[cfg(target_os = "linux")]
-    nonce_peer: MessageProcess,
+    nonce_peer: IssuerReceipt,
     #[cfg(target_os = "linux")]
-    grant_peer: MessageProcess,
+    grant_peer: IssuerReceipt,
     #[cfg(target_os = "linux")]
     channel: Channel,
 }
@@ -132,7 +133,7 @@ impl EnrolledProcessRoleOwner {
                         super::birth::load_policy(&mut acquisition)? == self.policy,
                         "native_enrollment_operator_selection_changed"
                     );
-                    self.issuer.check_identity(&mut acquisition)?;
+                    self.issuer.check_live(&mut acquisition)?;
                     self.certificate.verify(&self.policy)?;
                     let mut current =
                         SelfSnapshot::acquire(self.policy.code(self.role), &mut acquisition)?;
@@ -151,7 +152,7 @@ impl EnrolledProcessRoleOwner {
                         certificate == self.certificate && grant.data.runtime == self.binding,
                         "native_enrollment_incarnation_or_runtime_changed"
                     );
-                    self.issuer.check_identity(&mut acquisition)?;
+                    self.issuer.check_live(&mut acquisition)?;
                     Ok((acquisition, current, grant, grant_peer, nonce_peer, channel))
                 }
             })();
@@ -285,9 +286,9 @@ impl EnrolledRoleStage<'_> {
                     "native_enrollment_operator_selection_changed"
                 );
                 self.current.check(&mut self.acquisition)?;
-                self.owner.issuer.check_identity(&mut self.acquisition)?;
-                self.nonce_peer.check_identity(&mut self.acquisition)?;
-                self.grant_peer.check_identity(&mut self.acquisition)?;
+                self.owner.issuer.check_live(&mut self.acquisition)?;
+                self.nonce_peer.check_live(&mut self.acquisition)?;
+                self.grant_peer.check_live(&mut self.acquisition)?;
                 Ok(())
             }
             #[cfg(not(target_os = "linux"))]
@@ -421,8 +422,8 @@ fn exchange(
 ) -> Result<(
     IssuerCertificate,
     SignedStage,
-    MessageProcess,
-    MessageProcess,
+    IssuerReceipt,
+    IssuerReceipt,
     Channel,
 )> {
     let request = protocol::nonce("role-request")?;
@@ -438,7 +439,7 @@ fn exchange(
         },
         acquisition,
     )?;
-    let (packet, mut nonce_peer) = channel.receive(&policy.issuer_code, acquisition)?;
+    let (packet, mut nonce_peer) = channel.receive_issuer(acquisition)?;
     let Packet::StageNonce {
         request: echoed,
         challenge,
@@ -460,15 +461,11 @@ fn exchange(
         },
         acquisition,
     )?;
-    let (packet, mut issuer) = channel.receive(&policy.issuer_code, acquisition)?;
+    let (packet, mut issuer) = channel.receive_issuer(acquisition)?;
     let Packet::StageGrant { certificate, stage } = packet else {
         anyhow::bail!("native_enrollment_stage_order")
     };
     certificate.verify(policy)?;
-    ensure!(
-        issuer.data() == &certificate.data.process && nonce_peer.data() == issuer.data(),
-        "native_enrollment_issuer_sender_changed"
-    );
     runtime::require_common(&certificate.data.process, &certificate.data.provisioner)?;
     runtime::require_common(&current.data, &certificate.data.process)?;
     ensure!(
@@ -496,7 +493,9 @@ fn exchange(
         "native_enrollment_stage_interval"
     );
     current.check(acquisition)?;
-    nonce_peer.check_identity(acquisition)?;
-    issuer.check_identity(acquisition)?;
+    nonce_peer.bind(&certificate, policy, acquisition)?;
+    issuer.bind(&certificate, policy, acquisition)?;
+    nonce_peer.check_live(acquisition)?;
+    issuer.check_live(acquisition)?;
     Ok((certificate, *stage, issuer, nonce_peer, channel))
 }

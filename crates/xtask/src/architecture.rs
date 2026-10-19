@@ -753,7 +753,8 @@ fn glob_names(prefix: &str) -> &'static [&'static str] {
         "std::time" => &["SystemTime", "Instant"],
         "std::path" => &["Path", "PathBuf", "Components", "Iter", "absolute"],
         "time" => &["OffsetDateTime", "UtcDateTime"],
-        "rustix" => &["time", "fs", "io", "net", "event", "process"],
+        "rustix" => &["time", "fs", "io", "net", "event", "process", "stdio"],
+        "rustix::stdio" => &["stdin", "stdout"],
         "rustix::net" => &[
             "socket_with",
             "socketpair",
@@ -775,7 +776,7 @@ fn glob_names(prefix: &str) -> &'static [&'static str] {
         "rustix::event" => &["poll"],
         "rustix::process" => &["getppid"],
         "rustix::fs" => &["open", "openat", "openat2", "fstatfs", "statx", "fsync"],
-        "rustix::io" => &["pread", "pwrite"],
+        "rustix::io" => &["pread", "pwrite", "fcntl_dupfd_cloexec"],
         "nix" => &["sys", "poll"],
         "nix::sys" => &["socket"],
         "nix::sys::socket" => &["getsockopt"],
@@ -1450,6 +1451,7 @@ fn canonical_import_namespace(target: &str) -> Option<DeclarationNamespace> {
                 | "rustix::net::sockopt"
                 | "rustix::event"
                 | "rustix::process"
+                | "rustix::stdio"
                 | "nix"
                 | "nix::sys"
                 | "nix::sys::socket"
@@ -5698,6 +5700,10 @@ fn ambient_binding(target: &str) -> bool {
                 | "rustix::io"
                 | "rustix::io::pread"
                 | "rustix::io::pwrite"
+                | "rustix::io::fcntl_dupfd_cloexec"
+                | "rustix::stdio"
+                | "rustix::stdio::stdin"
+                | "rustix::stdio::stdout"
                 | "rustix::net"
                 | "rustix::net::sockopt"
                 | "rustix::event"
@@ -5895,6 +5901,9 @@ fn hazard(target: &str) -> Option<&'static str> {
             | "rustix::fs::fsync"
             | "rustix::io::pread"
             | "rustix::io::pwrite"
+            | "rustix::io::fcntl_dupfd_cloexec"
+            | "rustix::stdio::stdin"
+            | "rustix::stdio::stdout"
     ) || target
         .rsplit_once("::")
         .is_some_and(|(owner, method)| owner == "std::path::Path" && path_filesystem_method(method))
@@ -7375,6 +7384,9 @@ mod tests {
             ("rustix::net::sockopt", "set_socket_passpidfd", "network"),
             ("rustix::event", "poll", "scheduling"),
             ("rustix::process", "getppid", "process"),
+            ("rustix::io", "fcntl_dupfd_cloexec", "filesystem"),
+            ("rustix::stdio", "stdin", "filesystem"),
+            ("rustix::stdio", "stdout", "filesystem"),
         ] {
             let target = format!("{module}::{operation}");
             for source in [
