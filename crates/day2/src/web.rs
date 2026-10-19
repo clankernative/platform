@@ -30,7 +30,7 @@ use std::{
 use tokio::{net::TcpListener, sync::Semaphore};
 
 #[path = "web_live.rs"]
-mod live;
+pub(crate) mod live;
 
 struct Grant {
     hash: String,

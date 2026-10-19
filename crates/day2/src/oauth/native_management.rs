@@ -129,9 +129,10 @@ pub(super) fn selected_scopes(
 }
 
 /// Not a Send handle. Capture is the FIRST operation in Manager::capture.
-pub(crate) struct AppCreator {
+pub(crate) struct AppCreator<'a> {
     original: CapturedOriginal,
     app: String,
+    start: &'a super::management::app::CaptureStart,
 }
 
 enum CapturedOriginal {
@@ -152,9 +153,12 @@ fn capture(owners: &mut Owners, expected: NativeRole) -> Result<Original<Enrolle
     })
 }
 
-pub(super) fn capture_app(app: &str) -> Result<AppCreator> {
+pub(super) fn capture_app<'a>(
+    start: &'a super::management::app::CaptureStart,
+    app: &str,
+) -> Result<AppCreator<'a>> {
     #[cfg(test)]
-    if let Some(captured) = fixtures::capture_app(app)? {
+    if let Some(captured) = fixtures::capture_app(start, app)? {
         return Ok(captured);
     }
     OWNERS.with(|owners| {
@@ -164,13 +168,23 @@ pub(super) fn capture_app(app: &str) -> Result<AppCreator> {
         Ok(AppCreator {
             original: CapturedOriginal::Native(capture(owners, NativeRole::AppHost)?),
             app: app.into(),
+            start,
         })
     })
 }
 
-impl AppCreator {
+impl AppCreator<'_> {
     /// Called once AFTER the actual Pending transaction commits.
-    pub(super) fn bind(self, intent: &FreshIntent, wall: i64) -> Result<()> {
+    pub(super) fn bind(
+        self,
+        committed: super::management::app::CommittedCapture<'_>,
+        wall: i64,
+    ) -> Result<()> {
+        ensure!(
+            std::ptr::eq(self.start, committed.start()),
+            "native App creator changed before commit"
+        );
+        let intent = committed.intent();
         ensure!(
             self.app == intent.app(),
             "native App original target changed"
@@ -461,6 +475,14 @@ fn with_current_for_role<T>(
 #[derive(Clone)]
 pub(super) struct Sink(Rc<RefCell<BTreeMap<(NativeRole, String), SinkBinding>>>);
 
+pub(super) fn current_sink() -> Result<Sink> {
+    ACTIVE_SINK.with(|slot| {
+        slot.try_borrow()?
+            .clone()
+            .context("native response scope missing")
+    })
+}
+
 #[derive(Clone)]
 struct SinkBinding {
     intent: FreshIntent,
@@ -552,25 +574,66 @@ pub(super) fn check(intent: &FreshIntent, phase: Phase, wall: i64) -> Result<()>
 }
 
 #[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn autonomous_role_is_scope_bound_and_cannot_supply_a_native_stage() -> Result<()> {
+        let scope = AuthorityScope {
+            installation: "testco".to_owned().try_into()?,
+            environment: "test".to_owned().try_into()?,
+            app: "calendar".to_owned().try_into()?,
+        };
+        assert!(with_current_app_role(&scope, RuntimePhase::Read, |_| Ok(())).is_err());
+        let world = super::super::simulation::World::new(88);
+        super::super::effects::scope(world.clone(), || -> Result<()> {
+            assert!(with_current_app_role(&scope, RuntimePhase::Read, |_| Ok(())).is_err());
+            fixtures::select_app_scope(&scope)?;
+            with_current_app_role(&scope, RuntimePhase::Read, |stage| {
+                stage.check_for(&scope, NativeRole::AppHost)?;
+                assert!(stage.with_native(|_| Ok(())).is_err());
+                let mut wrong = scope.clone();
+                wrong.environment = "different".to_owned().try_into()?;
+                assert!(stage.check_for(&wrong, NativeRole::AppHost).is_err());
+                Ok(())
+            })?;
+            let failed: Result<()> =
+                with_current_app_role(&scope, RuntimePhase::Refresh, |stage| {
+                    world.advance(5);
+                    stage.check()
+                });
+            assert!(failed.is_err());
+            assert!(with_current_app_role(&scope, RuntimePhase::Read, |_| Ok(())).is_err());
+            Ok(())
+        })
+    }
+}
+
+#[cfg(test)]
 pub(crate) mod fixtures {
     use super::*;
     use crate::oauth::effects::Hooks;
+    use std::cell::Cell;
 
     thread_local! {
         static FIXTURE: RefCell<Option<Fixture>> = const { RefCell::new(None) };
-        // Distinct inner effect tracks survive across requests ONLY for the
-        // lifetime of the fixed executor thread. A scope switch is not a
-        // process restart and cannot discard its original owners.
+        // Scope switches/polls do not recreate a simulated process. Retained
+        // entries use weak suppliers, are pruned when a world ends, and cannot
+        // move across OS threads. Explicit restart discards native ownership.
         static RETAINED: RefCell<BTreeMap<u64, Fixture>> = const { RefCell::new(BTreeMap::new()) };
     }
     struct Fixture {
-        hooks: std::sync::Arc<dyn Hooks>,
+        hooks: std::sync::Weak<dyn Hooks>,
+        domain: u64,
         originals: BTreeMap<(NativeRole, String), Original<SimulationClock>>,
         scopes: BTreeMap<String, AuthorityScope>,
+        roles: BTreeMap<(NativeRole, String), Rc<Cell<bool>>>,
     }
     pub(super) struct SimulationClock {
-        hooks: std::sync::Arc<dyn Hooks>,
+        hooks: std::sync::Weak<dyn Hooks>,
         origin: Duration,
+        latest: Duration,
+        owner_refused: Rc<Cell<bool>>,
     }
     pub(crate) struct SimulationStage {
         hooks: std::sync::Arc<dyn Hooks>,
@@ -580,6 +643,7 @@ pub(crate) mod fixtures {
         refused: bool,
         role: NativeRole,
         scope: Option<AuthorityScope>,
+        owner_refused: Rc<Cell<bool>>,
     }
     impl SimulationStage {
         pub(super) fn check_for(&mut self, scope: &AuthorityScope, role: NativeRole) -> Result<()> {
@@ -595,6 +659,7 @@ pub(crate) mod fixtures {
                 let now = self.hooks.monotonic();
                 ensure!(
                     !self.refused
+                        && !self.owner_refused.get()
                         && super::super::effects::current_domain() == Some(self.hooks.domain())
                         && self.thread == std::thread::current().id()
                         && now >= self.origin
@@ -607,6 +672,7 @@ pub(crate) mod fixtures {
             })();
             if result.is_err() {
                 self.refused = true;
+                self.owner_refused.set(true);
             }
             result
         }
@@ -616,19 +682,48 @@ pub(crate) mod fixtures {
             self.origin
         }
         fn sample(&mut self) -> Result<Duration> {
-            ensure!(
-                super::super::effects::current_domain() == Some(self.hooks.domain()),
-                "native simulation clock domain changed"
-            );
-            Ok(self.hooks.monotonic())
+            let Some(hooks) = self.hooks.upgrade() else {
+                self.owner_refused.set(true);
+                anyhow::bail!("native simulation supplier ended");
+            };
+            if self.owner_refused.get()
+                || super::super::effects::current_domain() != Some(hooks.domain())
+            {
+                self.owner_refused.set(true);
+                anyhow::bail!("native simulation role or clock domain refused");
+            }
+            let now = hooks.monotonic();
+            if now < self.origin || now < self.latest {
+                self.owner_refused.set(true);
+                anyhow::bail!("native simulation clock moved backwards");
+            }
+            self.latest = now;
+            Ok(now)
         }
     }
-    fn capture(fixture: &Fixture) -> Result<Original<SimulationClock>> {
-        let origin = fixture.hooks.monotonic();
-        Original::capture(SimulationClock {
-            hooks: fixture.hooks.clone(),
+    fn capture(
+        fixture: &mut Fixture,
+        role: NativeRole,
+        app: &str,
+    ) -> Result<Original<SimulationClock>> {
+        let hooks = fixture
+            .hooks
+            .upgrade()
+            .context("native simulation supplier ended")?;
+        let origin = hooks.monotonic();
+        let owner_refused = fixture
+            .roles
+            .entry((role, app.into()))
+            .or_insert_with(|| Rc::new(Cell::new(false)))
+            .clone();
+        let mut clock = SimulationClock {
+            hooks: std::sync::Arc::downgrade(&hooks),
             origin,
-        })
+            latest: origin,
+            owner_refused,
+        };
+        clock.sample()?;
+        Original::capture(clock)
     }
     pub(crate) struct Guard {
         previous: Option<Fixture>,
@@ -638,14 +733,8 @@ pub(crate) mod fixtures {
         fn drop(&mut self) {
             if self.changed {
                 let current = FIXTURE.with(|slot| slot.replace(self.previous.take()));
-                if super::super::native_http::owns_thread() {
-                    if let Some(current) = current {
-                        RETAINED.with(|retained| {
-                            retained
-                                .borrow_mut()
-                                .insert(current.hooks.domain(), current)
-                        });
-                    }
+                if let Some(current) = current {
+                    RETAINED.with(|retained| retained.borrow_mut().insert(current.domain, current));
                 }
             }
         }
@@ -665,28 +754,37 @@ pub(crate) mod fixtures {
             };
             if slot
                 .as_ref()
-                .is_some_and(|fixture| fixture.hooks.domain() == hooks.domain())
+                .is_some_and(|fixture| fixture.domain == hooks.domain())
             {
                 return Guard {
                     previous: None,
                     changed: false,
                 };
             }
-            let retained = RETAINED.with(|retained| retained.borrow_mut().remove(&hooks.domain()));
+            let retained = RETAINED.with(|retained| {
+                let mut retained = retained.borrow_mut();
+                retained.retain(|_, fixture| fixture.hooks.strong_count() != 0);
+                retained.remove(&hooks.domain())
+            });
             Guard {
                 previous: slot.replace(retained.unwrap_or_else(|| Fixture {
-                    hooks,
+                    domain: hooks.domain(),
+                    hooks: std::sync::Arc::downgrade(&hooks),
                     originals: BTreeMap::new(),
                     scopes: BTreeMap::new(),
+                    roles: BTreeMap::new(),
                 })),
                 changed: true,
             }
         })
     }
-    pub(super) fn capture_app(app: &str) -> Result<Option<AppCreator>> {
+    pub(super) fn capture_app<'a>(
+        start: &'a super::super::management::app::CaptureStart,
+        app: &str,
+    ) -> Result<Option<AppCreator<'a>>> {
         FIXTURE.with(|slot| {
-            let slot = slot.borrow();
-            let Some(fixture) = slot.as_ref() else {
+            let mut slot = slot.try_borrow_mut()?;
+            let Some(fixture) = slot.as_mut() else {
                 return Ok(None);
             };
             ensure!(
@@ -694,8 +792,9 @@ pub(crate) mod fixtures {
                 "fixture native original capacity"
             );
             Ok(Some(AppCreator {
-                original: CapturedOriginal::Simulated(capture(fixture)?),
+                original: CapturedOriginal::Simulated(capture(fixture, NativeRole::AppHost, app)?),
                 app: app.into(),
+                start,
             }))
         })
     }
@@ -704,7 +803,7 @@ pub(crate) mod fixtures {
         original: Original<SimulationClock>,
     ) -> Result<()> {
         FIXTURE.with(|slot| {
-            let mut slot = slot.borrow_mut();
+            let mut slot = slot.try_borrow_mut()?;
             let fixture = slot.as_mut().context("fixture executor missing")?;
             ensure!(
                 fixture
@@ -718,7 +817,7 @@ pub(crate) mod fixtures {
     }
     pub(super) fn reserve_shell(intent: &FreshIntent, wall: i64) -> Result<bool> {
         FIXTURE.with(|slot| {
-            let mut slot = slot.borrow_mut();
+            let mut slot = slot.try_borrow_mut()?;
             let Some(fixture) = slot.as_mut() else {
                 return Ok(false);
             };
@@ -730,7 +829,7 @@ pub(crate) mod fixtures {
                     fixture.originals.len() < 1024,
                     "fixture native original capacity"
                 );
-                let mut original = capture(fixture)?;
+                let mut original = capture(fixture, NativeRole::SecurityShell, intent.app())?;
                 original.bind(intent, wall)?;
                 fixture.originals.insert(key, original);
             }
@@ -739,7 +838,19 @@ pub(crate) mod fixtures {
         })
     }
     pub(super) fn active() -> bool {
-        FIXTURE.with(|slot| slot.borrow().is_some())
+        FIXTURE.with(|slot| slot.try_borrow().map_or(true, |fixture| fixture.is_some()))
+    }
+
+    pub(crate) fn restart(domain: u64) {
+        FIXTURE.with(|slot| {
+            assert!(
+                slot.borrow()
+                    .as_ref()
+                    .is_none_or(|fixture| fixture.domain != domain),
+                "cannot restart a borrowed fixture executor"
+            )
+        });
+        RETAINED.with(|retained| retained.borrow_mut().remove(&domain));
     }
 
     pub(crate) fn select_app_scope(scope: &AuthorityScope) -> Result<()> {
@@ -755,6 +866,10 @@ pub(crate) mod fixtures {
                     .scopes
                     .insert(scope.app.as_str().into(), scope.clone());
             }
+            fixture
+                .roles
+                .entry((NativeRole::AppHost, scope.app.as_str().into()))
+                .or_insert_with(|| Rc::new(Cell::new(false)));
             Ok(())
         })
     }
@@ -773,16 +888,25 @@ pub(crate) mod fixtures {
                 fixture.scopes.get(scope.app.as_str()) == Some(scope),
                 "native simulation App scope missing"
             );
-            let origin = fixture.hooks.monotonic();
+            let hooks = fixture
+                .hooks
+                .upgrade()
+                .context("native simulation supplier ended")?;
+            let origin = hooks.monotonic();
             let mut stage = RoleStage {
                 source: RoleSource::Simulated(SimulationStage {
-                    hooks: fixture.hooks.clone(),
+                    hooks,
                     origin,
                     latest: origin,
                     thread: std::thread::current().id(),
                     refused: false,
                     role: NativeRole::AppHost,
                     scope: Some(scope.clone()),
+                    owner_refused: fixture
+                        .roles
+                        .get(&(NativeRole::AppHost, scope.app.as_str().into()))
+                        .context("native simulation role missing")?
+                        .clone(),
                 }),
             };
             stage.check_for(scope, NativeRole::AppHost)?;
@@ -798,7 +922,7 @@ pub(crate) mod fixtures {
         use_current: impl FnOnce(&mut RoleStage<'_>, &mut OriginalPhase<'_>) -> Result<T>,
     ) -> Result<T> {
         FIXTURE.with(|slot| {
-            let mut slot = slot.borrow_mut();
+            let mut slot = slot.try_borrow_mut()?;
             let fixture = slot
                 .as_mut()
                 .context("native simulation supplier missing")?;
@@ -816,15 +940,28 @@ pub(crate) mod fixtures {
                 }
                 _ => NativeRole::AppHost,
             });
+            let owner_refused = fixture
+                .originals
+                .get(&(kind, intent.attempt().into()))
+                .context("fixture original absent; SQL cannot restore it")?
+                .clock
+                .owner_refused
+                .clone();
+            let hooks = fixture
+                .hooks
+                .upgrade()
+                .context("native simulation supplier ended")?;
+            let origin = hooks.monotonic();
             let mut stage = RoleStage {
                 source: RoleSource::Simulated(SimulationStage {
-                    hooks: fixture.hooks.clone(),
-                    origin: fixture.hooks.monotonic(),
-                    latest: fixture.hooks.monotonic(),
+                    hooks,
+                    origin,
+                    latest: origin,
                     thread: std::thread::current().id(),
                     refused: false,
                     role: kind,
                     scope: fixture.scopes.get(intent.app()).cloned(),
+                    owner_refused,
                 }),
             };
             let original = fixture

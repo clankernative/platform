@@ -77,6 +77,29 @@ pub(crate) struct Manager {
     authority: Arc<admission::ArtifactApprovalAuthority>,
 }
 
+/// A non-transferable creator point, never returned by a request or restored
+/// from a row. The nonzero size preserves identity while this borrow is live.
+pub(crate) struct CaptureStart {
+    marker: u8,
+    local: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+/// Constructed only after the actual capture transaction commits, tied to the
+/// same live creator point. FreshIntent DATA alone cannot bind an App owner.
+pub(crate) struct CommittedCapture<'a> {
+    start: &'a CaptureStart,
+    intent: crate::oauth::fresh_auth::FreshIntent,
+}
+
+impl CommittedCapture<'_> {
+    pub(in crate::oauth) fn start(&self) -> &CaptureStart {
+        self.start
+    }
+    pub(in crate::oauth) fn intent(&self) -> &crate::oauth::fresh_auth::FreshIntent {
+        &self.intent
+    }
+}
+
 impl Manager {
     pub(in crate::oauth) fn native_scopes(
         &self,
@@ -268,7 +291,11 @@ impl Manager {
         identity: &iap::Verified,
         now: i64,
     ) -> Result<View> {
-        let original = crate::oauth::native_management::capture_app(self.runtime.app())?;
+        let start = CaptureStart {
+            marker: 0,
+            local: std::marker::PhantomData,
+        };
+        let original = crate::oauth::native_management::capture_app(&start, self.runtime.app())?;
         crate::oauth::connect::identifier(registration)?;
         let mut db = store::open(self.runtime.db())?;
         iap::bind_subject(&db, identity, now)?;
@@ -335,7 +362,10 @@ impl Manager {
             params![view.id, json, view.expires_at])?;
         tx.commit()?;
         original.bind(
-            &crate::oauth::fresh_auth::FreshIntent::management(&view, identity)?,
+            CommittedCapture {
+                start: &start,
+                intent: crate::oauth::fresh_auth::FreshIntent::management(&view, identity)?,
+            },
             captured_at,
         )?;
         Ok(view)
@@ -1242,6 +1272,9 @@ mod tests {
             fixture.manager.pending(&view.id, &fixture.identity, 100)?;
             Ok(view)
         })?;
+        crate::oauth::native_management::fixtures::restart(effects::Hooks::domain(
+            fixture.port.as_ref(),
+        ));
         effects::scope(fixture.port.clone(), || -> Result<()> {
             assert!(
                 fixture

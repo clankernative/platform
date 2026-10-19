@@ -8,7 +8,7 @@ use ring::hmac;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-pub(super) mod app;
+pub(crate) mod app;
 pub(super) mod shell;
 
 pub(super) const PREFIX: &str = "/oauth/connections/";

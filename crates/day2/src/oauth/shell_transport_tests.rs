@@ -1083,24 +1083,35 @@ fn mounted_management_authenticates_both_callers_and_lost_confirmation_is_not_re
         entropy: AtomicUsize::new(1),
         sends: AtomicUsize::new(0),
     });
-    let executor = tokio::runtime::Builder::new_current_thread()
+    let executor = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
         .enable_all()
         .build()?;
+    let listener = executor.block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))?;
+    let endpoint = format!("http://{}{PATH}", listener.local_addr()?);
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let serving_port = port.clone();
+    let server = executor.spawn(effects::scope_async(
+        serving_port,
+        crate::oauth::native_http::serve(
+            crate::oauth::native_http::Endpoint::Receiver(receiver),
+            listener,
+            1,
+            Arc::new(AtomicBool::new(true)),
+            async {
+                let _ = stopped.await;
+            },
+        ),
+    ));
+    let client = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(5))
+        .build()?;
     let invoke = |headers: HeaderMap, body: Vec<u8>| -> Result<(StatusCode, Vec<u8>)> {
-        executor.block_on(effects::scope_async(port.clone(), async {
-            let mut request = Request::builder()
-                .method(Method::POST)
-                .uri(PATH)
-                .body(axum::body::Body::from(body))?;
-            *request.headers_mut() = headers;
-            let response = receiver.clone().handle(request).await;
-            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
-            let status = response.status();
-            Ok((
-                status,
-                to_bytes(response.into_body(), MAX_RESPONSE).await?.to_vec(),
-            ))
-        }))
+        let response = client.post(&endpoint).headers(headers).body(body).send()?;
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        let status = response.status();
+        Ok((status, response.bytes()?.to_vec()))
     };
     let encode = |call| {
         serde_json::to_vec(&RequestBody::Management {
@@ -1269,6 +1280,10 @@ fn mounted_management_authenticates_both_callers_and_lost_confirmation_is_not_re
     let pending = snapshot()?;
     port.at.store(102, Ordering::SeqCst);
     let proof = effects::scope(port.clone(), || -> Result<_> {
+        crate::oauth::native_management::reserve_shell(
+            &FreshIntent::management(&view, &identity)?,
+            102,
+        )?;
         let fresh = VerifiedAuthTime::from_google(shell_oidc::Reauthenticated::fixture(
             FreshIntent::management(&view, &identity)?,
             identity.email.clone(),
@@ -1334,6 +1349,8 @@ fn mounted_management_authenticates_both_callers_and_lost_confirmation_is_not_re
         0
     );
     assert_eq!(port.sends.load(Ordering::SeqCst), 0);
+    stop.send(()).unwrap();
+    executor.block_on(server)??;
     Ok(())
 }
 

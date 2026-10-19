@@ -92,6 +92,23 @@ struct Subscription {
     state: SubscriptionState,
 }
 
+/// Closed host-owned continuation, never an application task callback.
+pub(crate) struct LiveWork {
+    subscription: Subscription,
+    host: Arc<Host>,
+    sender: mpsc::Sender<String>,
+    terminal: oneshot::Sender<String>,
+    permit: OwnedSemaphorePermit,
+}
+
+impl LiveWork {
+    pub(crate) async fn run(self) {
+        self.subscription
+            .run(self.host, self.sender, self.terminal, self.permit)
+            .await;
+    }
+}
+
 /// Replayable decisions; database/rendering observations are supplied by the host.
 struct SubscriptionState {
     actor: String,
@@ -312,11 +329,19 @@ impl Host {
             .try_send(elements(&initial, "outer"))
             .map_err(|_| anyhow::anyhow!("live_initial_frame"))?;
         let host = self.clone();
-        tokio::spawn(async move {
-            subscription
-                .run(host, sender, terminal_sender, permit)
-                .await;
-        });
+        let native = host.oauth.is_some();
+        let work = LiveWork {
+            subscription,
+            host,
+            sender,
+            terminal: terminal_sender,
+            permit,
+        };
+        if native {
+            crate::oauth::native_http::start_live(work)?;
+        } else {
+            tokio::spawn(work.run());
+        }
         Ok(stream_response(LiveBody {
             receiver,
             terminal: Some(terminal),
@@ -495,12 +520,15 @@ impl Subscription {
         terminal: oneshot::Sender<String>,
         _permit: OwnedSemaphorePermit,
     ) {
-        let mut ticks = host.live_ticks.start(CHECK_INTERVAL);
+        let mut ticks = crate::oauth::native_http::timer(|| host.live_ticks.start(CHECK_INTERVAL));
         let mut heartbeat = host.clock.monotonic();
         loop {
+            if host.oauth.is_some() {
+                crate::oauth::native_http::cooperate().await;
+            }
             tokio::select! {
                 _ = sender.closed() => break,
-                _ = ticks.next() => {}
+                _ = crate::oauth::native_http::readiness(ticks.next()) => {}
             }
             if !host.admitting.load(Ordering::Acquire) {
                 break;
@@ -511,12 +539,17 @@ impl Subscription {
                 continue;
             };
             let evaluator = host.clone();
-            let refreshed = tokio::task::spawn_blocking(move || {
+            let native = host.oauth.is_some();
+            let refresh = move || {
                 let _work = work;
                 let result = self.refresh(&evaluator);
                 (self, result)
-            })
-            .await;
+            };
+            let refreshed = if native {
+                Ok(refresh())
+            } else {
+                tokio::task::spawn_blocking(refresh).await
+            };
             let (subscription, result) = match refreshed {
                 Ok(result) => result,
                 Err(_) => break,
