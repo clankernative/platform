@@ -76,7 +76,10 @@ impl EnrolledProcessRoleOwner {
         #[cfg(target_os = "linux")]
         {
             let policy = super::birth::load_policy(&mut acquisition)?;
-            ensure!(policy.scope == *scope, "native_enrollment_scope_mismatch");
+            ensure!(
+                policy.bootstrap.scope == *scope,
+                "native_enrollment_scope_mismatch"
+            );
             let key = KeyOwner::generate()?;
             let mut current = SelfSnapshot::acquire(policy.code(role), &mut acquisition)?;
             let (certificate, grant, issuer, _nonce_peer, _channel) =
@@ -225,8 +228,22 @@ impl EnrolledProcessRoleOwner {
 }
 
 impl EnrolledRoleStage<'_> {
+    pub(crate) fn check_selection(
+        &mut self,
+        policy: &day2_capabilities::security_epoch::bootstrap::InitialBootstrapPolicy,
+        store: &day2_capabilities::security_epoch::EpochStore,
+        role: NativeRole,
+    ) -> Result<()> {
+        if self.owner.policy.bootstrap != *policy || self.owner.policy.store != *store {
+            self.owner.refused = true;
+            self.acquisition.refuse();
+            anyhow::bail!("native_enrollment_full_selection_changed");
+        }
+        self.check_for(&policy.scope, role)
+    }
+
     pub(crate) fn check_for(&mut self, scope: &AuthorityScope, role: NativeRole) -> Result<()> {
-        let selected = self.owner.policy.scope == *scope && self.owner.role == role;
+        let selected = self.owner.policy.bootstrap.scope == *scope && self.owner.role == role;
         if !selected {
             self.owner.refused = true;
             self.acquisition.refuse();
@@ -313,58 +330,64 @@ struct ClockAnchors {
 impl ClockAnchors {
     fn capture(stage: &mut EnrolledRoleStage<'_>) -> Result<Self> {
         #[cfg(not(target_os = "linux"))]
-        { let _ = stage; anyhow::bail!("native_enrollment_platform_unsupported") }
+        {
+            let _ = stage;
+            anyhow::bail!("native_enrollment_platform_unsupported")
+        }
         #[cfg(target_os = "linux")]
         {
-        use crate::security_epoch::native_namespace as ns;
-        stage.check()?;
-        let proc = ns::open_root(&mut stage.acquisition)?;
-        let task = ns::open_task(&proc, &mut stage.acquisition)?;
-        let mut namespaces = std::collections::BTreeMap::new();
-        for name in ["time", "time_for_children", "pid", "user"] {
-            namespaces.insert(
-                name.to_owned(),
-                ns::open_namespace(&task, name, &mut stage.acquisition)?,
-            );
-        }
-        let mut owner = Self {
-            proc,
-            task,
-            namespaces,
-        };
-        owner.check(stage)?;
-        Ok(owner)
+            use crate::security_epoch::native_namespace as ns;
+            stage.check()?;
+            let proc = ns::open_root(&mut stage.acquisition)?;
+            let task = ns::open_task(&proc, &mut stage.acquisition)?;
+            let mut namespaces = std::collections::BTreeMap::new();
+            for name in ["time", "time_for_children", "pid", "user"] {
+                namespaces.insert(
+                    name.to_owned(),
+                    ns::open_namespace(&task, name, &mut stage.acquisition)?,
+                );
+            }
+            let mut owner = Self {
+                proc,
+                task,
+                namespaces,
+            };
+            owner.check(stage)?;
+            Ok(owner)
         }
     }
 
     fn check(&mut self, stage: &mut EnrolledRoleStage<'_>) -> Result<()> {
         #[cfg(not(target_os = "linux"))]
-        { let _ = stage; anyhow::bail!("native_enrollment_platform_unsupported") }
+        {
+            let _ = stage;
+            anyhow::bail!("native_enrollment_platform_unsupported")
+        }
         #[cfg(target_os = "linux")]
         {
-        use crate::security_epoch::native_namespace as ns;
-        stage.check()?;
-        let current = ns::open_root(&mut stage.acquisition)?;
-        ensure!(
-            ns::proc_identity(&current)? == ns::proc_identity(&self.proc)?,
-            "native_enrollment_clock_proc_changed"
-        );
-        let current = ns::open_task(&current, &mut stage.acquisition)?;
-        ensure!(
-            ns::proc_identity(&current)? == ns::proc_identity(&self.task)?,
-            "native_enrollment_clock_task_changed"
-        );
-        for (name, original) in &self.namespaces {
-            let value = ns::namespace_identity(original)?;
-            let current = ns::open_namespace(&current, name, &mut stage.acquisition)?;
+            use crate::security_epoch::native_namespace as ns;
+            stage.check()?;
+            let current = ns::open_root(&mut stage.acquisition)?;
             ensure!(
-                ns::namespace_identity(&current)? == value
-                    && stage.current.data.namespaces.get(name)
-                        == Some(&(value.device, value.inode)),
-                "native_enrollment_clock_namespace_changed"
+                ns::proc_identity(&current)? == ns::proc_identity(&self.proc)?,
+                "native_enrollment_clock_proc_changed"
             );
-        }
-        stage.check()
+            let current = ns::open_task(&current, &mut stage.acquisition)?;
+            ensure!(
+                ns::proc_identity(&current)? == ns::proc_identity(&self.task)?,
+                "native_enrollment_clock_task_changed"
+            );
+            for (name, original) in &self.namespaces {
+                let value = ns::namespace_identity(original)?;
+                let current = ns::open_namespace(&current, name, &mut stage.acquisition)?;
+                ensure!(
+                    ns::namespace_identity(&current)? == value
+                        && stage.current.data.namespaces.get(name)
+                            == Some(&(value.device, value.inode)),
+                    "native_enrollment_clock_namespace_changed"
+                );
+            }
+            stage.check()
         }
     }
 }

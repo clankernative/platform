@@ -1,5 +1,5 @@
-//! Retained identity, not a renewable permission. Only the kernel packet receiver
-//! can construct this owner; numeric PIDs and certificate rows cannot adopt it.
+//! Retained identity, not a renewable permission. Only the private kernel packet
+//! and fixed runtime adapters construct it; certificate rows cannot adopt it.
 
 use crate::security_epoch::native_enrollment::protocol::ProcessData;
 use crate::security_epoch::{
@@ -95,14 +95,45 @@ impl MessageProcess {
         expected_code: &Digest,
         acquisition: &mut NativeAcquisition,
     ) -> Result<Self> {
+        Self::observe(
+            packet.process,
+            packet.credentials.process,
+            expected_code,
+            acquisition,
+        )
+    }
+
+    /// Only the fixed runtime adapter calls this on its newly connected socket.
+    /// Connection identity has deliberately different provenance from a packet.
+    pub(super) fn runtime_peer(
+        socket: &std::os::unix::net::UnixStream,
+        code: &Digest,
+        acquisition: &mut NativeAcquisition,
+    ) -> Result<Self> {
+        acquisition.remaining()?;
+        let credentials =
+            nix::sys::socket::getsockopt(socket, nix::sys::socket::sockopt::PeerCredentials)?;
+        let pid = std::num::NonZeroU32::new(u32::try_from(credentials.pid())?)
+            .ok_or_else(|| anyhow::anyhow!("native_enrollment_runtime_peer_pid"))?;
+        let pidfd = nix::sys::socket::getsockopt(socket, nix::sys::socket::sockopt::PeerPidfd)?;
+        acquisition.remaining()?;
+        Self::observe(pidfd, KernelPidVisibility::Visible(pid), code, acquisition)
+    }
+
+    fn observe(
+        pidfd: std::os::fd::OwnedFd,
+        visibility: KernelPidVisibility,
+        expected_code: &Digest,
+        acquisition: &mut NativeAcquisition,
+    ) -> Result<Self> {
         let result = (|| {
-            let pid = match packet.credentials.process {
+            let pid = match visibility {
                 KernelPidVisibility::Visible(pid) => pid.get(),
                 KernelPidVisibility::NotVisible => {
                     anyhow::bail!("native_enrollment_pid_not_visible")
                 }
             };
-            let pidfd = File::from(packet.process);
+            let pidfd = File::from(pidfd);
             live(&pidfd, acquisition)?;
             let proc = ns::open_root(acquisition)?;
             let process = open_process(&proc, pid, acquisition)?;
