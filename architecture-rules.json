@@ -328,6 +328,8 @@
     "crates/day2/src/security_epoch/native_enrollment/policy.rs",
     "crates/day2/src/security_epoch/native_enrollment/process.rs",
     "crates/day2/src/security_epoch/native_enrollment/protocol.rs",
+    "crates/day2/src/security_epoch/native_enrollment/root_kms.rs",
+    "crates/day2/src/security_epoch/native_enrollment/root_kms/tests.rs",
     "crates/day2/src/security_epoch/native_enrollment/runtime.rs",
     "crates/day2/src/security_epoch/native_enrollment/runtime_wire.rs",
     "crates/day2/src/security_epoch/native_enrollment/service.rs",
