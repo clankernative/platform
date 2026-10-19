@@ -479,5 +479,5 @@ fn exchange(
     current.check(acquisition)?;
     nonce_peer.check_identity(acquisition)?;
     issuer.check_identity(acquisition)?;
-    Ok((certificate, stage, issuer, nonce_peer, channel))
+    Ok((certificate, *stage, issuer, nonce_peer, channel))
 }

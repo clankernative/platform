@@ -210,7 +210,7 @@ pub(super) fn require_common(
     ensure!(a.boot == b.boot, "native_enrollment_common_boot");
     for name in ["time", "time_for_children", "pid", "user"] {
         ensure!(
-            a.namespaces.get(name).is_some() && a.namespaces.get(name) == b.namespaces.get(name),
+            a.namespaces.contains_key(name) && a.namespaces.get(name) == b.namespaces.get(name),
             "native_enrollment_common_namespace"
         );
     }
