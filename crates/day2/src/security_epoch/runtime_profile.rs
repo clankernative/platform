@@ -10,13 +10,6 @@ use serde_json::Value;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct ContainerSelection {
-    pub name: String,
-    pub image: Digest,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(super) struct ContainerFacts {
     pub pod_name: String,
     pub pod_uid: String,
@@ -63,13 +56,10 @@ fn dns_label(value: &str) -> bool {
 pub(super) fn container(
     role: &GkeRoleSelection,
     reviewed: &ReviewedSubject,
-    selected: &ContainerSelection,
     bytes: &[u8],
 ) -> Result<ContainerFacts> {
-    ensure!(
-        dns_label(&selected.name),
-        "epoch_native_container_selection"
-    );
+    let selected = &role.container;
+    selected.validate()?;
     // Reuse actual response-shape/lifecycle/role/owner joins. This remains DATA:
     // authenticated transport and real runtime identity are separate owners.
     identity_protocol::pod(role, reviewed, bytes)?;
