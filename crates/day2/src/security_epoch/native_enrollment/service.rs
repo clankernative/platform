@@ -1,3 +1,4 @@
+use crate::security_epoch::native_clock::NativeAcquisition;
 use crate::security_epoch::native_enrollment::{
     birth::IssuerOwner,
     channel::Channel,
@@ -6,7 +7,6 @@ use crate::security_epoch::native_enrollment::{
     protocol::{self, Packet, ProcessData, SignedStage, StageData},
     runtime::{self, RuntimeBinding},
 };
-use crate::security_epoch::native_clock::NativeAcquisition;
 use anyhow::{Result, ensure};
 use std::collections::BTreeMap;
 
