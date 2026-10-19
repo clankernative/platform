@@ -123,6 +123,12 @@ pub(crate) enum Endpoint {
 }
 
 impl Endpoint {
+    async fn pump(&self, stopped: tokio::sync::watch::Receiver<bool>) -> Result<()> {
+        match self {
+            Self::App(host) => crate::web::native_pump(host.clone(), stopped).await,
+            _ => std::future::pending().await,
+        }
+    }
     fn install(&self) -> Result<()> {
         #[cfg(test)]
         if super::native_management::simulation_installed() {
@@ -219,12 +225,15 @@ async fn run(
     }
     let _clear = Clear;
     let endpoint = &endpoint;
+    let (pump_stop, pump_stopped) = tokio::sync::watch::channel(false);
+    let mut pump = std::pin::pin!(endpoint.pump(pump_stopped));
+    let mut pump_finished = !matches!(endpoint, Endpoint::App(_));
     let mut connections = FuturesUnordered::new();
     let mut live = FuturesUnordered::new();
     let mut shutdown = std::pin::pin!(shutdown);
     let mut draining = false;
     loop {
-        if draining && connections.is_empty() && live.is_empty() {
+        if draining && connections.is_empty() && live.is_empty() && pump_finished {
             return Ok(());
         }
         tokio::select! {
@@ -232,8 +241,17 @@ async fn run(
             _ = &mut shutdown, if !draining => {
                 draining = true;
                 admission.store(false, Ordering::Release);
+                let _ = pump_stop.send(true);
                 live_receiver.close();
                 while live_receiver.try_recv().is_ok() {} // Not-started work owns no external send.
+            }
+            result = &mut pump, if !pump_finished => {
+                result?;
+                pump_finished = true;
+                draining = true;
+                admission.store(false, Ordering::Release);
+                live_receiver.close();
+                while live_receiver.try_recv().is_ok() {}
             }
             work = live_receiver.recv(), if !draining => {
                 if let Some(work) = work { live.push(work.run()); }

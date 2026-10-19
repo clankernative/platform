@@ -16,6 +16,12 @@ No unsafe Send/Sync implementation, generic app task queue, or public executor
 callback is introduced. Normal apps without the selected OAuth receiver keep
 their ordinary web transport.
 
+Selected App dispatch, live-page refreshes, and the existing command/schedule/
+journal pump stay on the same owner as well. Live refreshes use a bounded queue
+of one closed host continuation type. The pump uses its existing state machine,
+with synchronous native work on the owner and explicit cooperative yields.
+Neither path moves native role owners to a blocking pool.
+
 The thread enrolls each selected authority scope before accepting requests. The
 first S1 operator profile admits exactly one scope; a shared shell with other
 selected scopes refuses startup unless every scope can actually enroll. It
