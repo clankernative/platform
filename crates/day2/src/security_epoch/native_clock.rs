@@ -102,6 +102,12 @@ impl NativeAcquisition {
         Budget::from_native_origin(self.sample()?, self.origin, self.deadline)
     }
 
+    /// Interval DATA for a signature, never a constructor or renewal.
+    pub(super) fn interval_data(&mut self) -> Result<(Duration, Duration)> {
+        self.sample()?;
+        Ok((self.origin, self.deadline))
+    }
+
     #[cfg(test)]
     pub(super) fn fixture(domain: Digest, process: u32, origin: Duration, limit: Duration) -> Self {
         Self {
@@ -118,7 +124,7 @@ impl NativeAcquisition {
 }
 
 #[cfg(target_os = "linux")]
-fn boottime() -> Result<Duration> {
+pub(super) fn boottime() -> Result<Duration> {
     let value = rustix::time::clock_gettime_dynamic(rustix::time::DynamicClockId::Boottime)?;
     ensure!(
         value.tv_sec >= 0 && (0..1_000_000_000).contains(&value.tv_nsec),
@@ -131,7 +137,7 @@ fn boottime() -> Result<Duration> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn boottime() -> Result<Duration> {
+pub(super) fn boottime() -> Result<Duration> {
     anyhow::bail!("epoch_native_clock_platform_unsupported")
 }
 
