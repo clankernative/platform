@@ -92,7 +92,7 @@ pub(super) fn simulation_installed() -> bool {
     fixtures::active()
 }
 
-pub(super) fn selected_scopes(
+pub(crate) fn selected_scopes(
     instance: &crate::artifact::Instance,
     only_app: Option<&str>,
 ) -> Result<Vec<AuthorityScope>> {
@@ -189,6 +189,9 @@ impl AppCreator<'_> {
             self.app == intent.app(),
             "native App original target changed"
         );
+        #[cfg(not(test))]
+        let CapturedOriginal::Native(mut original) = self.original;
+        #[cfg(test)]
         let mut original = match self.original {
             CapturedOriginal::Native(original) => original,
             #[cfg(test)]
@@ -321,6 +324,7 @@ impl RoleStage<'_> {
 
 #[derive(Clone, Copy)]
 pub(crate) enum RuntimePhase {
+    InitialStorage,
     Read,
     Refresh,
 }
@@ -657,6 +661,11 @@ mod tests {
         super::super::effects::scope(world.clone(), || -> Result<()> {
             assert!(with_current_app_role(&scope, RuntimePhase::Read, |_| Ok(())).is_err());
             fixtures::select_app_scope(&scope)?;
+            with_current_app_role(&scope, RuntimePhase::InitialStorage, |stage| {
+                stage.check_for(&scope, NativeRole::AppHost)?;
+                assert!(stage.with_native(|_| Ok(())).is_err());
+                Ok(())
+            })?;
             with_current_app_role(&scope, RuntimePhase::Read, |stage| {
                 stage.check_for(&scope, NativeRole::AppHost)?;
                 assert!(stage.with_native(|_| Ok(())).is_err());

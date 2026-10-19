@@ -8,6 +8,10 @@ use std::{
     fs::{self, File, OpenOptions},
     num::NonZeroU16,
     path::{Component, Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -492,6 +496,84 @@ pub(crate) async fn serve_with_oauth(
     serve_configured(instance_path, app, access, providers, Ok).await
 }
 
+/// Closed selected-App startup, consumed only on its final HTTP owner. Runtime
+/// and instance selections are DATA until that owner enrolls; no initialized
+/// storage owner or borrowed role crosses the launch boundary.
+pub(crate) struct NativeAppStartup {
+    runtime: Runtime,
+    declared: Instance,
+    providers: Option<crate::oauth::host::Providers>,
+    configure: Box<dyn FnOnce(Runtime) -> Result<Runtime> + Send>,
+    listener: tokio::net::TcpListener,
+    concurrency: usize,
+    replicas: u8,
+}
+
+impl NativeAppStartup {
+    pub(crate) fn scopes(&self) -> Result<Vec<day2_capabilities::security_epoch::AuthorityScope>> {
+        crate::oauth::native_management::selected_scopes(&self.declared, Some(self.runtime.app()))
+    }
+
+    pub(crate) fn prepare(
+        self,
+        admission: Arc<AtomicBool>,
+    ) -> Result<(Arc<crate::web::Host>, tokio::net::TcpListener)> {
+        ensure!(
+            admission.load(Ordering::Acquire),
+            "native App startup admission closed"
+        );
+        for scope in self.scopes()? {
+            crate::oauth::native_management::with_current_app_role(
+                &scope,
+                crate::oauth::native_management::RuntimePhase::InitialStorage,
+                |stage| stage.check(),
+            )?;
+        }
+        // S3's InitialStorage consumer runs within Runtime::initialize here,
+        // after enrollment and before ordinary schema initialization/serving.
+        let security = admit_store(&self.runtime)?;
+        ensure!(
+            admission.load(Ordering::Acquire),
+            "native App startup admission closed"
+        );
+        if let Some(requirements) = &security {
+            requirements.require_runtime()?;
+        }
+        let runtime = (self.configure)(self.runtime)?;
+        let providers = match self.providers {
+            Some(providers) => providers,
+            None => crate::oauth::host::Providers::from_gke_runtime(&runtime)?,
+        };
+        let (runtime, receiver) = crate::oauth::host::app_receiver(runtime, &providers)?;
+        ensure!(
+            admission.load(Ordering::Acquire),
+            "native App startup admission closed"
+        );
+        let (identity, edge) = self.declared.edge(runtime.app())?;
+        let verifier = crate::iap::Verifier::new(
+            &edge.iap_audience,
+            &identity.hosted_domain,
+            Box::new(crate::iap::GoogleKeys),
+        )?;
+        let mut server = LocalServer::bind_edge_listener(
+            runtime,
+            self.listener,
+            edge,
+            verifier,
+            self.concurrency,
+        )?;
+        server.mount_oauth(receiver)?;
+        println!(
+            "{}",
+            serde_json::json!({
+                "mode":"edge", "scheme":identity.scheme,
+                "origin":server.origin, "replicas":self.replicas
+            })
+        );
+        server.into_native_parts(admission)
+    }
+}
+
 async fn serve_configured(
     instance_path: &Path,
     app: &str,
@@ -537,32 +619,65 @@ async fn serve_configured(
             == Some(day2_assets::hash_part(runtime.artifact().id())?),
         "active deployment artifact address mismatch"
     );
-    let security = admit_store(&runtime)?;
+    let security = if oauth { None } else { admit_store(&runtime)? };
     if let Ok(expected) = std::env::var("DAY2_EXPECTED_ARTIFACT") {
         ensure!(
             expected == runtime.artifact().id(),
             "deployment_artifact_changed"
         );
     }
+    if oauth {
+        let concurrency = usize::from(profile.resources().http_concurrency());
+        let startup = NativeAppStartup {
+            runtime,
+            declared,
+            providers,
+            configure: Box::new(configure),
+            listener: tokio::net::TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, 8080))
+                .await?,
+            concurrency,
+            replicas: profile.replicas(),
+        };
+        let admission = Arc::new(AtomicBool::new(true));
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let mut http = tokio::spawn(crate::oauth::native_http::serve_app(
+            startup,
+            admission.clone(),
+            async {
+                let _ = shutdown_rx.await;
+            },
+        ));
+        let mut http_finished = false;
+        let cause = tokio::select! {
+            signal = termination() => signal,
+            result = &mut http => {
+                http_finished = true;
+                result.context("HTTP supervisor failed").and_then(|result| result)
+                    .and_then(|()| anyhow::bail!("HTTP server stopped unexpectedly"))
+            },
+        };
+        admission.store(false, Ordering::Release);
+        let _ = shutdown_tx.send(());
+        let drain = async {
+            if !http_finished {
+                (&mut http).await.context("HTTP drain failed")?
+            } else {
+                Ok(())
+            }
+        };
+        tokio::time::timeout(
+            Duration::from_secs(u64::from(profile.resources().shutdown_seconds())),
+            drain,
+        )
+        .await
+        .context("shutdown grace exceeded; pending work remains recoverable")??;
+        return cause;
+    }
     if let Some(requirements) = &security {
         requirements.require_runtime()?;
     }
     let runtime = tokio::task::spawn_blocking(move || configure(runtime)).await??;
     let concurrency = usize::from(profile.resources().http_concurrency());
-    let (runtime, receiver) = if oauth {
-        tokio::task::spawn_blocking(move || {
-            let providers = match providers {
-                Some(providers) => providers,
-                None => crate::oauth::host::Providers::from_gke_runtime(&runtime)?,
-            };
-            let (runtime, receiver) = crate::oauth::host::app_receiver(runtime, &providers)?;
-            Ok::<_, anyhow::Error>((runtime, Some(receiver)))
-        })
-        .await
-        .context("OAuth host startup failed")??
-    } else {
-        (runtime, None)
-    };
     let server = match access {
         Access::Development {
             actor,
@@ -581,10 +696,7 @@ async fn serve_configured(
         }
         Access::Edge => {
             let (identity, edge) = declared.edge(app)?;
-            let mut server = LocalServer::bind_edge(runtime, identity, edge, concurrency).await?;
-            if let Some(receiver) = receiver {
-                server.mount_oauth(receiver)?;
-            }
+            let server = LocalServer::bind_edge(runtime, identity, edge, concurrency).await?;
             println!(
                 "{}",
                 serde_json::json!({

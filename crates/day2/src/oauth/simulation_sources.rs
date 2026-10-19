@@ -398,11 +398,13 @@ fn every_oauth_module_uses_the_controlled_effect_boundary() -> Result<()> {
             continue;
         }
         let parsed = syn::parse_file(source)?;
-        let mut guard = Guard::default();
-        guard.native = match name {
-            "native_http.rs" => NativeBoundary::Http,
-            "native_original.rs" => NativeBoundary::Original,
-            _ => NativeBoundary::None,
+        let mut guard = Guard {
+            native: match name {
+                "native_http.rs" => NativeBoundary::Http,
+                "native_original.rs" => NativeBoundary::Original,
+                _ => NativeBoundary::None,
+            },
+            ..Guard::default()
         };
         if name.ends_with("managed_credentials/crypto.rs") {
             // Shared credential crypto has unrelated operations. OAuth's
