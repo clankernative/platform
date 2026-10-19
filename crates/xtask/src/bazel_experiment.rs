@@ -71,7 +71,10 @@ fn timed_build(root: &Path, timing: Timing) -> Result<serde_json::Value> {
                 "--message-format=json",
                 "--jobs=2",
             ]);
-            command.env("CARGO_TARGET_DIR", "/tmp/day2-comparison-cargo-alltargets-target");
+            command.env(
+                "CARGO_TARGET_DIR",
+                "/tmp/day2-comparison-cargo-alltargets-target",
+            );
             command.env("RUSTC_WRAPPER", "");
             command.env("RUSTC_WORKSPACE_WRAPPER", "");
             command.env("CARGO_INCREMENTAL", "0");
