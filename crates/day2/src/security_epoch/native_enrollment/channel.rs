@@ -1,11 +1,11 @@
 //! One bounded sequence-packet exchange. No FD adoption or raw ancillary API is
 //! exposed to a caller. The private birth owner is the only socketpair creator.
 
+use crate::security_epoch::native_clock::NativeAcquisition;
 use crate::security_epoch::native_enrollment::{
     process::MessageProcess,
     protocol::{self, MAX_PACKET, Packet},
 };
-use crate::security_epoch::native_clock::NativeAcquisition;
 use anyhow::{Result, ensure};
 use day2_capabilities::Digest;
 use rustix::{
