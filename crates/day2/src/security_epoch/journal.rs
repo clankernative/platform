@@ -218,31 +218,38 @@ pub(crate) struct CounterResponse {
 
 impl AuthorizedDispatch {
     pub(super) fn prepare(
-        mut self,
+        self,
         selection: &EpochStore,
         port: &mut impl Port,
     ) -> Result<PreparedDispatch> {
-        let (request, budget) = match &mut self {
-            Self::Shared(claim) => claim.prepare(selection, port)?,
-            #[cfg(test)]
-            Self::Create(permit) => {
-                ensure!(
-                    permit.context.selection == Digest::of(selection)?,
-                    "security_epoch_execution_selection_changed"
-                );
-                (permit.request.clone(), permit.context.budget(port)?)
+        let (owner, request, budget) = match self {
+            Self::Shared(claim) => {
+                let (claim, request, budget) = claim.prepare(selection, port)?;
+                (Self::Shared(Box::new(claim)), request, budget)
             }
             #[cfg(test)]
-            Self::Activate(permit) => {
+            Self::Create(mut permit) => {
                 ensure!(
                     permit.context.selection == Digest::of(selection)?,
                     "security_epoch_execution_selection_changed"
                 );
-                (permit.request.clone(), permit.context.budget(port)?)
+                let request = permit.request.clone();
+                let budget = permit.context.budget(port)?;
+                (Self::Create(permit), request, budget)
+            }
+            #[cfg(test)]
+            Self::Activate(mut permit) => {
+                ensure!(
+                    permit.context.selection == Digest::of(selection)?,
+                    "security_epoch_execution_selection_changed"
+                );
+                let request = permit.request.clone();
+                let budget = permit.context.budget(port)?;
+                (Self::Activate(permit), request, budget)
             }
         };
         Ok(PreparedDispatch {
-            owner: self,
+            owner,
             request,
             budget,
         })
