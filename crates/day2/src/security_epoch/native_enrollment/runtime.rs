@@ -288,12 +288,29 @@ fn label<'a>(container: &'a wire::Container, key: &str) -> Result<&'a str> {
 fn require_kernel(policy: &EnrollmentPolicy, acquisition: &mut NativeAcquisition) -> Result<()> {
     use crate::security_epoch::native_namespace as ns;
     acquisition.remaining()?;
-    let mut file = std::fs::File::from(rustix::fs::open("/proc/sys/kernel/osrelease", rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC | rustix::fs::OFlags::NONBLOCK, rustix::fs::Mode::empty())?);
+    let mut file = std::fs::File::from(rustix::fs::open(
+        "/proc/sys/kernel/osrelease",
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::CLOEXEC
+            | rustix::fs::OFlags::NONBLOCK,
+        rustix::fs::Mode::empty(),
+    )?);
     ns::require_proc(&file)?;
     let bytes = ns::read_proc(&mut file, 254, acquisition)?;
-    ensure!(bytes == format!("{}\n", policy.runtime.kernel_release).as_bytes(), "native_enrollment_kernel_release");
-    let architecture = match std::env::consts::ARCH {"x86_64" => "amd64", "aarch64" => "arm64", _ => anyhow::bail!("native_enrollment_architecture_unsupported")};
-    ensure!(architecture == policy.runtime.architecture, "native_enrollment_architecture_selection");
+    ensure!(
+        bytes == format!("{}\n", policy.runtime.kernel_release).as_bytes(),
+        "native_enrollment_kernel_release"
+    );
+    let architecture = match std::env::consts::ARCH {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        _ => anyhow::bail!("native_enrollment_architecture_unsupported"),
+    };
+    ensure!(
+        architecture == policy.runtime.architecture,
+        "native_enrollment_architecture_selection"
+    );
     Ok(())
 }
 
@@ -346,7 +363,16 @@ fn kubernetes(
             acquisition,
         )?,
     )?;
-    identity_protocol::google_service_account(&selected.google_service_account, &policy.runtime.cluster.project, &http.request(Route::GoogleAccount(&selected.google_service_account), &source.authorization()?, None, acquisition)?)?;
+    identity_protocol::google_service_account(
+        &selected.google_service_account,
+        &policy.runtime.cluster.project,
+        &http.request(
+            Route::GoogleAccount(&selected.google_service_account),
+            &source.authorization()?,
+            None,
+            acquisition,
+        )?,
+    )?;
     let pod = Zeroizing::new(http.request(
         Route::Pod {
             namespace: ns,
