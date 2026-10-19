@@ -41,7 +41,7 @@ struct NativeLiveWork {
 }
 
 enum LiveJob {
-    Page(crate::web::live::LiveWork),
+    Page(Box<crate::web::live::LiveWork>),
     #[cfg(test)]
     Probe(Arc<tests::Exchange>, tokio::sync::oneshot::Sender<String>),
 }
@@ -51,7 +51,7 @@ impl NativeLiveWork {
         self.effects
             .run_async(self.sink.scope(async move {
                 match self.work {
-                    LiveJob::Page(work) => work.run().await,
+                    LiveJob::Page(work) => (*work).run().await,
                     #[cfg(test)]
                     LiveJob::Probe(exchange, response) => {
                         exchange
@@ -69,7 +69,7 @@ impl NativeLiveWork {
 
 pub(crate) fn start_live(work: crate::web::live::LiveWork) -> Result<()> {
     let work = NativeLiveWork {
-        work: LiveJob::Page(work),
+        work: LiveJob::Page(Box::new(work)),
         sink: super::native_management::current_sink()?,
         effects: crate::managed_credentials::effects::capture(),
     };
@@ -192,6 +192,71 @@ pub(crate) async fn serve(
         (1..=256).contains(&capacity),
         "invalid native HTTP capacity"
     );
+    launch(
+        Launch::Ready {
+            endpoint,
+            listener,
+            capacity,
+            admission,
+        },
+        shutdown,
+    )
+    .await
+}
+
+pub(crate) async fn serve_app(
+    startup: crate::deployment::NativeAppStartup,
+    admission: Arc<AtomicBool>,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> Result<()> {
+    launch(Launch::App(Box::new(startup), admission), shutdown).await
+}
+
+enum Launch {
+    Ready {
+        endpoint: Endpoint,
+        listener: TcpListener,
+        capacity: usize,
+        admission: Arc<AtomicBool>,
+    },
+    App(Box<crate::deployment::NativeAppStartup>, Arc<AtomicBool>),
+}
+
+impl Launch {
+    async fn run(self, shutdown: impl Future<Output = ()>) -> Result<()> {
+        match self {
+            Self::Ready {
+                endpoint,
+                listener,
+                capacity,
+                admission,
+            } => run(endpoint, listener, capacity, admission, shutdown, false).await,
+            Self::App(startup, admission) => {
+                let scopes = startup.scopes()?;
+                super::native_management::install(
+                    &scopes,
+                    crate::security_epoch::native_enrollment::NativeRole::AppHost,
+                )?;
+                let (host, listener) = (*startup).prepare(admission.clone())?;
+                ensure!(
+                    crate::web::native_scopes(&host)? == scopes,
+                    "native App startup scope changed"
+                );
+                run(
+                    Endpoint::App(host),
+                    listener,
+                    crate::web::MAX_QUEUED,
+                    admission,
+                    shutdown,
+                    true,
+                )
+                .await
+            }
+        }
+    }
+}
+
+async fn launch(launch: Launch, shutdown: impl Future<Output = ()> + Send + 'static) -> Result<()> {
     let reactor = Handle::try_current().context("native HTTP readiness runtime missing")?;
     let effects = crate::managed_credentials::effects::capture();
     let (completed, completion) = tokio::sync::oneshot::channel();
@@ -201,9 +266,7 @@ pub(crate) async fn serve(
         .name("day2-oauth-owner".into())
         .spawn(move || {
             REACTOR.with(|slot| *slot.borrow_mut() = Some(reactor));
-            let result = effects.run(|| {
-                futures_executor::block_on(run(endpoint, listener, capacity, admission, shutdown))
-            });
+            let result = effects.run(|| futures_executor::block_on(launch.run(shutdown)));
             REACTOR.with(|slot| slot.borrow_mut().take());
             let _ = completed.send(result);
         })
@@ -217,6 +280,7 @@ async fn run(
     capacity: usize,
     admission: Arc<AtomicBool>,
     shutdown: impl Future<Output = ()>,
+    enrolled: bool,
 ) -> Result<()> {
     let owner = std::thread::current().id();
     // Fixtures create their originals on this final executor too. Only Send
@@ -229,7 +293,9 @@ async fn run(
         }
         endpoint => endpoint,
     };
-    endpoint.install()?;
+    if !enrolled {
+        endpoint.install()?;
+    }
     let (live_sender, mut live_receiver) = tokio::sync::mpsc::channel(32);
     LIVE.with(|slot| slot.replace(Some(live_sender)));
     struct Clear;
@@ -477,6 +543,116 @@ mod tests {
             ));
             Response::new(body)
         }
+    }
+
+    #[tokio::test]
+    async fn owner_preparation_commits_before_http_and_refusal_never_dispatches() -> Result<()> {
+        for refuse in [false, true] {
+            let directory = tempfile::tempdir()?;
+            let path = directory.path().join("startup.sqlite");
+            let listener = TcpListener::bind("127.0.0.1:0").await?;
+            let address = listener.local_addr()?;
+            let exchange = Exchange::new(false);
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let gate = Arc::new((Mutex::new(false), Condvar::new()));
+            struct Release(Arc<(Mutex<bool>, Condvar)>);
+            impl Drop for Release {
+                fn drop(&mut self) {
+                    *self.0.0.lock().unwrap() = true;
+                    self.0.1.notify_all();
+                }
+            }
+            let release = Release(gate.clone());
+            let prepared_on = Arc::new(Mutex::new(None));
+            let preparation = {
+                let path = path.clone();
+                let entered = entered.clone();
+                let prepared_on = prepared_on.clone();
+                move || {
+                    *prepared_on.lock().unwrap() = Some(thread::current().id());
+                    let mut db = rusqlite::Connection::open(path)?;
+                    let tx = db.transaction()?;
+                    tx.execute_batch(
+                        "CREATE TABLE startup(value INTEGER); INSERT INTO startup VALUES(1);",
+                    )?;
+                    entered.notify_one();
+                    let (lock, changed) = &*gate;
+                    let (ready, timeout) = changed
+                        .wait_timeout_while(
+                            lock.lock().unwrap(),
+                            std::time::Duration::from_secs(5),
+                            |ready| !*ready,
+                        )
+                        .unwrap();
+                    ensure!(
+                        *ready && !timeout.timed_out(),
+                        "startup test release watchdog"
+                    );
+                    ensure!(!refuse, "startup deliberately refused");
+                    tx.commit()?;
+                    Ok(())
+                }
+            };
+            let (stop, stopped) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(serve(
+                Endpoint::Prepared(
+                    Box::new(Endpoint::Test(exchange.clone())),
+                    Box::new(preparation),
+                ),
+                listener,
+                1,
+                Arc::new(AtomicBool::new(true)),
+                async {
+                    let _ = stopped.await;
+                },
+            ));
+            let mut client = tokio::net::TcpStream::connect(address).await?;
+            client
+                .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                .await?;
+            tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified()).await?;
+            assert!(exchange.calls.lock().unwrap().is_empty());
+            let observer = rusqlite::Connection::open(path)?;
+            let tables: i64 = observer.query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name='startup'",
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!(tables, 0, "startup transaction leaked before commit");
+            drop(release);
+            if refuse {
+                assert!(
+                    tokio::time::timeout(std::time::Duration::from_secs(5), server)
+                        .await??
+                        .is_err()
+                );
+                assert!(exchange.calls.lock().unwrap().is_empty());
+                let tables: i64 = observer.query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE name='startup'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(tables, 0);
+            } else {
+                let mut response = Vec::new();
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    client.read_to_end(&mut response),
+                )
+                .await??;
+                assert!(response.starts_with(b"HTTP/1.1 200"));
+                let value: i64 =
+                    observer.query_row("SELECT value FROM startup", [], |row| row.get(0))?;
+                assert_eq!(value, 1);
+                assert_eq!(
+                    exchange.calls.lock().unwrap().as_slice(),
+                    &[prepared_on.lock().unwrap().unwrap()]
+                );
+                stop.send(()).unwrap();
+                tokio::time::timeout(std::time::Duration::from_secs(5), server).await???;
+            }
+        }
+        Ok(())
     }
 
     #[tokio::test]

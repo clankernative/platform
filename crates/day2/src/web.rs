@@ -469,6 +469,17 @@ impl LocalServer {
         Admission(self.host.admitting.clone())
     }
 
+    pub(crate) fn into_native_parts(
+        mut self,
+        admission: Arc<AtomicBool>,
+    ) -> Result<(Arc<Host>, TcpListener)> {
+        ensure!(self.host.oauth.is_some(), "native App receiver missing");
+        Arc::get_mut(&mut self.host)
+            .context("native App startup host escaped")?
+            .admitting = admission;
+        Ok((self.host, self.listener))
+    }
+
     pub(crate) fn mount_oauth(
         &mut self,
         receiver: Arc<crate::oauth::shell_transport::AppApprovalReceiver>,
@@ -537,7 +548,7 @@ impl LocalServer {
 const QUEUE_WAIT: Duration = Duration::from_secs(10);
 
 /// Requests that may wait for a permit at once; beyond this, refuse immediately.
-const MAX_QUEUED: usize = 256;
+pub(crate) const MAX_QUEUED: usize = 256;
 
 /// Wait in arrival order for an execution permit. Tokio's semaphore serves waiters
 /// first come, first served, so a burst queues instead of being refused; only a

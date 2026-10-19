@@ -22,6 +22,16 @@ of one closed host continuation type. The pump uses its existing state machine,
 with synchronous native work on the owner and explicit cooperative yields.
 Neither path moves native role owners to a blocking pool.
 
+The selected deployment also initializes on that same owner. Its closed
+`NativeAppStartup` carries runtime/instance selections and the existing native
+configuration until enrollment succeeds. It then admits the store, configures
+the adapters, constructs the edge host and starts the local HTTP/pump loop.
+`InitialStorage` is a nonhuman current-role phase for S3's actual first-file
+consumer; the startup precheck does not itself grant storage authority. Earlier
+layout and active-binding selection remain data inputs, and S3 must cover any
+protected payload access there separately. Ordinary hosts retain their existing
+startup path.
+
 The thread enrolls each selected authority scope before accepting requests. The
 first S1 operator profile admits exactly one scope; a shared shell with other
 selected scopes refuses startup unless every scope can actually enroll. It
@@ -74,7 +84,7 @@ These owners do not implement the missing epoch/storage authority or create a
 fresh-human proof. The existing production proof refusal remains until S1, S2
 and S3 are composed and qualified together.
 
-Ordinary read and refresh consumers borrow a current App role for their exact
+Initial storage, ordinary read and refresh consumers borrow a current App role for their exact
 authority scope through `with_current_app_role`. They do not borrow a human
 management original or acquire another 300 seconds. Their current epoch, writer
 and response-disposition checks remain S3's consuming boundary.
