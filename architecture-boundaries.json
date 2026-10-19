@@ -117,6 +117,26 @@
           "local_path": null
         },
         {
+          "name": "futures-executor",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "futures-util",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
           "name": "getrandom",
           "kind": "normal",
           "target": null,
@@ -142,6 +162,31 @@
           "target": null,
           "rename": null,
           "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "hyper",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [
+            "http1",
+            "server"
+          ],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "hyper-util",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [
+            "tokio"
+          ],
           "default_features": true,
           "optional": false,
           "local_path": null
