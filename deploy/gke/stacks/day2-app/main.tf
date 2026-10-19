@@ -241,7 +241,20 @@ resource "kubernetes_stateful_set_v1" "day2" {
         enable_service_links             = false
         termination_grace_period_seconds = var.runtime_resources.shutdown_seconds + 15
 
-        node_selector = var.node_selector
+        host_pid = var.native_enrollment_placement != null
+        node_selector = merge(var.node_selector, var.native_enrollment_placement == null ? {} : {
+          "cloud.google.com/gke-nodepool"                      = var.native_enrollment_placement.pool_name
+          "day2.dev.node-restriction.kubernetes.io/enrollment" = var.native_enrollment_placement.profile
+        })
+        dynamic "toleration" {
+          for_each = var.native_enrollment_placement == null ? [] : [var.native_enrollment_placement]
+          content {
+            key      = "day2.dev/native-enrollment"
+            value    = toleration.value.profile
+            operator = "Equal"
+            effect   = "NoSchedule"
+          }
+        }
 
         # No fsGroup on purpose: kubelet's fsGroup handling would re-add group
         # rwx and setgid to the state directory day2 keeps at 0700.
@@ -483,8 +496,16 @@ resource "kubernetes_stateful_set_v1" "day2" {
           name              = "day2"
           image             = local.release_image
           image_pull_policy = "IfNotPresent"
-          command           = ["/usr/local/bin/day2-serve"]
-          args              = concat([local.instance_path, var.app_id, "--edge"], var.app_calls == null ? [] : ["--app-calls", "${local.app_call_dir}/host.json"])
+          dynamic "volume_mount" {
+            for_each = var.native_enrollment_placement == null ? [] : [true]
+            content {
+              name       = "native-enrollment"
+              mount_path = "/run/day2-native-enrollment"
+              read_only  = true
+            }
+          }
+          command = ["/usr/local/bin/day2-serve"]
+          args    = concat([local.instance_path, var.app_id, "--edge"], var.app_calls == null ? [] : ["--app-calls", "${local.app_call_dir}/host.json"])
           env {
             name  = "DAY2_EXPECTED_ARTIFACT"
             value = local.release_artifact
@@ -652,6 +673,16 @@ resource "kubernetes_stateful_set_v1" "day2" {
           }
         }
 
+        dynamic "volume" {
+          for_each = var.native_enrollment_placement == null ? [] : [true]
+          content {
+            name = "native-enrollment"
+            host_path {
+              path = "/run/day2-native-enrollment"
+              type = "Directory"
+            }
+          }
+        }
         dynamic "volume" {
           for_each = local.has_credentials ? [true] : []
 

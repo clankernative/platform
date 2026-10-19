@@ -96,13 +96,25 @@ resource "kubernetes_deployment_v1" "shell" {
         annotations = { "day2.dev/instance-sha256" = sha256(var.instance_json) }
       }
       spec {
-        service_account_name             = "security-shell"
-        automount_service_account_token  = false
-        enable_service_links             = false
-        host_network                     = false
-        host_pid                         = false
-        host_ipc                         = false
-        node_selector                    = var.node_selector
+        service_account_name            = "security-shell"
+        automount_service_account_token = false
+        enable_service_links            = false
+        host_network                    = false
+        host_pid                        = var.native_enrollment_placement != null
+        host_ipc                        = false
+        node_selector = merge(var.node_selector, var.native_enrollment_placement == null ? {} : {
+          "cloud.google.com/gke-nodepool"                      = var.native_enrollment_placement.pool_name
+          "day2.dev.node-restriction.kubernetes.io/enrollment" = var.native_enrollment_placement.profile
+        })
+        dynamic "toleration" {
+          for_each = var.native_enrollment_placement == null ? [] : [var.native_enrollment_placement]
+          content {
+            key      = "day2.dev/native-enrollment"
+            value    = toleration.value.profile
+            operator = "Equal"
+            effect   = "NoSchedule"
+          }
+        }
         termination_grace_period_seconds = local.resources.shutdown_seconds + 5
         security_context {
           run_as_non_root = true
@@ -114,8 +126,16 @@ resource "kubernetes_deployment_v1" "shell" {
           name              = "security-shell"
           image             = var.image
           image_pull_policy = "IfNotPresent"
-          command           = ["/usr/local/bin/day2-security-shell"]
-          args              = ["/srv/day2/instance.json"]
+          dynamic "volume_mount" {
+            for_each = var.native_enrollment_placement == null ? [] : [true]
+            content {
+              name       = "native-enrollment"
+              mount_path = "/run/day2-native-enrollment"
+              read_only  = true
+            }
+          }
+          command = ["/usr/local/bin/day2-security-shell"]
+          args    = ["/srv/day2/instance.json"]
           env {
             name  = "DAY2_EXPECTED_SHELL_INSTANCE"
             value = "sha256:${sha256(var.instance_json)}"
@@ -169,6 +189,16 @@ resource "kubernetes_deployment_v1" "shell" {
           config_map {
             name         = kubernetes_config_map_v1.instance.metadata[0].name
             default_mode = "0444"
+          }
+        }
+        dynamic "volume" {
+          for_each = var.native_enrollment_placement == null ? [] : [true]
+          content {
+            name = "native-enrollment"
+            host_path {
+              path = "/run/day2-native-enrollment"
+              type = "Directory"
+            }
           }
         }
         volume {
