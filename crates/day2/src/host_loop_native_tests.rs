@@ -59,7 +59,7 @@ async fn selected_native_pump_commits_on_its_owner_thread_and_drains() -> Result
             self.work.observe(event, state);
         }
     }
-    let (work, _, cleanup, stopped) = fixture(false);
+    let (work, _observed, cleanup, stopped) = fixture(false);
     for release in &cleanup.release {
         release.send(()).unwrap();
     }
