@@ -126,7 +126,10 @@ pub(super) fn timings(root: &Path) -> Result<()> {
     let graph: serde_json::Value =
         serde_json::from_slice(&fs::read("/tmp/day2-bazel-action-graph.json")?)?;
     let mut scripts = 0;
-    for action in graph["actions"].as_array().context("action graph required")? {
+    for action in graph["actions"]
+        .as_array()
+        .context("action graph required")?
+    {
         if action["mnemonic"] != "CargoBuildScriptRun" {
             continue;
         }
