@@ -2105,7 +2105,8 @@ impl Host {
             };
             ensure!(
                 compatible
-                    && !native.choices.is_empty()
+                    && (native.mode == security::NativeMode::MultipleSelect
+                        || !native.choices.is_empty())
                     && native.choices.iter().all(|choice| !choice.is_empty())
                     && native
                         .choices

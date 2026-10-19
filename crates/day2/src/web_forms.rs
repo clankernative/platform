@@ -185,8 +185,7 @@ pub(crate) fn native_field(
             "native_form_schema_mismatch"
         );
         ensure!(
-            !control.choices.is_empty()
-                && control.choices.iter().all(|choice| !choice.is_empty())
+            control.choices.iter().all(|choice| !choice.is_empty())
                 && control.choices.iter().collect::<BTreeSet<_>>().len() == control.choices.len(),
             "invalid_or_duplicate_native_choice"
         );
@@ -600,7 +599,7 @@ pub(crate) fn controls(form: ElementRef<'_>) -> Result<Vec<Control>> {
                     })
                     .collect::<Result<Vec<_>>>()?;
                 ensure!(
-                    !options.is_empty() && options.len() <= crate::input_shape::MAX_LIST_ITEMS,
+                    options.len() <= crate::input_shape::MAX_LIST_ITEMS,
                     "multiple_select_choice_bound"
                 );
                 options
@@ -1099,6 +1098,12 @@ mod query_form_tests {
         let metadata = native_field(&[&fields[0]], &kind).unwrap().unwrap();
         assert_eq!(metadata.0.mode, security::NativeMode::MultipleSelect);
         assert_eq!(metadata.0.omitted, Value::Array(Vec::new()));
+        let empty =
+            Html::parse_fragment(r#"<form><select name="members" multiple></select></form>"#);
+        let empty_controls = controls(empty.select(&selector("form")).next().unwrap()).unwrap();
+        let empty_metadata = native_field(&[&empty_controls[0]], &kind).unwrap().unwrap();
+        assert!(empty_metadata.0.choices.is_empty());
+        assert_eq!(empty_metadata.0.omitted, Value::Array(Vec::new()));
         assert_eq!(
             security::field_values(&kind, &[]).unwrap(),
             Value::Array(Vec::new())
