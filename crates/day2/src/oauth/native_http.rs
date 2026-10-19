@@ -31,6 +31,70 @@ thread_local! {
     // Only timer creation enters this handle. Keeping an entered Tokio runtime
     // across dispatch would prohibit reqwest's existing blocking adapter.
     static REACTOR: RefCell<Option<Handle>> = const { RefCell::new(None) };
+    static LIVE: RefCell<Option<tokio::sync::mpsc::Sender<NativeLiveWork>>> = const { RefCell::new(None) };
+}
+
+struct NativeLiveWork {
+    work: LiveJob,
+    sink: super::native_management::Sink,
+    effects: crate::managed_credentials::effects::Captured,
+}
+
+enum LiveJob {
+    Page(crate::web::live::LiveWork),
+    #[cfg(test)]
+    Probe(Arc<tests::Exchange>, tokio::sync::oneshot::Sender<String>),
+}
+
+impl NativeLiveWork {
+    async fn run(self) {
+        self.effects
+            .run_async(self.sink.scope(async move {
+                match self.work {
+                    LiveJob::Page(work) => work.run().await,
+                    #[cfg(test)]
+                    LiveJob::Probe(exchange, response) => {
+                        exchange
+                            .background
+                            .lock()
+                            .unwrap()
+                            .push(std::thread::current().id());
+                        let _ = response.send("live".into());
+                    }
+                }
+            }))
+            .await;
+    }
+}
+
+pub(crate) fn start_live(work: crate::web::live::LiveWork) -> Result<()> {
+    let work = NativeLiveWork {
+        work: LiveJob::Page(work),
+        sink: super::native_management::current_sink()?,
+        effects: crate::managed_credentials::effects::capture(),
+    };
+    LIVE.with(|slot| {
+        slot.try_borrow()?
+            .as_ref()
+            .context("native live executor missing")?
+            .try_send(work)
+            .map_err(|_| anyhow::anyhow!("native live executor capacity"))
+    })
+}
+
+/// Tokio's implicit task budget is absent on the local owner executor. A live
+/// refresh must yield explicitly even if its interval has accumulated ticks.
+pub(crate) async fn cooperate() {
+    let mut first = true;
+    std::future::poll_fn(|cx| {
+        if std::mem::take(&mut first) {
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        } else {
+            Poll::Ready(())
+        }
+    })
+    .await
 }
 
 pub(crate) fn timer<F>(create: impl FnOnce() -> F) -> F {
@@ -41,9 +105,12 @@ pub(crate) fn timer<F>(create: impl FnOnce() -> F) -> F {
     })
 }
 
-#[cfg(test)]
-pub(super) fn owns_thread() -> bool {
-    REACTOR.with(|slot| slot.borrow().is_some())
+/// Poll only reactor readiness here; native dispatch stays outside runtime
+/// entry. Tokio interval polling also needs its selected (possibly paused)
+/// clock, rather than falling back to an unrelated ambient clock.
+pub(crate) async fn readiness<F: Future>(future: F) -> F::Output {
+    let mut future = std::pin::pin!(future);
+    std::future::poll_fn(|cx| timer(|| future.as_mut().poll(cx))).await
 }
 
 /// Closed transport composition; never an app-supplied callback/task port.
@@ -141,19 +208,23 @@ async fn run(
 ) -> Result<()> {
     let owner = std::thread::current().id();
     endpoint.install()?;
+    let (live_sender, mut live_receiver) = tokio::sync::mpsc::channel(32);
+    LIVE.with(|slot| slot.replace(Some(live_sender)));
     struct Clear;
     impl Drop for Clear {
         fn drop(&mut self) {
             super::native_management::clear();
+            LIVE.with(|slot| slot.borrow_mut().take());
         }
     }
     let _clear = Clear;
     let endpoint = &endpoint;
     let mut connections = FuturesUnordered::new();
+    let mut live = FuturesUnordered::new();
     let mut shutdown = std::pin::pin!(shutdown);
     let mut draining = false;
     loop {
-        if draining && connections.is_empty() {
+        if draining && connections.is_empty() && live.is_empty() {
             return Ok(());
         }
         tokio::select! {
@@ -161,7 +232,13 @@ async fn run(
             _ = &mut shutdown, if !draining => {
                 draining = true;
                 admission.store(false, Ordering::Release);
+                live_receiver.close();
+                while live_receiver.try_recv().is_ok() {} // Not-started work owns no external send.
             }
+            work = live_receiver.recv(), if !draining => {
+                if let Some(work) = work { live.push(work.run()); }
+            }
+            _ = live.next(), if !live.is_empty() => {}
             _ = connections.next(), if !connections.is_empty() => {}
             accepted = futures_util::future::poll_fn(|cx| timer(|| listener.poll_accept(cx))), if !draining && connections.len() < capacity => {
                 let (stream, _) = accepted?;
@@ -284,6 +361,7 @@ mod tests {
         calls: Mutex<Vec<ThreadId>>,
         bodies: Mutex<Vec<ThreadId>>,
         pub(super) writes: Mutex<Vec<ThreadId>>,
+        pub(super) background: Mutex<Vec<ThreadId>>,
         entered: tokio::sync::Notify,
         release: (Mutex<bool>, Condvar),
         large: bool,
@@ -295,6 +373,7 @@ mod tests {
                 calls: Mutex::new(Vec::new()),
                 bodies: Mutex::new(Vec::new()),
                 writes: Mutex::new(Vec::new()),
+                background: Mutex::new(Vec::new()),
                 entered: tokio::sync::Notify::new(),
                 release: (Mutex::new(false), Condvar::new()),
                 large,
@@ -308,6 +387,26 @@ mod tests {
             );
             self.calls.lock().unwrap().push(thread::current().id());
             self.entered.notify_one();
+            if request.uri().path() == "/live" {
+                let (sender, receiver) = tokio::sync::oneshot::channel();
+                let work = NativeLiveWork {
+                    work: LiveJob::Probe(self.clone(), sender),
+                    sink: super::super::native_management::current_sink().unwrap(),
+                    effects: crate::managed_credentials::effects::capture(),
+                };
+                LIVE.with(|slot| {
+                    slot.borrow()
+                        .as_ref()
+                        .unwrap()
+                        .try_send(work)
+                        .unwrap_or_else(|_| panic!("probe queue full"))
+                });
+                let exchange = self.clone();
+                return Response::new(Body::from_stream(futures_util::stream::once(async move {
+                    exchange.bodies.lock().unwrap().push(thread::current().id());
+                    receiver.await.map(Bytes::from).map_err(io::Error::other)
+                })));
+            }
             if request.uri().path() == "/block" {
                 let (lock, changed) = &self.release;
                 let mut released = lock.lock().unwrap();
@@ -351,7 +450,7 @@ mod tests {
         ));
         let mut client = tokio::net::TcpStream::connect(address).await?;
         client
-            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .write_all(b"GET /live HTTP/1.1\r\nHost: localhost\r\n\r\n")
             .await?;
         let mut bytes = Vec::new();
         tokio::time::timeout(
@@ -366,7 +465,7 @@ mod tests {
         let calls = exchange.calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         assert_ne!(calls[0], thread::current().id());
-        for observations in [&exchange.bodies, &exchange.writes] {
+        for observations in [&exchange.bodies, &exchange.background, &exchange.writes] {
             let observations = observations.lock().unwrap();
             assert!(!observations.is_empty());
             assert!(observations.iter().all(|id| id == &calls[0]));

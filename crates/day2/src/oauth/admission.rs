@@ -4211,6 +4211,7 @@ pub(super) mod tests {
             assert!(clock.requests().is_empty());
             // A separate, explicitly isolated per-proof witness keeps native
             // conformance tests meaningful. It is absent from production builds.
+            super::super::native_management::reserve_shell(&intent, 104)?;
             let isolated = VerifiedAuthTime::from_google(shell_oidc::Reauthenticated::fixture(
                 intent,
                 identity.email.clone(),

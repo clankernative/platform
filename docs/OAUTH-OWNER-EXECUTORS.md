@@ -49,8 +49,9 @@ before write, flush and shutdown. Both HTTP headers and body bytes go through
 that wrapper; checking only `Body::poll_frame` would miss buffered headers and
 writes. There is one request per connection, with keepalive and pipelining
 disabled. Accepted connections are bounded, including slow responses. Header
-and request-body reads have short bounds; the complete connection has a
-30-second delivery bound. Excess connections wait in the OS listener rather
+and request-body reads have short bounds; asynchronous connection delivery has
+a 30-second timeout measured from acceptance. It cannot preempt synchronous
+native work, which keeps its slot until it returns. Excess connections wait in the OS listener rather
 than accumulating an unbounded in-process task queue.
 
 A disconnected browser cannot cancel an already executing synchronous native
