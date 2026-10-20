@@ -45,6 +45,15 @@ struct Owners {
     role: Role,
     kind: NativeRole,
     originals: BTreeMap<String, Original<EnrolledClock>>,
+    storage: AppStorage,
+}
+
+// Neither absence nor the refusal marker is a storage witness. The only live
+// variant consumes the actual authenticated App first holder on THIS executor.
+enum AppStorage {
+    Unstarted,
+    Refused,
+    Initial(Box<crate::security_epoch::AppInitialStorageContinuity>),
 }
 
 thread_local! {
@@ -69,7 +78,8 @@ pub(super) fn install(scopes: &[AuthorityScope], kind: NativeRole) -> Result<()>
                     Owners {
                         role: Rc::new(RefCell::new(role)),
                         kind,
-                        originals: BTreeMap::new()
+                        originals: BTreeMap::new(),
+                        storage: AppStorage::Unstarted,
                     }
                 )
                 .is_none(),
@@ -86,6 +96,105 @@ pub(super) fn install(scopes: &[AuthorityScope], kind: NativeRole) -> Result<()>
 
 pub(super) fn clear() {
     OWNERS.with(|owners| owners.borrow_mut().clear());
+}
+
+/// Called on the final enrolled App executor, before any Runtime or serving
+/// database open. Selection and metadata are DATA; the real channel, first
+/// holder and original file are supplied only by the native S1/S3 exchange.
+pub(crate) fn prepare_initial_app_storage(
+    metadata: &crate::store::InitialStoreMetadata,
+    instance: &crate::artifact::Instance,
+) -> Result<()> {
+    use crate::security_epoch::{
+        AppInitialStorageContinuity, AppPreparedFile,
+        native_enrollment::AuthenticatedInitialHolderOffer,
+    };
+    let control = instance
+        .control
+        .as_ref()
+        .context("native App control missing")?;
+    let mut selected = control
+        .security_bootstraps
+        .values()
+        .filter(|policy| policy.scope.app.as_str() == metadata.app());
+    let policy = selected.next().context("native App bootstrap missing")?;
+    ensure!(selected.next().is_none(), "native App bootstrap ambiguous");
+    let store = control
+        .security_epochs
+        .get(&policy.epoch_store.id)
+        .context("native App epoch selection missing")?;
+    OWNERS.with(|owners| {
+        let mut owners = owners.try_borrow_mut()?;
+        let owners = owners
+            .get_mut(metadata.app())
+            .context("native App executor missing")?;
+        ensure!(
+            owners.kind == NativeRole::AppHost,
+            "native initial storage requires App owner"
+        );
+        ensure!(
+            matches!(owners.storage, AppStorage::Unstarted),
+            "native App storage attempt already spent"
+        );
+        // Close before stage acquisition or the first channel operation. A
+        // failed/unknown exchange can never be retried from metadata or SQL.
+        owners.storage = AppStorage::Refused;
+        let mut role = owners.role.try_borrow_mut()?;
+        let mut stage = role.begin_current_stage()?;
+        stage.check_selection(policy, store, NativeRole::AppHost)?;
+        let mut offer = AuthenticatedInitialHolderOffer::receive(&mut stage)?;
+        let file =
+            AppPreparedFile::observe_existing(&mut stage, metadata, policy, store, &mut offer)?;
+        let holder = offer.finish(file)?;
+        let storage = AppInitialStorageContinuity::retain(holder)?;
+        stage.check_selection(policy, store, NativeRole::AppHost)?;
+        owners.storage = AppStorage::Initial(Box::new(storage));
+        Ok(())
+    })
+}
+
+/// A scoped lend of the retained App file/peer and a fresh stage from the SAME
+/// enrolled executor. No lookup can construct a holder or return its ownership.
+/// S3 must enter its real bootstrap/activation phase inside this callback.
+pub(crate) fn with_initial_app_storage<T>(
+    scope: &AuthorityScope,
+    operation: impl FnOnce(
+        &mut crate::security_epoch::AppInitialStorageContinuity,
+        &mut EnrolledRoleStage<'_>,
+    ) -> Result<T>,
+) -> Result<T> {
+    OWNERS.with(|owners| {
+        let mut owners = owners.try_borrow_mut()?;
+        let owners = owners
+            .get_mut(scope.app.as_str())
+            .context("native App executor missing")?;
+        ensure!(
+            owners.kind == NativeRole::AppHost,
+            "native storage requires App owner"
+        );
+        let AppStorage::Initial(storage) = &mut owners.storage else {
+            anyhow::bail!("native initial App holder unavailable")
+        };
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut role = owners.role.try_borrow_mut()?;
+            let mut stage = role.begin_current_stage()?;
+            stage.check_for(scope, NativeRole::AppHost)?;
+            let value = operation(storage, &mut stage)?;
+            stage.check_for(scope, NativeRole::AppHost)?;
+            Ok(value)
+        }));
+        match result {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(error)) => {
+                storage.refuse();
+                Err(error)
+            }
+            Err(panic) => {
+                storage.refuse();
+                std::panic::resume_unwind(panic)
+            }
+        }
+    })
 }
 
 #[cfg(test)]
@@ -1029,6 +1138,29 @@ pub(super) fn check(intent: &FreshIntent, phase: Phase, wall: i64) -> Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn initial_app_storage_cannot_resolve_a_native_holder_from_simulated_roles() -> Result<()> {
+        let world = super::super::simulation::World::new(451);
+        super::super::effects::scope(world, || -> Result<()> {
+            let scope = AuthorityScope {
+                installation: "example".to_owned().try_into()?,
+                environment: "development".to_owned().try_into()?,
+                app: "reports".to_owned().try_into()?,
+            };
+            let entered = std::cell::Cell::new(false);
+            let result = with_initial_app_storage(&scope, |_, _| {
+                entered.set(true);
+                Ok(())
+            });
+            assert_eq!(
+                result.unwrap_err().to_string(),
+                "native App executor missing"
+            );
+            assert!(!entered.get());
+            Ok(())
+        })
+    }
 
     fn original_intent(attempt: &str, deadline: i64) -> Result<FreshIntent> {
         FreshIntent::fixture_oauth(

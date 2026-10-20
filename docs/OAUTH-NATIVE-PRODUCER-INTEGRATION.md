@@ -15,7 +15,7 @@ exchange is included, but genuine P3/current serving authority is still absent.
   Credential owns the fixed issuer entrypoint, operational composition and
   live enrollment qualification; G1 is implementing the exchange against S1.
 - G1 owns provider P3/bootstrap/current-writer/serving implementation, native
-  Runtime admission, authenticated peer helpers and IAM governance remediation.
+  Runtime admission, authenticated peer helpers and the accepted governance contract.
   Product owns final consumer settlement and this integration branch. The current
   `NativeStorageCreationAuthority`, `PreparedInitialFile`, and
   `PreparedFileContinuity` retain real resources, but cannot authorize serving
@@ -145,11 +145,26 @@ validates DATA only; a caller Connection cannot construct a native owner.
 Positive bootstrap/serving still requires the actual exclusive-mutator and
 provider durability contract. The selected engineering profile is zonal
 pd-balanced storage with ext4 and the trusted Controller/node/kernel/CSI/block
-path. Its source implementation and actual device, mount, sync and peer
-qualification remain G1's work. The existing unapplied governance proposal
-still requires approval and effective delegation checks. Enrollment, local
-fsync, previous readback and an authenticated first holder cannot replace those
-requirements. Native production factories remain closed while they are unresolved.
+path. The user accepted the Google-managed Firebase Rules service agent as a
+trusted writer/impersonation path, and confirmed Chander, Sebastian and
+internal-tools-infra as governance roots. That decision requests no IAM changes;
+the earlier v2 IAM proposal remains unapplied. The storage-access, impersonation
+and durability decisions are settled. Their actual writer/serving implementation
+and native qualification remain G1's work. Enrollment, local fsync, previous
+readback and an authenticated first holder cannot substitute for current
+authority. Native production factories remain closed until implemented.
+
+For a selected native bootstrap, the launcher checks only desired deployment
+metadata and S3's fixed `/state` mount. It never reads an ordinary SQLite
+authority row or creates the ordinary replica lock. On the final enrolled App
+thread, the real Controller offer is authenticated before opening or parsing
+the original file. The completed exchange is consumed into the same executor's
+`AppInitialStorageContinuity`; an attempt closes before stage acquisition or
+channel I/O, and cannot be retried from SQL or metadata after failure. Scoped
+bootstrap participation lends that actual owner and a fresh stage from the
+same enrollment, retaining refusal on error or panic. Runtime activation stays
+closed pending G1's active-owner constructor. Shell receives no App file or
+storage authority through this path.
 
 Current App/Controller peer phases require distinct issuer-signed role grants
 from the initial exchange and the last completed phase. A new wrapper, nonce
