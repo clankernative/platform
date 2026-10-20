@@ -14,10 +14,9 @@ exchange is included, but genuine P3/current serving authority is still absent.
   holder still cannot substitute for P3/current serving authority.
   Credential owns the fixed issuer entrypoint, operational composition and
   live enrollment qualification; G1 is implementing the exchange against S1.
-- Product owns provider P3/bootstrap/current-writer/serving implementation and
-  Runtime admission on this branch, alongside final consumer settlement. G1
-  retains authenticated peer helpers, IAM governance remediation and native
-  access coordination. The current
+- G1 owns provider P3/bootstrap/current-writer/serving implementation, native
+  Runtime admission, authenticated peer helpers and IAM governance remediation.
+  Product owns final consumer settlement and this integration branch. The current
   `NativeStorageCreationAuthority`, `PreparedInitialFile`, and
   `PreparedFileContinuity` retain real resources, but cannot authorize serving
   mutations. `CurrentBootstrapExecution` has no production constructor.
@@ -144,11 +143,19 @@ schema, scope and artifact while permitting ordinary App row changes. It
 validates DATA only; a caller Connection cannot construct a native owner.
 
 Positive bootstrap/serving still requires the actual exclusive-mutator and
-provider durability contract. The existing unapplied governance proposal has
-not supplied that authority: it records a Firebase Rules bypass and unresolved
-administrative/impersonation paths. Enrollment, local fsync, previous readback
-and an authenticated first holder cannot replace that missing contract. Native
-production factories remain closed while those requirements are unresolved.
+provider durability contract. The selected engineering profile is zonal
+pd-balanced storage with ext4 and the trusted Controller/node/kernel/CSI/block
+path. Its source implementation and actual device, mount, sync and peer
+qualification remain G1's work. The existing unapplied governance proposal
+still requires approval and effective delegation checks. Enrollment, local
+fsync, previous readback and an authenticated first holder cannot replace those
+requirements. Native production factories remain closed while they are unresolved.
+
+Current App/Controller peer phases require distinct issuer-signed role grants
+from the initial exchange and the last completed phase. A new wrapper, nonce
+or acquisition domain around the same signed grant cannot refresh authority.
+This exchange does not supply Shell serving permission; that requires its own
+genuine narrow producer without granting Shell storage reader/writer access.
 
 `Runtime::load` now refuses an explicitly selected native bootstrap profile
 before inspecting or creating `.state` or opening SQLite. Existing SQL authority
