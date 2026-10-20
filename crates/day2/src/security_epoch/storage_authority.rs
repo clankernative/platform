@@ -17,7 +17,7 @@ use native_volume::NativeVolumeObservation;
 mod persistent_disk;
 mod preparation;
 pub(crate) use preparation::{
-    AppPreparedFile, BeforeAttemptRefusal, CurrentPreparedFilePhase,
+    AppFileContinuity, AppPreparedFile, BeforeAttemptRefusal, CurrentPreparedFilePhase,
     NativeOriginalPreparationOutcome, OriginalCreatorFd, PreparationCoordinator,
     PreparedFileContinuity, PreparedFileProjection, PreparedInitialFile, PreparedRetentionOutcome,
     RefusedOriginalPreparation,
