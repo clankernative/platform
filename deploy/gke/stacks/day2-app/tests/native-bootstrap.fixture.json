@@ -1,0 +1,13 @@
+{
+  "scope": {"installation": "exampleco", "environment": "production", "app": "example_app"},
+  "epoch_store": {"id": "app_epoch"},
+  "app": {
+    "namespace": {"name": "app-example", "uid": "app-namespace-uid"},
+    "kubernetes_service_account": {"name": "runtime", "uid": "app-account-uid"},
+    "google_service_account": {"kind": "gke_workload_identity_v1", "service_account": "app-native@example-tools.iam.gserviceaccount.com", "service_account_uid": "100000000000000000007"},
+    "workload_kind": "stateful_set_v1",
+    "workload": {"name": "day2-example-app", "uid": "app-workload-uid"},
+    "container": {"name": "day2", "image": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+    "token_review_audience": "day2-native-app-fixture"
+  }
+}

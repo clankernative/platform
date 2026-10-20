@@ -1,0 +1,13 @@
+{
+  "scope": {"installation": "company", "environment": "production", "app": "workspace"},
+  "epoch_store": {"id": "app_epoch"},
+  "shell": {
+    "namespace": {"name": "day2-security", "uid": "shell-namespace-uid"},
+    "kubernetes_service_account": {"name": "security-shell", "uid": "shell-account-uid"},
+    "google_service_account": {"kind": "gke_workload_identity_v1", "service_account": "shell@example-tools.iam.gserviceaccount.com", "service_account_uid": "100000000000000000008"},
+    "workload_kind": "deployment_v1",
+    "workload": {"name": "security-shell", "uid": "shell-workload-uid"},
+    "container": {"name": "security-shell", "image": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+    "token_review_audience": "day2-native-shell-fixture"
+  }
+}

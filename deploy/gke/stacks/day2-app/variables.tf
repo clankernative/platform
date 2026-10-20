@@ -37,7 +37,7 @@ variable "platform_contract_config_map" {
 }
 
 variable "service_account_name" {
-  description = "Existing Kubernetes service account for the pod. Its token is not mounted; day2 needs no Kubernetes API access."
+  description = "Existing Kubernetes service account. Automount stays off; only selected native mode projects its explicit API/subject tokens."
   type        = string
   default     = "runtime"
 }

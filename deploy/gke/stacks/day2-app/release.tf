@@ -85,20 +85,26 @@ locals {
 }
 
 resource "terraform_data" "release_admission" {
+  depends_on = [terraform_data.native_admission]
   lifecycle {
     # A directly deployed app is rolled by this apply, so it must roll exactly
     # the image `maintain activate` stamped, or wait.
     precondition {
-      condition     = var.release_managed || !local.activation_pending || local.activated_image == var.image
+      condition     = local.native_enabled || var.release_managed || !local.activation_pending || local.activated_image == var.image
       error_message = "${var.app_id}: `day2 platform maintain activate` activated ${coalesce(local.activated_image, "-")} and stopped ${local.workload_name}; its database no longer runs the deployed build. Set image (and its artifact_id) to that build and apply again."
     }
 
-    # Nor may it roll an installed app to an image nothing has activated: even
+    # Native mode never opens/upgrades that ordinary database. Its mandatory
+    # existing-file Runtime consumes the actual enrolled App/Controller first
+    # holder and current admission instead. Complete native deployment inputs
+    # are checked above, while native code alone supplies that authority. This
+    # preserves the workload UID; no fabricated migration stamp or STS recreate.
+    # Ordinary mode may not roll to an image nothing has activated: even
     # with the same artifact_id, another image runs another platform build's
     # day2-serve, whose store admission and upgrades only `maintain activate`
     # rehearses before it starts on the store.
     precondition {
-      condition     = var.release_managed || local.activation_pending || local.live == null || local.live_image == var.image
+      condition     = local.native_enabled || var.release_managed || local.activation_pending || local.live == null || local.live_image == var.image
       error_message = "${var.app_id}: ${local.workload_name} runs ${coalesce(local.live_image, "-")}, not ${var.image}. Run `day2 platform maintain activate` with ${var.image} as the target first; it opens a copy of the store with that build before the app's database moves to it."
     }
 
