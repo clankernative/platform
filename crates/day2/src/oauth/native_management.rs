@@ -9,6 +9,7 @@ use super::{
 use crate::security_epoch::native_enrollment::{
     EnrolledOriginalClock, EnrolledProcessRoleOwner, EnrolledRoleStage, NativeRole,
 };
+use crate::security_epoch::serving::{CurrentServingPhase, ServingUse};
 use anyhow::{Context, Result, ensure};
 use day2_capabilities::security_epoch::AuthorityScope;
 use std::{
@@ -414,11 +415,13 @@ impl OriginalPhase<'_> {
         role: &mut RoleStage<'_>,
         expected: &FreshIntent,
     ) -> Result<()> {
-        ensure!(
-            self.phase == Phase::Signature && self.intent == expected,
-            "native signature phase required"
-        );
+        self.require_signature_intent(expected)?;
         self.check(role)
+    }
+
+    fn require_signature_intent(&self, expected: &FreshIntent) -> Result<()> {
+        ensure!(self.phase == Phase::Signature && self.intent == expected, "native signature phase required");
+        Ok(())
     }
 
     pub(crate) fn check(&mut self, stage: &mut RoleStage<'_>) -> Result<()> {
@@ -470,20 +473,38 @@ impl OriginalPhase<'_> {
 /// Dropping an armed borrow (error, panic or ambiguous result) closes the retained
 /// original permanently. SQL readback, elapsed time and a later request cannot
 /// turn an unknown result into a new permission. This supplies original/role
-/// settlement, not the missing S3 current-serving/storage producer.
+/// settlement. Native construction additionally requires the sealed S3 serving
+/// phase; the simulator can never construct that variant.
 pub(crate) struct Consumer<'a, 'role, 'original> {
-    role: &'a mut RoleStage<'role>,
+    source: ConsumerSource<'a, 'role>,
     original: &'a mut OriginalPhase<'original>,
     armed: &'a std::cell::Cell<bool>,
 }
 
+enum ConsumerSource<'stage, 'role> {
+    Native {
+        stage: &'stage mut EnrolledRoleStage<'role>,
+        current: &'stage mut dyn CurrentServingPhase,
+    },
+    #[cfg(test)]
+    Simulated(&'stage mut fixtures::SimulationStage),
+}
+
 impl Consumer<'_, '_, '_> {
     pub(crate) fn check(&mut self) -> Result<()> {
-        self.original.check(self.role)
+        let result = match &mut self.source {
+            ConsumerSource::Native { stage, current } => current.check(stage).and_then(|()| {
+                self.original.check_with_native(stage, self.original.wall)
+            }),
+            #[cfg(test)]
+            ConsumerSource::Simulated(stage) => self.original.check_at(BorrowedRoleStage::Simulated(stage), self.original.wall),
+        };
+        if result.is_err() { self.refuse(); }
+        result
     }
 
     pub(crate) fn require_signature(&mut self, expected: &FreshIntent) -> Result<()> {
-        self.original.require_signature(self.role, expected)?;
+        self.original.require_signature_intent(expected)?;
         self.arm()
     }
 
@@ -493,7 +514,13 @@ impl Consumer<'_, '_, '_> {
     pub(crate) fn arm(&mut self) -> Result<()> {
         self.check()?;
         self.armed.set(true);
-        Ok(())
+        let result = match &mut self.source {
+            ConsumerSource::Native { stage, current } => current.arm(stage),
+            #[cfg(test)]
+            ConsumerSource::Simulated(_) => Ok(()),
+        };
+        if result.is_err() { self.refuse(); }
+        result
     }
 
     /// Hold the same borrow before COMMIT, through the actual SQLite result,
@@ -506,9 +533,58 @@ impl Consumer<'_, '_, '_> {
             self.check()
         })();
         if result.is_err() {
-            self.original.refuse();
+            self.refuse();
         }
         result
+    }
+
+    fn refuse(&mut self) {
+        self.original.refuse();
+        if let ConsumerSource::Native { current, .. } = &mut self.source {
+            current.refuse();
+        }
+    }
+
+    fn run<T>(&mut self, operation: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        let mut excluded = false;
+        // Catch only to record terminal disposition while the genuine S3
+        // borrow is still held, then resume the ORIGINAL unwind. Never retry
+        // or convert a panic into a success or a new native acquisition.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.check()?;
+            let output = operation(self);
+            self.check()?;
+            match output {
+                Ok(output) => {
+                    if let ConsumerSource::Native { current, stage } = &mut self.source {
+                        current.finish_known(stage)?;
+                        // finish_known has not released the owner scope. A
+                        // later original failure still refuses that owner.
+                        self.original.check_with_native(stage, self.original.wall)?;
+                    }
+                    Ok(output)
+                }
+                Err(error) => {
+                    if !self.armed.get() {
+                        if let ConsumerSource::Native { current, .. } = &mut self.source {
+                            current.finish_excluded()?;
+                        }
+                        excluded = true;
+                    }
+                    Err(error)
+                }
+            }
+        }));
+        match result {
+            Ok(result) => {
+                if result.is_err() && !excluded { self.refuse(); }
+                result
+            }
+            Err(payload) => {
+                self.refuse();
+                std::panic::resume_unwind(payload)
+            }
+        }
     }
 }
 
@@ -548,6 +624,33 @@ pub(crate) fn with_consumer<T>(
         | Phase::Callback => NativeRole::AppHost,
         _ => anyhow::bail!("native consumer purpose unsupported"),
     };
+    with_consumer_for_role(intent, phase, wall, role, operation)
+}
+
+fn serving_use(phase: Phase) -> Result<ServingUse> {
+    Ok(match phase {
+        Phase::StartCommit => ServingUse::StartCommit,
+        Phase::DispatchCommit => ServingUse::DispatchCommit,
+        Phase::ProviderSend => ServingUse::ProviderSend,
+        Phase::FinishCommit => ServingUse::FinishCommit,
+        Phase::DisconnectCommit => ServingUse::DisconnectCommit,
+        Phase::Session => ServingUse::Session,
+        Phase::Signature => ServingUse::Signature,
+        Phase::Verification => ServingUse::Verification,
+        Phase::Callback => ServingUse::Callback,
+        Phase::Response => ServingUse::Response,
+        _ => anyhow::bail!("native serving consumer purpose unsupported"),
+    })
+}
+
+fn with_consumer_for_role<T>(
+    intent: &FreshIntent,
+    phase: Phase,
+    wall: i64,
+    role: NativeRole,
+    operation: impl FnOnce(&mut Consumer<'_, '_, '_>) -> Result<T>,
+) -> Result<T> {
+    let purpose = serving_use(phase)?;
     let mut guard = ConsumerGuard {
         intent: intent.clone(),
         role,
@@ -555,18 +658,21 @@ pub(crate) fn with_consumer<T>(
         settled: false,
         local: std::marker::PhantomData,
     };
-    let result = with_current_original(intent, phase, wall, |role, original| {
-        let mut consumer = Consumer {
-            role,
-            original,
-            armed: &guard.armed,
-        };
-        consumer.check()?;
-        let output = operation(&mut consumer);
-        let checked = consumer.check();
-        let output = output?;
-        checked?;
-        Ok(output)
+    let result = with_current_for_role(intent, phase, wall, Some(role), |role, original| {
+        match &mut role.source {
+            RoleSource::Native(stage) => crate::security_epoch::serving::with_current_serving(
+                stage, intent, purpose, |current, same_stage| {
+                    Consumer {
+                        source: ConsumerSource::Native { stage: same_stage, current },
+                        original, armed: &guard.armed,
+                    }.run(operation)
+                },
+            ),
+            #[cfg(test)]
+            RoleSource::Simulated(stage) => Consumer {
+                source: ConsumerSource::Simulated(stage), original, armed: &guard.armed,
+            }.run(operation),
+        }
     });
     guard.settled = result.is_ok();
     result
@@ -687,6 +793,10 @@ impl Sink {
     }
 
     pub(super) fn with_current<T>(&self, operation: impl FnOnce() -> T) -> Result<T> {
+        self.with_current_result(|| Ok(operation()))
+    }
+
+    fn with_current_result<T>(&self, operation: impl FnOnce() -> Result<T>) -> Result<T> {
         ensure!(
             !self.refused.get(),
             "native response outcome unknown or excluded"
@@ -698,34 +808,18 @@ impl Sink {
             .map(|((role, _), binding)| (*role, binding.clone()))
             .collect();
         match intents.as_slice() {
-            [] => Ok(operation()),
+            [] => operation(),
             [(role, binding)] => binding.effects.clone().run(|| {
-                let mut guard = ConsumerGuard {
-                    intent: binding.intent.clone(),
-                    role: *role,
-                    armed: std::cell::Cell::new(false),
-                    settled: false,
-                    local: std::marker::PhantomData,
-                };
-                let result = with_current_for_role(
+                with_consumer_for_role(
                     &binding.intent,
                     Phase::Response,
                     super::effects::wall_time()?,
-                    Some(*role),
-                    |stage, original| {
-                        let mut consumer = Consumer {
-                            role: stage,
-                            original,
-                            armed: &guard.armed,
-                        };
+                    *role,
+                    |consumer| {
                         consumer.arm()?;
-                        let output = operation();
-                        consumer.check()?;
-                        Ok(output)
+                        operation()
                     },
-                );
-                guard.settled = result.is_ok();
-                result
+                )
             }),
             _ => anyhow::bail!("native response must have exactly one original"),
         }
@@ -752,11 +846,10 @@ impl Sink {
         &self,
         operation: impl FnOnce() -> Poll<std::io::Result<T>>,
     ) -> Poll<std::io::Result<T>> {
-        match self.with_current(operation) {
-            Ok(Poll::Ready(Err(error))) => {
-                self.abort();
-                Poll::Ready(Err(error))
-            }
+        match self.with_current_result(|| match operation() {
+            Poll::Ready(Err(error)) => Err(error.into()),
+            output => Ok(output),
+        }) {
             Ok(output) => output,
             Err(_) => {
                 self.abort();
